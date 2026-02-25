@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
+
 import type { AuthProvider } from "../config";
 
 export interface WrapperFeatures {

@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+
 import { isScaffoldableEmptyProject, runInitCommand } from "../../src/cli/init";
 
 function withTempDir(run: (root: string) => void): void {

@@ -1,22 +1,23 @@
 #!/usr/bin/env node
 
+import { log, outro, note } from "@clack/prompts";
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { log, outro, note } from "@clack/prompts";
-import { runLink } from "./link";
-import { runLoginCommand } from "./login";
-import { runProjectsCommand } from "./projects";
+
+import { getPackageDir } from "./agents";
+import { parseDeployArgs } from "./args";
+import { asciiArts } from "./ascii";
 import { getToken, removeToken, isStagingMode, setStagingMode, printStagingBanner } from "./auth";
 import { PlatformClient } from "./client";
-import { parseDeployArgs } from "./args";
-import { parseSecretArgs } from "./secret-args";
 import { parseDbArgs } from "./db-args";
-import { parseGenArgs } from "./gen-args";
 import { parseDomainArgs } from "./domain";
+import { parseGenArgs } from "./gen-args";
+import { runLink } from "./link";
+import { runLoginCommand } from "./login";
 import { categoryTitle, helpLine, pc, sectionTitle } from "./output";
-import { getPackageDir } from "./agents";
-import { asciiArts } from "./ascii";
+import { runProjectsCommand } from "./projects";
+import { parseSecretArgs } from "./secret-args";
 
 const args = process.argv.slice(2);
 const command = args[0];

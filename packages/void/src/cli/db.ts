@@ -1,11 +1,13 @@
+import { intro, outro, log } from "@clack/prompts";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { intro, outro, log } from "@clack/prompts";
+
+import type { DbArgs } from "./db-args";
+
 import { getToken } from "./auth";
 import { PlatformClient } from "./client";
-import { readProjectConfig } from "./project";
-import type { DbArgs } from "./db-args";
 import { cliTitle, dim, pc } from "./output";
+import { readProjectConfig } from "./project";
 
 export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
   console.log();

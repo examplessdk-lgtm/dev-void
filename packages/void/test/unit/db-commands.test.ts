@@ -1,6 +1,7 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { join } from "node:path";
 import { mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { describe, it, expect, afterEach } from "vitest";
+
 import { getAppliedMigrations } from "../../src/migrations/runner";
 
 const TMP_DIR = join(import.meta.dirname, ".tmp-db-commands-test");

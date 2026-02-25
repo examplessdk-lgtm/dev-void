@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import { parseGenArgs } from "../../src/cli/gen-args";
 
 describe("parseGenArgs", () => {

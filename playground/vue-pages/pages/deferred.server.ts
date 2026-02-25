@@ -1,5 +1,6 @@
-import { defineHandler, defer } from "void";
 import type { InferProps } from "void";
+
+import { defineHandler, defer } from "void";
 
 export type Props = InferProps<typeof loader>;
 

@@ -1,9 +1,10 @@
 import { intro, outro, log } from "@clack/prompts";
+
 import { getToken } from "./auth";
 import { PlatformClient, type DeploymentResponse } from "./client";
+import { cliTitle, dim, pc, tablePrefix } from "./output";
 import { readProjectConfig } from "./project";
 import { resolveProjectBySlug } from "./resolve-project";
-import { cliTitle, dim, pc, tablePrefix } from "./output";
 
 export async function runListCommand(root: string, slug?: string): Promise<void> {
   console.log();

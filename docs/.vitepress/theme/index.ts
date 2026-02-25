@@ -1,15 +1,16 @@
 import type { Theme } from "vitepress";
-import BaseTheme, { themeContextKey } from "@voidzero-dev/vitepress-theme";
-import { h } from "vue";
+
+import monoIcon from "@assets/icons/vite-mono.svg";
+import footerBg from "@assets/vite/footer-background.jpg";
 import "virtual:group-icons.css";
 import "./styles.css";
+import BaseTheme, { themeContextKey } from "@voidzero-dev/vitepress-theme";
+import { h } from "vue";
 
 import logoDark from "./void-dark.svg";
 import logoLight from "./void-light.svg";
 import voidzeroLogoDark from "./voidzero-logo-dark.svg";
 import voidzeroLogoLight from "./voidzero-logo-light.svg";
-import footerBg from "@assets/vite/footer-background.jpg";
-import monoIcon from "@assets/icons/vite-mono.svg";
 
 function AsideCredit() {
   return h(

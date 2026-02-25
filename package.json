@@ -8,7 +8,7 @@
     "build:docs": "pnpm -F docs build",
     "test": "vitest --run",
     "lint": "oxlint",
-    "fmt": "oxfmt --write .",
+    "fmt": "oxfmt",
     "check": "pnpm -r --parallel typecheck",
     "docs": "cd docs && vitepress dev",
     "deploy:docs": "pnpm -F docs run deploy --project void-docs",

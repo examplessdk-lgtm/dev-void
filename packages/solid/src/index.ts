@@ -1,8 +1,10 @@
-import solid from "vite-plugin-solid";
 import type { Plugin } from "vite";
-import { pagesPlugin } from "./plugin-pages";
-import { islandsPlugin } from "./plugin-islands";
+
 import { join } from "node:path";
+import solid from "vite-plugin-solid";
+
+import { islandsPlugin } from "./plugin-islands";
+import { pagesPlugin } from "./plugin-pages";
 
 export interface VoidSolidOptions {
   solid?: Parameters<typeof solid>[0];

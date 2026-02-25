@@ -1,4 +1,5 @@
 import { intro, outro, log, spinner, select, isCancel, cancel } from "@clack/prompts";
+
 import { getToken, runLogin, saveToken, isStagingMode } from "./auth";
 import { cliTitle } from "./output";
 

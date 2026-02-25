@@ -1,5 +1,6 @@
-import { ofetch, FetchError } from "ofetch";
 import type { RouteMap } from "void/routes";
+
+import { ofetch, FetchError } from "ofetch";
 
 export { FetchError };
 

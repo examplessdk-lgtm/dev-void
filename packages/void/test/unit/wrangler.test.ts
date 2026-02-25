@@ -1,9 +1,11 @@
-import { describe, it, expect, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
 import { readFileSync } from "node:fs";
-import { readWranglerCompat, syncWranglerBindings } from "../../src/cli/wrangler";
+import { join } from "node:path";
+import { describe, it, expect, afterEach } from "vitest";
+
 import type { InferredBindings } from "../../src/inference/walk";
+
+import { readWranglerCompat, syncWranglerBindings } from "../../src/cli/wrangler";
 
 const tmpDir = join(import.meta.dirname, ".tmp-wrangler-test");
 

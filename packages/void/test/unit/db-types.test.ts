@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { generateDbTypes } from "../../src/codegen/db-types";
+
 import type { SchemaMap, TableSchema } from "../../src/migrations/schema";
+
+import { generateDbTypes } from "../../src/codegen/db-types";
 
 function makeSchema(tables: TableSchema[]): SchemaMap {
   const map: SchemaMap = new Map();

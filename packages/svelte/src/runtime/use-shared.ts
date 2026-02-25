@@ -1,4 +1,5 @@
 import type { CloudContextVariables } from "void";
+
 import { getContext } from "svelte";
 
 export function useShared<T = CloudContextVariables["shared"]>(): T {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { generateRouteTypes } from "../../src/codegen/route-types";
+
 import type { ScanResult } from "../../src/router/scan";
+
+import { generateRouteTypes } from "../../src/codegen/route-types";
 
 describe("generateRouteTypes", () => {
   it("generates route type declarations for single-method routes", () => {

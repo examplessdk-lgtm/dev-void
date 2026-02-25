@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+
 import { FRAMEWORK_PRESETS } from "../../src/cli/preset";
 
 describe("FRAMEWORK_PRESETS", () => {

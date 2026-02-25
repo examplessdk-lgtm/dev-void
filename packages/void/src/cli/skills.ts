@@ -1,3 +1,4 @@
+import { log } from "@clack/prompts";
 import {
   existsSync,
   mkdirSync,
@@ -7,7 +8,7 @@ import {
   symlinkSync,
 } from "node:fs";
 import { join, relative } from "node:path";
-import { log } from "@clack/prompts";
+
 import { detectAgents, getPackageDir, type AgentConfig } from "./agents";
 
 interface SkillInfo {

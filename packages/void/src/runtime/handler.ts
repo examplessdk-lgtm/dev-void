@@ -1,5 +1,7 @@
 import type { Context, Env, MiddlewareHandler } from "hono";
+
 import type { AuthUser } from "./auth";
+
 import { convertReturnValue } from "./response";
 import { runValidation, type ValidatorSlots, type HandlerInput } from "./validator";
 

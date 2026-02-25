@@ -1,8 +1,10 @@
-import vue from "@vitejs/plugin-vue";
 import type { Plugin } from "vite";
-import { pagesPlugin } from "./plugin-pages";
-import { islandsPlugin } from "./plugin-islands";
+
+import vue from "@vitejs/plugin-vue";
 import { join } from "node:path";
+
+import { islandsPlugin } from "./plugin-islands";
+import { pagesPlugin } from "./plugin-pages";
 
 export interface VoidVueOptions {
   vue?: Parameters<typeof vue>[0];

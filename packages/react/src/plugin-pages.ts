@@ -1,8 +1,10 @@
 import type { Plugin } from "vite";
+import type { PageScanResult } from "void/pages";
+
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { scanPages } from "void/pages";
-import type { PageScanResult } from "void/pages";
+
 import { generateComponentManifest } from "./pages-manifest";
 
 const RENDERER_ID = "virtual:void-pages-renderer";

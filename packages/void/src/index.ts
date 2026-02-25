@@ -1,10 +1,12 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { loadEnv, type Plugin } from "vite";
 import { cloudflare, type WorkerConfig } from "@cloudflare/vite-plugin";
-import { routingPlugin } from "./plugin-routing";
-import { migrationPlugin } from "./plugin-migration";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { loadEnv, type Plugin } from "vite";
+
+import { syncWranglerBindings } from "./cli/wrangler";
+import { readConfig, normalizeAuth, resolveBindingNames } from "./config";
+import { scanJobsSync } from "./crons/scan";
 import { dbTypesPlugin } from "./plugin-db-types";
 import {
   inferProjectBindings,
@@ -12,11 +14,10 @@ import {
   FRAMEWORK_SCAN_DIRS,
   type Framework,
 } from "./plugin-inference";
-import { scanJobsSync } from "./crons/scan";
+import { migrationPlugin } from "./plugin-migration";
+import { routingPlugin } from "./plugin-routing";
 import { scanQueuesSync } from "./queues/scan";
 import { validateSsrEntry } from "./ssr/entry";
-import { readConfig, normalizeAuth, resolveBindingNames } from "./config";
-import { syncWranglerBindings } from "./cli/wrangler";
 
 export type { AuthProvider } from "./config";
 

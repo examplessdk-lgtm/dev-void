@@ -2,13 +2,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+
+import type { ProjectResponse } from "../../src/cli/client";
+
 import { detectWorkerDir } from "../../src/cli/deploy";
 import {
   getRequestedProjectSlug,
   inferDefaultSlug,
   resolveProjectBySlug,
 } from "../../src/cli/resolve-project";
-import type { ProjectResponse } from "../../src/cli/client";
 
 const tempDirs: string[] = [];
 

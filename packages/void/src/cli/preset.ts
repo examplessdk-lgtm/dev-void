@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+
 import { hasSsrEntry } from "../ssr/entry";
 
 /** Build output conventions for a meta-framework (Class B/C). */

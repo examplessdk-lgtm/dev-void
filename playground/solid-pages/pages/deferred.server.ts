@@ -1,5 +1,6 @@
-import { defineHandler, defer } from "void";
 import type { Deferred } from "void";
+
+import { defineHandler, defer } from "void";
 
 export interface Props {
   title: string;

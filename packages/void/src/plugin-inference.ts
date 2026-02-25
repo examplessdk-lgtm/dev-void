@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
-import { globSync } from "tinyglobby";
 import { join } from "node:path";
+import { globSync } from "tinyglobby";
+
 import { inferBindingsFromSource, mergeBindings, type InferredBindings } from "./inference/walk";
 import { getSsrServerEntryPath } from "./ssr/entry";
 

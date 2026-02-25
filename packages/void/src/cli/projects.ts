@@ -1,4 +1,5 @@
 import { intro, outro, log } from "@clack/prompts";
+
 import { getToken, getSiteDomain } from "./auth";
 import { PlatformClient } from "./client";
 import { cliTitle, dim, pc, tablePrefix } from "./output";

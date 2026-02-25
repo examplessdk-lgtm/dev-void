@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import { hashPassword, verifyPassword } from "../../src/auth/password";
 
 describe("hashPassword", () => {

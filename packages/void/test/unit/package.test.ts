@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+
 import { computeAssetHashes, packageBuild, packageStaticBuild } from "../../src/cli/package";
 
 const TMP = join(import.meta.dirname, ".tmp-package-test");

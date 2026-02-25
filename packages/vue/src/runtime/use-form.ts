@@ -1,5 +1,6 @@
-import { reactive, ref, inject, watch } from "vue";
 import type { PageActionMap } from "void/routes";
+
+import { reactive, ref, inject, watch } from "vue";
 
 type HasParams<U extends keyof PageActionMap> = PageActionMap[U] extends { params: infer P }
   ? P extends Record<string, string>

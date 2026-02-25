@@ -1,11 +1,13 @@
 import { join } from "node:path";
 import { glob } from "tinyglobby";
-import { parseRouteFilename, type RouteDefinition } from "./parse-filename";
-import { detectHttpExports } from "./detect-exports";
-import { scanJobs, type JobDefinition } from "../crons/scan";
-import { scanQueues, type QueueDefinition } from "../queues/scan";
-import { scanPages } from "../pages/scan";
+
 import type { PageScanResult } from "../pages/types";
+
+import { scanJobs, type JobDefinition } from "../crons/scan";
+import { scanPages } from "../pages/scan";
+import { scanQueues, type QueueDefinition } from "../queues/scan";
+import { detectHttpExports } from "./detect-exports";
+import { parseRouteFilename, type RouteDefinition } from "./parse-filename";
 
 export interface ScanResult {
   routes: RouteDefinition[];

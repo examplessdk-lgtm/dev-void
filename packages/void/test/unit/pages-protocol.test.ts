@@ -1,12 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
+import { describe, expect, it, vi } from "vitest";
+
+import { defer } from "../../src/pages/defer";
 import {
   handlePageGet,
   handlePageMutation,
   flattenValidationErrors,
   ValidationError,
 } from "../../src/pages/protocol";
-import { defer } from "../../src/pages/defer";
 
 /** Create a minimal Hono context for testing */
 function createTestContext(

@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeAll } from "vitest";
-import { searchDocs } from "../../src/cli/mcp";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { describe, it, expect, beforeAll } from "vitest";
+
+import { searchDocs } from "../../src/cli/mcp";
 
 // Replicate loadDocs logic for tests.
 function loadDocs() {

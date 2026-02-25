@@ -1,6 +1,6 @@
-import { createInterface } from "node:readline";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 // --- Types ---

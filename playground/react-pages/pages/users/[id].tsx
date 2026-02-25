@@ -1,4 +1,5 @@
 import { Link } from "void/react";
+
 import type { Props } from "./[id].server";
 
 export default function UserDetailPage({ user }: Props) {

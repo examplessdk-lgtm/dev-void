@@ -1,5 +1,7 @@
-import { useContext } from "react";
 import type { CloudContextVariables } from "void";
+
+import { useContext } from "react";
+
 import { SharedContext } from "./context";
 
 export function useShared<T = CloudContextVariables["shared"]>(): T {

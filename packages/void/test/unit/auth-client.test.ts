@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+
 import { auth, AuthError } from "../../src/runtime/auth-client";
 
 function jsonResponse(data: unknown, status = 200) {

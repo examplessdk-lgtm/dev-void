@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { compileRouteTable, type PagesCompileOptions } from "../../src/router/compile";
+
 import type { ScanResult } from "../../src/router/scan";
+
+import { compileRouteTable, type PagesCompileOptions } from "../../src/router/compile";
 
 const testOptions = {
   honoPath: "/resolved/hono/index.mjs",

@@ -1,8 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, basename, extname } from "node:path";
 import { glob } from "tinyglobby";
-import { parseRouteFilename } from "../router/parse-filename";
+
 import type { PageDefinition, LayoutDefinition, PageScanResult } from "./types";
+
+import { parseRouteFilename } from "../router/parse-filename";
 
 const COMPONENT_EXTENSIONS = ["vue", "tsx", "jsx", "svelte"];
 const SERVER_EXTENSIONS = ["ts", "tsx", "js", "mjs", "mts"];

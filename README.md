@@ -46,7 +46,7 @@ Full docs at [void.cloud](https://void.cloud)
 ### Setup
 
 ```sh
-git clone https://github.com/nicepkg/void.git
+git clone https://github.com/voidzero-dev/void.git
 cd void
 pnpm install
 pnpm -r build

@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..", "..");
 const DEV_PORT = 5194;

@@ -1,4 +1,5 @@
 import { relative } from "node:path";
+
 import type { ScanResult } from "../router/scan";
 
 export interface RouteTypesResult {

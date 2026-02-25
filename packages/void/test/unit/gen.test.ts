@@ -1,6 +1,7 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
-import { join } from "node:path";
 import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { describe, it, expect, afterEach, vi } from "vitest";
+
 import { runGenCommand } from "../../src/cli/gen";
 
 const mockSelect = vi.fn();

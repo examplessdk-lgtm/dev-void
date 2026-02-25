@@ -1,8 +1,14 @@
+import type { Plugin } from "vite";
+
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Plugin } from "vite";
-import { scanRoutes, type ScanResult } from "./router/scan";
+
+import type { AuthProvider } from "./index";
+
+import { generateQueueTypes } from "./codegen/queue-types";
+import { generateRouteTypes } from "./codegen/route-types";
+import { inferBindingsFromSource } from "./inference/walk";
 import {
   compileRouteTable,
   compileWorkerEntry,
@@ -11,10 +17,7 @@ import {
   type SsrCompileOptions,
   type PagesCompileOptions,
 } from "./router/compile";
-import { generateRouteTypes } from "./codegen/route-types";
-import { generateQueueTypes } from "./codegen/queue-types";
-import type { AuthProvider } from "./index";
-import { inferBindingsFromSource } from "./inference/walk";
+import { scanRoutes, type ScanResult } from "./router/scan";
 import {
   validateSsrEntries,
   SSR_SERVER_ENTRY_RELATIVE_PATHS,

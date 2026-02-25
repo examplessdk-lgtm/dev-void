@@ -1,8 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..", "..");
 const DEV_PORT = 5191;

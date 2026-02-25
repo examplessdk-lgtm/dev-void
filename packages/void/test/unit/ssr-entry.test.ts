@@ -1,7 +1,8 @@
-import { describe, expect, it, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { describe, expect, it, afterEach } from "vitest";
+
 import { getSsrServerEntryPath, hasSsrEntry, validateSsrEntry } from "../../src/ssr/entry";
 
 const tempDirs: string[] = [];

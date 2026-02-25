@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { describe, it, expect } from "vitest";
+
 import {
   readConfig,
   convertHeadersConfig,

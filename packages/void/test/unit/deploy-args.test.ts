@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import { parseDeployArgs } from "../../src/cli/args";
 
 describe("parseDeployArgs", () => {

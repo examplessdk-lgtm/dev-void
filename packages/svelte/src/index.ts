@@ -1,8 +1,10 @@
-import { svelte } from "@sveltejs/vite-plugin-svelte";
 import type { Plugin } from "vite";
-import { pagesPlugin } from "./plugin-pages";
-import { islandsPlugin } from "./plugin-islands";
+
+import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { join } from "node:path";
+
+import { islandsPlugin } from "./plugin-islands";
+import { pagesPlugin } from "./plugin-pages";
 
 export interface VoidSvelteOptions {
   svelte?: Parameters<typeof svelte>[0];

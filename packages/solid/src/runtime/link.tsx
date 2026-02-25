@@ -1,5 +1,7 @@
-import { useContext, splitProps, createMemo } from "solid-js";
 import type { JSX } from "solid-js";
+
+import { useContext, splitProps, createMemo } from "solid-js";
+
 import { RouterContext } from "./context";
 
 type CommonProps = {

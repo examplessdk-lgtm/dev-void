@@ -1,5 +1,6 @@
-import { getContext } from "svelte";
 import type { PageActionMap } from "void/routes";
+
+import { getContext } from "svelte";
 
 type HasParams<U extends keyof PageActionMap> = PageActionMap[U] extends { params: infer P }
   ? P extends Record<string, string>

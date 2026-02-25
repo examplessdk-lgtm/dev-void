@@ -1,5 +1,6 @@
-import { join } from "node:path";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import type { ProjectResponse } from "./client";
 import type { ProjectConfig } from "./project";
 

@@ -1,7 +1,9 @@
+import { intro, outro, log, select, isCancel, cancel } from "@clack/prompts";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { intro, outro, log, select, isCancel, cancel } from "@clack/prompts";
+
 import type { GenArgs } from "./gen-args";
+
 import { ensureProjectTsconfig } from "../codegen/project-tsconfig";
 import { cliTitle } from "./output";
 

@@ -1,5 +1,5 @@
-import { ValidationError } from "./validation-error";
 import { DEFERRED, separateDeferred, type ResolvedDeferredGroup } from "./defer";
+import { ValidationError } from "./validation-error";
 
 export { ValidationError };
 

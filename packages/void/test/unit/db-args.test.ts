@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import { parseDbArgs } from "../../src/cli/db-args";
 
 describe("parseDbArgs", () => {

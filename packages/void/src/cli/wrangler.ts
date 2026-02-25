@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+
 import type { InferredBindings } from "../inference/walk";
 
 /** Subset of wrangler config fields we extract. */

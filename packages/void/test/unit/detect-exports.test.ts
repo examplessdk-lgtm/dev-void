@@ -1,6 +1,7 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+
 import { detectHttpExports } from "../../src/router/detect-exports";
 
 const TMP = join(import.meta.dirname, "__tmp_detect_test__");

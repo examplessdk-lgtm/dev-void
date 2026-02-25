@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { runValidation, type ValidatorSlots } from "../../src/runtime/validator";
+
 import type { StandardSchemaV1 } from "../../src/standard-schema";
+
+import { runValidation, type ValidatorSlots } from "../../src/runtime/validator";
 
 /** Create a mock Standard Schema that always succeeds with the given value. */
 function mockSchema<T>(output: T): StandardSchemaV1<unknown, T> {

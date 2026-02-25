@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
 import { homedir } from "node:os";
+import { join } from "node:path";
+
 import { pc } from "./output";
 
 const CONFIG_DIR = join(homedir(), ".void");

@@ -1,4 +1,5 @@
 import type { CloudContextVariables } from "void";
+
 import { inject } from "vue";
 
 export function useShared<T = CloudContextVariables["shared"]>(): T {

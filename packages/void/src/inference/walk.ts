@@ -1,6 +1,6 @@
 import { parse } from "es-module-lexer/js";
-import { parseSync } from "vite";
 import { walk } from "estree-walker";
+import { parseSync } from "vite";
 
 export interface InferredBindings {
   needsD1: boolean;

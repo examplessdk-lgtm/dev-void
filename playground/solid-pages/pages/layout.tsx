@@ -1,5 +1,6 @@
-import { Link, useShared } from "void/solid";
 import type { JSX } from "solid-js";
+
+import { Link, useShared } from "void/solid";
 
 export default function Layout(props: { children: JSX.Element }) {
   const shared = useShared();

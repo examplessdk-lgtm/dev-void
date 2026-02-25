@@ -1,4 +1,5 @@
 import { Link, useForm } from "void/react";
+
 import type { Props } from "./index.server";
 
 export default function UsersPage({ users }: Props) {

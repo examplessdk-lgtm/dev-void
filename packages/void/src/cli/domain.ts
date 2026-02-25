@@ -1,8 +1,9 @@
 import { log, note } from "@clack/prompts";
+
 import { getToken } from "./auth";
 import { PlatformClient } from "./client";
-import { readProjectConfig } from "./project";
 import { pc } from "./output";
+import { readProjectConfig } from "./project";
 
 export interface DomainArgs {
   subcommand: "add" | "remove" | "list" | "status";

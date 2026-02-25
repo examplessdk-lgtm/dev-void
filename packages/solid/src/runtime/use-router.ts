@@ -1,4 +1,5 @@
 import { useContext } from "solid-js";
+
 import { RouterContext } from "./context";
 
 export function useRouter() {

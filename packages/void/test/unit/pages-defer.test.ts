@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+
 import { defer, separateDeferred, DEFERRED } from "../../src/pages/defer";
 
 describe("defer", () => {

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+
 import { searchDocs } from "../../src/cli/mcp";
 
 interface DocPage {

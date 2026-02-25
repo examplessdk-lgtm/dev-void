@@ -1,6 +1,7 @@
+import type { AuthUser } from "void/client";
+
 import { useState, useEffect } from "react";
 import { auth, AuthError } from "void/client";
-import type { AuthUser } from "void/client";
 
 export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null);

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import { CREATE_AUTH_TABLES_SQL, generateUserId } from "../../src/auth/schema";
 
 describe("CREATE_AUTH_TABLES_SQL", () => {

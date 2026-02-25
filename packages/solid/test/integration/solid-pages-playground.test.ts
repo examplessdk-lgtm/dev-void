@@ -1,9 +1,9 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { join } from "node:path";
 import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..", "..");
 const DEV_PORT = 5215;

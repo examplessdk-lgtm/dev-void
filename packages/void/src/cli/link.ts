@@ -1,10 +1,11 @@
 import { intro, outro, log, cancel } from "@clack/prompts";
+
 import { getToken, getSiteDomain } from "./auth";
 import { PlatformClient } from "./client";
+import { cliTitle } from "./output";
 import { readProjectConfig, writeProjectConfig } from "./project";
 import { promptProjectSelection, promptProjectSlug } from "./prompt";
 import { inferDefaultSlug } from "./resolve-project";
-import { cliTitle } from "./output";
 
 export async function runLink(root: string, slug?: string): Promise<void> {
   console.log();

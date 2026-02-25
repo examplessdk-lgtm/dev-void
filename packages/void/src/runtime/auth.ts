@@ -1,6 +1,7 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { Context, Env } from "hono";
+
 import { HTTPException } from "hono/http-exception";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 /** The authenticated user stored in the session and set on context by the auth middleware. */
 export interface AuthUser {

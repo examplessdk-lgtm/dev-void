@@ -1,8 +1,10 @@
 import type { Plugin } from "vite";
+import type { PageScanResult } from "void/pages";
+
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve, relative } from "node:path";
 import { scanPages } from "void/pages";
-import type { PageScanResult } from "void/pages";
+
 import { generateComponentManifest } from "./pages-manifest";
 
 const ISLANDS_RENDERER_ID = "virtual:void-islands-renderer";

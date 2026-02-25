@@ -1,9 +1,10 @@
 import { intro, outro, note, log, text, isCancel, cancel, spinner } from "@clack/prompts";
+
 import { getToken } from "./auth";
 import { PlatformClient } from "./client";
+import { cliTitle } from "./output";
 import { readProjectConfig, removeProjectConfig } from "./project";
 import { resolveProjectBySlug } from "./resolve-project";
-import { cliTitle } from "./output";
 
 export async function runDeleteCommand(root: string, slug?: string): Promise<void> {
   console.log();

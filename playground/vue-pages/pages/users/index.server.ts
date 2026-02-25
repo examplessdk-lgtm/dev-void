@@ -1,5 +1,6 @@
-import { defineHandler } from "void";
 import * as v from "valibot";
+import { defineHandler } from "void";
+
 import { USERS } from "./_data";
 
 export interface Props {

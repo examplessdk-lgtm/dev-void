@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
+
+import { Hono } from "hono";
+import { describe, expect, it } from "vitest";
+
 import type { StandardSchemaV1 } from "../../src/standard-schema";
+
 import { defineHandler, defineMiddleware } from "../../src/runtime/handler";
 import { convertReturnValue } from "../../src/runtime/response";
 

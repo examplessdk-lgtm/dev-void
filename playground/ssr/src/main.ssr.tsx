@@ -1,5 +1,6 @@
 import { renderToString } from "react-dom/server";
 import { defineRender } from "void";
+
 import App from "./App";
 
 async function readBlogPost(slug: string): Promise<string | null> {

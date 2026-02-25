@@ -1,6 +1,8 @@
-import { useContext } from "solid-js";
-import { SharedContext } from "./context";
 import type { CloudContextVariables } from "void";
+
+import { useContext } from "solid-js";
+
+import { SharedContext } from "./context";
 
 export function useShared<T = CloudContextVariables["shared"]>(): T {
   const shared = useContext(SharedContext);

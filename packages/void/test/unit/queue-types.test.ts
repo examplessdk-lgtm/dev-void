@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import { generateQueueTypes } from "../../src/codegen/queue-types";
 
 describe("generateQueueTypes", () => {

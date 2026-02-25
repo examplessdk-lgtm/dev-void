@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import { parseSecretArgs } from "../../src/cli/secret-args";
 
 describe("parseSecretArgs", () => {

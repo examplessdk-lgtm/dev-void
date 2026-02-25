@@ -1,4 +1,5 @@
 import { relative } from "node:path";
+
 import type { QueueDefinition } from "../queues/scan";
 
 /**

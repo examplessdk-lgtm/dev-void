@@ -1,32 +1,12 @@
+import { intro, outro, log, note, spinner, confirm, isCancel } from "@clack/prompts";
 import { execFileSync, execSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { intro, outro, log, note, spinner, confirm, isCancel } from "@clack/prompts";
 import { createServer, loadEnv } from "vite";
-import { getToken, getTokenSource } from "./auth";
-import { readProjectConfig, writeProjectConfig, type ProjectConfig } from "./project";
-import {
-  computeAssetHashes,
-  packageBuild,
-  packageStaticBuild,
-  packageFrameworkBuild,
-} from "./package";
-import { PlatformClient } from "./client";
-import {
-  inferProjectBindings,
-  FRAMEWORK_SCAN_DIRS,
-  detectFramework,
-  type DetectedFramework,
-} from "../plugin-inference";
-import { promptProjectSelection, promptProjectSlug } from "./prompt";
-import { collectMigrations } from "../migrations/collect";
-import { validateMigrations } from "../migrations/validate";
-import { scanJobsSync } from "../crons/scan";
-import { scanQueuesSync } from "../queues/scan";
-import { validateSsrEntry, detectSsrPrerender, getSsrServerEntryPath } from "../ssr/entry";
-import { scanPages } from "../pages/scan";
-import { detectPreset, FRAMEWORK_PRESETS, type StaticPreset, type FrameworkPreset } from "./preset";
+
+import type { HeaderRule } from "./types";
+
 import {
   readConfig,
   convertHeadersConfig,
@@ -34,17 +14,39 @@ import {
   type AuthProvider,
   type VoidConfig,
 } from "../config";
-import { readWranglerCompat } from "./wrangler";
+import { scanJobsSync } from "../crons/scan";
+import { collectMigrations } from "../migrations/collect";
+import { validateMigrations } from "../migrations/validate";
+import { scanPages } from "../pages/scan";
+import {
+  inferProjectBindings,
+  FRAMEWORK_SCAN_DIRS,
+  detectFramework,
+  type DetectedFramework,
+} from "../plugin-inference";
+import { scanQueuesSync } from "../queues/scan";
+import { validateSsrEntry, detectSsrPrerender, getSsrServerEntryPath } from "../ssr/entry";
+import { getToken, getTokenSource } from "./auth";
+import { PlatformClient } from "./client";
 import { parseHeadersFile } from "./headers";
-import type { HeaderRule } from "./types";
+import { cliTitle } from "./output";
+import {
+  computeAssetHashes,
+  packageBuild,
+  packageStaticBuild,
+  packageFrameworkBuild,
+} from "./package";
+import { detectPreset, FRAMEWORK_PRESETS, type StaticPreset, type FrameworkPreset } from "./preset";
+import { readProjectConfig, writeProjectConfig, type ProjectConfig } from "./project";
+import { promptProjectSelection, promptProjectSlug } from "./prompt";
+import { getRequestedProjectSlug, resolveProjectBySlug, inferDefaultSlug } from "./resolve-project";
+import { readWranglerCompat } from "./wrangler";
 import {
   needsWrapper,
   generateAndBundleWrapper,
   cleanupWrapper,
   type WrapperFeatures,
 } from "./wrapper";
-import { getRequestedProjectSlug, resolveProjectBySlug, inferDefaultSlug } from "./resolve-project";
-import { cliTitle } from "./output";
 
 export interface RunDeployOptions {
   projectSlug?: string;

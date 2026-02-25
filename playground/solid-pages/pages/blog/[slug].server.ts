@@ -1,4 +1,5 @@
 import { defineHandler } from "void";
+
 import { POSTS } from "./_data";
 
 export interface Props {

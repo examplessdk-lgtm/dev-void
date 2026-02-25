@@ -1,6 +1,7 @@
+import type { Plugin } from "vite";
+
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { Plugin } from "vite";
 
 /**
  * Vite plugin that runs local D1 migrations on dev server startup.

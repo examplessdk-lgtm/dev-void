@@ -1,5 +1,7 @@
-import { useState, useRef, useCallback, useContext, useMemo } from "react";
 import type { PageActionMap } from "void/routes";
+
+import { useState, useRef, useCallback, useContext, useMemo } from "react";
+
 import { RouterContext } from "./context";
 
 type HasParams<U extends keyof PageActionMap> = PageActionMap[U] extends { params: infer P }

@@ -1,6 +1,7 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+
 import { detectPreset } from "../../src/cli/preset";
 
 const TMP = join(import.meta.dirname, ".tmp-preset");

@@ -1,13 +1,9 @@
+import { intro, outro, log, confirm, isCancel, cancel, note, select } from "@clack/prompts";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
-import { intro, outro, log, confirm, isCancel, cancel, note, select } from "@clack/prompts";
+
 import { ensureProjectTsconfig } from "../codegen/project-tsconfig";
-import {
-  SCAFFOLD_FILES,
-  SCAFFOLD_GITIGNORE_LINES,
-  SCAFFOLD_RUNTIME_DEPENDENCIES,
-} from "./template";
 import {
   detectAgents,
   getAgentById,
@@ -16,6 +12,11 @@ import {
   type McpConfigTarget,
 } from "./agents";
 import { cliTitle } from "./output";
+import {
+  SCAFFOLD_FILES,
+  SCAFFOLD_GITIGNORE_LINES,
+  SCAFFOLD_RUNTIME_DEPENDENCIES,
+} from "./template";
 
 export interface InitArgs {
   tsconfig: boolean;

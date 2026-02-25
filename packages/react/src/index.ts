@@ -1,8 +1,10 @@
-import react from "@vitejs/plugin-react";
 import type { Plugin } from "vite";
-import { pagesPlugin } from "./plugin-pages";
-import { islandsPlugin } from "./plugin-islands";
+
+import react from "@vitejs/plugin-react";
 import { join } from "node:path";
+
+import { islandsPlugin } from "./plugin-islands";
+import { pagesPlugin } from "./plugin-pages";
 
 export interface VoidReactOptions {
   react?: Parameters<typeof react>[0];

@@ -1,6 +1,6 @@
+import { voidSolid } from "@void-x/solid";
 import { defineConfig } from "vite";
 import { voidPlugin } from "void";
-import { voidSolid } from "@void-x/solid";
 
 export default defineConfig({
   plugins: [voidPlugin(), voidSolid()],
