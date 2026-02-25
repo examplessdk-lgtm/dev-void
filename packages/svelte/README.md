@@ -7,7 +7,7 @@ Svelte 5 framework adapter for Void Pages mode — Inertia-inspired full-stack D
 ```ts
 // vite.config.ts
 import { defineConfig } from "vite";
-import voidPlugin from "void";
+import { voidPlugin } from "void";
 import { voidSvelte } from "@void-x/svelte";
 
 export default defineConfig({

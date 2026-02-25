@@ -172,7 +172,7 @@ async function runAiSetupPrompt(
  * that are missing. This allows `vite build && wrangler deploy` to work
  * for deploying directly to Cloudflare without the Void platform.
  */
-export default function voidPlugin(options?: { persistTo?: string }): Plugin[] {
+export function voidPlugin(options?: { persistTo?: string }): Plugin[] {
   // Resolve root relative to CWD — this runs at config time
   const root = process.cwd();
   const config = readConfig(root);

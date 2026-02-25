@@ -7,7 +7,7 @@ SolidJS framework adapter for Void Pages mode — Inertia-inspired full-stack DX
 ```ts
 // vite.config.ts
 import { defineConfig } from "vite";
-import voidPlugin from "void";
+import { voidPlugin } from "void";
 import { voidSolid } from "@void-x/solid";
 
 export default defineConfig({

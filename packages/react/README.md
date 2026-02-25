@@ -7,7 +7,7 @@ React framework adapter for Void Pages mode — Inertia-inspired full-stack DX w
 ```ts
 // vite.config.ts
 import { defineConfig } from "vite";
-import voidPlugin from "void";
+import { voidPlugin } from "void";
 import { voidReact } from "@void-x/react";
 
 export default defineConfig({

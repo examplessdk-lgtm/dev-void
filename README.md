@@ -7,7 +7,7 @@ Add a single plugin to your `vite.config.ts` and get file-based API routing, ser
 ```ts
 // vite.config.ts
 import { defineConfig } from "vite";
-import voidPlugin from "void";
+import { voidPlugin } from "void";
 
 export default defineConfig({
   plugins: [voidPlugin()],

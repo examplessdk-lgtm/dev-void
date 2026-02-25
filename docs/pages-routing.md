@@ -77,7 +77,7 @@ Add both plugins to your Vite config:
 ```ts [React]
 // vite.config.ts
 import { defineConfig } from "vite";
-import voidPlugin from "void";
+import { voidPlugin } from "void";
 import { voidReact } from "@void-x/react";
 
 export default defineConfig({
@@ -88,7 +88,7 @@ export default defineConfig({
 ```ts [Vue]
 // vite.config.ts
 import { defineConfig } from "vite";
-import voidPlugin from "void";
+import { voidPlugin } from "void";
 import { voidVue } from "@void-x/vue";
 
 export default defineConfig({
@@ -99,7 +99,7 @@ export default defineConfig({
 ```ts [Svelte]
 // vite.config.ts
 import { defineConfig } from "vite";
-import voidPlugin from "void";
+import { voidPlugin } from "void";
 import { voidSvelte } from "@void-x/svelte";
 
 export default defineConfig({
@@ -110,7 +110,7 @@ export default defineConfig({
 ```ts [Solid]
 // vite.config.ts
 import { defineConfig } from "vite";
-import voidPlugin from "void";
+import { voidPlugin } from "void";
 import { voidSolid } from "@void-x/solid";
 
 export default defineConfig({

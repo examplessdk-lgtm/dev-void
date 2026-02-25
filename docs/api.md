@@ -10,10 +10,10 @@ All public exports of the `void` package.
 
 ### `voidPlugin()`
 
-The default export. Returns an array of Vite plugins that set up file-based routing, migration support, and the Cloudflare Workers runtime. Takes no arguments — all configuration is read from [`void.json`](./config.md).
+Named export from `"void"`. Returns an array of Vite plugins that set up file-based routing, migration support, and the Cloudflare Workers runtime. Takes no arguments — all configuration is read from [`void.json`](./config.md).
 
 ```ts
-import voidPlugin from "void";
+import { voidPlugin } from "void";
 
 export default defineConfig({
   plugins: [voidPlugin()],
@@ -784,7 +784,7 @@ Imported from `"void/svelte"`.
 
 | Import path      | Contents                                                                                     |
 | ---------------- | -------------------------------------------------------------------------------------------- |
-| `void`           | Plugin default export + all handler/type re-exports                                          |
+| `void`           | `voidPlugin` named export + all handler/type re-exports                                      |
 | `void/handler`   | `defineHandler`, `defineMiddleware`, `defineScheduled`, `defineQueue`, `defineRender`, types |
 | `void/auth`      | `requireAuth`, `AuthUser`                                                                    |
 | `void/client`    | `fetch`, `FetchError`, `auth`, `AuthError`, `AuthUser`                                       |

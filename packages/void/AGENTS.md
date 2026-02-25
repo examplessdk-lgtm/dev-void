@@ -81,7 +81,7 @@ src/
 
 | Subpath          | What                                                                                                                |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `void`           | `voidPlugin()` default export + `defineHandler` + `defineMiddleware` + `defineQueue` + `CloudContext` type          |
+| `void`           | `voidPlugin()` named export + `defineHandler` + `defineMiddleware` + `defineQueue` + `CloudContext` type            |
 | `void/handler`   | `defineHandler()`, `defineHandler.withValidator()`, `defineMiddleware()`, types                                     |
 | `void/response`  | `convertReturnValue()`                                                                                              |
 | `void/validator` | `runValidation()`, `ValidatorSlots`, `HandlerInput` types                                                           |

@@ -18,7 +18,7 @@ npx void init
 
 ```ts
 // vite.config.ts
-import voidPlugin from "void";
+import { voidPlugin } from "void";
 
 export default {
   plugins: [voidPlugin()],
