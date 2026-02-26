@@ -4,13 +4,25 @@ import { describe, it, expect } from "vitest";
 
 function sendRpc(proc: ChildProcess, request: object): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("MCP response timeout")), 5000);
+    const timer = setTimeout(() => {
+      proc.stdout!.off("data", onData);
+      reject(new Error("MCP response timeout"));
+    }, 5000);
 
-    proc.stdout!.once("data", (chunk: Buffer) => {
+    let buffer = "";
+
+    const onData = (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex === -1) return;
+
+      const line = buffer.slice(0, newlineIndex).trim();
+      proc.stdout!.off("data", onData);
       clearTimeout(timer);
-      resolve(JSON.parse(chunk.toString().trim()));
-    });
+      resolve(JSON.parse(line));
+    };
 
+    proc.stdout!.on("data", onData);
     proc.stdin!.write(JSON.stringify(request) + "\n");
   });
 }
