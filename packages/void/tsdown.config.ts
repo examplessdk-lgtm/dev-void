@@ -88,6 +88,7 @@ export default defineConfig({
     "@void-x/react",
     "@void-x/svelte",
     "@void-x/solid",
+    "@napi-rs/keyring",
   ],
   inlineOnly: [
     "fdir",

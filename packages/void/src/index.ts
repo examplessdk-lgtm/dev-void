@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { loadEnv, type Plugin } from "vite";
 import { cloudflare, type WorkerConfig } from "@cloudflare/vite-plugin";
 import { routingPlugin } from "./plugin-routing";
@@ -17,6 +16,7 @@ import { scanQueuesSync } from "./queues/scan";
 import { validateSsrEntry } from "./ssr/entry";
 import { readConfig, normalizeAuth, resolveBindingNames } from "./config";
 import { ensureWranglerNodejsAlsFlag, syncWranglerBindings } from "./cli/wrangler";
+import { getToken, isStagingMode } from "./cli/auth";
 
 export type { AuthProvider } from "./config";
 
@@ -42,29 +42,22 @@ type CredentialStatus =
  * "no token" from "no project" for targeted onboarding guidance.
  */
 function readVoidDevCredentials(root: string): CredentialStatus {
-  const configPath = join(homedir(), ".void", "config.json");
-  let config: { token?: string; stagingToken?: string; staging?: boolean };
-  try {
-    config = JSON.parse(readFileSync(configPath, "utf-8"));
-  } catch {
-    return { status: "no-token" };
-  }
-  const staging = config.staging === true;
-  const token = staging ? config.stagingToken : config.token;
+  const token = getToken();
   if (!token) return { status: "no-token" };
+  const staging = isStagingMode() || undefined;
 
   const projectPath = join(root, ".void", "project.json");
   let project: { projectId?: string };
   try {
     project = JSON.parse(readFileSync(projectPath, "utf-8"));
   } catch {
-    return { status: "no-project", token, staging: staging || undefined };
+    return { status: "no-project", token, staging };
   }
   if (!project.projectId) {
-    return { status: "no-project", token, staging: staging || undefined };
+    return { status: "no-project", token, staging };
   }
 
-  return { status: "ok", token, projectId: project.projectId, staging: staging || undefined };
+  return { status: "ok", token, projectId: project.projectId, staging };
 }
 
 const DEFAULT_API_URL = "https://api.void.cloud";

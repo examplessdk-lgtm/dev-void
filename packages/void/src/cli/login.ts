@@ -34,11 +34,7 @@ export async function runLoginCommand(): Promise<void> {
     const token = await runLogin(provider);
     saveToken(token);
     s.stop("Logged in!");
-    outro(
-      isStagingMode()
-        ? "Staging token saved to ~/.void/config.json"
-        : "Token saved to ~/.void/config.json",
-    );
+    outro(isStagingMode() ? "Staging token saved." : "Token saved.");
   } catch (err) {
     s.stop("Login failed");
     throw err;

@@ -139,7 +139,7 @@ if (command === "staging") {
       execSync(cmd, { input: token });
       log.success("Token copied to clipboard.");
     } catch {
-      log.warn("Could not copy to clipboard. Copy the token manually from ~/.void/config.json");
+      log.warn("Could not copy to clipboard. Re-run `void login` to generate a new token.");
     }
   })().catch((err) => {
     log.error(err instanceof Error ? err.message : String(err));
@@ -296,7 +296,7 @@ if (command === "staging") {
 
   note(
     [
-      helpLine("VOID_TOKEN", "Auth token (or use ~/.void/config.json)"),
+      helpLine("VOID_TOKEN", "Auth token (or use `void login`)"),
       helpLine("VOID_PROJECT", "Deploy target project name override"),
     ].join("\n"),
     sectionTitle("Environment"),

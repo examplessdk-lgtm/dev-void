@@ -1,10 +1,49 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { Entry } from "@napi-rs/keyring";
 import { pc } from "./output";
 
 const CONFIG_DIR = join(homedir(), ".void");
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
+
+const KEYRING_SERVICE = "dev.void.cli";
+
+// ---------------------------------------------------------------------------
+// Keyring helpers — try/catch around `new Entry` for environments where the
+// native addon fails at runtime (CI, Docker, SSH, etc.)
+// ---------------------------------------------------------------------------
+
+function keyringGet(account: string): string | null {
+  try {
+    return new Entry(KEYRING_SERVICE, account).getPassword();
+  } catch {
+    return null;
+  }
+}
+
+function keyringSet(account: string, password: string): boolean {
+  try {
+    new Entry(KEYRING_SERVICE, account).setPassword(password);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function keyringDelete(account: string): boolean {
+  try {
+    new Entry(KEYRING_SERVICE, account).deletePassword();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Config file — non-sensitive fields only (staging, api).
+// Token fields are kept in the interface for migration reads.
+// ---------------------------------------------------------------------------
 
 interface Config {
   token?: string;
@@ -51,17 +90,32 @@ export function printStagingBanner(): void {
 }
 
 /**
- * Read the deploy token from environment or config file.
- * Priority: VOID_TOKEN env var > ~/.void/config.json
+ * Read the deploy token.
+ * Priority: VOID_TOKEN env var > system keychain > ~/.void/config.json (auto-migrated)
  */
 export function getToken(): string | null {
   const envToken = process.env.VOID_TOKEN;
-  if (envToken) {
-    return envToken;
+  if (envToken) return envToken;
+
+  const account = isStagingMode() ? "stagingToken" : "token";
+
+  // Try keyring first
+  const keyringToken = keyringGet(account);
+  if (keyringToken) return keyringToken;
+
+  // File fallback — auto-migrate to keyring if available
+  const config = readConfig();
+  const fileToken = config[account];
+  if (fileToken) {
+    if (keyringSet(account, fileToken)) {
+      // Successfully migrated — remove from config file
+      delete config[account];
+      writeConfig(config);
+    }
+    return fileToken;
   }
 
-  const config = readConfig();
-  return (isStagingMode() ? config.stagingToken : config.token) ?? null;
+  return null;
 }
 
 export function getTokenSource(): "ci" | "manual" {
@@ -69,26 +123,36 @@ export function getTokenSource(): "ci" | "manual" {
 }
 
 export function saveToken(token: string): void {
+  const account = isStagingMode() ? "stagingToken" : "token";
+  if (keyringSet(account, token)) return;
+
+  // Keyring unavailable — fall back to file
+  console.warn(pc.yellow("System keychain unavailable, storing token in ~/.void/config.json"));
   const config = readConfig();
-  if (isStagingMode()) {
-    config.stagingToken = token;
-  } else {
-    config.token = token;
-  }
+  config[account] = token;
   writeConfig(config);
 }
 
 export function removeToken(): boolean {
+  const account = isStagingMode() ? "stagingToken" : "token";
+  let removed = false;
+
+  // Remove from keyring
+  if (keyringDelete(account)) removed = true;
+
+  // Also clean up config file if token exists there
   try {
     const config = readConfig();
-    const key = isStagingMode() ? "stagingToken" : "token";
-    if (!config[key]) return false;
-    delete config[key];
-    writeConfig(config);
-    return true;
+    if (config[account]) {
+      delete config[account];
+      writeConfig(config);
+      removed = true;
+    }
   } catch {
-    return false;
+    // ignore
   }
+
+  return removed;
 }
 
 const DEFAULT_API_URL = "https://api.void.cloud";
