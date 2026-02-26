@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // --- Types ---
@@ -27,15 +27,28 @@ interface JsonRpcRequest {
 
 // --- Doc loading ---
 
+function findPackageRoot(from: string): string {
+  let dir = from;
+  while (true) {
+    if (existsSync(join(dir, "package.json"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error("Could not find package.json from: " + from);
+}
+
 function resolveDocsDir(): string {
-  const moduleDir = join(fileURLToPath(import.meta.url), "..");
-  const bundledDocsDir = join(moduleDir, "..", "..", "skills", "void", "docs");
+  const pkgRoot = findPackageRoot(dirname(fileURLToPath(import.meta.url)));
+
+  // Bundled docs (dist + npm installs)
+  const bundledDocsDir = join(pkgRoot, "skills", "void", "docs");
   if (existsSync(bundledDocsDir)) {
     return bundledDocsDir;
   }
 
   // Monorepo fallback for local development before package build.
-  const workspaceDocsDir = join(moduleDir, "..", "..", "..", "website", "docs");
+  const workspaceDocsDir = join(pkgRoot, "..", "..", "docs");
   if (existsSync(workspaceDocsDir)) {
     return workspaceDocsDir;
   }

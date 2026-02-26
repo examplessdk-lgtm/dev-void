@@ -8,7 +8,7 @@ function loadDocs() {
   const bundledDocsDir = join(import.meta.dirname, "../../skills/void/docs");
   const docsDir = existsSync(bundledDocsDir)
     ? bundledDocsDir
-    : join(import.meta.dirname, "../../../website/docs");
+    : join(import.meta.dirname, "../../../docs");
   const files = readdirSync(docsDir)
     .filter((f) => f.endsWith(".md"))
     .sort();
