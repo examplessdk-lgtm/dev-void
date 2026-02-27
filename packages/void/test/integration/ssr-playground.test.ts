@@ -162,6 +162,7 @@ describe("playground/ssr build + preview", () => {
       "/**",
       "!/assets/*",
       "!/@*",
+      "!/__uno*",
       "!/src/*",
       "!/node_modules/*",
     ]);
