@@ -23,6 +23,10 @@ When `output` is `"static"`:
 
 During `vite build`, after both the worker and client bundles are written to disk, Void spins up Miniflare with the built worker and fetches each page. The HTML responses are written to `dist/client/` as static files (e.g. `/about` becomes `dist/client/about.html`).
 
+::: important
+Running `vite build` locally does **not** generate HTML files — the build only produces the worker and client asset bundles. Prerendered HTML files are generated remotely when the app is deployed.
+:::
+
 ## Per-page overrides
 
 Individual pages can opt out of prerendering:
