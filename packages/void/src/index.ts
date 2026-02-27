@@ -554,6 +554,8 @@ export function voidPlugin(options?: { persistTo?: string }): Plugin[] {
         "/**",
         "!/assets/*",
         "!/@*",
+        // UnoCSS resolves `virtual:uno.css` to `/__uno.css` instead of using Rollup's `\0` prefix
+        "!/__uno*",
         "!/src/*",
         "!/node_modules/*",
         ...(hasPages ? ["!/pages/*"] : []),
