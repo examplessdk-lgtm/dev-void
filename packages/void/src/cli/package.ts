@@ -112,6 +112,10 @@ export function packageBuild(
     if (relativePath === "wrangler.json") continue;
     // Skip .vite/ build metadata (manifest.json etc.) — not runtime code
     if (relativePath.startsWith(".vite/") || relativePath.startsWith(".vite\\")) continue;
+    // Skip CSS files — Vite extracts them during SSR build but they're only
+    // needed on the client side. Uploading them as worker modules causes
+    // Cloudflare to reject the deploy (SyntaxError parsing CSS as JS).
+    if (relativePath.endsWith(".css")) continue;
     const content = readFileSync(filePath);
     formData.append(`worker:${relativePath}`, new Blob([content]), relativePath);
   }
@@ -222,6 +226,7 @@ export function packageFrameworkBuild(opts: {
     const relativePath = relative(opts.workerDir, filePath);
     if (relativePath === "wrangler.json" || relativePath === "wrangler.jsonc") continue;
     if (relativePath.startsWith(".vite/") || relativePath.startsWith(".vite\\")) continue;
+    if (relativePath.endsWith(".css")) continue;
     const content = readFileSync(filePath);
     formData.append(`worker:${relativePath}`, new Blob([content]), relativePath);
   }
