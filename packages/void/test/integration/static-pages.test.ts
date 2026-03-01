@@ -61,6 +61,18 @@ describe("playground/static-pages build (output: static)", () => {
     expect(html).not.toContain("/@id/");
   });
 
+  it("prerenders dynamic pages with getPrerenderPaths", () => {
+    // posts/[slug] exports getPrerenderPaths returning [{slug:"hello"},{slug:"world"}]
+    const helloPath = join(DIST, "client/posts/hello.html");
+    const worldPath = join(DIST, "client/posts/world.html");
+    expect(existsSync(helloPath)).toBe(true);
+    expect(existsSync(worldPath)).toBe(true);
+
+    const html = readFileSync(helloPath, "utf-8");
+    expect(html).toContain('data-testid="post-title"');
+    expect(html).toContain("Post hello");
+  });
+
   it("does not prerender dynamic pages without getPrerenderPaths", () => {
     // items/[id] has no getPrerenderPaths, so it should NOT be prerendered
     expect(existsSync(join(DIST, "client/items"))).toBe(false);
