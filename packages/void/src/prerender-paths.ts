@@ -1,9 +1,49 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { createServer } from "vite";
+import { createServer, loadConfigFromFile, type Plugin } from "vite";
 import { scanPages } from "./pages/scan";
 import { detectSsrPrerender, getSsrServerEntryPath } from "./ssr/entry";
 import type { VoidConfig } from "./config";
+
+/**
+ * Create a temporary Vite dev server for ssrLoadModule().
+ *
+ * Loads the user's full Vite config (plugins, resolve aliases, SSR options,
+ * etc.) but filters out @cloudflare/vite-plugin plugins which replace the
+ * SSR environment with a FetchableDevEnvironment that requires a running
+ * Miniflare backend, making ssrLoadModule() unusable.
+ */
+async function createSsrLoadServer(root: string) {
+  const loaded = await loadConfigFromFile(
+    {
+      command: "serve",
+      mode: process.env.NODE_ENV === "development" ? "development" : "production",
+    },
+    undefined,
+    root,
+  );
+
+  if (!loaded) {
+    throw new Error("[void] Failed to load Vite config — expected a vite.config.{ts,js,mjs} file");
+  }
+
+  const { plugins: rawPlugins, ...restConfig } = loaded.config;
+  const plugins = ((rawPlugins ?? []) as unknown[]).flat(Infinity).filter((p): p is Plugin => {
+    if (!p || typeof p !== "object") return false;
+    const name = (p as Plugin).name;
+    if (!name) return true;
+    return !name.startsWith("vite-plugin-cloudflare");
+  });
+
+  return createServer({
+    ...restConfig,
+    root,
+    configFile: false,
+    server: { middlewareMode: true },
+    logLevel: "silent",
+    plugins,
+  });
+}
 
 /**
  * Collect all paths that should be prerendered.
@@ -39,12 +79,7 @@ export async function collectPrerenderPaths(options: {
       (p) => p.prerender && p.hasGetPrerenderPaths && (p.params.length > 0 || p.catchAll),
     );
     if (dynamicPrerenderPages.length > 0) {
-      const viteServer = await createServer({
-        root,
-        configFile: false,
-        server: { middlewareMode: true },
-        logLevel: "silent",
-      });
+      const viteServer = await createSsrLoadServer(root);
       try {
         for (const page of dynamicPrerenderPages) {
           try {
@@ -65,8 +100,9 @@ export async function collectPrerenderPaths(options: {
               }
             }
           } catch (err) {
-            console.warn(
+            throw new Error(
               `[void] Failed to resolve prerender paths for ${page.pattern}: ${err instanceof Error ? err.message : String(err)}`,
+              { cause: err },
             );
           }
         }
@@ -79,12 +115,7 @@ export async function collectPrerenderPaths(options: {
   // Custom SSR: getPrerenderPaths() in src/main.ssr.ts
   const ssrPrerender = detectSsrPrerender(root);
   if (ssrPrerender?.hasGetPrerenderPaths) {
-    const viteServer = await createServer({
-      root,
-      configFile: false,
-      server: { middlewareMode: true },
-      logLevel: "silent",
-    });
+    const viteServer = await createSsrLoadServer(root);
     try {
       const entryPath = getSsrServerEntryPath(root)!;
       const mod = await viteServer.ssrLoadModule(entryPath);
@@ -97,8 +128,9 @@ export async function collectPrerenderPaths(options: {
         }
       }
     } catch (err) {
-      console.warn(
+      throw new Error(
         `[void] Failed to resolve SSR prerender paths: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
       );
     } finally {
       await viteServer.close();

@@ -73,6 +73,18 @@ describe("playground/static-pages build (output: static)", () => {
     expect(html).toContain("Post hello");
   });
 
+  it("prerenders dynamic pages with getPrerenderPaths using virtual modules", () => {
+    // tags/[tag] exports getPrerenderPaths that imports from virtual:tags plugin
+    const vuePath = join(DIST, "client/tags/vue.html");
+    const vitePath = join(DIST, "client/tags/vite.html");
+    expect(existsSync(vuePath)).toBe(true);
+    expect(existsSync(vitePath)).toBe(true);
+
+    const html = readFileSync(vuePath, "utf-8");
+    expect(html).toContain('data-testid="tag-title"');
+    expect(html).toContain("Tag vue");
+  });
+
   it("does not prerender dynamic pages without getPrerenderPaths", () => {
     // items/[id] has no getPrerenderPaths, so it should NOT be prerendered
     expect(existsSync(join(DIST, "client/items"))).toBe(false);
