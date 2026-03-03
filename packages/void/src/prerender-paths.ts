@@ -66,7 +66,8 @@ export async function collectPrerenderPaths(options: {
             }
           } catch (err) {
             throw new Error(
-              `Failed to resolve prerender paths for ${page.pattern}: ${err instanceof Error ? err.message : String(err)}`,
+              `[void] Failed to resolve prerender paths for ${page.pattern}: ${err instanceof Error ? err.message : String(err)}`,
+              { cause: err },
             );
           }
         }
@@ -98,7 +99,8 @@ export async function collectPrerenderPaths(options: {
       }
     } catch (err) {
       throw new Error(
-        `Failed to resolve SSR prerender paths: ${err instanceof Error ? err.message : String(err)}`,
+        `[void] Failed to resolve SSR prerender paths: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
       );
     } finally {
       await viteServer.close();
