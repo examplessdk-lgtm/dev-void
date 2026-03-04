@@ -198,24 +198,6 @@ export async function runLogin(provider = "github"): Promise<string> {
       }
 
       const error = url.searchParams.get("error");
-      if (error === "email_conflict") {
-        const existing = url.searchParams.get("existing_provider");
-        res.writeHead(400, { "Content-Type": "text/html" });
-        res.end(
-          page(
-            "Login failed",
-            `This email is already registered with ${existing}. Please log in with ${existing} instead.`,
-          ),
-        );
-        server.close();
-        reject(
-          new Error(
-            `This email is already registered with ${existing}. Please log in with ${existing} instead.`,
-          ),
-        );
-        return;
-      }
-
       if (error === "signup_restricted") {
         res.writeHead(403, { "Content-Type": "text/html" });
         res.end(

@@ -94,6 +94,8 @@ These Void features work identically across all targets:
 - [File-based routing](../guide/server-routing.md) (`routes/`, `middleware/`)
 - [Pages mode](../guide/pages-routing/overview.md) with SSR (React, Vue, Svelte, Solid)
 - [Typed fetch client](../guide/typed-fetch.md) (`void/client`)
+- [Custom headers](../guide/edge/headers.md) (`routing.headers`)
+- [Redirects](../guide/edge/redirects.md) (`routing.redirects`)
 - [Environment variables](../guide/env-vars.md) (`.env` files)
 - [Static site generation](../guide/ssg.md)
 - [Vite preview](https://vite.dev/guide/cli#vite-preview) for testing production builds locally

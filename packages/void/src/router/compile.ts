@@ -1,3 +1,4 @@
+import type { HeaderRule, RedirectRule } from "../cli/types";
 import type { ScanResult } from "./scan";
 
 /**
@@ -31,6 +32,10 @@ export interface CompileOptions {
   auth: AuthCompileOptions | null;
   /** Non-CF target — omits executionCtx from ALS context */
   nodeTarget?: boolean;
+  /** Header rules from routing.headers config (node targets only) */
+  headerRules?: HeaderRule[];
+  /** Redirect rules from routing.redirects config (node targets only) */
+  redirectRules?: RedirectRule[];
 }
 
 export interface SsrCompileOptions {
@@ -125,6 +130,14 @@ export function compileRouteTable(
   }
   lines.push("});");
   lines.push("");
+
+  // Edge routing middleware (node targets only — on CF these are handled by the dispatch worker)
+  if (options.nodeTarget && options.redirectRules?.length) {
+    compileRedirectMiddleware(lines, options.redirectRules);
+  }
+  if (options.nodeTarget && options.headerRules?.length) {
+    compileHeaderMiddleware(lines, options.headerRules);
+  }
 
   // Auth: ensure tables exist + session middleware
   if (auth) {
@@ -1171,6 +1184,73 @@ export async function fetch(path, options) {
 
   return data;
 }`;
+}
+
+/**
+ * Emit inline `matchPattern()` — glob `*` → regex matching.
+ * Mirrors the dispatch worker's `matchPattern()` from `packages/dispatch/src/headers.ts`.
+ */
+function emitMatchPattern(lines: string[]): void {
+  lines.push("function __matchPattern(pattern, pathname) {");
+  lines.push(
+    '  const escaped = pattern.replace(/[.+?^${}()|[\\]\\\\]/g, "\\\\$&").replaceAll("*", ".*");',
+  );
+  lines.push("  return new RegExp(`^${escaped}$`).test(pathname);");
+  lines.push("}");
+  lines.push("");
+}
+
+/**
+ * Emit redirect middleware — short-circuits matching requests before route handlers.
+ * Last match wins, consistent with dispatch worker behavior.
+ */
+function compileRedirectMiddleware(lines: string[], rules: RedirectRule[]): void {
+  emitMatchPattern(lines);
+  lines.push("// Redirect rules (applied before route handlers)");
+  lines.push(`const __redirectRules = ${JSON.stringify(rules)};`);
+  lines.push('app.use("*", async (c, next) => {');
+  lines.push("  const pathname = new URL(c.req.url).pathname;");
+  lines.push("  let matched;");
+  lines.push("  for (const rule of __redirectRules) {");
+  lines.push("    if (__matchPattern(rule.source, pathname)) matched = rule;");
+  lines.push("  }");
+  lines.push("  if (matched) {");
+  lines.push("    let dest = matched.destination;");
+  lines.push('    if (dest.includes(":splat") && matched.source.includes("*")) {');
+  lines.push('      const prefix = matched.source.split("*")[0];');
+  lines.push("      const splat = pathname.slice(prefix.length);");
+  lines.push('      dest = dest.replace(":splat", splat);');
+  lines.push("    }");
+  lines.push("    return c.redirect(dest, matched.status);");
+  lines.push("  }");
+  lines.push("  return next();");
+  lines.push("});");
+  lines.push("");
+}
+
+/**
+ * Emit header middleware — applies matching header rules to every response.
+ * All matching rules merge; last match wins for same header name.
+ */
+function compileHeaderMiddleware(lines: string[], rules: HeaderRule[]): void {
+  // matchPattern may already be emitted by redirect middleware
+  if (!lines.some((l) => l.includes("function __matchPattern"))) {
+    emitMatchPattern(lines);
+  }
+  lines.push("// Header rules (applied to responses)");
+  lines.push(`const __headerRules = ${JSON.stringify(rules)};`);
+  lines.push('app.use("*", async (c, next) => {');
+  lines.push("  await next();");
+  lines.push("  const pathname = new URL(c.req.url).pathname;");
+  lines.push("  const matched = [];");
+  lines.push("  for (const rule of __headerRules) {");
+  lines.push("    if (__matchPattern(rule.pattern, pathname)) matched.push(...rule.headers);");
+  lines.push("  }");
+  lines.push("  for (const [name, value] of matched) {");
+  lines.push("    c.res.headers.set(name, value);");
+  lines.push("  }");
+  lines.push("});");
+  lines.push("");
 }
 
 export function compileWorkerClient(authClientPath: string): string {

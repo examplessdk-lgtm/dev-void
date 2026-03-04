@@ -10,20 +10,29 @@ import bg from "./hero-bg.jpg";
 const { frontmatter } = useData();
 
 const tree = (ext) => [
-  { name: "pages/", children: [{ name: `index${ext}` }, { name: `about${ext}` }] },
+  {
+    name: "pages/",
+    children: [
+      { name: `index${ext}` },
+      {
+        name: "users/",
+        children: [{ name: `[id]${ext}` }, { name: "[id].server.ts" }],
+      },
+    ],
+  },
   {
     name: "routes/",
     children: [
       {
         name: "api/",
-        children: [
-          { name: "hello.ts" },
-          { name: "users/", children: [{ name: "index.ts" }, { name: "[id].ts" }] },
-        ],
+        children: [{ name: "hello.ts" }],
       },
     ],
   },
-  { name: "migrations/", children: [{ name: "0001_create_users.sql" }] },
+  { name: "middleware/", collapsed: true, children: [{ name: "01.auth.ts" }] },
+  { name: "crons/", collapsed: true, children: [{ name: "daily-cleanup.ts" }] },
+  { name: "queues/", collapsed: true, children: [{ name: "email-sender.ts" }] },
+  { name: "migrations/", collapsed: true, children: [{ name: "0001_create_users.sql" }] },
   { name: "vite.config.ts" },
   { name: "void.json" },
 ];
@@ -55,11 +64,20 @@ const tree = (ext) => [
 <style scoped>
 .hero-file-tree {
   margin-top: 2rem;
+  max-width: calc(100vw - 80px);
 }
 
 @media (min-width: 768px) {
   .hero-file-tree {
     margin-top: 0;
+    max-width: none;
+  }
+}
+
+@media (min-width: 1024px) {
+  .hero-file-tree :deep(.file-tree) {
+    max-height: 468px;
+    overflow-y: auto;
   }
 }
 

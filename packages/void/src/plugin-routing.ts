@@ -40,6 +40,8 @@ interface RoutingPluginOptions {
   headConfig?: import("./pages/head").HeadConfig;
   remoteMode?: boolean;
   target?: "node" | "bun" | "deno";
+  headerRules?: import("./cli/types").HeaderRule[];
+  redirectRules?: import("./cli/types").RedirectRule[];
 }
 
 export function routingPlugin(root: string, options: RoutingPluginOptions): Plugin {
@@ -98,6 +100,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     reactRefresh: false,
     auth: null,
     nodeTarget: !!options.target,
+    headerRules: options.headerRules,
+    redirectRules: options.redirectRules,
   };
 
   // Auth compile options are set up lazily in buildStart (after env plugin

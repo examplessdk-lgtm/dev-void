@@ -15,7 +15,14 @@ import { inferBindingsFromSource } from "./inference/walk";
 import { scanJobsSync } from "./crons/scan";
 import { scanQueuesSync } from "./queues/scan";
 import { validateSsrEntry } from "./ssr/entry";
-import { readConfig, normalizeAuth, resolveBindingNames, isNodeTarget } from "./config";
+import {
+  readConfig,
+  normalizeAuth,
+  resolveBindingNames,
+  isNodeTarget,
+  convertHeadersConfig,
+  convertRedirectsConfig,
+} from "./config";
 import { ensureWranglerNodejsAlsFlag, syncWranglerBindings } from "./cli/wrangler";
 import { restartPlugin } from "./plugin-restart";
 import { prerenderPlugin } from "./plugin-prerender";
@@ -703,6 +710,8 @@ export function voidPlugin(options?: {
         getAuth: () => null,
         headConfig: config.head,
         target: config.target as "node" | "bun" | "deno",
+        headerRules: convertHeadersConfig(config.routing?.headers),
+        redirectRules: convertRedirectsConfig(config.routing?.redirects),
       }),
       prerenderPlugin(root, config),
       ...nodeTargetPlugin(config.target as "node" | "bun" | "deno"),

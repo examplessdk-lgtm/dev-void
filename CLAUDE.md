@@ -6,6 +6,7 @@ Full-stack framework for Cloudflare Workers, powered by Vite.
 
 - **Important**: The source of truth for agent instructions is `CLAUDE.md` (this file). `AGENTS.md` is a symlink to this file. `README.md` is a separate public-facing file. When asked to update agent instructions, always update `CLAUDE.md`.
 - Documentation source lives in `docs/`.
+  - Docs is a Vitepress project using our custom theme. When asked to "link the theme", temporarily edit `docs/package.json` so that `@voidzero-dev/vitepress-theme` point to `link:../../../theme`. Rerun `pnpm install` to link it. Revert these when asked to "unlink the theme".
 
 ## Important Note for Release Workflows
 
@@ -33,9 +34,9 @@ The `void` package on npm has these previous versions: '0.0.1', '0.1.0', '0.1.2'
 
 ```
 pnpm -r build                       # Build all packages
-pnpm -C packages/void build   # Build only the core plugin
+pnpm -C packages/void build         # Build only the core plugin
 pnpm test                           # Run vitest (unit + integration tests)
-pnpm test packages/void       # Only test the core plugin
+pnpm test packages/void             # Only test the core plugin
 pnpm lint                           # oxlint
 pnpm fmt                            # oxfmt --write .
 pnpm check                          # Typecheck all packages (tsc --noEmit)

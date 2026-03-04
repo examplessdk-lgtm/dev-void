@@ -14,3 +14,11 @@
 :root[data-theme="light"] {
   --color-brand: #4f30e8;
 }
+
+.dark .aside-credit-logo-dark {
+  display: none !important;
+}
+
+.dark .aside-credit-logo-light {
+  display: inline !important;
+}

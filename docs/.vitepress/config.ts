@@ -107,6 +107,7 @@ const socialLinks = [
 const platformLinks = {
   text: "Platform",
   items: [
+    { text: "Company", link: "https://voidzero.dev" },
     { text: "Features", link: "/platform/features" },
     { text: "Pricing", link: "/platform/pricing" },
     { text: "Enterprise", link: "/platform/enterprise" },
@@ -119,6 +120,7 @@ export default extendConfig(
     description: "Fullstack Vite plugin for Cloudflare Workers",
     cleanUrls: true,
     head: [["link", { rel: "icon", type: "image/svg+xml", href: "/icon.svg" }]],
+    appearance: "dark",
 
     // ./index.server imports in code blocks are false positives
     ignoreDeadLinks: [/\/index$/],
