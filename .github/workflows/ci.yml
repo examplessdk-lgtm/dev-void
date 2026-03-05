@@ -52,6 +52,6 @@ jobs:
       - run: pnpm build
 
       - run: pnpm exec playwright install --with-deps chromium
-        if: matrix.suite == 'core-markdown' || startsWith(matrix.suite, 'pages-')
+        if: matrix.suite == 'core-markdown' || matrix.suite == 'metaframeworks' || startsWith(matrix.suite, 'pages-')
 
       - run: pnpm ${{ matrix.script }}${{ matrix.retry && format(' --retry {0}', matrix.retry) || '' }}

@@ -7,6 +7,7 @@ const metaframeworks = [
   "packages/void/test/integration/tanstack-start.test.ts",
   "packages/void/test/integration/vinext-pages.test.ts",
   "packages/void/test/integration/vinext-app.test.ts",
+  "packages/void/test/integration/react-router.test.ts",
 ];
 
 export default defineConfig({

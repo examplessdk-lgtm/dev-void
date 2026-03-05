@@ -8,8 +8,7 @@ const items: FileTreeItem[] = [
       {
         name: "api/",
         children: [
-          { name: "hello.get.ts", description: "→ GET /api/hello" },
-          { name: "hello.post.ts", description: "→ POST /api/hello" },
+          { name: "hello.ts", description: "→ GET|POST /api/hello" },
           {
             name: "users/",
             children: [

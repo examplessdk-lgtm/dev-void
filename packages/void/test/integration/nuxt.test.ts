@@ -99,14 +99,33 @@ describe("playground/nuxt dev", () => {
     expect(html).toContain("Nuxt + Void");
   });
 
-  it("smoke API returns D1 and KV data", async () => {
-    const response = await fetch(`${DEV_BASE}/api/smoke`);
-    expect(response.status).toBe(200);
-    const data = (await response.json()) as {
-      user: { name: string } | null;
-      kvValue: string | null;
-    };
-    expect(data.user?.name).toBe("Alice");
-    expect(data.kvValue).toBe("ok");
+  it("navigates to smoke route via SPA from home page", async () => {
+    const { chromium } = await import("playwright");
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      await page.goto(DEV_BASE);
+      await page.waitForLoadState("networkidle");
+
+      // Mark the document to detect full page reloads
+      await page.evaluate(() => {
+        (window as any).__spa_marker = true;
+      });
+
+      await page.click('a[href="/smoke"]');
+      await page.waitForURL("**/smoke");
+      await page.waitForSelector('[data-testid="d1-user"]');
+
+      // Assert SPA navigation (no full reload)
+      const spaMarker = await page.evaluate(() => (window as any).__spa_marker);
+      expect(spaMarker).toBe(true);
+
+      const d1User = await page.textContent('[data-testid="d1-user"]');
+      const kvValue = await page.textContent('[data-testid="kv-value"]');
+      expect(d1User).toBe("Alice");
+      expect(kvValue).toBe("ok");
+    } finally {
+      await browser.close();
+    }
   });
 }, 60_000);

@@ -24,9 +24,9 @@ describe("FRAMEWORK_PRESETS", () => {
     const preset = FRAMEWORK_PRESETS.astro;
     expect(preset).toBeDefined();
     expect(preset.buildCommand).toBe("astro build");
-    expect(preset.workerDir).toBe("dist/_worker.js");
-    expect(preset.workerMain).toBe("index.js");
-    expect(preset.assetsDir).toBe("dist");
+    expect(preset.workerDir).toBe("dist/server");
+    expect(preset.workerMain).toBe("entry.mjs");
+    expect(preset.assetsDir).toBe("dist/client");
   });
 
   it("all presets have required fields", () => {

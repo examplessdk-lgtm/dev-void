@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { detectWorkerDir } from "../../src/cli/deploy";
+import { resolveDistDir, resolveWorkerDirName } from "../../src/cli/deploy";
+import { FRAMEWORK_PRESETS } from "../../src/cli/preset";
 import {
   getRequestedProjectSlug,
   inferDefaultSlug,
@@ -92,7 +93,7 @@ describe("inferDefaultSlug", () => {
   });
 });
 
-describe("detectWorkerDir", () => {
+describe("resolveDistDir", () => {
   afterEach(() => {
     while (tempDirs.length > 0) {
       const dir = tempDirs.pop()!;
@@ -100,21 +101,92 @@ describe("detectWorkerDir", () => {
     }
   });
 
-  it("returns 'ssr' when dist/ssr exists", () => {
+  it("returns dist/ for non-framework deploys", () => {
+    const root = mkdtempSync(join(tmpdir(), "void-test-"));
+    tempDirs.push(root);
+    mkdirSync(join(root, "dist"), { recursive: true });
+
+    expect(resolveDistDir(root)).toBe(join(root, "dist"));
+  });
+
+  it("returns dist/ for tanstack-start preset", () => {
+    const root = mkdtempSync(join(tmpdir(), "void-test-"));
+    tempDirs.push(root);
+    mkdirSync(join(root, "dist"), { recursive: true });
+
+    expect(resolveDistDir(root, FRAMEWORK_PRESETS["tanstack-start"])).toBe(join(root, "dist"));
+  });
+
+  it("returns build/ for react-router preset", () => {
+    const root = mkdtempSync(join(tmpdir(), "void-test-"));
+    tempDirs.push(root);
+    mkdirSync(join(root, "build"), { recursive: true });
+
+    expect(resolveDistDir(root, FRAMEWORK_PRESETS["react-router"])).toBe(join(root, "build"));
+  });
+
+  it("throws with framework-specific message when build dir missing", () => {
+    const root = mkdtempSync(join(tmpdir(), "void-test-"));
+    tempDirs.push(root);
+
+    expect(() => resolveDistDir(root, FRAMEWORK_PRESETS["react-router"])).toThrow(
+      'Build output directory "build" not found',
+    );
+  });
+});
+
+describe("resolveWorkerDirName", () => {
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop()!;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns preset worker subdir for react-router", () => {
+    const root = mkdtempSync(join(tmpdir(), "void-test-"));
+    tempDirs.push(root);
+    const buildDir = join(root, "build");
+    mkdirSync(join(buildDir, "server"), { recursive: true });
+
+    expect(resolveWorkerDirName(buildDir, FRAMEWORK_PRESETS["react-router"])).toBe("server");
+  });
+
+  it("returns preset worker subdir for tanstack-start", () => {
+    const root = mkdtempSync(join(tmpdir(), "void-test-"));
+    tempDirs.push(root);
+    const dist = join(root, "dist");
+    mkdirSync(join(dist, "server"), { recursive: true });
+
+    expect(resolveWorkerDirName(dist, FRAMEWORK_PRESETS["tanstack-start"])).toBe("server");
+  });
+
+  it("probes for ssr/ without a preset", () => {
     const root = mkdtempSync(join(tmpdir(), "void-test-"));
     tempDirs.push(root);
     const dist = join(root, "dist");
     mkdirSync(join(dist, "ssr"), { recursive: true });
 
-    expect(detectWorkerDir(dist)).toBe("ssr");
+    expect(resolveWorkerDirName(dist)).toBe("ssr");
   });
 
-  it("throws when dist/ssr does not exist", () => {
+  it("throws with framework-specific message when worker dir missing", () => {
+    const root = mkdtempSync(join(tmpdir(), "void-test-"));
+    tempDirs.push(root);
+    const buildDir = join(root, "build");
+    mkdirSync(buildDir, { recursive: true });
+
+    expect(() => resolveWorkerDirName(buildDir, FRAMEWORK_PRESETS["react-router"])).toThrow(
+      'Worker output not found at "build/server"',
+    );
+  });
+
+  it("throws when no worker dir exists without preset", () => {
     const root = mkdtempSync(join(tmpdir(), "void-test-"));
     tempDirs.push(root);
     const dist = join(root, "dist");
     mkdirSync(dist, { recursive: true });
 
-    expect(() => detectWorkerDir(dist)).toThrow("Worker output not found");
+    expect(() => resolveWorkerDirName(dist)).toThrow("Worker output not found");
   });
 });

@@ -75,7 +75,7 @@ export class PlatformClient {
     this.baseUrl = apiUrl ?? getApiUrl();
   }
 
-  async whoami(): Promise<{ login: string }> {
+  async whoami(): Promise<{ login: string; plan: string }> {
     const res = await fetch(`${this.baseUrl}/me`, {
       headers: {
         Authorization: `Bearer ${this.token}`,

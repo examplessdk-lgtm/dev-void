@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { Plugin } from "vite";
 import { isNodeTarget, type VoidConfig } from "./config";
-import { detectWorkerDir } from "./cli/deploy";
+import { resolveDistDir, resolveWorkerDirName } from "./cli/deploy";
 import { collectPrerenderPaths } from "./prerender-paths";
 import { prerenderPages, prerenderPagesNode } from "./prerender";
 import { voidLog, voidWarn, setShowTimestamp } from "./log";
@@ -22,7 +22,8 @@ export function prerenderPlugin(root: string, config: VoidConfig): Plugin {
       if (this.environment?.name !== "client") return;
       setShowTimestamp(false);
 
-      const distDir = join(root, "dist");
+      // Prerender only applies to void apps (not meta-frameworks), so no preset needed
+      const distDir = resolveDistDir(root);
       const clientDir = join(distDir, "client");
 
       // Collect paths to prerender
@@ -47,13 +48,7 @@ export function prerenderPlugin(root: string, config: VoidConfig): Plugin {
       } else {
         // Cloudflare: use Miniflare
         const persistDir = join(root, ".void");
-        let workerDirName: string;
-        try {
-          workerDirName = detectWorkerDir(distDir);
-        } catch (err) {
-          voidWarn(`Skipping prerender: ${err instanceof Error ? err.message : String(err)}`);
-          return;
-        }
+        const workerDirName = resolveWorkerDirName(distDir);
         const workerDir = join(distDir, workerDirName);
 
         result = await prerenderPages({

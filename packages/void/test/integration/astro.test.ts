@@ -115,12 +115,20 @@ describe("playground/astro dev", () => {
     expect(html).toContain("Astro + Void");
   });
 
-  it("smoke route exercises D1 and KV", async () => {
-    const response = await fetch(`${DEV_BASE}/smoke`);
-    const html = await response.text();
-    // eslint-disable-next-line jest/valid-expect -- vitest custom error message
-    expect(response.status, html).toBe(200);
-    expect(html).toMatch(/<span[^>]*data-testid="d1-user"[^>]*>Alice<\/span>/);
-    expect(html).toMatch(/<span[^>]*data-testid="kv-value"[^>]*>ok<\/span>/);
+  it("navigates to smoke route from home page", async () => {
+    const { chromium } = await import("playwright");
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      await page.goto(DEV_BASE);
+      await page.click('a[href="/smoke"]');
+      await page.waitForURL("**/smoke");
+      const d1User = await page.textContent('[data-testid="d1-user"]');
+      const kvValue = await page.textContent('[data-testid="kv-value"]');
+      expect(d1User).toBe("Alice");
+      expect(kvValue).toBe("ok");
+    } finally {
+      await browser.close();
+    }
   });
 }, 60_000);

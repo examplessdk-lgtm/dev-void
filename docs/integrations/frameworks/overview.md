@@ -6,7 +6,7 @@ outline: deep
 
 Void supports deploying meta-framework apps to the Void platform via `void deploy`. Add `voidPlugin()` to your framework's Vite config to get binding inference, typed DB generation, migration management, auth, cron jobs, queues, and caching.
 
-Some frameworks (TanStack Start, React Router, Vinext) compose directly with `@cloudflare/vite-plugin`, which Void already depends on and covers. Others (SvelteKit, Nuxt, Astro) have their own Cloudflare integrations, which Void respects. In both cases, the framework owns routing and rendering — Void serves as the platform SDK that enhances backend DX.
+Some frameworks (TanStack Start, React Router) compose directly with `@cloudflare/vite-plugin`, which Void already depends on and covers. Others (SvelteKit, Nuxt, Astro) have their own Cloudflare integrations, which Void respects. In both cases, the framework owns routing and rendering — Void serves as the platform SDK that enhances backend DX.
 
 ![void relationships with meta frameworks and deployment targets](./void-relationships.svg)
 
@@ -19,7 +19,6 @@ Some frameworks (TanStack Start, React Router, Vinext) compose directly with `@c
 | [SvelteKit](https://svelte.dev/docs/kit)            | `@sveltejs/kit`         | Vite-based, uses its own Cloudflare adapter                                  |
 | [Nuxt](https://nuxt.com/)                           | `nuxt`                  | Own CLI and build toolchain                                                  |
 | [Astro **v6+**](https://astro.build/)               | `astro`                 | Own CLI and Cloudflare adapter (v6 required)                                 |
-| [Vinext](https://vinext.io/)                        | `vinext`                | Vite plugin composition — Next.js API surface on Cloudflare Workers          |
 
 Detection is automatic — the CLI reads your `package.json` dependencies.
 
@@ -30,7 +29,6 @@ See the individual framework guides for setup instructions:
 - [SvelteKit](./sveltekit.md)
 - [Nuxt](./nuxt.md)
 - [Astro](./astro.md)
-- [Vinext](./vinext.md)
 
 ## Feature Support
 

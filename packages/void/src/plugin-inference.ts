@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { globSync } from "tinyglobby";
 import { join } from "node:path";
 import { inferBindingsFromSource, mergeBindings, type InferredBindings } from "./inference/walk";
@@ -15,7 +15,7 @@ export interface DetectedFramework {
 }
 
 /** Class A framework names (used for entry point lookup). */
-export type Framework = "tanstack-start" | "react-router" | "vinext";
+export type Framework = "tanstack-start" | "react-router" | "vinext-app" | "vinext-pages";
 
 /** Directories to scan for binding inference in framework mode. */
 export const FRAMEWORK_SCAN_DIRS = ["src", "app", "pages", "routes", "server"] as const;
@@ -29,7 +29,7 @@ export const FRAMEWORK_SCAN_DIRS = ["src", "app", "pages", "routes", "server"] a
 const FRAMEWORK_PACKAGES: Record<string, DetectedFramework> = {
   "@tanstack/react-start": { name: "tanstack-start", class: "a" },
   "@react-router/dev": { name: "react-router", class: "a" },
-  vinext: { name: "vinext", class: "a" },
+  vinext: { name: "vinext-pages", class: "a" },
   "@sveltejs/kit": { name: "sveltekit", class: "b" },
   nuxt: { name: "nuxt", class: "c" },
   astro: { name: "astro", class: "c" },
@@ -51,7 +51,13 @@ export function detectFramework(root: string): DetectedFramework | undefined {
     ...(pkg.devDependencies as Record<string, string> | undefined),
   };
   for (const [pkgName, framework] of Object.entries(FRAMEWORK_PACKAGES)) {
-    if (pkgName in deps) return framework;
+    if (pkgName in deps) {
+      // vinext has two modes: App Router (app/ exists) vs Pages Router
+      if (framework.name === "vinext-pages" && existsSync(join(root, "app"))) {
+        return { name: "vinext-app", class: "a" };
+      }
+      return framework;
+    }
   }
   return undefined;
 }

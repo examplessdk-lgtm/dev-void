@@ -169,23 +169,34 @@ describe("detectFramework", () => {
     }
   });
 
-  it("detects vinext from package.json", () => {
+  it("detects vinext-pages when no app/ directory", () => {
     const root = createTempRoot();
     writeFileSync(
       join(root, "package.json"),
       JSON.stringify({ dependencies: { vinext: "^0.0.5", react: "^19.0.0" } }),
     );
     const result = detectFramework(root);
-    expect(result).toEqual({ name: "vinext", class: "a" });
+    expect(result).toEqual({ name: "vinext-pages", class: "a" });
   });
 
-  it("detects vinext from devDependencies", () => {
+  it("detects vinext-app when app/ directory exists", () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, "app"));
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ dependencies: { vinext: "^0.0.5", react: "^19.0.0" } }),
+    );
+    const result = detectFramework(root);
+    expect(result).toEqual({ name: "vinext-app", class: "a" });
+  });
+
+  it("detects vinext-pages from devDependencies", () => {
     const root = createTempRoot();
     writeFileSync(
       join(root, "package.json"),
       JSON.stringify({ devDependencies: { vinext: "^0.0.5" } }),
     );
     const result = detectFramework(root);
-    expect(result).toEqual({ name: "vinext", class: "a" });
+    expect(result).toEqual({ name: "vinext-pages", class: "a" });
   });
 });

@@ -70,7 +70,6 @@ const integrationItems = [
       { text: "Astro", link: "/integrations/frameworks/astro" },
       { text: "SvelteKit", link: "/integrations/frameworks/sveltekit" },
       { text: "Nuxt", link: "/integrations/frameworks/nuxt" },
-      { text: "Vinext", link: "/integrations/frameworks/vinext" },
     ],
   },
   { text: "Coding Agents", link: "/integrations/agents" },
@@ -117,7 +116,7 @@ const platformLinks = {
 export default extendConfig(
   defineConfig({
     title: "Void",
-    description: "Fullstack Vite plugin for Cloudflare Workers",
+    description: "Build and deploy full-stack Vite apps at warp speed",
     cleanUrls: true,
     head: [["link", { rel: "icon", type: "image/svg+xml", href: "/icon.svg" }]],
     appearance: "dark",
@@ -236,7 +235,6 @@ export default extendConfig(
             Astro: { light: "logos:astro-icon", dark: "simple-icons:astro" },
             SvelteKit: "logos:svelte-icon",
             Nuxt: "logos:nuxt-icon",
-            Vinext: "devicon-plain:nextjs",
           };
           const itemIcons: Record<string, IconOption> = {
             "Coding Agents": "lucide:bot",

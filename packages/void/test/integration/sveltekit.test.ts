@@ -89,11 +89,33 @@ describe("playground/sveltekit dev", () => {
     expect(html).toContain("SvelteKit + Void");
   });
 
-  it("smoke route exercises D1 and KV", async () => {
-    const response = await fetch(`${DEV_BASE}/smoke`);
-    expect(response.status).toBe(200);
-    const html = await response.text();
-    expect(html).toContain("Alice");
-    expect(html).toContain("ok");
+  it("navigates to smoke route via SPA from home page", async () => {
+    const { chromium } = await import("playwright");
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      await page.goto(DEV_BASE);
+      await page.waitForLoadState("networkidle");
+
+      // Mark the document to detect full page reloads
+      await page.evaluate(() => {
+        (window as any).__spa_marker = true;
+      });
+
+      await page.click('a[href="/smoke"]');
+      await page.waitForURL("**/smoke");
+      await page.waitForSelector('[data-testid="d1-user"]');
+
+      // Assert SPA navigation (no full reload)
+      const spaMarker = await page.evaluate(() => (window as any).__spa_marker);
+      expect(spaMarker).toBe(true);
+
+      const d1User = await page.textContent('[data-testid="d1-user"]');
+      const kvValue = await page.textContent('[data-testid="kv-value"]');
+      expect(d1User).toBe("Alice");
+      expect(kvValue).toBe("ok");
+    } finally {
+      await browser.close();
+    }
   });
 }, 60_000);

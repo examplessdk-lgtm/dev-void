@@ -71,7 +71,7 @@ File-based HTTP API endpoints built on [Hono](https://hono.dev). Each file expor
 - **Named exports**: `export const GET = defineHandler(...)`, `export const POST = ...`
 - **Dynamic segments**: `[id]` becomes `:id` route parameter
 - **Catch-all**: `[...slug]` matches the remaining path
-- **Method-specific files**: `hello.get.ts` handles only GET requests
+- **Route groups**: `(admin)/` organizes files without affecting URL paths
 - **Files starting with `_`** are ignored
 
 See [Server Routing](/guide/server-routing) for the full guide.

@@ -29,12 +29,8 @@ import { collectPrerenderPaths } from "../prerender-paths";
 import { detectPreset, FRAMEWORK_PRESETS, type StaticPreset, type FrameworkPreset } from "./preset";
 import { readConfig, resolveBindingNames, type AuthProvider, type VoidConfig } from "../config";
 import { readWranglerCompat } from "./wrangler";
-import {
-  needsWrapper,
-  generateAndBundleWrapper,
-  cleanupWrapper,
-  type WrapperFeatures,
-} from "./wrapper";
+import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from "./wrapper";
+import type { WrapperFeatures } from "./wrapper";
 import { getRequestedProjectSlug, resolveProjectBySlug, inferDefaultSlug } from "./resolve-project";
 import { cliTitle } from "./output";
 import { parseHeadersFile, parseRedirectsFile } from "./headers";
@@ -126,8 +122,8 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
   const detected = detectFramework(root);
   if (detected) {
     const gitCommit = options?.skipBuild ? null : getGitCommit(root);
+    const fwPreset = FRAMEWORK_PRESETS[detected.name];
     if (detected.class === "b" || detected.class === "c") {
-      const fwPreset = FRAMEWORK_PRESETS[detected.name];
       if (!fwPreset) {
         log.error(`No deploy preset found for framework "${detected.name}".`);
         process.exit(1);
@@ -143,7 +139,8 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
         gitCommit,
       );
     } else {
-      await runFullDeploy(root, config, client, options?.skipBuild, gitCommit, detected);
+      // Class A: preset is optional (e.g. vinext probes at runtime)
+      await runFullDeploy(root, config, client, fwPreset, options?.skipBuild, gitCommit, detected);
     }
     return;
   }
@@ -189,7 +186,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
       convertRedirectsConfig(voidConfig.routing?.redirects) ?? [],
     );
   } else {
-    await runFullDeploy(root, config, client, options?.skipBuild, gitCommit);
+    await runFullDeploy(root, config, client, undefined, options?.skipBuild, gitCommit);
   }
 }
 
@@ -312,7 +309,7 @@ async function runFrameworkDeploy(
   skipBuild?: boolean,
   commit?: string | null,
 ): Promise<void> {
-  log.info(`${detected.name} (Class ${detected.class.toUpperCase()}) deploy`);
+  log.info(`${detected.name} framework deploy`);
 
   // 1. Build
   if (!skipBuild) {
@@ -336,7 +333,9 @@ async function runFrameworkDeploy(
   const redirectRules: RedirectRule[] = [...(fwRedirectRules ?? []), ...(cfgRedirectRules ?? [])];
 
   if (!existsSync(workerDir)) {
-    log.error(`Worker output not found: ${fwPreset.workerDir}`);
+    log.error(
+      `Worker output not found at "${fwPreset.workerDir}". Run "${fwPreset.buildCommand}" first.`,
+    );
     process.exit(1);
   }
 
@@ -376,7 +375,6 @@ async function runFrameworkDeploy(
   const originalEntry = join(workerDir, fwPreset.workerMain);
 
   const wrapperFeatures: WrapperFeatures = {
-    originalEntry,
     auth: authProviders,
     crons: rawJobs,
     queues: rawQueues,
@@ -385,12 +383,20 @@ async function runFrameworkDeploy(
   let actualWorkerDir = workerDir;
   let actualWorkerMain = fwPreset.workerMain;
 
+  // Step 1: Bundle if framework has unbundled bare imports (e.g. SvelteKit)
+  if (fwPreset.bundle) {
+    log.step("Bundling worker...");
+    const bundleResult = await bundleEntry(root, originalEntry);
+    actualWorkerDir = bundleResult.outputDir;
+    actualWorkerMain = bundleResult.entryFilename;
+    log.info("Worker bundled");
+  }
+
+  // Step 2: Wrap if crons/queues are present (in-place, no re-bundling)
   if (needsWrapper(wrapperFeatures)) {
     log.step("Generating wrapper...");
-    const wrapperResult = await generateAndBundleWrapper(root, wrapperFeatures);
-    actualWorkerDir = wrapperResult.outputDir;
-    actualWorkerMain = wrapperResult.entryFilename;
-    log.info("Wrapper bundled");
+    await generateWrapper(actualWorkerDir, actualWorkerMain, root, wrapperFeatures);
+    log.info("Wrapper generated");
   }
 
   // 8. Read wrangler compat settings (void.json > wrangler.jsonc > default)
@@ -499,6 +505,7 @@ async function runFullDeploy(
   root: string,
   config: ProjectConfig,
   client: PlatformClient,
+  fwPreset?: FrameworkPreset,
   skipBuild?: boolean,
   commit?: string | null,
   detected?: DetectedFramework,
@@ -518,7 +525,7 @@ async function runFullDeploy(
 
   // 4. Resolve build output paths from build artifacts (avoids re-resolving
   // Vite config in the main process — plugins only run once inside the build)
-  const distDir = join(root, "dist");
+  const distDir = resolveDistDir(root, fwPreset);
 
   // Detect non-default assetsDir from Vite client manifest for _headers generation
   let assetsPrefix = "assets";
@@ -569,7 +576,7 @@ async function runFullDeploy(
       process.exit(1);
     }
   }
-  const workerDirName = detectWorkerDir(distDir);
+  const workerDirName = resolveWorkerDirName(distDir, fwPreset);
 
   const schedules = scanJobsSync(root).flatMap((job) =>
     job.crons.map((cron) => ({
@@ -806,16 +813,55 @@ function loadDeployEnv(root: string): Record<string, string> {
 }
 
 /**
- * Detect the worker output directory name.
- * RSC output (vinext App Router) → dist/rsc/
- * SSR output (all others) → dist/ssr/
+ * Resolve the top-level build output directory.
+ *
+ * When a framework preset is available, uses its workerDir to derive the
+ * parent directory (e.g. "build/server" → "build"). This gives framework-
+ * specific error messages when the output is missing.
+ *
+ * For non-framework (Void app) deploys, defaults to "dist".
  */
-export function detectWorkerDir(distDir: string): string {
-  const rscPath = join(distDir, "rsc");
-  if (existsSync(rscPath)) return "rsc";
+export function resolveDistDir(root: string, fwPreset?: FrameworkPreset): string {
+  if (fwPreset) {
+    // Derive the top-level build dir from the preset's workerDir
+    // e.g. "build/server" → "build", "dist/ssr" → "dist"
+    const topDir = fwPreset.workerDir.split("/")[0];
+    const distDir = join(root, topDir);
+    if (!existsSync(distDir)) {
+      throw new Error(
+        `Build output directory "${topDir}" not found. Run "${fwPreset.buildCommand}" first.`,
+      );
+    }
+    return distDir;
+  }
+  return join(root, "dist");
+}
 
-  const ssrPath = join(distDir, "ssr");
-  if (existsSync(ssrPath)) return "ssr";
+/**
+ * Resolve the worker output subdirectory name within the build dir.
+ *
+ * When a framework preset is available, uses the preset's workerDir to
+ * derive the subdirectory name and gives a framework-specific error.
+ *
+ * For non-framework (Void app) deploys, probes for known subdirectories.
+ */
+export function resolveWorkerDirName(distDir: string, fwPreset?: FrameworkPreset): string {
+  if (fwPreset) {
+    // Derive the subdirectory from the preset's workerDir
+    // e.g. "build/server" → "server", "dist/ssr" → "ssr"
+    const parts = fwPreset.workerDir.split("/");
+    const subDir = parts.slice(1).join("/");
+    if (!existsSync(join(distDir, subDir))) {
+      throw new Error(
+        `Worker output not found at "${fwPreset.workerDir}". Run "${fwPreset.buildCommand}" first.`,
+      );
+    }
+    return subDir;
+  }
 
-  throw new Error(`Worker output not found: expected dist/ssr/ or dist/rsc/`);
+  // Non-framework: probe for known output subdirectories
+  for (const name of ["ssr", "rsc", "server"]) {
+    if (existsSync(join(distDir, name))) return name;
+  }
+  throw new Error("Worker output not found: expected dist/ssr/ or dist/rsc/");
 }

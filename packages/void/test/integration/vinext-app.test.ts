@@ -9,7 +9,8 @@ const PLAYGROUND = "playground/vinext-app";
 let DEV_PORT: number;
 let DEV_BASE: string;
 
-describe("playground/vinext-app build", () => {
+// Temporarily disabled — Vinext integration removed from public docs
+describe.skip("playground/vinext-app build", () => {
   beforeAll(() => {
     const pg = join(ROOT, PLAYGROUND);
     rmSync(join(pg, "dist"), { recursive: true, force: true });
@@ -41,7 +42,7 @@ describe("playground/vinext-app build", () => {
   });
 });
 
-describe("playground/vinext-app dev", () => {
+describe.skip("playground/vinext-app dev", () => {
   let child: ReturnType<typeof spawn>;
   let stderr = "";
 

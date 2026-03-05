@@ -32,18 +32,21 @@ A file can export multiple methods:
 ```ts
 // routes/api/users/index.ts  →  GET + POST /api/users
 import { defineHandler } from "void";
+import { db } from "void/db";
 
-export const GET = defineHandler(async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT * FROM users").all();
-  return results;
+export const GET = defineHandler(async () => {
+  const users = await db.list("users");
+  return users;
 });
 
 export const POST = defineHandler(async (c) => {
   const body = await c.req.json();
-  await c.env.DB.prepare("INSERT INTO users (name) VALUES (?)").bind(body.name).run();
+  await db.insert("users", { name: body.name });
   return { created: true };
 });
 ```
+
+The `db` helper provides a typed query API over D1 — see [Database](./database.md) for the full API.
 
 ## `defineHandler`
 
@@ -74,6 +77,7 @@ Return values are automatically converted:
 // routes/api/users/index.ts
 import * as v from "valibot";
 import { defineHandler } from "void";
+import { db } from "void/db";
 
 export const POST = defineHandler.withValidator({
   body: v.object({
@@ -82,9 +86,7 @@ export const POST = defineHandler.withValidator({
   }),
 })(async (c, { body }) => {
   // body is typed as { name: string; email: string }
-  await c.env.DB.prepare("INSERT INTO users (name, email) VALUES (?, ?)")
-    .bind(body.name, body.email)
-    .run();
+  await db.insert("users", { name: body.name, email: body.email });
   return { created: true };
 });
 ```
@@ -95,14 +97,13 @@ You can validate multiple slots at once:
 // routes/api/users/[id].ts
 import { z } from "zod";
 import { defineHandler } from "void";
+import { db } from "void/db";
 
 export const PUT = defineHandler.withValidator({
   params: z.object({ id: z.string() }),
   body: z.object({ name: z.string(), email: z.string().email() }),
 })(async (c, { params, body }) => {
-  await c.env.DB.prepare("UPDATE users SET name = ?, email = ? WHERE id = ?")
-    .bind(body.name, body.email, params.id)
-    .run();
+  await db.update("users", { name: body.name, email: body.email }, { where: { id: params.id } });
   return { updated: true };
 });
 ```

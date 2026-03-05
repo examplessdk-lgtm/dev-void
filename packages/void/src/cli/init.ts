@@ -855,7 +855,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   const preScaffoldState = detectProjectState(root);
 
   if (framework) {
-    log.info(`Detected ${framework.name} (class ${framework.class})`);
+    log.info(`Detected ${framework.name} framework`);
   }
 
   if (!framework && isScaffoldableEmptyProject(root)) {

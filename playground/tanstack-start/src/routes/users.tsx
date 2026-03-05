@@ -1,10 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
-import { env } from "cloudflare:workers";
+import { db } from "void/db";
 
 const getUsers = createServerFn().handler(async () => {
-  const result = await env.DB.prepare("SELECT * FROM users ORDER BY id").all();
-  return result.results as { id: number; name: string; email: string }[];
+  return db.list("users");
 });
 
 export const Route = createFileRoute("/users")({

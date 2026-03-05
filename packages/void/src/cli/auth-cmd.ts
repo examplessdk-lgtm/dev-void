@@ -24,7 +24,7 @@ export async function runAuthCommand(_root: string, args: AuthArgs): Promise<voi
       }
       const client = new PlatformClient(token);
       const user = await client.whoami();
-      log.info(user.login);
+      log.info(`${user.login} (${user.plan})`);
       return;
     }
     case "token": {

@@ -1,10 +1,8 @@
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { build } from "vite";
+import { mkdirSync, writeFileSync, rmSync, renameSync, copyFileSync, readdirSync } from "node:fs";
+import { join, extname } from "node:path";
+import { build, type UserConfig } from "vite";
 
 export interface WrapperFeatures {
-  /** Absolute path to the framework's original worker entry. */
-  originalEntry: string;
   /** Auth providers (kept for interface compat, no longer used by wrapper). */
   auth: string[] | null;
   /** Cron job definitions (from scanJobsSync). */
@@ -14,9 +12,9 @@ export interface WrapperFeatures {
 }
 
 export interface WrapperResult {
-  /** Filename of the bundled wrapper entry module. */
+  /** Filename of the bundled entry module. */
   entryFilename: string;
-  /** Absolute path to the directory containing the bundled wrapper. */
+  /** Absolute path to the directory containing the bundled output. */
   outputDir: string;
 }
 
@@ -28,35 +26,34 @@ export function needsWrapper(features: WrapperFeatures): boolean {
 }
 
 /**
- * Generate a wrapper module, bundle it with Vite, and return the output info.
+ * Generate a wrapper entry in-place in the worker directory.
  *
- * The wrapper wraps the framework's original worker with:
- * - Scheduled handler for cron jobs (if any)
- * - Queue handler for queue consumers (if any)
+ * - Renames the original entry (e.g. `index.js` → `__original.js`)
+ * - Compiles cron/queue handlers via a small Vite build
+ * - Writes a wrapper module as the original entry name that imports
+ *   the renamed original + compiled handlers
+ *
+ * The original worker code is never re-bundled.
  */
-export async function generateAndBundleWrapper(
+export async function generateWrapper(
+  workerDir: string,
+  workerMain: string,
   root: string,
   features: WrapperFeatures,
-): Promise<WrapperResult> {
-  const tmpDir = join(root, ".void", "wrapper");
+): Promise<void> {
+  const ext = extname(workerMain) || ".js";
+  const renamedName = `__original${ext}`;
+
+  // Rename original entry
+  renameSync(join(workerDir, workerMain), join(workerDir, renamedName));
+
+  // Compile cron/queue handlers (small focused build — user source is TypeScript)
+  const tmpDir = join(root, ".void", "handlers");
   mkdirSync(tmpDir, { recursive: true });
+  const handlersSource = generateHandlersSource(root, features);
+  const handlersEntry = join(tmpDir, "handlers.ts");
+  writeFileSync(handlersEntry, handlersSource);
 
-  // Generate wrapper source
-  const entrySource = generateWrapperSource(root, tmpDir, features);
-  const entryPath = join(tmpDir, "entry.ts");
-  writeFileSync(entryPath, entrySource);
-
-  // Generate scheduled handler if needed
-  if (features.crons.length > 0) {
-    writeFileSync(join(tmpDir, "scheduled.ts"), generateScheduledSource(root, features.crons));
-  }
-
-  // Generate queue handler if needed
-  if (features.queues.length > 0) {
-    writeFileSync(join(tmpDir, "queue.ts"), generateQueueSource(root, features.queues));
-  }
-
-  // Bundle with Vite
   const outDir = join(tmpDir, "out");
   await build({
     root: tmpDir,
@@ -65,48 +62,99 @@ export async function generateAndBundleWrapper(
       outDir,
       emptyOutDir: true,
       lib: {
-        entry: entryPath,
+        entry: handlersEntry,
         formats: ["es"],
-        fileName: "wrapper",
+        fileName: "__void_handlers",
       },
       rollupOptions: {
-        external: ["node:async_hooks", "cloudflare:workers"],
+        external: [/^cloudflare:/, /^node:/],
       },
       minify: false,
       target: "esnext",
     },
-    resolve: {
-      alias: {
-        __ORIGINAL_WORKER__: features.originalEntry,
-      },
-    },
   });
 
-  return {
-    entryFilename: "wrapper.mjs",
-    outputDir: outDir,
-  };
+  // Find the actual output filename and copy to worker dir
+  const handlerFiles = readdirSync(outDir).filter((f) => f.startsWith("__void_handlers"));
+  const handlerFilename = handlerFiles[0] ?? "__void_handlers.mjs";
+  copyFileSync(join(outDir, handlerFilename), join(workerDir, handlerFilename));
+
+  // Write wrapper in place of original entry
+  const wrapperSource = generateWrapperSource(renamedName, handlerFilename, features);
+  writeFileSync(join(workerDir, workerMain), wrapperSource);
 }
 
 /**
- * Clean up generated wrapper files.
+ * Bundle a worker entry into a self-contained module.
+ *
+ * Used for frameworks whose build output has unbundled bare imports
+ * (e.g. SvelteKit's `_worker.js` imports from `@sveltejs/kit`).
+ */
+export async function bundleEntry(root: string, entry: string): Promise<WrapperResult> {
+  const tmpDir = join(root, ".void", "bundle");
+  mkdirSync(tmpDir, { recursive: true });
+  const outDir = join(tmpDir, "out");
+  await build({
+    root: tmpDir,
+    logLevel: "silent",
+    build: {
+      outDir,
+      emptyOutDir: true,
+      lib: {
+        entry,
+        formats: ["es"],
+        fileName: "index",
+      },
+      rollupOptions: {
+        external: [/^cloudflare:/, /^node:/],
+        output: {
+          // Workers for Platforms restricts caches.default access.
+          // Stub it so framework code (e.g. SvelteKit) that uses it doesn't throw.
+          banner: [
+            "const __noopCache = {",
+            "  match() { return Promise.resolve(undefined); },",
+            "  put() { return Promise.resolve(); },",
+            "  delete() { return Promise.resolve(false); },",
+            "};",
+            "globalThis.caches = { default: __noopCache, open() { return Promise.resolve(__noopCache); } };",
+          ].join("\n"),
+        },
+      },
+      minify: false,
+      target: "esnext",
+    },
+  });
+
+  // Read actual output filename from the output directory
+  const outFiles = readdirSync(outDir).filter((f) => f.startsWith("index"));
+  const entryFilename = outFiles[0] ?? "index.mjs";
+
+  return { entryFilename, outputDir: outDir };
+}
+
+/**
+ * Clean up generated wrapper/bundle files.
  */
 export function cleanupWrapper(root: string): void {
-  rmSync(join(root, ".void", "wrapper"), { recursive: true, force: true });
+  rmSync(join(root, ".void"), { recursive: true, force: true });
 }
 
 // ─── Source Generators ─────────────────────────────────────────────
 
-function generateWrapperSource(root: string, tmpDir: string, features: WrapperFeatures): string {
+function generateWrapperSource(
+  renamedEntry: string,
+  handlersModule: string,
+  features: WrapperFeatures,
+): string {
   const lines: string[] = [];
 
-  lines.push(`import original from "__ORIGINAL_WORKER__";`);
+  lines.push(`import original from "./${renamedEntry}";`);
 
   if (features.crons.length > 0) {
-    lines.push(`import { handleScheduled } from "./scheduled.ts";`);
+    lines.push(`import { handleScheduled } from "./${handlersModule}";`);
   }
   if (features.queues.length > 0) {
-    lines.push(`import { handleQueue } from "./queue.ts";`);
+    lines.push(`import { handleQueue } from "./${handlersModule}";`);
   }
 
   lines.push("");
@@ -136,20 +184,16 @@ function generateWrapperSource(root: string, tmpDir: string, features: WrapperFe
 
   lines.push("export default {");
 
-  // fetch handler — when crons exist, wrap to intercept /__scheduled;
-  // otherwise pass through to the original worker.
   if (features.crons.length > 0) {
     lines.push("  fetch: wrappedFetch,");
   } else {
     lines.push("  fetch: original.fetch,");
   }
 
-  // scheduled handler
   if (features.crons.length > 0) {
     lines.push("  scheduled: handleScheduled,");
   }
 
-  // queue handler
   if (features.queues.length > 0) {
     lines.push("  queue: handleQueue,");
   }
@@ -159,73 +203,76 @@ function generateWrapperSource(root: string, tmpDir: string, features: WrapperFe
   return lines.join("\n");
 }
 
-function generateScheduledSource(root: string, crons: WrapperFeatures["crons"]): string {
+function generateHandlersSource(root: string, features: WrapperFeatures): string {
   const lines: string[] = [];
 
-  // Import cron handler files
-  for (let i = 0; i < crons.length; i++) {
-    const absPath = join(root, "crons", crons[i].filePath);
-    lines.push(`import handler${i} from "${absPath}";`);
-  }
-
-  lines.push("");
-  lines.push("export async function handleScheduled(controller, env, ctx) {");
-  lines.push("  switch (controller.cron) {");
-
-  for (let i = 0; i < crons.length; i++) {
-    for (const expr of crons[i].crons) {
-      lines.push(`    case ${JSON.stringify(expr)}:`);
+  // Scheduled handlers
+  if (features.crons.length > 0) {
+    for (let i = 0; i < features.crons.length; i++) {
+      const absPath = join(root, "crons", features.crons[i].filePath);
+      lines.push(`import cronHandler${i} from "${absPath}";`);
     }
-    lines.push(`      if (typeof handler${i} === "function") {`);
-    lines.push(`        await handler${i}(controller, env, ctx);`);
-    lines.push(`      } else if (handler${i} && typeof handler${i}.default === "function") {`);
-    lines.push(`        await handler${i}.default(controller, env, ctx);`);
-    lines.push(`      }`);
-    lines.push(`      return;`);
-  }
 
-  lines.push("  }");
-  lines.push("}");
-
-  return lines.join("\n");
-}
-
-function generateQueueSource(root: string, queues: WrapperFeatures["queues"]): string {
-  const lines: string[] = [];
-
-  // Import queue handler files
-  for (let i = 0; i < queues.length; i++) {
-    const absPath = join(root, "queues", queues[i].filePath);
-    lines.push(`import handler${i} from "${absPath}";`);
-  }
-
-  lines.push("");
-  lines.push("export async function handleQueue(batch, env, ctx) {");
-  lines.push("  const queueSuffix = batch.queue;");
-  lines.push("  const messages = [...batch.messages].map(m => ({");
-  lines.push("    id: m.id,");
-  lines.push("    timestamp: m.timestamp.toISOString(),");
-  lines.push("    body: m.body,");
-  lines.push("    attempts: m.attempts,");
-  lines.push("  }));");
-  lines.push("  const payload = { queue: queueSuffix, messages };");
-
-  for (let i = 0; i < queues.length; i++) {
-    const name = queues[i].name;
     lines.push("");
-    lines.push(
-      `  if (queueSuffix === ${JSON.stringify(name)} || queueSuffix.endsWith("-" + ${JSON.stringify(name)})) {`,
-    );
-    lines.push(`    if (typeof handler${i} === "function") {`);
-    lines.push(`      await handler${i}(payload, env);`);
-    lines.push(`    } else if (handler${i} && typeof handler${i}.default === "function") {`);
-    lines.push(`      await handler${i}.default(payload, env);`);
-    lines.push(`    }`);
-    lines.push(`    return;`);
-    lines.push(`  }`);
+    lines.push("export async function handleScheduled(controller, env, ctx) {");
+    lines.push("  switch (controller.cron) {");
+
+    for (let i = 0; i < features.crons.length; i++) {
+      for (const expr of features.crons[i].crons) {
+        lines.push(`    case ${JSON.stringify(expr)}:`);
+      }
+      lines.push(`      if (typeof cronHandler${i} === "function") {`);
+      lines.push(`        await cronHandler${i}(controller, env, ctx);`);
+      lines.push(
+        `      } else if (cronHandler${i} && typeof cronHandler${i}.default === "function") {`,
+      );
+      lines.push(`        await cronHandler${i}.default(controller, env, ctx);`);
+      lines.push(`      }`);
+      lines.push(`      return;`);
+    }
+
+    lines.push("  }");
+    lines.push("}");
   }
 
-  lines.push("}");
+  // Queue handlers
+  if (features.queues.length > 0) {
+    lines.push("");
+    for (let i = 0; i < features.queues.length; i++) {
+      const absPath = join(root, "queues", features.queues[i].filePath);
+      lines.push(`import queueHandler${i} from "${absPath}";`);
+    }
+
+    lines.push("");
+    lines.push("export async function handleQueue(batch, env, ctx) {");
+    lines.push("  const queueSuffix = batch.queue;");
+    lines.push("  const messages = [...batch.messages].map(m => ({");
+    lines.push("    id: m.id,");
+    lines.push("    timestamp: m.timestamp.toISOString(),");
+    lines.push("    body: m.body,");
+    lines.push("    attempts: m.attempts,");
+    lines.push("  }));");
+    lines.push("  const payload = { queue: queueSuffix, messages };");
+
+    for (let i = 0; i < features.queues.length; i++) {
+      const name = features.queues[i].name;
+      lines.push("");
+      lines.push(
+        `  if (queueSuffix === ${JSON.stringify(name)} || queueSuffix.endsWith("-" + ${JSON.stringify(name)})) {`,
+      );
+      lines.push(`    if (typeof queueHandler${i} === "function") {`);
+      lines.push(`      await queueHandler${i}(payload, env);`);
+      lines.push(
+        `    } else if (queueHandler${i} && typeof queueHandler${i}.default === "function") {`,
+      );
+      lines.push(`      await queueHandler${i}.default(payload, env);`);
+      lines.push(`    }`);
+      lines.push(`    return;`);
+      lines.push(`  }`);
+    }
+
+    lines.push("}");
+  }
 
   return lines.join("\n");
 }

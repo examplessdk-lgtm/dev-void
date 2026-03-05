@@ -196,10 +196,7 @@ export function packageBuild(
   const workerFiles = collectFiles(workerDir);
   for (const filePath of workerFiles) {
     const relativePath = relative(workerDir, filePath);
-    // Skip wrangler.json — platform manages worker config
-    if (relativePath === "wrangler.json") continue;
-    // Skip .vite/ build metadata (manifest.json etc.) — not runtime code
-    if (relativePath.startsWith(".vite/") || relativePath.startsWith(".vite\\")) continue;
+    if (!isWorkerModule(relativePath)) continue;
     const content = readFileSync(filePath);
     formData.append(`worker:${relativePath}`, new Blob([content]), relativePath);
   }
@@ -353,26 +350,26 @@ export function packageFrameworkBuild(opts: {
 
   formData.append("manifest", JSON.stringify(manifest));
 
-  // Collect worker files
-  const workerFiles = collectFiles(opts.workerDir);
-  for (const filePath of workerFiles) {
-    const relativePath = relative(opts.workerDir, filePath);
-    if (relativePath === "wrangler.json" || relativePath === "wrangler.jsonc") continue;
-    if (relativePath.startsWith(".vite/") || relativePath.startsWith(".vite\\")) continue;
-    const content = readFileSync(filePath);
-    formData.append(`worker:${relativePath}`, new Blob([content]), relativePath);
-  }
-
-  // Collect asset files, excluding worker dir when it overlaps
+  // Collect worker files and asset files, handling directory overlap
   const workerDirNorm = opts.workerDir.replace(/\\/g, "/");
   const assetsDirNorm = opts.assetsDir.replace(/\\/g, "/");
   const isOverlap =
     workerDirNorm.startsWith(assetsDirNorm + "/") || workerDirNorm === assetsDirNorm;
 
+  // Worker files
+  const workerFiles = collectFiles(opts.workerDir);
+  for (const filePath of workerFiles) {
+    const relativePath = relative(opts.workerDir, filePath);
+    if (!isWorkerModule(relativePath)) continue;
+    const content = readFileSync(filePath);
+    formData.append(`worker:${relativePath}`, new Blob([content]), relativePath);
+  }
+
+  // Asset files
   try {
     const assetFiles = collectFiles(opts.assetsDir);
     for (const filePath of assetFiles) {
-      // Skip worker files when workerDir is inside assetsDir
+      // Skip worker files when workerDir overlaps with assetsDir
       if (isOverlap && filePath.replace(/\\/g, "/").startsWith(workerDirNorm)) continue;
       const relativePath = relative(opts.assetsDir, filePath);
       if (opts.neededAssets && !opts.neededAssets.has("/" + relativePath)) continue;
@@ -386,6 +383,20 @@ export function packageFrameworkBuild(opts: {
   if (opts.neededAssets) formData.append("preflight", "true");
 
   return formData;
+}
+
+/**
+ * Check if a file (by relative path) should be included as a worker module.
+ * Skips build metadata and files with extensions CF Workers can't handle as modules.
+ */
+function isWorkerModule(relativePath: string): boolean {
+  const norm = relativePath.replace(/\\/g, "/");
+  // Skip build metadata at any depth
+  if (norm.includes("/.vite/") || norm.startsWith(".vite/")) return false;
+  // Skip wrangler config
+  if (norm === "wrangler.json" || norm === "wrangler.jsonc") return false;
+  // Only include CF-compatible module extensions
+  return /\.(js|mjs|cjs|wasm|map|txt)$/.test(norm);
 }
 
 /**

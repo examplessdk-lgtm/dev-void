@@ -43,7 +43,7 @@ export const SSG_PRESETS: Record<string, SsgPreset> = {
   },
 };
 
-/** Build output conventions for a meta-framework (Class B/C). */
+/** Build output conventions for a meta-framework. */
 export interface FrameworkPreset {
   /** Default build command (overridable via void.json `build`). */
   buildCommand: string;
@@ -55,19 +55,54 @@ export interface FrameworkPreset {
   assetsDir: string;
   /** URL-level prefix for hashed/immutable assets (used by dispatch for cache headers + edge cache keys). */
   hashedAssetsPrefix?: string;
+  /** Whether the worker entry needs bundling (bare imports not resolved by framework build). */
+  bundle?: boolean;
 }
 
 /**
- * Known output conventions for Class B/C meta-frameworks.
+ * Known output conventions for meta-frameworks.
  * Keyed by the framework name from `detectFramework()`.
+ *
+ * Class A frameworks (tanstack-start, react-router, vinext) use `vite build`
+ * and have their output structure determined by the framework's Vite plugin.
+ *
+ * Class B/C frameworks (sveltekit, nuxt, astro) use their own build CLI
+ * and have framework-specific output conventions.
  */
 export const FRAMEWORK_PRESETS: Record<string, FrameworkPreset> = {
+  // Class A
+  "tanstack-start": {
+    buildCommand: "vite build",
+    workerDir: "dist/server",
+    workerMain: "index.js",
+    assetsDir: "dist/client",
+  },
+  "react-router": {
+    buildCommand: "vite build",
+    workerDir: "build/server",
+    workerMain: "index.js",
+    assetsDir: "build/client",
+  },
+  "vinext-app": {
+    buildCommand: "vite build",
+    workerDir: "dist/rsc",
+    workerMain: "index.js",
+    assetsDir: "dist/client",
+  },
+  "vinext-pages": {
+    buildCommand: "vite build",
+    workerDir: "dist/ssr",
+    workerMain: "index.js",
+    assetsDir: "dist/client",
+  },
+  // Class B/C
   sveltekit: {
     buildCommand: "vite build",
     workerDir: ".svelte-kit/cloudflare",
     workerMain: "_worker.js",
     assetsDir: ".svelte-kit/cloudflare",
     hashedAssetsPrefix: "_app/immutable",
+    bundle: true,
   },
   nuxt: {
     buildCommand: "nuxt build",
@@ -78,9 +113,9 @@ export const FRAMEWORK_PRESETS: Record<string, FrameworkPreset> = {
   },
   astro: {
     buildCommand: "astro build",
-    workerDir: "dist/_worker.js",
-    workerMain: "index.js",
-    assetsDir: "dist",
+    workerDir: "dist/server",
+    workerMain: "entry.mjs",
+    assetsDir: "dist/client",
     hashedAssetsPrefix: "_astro",
   },
 };

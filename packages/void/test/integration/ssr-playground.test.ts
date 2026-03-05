@@ -128,9 +128,9 @@ describe("playground/ssr build + preview", () => {
     expect(existsSync(clientManifest)).toBe(true);
 
     const code = readFileSync(workerEntry, "utf-8");
-    expect(code).toContain("renderSsrResponse(c, mod)");
-    expect(code).toContain('new URL("/.vite/manifest.json", request.url)');
-    expect(code).toContain('SSR_CLIENT_ENTRY_ID = "src/main.client.tsx"');
+    // String literals survive minification; function names may be mangled
+    expect(code).toContain("/.vite/manifest.json");
+    expect(code).toContain("src/main.client.tsx");
 
     const wranglerConfig = JSON.parse(
       readFileSync(join(ROOT, "playground/ssr/dist/ssr/wrangler.json"), "utf-8"),
