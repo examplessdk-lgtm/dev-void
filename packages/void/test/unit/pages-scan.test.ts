@@ -74,6 +74,33 @@ describe("scanPages", () => {
     expect(page!.methods).toEqual(["loader", "action"]);
   });
 
+  it("detects actions (plural) export from .server.ts", async () => {
+    writeFile("settings.vue", "<template><div>Settings</div></template>");
+    writeFile(
+      "settings.server.ts",
+      "export const actions = {\n  updateName: async () => ({}),\n  updateEmail: async () => ({}),\n};",
+    );
+
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === "settings");
+    expect(page).toBeDefined();
+    expect(page!.serverPath).toBe("settings.server.ts");
+    expect(page!.methods).toEqual(["actions"]);
+  });
+
+  it("detects both loader and actions exports from .server.ts", async () => {
+    writeFile("profile.vue", "<template><div>Profile</div></template>");
+    writeFile(
+      "profile.server.ts",
+      "export const loader = () => ({});\nexport const actions = {\n  update: async () => ({}),\n};",
+    );
+
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === "profile");
+    expect(page).toBeDefined();
+    expect(page!.methods).toEqual(["loader", "actions"]);
+  });
+
   it("identifies layout.vue files separately", async () => {
     writeFile("layout.vue", "<template><slot /></template>");
     writeFile("users/layout.vue", "<template><slot /></template>");

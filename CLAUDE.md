@@ -18,8 +18,8 @@ The `void` package on npm has these previous versions: '0.0.1', '0.1.0', '0.1.2'
 - When adding new dependencies to the project, always run `npm view [package] version` to get the latest version.
 - Every implementation plan should include the following:
   - During plan generation: ask clarifying questions when necessary, especially around developer-experience defining design decisions.
-  - Verification: run `pnpm lint`, `pnpm fmt`, and `pnpm check`.
-    - Fix lint warnings too, not just errors.
+  - Verification:
+    - Run `pnpm check` for typechecking after completing a batch of tasks.
     - Run `pnpm test` on tests relevant to the current feature only during feature development. Only run the full test suite when everything is done for final verification.
     - If there are tests hanging or running particularly slow, investigate right there and attempt to fix. Testing velocity is something that should be maintained or improved at every opportunity.
   - Documentation: after verification, update all docs if relevant and applicable:

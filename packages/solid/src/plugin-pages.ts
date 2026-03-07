@@ -179,7 +179,7 @@ function generateClientEntry(
   return `
 import { createSignal, createComponent, batch } from "solid-js";
 import { hydrate } from "solid-js/web";
-import { SharedContext, ErrorsContext, RouterContext } from "@void-x/solid/runtime";
+import { SharedContext, ErrorsContext, RouterContext, setActionRouter } from "@void-x/solid/runtime";
 import { createPageRouter } from "void/pages-client";
 import { parseCacheFor } from "void/pages-prefetch";
 
@@ -216,6 +216,8 @@ const { router, initialPageData, initialComponent, initialLayouts, start } =
     prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
     prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? "30s")}),
   });
+
+setActionRouter(router);
 
 batch(() => {
   setComponent(() => initialComponent);

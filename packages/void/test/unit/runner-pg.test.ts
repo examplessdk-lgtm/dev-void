@@ -121,7 +121,7 @@ describe("applyPgMigrations", () => {
       { name: "002_bad.sql", sql: "INVALID SQL THAT WILL FAIL" },
     ];
 
-    await expect(applyPgMigrations(client, migrations)).rejects.toThrow();
+    await expect(applyPgMigrations(client, migrations)).rejects.toThrow(/INVALID/i);
 
     // First migration committed before the failure
     const tracking = await pglite.query<{ name: string }>("SELECT name FROM _void_migrations");
@@ -143,7 +143,7 @@ describe("applyPgMigrations", () => {
       },
     ];
 
-    await expect(applyPgMigrations(client, migrations)).rejects.toThrow();
+    await expect(applyPgMigrations(client, migrations)).rejects.toThrow(/INVALID/i);
 
     // temp_table should NOT exist — transaction rolled back
     const tables = await pglite.query(

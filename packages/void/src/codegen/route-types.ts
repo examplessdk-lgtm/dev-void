@@ -89,11 +89,22 @@ export function generateRouteTypes(
   lines.push("  }");
 
   // PageActionMap — page actions for typed useForm
-  const actionPages = scan.pages.pages.filter((p) => p.methods.includes("action"));
+  const actionPages = scan.pages.pages.filter(
+    (p) => p.methods.includes("action") || p.methods.includes("actions"),
+  );
   if (actionPages.length > 0 && pagesDir) {
     lines.push("  interface PageActionMap {");
 
     for (const page of actionPages) {
+      const hasAction = page.methods.includes("action");
+      const hasActions = page.methods.includes("actions");
+
+      if (hasAction && hasActions) {
+        throw new Error(
+          `Page "${page.pattern}" exports both "action" and "actions". Use one or the other.`,
+        );
+      }
+
       lines.push(`    ${JSON.stringify(page.pattern)}: {`);
 
       let importPath: string | null = null;
@@ -105,7 +116,16 @@ export function generateRouteTypes(
         importPath = rel.replace(/\.(ts|mts|js|mjs)$/, "");
       }
 
-      if (importPath) {
+      if (hasActions) {
+        if (importPath) {
+          const actionsImport = `(typeof import(${JSON.stringify(importPath)}))["actions"]`;
+          lines.push(`      actions: { [K in keyof ${actionsImport}]: {`);
+          lines.push(
+            `        body: ExtractInput<${actionsImport}[K]["__validators"]> extends { body: infer B } ? B : Record<string, unknown>;`,
+          );
+          lines.push("      } };");
+        }
+      } else if (importPath) {
         const importExpr = `(typeof import(${JSON.stringify(importPath)}))["action"]`;
         lines.push(
           `      body: ExtractInput<${importExpr}["__validators"]> extends { body: infer B } ? B : Record<string, unknown>;`,

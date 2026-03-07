@@ -2,11 +2,80 @@
 outline: deep
 ---
 
-# Forms
+# Actions & Forms
 
-`useForm` handles form submissions, loading state, and validation errors. It is **fully typed end-to-end** — the URL autocompletes to pages that have an `action`, `form.data` is typed to match the action's validator schema, and `form.errors` keys are constrained to the body's field names. No manual type annotations needed.
+Actions handle mutations (POST, PUT, PATCH, DELETE) in companion `.server.ts` files. They use the same `defineHandler` API as [loaders](./loaders) and [server routes](../server-routing.md), with the same typed `c.env` bindings, `withValidator()` support, and Hono context methods.
 
-## Usage
+## Defining an Action
+
+Export `action` from a `.server.ts` file. Use `withValidator()` with a [schema-derived validator](../database.md#schema-derived-validators) to validate the request body:
+
+```ts
+// pages/users/index.server.ts
+import { defineHandler } from "void";
+import { db } from "void/db";
+import { users, insertUserSchema } from "@schema";
+
+export const action = defineHandler.withValidator({
+  body: insertUserSchema,
+})(async (c, { body }) => {
+  await db.insert(users).values(body);
+  // No return → re-runs loader, page re-renders with fresh data
+});
+```
+
+| Action returns        | Behavior                                              |
+| --------------------- | ----------------------------------------------------- |
+| Nothing (void)        | Re-runs the loader, page re-renders with fresh props. |
+| `c.redirect('/path')` | Navigates to another page.                            |
+
+## Named Actions
+
+When a page needs multiple mutations — for example, updating and deleting a user on the same page — export `actions` (plural) instead of `action`:
+
+```ts
+// pages/users/edit.server.ts
+import { defineHandler } from "void";
+import { db, eq } from "void/db";
+import { users } from "@schema";
+
+export const actions = {
+  update: defineHandler.withValidator({
+    body: updateUserSchema,
+  })(async (c, { body }) => {
+    await db
+      .update(users)
+      .set(body)
+      .where(eq(users.id, c.req.param("id")));
+  }),
+
+  delete: defineHandler(async (c) => {
+    const { id } = await c.req.json<{ id: string }>();
+    await db.delete(users).where(eq(users.id, id));
+  }),
+};
+```
+
+Named actions are dispatched via a `?actionName` suffix on the URL (e.g. `/users/edit?update`). The client primitives `useForm` and `action()` handle this automatically.
+
+`export const action` (singular) still works for pages that only need one mutation. Named actions are opt-in. Exporting both `action` and `actions` from the same file is an error.
+
+You can also define an `actions.default` key for the action that runs when no name is specified (i.e. a bare POST to the page URL):
+
+```ts
+export const actions = {
+  default: defineHandler(async (c) => {
+    // runs on POST /users/edit (no ?suffix)
+  }),
+  delete: defineHandler(async (c) => {
+    // runs on POST /users/edit?delete
+  }),
+};
+```
+
+## `useForm`
+
+`useForm` handles form submissions, loading state, and validation errors. It is **fully typed end-to-end** — the URL autocompletes to pages that have an action, `form.data` is typed to match the action's validator schema, and `form.errors` keys are constrained to the body's field names. No manual type annotations needed.
 
 First, define the action in your server handler:
 
@@ -133,7 +202,7 @@ export default function CreateUser() {
 
 The types are inferred from your action's `withValidator()` schema in the companion `.server.ts` file. If no validator is defined, the body type falls back to `Record<string, unknown>` — you still get URL autocomplete either way.
 
-## API Reference
+### `useForm` API
 
 `useForm` returns a reactive object with:
 
@@ -154,6 +223,33 @@ For dynamic routes, pass `params` in the options:
 const form = useForm("/users/:id", { name: "" }, { params: { id: "42" } });
 form.put(); // submits to /users/42
 ```
+
+### Named Actions with `useForm`
+
+When a page exports named actions, append `?actionName` to the URL:
+
+```ts
+const form = useForm("/users/:id?update", { name: "" }, { params: { id } });
+form.put(); // submits to /users/42?update
+```
+
+The URL, body fields, and error keys are all typed per-action — each named action gets its own validator schema. See [Type Safety — Action → useForm](../type-safety#action-useform) for the full typing story.
+
+## `action()` Helper
+
+For one-shot mutations that don't need form state (dirty tracking, reset, field-level errors), use `action()` instead of `useForm`. It sends a request to a page action and triggers an Inertia page update, just like `useForm` — but without the reactive form object:
+
+```ts
+import { useForm, action } from "void/react"; // or "void/vue", "void/svelte", "void/solid"
+
+// Form with state + Inertia page update
+const form = useForm("/?create-user", { name: "", email: "" });
+
+// Programmatic call + Inertia page update (no form state)
+await action("/?delete-user", { id: 42 });
+```
+
+`action()` is useful in event handlers — button clicks, confirmation dialogs, or anywhere you want to call a server action without managing form state.
 
 ## Validation Errors
 
@@ -284,3 +380,13 @@ export const action = defineHandler(async (c) => {
   }
 });
 ```
+
+## Choosing a Primitive
+
+| Primitive  | Inertia page update | Form state                 | Framework-specific |
+| ---------- | ------------------- | -------------------------- | ------------------ |
+| `useForm`  | Yes                 | Yes (errors, dirty, reset) | Yes                |
+| `action()` | Yes                 | No                         | Yes                |
+| `fetch()`  | No (raw response)   | No                         | No                 |
+
+Use `useForm` when you have a form with inputs. Use `action()` for programmatic mutations (delete buttons, toggles). Use `fetch()` when you need the raw response and don't want Inertia page updates.

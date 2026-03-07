@@ -221,6 +221,7 @@ function generateClientEntry(
   return `
 import { createSSRApp, h, reactive, provide, shallowRef, nextTick } from "vue";
 import { createDeferred, resolveDeferred, rejectDeferred } from "@void-x/vue/deferred";
+import { setActionRouter } from "@void-x/vue/runtime";
 import { createPageRouter } from "void/pages-client";
 import { parseCacheFor } from "void/pages-prefetch";
 
@@ -260,6 +261,8 @@ const { router, initialPageData, initialComponent, initialLayouts, start } =
     prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
     prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? "30s")}),
   });
+
+setActionRouter(router);
 
 Object.assign(shared, initialPageData.shared || {});
 Object.assign(errors, initialPageData.errors || {});

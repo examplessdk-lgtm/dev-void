@@ -164,7 +164,8 @@ describe("compileRouteTable with pages", () => {
 
     // Action mutation handler (POST, PUT, PATCH, DELETE)
     expect(code).toContain('app.on(["POST", "PUT", "PATCH", "DELETE"], "/users"');
-    expect(code).toContain("handlePageMutation(mod.action, mod.loader, mod.head");
+    expect(code).toContain("const handler = mod.action;");
+    expect(code).toContain("handlePageMutation(handler, mod.loader, mod.head");
   });
 
   it("generates catch-all for SPA navigation", () => {

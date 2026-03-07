@@ -165,7 +165,11 @@ export default function Layout(props: { children: JSX.Element }) {
 
 :::
 
-Layouts nest automatically (e.g. root layout wraps `users/layout` wraps page component) and persist across navigations within their subtree — component state is preserved.
+When a page renders, the layout wraps it — the page component is injected as the layout's children (React/Solid/Svelte) or slot (Vue):
+
+<img src="./layout-nesting.svg" alt="Layout nesting diagram: pages/layout wraps pages/users/layout wraps pages/users/[id] page component" style="max-width: 520px; width: 100%;" />
+
+Layouts nest automatically and persist across navigations within their subtree — component state is preserved.
 
 ## Named Layouts
 

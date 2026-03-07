@@ -1,5 +1,5 @@
 import { defineHandler } from "void";
-import { db, eq } from "void/db";
+import { db } from "void/db";
 import { users } from "@schema";
 
 // GET /api/users — list all users

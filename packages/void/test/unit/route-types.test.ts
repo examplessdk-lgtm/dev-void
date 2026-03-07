@@ -230,6 +230,97 @@ describe("generateRouteTypes", () => {
     expect(dts).not.toContain("PageActionMap");
   });
 
+  it("generates PageActionMap with named actions", () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: {
+        pages: [
+          {
+            pattern: "/users",
+            params: [],
+            catchAll: false,
+            componentPath: "users/index.vue",
+            serverPath: "users/index.server.ts",
+            methods: ["loader", "actions"],
+            componentId: "users",
+          },
+        ],
+        layouts: [],
+        namedLayouts: [],
+      },
+    };
+
+    const { dts } = generateRouteTypes(scan, "/project/routes", "/project/.void", "/project/pages");
+
+    expect(dts).toContain("interface PageActionMap");
+    expect(dts).toContain('"/users"');
+    expect(dts).toContain("[K in keyof");
+    expect(dts).toContain('["actions"]');
+    expect(dts).not.toContain('["action"]');
+  });
+
+  it("generates PageActionMap for named actions with dynamic params", () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: {
+        pages: [
+          {
+            pattern: "/users/:id",
+            params: ["id"],
+            catchAll: false,
+            componentPath: "users/[id].vue",
+            serverPath: "users/[id].server.ts",
+            methods: ["loader", "actions"],
+            componentId: "users/[id]",
+          },
+        ],
+        layouts: [],
+        namedLayouts: [],
+      },
+    };
+
+    const { dts } = generateRouteTypes(scan, "/project/routes", "/project/.void", "/project/pages");
+
+    expect(dts).toContain("interface PageActionMap");
+    expect(dts).toContain('"/users/:id"');
+    expect(dts).toContain('["actions"]');
+    expect(dts).toContain("params: { id: string }");
+  });
+
+  it("errors when both action and actions are present", () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: {
+        pages: [
+          {
+            pattern: "/users",
+            params: [],
+            catchAll: false,
+            componentPath: "users/index.vue",
+            serverPath: "users/index.server.ts",
+            methods: ["loader", "action", "actions"],
+            componentId: "users",
+          },
+        ],
+        layouts: [],
+        namedLayouts: [],
+      },
+    };
+
+    expect(() =>
+      generateRouteTypes(scan, "/project/routes", "/project/.void", "/project/pages"),
+    ).toThrow(/both.*action.*actions/i);
+  });
+
   it("omits PageActionMap when pagesDir is not provided", () => {
     const scan: ScanResult = {
       routes: [],

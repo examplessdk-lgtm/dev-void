@@ -179,10 +179,9 @@ export default extendConfig(
                 collapsed: true,
                 items: [
                   { text: "Overview", link: "/guide/pages-routing/overview" },
-                  { text: "Loaders & Actions", link: "/guide/pages-routing/loaders-actions" },
                   { text: "Layouts & Shared Data", link: "/guide/pages-routing/layouts" },
-                  { text: "Forms", link: "/guide/pages-routing/forms" },
-                  { text: "Deferred Props", link: "/guide/pages-routing/deferred-props" },
+                  { text: "Loaders & Props", link: "/guide/pages-routing/loaders" },
+                  { text: "Actions & Forms", link: "/guide/pages-routing/actions-and-forms" },
                   { text: "View Transitions", link: "/guide/pages-routing/view-transitions" },
                   { text: "Head Management", link: "/guide/pages-routing/head" },
                   { text: "Islands", link: "/guide/pages-routing/islands" },

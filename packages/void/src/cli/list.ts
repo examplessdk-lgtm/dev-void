@@ -1,6 +1,6 @@
 import { intro, outro, log } from "@clack/prompts";
 import { getToken } from "./auth";
-import { PlatformClient, type DeploymentResponse, type DeploymentListResponse } from "./client";
+import { PlatformClient, type DeploymentResponse } from "./client";
 import { readProjectConfig } from "./project";
 import { resolveProjectBySlug } from "./resolve-project";
 import { cliTitle, dim, pc, tablePrefix } from "./output";

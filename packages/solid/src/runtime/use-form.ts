@@ -1,31 +1,20 @@
 import { createSignal, createMemo, useContext } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { RouterContext, ErrorsContext } from "./context";
-import type { PageActionMap } from "void/routes";
-
-type HasParams<U extends keyof PageActionMap> = PageActionMap[U] extends { params: infer P }
-  ? P extends Record<string, string>
-    ? true
-    : false
-  : false;
-
-type FormOptions<U extends keyof PageActionMap> =
-  HasParams<U> extends true
-    ? { params: PageActionMap[U] extends { params: infer P } ? P : never }
-    : { params?: never };
+import type { ActionUrl, ResolveActionBody, ActionFormOptions } from "void/routes";
 
 // Typed overload — full inference from PageActionMap (requires codegen)
-export function useForm<U extends keyof PageActionMap & string>(
+export function useForm<U extends ActionUrl & string>(
   url: U,
-  defaults: PageActionMap[U]["body"],
-  options?: FormOptions<U>,
+  defaults: ResolveActionBody<U>,
+  options?: ActionFormOptions<U>,
 ): {
-  data: PageActionMap[U]["body"];
-  setData: <K extends keyof PageActionMap[U]["body"] & string>(
+  data: ResolveActionBody<U>;
+  setData: <K extends keyof ResolveActionBody<U> & string>(
     field: K,
-    value: PageActionMap[U]["body"][K],
+    value: ResolveActionBody<U>[K],
   ) => void;
-  errors: Partial<Record<keyof PageActionMap[U]["body"] & string, string>>;
+  errors: Partial<Record<keyof ResolveActionBody<U> & string, string>>;
   processing: boolean;
   isDirty: boolean;
   wasSuccessful: boolean;
@@ -34,8 +23,8 @@ export function useForm<U extends keyof PageActionMap & string>(
   put(opts?: any): void;
   patch(opts?: any): void;
   delete(opts?: any): void;
-  reset(...fields: (keyof PageActionMap[U]["body"] & string)[]): void;
-  clearErrors(...fields: (keyof PageActionMap[U]["body"] & string)[]): void;
+  reset(...fields: (keyof ResolveActionBody<U> & string)[]): void;
+  clearErrors(...fields: (keyof ResolveActionBody<U> & string)[]): void;
 };
 
 // Untyped fallback — manual generic for use without codegen
@@ -65,11 +54,22 @@ export function useForm(
   options?: { params?: Record<string, string> },
 ): any {
   let resolvedUrl = url;
+
+  // Strip ?action query before param resolution, then re-append
+  let actionQuery = "";
+  const qIdx = resolvedUrl.indexOf("?");
+  if (qIdx !== -1) {
+    actionQuery = resolvedUrl.slice(qIdx);
+    resolvedUrl = resolvedUrl.slice(0, qIdx);
+  }
+
   if (options?.params) {
     for (const [key, value] of Object.entries(options.params)) {
       resolvedUrl = resolvedUrl.replace(`:${key}`, encodeURIComponent(value));
     }
   }
+
+  resolvedUrl = resolvedUrl + actionQuery;
 
   const router = useContext(RouterContext);
   // ErrorsContext provides the errors signal accessor — a reactive function

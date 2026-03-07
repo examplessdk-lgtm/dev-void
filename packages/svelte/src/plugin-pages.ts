@@ -164,6 +164,7 @@ function generateClientEntry(
 import { hydrate } from "svelte";
 import { writable } from "svelte/store";
 import App from "@void-x/svelte/App.svelte";
+import { setActionRouter } from "@void-x/svelte/runtime";
 import { createPageRouter } from "void/pages-client";
 import { parseCacheFor } from "void/pages-prefetch";
 
@@ -198,6 +199,8 @@ const { router, initialPageData, initialComponent, initialLayouts, start } =
     prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
     prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? "30s")}),
   });
+
+setActionRouter(router);
 
 pageStore.set(initialComponent);
 propsStore.set(initialPageData.props);

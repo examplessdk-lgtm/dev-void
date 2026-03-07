@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync, renameSync, copyFileSync, readdirSync } from "node:fs";
 import { join, extname } from "node:path";
-import { build, type UserConfig } from "vite";
+import { build } from "vite";
 
 export interface WrapperFeatures {
   /** Auth providers (kept for interface compat, no longer used by wrapper). */

@@ -1,38 +1,24 @@
-import { useForm } from "void/react";
+import { useForm, action } from "void/react";
 import type { Props } from "./index.server";
 
 export default function DbPage({ users, posts }: Props) {
-  const userForm = useForm("/", {
-    intent: "create-user",
+  const userForm = useForm("/?create-user", {
     name: "",
     email: "",
   });
 
-  const deleteUserForm = useForm("/", {
-    intent: "delete-user",
-    id: 0,
-  });
-
-  const postForm = useForm("/", {
-    intent: "create-post",
+  const postForm = useForm("/?create-post", {
     title: "",
     body: "",
     authorId: 0,
   });
 
-  const deletePostForm = useForm("/", {
-    intent: "delete-post",
-    id: 0,
-  });
-
-  function deleteUser(id: number) {
-    deleteUserForm.setData("id", id);
-    deleteUserForm.post();
+  async function deleteUser(id: number) {
+    await action("/?delete-user", { id });
   }
 
-  function deletePost(id: number) {
-    deletePostForm.setData("id", id);
-    deletePostForm.post();
+  async function deletePost(id: number) {
+    await action("/?delete-post", { id });
   }
 
   return (
@@ -94,9 +80,7 @@ export default function DbPage({ users, posts }: Props) {
                 <td>{user.active ? "Yes" : "No"}</td>
                 <td>{String(user.createdAt)}</td>
                 <td>
-                  <button onClick={() => deleteUser(user.id)} disabled={deleteUserForm.processing}>
-                    Delete
-                  </button>
+                  <button onClick={() => deleteUser(user.id)}>Delete</button>
                 </td>
               </tr>
             ))}
@@ -178,9 +162,7 @@ export default function DbPage({ users, posts }: Props) {
                 <td>{post.author}</td>
                 <td>{String(post.createdAt)}</td>
                 <td>
-                  <button onClick={() => deletePost(post.id)} disabled={deletePostForm.processing}>
-                    Delete
-                  </button>
+                  <button onClick={() => deletePost(post.id)}>Delete</button>
                 </td>
               </tr>
             ))}

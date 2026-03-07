@@ -11,7 +11,7 @@ import type {
 
 const COMPONENT_EXTENSIONS = ["vue", "tsx", "jsx", "svelte", "md"];
 const SERVER_EXTENSIONS = ["ts", "tsx", "js", "mjs", "mts"];
-const PAGES_EXPORT_RE = /export\s+(?:const|function|async\s+function)\s+(loader|action)\b/g;
+const PAGES_EXPORT_RE = /export\s+(?:const|function|async\s+function)\s+(loader|actions?)\b/g;
 const REVALIDATE_RE = /export\s+const\s+revalidate\s*=\s*(\d+)\s*;/;
 const PRERENDER_RE = /export\s+const\s+prerender\s*=\s*true\s*;/;
 const PRERENDER_FALSE_RE = /export\s+const\s+prerender\s*=\s*false\s*;/;

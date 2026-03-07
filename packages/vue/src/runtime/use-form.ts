@@ -1,24 +1,13 @@
 import { reactive, ref, inject, watch } from "vue";
-import type { PageActionMap } from "void/routes";
+import type { ActionUrl, ResolveActionBody, ActionFormOptions } from "void/routes";
 
-type HasParams<U extends keyof PageActionMap> = PageActionMap[U] extends { params: infer P }
-  ? P extends Record<string, string>
-    ? true
-    : false
-  : false;
-
-type FormOptions<U extends keyof PageActionMap> =
-  HasParams<U> extends true
-    ? { params: PageActionMap[U] extends { params: infer P } ? P : never }
-    : { params?: never };
-
-export function useForm<U extends keyof PageActionMap & string>(
+export function useForm<U extends ActionUrl & string>(
   url: U,
-  defaults: PageActionMap[U]["body"],
-  options?: FormOptions<U>,
+  defaults: ResolveActionBody<U>,
+  options?: ActionFormOptions<U>,
 ): {
-  data: PageActionMap[U]["body"];
-  errors: Partial<Record<keyof PageActionMap[U]["body"] & string, string>>;
+  data: ResolveActionBody<U>;
+  errors: Partial<Record<keyof ResolveActionBody<U> & string, string>>;
   processing: boolean;
   isDirty: boolean;
   wasSuccessful: boolean;
@@ -27,8 +16,8 @@ export function useForm<U extends keyof PageActionMap & string>(
   put(opts?: any): void;
   patch(opts?: any): void;
   delete(opts?: any): void;
-  reset(...fields: (keyof PageActionMap[U]["body"] & string)[]): void;
-  clearErrors(...fields: (keyof PageActionMap[U]["body"] & string)[]): void;
+  reset(...fields: (keyof ResolveActionBody<U> & string)[]): void;
+  clearErrors(...fields: (keyof ResolveActionBody<U> & string)[]): void;
 };
 
 export function useForm(
@@ -39,11 +28,21 @@ export function useForm(
   let resolvedUrl = url;
   const formDefaults = defaults;
 
+  // Strip ?action query before param resolution, then re-append
+  let actionQuery = "";
+  const qIdx = resolvedUrl.indexOf("?");
+  if (qIdx !== -1) {
+    actionQuery = resolvedUrl.slice(qIdx);
+    resolvedUrl = resolvedUrl.slice(0, qIdx);
+  }
+
   if (options?.params) {
     for (const [key, value] of Object.entries(options.params)) {
       resolvedUrl = resolvedUrl.replace(`:${key}`, encodeURIComponent(value));
     }
   }
+
+  resolvedUrl = resolvedUrl + actionQuery;
 
   const router = inject<any>("__void_router", null);
   const data = reactive({ ...formDefaults }) as Record<string, unknown>;

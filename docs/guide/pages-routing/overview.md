@@ -88,6 +88,19 @@ That's it — no SSR entry, no client entry, no hydration boilerplate. The adapt
 
 Each adapter plugin includes the framework's Vite plugin (`@vitejs/plugin-react`, `@vitejs/plugin-vue`, `@sveltejs/vite-plugin-svelte`, `vite-plugin-solid`) so you don't need to install or configure it separately. Pass framework plugin options via `voidReact({ react: { ... } })`, `voidVue({ vue: { ... } })`, `voidSvelte({ svelte: { ... } })`, or `voidSolid({ solid: { ... } })` if needed.
 
+## Directory Structure
+
+Pages can be flat files (`about.vue`) or use directory-based routing (`about/index.vue`) — both map to the same route:
+
+<PagesFileTree />
+
+Each page can have a companion `.server.ts` file that runs exclusively on the server. It can export:
+
+- A [**loader**](./loaders) — runs on GET, returns data that becomes the page component's props
+- [**Actions**](./actions-and-forms) — handle mutations (POST, PUT, PATCH, DELETE) from forms and programmatic calls. Export a single `action` or multiple [named actions](./actions-and-forms#named-actions) for pages with several mutations
+
+File-based routing rules are the same as [server routing](../server-routing.md): `[param]` for dynamic segments, `[...param]` for catch-all, `(group)/` for route groups.
+
 ## How Navigation Works
 
 Pages uses an Inertia-style protocol under the hood:
@@ -150,11 +163,3 @@ router.visit("/users");
 router.reload(); // re-fetch current page props
 router.post("/logout"); // non-GET navigation
 ```
-
-## Directory Structure
-
-Each page is a component file paired with a `.server.ts` file that provides server-side data loading. Pages can be flat files (`about.vue`) or use directory-based routing (`about/index.vue`) — both map to the same route:
-
-<PagesFileTree />
-
-File-based routing rules are the same as [server routing](../server-routing.md): `[param]` for dynamic segments, `[...param]` for catch-all, `(group)/` for route groups.

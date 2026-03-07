@@ -98,14 +98,14 @@ describe("playground/pg-test", () => {
   });
 
   it("creates a user via action", async () => {
-    // POST to create user
-    const createRes = await fetch(BASE + "/", {
+    // POST to named action
+    const createRes = await fetch(BASE + "/?create-user", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-VoidPages": "true",
       },
-      body: JSON.stringify({ intent: "create-user", name: "Alice", email: "alice@test.com" }),
+      body: JSON.stringify({ name: "Alice", email: "alice@test.com" }),
       redirect: "manual",
     });
     expect(createRes.status).toBeLessThan(400);
@@ -127,15 +127,14 @@ describe("playground/pg-test", () => {
     const alice = data.props.users.find((u: any) => u.name === "Alice");
     expect(alice).toBeTruthy();
 
-    // Create post
-    const createRes = await fetch(BASE + "/", {
+    // Create post via named action
+    const createRes = await fetch(BASE + "/?create-post", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-VoidPages": "true",
       },
       body: JSON.stringify({
-        intent: "create-post",
         title: "Hello World",
         body: "Test post",
         authorId: alice.id,
@@ -158,13 +157,13 @@ describe("playground/pg-test", () => {
     const post = data.props.posts.find((p: any) => p.title === "Hello World");
     expect(post).toBeTruthy();
 
-    const deleteRes = await fetch(BASE + "/", {
+    const deleteRes = await fetch(BASE + "/?delete-post", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-VoidPages": "true",
       },
-      body: JSON.stringify({ intent: "delete-post", id: post.id }),
+      body: JSON.stringify({ id: post.id }),
       redirect: "manual",
     });
     expect(deleteRes.status).toBeLessThan(400);
@@ -180,11 +179,10 @@ describe("playground/pg-test", () => {
     const data = (await propsRes.json()) as any;
     const alice = data.props.users.find((u: any) => u.name === "Alice");
 
-    await fetch(BASE + "/", {
+    await fetch(BASE + "/?create-post", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-VoidPages": "true" },
       body: JSON.stringify({
-        intent: "create-post",
         title: "To Be Deleted",
         body: "Gone soon",
         authorId: alice.id,
@@ -193,10 +191,10 @@ describe("playground/pg-test", () => {
     });
 
     // Delete Alice (should cascade-delete posts)
-    const deleteRes = await fetch(BASE + "/", {
+    const deleteRes = await fetch(BASE + "/?delete-user", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-VoidPages": "true" },
-      body: JSON.stringify({ intent: "delete-user", id: alice.id }),
+      body: JSON.stringify({ id: alice.id }),
       redirect: "manual",
     });
     expect(deleteRes.status).toBeLessThan(400);

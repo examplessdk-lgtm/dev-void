@@ -198,7 +198,7 @@ function generateClientEntry(
 import React, { useSyncExternalStore } from "react";
 import { hydrateRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
-import { SharedContext, ErrorsContext, RouterContext } from "@void-x/react/runtime";
+import { SharedContext, ErrorsContext, RouterContext, setActionRouter } from "@void-x/react/runtime";
 import { createPageRouter } from "void/pages-client";
 import { parseCacheFor } from "void/pages-prefetch";
 
@@ -253,6 +253,8 @@ const { router, initialPageData, initialComponent, initialLayouts, start } =
     prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
     prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? "30s")}),
   });
+
+setActionRouter(router);
 
 state = {
   component: initialComponent,

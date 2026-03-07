@@ -1,6 +1,6 @@
 import { intro, outro, log, select, confirm, isCancel, cancel, spinner } from "@clack/prompts";
 import { getToken } from "./auth";
-import { PlatformClient, type DeploymentResponse } from "./client";
+import { PlatformClient } from "./client";
 import { readProjectConfig } from "./project";
 import { cliTitle, dim, pc } from "./output";
 

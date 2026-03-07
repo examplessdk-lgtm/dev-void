@@ -20,29 +20,29 @@ export const loader = defineHandler(async () => {
   return { users: allUsers, posts: allPosts };
 });
 
-export const action = defineHandler(async (c) => {
-  const body = await c.req.json<{
-    intent: string;
-    name?: string;
-    email?: string;
-    title?: string;
-    body?: string;
-    authorId?: number;
-    id?: number;
-  }>();
+export const actions = {
+  "create-user": defineHandler(async (c) => {
+    const { name, email } = await c.req.json<{ name: string; email: string }>();
+    await db.insert(users).values({ name, email });
+  }),
 
-  if (body.intent === "create-user") {
-    await db.insert(users).values({ name: body.name!, email: body.email! });
-  } else if (body.intent === "delete-user") {
-    await db.delete(posts).where(eq(posts.authorId, body.id!));
-    await db.delete(users).where(eq(users.id, body.id!));
-  } else if (body.intent === "create-post") {
-    await db.insert(posts).values({
-      title: body.title!,
-      body: body.body!,
-      authorId: body.authorId!,
-    });
-  } else if (body.intent === "delete-post") {
-    await db.delete(posts).where(eq(posts.id, body.id!));
-  }
-});
+  "delete-user": defineHandler(async (c) => {
+    const { id } = await c.req.json<{ id: number }>();
+    await db.delete(posts).where(eq(posts.authorId, id));
+    await db.delete(users).where(eq(users.id, id));
+  }),
+
+  "create-post": defineHandler(async (c) => {
+    const { title, body, authorId } = await c.req.json<{
+      title: string;
+      body: string;
+      authorId: number;
+    }>();
+    await db.insert(posts).values({ title, body, authorId });
+  }),
+
+  "delete-post": defineHandler(async (c) => {
+    const { id } = await c.req.json<{ id: number }>();
+    await db.delete(posts).where(eq(posts.id, id));
+  }),
+};

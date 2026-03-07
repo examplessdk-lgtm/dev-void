@@ -92,8 +92,9 @@ export function drizzlePlugin(
     },
 
     load: {
+      // oxlint-disable-next-line no-control-regex -- \0 prefix is Vite's virtual module convention
       filter: { id: /^\0virtual:void-db$/ },
-      handler(id) {
+      handler(_id) {
         // void/db virtual module
         const schemaImport = JSON.stringify(schema!.path);
 

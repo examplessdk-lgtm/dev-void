@@ -965,14 +965,29 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
     lines.push(`});`);
 
     // Action (POST, PUT, PATCH, DELETE all route to action)
-    if (page.methods.includes("action")) {
+    if (page.methods.includes("action") || page.methods.includes("actions")) {
       const loaderName = `_pload_${safeId}`;
       lines.push(
         `app.on(["POST", "PUT", "PATCH", "DELETE"], ${JSON.stringify(page.pattern)}, async (c) => {`,
       );
       lines.push(`  const mod = await ${loaderName}();`);
+
+      if (page.methods.includes("actions")) {
+        // Named actions — resolve from query string
+        lines.push(`  const actionName = new URL(c.req.url).searchParams.keys().next().value;`);
+        lines.push(
+          `  const handler = actionName ? mod.actions?.[actionName] : mod.actions?.default;`,
+        );
+        lines.push(
+          `  if (!handler) return new Response("Unknown action" + (actionName ? ": " + actionName : ""), { status: 404 });`,
+        );
+      } else {
+        // Single action (backward compat)
+        lines.push(`  const handler = mod.action;`);
+      }
+
       lines.push(
-        `  return handlePageMutation(mod.action, mod.loader, mod.head, c, ${JSON.stringify(page.componentId)}, ${renderer}, ${assetTags}, __voidHeadConfig${islandFlag});`,
+        `  return handlePageMutation(handler, mod.loader, mod.head, c, ${JSON.stringify(page.componentId)}, ${renderer}, ${assetTags}, __voidHeadConfig${islandFlag});`,
       );
       lines.push(`});`);
     }
