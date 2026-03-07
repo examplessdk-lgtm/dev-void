@@ -4,12 +4,18 @@ import { defineConfig } from "vitepress";
 import { groupIconMdPlugin, groupIconVitePlugin } from "vitepress-plugin-group-icons";
 
 const referenceItems = [
-  { text: "Project Structure", link: "/reference/structure" },
-  { text: "Resource Inference", link: "/reference/resource-inference" },
+  {
+    text: "General",
+    collapsed: false,
+    items: [
+      { text: "Project Structure", link: "/reference/structure" },
+      { text: "Resource Inference", link: "/reference/resource-inference" },
+    ],
+  },
   {
     text: "Config",
     link: "/reference/config",
-    collapsed: false,
+    collapsed: true,
     items: [
       { text: "target", link: "/reference/config#target" },
       { text: "routing", link: "/reference/config#routing" },
@@ -22,7 +28,7 @@ const referenceItems = [
   {
     text: "CLI",
     link: "/reference/cli",
-    collapsed: false,
+    collapsed: true,
     items: [
       { text: "void init", link: "/reference/cli#setup" },
       { text: "void auth", link: "/reference/cli#auth" },
@@ -38,7 +44,7 @@ const referenceItems = [
   {
     text: "API",
     link: "/reference/api",
-    collapsed: false,
+    collapsed: true,
     items: [
       { text: "Plugin", link: "/reference/api#plugin" },
       { text: "Handlers", link: "/reference/api#handlers" },
@@ -141,8 +147,8 @@ export default extendConfig(
 
       nav: [
         { text: "Guide", link: "/guide/", activeMatch: "/guide/" },
-        integrationLinks,
         referenceLinks,
+        integrationLinks,
         resourcesLinks,
         platformLinks,
         { text: "Dashboard", link: "https://dash.void.cloud" },
@@ -206,6 +212,7 @@ export default extendConfig(
             items: [
               { text: "Supported App Types", link: "/guide/app-types" },
               { text: "Deployment", link: "/guide/deployment" },
+              { text: "Remote Development", link: "/guide/remote-dev" },
               {
                 text: "Edge Routing",
                 collapsed: false,
@@ -260,18 +267,25 @@ export default extendConfig(
         })(),
         "/reference/": (() => {
           const icons: Record<string, string> = {
+            General: "lucide:book-open",
             "Project Structure": "lucide:folder-tree",
             "Resource Inference": "lucide:scan-search",
             Config: "lucide:settings",
             API: "lucide:code",
             CLI: "lucide:terminal",
           };
-          return referenceItems.map((item) => ({ ...item, icon: icons[item.text] }));
+          return referenceItems.map((item) => ({
+            ...item,
+            icon: icons[item.text],
+            items: item.items?.map((child) => ({
+              ...child,
+              icon: icons[child.text] ?? child.icon,
+            })),
+          }));
         })(),
       },
 
       footer: {
-        // @ts-expect-error theme did not augment vitepress theme config
         nav: [
           {
             title: "Docs",

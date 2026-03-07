@@ -27,11 +27,17 @@ The `nitro-cloudflare-dev` module enables `getPlatformProxy()` for local dev, gi
 ### 3. Configure `nuxt.config.ts`
 
 ```ts
+import { resolve } from "node:path";
 import { voidPlugin } from "void";
 
 export default defineNuxtConfig({
   nitro: {
     preset: "cloudflare-module",
+    alias: {
+      // Nitro has its own bundler that doesn't use Vite aliases.
+      // Duplicate @schema here so Nitro can resolve it.
+      "@schema": resolve(__dirname, "db/schema.ts"),
+    },
   },
   modules: ["nitro-cloudflare-dev"],
   vite: { plugins: [voidPlugin()] },
@@ -68,11 +74,16 @@ All [Void platform features](../../guide/app-types.md#void-apps) work with Nuxt.
 ```ts
 // server/api/users.get.ts
 import { db } from "void/db";
+import { users } from "@schema";
 
 export default defineEventHandler(async () => {
-  return db.list("users"); // fully typed from migrations
+  return db.select().from(users);
 });
 ```
+
+::: warning ⚠️ Nuxt limitation
+Nuxt uses Nitro, which bundles server routes outside of Vite's plugin pipeline. The schema cannot be injected into the `db` instance, so `db.query.*` relational queries are not available in Nuxt. Use the standard query builder API (`db.select().from(table)`) instead.
+:::
 
 ### Auth
 

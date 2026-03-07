@@ -20,27 +20,7 @@ All Void features that involve backend logic — [server routing](./server-routi
 
 A Void app can be **API-only** (just `routes/`), a **SPA + API** (frontend in `src/` with API routes), or **full-stack with pages mode** (server-rendered pages in `pages/` with co-located data loading):
 
-```
-my-app/
-  pages/                   ← pages mode (SSR + SPA navigation)
-    layout.vue
-    index.vue
-    index.server.ts
-    users/
-      index.vue
-      index.server.ts
-  routes/
-    api/
-      hello.ts             ← export const GET = defineHandler(...)
-      users/
-        index.ts            ← export const GET, POST
-        [id].ts             ← export const GET
-  middleware/
-    01.auth.ts
-  migrations/
-    001_create_users.sql
-  vite.config.ts            ← plugins: [voidPlugin()]
-```
+<VoidAppFileTree annotations />
 
 Your worker handles API routes, page rendering, and (optionally) [custom SSR](./ssr.md). Static assets are served from the edge via per-worker assets. Cloudflare bindings (D1, KV, R2) are [inferred from your source code](../reference/resource-inference.md) and provisioned automatically.
 

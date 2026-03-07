@@ -35,7 +35,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("gen model", () => {
-  it("generates migration with correct SQL", async () => {
+  it("generates Drizzle table definition", async () => {
     writePkg({ valibot: "^1.0.0" });
     await runGenCommand(TMP, {
       subcommand: "model",
@@ -47,20 +47,19 @@ describe("gen model", () => {
       ],
     });
 
-    const sql = read("migrations/001_create_posts.sql");
-    expect(sql).toBe(
-      `CREATE TABLE IF NOT EXISTS posts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  title TEXT NOT NULL,
-  body TEXT NOT NULL,
-  published INTEGER NOT NULL,
-  created_at TEXT DEFAULT (datetime('now'))
-);
-`,
-    );
+    const schema = read("db/schema/posts.ts");
+    expect(schema).toContain('from "void/schema-helpers"');
+    expect(schema).toContain("import { sqliteTable");
+    expect(schema).toContain('export const posts = sqliteTable("posts"');
+    expect(schema).toContain('id: integer("id").primaryKey({ autoIncrement: true })');
+    expect(schema).toContain('title: text("title").notNull()');
+    expect(schema).toContain('body: text("body").notNull()');
+    expect(schema).toContain('integer("published", { mode: "boolean" }).notNull()');
+    expect(schema).toContain("createdAt:");
+    expect(schema).toContain("updatedAt:");
   });
 
-  it("maps all column types correctly in migration", async () => {
+  it("maps all column types correctly in schema", async () => {
     writePkg({ valibot: "^1.0.0" });
     await runGenCommand(TMP, {
       subcommand: "model",
@@ -68,38 +67,49 @@ describe("gen model", () => {
       columns: [
         { name: "a", type: "string", nullable: false },
         { name: "b", type: "text", nullable: false },
-        { name: "c", type: "datetime", nullable: false },
-        { name: "d", type: "integer", nullable: false },
-        { name: "e", type: "boolean", nullable: false },
-        { name: "f", type: "real", nullable: false },
-        { name: "g", type: "blob", nullable: false },
+        { name: "c", type: "integer", nullable: false },
+        { name: "d", type: "boolean", nullable: false },
+        { name: "e", type: "real", nullable: false },
       ],
     });
 
-    const sql = read("migrations/001_create_t.sql");
-    expect(sql).toContain("a TEXT NOT NULL");
-    expect(sql).toContain("b TEXT NOT NULL");
-    expect(sql).toContain("c TEXT NOT NULL");
-    expect(sql).toContain("d INTEGER NOT NULL");
-    expect(sql).toContain("e INTEGER NOT NULL");
-    expect(sql).toContain("f REAL NOT NULL");
-    expect(sql).toContain("g BLOB NOT NULL");
+    const schema = read("db/schema/t.ts");
+    expect(schema).toContain('a: text("a").notNull()');
+    expect(schema).toContain('b: text("b").notNull()');
+    expect(schema).toContain('c: integer("c").notNull()');
+    expect(schema).toContain('integer("d", { mode: "boolean" }).notNull()');
+    expect(schema).toContain('e: real("e").notNull()');
   });
 
-  it("handles nullable columns in migration", async () => {
+  it("creates barrel export in db/schema.ts", async () => {
     writePkg({ valibot: "^1.0.0" });
     await runGenCommand(TMP, {
       subcommand: "model",
       name: "posts",
-      columns: [{ name: "bio", type: "text", nullable: true }],
+      columns: [{ name: "title", type: "string", nullable: false }],
     });
 
-    const sql = read("migrations/001_create_posts.sql");
-    expect(sql).toContain("  bio TEXT,");
-    expect(sql).not.toContain("bio TEXT NOT NULL");
+    const barrel = read("db/schema.ts");
+    expect(barrel).toContain('export * from "./schema/posts"');
   });
 
-  it("generates index route with GET and POST", async () => {
+  it("appends to existing barrel export", async () => {
+    writePkg({ valibot: "^1.0.0" });
+    mkdirSync(join(TMP, "db"), { recursive: true });
+    writeFileSync(join(TMP, "db/schema.ts"), 'export * from "./schema/users";\n');
+
+    await runGenCommand(TMP, {
+      subcommand: "model",
+      name: "posts",
+      columns: [],
+    });
+
+    const barrel = read("db/schema.ts");
+    expect(barrel).toContain('export * from "./schema/users"');
+    expect(barrel).toContain('export * from "./schema/posts"');
+  });
+
+  it("generates index route with GET and POST using Drizzle", async () => {
     writePkg({ valibot: "^1.0.0" });
     await runGenCommand(TMP, {
       subcommand: "model",
@@ -114,12 +124,13 @@ describe("gen model", () => {
     expect(route).toContain('import * as v from "valibot"');
     expect(route).toContain('import { defineHandler } from "void"');
     expect(route).toContain('import { db } from "void/db"');
+    expect(route).toContain('import { posts } from "@schema"');
     expect(route).toContain("export const GET = defineHandler");
-    expect(route).toContain('db.list("posts")');
+    expect(route).toContain("db.select().from(posts)");
     expect(route).toContain("export const POST = defineHandler.withValidator");
     expect(route).toContain("title: v.string()");
     expect(route).toContain("body: v.string()");
-    expect(route).toContain('db.insert("posts", { title: body.title, body: body.body })');
+    expect(route).toContain("db.insert(posts).values({ title: body.title, body: body.body })");
   });
 
   it("generates index route without validator when no columns", async () => {
@@ -133,21 +144,17 @@ describe("gen model", () => {
     const route = read("routes/api/events/index.ts");
     expect(route).not.toContain("valibot");
     expect(route).not.toContain("withValidator");
-    expect(route).toContain('db.list("events")');
-    expect(route).toContain('db.insert("events", {})');
+    expect(route).toContain("db.select().from(events)");
+    expect(route).toContain("db.insert(events).values(body)");
 
     // [id] route is still generated even with no columns
     const idRoute = read("routes/api/events/[id].ts");
     expect(idRoute).toContain("params: v.object({ id: v.string() })");
-    expect(idRoute).toContain('db.get("events"');
-
-    // db.d.ts is still regenerated
-    const dts = read(".void/db.d.ts");
-    expect(dts).toContain("export {}");
-    expect(dts).toContain("events:");
+    expect(idRoute).toContain("db.select().from(events)");
+    expect(idRoute).toContain("eq(events.id");
   });
 
-  it("generates [id] route with 404 handling", async () => {
+  it("generates [id] route with Drizzle query and 404 handling", async () => {
     writePkg({ valibot: "^1.0.0" });
     await runGenCommand(TMP, {
       subcommand: "model",
@@ -156,9 +163,11 @@ describe("gen model", () => {
     });
 
     const route = read("routes/api/posts/[id].ts");
+    expect(route).toContain('import { db, eq } from "void/db"');
     expect(route).toContain('import * as v from "valibot"');
+    expect(route).toContain('import { posts } from "@schema"');
     expect(route).toContain("params: v.object({ id: v.string() })");
-    expect(route).toContain('db.get("posts", { where: { id: Number(params.id) } })');
+    expect(route).toContain("db.select().from(posts).where(eq(posts.id, Number(params.id)))");
     expect(route).toContain('new Response("Not found", { status: 404 })');
   });
 
@@ -186,7 +195,7 @@ describe("gen model", () => {
     expect(route).toContain("f: v.optional(v.string())");
   });
 
-  it("regenerates db.d.ts with correct augmentation structure", async () => {
+  it("sets up project tsconfig with @schema paths", async () => {
     writePkg({ valibot: "^1.0.0" });
     await runGenCommand(TMP, {
       subcommand: "model",
@@ -194,33 +203,9 @@ describe("gen model", () => {
       columns: [{ name: "title", type: "string", nullable: false }],
     });
 
-    const dts = read(".void/db.d.ts");
-    // export {} is critical for augmentation semantics (vs ambient declaration)
-    expect(dts).toContain("export {}");
-    expect(dts).toContain('declare module "void/db"');
-    expect(dts).toContain("interface DbTables");
-    expect(dts).toContain("interface DbInsertTables");
-    expect(dts).toContain("posts:");
-    expect(dts).toContain("title: string;");
-    expect(dts).toContain("id: number;");
-    // id and created_at should be optional in DbInsertTables (PK/default)
-    expect(dts).toContain("id?: number;");
-    expect(dts).toContain("created_at");
-  });
-
-  it("auto-numbers migration after existing ones", async () => {
-    writePkg({ valibot: "^1.0.0" });
-    mkdirSync(join(TMP, "migrations"), { recursive: true });
-    writeFileSync(join(TMP, "migrations/001_create_users.sql"), "CREATE TABLE users (id INTEGER);");
-    writeFileSync(join(TMP, "migrations/002_add_email.sql"), "ALTER TABLE users ADD email TEXT;");
-
-    await runGenCommand(TMP, {
-      subcommand: "model",
-      name: "posts",
-      columns: [],
-    });
-
-    expect(existsSync(join(TMP, "migrations/003_create_posts.sql"))).toBe(true);
+    const tsconfig = JSON.parse(read(".void/tsconfig.json"));
+    expect(tsconfig.compilerOptions.paths["@schema"]).toBeDefined();
+    expect(tsconfig.compilerOptions.paths["@schema/*"]).toEqual(["../db/schema/*"]);
   });
 
   it("skips existing files without overwriting", async () => {
@@ -316,13 +301,14 @@ describe("gen model", () => {
     expect(index).not.toContain("arktype");
     expect(index).not.toContain("withValidator");
     expect(index).toContain("c.req.json()");
-    expect(index).toContain('db.insert("posts"');
+    expect(index).toContain("db.insert(posts).values(");
 
     const idRoute = read("routes/api/posts/[id].ts");
     expect(idRoute).not.toContain("valibot");
     expect(idRoute).not.toContain("withValidator");
     expect(idRoute).toContain('c.req.param("id")');
-    expect(idRoute).toContain('db.get("posts"');
+    expect(idRoute).toContain("db.select().from(posts)");
+    expect(idRoute).toContain("eq(posts.id");
     expect(idRoute).toContain("Number(id)");
   });
 
@@ -367,28 +353,28 @@ describe("gen migration", () => {
   it("generates numbered migration file", async () => {
     await runGenCommand(TMP, { subcommand: "migration", name: "add_avatar_to_users" });
 
-    const sql = read("migrations/001_add_avatar_to_users.sql");
+    const sql = read("db/migrations/001_add_avatar_to_users.sql");
     expect(sql).toBe("-- add_avatar_to_users\n");
   });
 
   it("auto-numbers with zero-padded prefix after existing migrations", async () => {
-    mkdirSync(join(TMP, "migrations"), { recursive: true });
-    writeFileSync(join(TMP, "migrations/005_something.sql"), "");
+    mkdirSync(join(TMP, "db", "migrations"), { recursive: true });
+    writeFileSync(join(TMP, "db/migrations/005_something.sql"), "");
 
     await runGenCommand(TMP, { subcommand: "migration", name: "another" });
 
-    expect(existsSync(join(TMP, "migrations/006_another.sql"))).toBe(true);
+    expect(existsSync(join(TMP, "db/migrations/006_another.sql"))).toBe(true);
     // Verify padding — "6_another.sql" should not exist
-    expect(existsSync(join(TMP, "migrations/6_another.sql"))).toBe(false);
+    expect(existsSync(join(TMP, "db/migrations/6_another.sql"))).toBe(false);
   });
 
   it("ignores seed.sql for numbering", async () => {
-    mkdirSync(join(TMP, "migrations"), { recursive: true });
-    writeFileSync(join(TMP, "migrations/seed.sql"), "");
+    mkdirSync(join(TMP, "db", "migrations"), { recursive: true });
+    writeFileSync(join(TMP, "db/migrations/seed.sql"), "");
 
     await runGenCommand(TMP, { subcommand: "migration", name: "first" });
 
-    expect(existsSync(join(TMP, "migrations/001_first.sql"))).toBe(true);
+    expect(existsSync(join(TMP, "db/migrations/001_first.sql"))).toBe(true);
   });
 });
 

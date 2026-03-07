@@ -112,31 +112,8 @@ export default defineRender(async (c, assetTags) => {
 
 **How it works**: In the browser, `fetch()` uses the normal HTTP client. In the worker, Void redirects the import to a virtual module that calls `app.fetch()` directly using the Hono app instance. AsyncLocalStorage threads the outer request context so headers and `waitUntil()` work correctly.
 
-## Using Your Own ORM
+## Using a Different ORM
 
-The built-in [database helper](./database.md) covers simple CRUD, but you're not locked into it. Any ORM or query builder that works with D1 works with Void — just pass the D1 binding.
-
-For example, with [Drizzle](https://orm.drizzle.team/docs/get-started/d1-new):
-
-```ts
-// db/drizzle.ts
-import { drizzle } from "drizzle-orm/d1";
-import { env } from "cloudflare:workers";
-
-export const db = drizzle(env.DB);
-```
-
-```ts
-// routes/api/users.ts
-import { defineHandler } from "void";
-import { db } from "../../db/drizzle";
-import { users } from "../../db/schema";
-
-export const GET = defineHandler(async (c) => {
-  return await db.select().from(users);
-});
-```
+Void's built-in [database](./database.md) uses Drizzle ORM with D1, but you're not locked into it. Any ORM or query builder that works with D1 works with Void — just pass the D1 binding. See [ORMs and External Databases](../integrations/orms-and-external-dbs.md) for examples with Kysely, raw D1, and external databases.
 
 The typed fetch client works regardless of how your handler queries the database — it infers the response type from whatever the handler returns. This means Drizzle, Kysely, raw D1 queries, or any other approach all get the same end-to-end type safety on the client side.
-
-Void still handles binding inference (it detects `env.DB` usage and provisions D1 automatically), migrations, and deployment. The query layer is the only part you're swapping out.

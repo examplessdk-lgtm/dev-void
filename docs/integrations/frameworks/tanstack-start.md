@@ -54,9 +54,10 @@ All [Void platform features](../../guide/app-types.md#void-apps) work with TanSt
 ```tsx
 import { createServerFn } from "@tanstack/react-start";
 import { db } from "void/db";
+import { users } from "@schema";
 
 const getUsers = createServerFn().handler(async () => {
-  return db.list("users"); // fully typed from migrations
+  return db.select().from(users);
 });
 ```
 

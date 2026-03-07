@@ -45,7 +45,7 @@ src/
     compile.ts              # Generates Hono app code + worker entry
   codegen/
     route-types.ts          # Generates .void/routes.d.ts (RouteMap with Serialize + ExtractInput)
-    db-types.ts             # Generates .void/db.d.ts (DbTables + DbInsertTables from migrations)
+    db-types.ts             # (removed — Drizzle schema is now the type source)
     queue-types.ts          # Generates .void/queues.d.ts (QueueMap with payload types)
   queues/
     scan.ts                 # Queue file scanner (queues/ dir, name from filename + consumer options)
@@ -57,14 +57,13 @@ src/
     fetch.ts                # Typed fetch client for void/client
     fetch-stream.ts         # SSE stream consumer (fetchStream) for void/client
     ai.ts                   # AI proxy — auto-detects backend (service binding / HTTPS / direct binding)
-    db.ts                   # Typed query client (db.list/get/insert/update/delete/raw) + DbTables/DbInsertTables stubs
+    db.ts                   # Drizzle D1 instance (auto-wired with user schema via virtual module)
   inference/
     walk.ts                 # AST walking with vite's parseSync + estree-walker
   migrations/
-    runner.ts               # Applies .sql files to local SQLite via better-sqlite3
-    collect.ts              # Reads .sql files from migrations/ dir, sorted by filename
+    runner.ts               # Applies pending migrations via drizzle-orm's programmatic migrate()
+    collect.ts              # Reads .sql files from db/migrations/ dir, sorted by filename
     validate.ts             # Destructive-op detection + pragma enforcement
-    schema.ts               # SQL DDL parser → SchemaMap (replays CREATE/ALTER/DROP TABLE)
   cli/
     cli.ts                  # CLI entry: `void deploy|link|login`
     deploy.ts               # Orchestrator: build → collect/validate migrations → package → upload
@@ -83,6 +82,7 @@ src/
 - **Pre-resolved paths in codegen**: Generated virtual module code uses absolute paths for `hono` and `void/response` (resolved via `import.meta.resolve()`). Virtual modules have no filesystem location, so bare specifiers can't resolve from them.
 - **CF plugin API**: Worker config (`main`, `d1_databases`, `kv_namespaces`, `r2_buckets`) goes inside the `config` option of `cloudflare()`, NOT as top-level properties. `persistState` takes `{ path: string }`, not a raw string. The `config` option uses a **function form** `(resolved: WorkerConfig) => Partial<WorkerConfig>` so that bindings from the user's `wrangler.json` (if present) take precedence over inferred placeholder bindings.
 - **Migration DB path**: Miniflare stores D1 data at a deterministic path computed from the `database_id` using HMAC-SHA256. The `getMiniflareDatabasePath()` function in `migrations/runner.ts` replicates this algorithm so migrations target `<persist-root>/v3/d1/miniflare-D1DatabaseObject/<hash>.sqlite` (for example `.void/v3/...` in default/class-A mode and `.wrangler/state/v3/...` in class-B/C framework mode).
+- **Drizzle-first database**: Schema is defined in `db/schema.ts` (Drizzle table definitions). `void/db` exports a Drizzle D1 instance. `@schema` is an auto-configured alias for `db/schema.ts`. Migrations live in `db/migrations/`. CLI commands: `void db push` (prototype), `void db generate` (create migration files), `void db migrate` (apply locally). `drizzle-orm` and `drizzle-kit` ship with void.
 
 ### Package Exports
 
@@ -94,7 +94,7 @@ src/
 | `void/validator` | `runValidation()`, `ValidatorSlots`, `HandlerInput` types                                                               |
 | `void/routes`    | Empty `RouteMap` stub interface (augmented by generated `routes.d.ts`)                                                  |
 | `void/client`    | Typed `fetch()` client + `fetchStream()` SSE consumer + `FetchError`                                                    |
-| `void/db`        | `db` query client + `createDb()` + `DbTables`/`DbInsertTables` stubs (augmented by generated `db.d.ts`)                 |
+| `void/db`        | `db` Drizzle D1 instance (auto-wired with user schema) + `createDb()` for custom D1 bindings                            |
 | `void/queues`    | `queues` typed proxy + `QueueMap` stub interface (augmented by generated `queues.d.ts`)                                 |
 | `void/ai`        | `ai` proxy — `ai.run()`, `ai.stream()`, `ai.models()` with auto-detected backend (service binding / HTTPS / direct)     |
 | `void/env`       | Global Cloudflare env types (`D1Database`, `KVNamespace`, `R2Bucket`, `Ai`)                                             |
@@ -132,19 +132,19 @@ HTTP methods are determined by **named exports** in each file (detected by `dete
 
 Rails/Laravel-style scaffolding commands for common boilerplate:
 
-| Command                                            | Creates                                          |
-| -------------------------------------------------- | ------------------------------------------------ |
-| `void gen model <name> [cols...]`                  | Migration + CRUD routes + regenerates `db.d.ts`  |
-| `void gen migration <name>`                        | Empty migration file with auto-numbered prefix   |
-| `void gen route <path> [--methods get,post,...]`   | Route file with `defineHandler` exports          |
-| `void gen middleware <name>`                       | Numbered middleware file with `defineMiddleware` |
-| `void gen ssr [--react\|--vue\|--svelte\|--solid]` | SSR entry + client entry + App component         |
-| `void gen cron <name>`                             | Cron job file with `defineScheduled` in `crons/` |
-| `void gen queue <name>`                            | Queue consumer file with `defineQueue`           |
+| Command                                            | Creates                                                     |
+| -------------------------------------------------- | ----------------------------------------------------------- |
+| `void gen model <name> [cols...]`                  | Drizzle table in `db/schema/` + barrel export + CRUD routes |
+| `void gen migration <name>`                        | Empty migration file with auto-numbered prefix              |
+| `void gen route <path> [--methods get,post,...]`   | Route file with `defineHandler` exports                     |
+| `void gen middleware <name>`                       | Numbered middleware file with `defineMiddleware`            |
+| `void gen ssr [--react\|--vue\|--svelte\|--solid]` | SSR entry + client entry + App component                    |
+| `void gen cron <name>`                             | Cron job file with `defineScheduled` in `crons/`            |
+| `void gen queue <name>`                            | Queue consumer file with `defineQueue`                      |
 
-Column types for `gen model`: `string`, `text`, `datetime` → TEXT; `integer`, `boolean` → INTEGER; `real` → REAL; `blob` → BLOB. Append `?` for nullable (e.g. `bio:text?`).
+Column types for `gen model`: `string`, `text`, `datetime` → `text()`, `integer` → `integer()`, `boolean` → `integer({ mode: "boolean" })`, `real` → `real()`. Append `?` for nullable (omits `.notNull()`).
 
-`gen model` auto-detects your validation library (valibot, zod, or arktype) from `package.json`. If none is found, prompts to choose one or skip validation.
+`gen model` creates Drizzle table definitions in `db/schema/` and updates the `db/schema.ts` barrel export. Auto-detects your validation library (valibot, zod, or arktype) from `package.json`. If none is found, prompts to choose one or skip validation.
 
 Source: `src/cli/gen-args.ts` (arg parsing), `src/cli/gen.ts` (command runner). Tests: `test/unit/gen-args.test.ts`, `test/unit/gen.test.ts`.
 
@@ -181,9 +181,7 @@ Agent instructions use versioned markers (`<!--injected-by-void-v0.0.1-->` / `<!
 | `test/unit/fetch.test.ts`                   | Typed fetch client (9 tests)                                   |
 | `test/unit/route-types.test.ts`             | Route type codegen output (6 tests)                            |
 | `test/unit/route-type-extraction.test.ts`   | Type extraction pipeline (Serialize + ExtractInput) (14 tests) |
-| `test/unit/schema.test.ts`                  | SQL DDL parser (41 tests)                                      |
-| `test/unit/db-types.test.ts`                | DB type codegen output (8 tests)                               |
-| `test/unit/db.test.ts`                      | Typed query client + type-level inference (25 tests)           |
+| `test/unit/db.test.ts`                      | Drizzle D1 instance + schema wiring (25 tests)                 |
 | `test/unit/queue-types.test.ts`             | Queue type codegen output (3 tests)                            |
 | `test/unit/plugin-node-target.test.ts`      | Node target plugin — binding guard, plugin creation (5 tests)  |
 | `test/integration/node-target.test.ts`      | Node app playground — dev server + production build (5 tests)  |

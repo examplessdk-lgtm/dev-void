@@ -5,6 +5,7 @@ export const projectSubcommands: SubcommandDef[] = [
   { name: "link", arg: "[name]", description: "Link directory to a project" },
   { name: "list", description: "List your projects" },
   { name: "logs", description: "Show runtime logs from the deployed project" },
+  { name: "rollback", arg: "[deployId]", description: "Roll back to a previous deployment" },
   {
     name: "delete",
     arg: "[name]",
@@ -16,7 +17,8 @@ export type ProjectArgs =
   | { subcommand: "status"; name: string }
   | { subcommand: "link"; name: string }
   | { subcommand: "list" }
-  | { subcommand: "logs"; filter: string; range: string }
+  | { subcommand: "logs"; filter: string; range: string; deployment: string }
+  | { subcommand: "rollback"; deployId: string }
   | { subcommand: "delete"; name: string; force: boolean };
 
 export function parseProjectArgs(args: string[]): ProjectArgs {
@@ -48,16 +50,27 @@ export function parseProjectArgs(args: string[]): ProjectArgs {
   if (subcommand === "logs") {
     let filter = "";
     let range = "1h";
+    let deployment = "";
     for (let i = 0; i < rest.length; i++) {
       if (rest[i] === "--filter" && rest[i + 1]) {
         filter = rest[++i];
       } else if (rest[i] === "--range" && rest[i + 1]) {
         range = rest[++i];
+      } else if (rest[i] === "--deployment" && rest[i + 1]) {
+        deployment = rest[++i];
       } else {
         throw new Error(`Error: Unexpected argument: ${rest[i]}`);
       }
     }
-    return { subcommand, filter, range };
+    return { subcommand, filter, range, deployment };
+  }
+
+  if (subcommand === "rollback") {
+    const [deployId, extra] = rest;
+    if (extra) {
+      throw new Error(`Error: Unexpected argument: ${extra}`);
+    }
+    return { subcommand, deployId: deployId ?? "" };
   }
 
   if (subcommand === "delete") {
@@ -77,5 +90,5 @@ export function parseProjectArgs(args: string[]): ProjectArgs {
     return { subcommand, name, force };
   }
 
-  throw new Error("Error: Usage: void project <status|link|list|logs|delete>");
+  throw new Error("Error: Usage: void project <status|link|list|logs|rollback|delete>");
 }

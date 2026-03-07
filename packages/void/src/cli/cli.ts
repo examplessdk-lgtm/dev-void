@@ -44,6 +44,7 @@ function printHelp() {
       helpLine("void project link [name]", "Link directory to a project"),
       helpLine("void project list", "List your projects"),
       helpLine("void project logs [--filter] [--range]", "Show runtime logs from deployed project"),
+      helpLine("void project rollback [deployId]", "Roll back to a previous deployment"),
       helpLine("void project delete [name]", "Delete a project and all its resources"),
       "",
       categoryTitle("secrets"),
@@ -65,6 +66,7 @@ function printHelp() {
       helpLine("void db execute <sql>", "Run SQL against the local database"),
       helpLine("  --file <path>", "Run SQL from a file instead"),
       helpLine("void db migrate", "Apply pending migrations locally"),
+      helpLine("void db studio", "Open Drizzle Studio for the local database"),
       helpLine("void db export [--output <path>]", "Export local database as SQL"),
       helpLine("  --no-data", "Schema only (no INSERT statements)"),
       helpLine("  --no-schema", "Data only (no CREATE TABLE)"),
@@ -237,7 +239,7 @@ if (command === "staging") {
     },
     {
       name: "project",
-      hint: "status | link | list | logs | delete",
+      hint: "status | link | list | logs | rollback | delete",
       description: "Manage projects and deployments",
     },
     { name: "secret", hint: "list | put | delete | sync", description: "Manage project secrets" },
@@ -248,7 +250,7 @@ if (command === "staging") {
     },
     {
       name: "db",
-      hint: "status | reset | seed | execute | migrate | export",
+      hint: "status | reset | seed | execute | migrate | studio | export",
       description: "Database migrations and management",
     },
     {

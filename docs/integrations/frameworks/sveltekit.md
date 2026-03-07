@@ -71,9 +71,10 @@ All [Void platform features](../../guide/app-types.md#void-apps) work with Svelt
 ```ts
 // src/routes/users/+page.server.ts
 import { db } from "void/db";
+import { users } from "@schema";
 
 export async function load() {
-  return { users: await db.list("users") }; // fully typed from migrations
+  return { users: await db.select().from(users) };
 }
 ```
 

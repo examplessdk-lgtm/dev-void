@@ -3,46 +3,17 @@ import FeatureGrid from "@components/oss/FeatureGrid.vue";
 import Footer from "@components/oss/Footer.vue";
 import Hero from "@components/oss/Hero.vue";
 import Spacer from "@components/shared/Spacer.vue";
-import FileTree from "./FileTree.vue";
 import { useData } from "vitepress";
 import bg from "./hero-bg.jpg";
 
 const { frontmatter } = useData();
-
-const tree = (ext) => [
-  {
-    name: "pages/",
-    children: [
-      { name: `index${ext}` },
-      {
-        name: "users/",
-        children: [{ name: `[id]${ext}` }, { name: "[id].server.ts" }],
-      },
-    ],
-  },
-  {
-    name: "routes/",
-    children: [
-      {
-        name: "api/",
-        children: [{ name: "hello.ts" }],
-      },
-    ],
-  },
-  { name: "middleware/", collapsed: true, children: [{ name: "01.auth.ts" }] },
-  { name: "crons/", collapsed: true, children: [{ name: "daily-cleanup.ts" }] },
-  { name: "queues/", collapsed: true, children: [{ name: "email-sender.ts" }] },
-  { name: "migrations/", collapsed: true, children: [{ name: "0001_create_users.sql" }] },
-  { name: "vite.config.ts" },
-  { name: "void.json" },
-];
 </script>
 
 <template>
   <Hero :background="bg">
     <template #hero-image>
       <div class="hero-file-tree">
-        <FileTree :items="tree" default-expanded adapter-tabs />
+        <VoidAppFileTree />
       </div>
     </template>
   </Hero>

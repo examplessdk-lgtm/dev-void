@@ -83,10 +83,11 @@ Use `void/db` in API routes and server-side code:
 ```ts
 import type { APIRoute } from "astro";
 import { db } from "void/db";
+import { users } from "@schema";
 
 export const GET: APIRoute = async () => {
-  const users = await db.list("users"); // fully typed from migrations
-  return Response.json(users);
+  const rows = await db.select().from(users);
+  return Response.json(rows);
 };
 ```
 

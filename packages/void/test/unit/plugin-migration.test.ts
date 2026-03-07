@@ -9,7 +9,7 @@ const roots: string[] = [];
 
 function createProjectRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "void-migrations-"));
-  const migrationsDir = join(root, "migrations");
+  const migrationsDir = join(root, "db", "migrations");
   mkdirSync(migrationsDir, { recursive: true });
   writeFileSync(
     join(migrationsDir, "001_create_users.sql"),

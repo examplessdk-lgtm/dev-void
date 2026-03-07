@@ -71,42 +71,61 @@ Return values are automatically converted:
 
 ## Validation
 
-`defineHandler.withValidator()` adds input validation using any [Standard Schema](https://standardschema.dev/)-compatible library (Zod, Valibot, ArkType, etc.). Validators can be specified for `body`, `query`, and/or `params`:
+`defineHandler.withValidator()` adds input validation for `body`, `query`, and/or `params`. The recommended approach is to derive validators from your [Drizzle schema](./database.md#schema-derived-validators) — this keeps validation in sync with your database automatically:
 
 ```ts
 // routes/api/users/index.ts
-import * as v from "valibot";
 import { defineHandler } from "void";
 import { db } from "void/db";
+import { users, insertUserSchema } from "@schema";
 
 export const POST = defineHandler.withValidator({
-  body: v.object({
-    name: v.pipe(v.string(), v.minLength(1)),
-    email: v.pipe(v.string(), v.email()),
-  }),
+  body: insertUserSchema,
 })(async (c, { body }) => {
-  // body is typed as { name: string; email: string }
-  await db.insert("users", { name: body.name, email: body.email });
-  return { created: true };
+  const [created] = await db.insert(users).values(body).returning();
+  return created;
 });
 ```
+
+See [Database — Schema-Derived Validators](./database.md#schema-derived-validators) for how to set up `createInsertSchema` with column refinements.
 
 You can validate multiple slots at once:
 
 ```ts
 // routes/api/users/[id].ts
-import { z } from "zod";
 import { defineHandler } from "void";
-import { db } from "void/db";
+import { db, eq } from "void/db";
+import { users, updateUserSchema } from "@schema";
 
 export const PUT = defineHandler.withValidator({
-  params: z.object({ id: z.string() }),
-  body: z.object({ name: z.string(), email: z.string().email() }),
-})(async (c, { params, body }) => {
-  await db.update("users", { name: body.name, email: body.email }, { where: { id: params.id } });
-  return { updated: true };
+  body: updateUserSchema,
+})(async (c, { body }) => {
+  const id = Number(c.req.param("id"));
+  const [updated] = await db.update(users).set(body).where(eq(users.id, id)).returning();
+  return updated;
 });
 ```
+
+### Manual validators
+
+For endpoints that don't map to a database table, you can write validators by hand using any [Standard Schema](https://standardschema.dev/)-compatible library (Valibot, Zod, ArkType, etc.):
+
+```ts
+import * as v from "valibot";
+import { defineHandler } from "void";
+
+export const POST = defineHandler.withValidator({
+  body: v.object({
+    query: v.pipe(v.string(), v.minLength(1)),
+    limit: v.optional(v.pipe(v.number(), v.maxValue(100)), 10),
+  }),
+})(async (c, { body }) => {
+  // body is typed as { query: string; limit: number }
+  return search(body.query, body.limit);
+});
+```
+
+### Validation errors
 
 When validation fails, a `400` response is returned with structured error details:
 

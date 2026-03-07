@@ -112,7 +112,7 @@ export function packageBuild(
   const formData = new FormData();
 
   // Build manifest from inferred bindings
-  const manifest: DeployManifest = { version: 2, bindings: {} };
+  const manifest: DeployManifest = { version: 3, bindings: {} };
   if (bindings.needsD1) manifest.bindings.d1 = [options?.bindingNames?.d1 ?? "DB"];
   if (bindings.needsKV) manifest.bindings.kv = [options?.bindingNames?.kv ?? "KV"];
   if (bindings.needsR2) manifest.bindings.r2 = [options?.bindingNames?.r2 ?? "STORAGE"];
@@ -124,10 +124,10 @@ export function packageBuild(
 
   // Add migration metadata to manifest + SQL content as FormData entries
   if (migrations && migrations.length > 0) {
-    manifest.migrations = migrations.map((m) => ({
-      name: m.name,
-      destructive: m.destructive,
-    }));
+    manifest.migrations = {
+      dialect: "sqlite",
+      pending: migrations.length,
+    };
     for (const m of migrations) {
       formData.append(`migration:${m.name}`, new Blob([m.sql]), m.name);
     }
@@ -234,7 +234,7 @@ export function packageStaticBuild(
   const formData = new FormData();
 
   const manifest: DeployManifest = {
-    version: 2,
+    version: 3,
     bindings: {},
     type: appType,
     assetConfig: {
@@ -300,7 +300,7 @@ export function packageFrameworkBuild(opts: {
   const po = opts.packageOptions;
 
   // Build manifest
-  const manifest: DeployManifest = { version: 2, bindings: {} };
+  const manifest: DeployManifest = { version: 3, bindings: {} };
   if (opts.bindings.needsD1) manifest.bindings.d1 = [po?.bindingNames?.d1 ?? "DB"];
   if (opts.bindings.needsKV) manifest.bindings.kv = [po?.bindingNames?.kv ?? "KV"];
   if (opts.bindings.needsR2) manifest.bindings.r2 = [po?.bindingNames?.r2 ?? "STORAGE"];
@@ -311,10 +311,10 @@ export function packageFrameworkBuild(opts: {
   }
 
   if (opts.migrations && opts.migrations.length > 0) {
-    manifest.migrations = opts.migrations.map((m) => ({
-      name: m.name,
-      destructive: m.destructive,
-    }));
+    manifest.migrations = {
+      dialect: "sqlite",
+      pending: opts.migrations.length,
+    };
     for (const m of opts.migrations) {
       formData.append(`migration:${m.name}`, new Blob([m.sql]), m.name);
     }

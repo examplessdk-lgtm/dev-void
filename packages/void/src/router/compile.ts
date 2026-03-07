@@ -32,6 +32,14 @@ export interface CompileOptions {
   auth: AuthCompileOptions | null;
   /** Non-CF target — omits executionCtx from ALS context */
   nodeTarget?: boolean;
+  /** Absolute path to the binding handler module (for /__void/* native binding access) */
+  bindingHandlerPath?: string;
+  /** Absolute path to the migration handler module */
+  migrationHandlerPath?: string;
+  /** Bundled migration SQL entries */
+  migrations?: { name: string; sql: string }[];
+  /** Migration dialect (sqlite or postgresql) */
+  migrationDialect?: "sqlite" | "postgresql";
   /** Header rules from routing.headers config (node targets only) */
   headerRules?: HeaderRule[];
   /** Redirect rules from routing.redirects config (node targets only) */
@@ -458,6 +466,40 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push(
       "  return c.json({ ok: __ok, ...(__decisions.size > 0 ? { decisions: Object.fromEntries(__decisions) } : {}) });",
     );
+    lines.push("});");
+    lines.push("");
+  }
+
+  // /__void/migrate handler — runs bundled D1 migrations in-worker (must precede wildcard)
+  if (options.migrationHandlerPath && options.migrations?.length) {
+    lines.push(
+      `import { createMigrationHandler as __createMigrationHandler } from ${JSON.stringify(options.migrationHandlerPath)};`,
+    );
+    lines.push(`const __migrations = ${JSON.stringify(options.migrations)};`);
+    lines.push(
+      `const __migrationDialect = ${JSON.stringify(options.migrationDialect ?? "sqlite")};`,
+    );
+    lines.push("let __voidMigrationHandler;");
+    lines.push('app.post("/__void/migrate", async (c) => {');
+    lines.push(
+      "  if (!__voidMigrationHandler) __voidMigrationHandler = __createMigrationHandler(c.env, __migrations, __migrationDialect);",
+    );
+    lines.push("  return __voidMigrationHandler(c.req.raw);");
+    lines.push("});");
+    lines.push("");
+  }
+
+  // /__void/* handler — native binding access via WfP dispatch (always injected for CF targets)
+  if (options.bindingHandlerPath) {
+    lines.push(
+      `import { createBindingHandler as __createBindingHandler } from ${JSON.stringify(options.bindingHandlerPath)};`,
+    );
+    lines.push("let __voidBindingApp;");
+    lines.push('app.all("/__void/*", async (c) => {');
+    lines.push("  if (!__voidBindingApp) __voidBindingApp = __createBindingHandler(c.env);");
+    lines.push("  const url = new URL(c.req.url);");
+    lines.push("  url.pathname = url.pathname.slice(7);");
+    lines.push("  return __voidBindingApp.fetch(new Request(url.toString(), c.req.raw));");
     lines.push("});");
     lines.push("");
   }

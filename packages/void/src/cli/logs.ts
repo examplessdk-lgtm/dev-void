@@ -4,7 +4,12 @@ import { PlatformClient, type LogEntry } from "./client";
 import { readProjectConfig } from "./project";
 import { cliTitle, dim, pc } from "./output";
 
-export async function runLogsCommand(root: string, filter: string, range: string): Promise<void> {
+export async function runLogsCommand(
+  root: string,
+  filter: string,
+  range: string,
+  deployment?: string,
+): Promise<void> {
   console.log();
   intro(cliTitle("project logs"));
 
@@ -29,7 +34,7 @@ export async function runLogsCommand(root: string, filter: string, range: string
 
   let entries: LogEntry[];
   try {
-    entries = await client.getLogs(linked.projectId, range);
+    entries = await client.getLogs(linked.projectId, range, 200, deployment || undefined);
   } catch (err) {
     log.error(err instanceof Error ? err.message : String(err));
     process.exit(1);

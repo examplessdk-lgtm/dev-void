@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
@@ -102,6 +102,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     nodeTarget: !!options.target,
     headerRules: options.headerRules,
     redirectRules: options.redirectRules,
+    bindingHandlerPath: options.target ? undefined : resolveFile("void/remote/binding-handler"),
   };
 
   // Auth compile options are set up lazily in buildStart (after env plugin
@@ -194,6 +195,20 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       await rescan();
       writeRouteTypes();
       writeQueueTypes();
+
+      // Bundle migrations into the worker for CF targets (in-worker migration runner)
+      if (!options.target) {
+        const migrationsDir = join(root, "db", "migrations");
+        if (existsSync(migrationsDir)) {
+          const { collectMigrations } = await import("./migrations/collect");
+          const migrations = collectMigrations(migrationsDir);
+          if (migrations.length > 0) {
+            compileOptions.migrationHandlerPath = resolveFile("void/runtime/migration-handler");
+            compileOptions.migrations = migrations;
+            compileOptions.migrationDialect = "sqlite";
+          }
+        }
+      }
       // Re-write entry with queue handler if needed
       if (options.target) {
         writeFileSync(join(outDir, "app.ts"), compileNodeApp(options.target));

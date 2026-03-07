@@ -37,14 +37,18 @@ export const loader = defineHandler<Props>(async (c) => {
 
 ## Actions
 
-`action` runs on mutations (POST, PUT, PATCH, DELETE):
+`action` runs on mutations (POST, PUT, PATCH, DELETE). Use `withValidator()` with a [schema-derived validator](../database.md#schema-derived-validators) to validate the request body:
 
 ```ts
 // pages/users/index.server.ts
+import { defineHandler } from "void";
+import { db } from "void/db";
+import { users, insertUserSchema } from "@schema";
+
 export const action = defineHandler.withValidator({
-  body: createUserSchema,
+  body: insertUserSchema,
 })(async (c, { body }) => {
-  await db.insert("users", body);
+  await db.insert(users).values(body);
   // No return → re-runs loader, page re-renders with fresh data
 });
 ```

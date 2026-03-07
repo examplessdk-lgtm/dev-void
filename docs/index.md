@@ -26,13 +26,13 @@ features:
     details: Void scans your source code, detects what you use, and provisions every resource automatically — no config files, no dashboard clicks. Locally and in the cloud.
   - iconify: lucide:shield-check
     title: End-to-End Type Safety
-    details: Types flow from SQL migrations through route handlers to page component props and the frontend fetch client. One schema validates at runtime and infers types at build time.
+    details: Types flow from Drizzle schema through route handlers to page component props and the frontend fetch client. One schema validates at runtime and infers types at build time.
   - iconify: lucide:blocks
-    title: Any Framework, Same DX
-    details: Pages mode works with React, Vue, Svelte, and Solid, under a unified, Inertia-inspired routing system. Vite-based meta frameworks are also supported and enjoy the same backend DX!
-  - iconify: lucide:shuffle
-    title: Every Rendering Model
-    details: SSR, SSG, ISR, islands with partial hydration, and markdown — mix and match per page. Choose the right strategy for each route, not one mode for the whole app.
+    title: Any Framework, Any Rendering
+    details: React, Vue, Svelte, Solid, plus Vite-based meta-frameworks. SSR, SSG, ISR, islands with partial hydration, and markdown — mix and match per page.
+  - iconify: lucide:bot
+    title: AI-Native
+    details: Built-in skills, MCP support, and reference prompts let coding agents scaffold and ship full-stack apps in a single prompt.
   - iconify: lucide:terminal
     title: One Command to Production
     details: "`void deploy` builds your app, runs migrations, provisions resources, and deploys to Cloudflare Workers, without requiring a Cloudflare account or knowledge about the infra."

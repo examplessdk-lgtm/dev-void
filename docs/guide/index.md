@@ -33,7 +33,7 @@ Void removes the gap. It's a Vite plugin that connects your app directly to the 
 This is what it unlocks:
 
 - **Write code, not config** — no infrastructure files, no dashboard clicks, no resource declarations. Your imports are your infrastructure.
-- **Types from database to frontend** — SQL migrations generate DB types, route handlers infer return types, the [typed fetch client](./typed-fetch.md) checks everything at the call site. One [Standard Schema](https://standardschema.dev/) validator defines runtime validation and compile-time types across the entire stack.
+- **Types from database to frontend** — your Drizzle schema defines DB types, route handlers infer return types, the [typed fetch client](./typed-fetch.md) checks everything at the call site. One [Standard Schema](https://standardschema.dev/) validator defines runtime validation and compile-time types across the entire stack.
 - **Real runtime in development** — `vite dev` runs your server code in the same runtime used in production, with local database, KV, and storage. What works locally works in production.
 - **Deploy understands your code** — `void deploy` doesn't just upload files. It reads your migrations, provisions only the resources you use, and deploys to the edge. One command, no intermediate steps.
 
@@ -57,7 +57,8 @@ import { db }                 →  D1 database (auto-provisioned)
 import { kv }                 →  KV namespace (auto-provisioned)
 import { storage }            →  R2 bucket (auto-provisioned)
 import { ai }                 →  Workers AI inference (metered)
-migrations/*.sql              →  Applied to D1 on dev startup and deploy
+db/schema.ts                  →  Drizzle schema — source of truth for DB types
+db/migrations/*.sql           →  Applied to D1 on deploy
 void deploy                   →  Live at https://<slug>.void.app
 ```
 

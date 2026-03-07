@@ -4,7 +4,7 @@ import { loadEnv, type Plugin } from "vite";
 import { cloudflare, type PluginConfig, type WorkerConfig } from "@cloudflare/vite-plugin";
 import { routingPlugin } from "./plugin-routing";
 import { migrationPlugin } from "./plugin-migration";
-import { dbTypesPlugin } from "./plugin-db-types";
+import { drizzlePlugin } from "./plugin-drizzle";
 import {
   inferProjectBindings,
   detectFramework,
@@ -365,7 +365,7 @@ export function voidPlugin(options?: {
       wranglerSyncPlugin,
       svelteKitHooksInjectPlugin,
       clientStubsPlugin,
-      dbTypesPlugin(root, false),
+      drizzlePlugin(root, false),
       migrationPlugin(root, "local", frameworkPersistRoot),
     ];
   }
@@ -706,7 +706,7 @@ export function voidPlugin(options?: {
       bindingWatchPlugin,
       envPlugin,
       clientStubsPlugin,
-      dbTypesPlugin(root, false),
+      drizzlePlugin(root, false),
       migrationPlugin(root),
       ...(vinextCompat ? [vinextCompat] : []),
       ...cloudflare({
@@ -790,7 +790,7 @@ export function voidPlugin(options?: {
     envPlugin,
     clientStubsPlugin,
     routingPlugin(root, { getAuth: () => authProviders, headConfig: config.head, remoteMode }),
-    dbTypesPlugin(root, true),
+    drizzlePlugin(root, true),
     migrationPlugin(root),
     prerenderPlugin(root, config),
     ...cloudflare({

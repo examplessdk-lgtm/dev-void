@@ -1,9 +1,9 @@
 import { db } from "void/db";
+import { users } from "@schema";
 import type { Route } from "./+types/users";
 
 export async function loader() {
-  const users = await db.list("users");
-  return { users };
+  return { users: await db.select().from(users) };
 }
 
 export default function UsersPage({ loaderData }: Route.ComponentProps) {

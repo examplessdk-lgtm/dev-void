@@ -1,7 +1,21 @@
-import { describe, it, expect, beforeAll } from "vitest";
-import { searchDocs } from "../../src/cli/mcp";
+import { vi, describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
+import { handleRequest, type McpContext } from "../../src/cli/mcp";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+
+function findMdFiles(dir: string, prefix = ""): string[] {
+  const results: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    const rel = prefix ? prefix + "/" + entry.name : entry.name;
+    if (entry.isDirectory()) {
+      results.push(...findMdFiles(join(dir, entry.name), rel));
+    } else if (entry.name.endsWith(".md")) {
+      results.push(rel);
+    }
+  }
+  return results;
+}
 
 // Replicate loadDocs logic for tests.
 function loadDocs() {
@@ -9,9 +23,7 @@ function loadDocs() {
   const docsDir = existsSync(bundledDocsDir)
     ? bundledDocsDir
     : join(import.meta.dirname, "../../../../docs");
-  const files = readdirSync(docsDir, { recursive: true })
-    .filter((f): f is string => typeof f === "string" && f.endsWith(".md") && !f.startsWith("."))
-    .sort();
+  const files = findMdFiles(docsDir).sort();
   return files.map((file) => {
     let content = readFileSync(join(docsDir, file), "utf-8");
     content = content.replace(/^---\n[\s\S]*?\n---\n/, "");
@@ -22,117 +34,15 @@ function loadDocs() {
   });
 }
 
-interface JsonRpcRequest {
-  jsonrpc: string;
-  id?: number | string;
-  method: string;
-  params?: Record<string, unknown>;
-}
-
-// Inline dispatch logic matching mcp.ts handleRequest
-const TOOLS = [
-  {
-    name: "list_pages",
-    description: "List all Void documentation pages with their slugs and titles",
-    inputSchema: { type: "object" as const, properties: {} },
-  },
-  {
-    name: "get_page",
-    description: "Get the full content of a Void documentation page by slug",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        slug: { type: "string", description: "Page slug, e.g. 'routing' or 'quickstart'" },
-      },
-      required: ["slug"],
-    },
-  },
-  {
-    name: "search_docs",
-    description:
-      "Search Void documentation by keyword query. Returns top 5 matching pages with snippets.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        query: {
-          type: "string",
-          description: "Search query, e.g. 'file routing' or 'database migrations'",
-        },
-      },
-      required: ["query"],
-    },
-  },
-];
-
-function handleRequest(
-  pages: { slug: string; title: string; content: string }[],
-  req: JsonRpcRequest,
-): object | null {
-  const { method, id, params } = req;
-
-  if (method === "initialize") {
-    return {
-      jsonrpc: "2.0",
-      id,
-      result: {
-        protocolVersion: "2024-11-05",
-        capabilities: { tools: {} },
-        serverInfo: { name: "void", version: "1.0.0" },
-      },
-    };
-  }
-  if (method === "notifications/initialized") return null;
-  if (method === "ping") return { jsonrpc: "2.0", id, result: {} };
-  if (method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
-  if (method === "tools/call") {
-    const toolName = (params as Record<string, unknown>)?.name as string;
-    const toolArgs = ((params as Record<string, unknown>)?.arguments ?? {}) as Record<
-      string,
-      unknown
-    >;
-    if (toolName === "list_pages") {
-      const list = pages.map((p) => ({ slug: p.slug, title: p.title }));
-      return {
-        jsonrpc: "2.0",
-        id,
-        result: { content: [{ type: "text", text: JSON.stringify(list, null, 2) }] },
-      };
-    }
-    if (toolName === "get_page") {
-      const slug = toolArgs.slug as string;
-      const page = pages.find((p) => p.slug === slug);
-      if (!page) {
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: { content: [{ type: "text", text: `Page not found: ${slug}` }], isError: true },
-        };
-      }
-      return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: page.content }] } };
-    }
-    if (toolName === "search_docs") {
-      const query = toolArgs.query as string;
-      const results = searchDocs(pages, query);
-      return {
-        jsonrpc: "2.0",
-        id,
-        result: { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] },
-      };
-    }
-    return { jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown tool: ${toolName}` } };
-  }
-  return { jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown method: ${method}` } };
-}
-
 describe("mcp server handler", () => {
-  let pages: { slug: string; title: string; content: string }[];
+  let ctx: McpContext;
 
   beforeAll(() => {
-    pages = loadDocs();
+    ctx = { pages: loadDocs(), token: null };
   });
 
   it("responds to initialize", () => {
-    const res = handleRequest(pages, {
+    const res = handleRequest(ctx, {
       jsonrpc: "2.0",
       id: 1,
       method: "initialize",
@@ -151,7 +61,7 @@ describe("mcp server handler", () => {
   });
 
   it("handles notifications/initialized (returns null)", () => {
-    const res = handleRequest(pages, {
+    const res = handleRequest(ctx, {
       jsonrpc: "2.0",
       method: "notifications/initialized",
     });
@@ -159,7 +69,7 @@ describe("mcp server handler", () => {
   });
 
   it("responds to ping", () => {
-    const res = handleRequest(pages, {
+    const res = handleRequest(ctx, {
       jsonrpc: "2.0",
       id: 2,
       method: "ping",
@@ -169,13 +79,13 @@ describe("mcp server handler", () => {
   });
 
   it("responds to tools/list with 3 tools", () => {
-    const res = handleRequest(pages, {
+    const res = handleRequest(ctx, {
       jsonrpc: "2.0",
       id: 3,
       method: "tools/list",
     }) as Record<string, unknown>;
     const result = res.result as { tools: { name: string }[] };
-    expect(result.tools).toHaveLength(3);
+    expect(result.tools).toHaveLength(4);
     const names = result.tools.map((t) => t.name);
     expect(names).toContain("list_pages");
     expect(names).toContain("get_page");
@@ -183,7 +93,7 @@ describe("mcp server handler", () => {
   });
 
   it("tools/call list_pages returns pages with slug and title", () => {
-    const res = handleRequest(pages, {
+    const res = handleRequest(ctx, {
       jsonrpc: "2.0",
       id: 4,
       method: "tools/call",
@@ -197,8 +107,8 @@ describe("mcp server handler", () => {
   });
 
   it("tools/call get_page returns page content", () => {
-    const slug = pages[0].slug;
-    const res = handleRequest(pages, {
+    const slug = ctx.pages[0].slug;
+    const res = handleRequest(ctx, {
       jsonrpc: "2.0",
       id: 5,
       method: "tools/call",
@@ -210,7 +120,7 @@ describe("mcp server handler", () => {
   });
 
   it("tools/call get_page returns error for unknown slug", () => {
-    const res = handleRequest(pages, {
+    const res = handleRequest(ctx, {
       jsonrpc: "2.0",
       id: 6,
       method: "tools/call",
@@ -222,7 +132,7 @@ describe("mcp server handler", () => {
   });
 
   it("tools/call search_docs returns results", () => {
-    const res = handleRequest(pages, {
+    const res = handleRequest(ctx, {
       jsonrpc: "2.0",
       id: 7,
       method: "tools/call",
@@ -238,7 +148,7 @@ describe("mcp server handler", () => {
   });
 
   it("returns error for unknown method", () => {
-    const res = handleRequest(pages, {
+    const res = handleRequest(ctx, {
       jsonrpc: "2.0",
       id: 8,
       method: "unknown/method",
@@ -249,7 +159,7 @@ describe("mcp server handler", () => {
   });
 
   it("returns error for unknown tool", () => {
-    const res = handleRequest(pages, {
+    const res = handleRequest(ctx, {
       jsonrpc: "2.0",
       id: 9,
       method: "tools/call",
@@ -267,11 +177,163 @@ describe("mcp server handler", () => {
       method: "tools/list",
     });
     const parsed = JSON.parse(request);
-    const response = handleRequest(pages, parsed);
+    const response = handleRequest(ctx, parsed);
     const serialized = JSON.stringify(response);
     const reparsed = JSON.parse(serialized);
     expect(reparsed.jsonrpc).toBe("2.0");
     expect(reparsed.id).toBe(10);
-    expect(reparsed.result.tools).toHaveLength(3);
+    expect(reparsed.result.tools).toHaveLength(4);
+  });
+});
+
+const mockFetch = vi.fn();
+
+describe("query tool", () => {
+  let ctx: McpContext;
+
+  beforeAll(() => {
+    ctx = { pages: loadDocs(), token: "test-token" };
+  });
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+    vi.stubGlobal("fetch", mockFetch);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("is listed in tools/list", () => {
+    const res = handleRequest(ctx, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+    }) as Record<string, unknown>;
+    const result = res.result as { tools: { name: string }[] };
+    const names = result.tools.map((t) => t.name);
+    expect(names).toContain("query");
+  });
+
+  it("executes simple code that calls void.projects()", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          id: "p1",
+          slug: "my-app",
+          type: "void",
+          created_at: "2026-01-01",
+          user_id: "u1",
+          custom_domain: null,
+        },
+      ],
+    });
+
+    const res = await handleRequest(ctx, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "query",
+        arguments: { code: "async () => await void_.projects()" },
+      },
+    });
+
+    const result = (res as Record<string, unknown>).result as { content: { text: string }[] };
+    const data = JSON.parse(result.content[0].text);
+    expect(data).toHaveLength(1);
+    expect(data[0].slug).toBe("my-app");
+  });
+
+  it("executes code that composes multiple calls", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          id: "p1",
+          slug: "my-app",
+          type: "void",
+          created_at: "2026-01-01",
+          user_id: "u1",
+          custom_domain: null,
+        },
+      ],
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          id: "d1",
+          status: "active",
+          source: "cli",
+          commit: "abc",
+          manifest: null,
+          error_message: null,
+          created_at: "2026-01-01",
+          deployed_at: "2026-01-01",
+        },
+      ],
+    });
+
+    const res = await handleRequest(ctx, {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "query",
+        arguments: {
+          code: `async () => {
+            const projects = await void_.projects();
+            const p = projects.find(p => p.slug === "my-app");
+            return await void_.deployments(p.id);
+          }`,
+        },
+      },
+    });
+
+    const result = (res as Record<string, unknown>).result as { content: { text: string }[] };
+    const data = JSON.parse(result.content[0].text);
+    expect(data).toHaveLength(1);
+    expect(data[0].status).toBe("active");
+  });
+
+  it("returns error when code throws", async () => {
+    const res = await handleRequest(ctx, {
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "query",
+        arguments: { code: "async () => { throw new Error('boom') }" },
+      },
+    });
+
+    const result = (res as Record<string, unknown>).result as {
+      content: { text: string }[];
+      isError: boolean;
+    };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("boom");
+  });
+
+  it("returns error when no token is available", async () => {
+    const noAuthCtx: McpContext = { pages: loadDocs(), token: null };
+    const res = await handleRequest(noAuthCtx, {
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: {
+        name: "query",
+        arguments: { code: "async () => await void_.projects()" },
+      },
+    });
+
+    const result = (res as Record<string, unknown>).result as {
+      content: { text: string }[];
+      isError: boolean;
+    };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Not logged in");
   });
 });

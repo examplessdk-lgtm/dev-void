@@ -7,7 +7,7 @@ const items = [
   { name: "routes/", description: "API endpoints (file-based routing)", link: "#routes" },
   { name: "pages/", description: "Full-stack server-rendered pages", link: "#pages" },
   { name: "middleware/", description: "Global request middleware", link: "#middleware" },
-  { name: "migrations/", description: "SQL database migrations", link: "#migrations" },
+  { name: "db/", description: "Drizzle schema and SQL migrations", link: "#db" },
   { name: "crons/", description: "Scheduled cron jobs", link: "#crons" },
   { name: "queues/", description: "Async queue consumers", link: "#queues" },
   { name: "src/", description: "Shared app code", link: "#src" },
@@ -30,12 +30,19 @@ const middlewareItems = [
   },
 ];
 
-const migrationsItems = [
+const dbItems = [
   {
-    name: "migrations/",
+    name: "db/",
     children: [
-      { name: "001_create_users.sql" },
-      { name: "002_add_posts.sql" },
+      { name: "schema.ts", description: "Drizzle schema (source of truth)" },
+      { name: "schema/", description: "Optional: split into multiple files" },
+      {
+        name: "migrations/",
+        children: [
+          { name: "0000_*.sql" },
+          { name: "0001_*.sql" },
+        ],
+      },
     ],
   },
 ];
@@ -44,7 +51,7 @@ const voidItems = [
   {
     name: ".void/",
     children: [
-      { name: "db.d.ts", description: "Types from SQL migrations" },
+      { name: "db.d.ts", description: "Drizzle DB instance types" },
       { name: "routes.d.ts", description: "Typed fetch client types" },
       { name: "queues.d.ts", description: "Queue consumer types" },
       { name: "tsconfig.json", description: "TypeScript config fragment" },
@@ -96,13 +103,17 @@ Global middleware that runs on every request. Numeric prefixes control execution
 
 Each file exports a `defineMiddleware()` handler. Use middleware to set shared context (auth, logging, rate limiting) available to all routes.
 
-## `migrations/`
+## `db/`
 
-SQL migration files for the [D1 database](/guide/database). Applied in order on deploy.
+[Drizzle schema](/guide/database#schema-definition) and SQL migration files for the [D1 database](/guide/database).
 
-<FileTree :items="migrationsItems" default-expanded />
+<FileTree :items="dbItems" default-expanded />
 
-Generate migrations with `void gen model` or write them by hand. Types are auto-generated in `.void/db.d.ts`.
+- `db/schema.ts` — your Drizzle table definitions (source of truth for DB types)
+- `db/schema/` — optional: split tables into separate files and re-export from `db/schema.ts`
+- `db/migrations/` — generated SQL migration files, applied in order on deploy
+
+Generate schema with `void gen model` or write it by hand. Generate migrations with `void db generate`.
 
 ## `crons/`
 

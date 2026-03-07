@@ -8,16 +8,39 @@ import { join } from "node:path";
  *
  * @param hasRouteTypes - When true, include routes.d.ts. When omitted,
  *   auto-detect by checking for a routes/ directory.
+ * @param hasDrizzle - When true, configure `@schema` paths for the user's
+ *   Drizzle schema.
  */
-export function ensureProjectTsconfig(root: string, hasRouteTypes?: boolean): void {
+export function ensureProjectTsconfig(
+  root: string,
+  hasRouteTypes?: boolean,
+  hasDrizzle?: boolean,
+): void {
   const outDir = join(root, ".void");
   mkdirSync(outDir, { recursive: true });
   const includeRoutes = hasRouteTypes ?? existsSync(join(root, "routes"));
   const includeQueues = existsSync(join(root, "queues"));
   const files = [
     ...(includeRoutes ? ["routes.d.ts"] : []),
-    "db.d.ts",
+    ...(hasDrizzle ? ["db.d.ts"] : []),
     ...(includeQueues ? ["queues.d.ts"] : []),
   ];
-  writeFileSync(join(outDir, "tsconfig.json"), JSON.stringify({ files }, null, 2) + "\n");
+
+  const tsconfig: Record<string, unknown> = { files };
+
+  if (hasDrizzle) {
+    // Determine whether schema is a file or directory
+    const isDir =
+      existsSync(join(root, "db", "schema")) && !existsSync(join(root, "db", "schema.ts"));
+
+    // Paths are relative to .void/ (where this tsconfig lives), so use ../
+    tsconfig.compilerOptions = {
+      paths: {
+        "@schema": isDir ? ["../db/schema/index.ts"] : ["../db/schema.ts"],
+        "@schema/*": ["../db/schema/*"],
+      },
+    };
+  }
+
+  writeFileSync(join(outDir, "tsconfig.json"), JSON.stringify(tsconfig, null, 2) + "\n");
 }

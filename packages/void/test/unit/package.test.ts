@@ -42,7 +42,7 @@ describe("packageStaticBuild", () => {
 
     const manifestRaw = form.get("manifest") as string;
     const manifest = JSON.parse(manifestRaw);
-    expect(manifest.version).toBe(2);
+    expect(manifest.version).toBe(3);
   });
 
   it("sets assetConfig for SPA mode", () => {
@@ -116,7 +116,7 @@ describe("packageBuild", () => {
 
     const manifestRaw = form.get("manifest") as string;
     const manifest = JSON.parse(manifestRaw);
-    expect(manifest.version).toBe(2);
+    expect(manifest.version).toBe(3);
   });
 });
 

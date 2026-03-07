@@ -29,8 +29,15 @@ export interface DeploymentResponse {
   commit: string | null;
   manifest: string | null;
   error_message: string | null;
+  retained: boolean;
+  applied_migrations: string | null;
   created_at: string;
   deployed_at: string | null;
+}
+
+export interface DeploymentListResponse {
+  deployments: DeploymentResponse[];
+  activeDeploymentId: string | null;
 }
 
 export interface SecretResponse {
@@ -105,7 +112,7 @@ export class PlatformClient {
     return res.json();
   }
 
-  async listDeployments(projectId: string): Promise<DeploymentResponse[]> {
+  async listDeployments(projectId: string): Promise<DeploymentListResponse> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/deployments`, {
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -115,6 +122,27 @@ export class PlatformClient {
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`Failed to list deployments: ${res.status} ${body}`);
+    }
+
+    return res.json();
+  }
+
+  async rollback(
+    projectId: string,
+    deploymentId: string,
+  ): Promise<{ ok: boolean; deploymentId?: string; migrationDiff?: string[]; error?: string }> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/rollback`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({ deploymentId }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Rollback failed: ${res.status} ${body}`);
     }
 
     return res.json();
@@ -351,15 +379,23 @@ export class PlatformClient {
     return res.json();
   }
 
-  async getLogs(projectId: string, since: string, limit = 200): Promise<LogEntry[]> {
-    const res = await fetch(
-      `${this.baseUrl}/projects/${projectId}/logs?since=${encodeURIComponent(since)}&limit=${limit}`,
-      {
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-        },
+  async getLogs(
+    projectId: string,
+    since: string,
+    limit = 200,
+    deploymentId?: string,
+  ): Promise<LogEntry[]> {
+    const params = new URLSearchParams({
+      since,
+      limit: String(limit),
+    });
+    if (deploymentId) params.set("deploymentId", deploymentId);
+
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/logs?${params}`, {
+      headers: {
+        Authorization: `Bearer ${this.token}`,
       },
-    );
+    });
 
     if (!res.ok) {
       const body = await res.text();

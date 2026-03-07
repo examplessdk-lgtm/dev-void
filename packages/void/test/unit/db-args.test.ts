@@ -57,6 +57,22 @@ describe("parseDbArgs", () => {
     expect(() => parseDbArgs(["migrate", "extra"])).toThrow("Error: Unexpected argument: extra");
   });
 
+  it("parses push", () => {
+    expect(parseDbArgs(["push"])).toEqual({ action: "push" });
+  });
+
+  it("errors on push with extra positional", () => {
+    expect(() => parseDbArgs(["push", "extra"])).toThrow("Error: Unexpected argument: extra");
+  });
+
+  it("parses generate", () => {
+    expect(parseDbArgs(["generate"])).toEqual({ action: "generate" });
+  });
+
+  it("errors on generate with extra positional", () => {
+    expect(() => parseDbArgs(["generate", "extra"])).toThrow("Error: Unexpected argument: extra");
+  });
+
   it("parses export with no flags", () => {
     expect(parseDbArgs(["export"])).toEqual({
       action: "export",
@@ -123,15 +139,23 @@ describe("parseDbArgs", () => {
     expect(() => parseDbArgs(["export", "extra"])).toThrow("Error: Unexpected argument: extra");
   });
 
+  it("parses studio", () => {
+    expect(parseDbArgs(["studio"])).toEqual({ action: "studio" });
+  });
+
+  it("errors on studio with extra positional", () => {
+    expect(() => parseDbArgs(["studio", "extra"])).toThrow("Error: Unexpected argument: extra");
+  });
+
   it("errors on unknown subcommand", () => {
     expect(() => parseDbArgs(["unknown"])).toThrow(
-      "Error: Usage: void db <status|reset|seed|execute|migrate|export>",
+      "Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export>",
     );
   });
 
   it("errors on no subcommand", () => {
     expect(() => parseDbArgs([])).toThrow(
-      "Error: Usage: void db <status|reset|seed|execute|migrate|export>",
+      "Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export>",
     );
   });
 

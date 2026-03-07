@@ -4,42 +4,39 @@ outline: deep
 
 # Type Safety
 
-Void provides end-to-end type safety across your entire stack — from database queries, through route handlers, to frontend fetch calls. Types are derived from your source code and SQL migrations. Nothing is manually written or duplicated.
+Void provides end-to-end type safety across your entire stack — from database queries, through route handlers, to frontend fetch calls. Types are derived from your source code and Drizzle schema. Nothing is manually written or duplicated.
 
 ## The Type Pipeline
 
 ```
-SQL migrations → DB types → Route handlers → Route types → Typed fetch client
+Drizzle schema → DB types → Route handlers → Route types → Typed fetch client
 ```
 
 Each layer feeds into the next:
 
-1. **Database types** are generated from your `migrations/*.sql` files. The plugin replays DDL statements to build a schema, then generates TypeScript interfaces for every table.
+1. **Database types** come from your [Drizzle schema](./database.md#schema-definition) in `db/schema.ts`. The schema is TypeScript — column types are already known at compile time.
 2. **Route handler types** are extracted from your `routes/` files using `typeof import(...)`. Return types, validator schemas, and parameter patterns all become part of the generated `RouteMap`.
 3. **The fetch client** consumes the `RouteMap` to type-check paths, methods, request bodies, and response types at the call site.
 
-All generated types live in `.void/` and update automatically when you change source files or migrations.
+All generated types live in `.void/` and update automatically when you change source files or schema.
 
 ## Database → Handler
 
-Types from `void/db` are inferred from your migration SQL. When a handler queries the database, the return type flows through naturally:
+Types from `void/db` are inferred from your [Drizzle schema](./database.md#schema-definition). When a handler queries the database, the return type flows through naturally:
 
 ```ts
-// migrations/001_create_users.sql
-// CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL)
-
 // routes/api/users.ts
 import { defineHandler } from "void";
 import { db } from "void/db";
+import { users } from "@schema";
 
 export const GET = defineHandler(async (c) => {
-  const users = await db.list("users", { select: ["name", "email"] });
-  return users;
+  return db.select({ name: users.name, email: users.email }).from(users).all();
   // Return type: { name: string; email: string }[]
 });
 ```
 
-TypeScript knows the shape of `users` because it was derived from the migration. The handler's return type is then captured by the route type generator.
+TypeScript knows the shape of the result because it's inferred from the Drizzle schema columns. The handler's return type is then captured by the route type generator.
 
 ## Handler → Client
 
@@ -60,22 +57,19 @@ No type annotation on `users` — it's inferred from the GET handler's return ty
 
 ## Validators Close the Loop
 
-When you add input validation with `defineHandler.withValidator()`, the schemas become part of the route's type. The fetch client enforces them at the call site:
+When you [derive validators from your Drizzle schema](./database.md#schema-derived-validators), types flow from the database all the way to the frontend fetch client — the schema is the single source of truth:
 
 ```ts
 // routes/api/users.ts
 import { defineHandler } from "void";
 import { db } from "void/db";
-import * as v from "valibot";
+import { users, insertUserSchema } from "@schema";
 
 export const POST = defineHandler.withValidator({
-  body: v.object({
-    name: v.pipe(v.string(), v.minLength(1)),
-    email: v.pipe(v.string(), v.email()),
-  }),
+  body: insertUserSchema,
 })(async (c, { body }) => {
-  await db.insert("users", body);
-  return { created: true };
+  const [created] = await db.insert(users).values(body).returning();
+  return created;
 });
 ```
 
@@ -83,7 +77,7 @@ export const POST = defineHandler.withValidator({
 // src/App.tsx
 import { fetch } from "void/client";
 
-// ✓ body shape matches the validator schema
+// ✓ body shape matches the schema-derived validator
 await fetch("/api/users", {
   method: "POST",
   body: { name: "Alice", email: "alice@example.com" },
@@ -96,7 +90,42 @@ await fetch("/api/users", {
 });
 ```
 
-The validator schema is the single source of truth — it defines runtime validation, handler input types, and client-side type checking all at once.
+The Drizzle schema defines database columns, runtime validation, handler input types, and client-side type checking all at once. For endpoints that don't map to a table, you can also write [manual validators](./server-routing.md#manual-validators) with any Standard Schema library.
+
+## Loader → Page Component
+
+In [pages mode](./pages-routing/overview), a `loader` in a `.server.ts` file returns data that becomes the page component's props. The return type flows through automatically via `InferProps`:
+
+```ts
+// pages/users/index.server.ts
+import { defineHandler, type InferProps } from "void";
+import { db } from "void/db";
+import { users } from "@schema";
+
+export type Props = InferProps<typeof loader>;
+
+export const loader = defineHandler(async (c) => {
+  return { users: await db.select().from(users).all() };
+});
+```
+
+The page component imports the `Props` type — everything is inferred from the loader's return type:
+
+```vue
+<!-- pages/users/index.vue -->
+<script setup lang="ts">
+import type { Props } from "./index.server";
+defineProps<Props>();
+</script>
+
+<template>
+  <ul>
+    <li v-for="u in users" :key="u.id">{{ u.name }}</li>
+  </ul>
+</template>
+```
+
+No manual interface needed — `InferProps` extracts the return type from `defineHandler`, so the props stay in sync with whatever the loader returns.
 
 ## Action → useForm
 
@@ -104,10 +133,14 @@ The same pipeline extends to [pages mode](./pages-routing/overview). When a page
 
 ```ts
 // pages/users/create.server.ts
+import { defineHandler } from "void";
+import { db } from "void/db";
+import { users, insertUserSchema } from "@schema";
+
 export const action = defineHandler.withValidator({
-  body: v.object({ name: v.string(), email: v.pipe(v.string(), v.email()) }),
+  body: insertUserSchema,
 })(async (c, { body }) => {
-  await db.insert("users", body);
+  await db.insert(users).values(body);
 });
 ```
 
@@ -135,7 +168,7 @@ Actions without validators still get URL autocomplete — the body falls back to
 
 | Layer        | What's type-checked                                                                              |
 | ------------ | ------------------------------------------------------------------------------------------------ |
-| Database     | Table names, column names, value types, required vs optional on insert                           |
+| Database     | Table columns, value types, insert/update shapes — all inferred from Drizzle schema              |
 | Handlers     | `c.env` bindings, validator input, return type                                                   |
 | Fetch client | Route paths, HTTP methods, `body`/`query`/`params`, response type                                |
 | `useForm`    | Page action URLs, `data` fields, `errors` keys, `reset()`/`clearErrors()` args, dynamic `params` |

@@ -16,11 +16,13 @@ outline: deep
 | `void db status`                  | Show local/remote migration status      |
 | `void db reset`                   | Drop and re-apply all migrations        |
 | `void db seed`                    | Reset + seed local database             |
+| `void db studio`                  | Open Drizzle Studio for local database  |
 | `void secret put <name=value>`    | Set a production secret                 |
 | `void secret sync .env.local`     | Bulk upload secrets from dotenv file    |
 | `void auth login`                 | Authenticate with Void                  |
 | `void project link`               | Link directory to a project             |
 | `void project logs`               | Show runtime logs from deployed project |
+| `void project rollback`           | Roll back to a previous deployment      |
 | `void init`                       | Setup wizard (tsconfig, agents, CI)     |
 
 ## Binary Invocation
@@ -100,7 +102,7 @@ List all your projects (slug, mode, URL).
 ### `void project logs`
 
 ```
-void project logs [--filter <text>] [--range <duration>]
+void project logs [--filter <text>] [--range <duration>] [--deployment <id>]
 ```
 
 Show runtime logs from the deployed project. Uses the linked project from `.void/project.json`.
@@ -109,8 +111,22 @@ Show runtime logs from the deployed project. Uses the linked project from `.void
 | -------------------- | --------------------------------------------------------------------------------------------------------------- | ------- |
 | `--range <duration>` | How far back to look. Format: `<number><unit>` (m/h/d). Max 7d.                                                 | `1h`    |
 | `--filter <text>`    | Case-insensitive text match against log/exception messages. Shows full request entry when any log line matches. | —       |
+| `--deployment <id>`  | Filter logs to a specific deployment ID.                                                                        | —       |
 
 Output shows one line per request (`HH:MM:SS METHOD URL STATUS`) with indented console log and exception lines beneath. Errors and exceptions are colored red, warnings yellow.
+
+### `void project rollback [deployId]`
+
+```
+void project rollback [deployId]
+```
+
+Roll back to a previous deployment. Traffic instantly switches to the target deployment's worker script via KV routing update.
+
+- If `[deployId]` is omitted, shows an interactive select menu of retained deployments
+- If the target deployment has fewer applied migrations than the current one, a warning is shown listing the migration diff before confirmation
+
+Only **retained** deployments can be rolled back to. The number of retained deployments depends on your plan (free: 1, solo: 5, pro: 25, unlimited for sponsored/custom).
 
 ### `void project delete [name]`
 
@@ -177,6 +193,10 @@ void db migrate
 ```
 
 Apply pending migrations to the local database without resetting. Unlike `void db reset`, this preserves existing data and only runs migrations that haven't been applied yet.
+
+### `void db studio`
+
+Open [Drizzle Studio](https://orm.drizzle.team/docs/drizzle-kit-studio) for the local D1 database. Launches a web-based GUI for browsing and editing your data.
 
 ### `void db export`
 

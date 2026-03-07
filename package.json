@@ -41,7 +41,8 @@
       "workerd"
     ],
     "overrides": {
-      "vite": "catalog:"
+      "vite": "catalog:",
+      "esbuild": "^0.27.3"
     }
   }
 }

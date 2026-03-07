@@ -8,7 +8,7 @@ Void runs on Cloudflare Workers. This page covers how bindings work, how the plu
 
 ## Bindings
 
-Void automatically infers and provisions Cloudflare bindings (D1, KV, R2) by scanning your source files. There are two ways to access them at runtime depending on your setup.
+Void automatically infers and provisions Cloudflare bindings (D1, KV, R2, AI, Queues) by scanning your source files. There are two ways to access them at runtime depending on your setup.
 
 ### Via Hono context (`c.env`)
 
@@ -39,6 +39,10 @@ export const GET = defineHandler(async (c) => {
 ### Via `cloudflare:workers` import
 
 When using framework mode (TanStack Start, React Router, SolidStart), the framework owns routing and you access bindings through the `cloudflare:workers` module instead:
+
+::: warning ⚠️ Cloudflare env access in meta frameworks
+Some frameworks, like Nuxt and SvelteKit, do not run in workerd during dev and therefore do not support directly importing from `cloudflare:workers`.
+:::
 
 ```ts
 import { env } from "cloudflare:workers";
@@ -77,38 +81,50 @@ Add `"void/env"` to your tsconfig `types` to get typed bindings on `env`:
 }
 ```
 
-This augments the `Cloudflare.Env` interface with `DB`, `KV`, and `STORAGE` and also pulls in `@cloudflare/workers-types`, so you don't need to add that separately.
+This augments the `Cloudflare.Env` interface with `DB`, `KV`, `STORAGE`, `AI`, and `QUEUE_*` and also pulls in `@cloudflare/workers-types`, so you don't need to add that separately.
 
 ### Available bindings
 
-| Binding   | Type          | Trigger                                         |
-| --------- | ------------- | ----------------------------------------------- |
-| `DB`      | `D1Database`  | `env.DB` or `c.env.DB` usage detected           |
-| `KV`      | `KVNamespace` | `env.KV` or `c.env.KV` usage detected           |
-| `STORAGE` | `R2Bucket`    | `env.STORAGE` or `c.env.STORAGE` usage detected |
+| Binding   | Type          | Trigger                                                         |
+| --------- | ------------- | --------------------------------------------------------------- |
+| `DB`      | `D1Database`  | `env.DB` / `c.env.DB` or `import from "void/db"`                |
+| `KV`      | `KVNamespace` | `env.KV` / `c.env.KV` or `import from "void/kv"`                |
+| `STORAGE` | `R2Bucket`    | `env.STORAGE` / `c.env.STORAGE` or `import from "void/storage"` |
+| `AI`      | `Ai`          | `env.AI` / `c.env.AI` or `import from "void/ai"`                |
+| `QUEUE_*` | `Queue<T>`    | `defineQueue()` or `import from "void/queue"`                   |
 
-Bindings are [inferred automatically](../reference/resource-inference.md) by scanning your source files for these access patterns. You can also set them explicitly in `void.json`:
+Bindings are [inferred automatically](../reference/resource-inference.md) by scanning your source files for import and access patterns. You can also set them explicitly in `void.json`:
 
 ```json
 {
-  "bindings": { "db": true, "kv": true, "storage": false }
+  "inference": {
+    "bindings": { "db": true, "kv": true, "storage": false, "ai": true }
+  }
 }
 ```
+
+`db`, `kv`, and `storage` accept a string to customize the binding name (e.g. `"db": "MY_DB"`). `ai` only accepts a boolean.
 
 See [Configuration](../reference/config.md) for details.
 
 ### Wrangler passthrough
 
-You can set non-binding wrangler fields like `compatibility_date`, `compatibility_flags`, and `vars` in `void.json`:
+You can set non-binding wrangler fields like `compatibility_date` and `compatibility_flags` in `void.json`:
 
 ```json
 {
   "worker": {
-    "compatibility_date": "2025-12-01",
-    "compatibility_flags": ["nodejs_compat"],
-    "vars": { "API_URL": "https://api.example.com" }
+    "compatibility_date": "2026-02-12",
+    "compatibility_flags": ["nodejs_compat"]
   }
 }
+```
+
+For environment variables, use `.env` files instead of `worker.vars` — Void automatically loads `.env` files via Vite's `loadEnv` and merges them into the worker's `vars` bindings:
+
+```bash
+# .env
+API_URL=https://api.example.com
 ```
 
 Binding arrays (`d1_databases`, `kv_namespaces`, `r2_buckets`) are not allowed in the `worker` field — bindings are fully managed by Void. To use custom bindings with real resource IDs, add a `wrangler.jsonc` to your project root instead. See [Wrangler config merging](#wrangler-config-merging) for how Void handles this.
@@ -119,9 +135,9 @@ By default, Void configures the Cloudflare plugin entirely programmatically -- y
 
 If you add a `wrangler.jsonc` (or `wrangler.json`) to your project root, Void respects it -- but **how** depends on whether Void owns the Cloudflare integration or a meta-framework does.
 
-### Void-only mode, TanStack Start, and React Router
+### Void-only mode and Vite-based frameworks
 
-In Void's default mode and when using TanStack Start or React Router, Void controls the `@cloudflare/vite-plugin` directly. It passes a `config` callback that merges inferred bindings into whatever the plugin resolves from your `wrangler.jsonc`:
+In Void's default mode and when using frameworks where Void controls the Cloudflare integration (TanStack Start, React Router), Void manages the `@cloudflare/vite-plugin` directly. It passes a `config` callback that merges inferred bindings into whatever the plugin resolves from your `wrangler.jsonc`:
 
 1. The plugin reads your `wrangler.jsonc` and resolves it into a config object with `d1_databases`, `kv_namespaces`, `r2_buckets`, etc.
 2. Void checks each inferred binding **by name** (e.g. `"DB"`, `"KV"`, `"STORAGE"`). If a binding with that name already exists in your config, it is left untouched.
@@ -134,9 +150,9 @@ Fields that Void always sets (`main`, `triggers`, `assets`) don't need to be in 
 
 In this mode, Void does **not** modify your `wrangler.jsonc` file on disk. The merge is purely in-memory.
 
-### SvelteKit, Nuxt, and Astro
+### Adapter-based frameworks (SvelteKit, Nuxt, Astro)
 
-When using SvelteKit, Nuxt, or Astro, the framework's own Cloudflare adapter owns the worker build and dev server. Void does **not** provide the `@cloudflare/vite-plugin` -- instead, it only contributes DB type codegen, migration management, and binding sync.
+When using SvelteKit, Nuxt, or Astro, the framework's own Cloudflare adapter owns the worker build and dev server. Void does **not** provide the `@cloudflare/vite-plugin` — instead, it only contributes DB type codegen, migration management, and binding sync.
 
 Because Void doesn't control the CF plugin in this mode, it can't merge bindings via a config callback. Instead, on dev startup Void syncs inferred bindings directly to your `wrangler.jsonc` file on disk:
 
@@ -218,7 +234,7 @@ Create `wrangler.jsonc` in your project root with the resource IDs from step 1:
 ```jsonc
 {
   "name": "my-app",
-  "compatibility_date": "2025-12-01",
+  "compatibility_date": "2026-02-12",
   "d1_databases": [
     {
       "binding": "DB",

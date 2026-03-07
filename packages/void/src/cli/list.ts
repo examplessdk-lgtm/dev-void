@@ -1,6 +1,6 @@
 import { intro, outro, log } from "@clack/prompts";
 import { getToken } from "./auth";
-import { PlatformClient, type DeploymentResponse } from "./client";
+import { PlatformClient, type DeploymentResponse, type DeploymentListResponse } from "./client";
 import { readProjectConfig } from "./project";
 import { resolveProjectBySlug } from "./resolve-project";
 import { cliTitle, dim, pc, tablePrefix } from "./output";
@@ -47,7 +47,7 @@ async function showDeployments(
   projectId: string,
   slug: string,
 ): Promise<void> {
-  const deployments = await client.listDeployments(projectId);
+  const { deployments, activeDeploymentId } = await client.listDeployments(projectId);
 
   if (deployments.length === 0) {
     outro(`No deployments for ${slug}.`);
@@ -59,7 +59,7 @@ async function showDeployments(
     log.error(`Latest deploy failed: ${latest.error_message}`);
   }
 
-  const rows = deployments.map((d) => formatDeploymentRow(d));
+  const rows = deployments.map((d) => formatDeploymentRow(d, activeDeploymentId));
 
   const idWidth = Math.max("id".length, ...rows.map((r) => r.id.length));
   const typeWidth = Math.max("type".length, ...rows.map((r) => r.appType.length));
@@ -93,7 +93,33 @@ interface DeploymentRow {
   deployed: string;
 }
 
-function formatDeploymentRow(d: DeploymentResponse): DeploymentRow {
+function computeDisplayStatus(d: DeploymentResponse, activeDeploymentId: string | null): string {
+  if (d.status === "failed") return "failed";
+  if (d.status !== "live") return d.status;
+  if (d.id === activeDeploymentId) return "live";
+  if (d.retained) return "retained";
+  return "evicted";
+}
+
+function colorStatus(status: string): string {
+  switch (status) {
+    case "live":
+      return pc.bold(pc.green(status));
+    case "retained":
+      return dim(pc.green(status));
+    case "evicted":
+      return dim(status);
+    case "failed":
+      return pc.red(status);
+    default:
+      return status;
+  }
+}
+
+function formatDeploymentRow(
+  d: DeploymentResponse,
+  activeDeploymentId: string | null,
+): DeploymentRow {
   let manifest: {
     type?: string;
     static?: string;
@@ -113,13 +139,8 @@ function formatDeploymentRow(d: DeploymentResponse): DeploymentRow {
   const source = d.source ?? "-";
   const commit = d.commit ? d.commit.slice(0, 7) : "-";
 
-  const statusRaw = d.status;
-  let statusColored = statusRaw;
-  if (d.status === "live") {
-    statusColored = pc.green(statusRaw);
-  } else if (d.status === "failed") {
-    statusColored = pc.red(statusRaw);
-  }
+  const statusRaw = computeDisplayStatus(d, activeDeploymentId);
+  const statusColored = colorStatus(statusRaw);
 
   const deployed = d.deployed_at ? formatRelativeTime(d.deployed_at) : "-";
 

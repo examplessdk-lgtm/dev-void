@@ -1,12 +1,13 @@
 import { defineHandler } from "void";
 import { db } from "void/db";
+import { notes, queueResults } from "@schema";
 import { kv } from "void/kv";
 import { storage } from "void/storage";
 
 export const POST = defineHandler(async () => {
   // Clear all D1 tables
-  await db.delete("notes");
-  await db.delete("queue_results");
+  await db.delete(notes);
+  await db.delete(queueResults);
 
   // Clear all KV keys (paginated)
   let kvComplete = false;

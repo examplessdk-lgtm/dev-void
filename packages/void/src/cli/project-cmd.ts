@@ -15,7 +15,11 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
   }
   if (args.subcommand === "logs") {
     const { runLogsCommand } = await import("./logs");
-    return runLogsCommand(root, args.filter, args.range);
+    return runLogsCommand(root, args.filter, args.range, args.deployment || undefined);
+  }
+  if (args.subcommand === "rollback") {
+    const { runRollbackCommand } = await import("./rollback");
+    return runRollbackCommand(root, args.deployId || undefined);
   }
   if (args.subcommand === "delete") {
     const { runDeleteCommand } = await import("./delete");

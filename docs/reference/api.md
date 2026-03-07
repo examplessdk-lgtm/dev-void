@@ -451,168 +451,47 @@ The typed client is built on [ofetch](https://github.com/unjs/ofetch) with a typ
 
 ## Database
 
-Imported from `"void/db"`. See [Database](../guide/database.md) for usage guide.
+Imported from `"void/db"`. The `db` export is a [Drizzle ORM](https://orm.drizzle.team) instance for [Cloudflare D1](https://developers.cloudflare.com/d1/). See the [Database guide](../guide/database.md) for usage and the [Drizzle docs](https://orm.drizzle.team/docs/select) for the full query API.
 
 ### `db`
 
-Default query client instance. Uses `env.DB` from `cloudflare:workers` automatically.
+Default Drizzle D1 instance, pre-wired with the `env.DB` binding and your schema from `db/schema.ts`.
 
 ```ts
 import { db } from "void/db";
+import { users } from "@schema";
 
-const users = await db.list("users");
+const allUsers = await db.select().from(users).all();
 ```
+
+When the Void plugin is active, `void/db` is served as a virtual module that auto-wires the D1 binding with your schema. The published npm fallback uses a lazy proxy that resolves the `DB` binding at first access.
 
 ### `createDb(database)`
 
-Creates a query client for a specific D1 instance. Use this when you need to pass the binding explicitly (e.g. in framework mode).
+Creates a Drizzle D1 instance from a specific D1 binding. Use this when you have multiple D1 databases or need a non-default binding.
 
 ```ts
 import { createDb } from "void/db";
 import { env } from "cloudflare:workers";
 
-const db = createDb(env.DB);
+const db = createDb(env.MY_OTHER_DB);
 ```
 
 **Signature:**
 
 ```ts
-function createDb(database: D1Database): QueryClient;
+function createDb(d1: D1Database): DrizzleD1Database;
 ```
 
-### `QueryClient`
+### Query Operators
 
-The query client interface. All table names, column names, and value types are checked at compile time via the generated `DbTables` and `DbInsertTables` interfaces.
-
-#### `db.list(table, options?)`
-
-Fetch multiple rows.
+`void/db` re-exports commonly used [Drizzle operators](https://orm.drizzle.team/docs/operators) so you never need to depend on `drizzle-orm` directly:
 
 ```ts
-const users = await db.list("users", {
-  select: ["name", "email"],
-  where: { role: "admin", id: [1, 2, 3] },
-  orderBy: ["name ASC", "created_at DESC"],
-  limit: 10,
-  offset: 20,
-});
+import { db, eq, and, or, desc, like, inArray, sql } from "void/db";
 ```
 
-**Signature:**
-
-```ts
-// With select — return type narrowed to selected columns
-list<T, K>(table: T, options: ListOptions<T> & { select: K[] }): Promise<Pick<Row<T>, K>[]>;
-// Without select — returns full row
-list<T>(table: T, options?: ListOptions<T>): Promise<Row<T>[]>;
-```
-
-**Options:**
-
-| Option    | Type                               | Description                                          |
-| --------- | ---------------------------------- | ---------------------------------------------------- |
-| `select`  | `string[]`                         | Columns to return. Omit for all columns (`SELECT *`) |
-| `where`   | `Record<string, value \| value[]>` | Filter conditions. Arrays produce `IN (...)` clauses |
-| `orderBy` | `string \| string[]`               | Column with optional `ASC`/`DESC` direction          |
-| `limit`   | `number`                           | Maximum rows to return                               |
-| `offset`  | `number`                           | Number of rows to skip                               |
-
-#### `db.get(table, options?)`
-
-Fetch a single row. Returns `null` if no match.
-
-```ts
-const user = await db.get("users", {
-  select: ["name"],
-  where: { id: 1 },
-});
-// { name: string } | null
-```
-
-**Signature:**
-
-```ts
-get<T, K>(table: T, options: GetOptions<T> & { select: K[] }): Promise<Pick<Row<T>, K> | null>;
-get<T>(table: T, options?: GetOptions<T>): Promise<Row<T> | null>;
-```
-
-**Options:** `select` and `where`, same as `list`.
-
-#### `db.insert(table, data)`
-
-Insert a row. Columns with `DEFAULT` or `PRIMARY KEY AUTOINCREMENT` are optional.
-
-```ts
-await db.insert("users", { name: "Alice", email: "alice@example.com" });
-```
-
-**Signature:**
-
-```ts
-insert<T>(table: T, data: DbInsertTables[T]): Promise<D1Result>;
-```
-
-#### `db.update(table, options)`
-
-Update rows. Throws if `set` is empty.
-
-```ts
-await db.update("users", {
-  set: { role: "admin" },
-  where: { id: 1 },
-});
-```
-
-**Signature:**
-
-```ts
-update<T>(table: T, options: { set: Partial<Row<T>>; where?: WhereClause<T> }): Promise<D1Result>;
-```
-
-#### `db.delete(table, options?)`
-
-Delete rows. Omitting `where` deletes all rows.
-
-```ts
-await db.delete("users", { where: { id: 1 } });
-```
-
-**Signature:**
-
-```ts
-delete<T>(table: T, options?: { where?: WhereClause<T> }): Promise<D1Result>;
-```
-
-#### `db.count(table, options?)`
-
-Count rows matching an optional filter.
-
-```ts
-const total = await db.count("users");
-const admins = await db.count("users", { where: { role: "admin" } });
-```
-
-**Signature:**
-
-```ts
-count<T>(table: T, options?: { where?: WhereClause<T> }): Promise<number>;
-```
-
-#### `db.raw(sql, bindings?)`
-
-Execute arbitrary SQL. Provide a type parameter for the result shape.
-
-```ts
-const results = await db.raw<{ name: string; total: number }>(
-  "SELECT name, COUNT(*) as total FROM users GROUP BY name",
-);
-```
-
-**Signature:**
-
-```ts
-raw<R = Record<string, unknown>>(sql: string, bindings?: unknown[]): Promise<R[]>;
-```
+**Full list:** `sql`, `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `and`, `or`, `not`, `desc`, `asc`, `like`, `ilike`, `notLike`, `inArray`, `notInArray`, `isNull`, `isNotNull`, `between`, `notBetween`, `exists`, `notExists`, `count`, `sum`, `avg`, `min`, `max`.
 
 ## Types
 
@@ -836,15 +715,16 @@ Imported from `"void/svelte"`.
 
 ## Subpath Exports
 
-| Import path      | Contents                                                                                                   |
-| ---------------- | ---------------------------------------------------------------------------------------------------------- |
-| `void`           | `voidPlugin` named export + all handler/type re-exports                                                    |
-| `void/handler`   | `defineHandler`, `defineMiddleware`, `defineScheduled`, `defineQueue`, `defineRender`, `defineHead`, types |
-| `void/auth`      | `requireAuth`, `AuthUser`                                                                                  |
-| `void/client`    | `fetch`, `FetchError`, `auth`, `AuthError`, `AuthUser`                                                     |
-| `void/response`  | `convertReturnValue`                                                                                       |
-| `void/validator` | `runValidation`, `ValidatorSlots`, `HandlerInput`                                                          |
-| `void/db`        | `db`, `createDb`, `QueryClient`, `DbTables`, `DbInsertTables`                                              |
-| `void/routes`    | `RouteMap` stub (types only)                                                                               |
-| `void/queues`    | `queues` proxy for sending messages to typed queues                                                        |
-| `void/env`       | Global Cloudflare env types (types only)                                                                   |
+| Import path           | Contents                                                                                                                                                         |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `void`                | `voidPlugin` named export + all handler/type re-exports                                                                                                          |
+| `void/handler`        | `defineHandler`, `defineMiddleware`, `defineScheduled`, `defineQueue`, `defineRender`, `defineHead`, types                                                       |
+| `void/auth`           | `requireAuth`, `AuthUser`                                                                                                                                        |
+| `void/client`         | `fetch`, `FetchError`, `auth`, `AuthError`, `AuthUser`                                                                                                           |
+| `void/response`       | `convertReturnValue`                                                                                                                                             |
+| `void/validator`      | `runValidation`, `ValidatorSlots`, `HandlerInput`                                                                                                                |
+| `void/schema-helpers` | Re-exports [`drizzle-orm/sqlite-core`](https://orm.drizzle.team/docs/column-types/sqlite) — define tables without depending on `drizzle-orm` directly            |
+| `void/db`             | `db` ([Drizzle D1](https://orm.drizzle.team/docs/get-started/d1-new) instance), `createDb`, query operators (`eq`, `and`, `or`, `desc`, `like`, `inArray`, etc.) |
+| `void/routes`         | `RouteMap` stub (types only)                                                                                                                                     |
+| `void/queues`         | `queues` proxy for sending messages to typed queues                                                                                                              |
+| `void/env`            | Global Cloudflare env types (types only)                                                                                                                         |

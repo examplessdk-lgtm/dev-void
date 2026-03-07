@@ -27,7 +27,7 @@ crons/
 - **Named method exports** — route files export `GET`, `POST`, etc. as separate handlers
 - **Input validation** — `defineHandler.withValidator()` with valibot schemas for body and params
 - **Typed fetch client** — `fetch` from `void/client` with full type inference from route definitions
-- **Typed DB queries** — `db.list()`, `db.get()`, `db.insert()` from `void/db` with types auto-generated in `.void/db.d.ts`
+- **Typed DB queries** — Drizzle ORM via `db` from `void/db` with schema defined in `db/schema.ts`
 - **Middleware** — `defineMiddleware` for cross-cutting concerns (request logging)
 - **Cron jobs** — `defineScheduled` with cron expression syntax (`"0 * * * *"`)
 - **SQL migrations** — auto-applied on dev server start

@@ -29,6 +29,10 @@ The `void` package on npm has these previous versions: '0.0.1', '0.1.0', '0.1.2'
     - `packages/void/skills/void` (if change affects skill/CLI guidance)
     - `packages/void/AGENT_PROMPT.md`
     - `packages/void/getting-started-prompt.txt`
+- When adding new CLI commands, always remember to update the following:
+  - CLI help message
+  - The hint message for command groups in the interactive list when running `void` with no args
+  - `docs/reference/cli.md`
 
 ## Quick Reference
 

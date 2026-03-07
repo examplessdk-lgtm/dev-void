@@ -48,6 +48,12 @@ Then ask what to do next.
 | SSR and caching                           | `docs/guide/ssr.md`, `docs/guide/edge/*.md`                                               |
 | Static site generation                    | `docs/guide/ssg.md`                                                                       |
 | Deployment and CI                         | `docs/guide/deployment.md`, `docs/reference/cli.md`                                       |
+| Project status, deployment history        | `docs/reference/cli.md`                                                                   |
+| Project logs, runtime errors              | `docs/reference/cli.md`                                                                   |
+| Secrets management (put/sync/delete)      | `docs/reference/cli.md`, `docs/guide/env-vars.md`                                         |
+| Custom domain setup                       | `docs/reference/cli.md`                                                                   |
+| Database status, reset, seed, export      | `docs/reference/cli.md`, `docs/guide/database.md`                                         |
+| Auth login/logout/whoami                  | `docs/reference/cli.md`                                                                   |
 | Overview / introduction                   | `docs/guide/index.md`                                                                     |
 | API surface details                       | `docs/reference/api.md`                                                                   |
 | Meta framework integration                | `docs/integrations/frameworks/*.md`                                                       |
@@ -59,6 +65,7 @@ Then ask what to do next.
 
 ## Working Rules
 
-- For CLI-heavy tasks, open `docs/reference/cli.md` first.
+- For any task involving running `void` commands — including checking status, managing secrets, viewing logs, or deploying — open `docs/reference/cli.md` FIRST. Do not guess command syntax.
+- Never guess or infer `void` CLI command names or flags. Always consult `docs/reference/cli.md` for the exact command before running it.
 - For multi-topic tasks, combine only the needed doc files.
 - If docs and memory differ, follow docs.

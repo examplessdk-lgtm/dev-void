@@ -1,9 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { db } from "void/db";
+import { users } from "@schema";
 
 const getUsers = createServerFn().handler(async () => {
-  return db.list("users");
+  return db.select().from(users);
 });
 
 export const Route = createFileRoute("/users")({

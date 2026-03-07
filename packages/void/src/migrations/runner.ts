@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
-import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { collectMigrations } from "./collect";
 
 export interface AppliedMigration {
   name: string;
@@ -9,7 +10,7 @@ export interface AppliedMigration {
 
 /**
  * Read the list of applied migrations from the local SQLite database.
- * Returns [] if the DB file or _migrations table doesn't exist.
+ * Returns [] if the DB file or tracking table doesn't exist.
  */
 export async function getAppliedMigrations(dbPath: string): Promise<AppliedMigration[]> {
   if (!existsSync(dbPath)) {
@@ -20,14 +21,11 @@ export async function getAppliedMigrations(dbPath: string): Promise<AppliedMigra
   const db = new Database(dbPath, { readonly: true });
 
   try {
-    // Check if _migrations table exists
-    const tableExists = db
+    const table = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")
       .get();
 
-    if (!tableExists) {
-      return [];
-    }
+    if (!table) return [];
 
     return db
       .prepare("SELECT name, applied_at FROM _migrations ORDER BY name")
@@ -61,69 +59,60 @@ export function getMiniflareDatabasePath(persistRoot: string, databaseId: string
 }
 
 /**
- * Apply unapplied SQL migrations from the migrations directory to a local SQLite database.
- * Uses better-sqlite3 to access the SQLite file directly.
- *
- * Tracks applied migrations in a _migrations table:
- *   CREATE TABLE _migrations (name TEXT PRIMARY KEY, applied_at TEXT)
+ * Apply unapplied SQL migrations from the migrations directory.
+ * Tracks applied migrations in the `_migrations` table.
+ * Each .sql file is split into statements and executed individually
+ * because D1's `exec()` with multi-statement SQL can fail.
  */
 export async function runMigrations(migrationsDir: string, dbPath: string): Promise<string[]> {
-  if (!existsSync(migrationsDir)) {
+  const allMigrations = collectMigrations(migrationsDir);
+  if (allMigrations.length === 0) {
     return [];
   }
 
-  // Dynamically import better-sqlite3 (dev-only dependency)
+  mkdirSync(dirname(dbPath), { recursive: true });
+
   const Database = (await import("better-sqlite3")).default;
-
-  // Ensure the directory for the database exists
-  const dbDir = join(dbPath, "..");
-  mkdirSync(dbDir, { recursive: true });
-
   const db = new Database(dbPath);
 
   try {
-    // Create migrations tracking table if it doesn't exist
+    // Create tracking table if it doesn't exist
     db.exec(`
       CREATE TABLE IF NOT EXISTS _migrations (
         name TEXT PRIMARY KEY,
-        applied_at TEXT NOT NULL
+        applied_at TEXT DEFAULT (datetime('now'))
       )
     `);
 
-    // Get already-applied migrations
     const applied = new Set(
-      db
-        .prepare("SELECT name FROM _migrations")
-        .all()
-        .map((row: any) => row.name),
+      (db.prepare("SELECT name FROM _migrations").all() as { name: string }[]).map((r) => r.name),
     );
 
-    // Read migration files, sorted by name
-    const files = readdirSync(migrationsDir)
-      .filter((f) => f.endsWith(".sql"))
-      .sort();
+    const pending = allMigrations.filter((m) => !applied.has(m.name));
+    if (pending.length === 0) {
+      return [];
+    }
 
-    const newlyApplied: string[] = [];
+    const insertStmt = db.prepare("INSERT INTO _migrations (name) VALUES (?)");
 
-    for (const file of files) {
-      if (applied.has(file)) continue;
+    for (const migration of pending) {
+      // Split into individual statements — D1/better-sqlite3 can choke on multi-statement exec
+      const statements = migration.sql
+        .split(";")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
 
-      const sql = readFileSync(join(migrationsDir, file), "utf-8");
-
-      // Run migration in a transaction
       const transaction = db.transaction(() => {
-        db.exec(sql);
-        db.prepare("INSERT INTO _migrations (name, applied_at) VALUES (?, ?)").run(
-          file,
-          new Date().toISOString(),
-        );
+        for (const stmt of statements) {
+          db.exec(stmt);
+        }
+        insertStmt.run(migration.name);
       });
 
       transaction();
-      newlyApplied.push(file);
     }
 
-    return newlyApplied;
+    return pending.map((m) => m.name);
   } finally {
     db.close();
   }

@@ -2,6 +2,8 @@ import { createInterface } from "node:readline";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getToken } from "./auth";
+import { PlatformClient } from "./client";
 
 // --- Types ---
 
@@ -56,12 +58,24 @@ function resolveDocsDir(): string {
   throw new Error(`Void docs directory not found. Expected bundled docs at: ${bundledDocsDir}`);
 }
 
+function findMdFiles(dir: string, prefix = ""): string[] {
+  const results: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    const rel = prefix ? prefix + "/" + entry.name : entry.name;
+    if (entry.isDirectory()) {
+      results.push(...findMdFiles(join(dir, entry.name), rel));
+    } else if (entry.name.endsWith(".md")) {
+      results.push(rel);
+    }
+  }
+  return results;
+}
+
 function loadDocs(): DocPage[] {
   const docsDir = resolveDocsDir();
 
-  const files = readdirSync(docsDir, { recursive: true })
-    .filter((f): f is string => typeof f === "string" && f.endsWith(".md") && !f.startsWith("."))
-    .sort();
+  const files = findMdFiles(docsDir).sort();
 
   return files.map((file) => {
     let content = readFileSync(join(docsDir, file), "utf-8");
@@ -136,6 +150,23 @@ export function searchDocs(pages: DocPage[], query: string): SearchResult[] {
   return scored.slice(0, 5);
 }
 
+// --- Query SDK ---
+
+function createQuerySdk(token: string) {
+  const client = new PlatformClient(token);
+  return {
+    me: () => client.whoami(),
+    projects: () => client.listProjects(),
+    deployments: (projectId: string) => client.listDeployments(projectId),
+    logs: (projectId: string, opts?: { since?: string; limit?: number }) =>
+      client.getLogs(projectId, opts?.since ?? "1h", opts?.limit ?? 200),
+    secrets: (projectId: string) => client.listSecrets(projectId),
+    domains: (projectId: string) => client.listDomains(projectId),
+    domainStatus: (projectId: string, domainId: string) =>
+      client.getDomainStatus(projectId, domainId),
+  };
+}
+
 // --- Tool definitions ---
 
 const TOOLS = [
@@ -173,11 +204,46 @@ const TOOLS = [
       required: ["query"],
     },
   },
+  {
+    name: "query",
+    description: `Execute JavaScript to query the Void platform API.
+
+Available methods on the "void_" object:
+  void_.me() → { login: string, plan: string }
+  void_.projects() → { id, slug, type, created_at, custom_domain }[]
+  void_.deployments(projectId) → { id, status, source, commit, created_at, deployed_at }[]
+  void_.logs(projectId, opts?) → { timestamp, outcome, logs, exceptions, url, method, status }[]
+    opts: { since?: string (default "1h"), limit?: number (default 200) }
+  void_.secrets(projectId) → { name }[]
+  void_.domains(projectId) → { id, hostname, status, cname_target }[]
+  void_.domainStatus(projectId, domainId) → { hostname, status, ssl_status, verification_errors }
+
+Write an async arrow function in JavaScript. The SDK is available as "void_".
+Example: async () => { const ps = await void_.projects(); return ps.map(p => p.slug); }`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        code: {
+          type: "string",
+          description: "JavaScript async arrow function to execute",
+        },
+      },
+      required: ["code"],
+    },
+  },
 ];
 
 // --- JSON-RPC dispatch ---
 
-function handleRequest(pages: DocPage[], req: JsonRpcRequest): object | null {
+export interface McpContext {
+  pages: DocPage[];
+  token: string | null;
+}
+
+export function handleRequest(
+  ctx: McpContext,
+  req: JsonRpcRequest,
+): object | null | Promise<object | null> {
   const { method, id, params } = req;
 
   if (method === "initialize") {
@@ -213,7 +279,7 @@ function handleRequest(pages: DocPage[], req: JsonRpcRequest): object | null {
     >;
 
     if (toolName === "list_pages") {
-      const list = pages.map((p) => ({ slug: p.slug, title: p.title }));
+      const list = ctx.pages.map((p) => ({ slug: p.slug, title: p.title }));
       return {
         jsonrpc: "2.0",
         id,
@@ -223,7 +289,7 @@ function handleRequest(pages: DocPage[], req: JsonRpcRequest): object | null {
 
     if (toolName === "get_page") {
       const slug = toolArgs.slug as string;
-      const page = pages.find((p) => p.slug === slug);
+      const page = ctx.pages.find((p) => p.slug === slug);
       if (!page) {
         return {
           jsonrpc: "2.0",
@@ -240,12 +306,65 @@ function handleRequest(pages: DocPage[], req: JsonRpcRequest): object | null {
 
     if (toolName === "search_docs") {
       const query = toolArgs.query as string;
-      const results = searchDocs(pages, query);
+      const results = searchDocs(ctx.pages, query);
       return {
         jsonrpc: "2.0",
         id,
         result: { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] },
       };
+    }
+
+    if (toolName === "query") {
+      const code = toolArgs.code as string;
+
+      if (!ctx.token) {
+        return {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [{ type: "text", text: "Not logged in. Run `void auth login` first." }],
+            isError: true,
+          },
+        };
+      }
+
+      const sdk = createQuerySdk(ctx.token);
+      const AsyncFunction = async function () {}.constructor as new (
+        ...args: string[]
+      ) => (...args: unknown[]) => Promise<unknown>;
+
+      return (async () => {
+        try {
+          const fn = new AsyncFunction("void_", `return await (${code})()`);
+          const result = await Promise.race([
+            fn(sdk),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("Query timed out after 10 seconds")), 10_000),
+            ),
+          ]);
+          return {
+            jsonrpc: "2.0",
+            id,
+            result: {
+              content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            },
+          };
+        } catch (err) {
+          return {
+            jsonrpc: "2.0",
+            id,
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: `Error: ${err instanceof Error ? err.message : String(err)}`,
+                },
+              ],
+              isError: true,
+            },
+          };
+        }
+      })();
     }
 
     return {
@@ -266,10 +385,12 @@ function handleRequest(pages: DocPage[], req: JsonRpcRequest): object | null {
 
 export function runMcp(): void {
   const pages = loadDocs();
+  const token = getToken();
+  const ctx: McpContext = { pages, token };
 
   const rl = createInterface({ input: process.stdin });
 
-  rl.on("line", (line) => {
+  rl.on("line", async (line) => {
     let req: JsonRpcRequest;
     try {
       req = JSON.parse(line);
@@ -284,7 +405,7 @@ export function runMcp(): void {
       return;
     }
 
-    const response = handleRequest(pages, req);
+    const response = await handleRequest(ctx, req);
     if (response !== null) {
       process.stdout.write(JSON.stringify(response) + "\n");
     }

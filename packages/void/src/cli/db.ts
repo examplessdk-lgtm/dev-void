@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { intro, outro, log } from "@clack/prompts";
 import { getToken } from "./auth";
 import { PlatformClient } from "./client";
@@ -7,11 +8,17 @@ import { readProjectConfig } from "./project";
 import type { DbArgs } from "./db-args";
 import { cliTitle, dim, pc } from "./output";
 
+const drizzleKitBin = join(fileURLToPath(import.meta.resolve("drizzle-kit")), "..", "bin.cjs");
+
 export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
   console.log();
   intro(cliTitle("db"));
 
-  if (args.action === "status") {
+  if (args.action === "push") {
+    await runPush(root);
+  } else if (args.action === "generate") {
+    await runGenerate(root);
+  } else if (args.action === "status") {
     await runStatus(root);
   } else if (args.action === "reset") {
     await runReset(root);
@@ -21,18 +28,64 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
     await runExecute(root, args.command, args.file);
   } else if (args.action === "migrate") {
     await runMigrate(root);
+  } else if (args.action === "studio") {
+    await runStudio(root);
   } else {
     await runExport(root, args);
   }
 }
 
+async function runPush(root: string): Promise<void> {
+  const { execSync } = await import("node:child_process");
+  const { mkdirSync } = await import("node:fs");
+  const { dirname } = await import("node:path");
+  const { writeDrizzleConfig } = await import("../drizzle/config");
+  const { getMiniflareDatabasePath } = await import("../migrations/runner");
+
+  const persistRoot = join(root, ".void");
+  const dbPath = getMiniflareDatabasePath(persistRoot, "local");
+
+  mkdirSync(dirname(dbPath), { recursive: true });
+
+  const configPath = writeDrizzleConfig(root, dbPath);
+
+  try {
+    execSync(`node ${drizzleKitBin} push --config ${configPath}`, {
+      cwd: root,
+      stdio: "inherit",
+    });
+  } catch {
+    process.exit(1);
+  }
+  outro("");
+}
+
+async function runGenerate(root: string): Promise<void> {
+  const { execSync } = await import("node:child_process");
+  const { writeDrizzleConfig } = await import("../drizzle/config");
+
+  // dbPath doesn't matter for generate (no DB connection needed),
+  // but drizzle-kit config requires it. Use a dummy path.
+  const configPath = writeDrizzleConfig(root, ":memory:");
+
+  try {
+    execSync(`node ${drizzleKitBin} generate --config ${configPath}`, {
+      cwd: root,
+      stdio: "inherit",
+    });
+  } catch {
+    process.exit(1);
+  }
+  outro("");
+}
+
 async function runStatus(root: string): Promise<void> {
-  const migrationsDir = join(root, "migrations");
+  const migrationsDir = join(root, "db", "migrations");
   const { collectMigrations } = await import("../migrations/collect");
   const allMigrations = collectMigrations(migrationsDir);
 
   if (allMigrations.length === 0) {
-    log.info("No migration files found in migrations/");
+    log.info("No migration files found in db/migrations/");
     outro("");
     return;
   }
@@ -100,7 +153,7 @@ async function runReset(root: string): Promise<void> {
   rmSync(dbPath + "-wal", { force: true });
   rmSync(dbPath + "-shm", { force: true });
 
-  const migrationsDir = join(root, "migrations");
+  const migrationsDir = join(root, "db", "migrations");
   const applied = await runMigrations(migrationsDir, dbPath);
   log.success(`Database reset. Applied ${applied.length} migration(s).`);
   log.info(dim("Restart your dev server if it's running."));
@@ -117,12 +170,12 @@ async function runSeed(root: string, file?: string): Promise<void> {
   rmSync(dbPath + "-wal", { force: true });
   rmSync(dbPath + "-shm", { force: true });
 
-  const migrationsDir = join(root, "migrations");
+  const migrationsDir = join(root, "db", "migrations");
   const applied = await runMigrations(migrationsDir, dbPath);
   log.step(`Applied ${applied.length} migration(s).`);
 
   // Run seed
-  const seedPath = file ? join(root, file) : join(migrationsDir, "seed.sql");
+  const seedPath = file ? join(root, file) : join(root, "db", "seed.sql");
   if (!existsSync(seedPath)) {
     log.error(`Seed file not found: ${seedPath}`);
     process.exit(1);
@@ -137,7 +190,7 @@ async function runSeed(root: string, file?: string): Promise<void> {
     db.close();
   }
 
-  log.success(`Seeded from ${file ?? "migrations/seed.sql"}.`);
+  log.success(`Seeded from ${file ?? "db/seed.sql"}.`);
   log.info(dim("Restart your dev server if it's running."));
   outro("");
 }
@@ -199,7 +252,7 @@ async function runMigrate(root: string): Promise<void> {
   const { getMiniflareDatabasePath, runMigrations } = await import("../migrations/runner");
   const persistRoot = join(root, ".void");
   const dbPath = getMiniflareDatabasePath(persistRoot, "local");
-  const migrationsDir = join(root, "migrations");
+  const migrationsDir = join(root, "db", "migrations");
 
   const applied = await runMigrations(migrationsDir, dbPath);
   if (applied.length === 0) {
@@ -212,6 +265,33 @@ async function runMigrate(root: string): Promise<void> {
     log.info(dim("Restart your dev server if it's running."));
   }
   outro("");
+}
+
+async function runStudio(root: string): Promise<void> {
+  const { existsSync } = await import("node:fs");
+  const { execSync } = await import("node:child_process");
+  const { writeDrizzleConfig } = await import("../drizzle/config");
+  const { getMiniflareDatabasePath } = await import("../migrations/runner");
+
+  const persistRoot = join(root, ".void");
+  const dbPath = getMiniflareDatabasePath(persistRoot, "local");
+
+  if (!existsSync(dbPath)) {
+    log.error("No local database found. Run `void dev` first.");
+    process.exit(1);
+  }
+
+  const configPath = writeDrizzleConfig(root, dbPath);
+
+  log.info("Opening Drizzle Studio...");
+  try {
+    execSync(`node ${drizzleKitBin} studio --config ${configPath}`, {
+      cwd: root,
+      stdio: "inherit",
+    });
+  } catch {
+    process.exit(1);
+  }
 }
 
 async function runExport(

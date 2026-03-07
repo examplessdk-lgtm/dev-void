@@ -1,13 +1,13 @@
 ---
 export const prerender = false;
 
-import { db } from "void/db";
+import { db, eq } from "void/db";
 import { kv } from "void/kv";
+import { users } from "@schema";
 
-await db.raw("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)");
-await db.raw("INSERT OR IGNORE INTO users (id, name) VALUES (1, 'Alice')");
+await db.insert(users).values({ id: 1, name: "Alice", email: "alice@example.com" }).onConflictDoNothing();
 
-const rows = await db.raw<{ name: string }>("SELECT name FROM users LIMIT 1");
+const rows = await db.select({ name: users.name }).from(users).where(eq(users.id, 1));
 const result = rows[0] ?? null;
 
 await kv.put("smoke", "ok");

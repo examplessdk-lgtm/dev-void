@@ -52,9 +52,10 @@ All [Void platform features](../../guide/app-types.md#void-apps) work with React
 ```tsx
 import type { Route } from "./+types/users";
 import { db } from "void/db";
+import { users } from "@schema";
 
 export async function loader({}: Route.LoaderArgs) {
-  return { users: await db.list("users") }; // fully typed from migrations
+  return { users: await db.select().from(users) };
 }
 ```
 

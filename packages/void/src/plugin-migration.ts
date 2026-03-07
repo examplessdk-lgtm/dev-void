@@ -18,7 +18,7 @@ export function migrationPlugin(
     apply: "serve",
 
     async configureServer() {
-      const migrationsDir = join(root, "migrations");
+      const migrationsDir = join(root, "db", "migrations");
       if (!existsSync(migrationsDir)) return;
 
       try {

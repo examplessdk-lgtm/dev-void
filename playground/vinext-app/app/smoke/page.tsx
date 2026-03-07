@@ -1,9 +1,10 @@
 import { db } from "void/db";
 import { kv } from "void/kv";
+import { users } from "@schema";
 
 export default async function SmokePage() {
-  const users = await db.list("users", { limit: 1 });
-  const user = users[0] ?? null;
+  const rows = await db.select().from(users).limit(1);
+  const user = rows[0] ?? null;
 
   await kv.put("smoke", "ok");
   const kvValue = await kv.get<string>("smoke");

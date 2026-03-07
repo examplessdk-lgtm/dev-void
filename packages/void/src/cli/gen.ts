@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, relative } from "node:path";
 import { intro, outro, log, select, isCancel, cancel } from "@clack/prompts";
 import type { GenArgs } from "./gen-args";
 import { ensureProjectTsconfig } from "../codegen/project-tsconfig";
@@ -81,28 +81,45 @@ interface ColumnSpec {
   nullable: boolean;
 }
 
-function columnToSql(col: ColumnSpec): string {
-  const sqlType = sqlTypeFor(col.type);
-  const nullConstraint = col.nullable ? "" : " NOT NULL";
-  return `  ${col.name} ${sqlType}${nullConstraint}`;
-}
-
-function sqlTypeFor(type: string): string {
+function drizzleColumnDef(col: ColumnSpec): string {
+  const { name, type } = col;
   switch (type) {
     case "string":
     case "text":
-    case "datetime":
-      return "TEXT";
+      return `  ${name}: text("${name}").notNull(),`;
     case "integer":
+      return `  ${name}: integer("${name}").notNull(),`;
     case "boolean":
-      return "INTEGER";
+      return `  ${name}: integer("${name}", { mode: "boolean" }).notNull().default(false),`;
     case "real":
-      return "REAL";
-    case "blob":
-      return "BLOB";
+      return `  ${name}: real("${name}").notNull(),`;
     default:
-      return "TEXT";
+      return `  ${name}: text("${name}"),`;
   }
+}
+
+function drizzleImportsForColumns(columns: ColumnSpec[]): string[] {
+  const types = new Set<string>(["text", "integer"]);
+  for (const col of columns) {
+    switch (col.type) {
+      case "string":
+      case "text":
+        types.add("text");
+        break;
+      case "integer":
+        types.add("integer");
+        break;
+      case "boolean":
+        types.add("integer");
+        break;
+      case "real":
+        types.add("real");
+        break;
+      default:
+        types.add("text");
+    }
+  }
+  return [...types].sort();
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +295,7 @@ function generateIndexRoute(name: string, columns: ColumnSpec[], validator: Vali
     importLine,
     'import { defineHandler } from "void";',
     'import { db } from "void/db";',
+    `import { ${name} } from "@schema";`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -285,31 +303,33 @@ function generateIndexRoute(name: string, columns: ColumnSpec[], validator: Vali
   const insertFields = columns.map((c) => `${c.name}: body.${c.name}`).join(", ");
 
   if (columns.length === 0 || validator === "none") {
-    // No validator — plain handler
     if (columns.length > 0) {
       return `import { defineHandler } from "void";
 import { db } from "void/db";
+import { ${name} } from "@schema";
 
 export const GET = defineHandler(async () => {
-  return db.list("${name}");
+  return db.select().from(${name});
 });
 
 export const POST = defineHandler(async (c) => {
   const body = await c.req.json();
-  await db.insert("${name}", { ${insertFields} });
+  await db.insert(${name}).values({ ${insertFields} });
   return { created: true };
 });
 `;
     }
     return `import { defineHandler } from "void";
 import { db } from "void/db";
+import { ${name} } from "@schema";
 
 export const GET = defineHandler(async () => {
-  return db.list("${name}");
+  return db.select().from(${name});
 });
 
-export const POST = defineHandler(async () => {
-  await db.insert("${name}", {});
+export const POST = defineHandler(async (c) => {
+  const body = await c.req.json();
+  await db.insert(${name}).values(body);
   return { created: true };
 });
 `;
@@ -319,13 +339,13 @@ export const POST = defineHandler(async () => {
   return `${imports}
 
 export const GET = defineHandler(async () => {
-  return db.list("${name}");
+  return db.select().from(${name});
 });
 
 export const POST = defineHandler.withValidator({
   body: ${bodySchema},
 })(async (c, { body }) => {
-  await db.insert("${name}", { ${insertFields} });
+  await db.insert(${name}).values({ ${insertFields} });
   return { created: true };
 });
 `;
@@ -334,11 +354,12 @@ export const POST = defineHandler.withValidator({
 function generateIdRoute(name: string, validator: Validator): string {
   if (validator === "none") {
     return `import { defineHandler } from "void";
-import { db } from "void/db";
+import { db, eq } from "void/db";
+import { ${name} } from "@schema";
 
 export const GET = defineHandler(async (c) => {
   const id = c.req.param("id");
-  const row = await db.get("${name}", { where: { id: Number(id) } });
+  const [row] = await db.select().from(${name}).where(eq(${name}.id, Number(id)));
 
   if (!row) {
     return new Response("Not found", { status: 404 });
@@ -353,12 +374,13 @@ export const GET = defineHandler(async (c) => {
 
   return `${importLine}
 import { defineHandler } from "void";
-import { db } from "void/db";
+import { db, eq } from "void/db";
+import { ${name} } from "@schema";
 
 export const GET = defineHandler.withValidator({
   params: ${paramsSchema},
 })(async (c, { params }) => {
-  const row = await db.get("${name}", { where: { id: Number(params.id) } });
+  const [row] = await db.select().from(${name}).where(eq(${name}.id, Number(params.id)));
 
   if (!row) {
     return new Response("Not found", { status: 404 });
@@ -375,48 +397,64 @@ export const GET = defineHandler.withValidator({
 async function runModel(root: string, name: string, columns: ColumnSpec[]): Promise<void> {
   const validator = await resolveValidator(root);
 
-  const migrationsDir = join(root, "migrations");
-  mkdirSync(migrationsDir, { recursive: true });
+  const schemaDir = join(root, "db", "schema");
+  const barrelPath = join(root, "db", "schema.ts");
+  const modelPath = join(schemaDir, `${name}.ts`);
 
-  // 1. Migration
-  const num = getNextMigrationNumber(migrationsDir);
-  const migrationFile = join(migrationsDir, `${num}_create_${name}.sql`);
-  const colDefs = columns.map(columnToSql);
-  const allColDefs = [
-    "  id INTEGER PRIMARY KEY AUTOINCREMENT",
+  // 1. Generate Drizzle table definition
+  const colDefs = columns.map((col) => drizzleColumnDef(col));
+  const columnImports = drizzleImportsForColumns(columns);
+  const allCols = [
+    `  id: integer("id").primaryKey({ autoIncrement: true }),`,
     ...colDefs,
-    "  created_at TEXT DEFAULT (datetime('now'))",
+    "  createdAt: text(\"created_at\").notNull().default(sql`(datetime('now'))`),",
+    "  updatedAt: text(\"updated_at\").notNull().default(sql`(datetime('now'))`),",
   ];
-  const migrationSql = `CREATE TABLE IF NOT EXISTS ${name} (\n${allColDefs.join(",\n")}\n);\n`;
-  writeIfNotExists(migrationFile, migrationSql);
 
-  // 2. Route: routes/api/<name>/index.ts
+  const content = [
+    `import { sqliteTable, ${columnImports.join(", ")} } from "void/schema-helpers";`,
+    `import { sql } from "void/db";`,
+    "",
+    `export const ${name} = sqliteTable("${name}", {`,
+    ...allCols,
+    "});",
+    "",
+  ].join("\n");
+
+  // Write the model file
+  mkdirSync(schemaDir, { recursive: true });
+  writeIfNotExists(modelPath, content);
+
+  // 2. Update or create barrel export
+  const exportLine = `export * from "./schema/${name}";`;
+  if (existsSync(barrelPath)) {
+    const existing = readFileSync(barrelPath, "utf-8");
+    if (!existing.includes(exportLine)) {
+      writeFileSync(barrelPath, existing.trimEnd() + "\n" + exportLine + "\n");
+    }
+  } else {
+    writeFileSync(barrelPath, exportLine + "\n");
+  }
+
+  // 3. Regenerate .void/tsconfig.json and db.d.ts
+  ensureProjectTsconfig(root, undefined, true);
+
+  log.success(`Created ${relative(root, modelPath)}`);
+  log.success(`Updated ${relative(root, barrelPath)}`);
+
+  // 4. Routes: routes/api/<name>/index.ts
   const routeIndexPath = join(root, "routes", "api", name, "index.ts");
   writeIfNotExists(routeIndexPath, generateIndexRoute(name, columns, validator));
 
-  // 3. Route: routes/api/<name>/[id].ts
+  // 5. Route: routes/api/<name>/[id].ts
   const routeIdPath = join(root, "routes", "api", name, "[id].ts");
   writeIfNotExists(routeIdPath, generateIdRoute(name, validator));
 
-  // 4. Regenerate db.d.ts
-  const { collectMigrations } = await import("../migrations/collect");
-  const { parseMigrationSchema } = await import("../migrations/schema");
-  const { generateDbTypes } = await import("../codegen/db-types");
-
-  const migrations = collectMigrations(migrationsDir);
-  const schema = parseMigrationSchema(migrations);
-  const dts = generateDbTypes(schema);
-  const outDir = join(root, ".void");
-  mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, "db.d.ts"), dts);
-  ensureProjectTsconfig(root);
-  log.success("Regenerated .void/db.d.ts");
-
-  outro("Model scaffolding complete.");
+  outro("Model scaffolding complete. Run `void db push` to apply.");
 }
 
 function runMigration(root: string, name: string): void {
-  const migrationsDir = join(root, "migrations");
+  const migrationsDir = join(root, "db", "migrations");
   mkdirSync(migrationsDir, { recursive: true });
 
   const num = getNextMigrationNumber(migrationsDir);

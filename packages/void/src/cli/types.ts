@@ -38,8 +38,12 @@ export interface DeployManifest {
     kv?: string[];
     r2?: string[];
     ai?: boolean;
+    hyperdrive?: string[];
   };
-  migrations?: MigrationMeta[];
+  migrations?: {
+    dialect: "sqlite" | "postgresql";
+    pending: number;
+  };
   schedules?: ScheduleMeta[];
   queues?: QueueMeta[];
   ssr?: boolean;
@@ -63,7 +67,8 @@ export type DeployEvent =
   | { event: "asset_upload_done" }
   | { event: "provisioning"; bindings: string[] }
   | { event: "provisioning_done" }
-  | { event: "migration"; name: string; index: number; total: number }
+  | { event: "migration_start"; pending: number }
+  | { event: "migration"; name: string; durationMs: number }
   | { event: "worker_upload"; modules: number }
   | { event: "worker_upload_done" }
   | { event: "queue_setup"; queues: string[] }
