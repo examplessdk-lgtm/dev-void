@@ -22,6 +22,7 @@ import {
   isNodeTarget,
   convertHeadersConfig,
   convertRedirectsConfig,
+  getDatabaseDialect,
 } from "./config";
 import { ensureWranglerNodejsAlsFlag, syncWranglerBindings } from "./cli/wrangler";
 import { restartPlugin } from "./plugin-restart";
@@ -365,8 +366,8 @@ export function voidPlugin(options?: {
       wranglerSyncPlugin,
       svelteKitHooksInjectPlugin,
       clientStubsPlugin,
-      drizzlePlugin(root, false),
-      migrationPlugin(root, "local", frameworkPersistRoot),
+      drizzlePlugin(root, false, getDatabaseDialect(config)),
+      migrationPlugin(root, getDatabaseDialect(config), "local", frameworkPersistRoot),
     ];
   }
 
@@ -550,6 +551,15 @@ export function voidPlugin(options?: {
       }
     },
     configureServer(server) {
+      // Defer status messages until after Vite prints "ready" so they're visible.
+      const afterReady = (fn: () => void) => {
+        if (server.httpServer) {
+          server.httpServer.once("listening", () => setTimeout(fn, 100));
+        } else {
+          fn();
+        }
+      };
+
       // Remote mode status — log which bindings are using the proxy
       if (remoteMode && (bindings.needsD1 || bindings.needsKV || bindings.needsR2)) {
         const credentials = readVoidDevCredentials(root);
@@ -558,13 +568,22 @@ export function voidPlugin(options?: {
           if (bindings.needsD1) lines.push("  DB      \x1b[2m→ remote D1\x1b[22m");
           if (bindings.needsKV) lines.push("  KV      \x1b[2m→ remote KV\x1b[22m");
           if (bindings.needsR2) lines.push("  STORAGE \x1b[2m→ remote R2\x1b[22m");
-          voidLog(lines.join("\n         "));
+          afterReady(() => {
+            console.log();
+            voidLog(lines.join("\n         "));
+          });
         } else if (credentials.status === "no-token") {
-          voidWarn("Remote mode requires authentication. Run `void auth login`, then restart.");
-          voidWarn("Falling back to local bindings.");
+          afterReady(() => {
+            console.log();
+            voidWarn("Remote mode requires authentication. Run `void auth login`, then restart.");
+            voidWarn("Falling back to local bindings.");
+          });
         } else {
-          voidWarn("Remote mode requires a linked project. Run `void project link` first.");
-          voidWarn("Falling back to local bindings.");
+          afterReady(() => {
+            console.log();
+            voidWarn("Remote mode requires a linked project. Run `void project link` first.");
+            voidWarn("Falling back to local bindings.");
+          });
         }
       }
 
@@ -572,15 +591,24 @@ export function voidPlugin(options?: {
       if (bindings.needsAI) {
         const credentials = readVoidDevCredentials(root);
         if (credentials.status === "no-token") {
-          voidWarn(
-            "AI requires authentication. Run `void auth login`, then restart the dev server.",
-          );
+          afterReady(() => {
+            console.log();
+            voidWarn(
+              "AI requires authentication. Run `void auth login`, then restart the dev server.",
+            );
+          });
         } else if (credentials.status === "no-project") {
           if (process.stdin.isTTY) {
             // Fire-and-forget interactive setup
-            runAiSetupPrompt(root, credentials.token, credentials.staging, server);
+            afterReady(() => {
+              console.log();
+              runAiSetupPrompt(root, credentials.token, credentials.staging, server);
+            });
           } else {
-            voidWarn("AI requires a linked project. Run `void project link` to set one up.");
+            afterReady(() => {
+              console.log();
+              voidWarn("AI requires a linked project. Run `void project link` to set one up.");
+            });
           }
         }
       }
@@ -706,8 +734,8 @@ export function voidPlugin(options?: {
       bindingWatchPlugin,
       envPlugin,
       clientStubsPlugin,
-      drizzlePlugin(root, false),
-      migrationPlugin(root),
+      drizzlePlugin(root, false, getDatabaseDialect(config)),
+      migrationPlugin(root, getDatabaseDialect(config)),
       ...(vinextCompat ? [vinextCompat] : []),
       ...cloudflare({
         ...inspectorPortOption,
@@ -753,9 +781,16 @@ export function voidPlugin(options?: {
     ];
   }
 
-  // Add nodejs_als for AsyncLocalStorage (used by isomorphic fetch context threading)
+  // PostgreSQL needs nodejs_compat for the `pg` driver (events, net, tls, dns, etc.)
+  // Other apps only need nodejs_als for AsyncLocalStorage (isomorphic fetch context threading)
   const existingFlags = (workerConfig.compatibility_flags as string[] | undefined) ?? [];
-  if (!existingFlags.includes("nodejs_als") && !existingFlags.includes("nodejs_compat")) {
+  const needsNodejsCompat = getDatabaseDialect(config) === "postgresql";
+  if (needsNodejsCompat && !existingFlags.includes("nodejs_compat")) {
+    workerConfig.compatibility_flags = [
+      ...existingFlags.filter((f) => f !== "nodejs_als"),
+      "nodejs_compat",
+    ];
+  } else if (!existingFlags.includes("nodejs_als") && !existingFlags.includes("nodejs_compat")) {
     workerConfig.compatibility_flags = [...existingFlags, "nodejs_als"];
   }
 
@@ -790,8 +825,8 @@ export function voidPlugin(options?: {
     envPlugin,
     clientStubsPlugin,
     routingPlugin(root, { getAuth: () => authProviders, headConfig: config.head, remoteMode }),
-    drizzlePlugin(root, true),
-    migrationPlugin(root),
+    drizzlePlugin(root, true, getDatabaseDialect(config)),
+    migrationPlugin(root, getDatabaseDialect(config)),
     prerenderPlugin(root, config),
     ...cloudflare({
       ...inspectorPortOption,

@@ -233,3 +233,25 @@ Curated Cloudflare Workers configuration. Binding arrays (`d1_databases`, `kv_na
   }
 }
 ```
+
+### `database`
+
+Database backend. Omit for D1/SQLite (default). Set to `"pg"` for PostgreSQL via Hyperdrive.
+
+```json
+{
+  "database": "pg"
+}
+```
+
+| Value       | Description                                           |
+| ----------- | ----------------------------------------------------- |
+| _(omitted)_ | D1 (SQLite) — fully managed by Void, no config needed |
+| `"pg"`      | PostgreSQL via Hyperdrive — bring your own database   |
+
+When using `"pg"`:
+
+- Add `DATABASE_URL` to `.env.local` for local development
+- Import schema helpers from `void/schema-pg` instead of `void/schema-d1`
+- `void/db` connects via Hyperdrive in production, direct connection locally
+- `void gen model` generates `pgTable` with `serial`, `timestamp`, etc.

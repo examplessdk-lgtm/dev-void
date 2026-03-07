@@ -27,4 +27,26 @@ describe("writeDrizzleConfig", () => {
     expect(config.out).toBe("./db/migrations");
     expect(config.dbCredentials.url).toBe("/tmp/test.sqlite");
   });
+
+  it("generates SQLite config by default", () => {
+    const configPath = writeDrizzleConfig(root, "/tmp/test.sqlite");
+    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(config.dialect).toBe("sqlite");
+  });
+
+  it("generates PostgreSQL config", () => {
+    const configPath = writeDrizzleConfig(root, "postgresql://localhost/test", "postgresql");
+    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(config.dialect).toBe("postgresql");
+    expect(config.schema).toBe("./db/schema.ts");
+    expect(config.out).toBe("./db/migrations");
+    expect(config.dbCredentials.url).toBe("postgresql://localhost/test");
+  });
+
+  it("generates SQLite config with explicit dialect", () => {
+    const configPath = writeDrizzleConfig(root, "/tmp/test.sqlite", "sqlite");
+    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(config.dialect).toBe("sqlite");
+    expect(config.dbCredentials.url).toBe("/tmp/test.sqlite");
+  });
 });

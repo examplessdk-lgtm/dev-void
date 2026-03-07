@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readConfig, getDatabaseDialect } from "./config";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
@@ -205,7 +206,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           if (migrations.length > 0) {
             compileOptions.migrationHandlerPath = resolveFile("void/runtime/migration-handler");
             compileOptions.migrations = migrations;
-            compileOptions.migrationDialect = "sqlite";
+            compileOptions.migrationDialect = getDatabaseDialect(readConfig(root));
           }
         }
       }

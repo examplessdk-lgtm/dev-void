@@ -29,7 +29,13 @@ import { validateSsrEntry } from "../ssr/entry";
 import { scanPages } from "../pages/scan";
 import { collectPrerenderPaths } from "../prerender-paths";
 import { detectPreset, FRAMEWORK_PRESETS, type StaticPreset, type FrameworkPreset } from "./preset";
-import { readConfig, resolveBindingNames, type AuthProvider, type VoidConfig } from "../config";
+import {
+  readConfig,
+  resolveBindingNames,
+  type AuthProvider,
+  type VoidConfig,
+  getDatabaseDialect,
+} from "../config";
 import { readWranglerCompat } from "./wrangler";
 import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from "./wrapper";
 import type { WrapperFeatures } from "./wrapper";
@@ -285,6 +291,7 @@ async function runStaticDeploy(
     headerRules,
     redirectRules,
   );
+  if (neededSet) formData.append("assetManifest", JSON.stringify(assetManifest));
   formData.append("source", getTokenSource());
   if (commit) formData.append("commit", commit);
 
@@ -315,6 +322,8 @@ async function runFrameworkDeploy(
   commit?: string | null,
 ): Promise<void> {
   log.info(`${detected.name} framework deploy`);
+
+  const dialect = getDatabaseDialect(voidConfig);
 
   // 1. Build
   if (!skipBuild) {
@@ -351,6 +360,34 @@ async function runFrameworkDeploy(
   const scanDirs = voidConfig.inference?.scanDirs ?? FRAMEWORK_SCAN_DIRS;
   const bindings = inferProjectBindings(root, inferenceOptions, scanDirs);
 
+  // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects
+  if (dialect === "postgresql" && bindings.needsD1) {
+    try {
+      const resources = await client.getResources(config.projectId);
+      const hasHyperdrive = resources.some((r: any) => r.type === "hyperdrive");
+      if (!hasHyperdrive) {
+        const { text: promptText, isCancel: isCancelPrompt } = await import("@clack/prompts");
+        const connectionString = await promptText({
+          message: "Your project uses PostgreSQL. Enter your connection string:",
+          placeholder: "postgresql://user:pass@host:5432/dbname",
+          validate(value) {
+            if (!value?.startsWith("postgres://") && !value?.startsWith("postgresql://")) {
+              return 'Must start with "postgres://" or "postgresql://"';
+            }
+          },
+        });
+        if (isCancelPrompt(connectionString)) {
+          log.info("Deploy cancelled.");
+          process.exit(0);
+        }
+        await client.provisionDatabase(config.projectId, connectionString as string);
+        log.success("Hyperdrive provisioned.");
+      }
+    } catch {
+      // Resources endpoint not available
+    }
+  }
+
   // Check for Drizzle schema drift
   const { discoverSchema: discoverDrizzleSchema } = await import("../drizzle/discover");
   const drizzleSchema = discoverDrizzleSchema(root);
@@ -359,7 +396,11 @@ async function runFrameworkDeploy(
     const { writeDrizzleConfig } = await import("../drizzle/config");
 
     try {
-      const driftConfigPath = writeDrizzleConfig(root, ":memory:");
+      const driftConfigPath = writeDrizzleConfig(
+        root,
+        dialect === "postgresql" ? "postgresql://dummy" : ":memory:",
+        dialect,
+      );
       execSyncDrift(`node ${drizzleKitBin} generate --config ${driftConfigPath}`, {
         cwd: root,
         stdio: "pipe",
@@ -509,7 +550,9 @@ async function runFrameworkDeploy(
     hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? "assets",
     headerRules,
     redirectRules,
+    dialect,
   });
+  if (neededSet) formData.append("assetManifest", JSON.stringify(assetManifest));
   formData.append("source", getTokenSource());
   if (commit) formData.append("commit", commit);
 
@@ -596,9 +639,38 @@ async function runFullDeploy(
 
   // 6. Infer bindings (expanded scan dirs in framework mode, or custom from config)
   const deployConfig = readConfig(root);
+  const dialect = getDatabaseDialect(deployConfig);
   const deployScanDirs =
     deployConfig.inference?.scanDirs ?? (isFrameworkMode ? FRAMEWORK_SCAN_DIRS : undefined);
   const bindings = inferProjectBindings(root, undefined, deployScanDirs);
+
+  // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects
+  if (dialect === "postgresql" && bindings.needsD1) {
+    try {
+      const resources = await client.getResources(config.projectId);
+      const hasHyperdrive = resources.some((r: any) => r.type === "hyperdrive");
+      if (!hasHyperdrive) {
+        const { text: promptText, isCancel: isCancelPrompt } = await import("@clack/prompts");
+        const connectionString = await promptText({
+          message: "Your project uses PostgreSQL. Enter your connection string:",
+          placeholder: "postgresql://user:pass@host:5432/dbname",
+          validate(value) {
+            if (!value?.startsWith("postgres://") && !value?.startsWith("postgresql://")) {
+              return 'Must start with "postgres://" or "postgresql://"';
+            }
+          },
+        });
+        if (isCancelPrompt(connectionString)) {
+          log.info("Deploy cancelled.");
+          process.exit(0);
+        }
+        await client.provisionDatabase(config.projectId, connectionString as string);
+        log.success("Hyperdrive provisioned.");
+      }
+    } catch {
+      // Resources endpoint not available — Hyperdrive will be checked at deploy time
+    }
+  }
 
   // Collect header rules: parse user/framework _headers file + void.json config
   const clientDir = join(distDir, "client");
@@ -619,7 +691,11 @@ async function runFullDeploy(
     const { writeDrizzleConfig } = await import("../drizzle/config");
 
     try {
-      const driftConfigPath = writeDrizzleConfig(root, ":memory:");
+      const driftConfigPath = writeDrizzleConfig(
+        root,
+        dialect === "postgresql" ? "postgresql://dummy" : ":memory:",
+        dialect,
+      );
       execSyncDrift(`node ${drizzleKitBin} generate --config ${driftConfigPath}`, {
         cwd: root,
         stdio: "pipe",
@@ -801,7 +877,9 @@ async function runFullDeploy(
     assetsPrefix,
     headerRules,
     redirectRules,
+    dialect,
   );
+  if (neededSet) formData.append("assetManifest", JSON.stringify(assetManifest));
   formData.append("source", getTokenSource());
   if (commit) formData.append("commit", commit);
 

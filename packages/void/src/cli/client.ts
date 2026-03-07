@@ -379,6 +379,57 @@ export class PlatformClient {
     return res.json();
   }
 
+  async getResources(projectId: string): Promise<{ type: string; binding_name: string }[]> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/resources`, {
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+      },
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Failed to get resources: ${res.status} ${body}`);
+    }
+
+    return res.json();
+  }
+
+  async provisionDatabase(projectId: string, connectionString: string): Promise<{ ok: boolean }> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/database`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({ connectionString }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Failed to provision database: ${res.status} ${body}`);
+    }
+
+    return res.json();
+  }
+
+  async setDatabaseUrl(projectId: string, connectionString: string): Promise<{ ok: boolean }> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/database-url`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({ connectionString }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Failed to update database URL: ${res.status} ${body}`);
+    }
+
+    return res.json();
+  }
+
   async getLogs(
     projectId: string,
     since: string,

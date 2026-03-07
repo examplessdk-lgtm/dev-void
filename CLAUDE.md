@@ -155,6 +155,7 @@ Local apps for testing features end-to-end. Run scripts with `pnpm -C playground
 | [`solid-pages`](./playground/solid-pages)                 | SolidJS Pages mode — companion `.server.ts` files, Inertia protocol, SSR, layouts, `useForm`          |
 | [`tanstack-start`](./playground/tanstack-start/README.md) | TanStack Start meta-framework — server functions, D1 queries, SSR via TanStack                        |
 | [`node-app`](./playground/node-app)                       | Node.js target — Hono API routes without CF bindings, `@hono/node-server` for production              |
+| [`pg-test`](./playground/pg-test)                         | React Pages mode — PostgreSQL via Hyperdrive, Drizzle ORM CRUD, `useForm`                             |
 
 `playground-local/` is gitignored and used for ad-hoc local testing apps that are not part of the codebase.
 

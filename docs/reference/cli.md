@@ -175,7 +175,7 @@ Drop the local D1 database and re-apply all migrations. Does not affect the remo
 void db seed [--file <path>]
 ```
 
-Reset the local database, re-apply all migrations, then execute a seed file. Defaults to `migrations/seed.sql`. The seed file is excluded from migration collection — it's never deployed or applied as a migration.
+Reset the local database, re-apply all migrations, then execute a seed file. Defaults to `db/seed.sql`.
 
 ### `void db execute`
 
@@ -196,7 +196,13 @@ Apply pending migrations to the local database without resetting. Unlike `void d
 
 ### `void db studio`
 
-Open [Drizzle Studio](https://orm.drizzle.team/docs/drizzle-kit-studio) for the local D1 database. Launches a web-based GUI for browsing and editing your data.
+Open [Drizzle Studio](https://orm.drizzle.team/docs/drizzle-kit-studio) for the local database. Launches a web-based GUI for browsing and editing your data.
+
+### `void db set-url`
+
+Update the PostgreSQL connection string for deployment. Only available for projects with `database.dialect: "postgresql"`.
+
+Prompts for a connection string and sends it to the platform API to create or update the Hyperdrive configuration.
 
 ### `void db export`
 

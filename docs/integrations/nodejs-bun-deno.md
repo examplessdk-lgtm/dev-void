@@ -115,7 +115,7 @@ The following imports are **not available** with a non-CF target and produce a c
 | `void/ai`      | Workers AI               |
 | `void/env`     | CF env type augmentation |
 
-If you need a database or storage, use an external provider and connect via standard Node.js libraries. See [ORMs and External Databases](./orms-and-external-dbs.md) for guidance on Drizzle, Kysely, and PostgreSQL.
+If you need a database or storage, use an external provider and connect via standard Node.js libraries.
 
 ### No cron job runtime
 

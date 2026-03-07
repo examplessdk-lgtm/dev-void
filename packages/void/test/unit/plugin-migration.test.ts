@@ -38,7 +38,7 @@ async function runConfigureServer(plugin: ReturnType<typeof migrationPlugin>) {
 describe("migrationPlugin persistence roots", () => {
   it("uses .void by default", async () => {
     const root = createProjectRoot();
-    const plugin = migrationPlugin(root);
+    const plugin = migrationPlugin(root, "sqlite");
 
     await runConfigureServer(plugin);
 
@@ -49,7 +49,7 @@ describe("migrationPlugin persistence roots", () => {
   it("supports custom persist root for framework mode", async () => {
     const root = createProjectRoot();
     const persistRoot = join(root, ".wrangler", "state");
-    const plugin = migrationPlugin(root, "local", persistRoot);
+    const plugin = migrationPlugin(root, "sqlite", "local", persistRoot);
 
     await runConfigureServer(plugin);
 

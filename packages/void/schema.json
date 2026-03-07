@@ -232,6 +232,11 @@
         }
       },
       "additionalProperties": false
+    },
+    "database": {
+      "type": "string",
+      "enum": ["pg"],
+      "description": "Database backend. Omit for D1 (SQLite, default). Set to \"pg\" for PostgreSQL via Hyperdrive."
     }
   },
   "additionalProperties": false

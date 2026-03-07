@@ -108,12 +108,19 @@ export function packageBuild(
   hashedAssetsPrefix?: string,
   headerRules?: HeaderRule[],
   redirectRules?: RedirectRule[],
+  dialect?: "sqlite" | "postgresql",
 ): FormData {
   const formData = new FormData();
 
   // Build manifest from inferred bindings
   const manifest: DeployManifest = { version: 3, bindings: {} };
-  if (bindings.needsD1) manifest.bindings.d1 = [options?.bindingNames?.d1 ?? "DB"];
+  if (bindings.needsD1) {
+    if (dialect === "postgresql") {
+      manifest.bindings.hyperdrive = ["HYPERDRIVE"];
+    } else {
+      manifest.bindings.d1 = [options?.bindingNames?.d1 ?? "DB"];
+    }
+  }
   if (bindings.needsKV) manifest.bindings.kv = [options?.bindingNames?.kv ?? "KV"];
   if (bindings.needsR2) manifest.bindings.r2 = [options?.bindingNames?.r2 ?? "STORAGE"];
   if (bindings.needsAI) manifest.bindings.ai = true;
@@ -125,7 +132,7 @@ export function packageBuild(
   // Add migration metadata to manifest + SQL content as FormData entries
   if (migrations && migrations.length > 0) {
     manifest.migrations = {
-      dialect: "sqlite",
+      dialect: dialect ?? "sqlite",
       pending: migrations.length,
     };
     for (const m of migrations) {
@@ -295,13 +302,20 @@ export function packageFrameworkBuild(opts: {
   hashedAssetsPrefix?: string;
   headerRules?: HeaderRule[];
   redirectRules?: RedirectRule[];
+  dialect?: "sqlite" | "postgresql";
 }): FormData {
   const formData = new FormData();
   const po = opts.packageOptions;
 
   // Build manifest
   const manifest: DeployManifest = { version: 3, bindings: {} };
-  if (opts.bindings.needsD1) manifest.bindings.d1 = [po?.bindingNames?.d1 ?? "DB"];
+  if (opts.bindings.needsD1) {
+    if (opts.dialect === "postgresql") {
+      manifest.bindings.hyperdrive = ["HYPERDRIVE"];
+    } else {
+      manifest.bindings.d1 = [po?.bindingNames?.d1 ?? "DB"];
+    }
+  }
   if (opts.bindings.needsKV) manifest.bindings.kv = [po?.bindingNames?.kv ?? "KV"];
   if (opts.bindings.needsR2) manifest.bindings.r2 = [po?.bindingNames?.r2 ?? "STORAGE"];
   if (opts.bindings.needsAI) manifest.bindings.ai = true;
@@ -312,7 +326,7 @@ export function packageFrameworkBuild(opts: {
 
   if (opts.migrations && opts.migrations.length > 0) {
     manifest.migrations = {
-      dialect: "sqlite",
+      dialect: opts.dialect ?? "sqlite",
       pending: opts.migrations.length,
     };
     for (const m of opts.migrations) {

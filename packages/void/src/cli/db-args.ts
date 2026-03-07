@@ -14,6 +14,7 @@ export const dbSubcommands: SubcommandDef[] = [
   { name: "execute", arg: "<sql>", description: "Run SQL against the local database" },
   { name: "migrate", description: "Apply pending migrations locally" },
   { name: "studio", description: "Open Drizzle Studio for the local database" },
+  { name: "set-url", description: "Update the PostgreSQL connection string for deployment" },
   {
     name: "export",
     description: "Export local database as SQL",
@@ -35,7 +36,8 @@ export type DbArgs =
   | { action: "execute"; command?: string; file?: string }
   | { action: "migrate" }
   | { action: "studio" }
-  | { action: "export"; output?: string; noData?: boolean; noSchema?: boolean; table?: string };
+  | { action: "export"; output?: string; noData?: boolean; noSchema?: boolean; table?: string }
+  | { action: "set-url" };
 
 export function parseDbArgs(args: string[]): DbArgs {
   const parsed = parseArgs({
@@ -118,6 +120,13 @@ export function parseDbArgs(args: string[]): DbArgs {
     return { action };
   }
 
+  if (action === "set-url") {
+    if (rest.length > 0) {
+      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+    }
+    return { action };
+  }
+
   if (action === "export") {
     if (rest.length > 0) {
       throw new Error(`Error: Unexpected argument: ${rest[0]}`);
@@ -130,6 +139,6 @@ export function parseDbArgs(args: string[]): DbArgs {
   }
 
   throw new Error(
-    "Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export>",
+    "Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url>",
   );
 }

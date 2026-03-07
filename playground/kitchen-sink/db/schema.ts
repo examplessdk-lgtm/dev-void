@@ -1,4 +1,4 @@
-import { sqliteTable, integer, text } from "void/schema-helpers";
+import { sqliteTable, integer, text } from "void/schema-d1";
 import { sql } from "void/db";
 
 export const notes = sqliteTable("notes", {

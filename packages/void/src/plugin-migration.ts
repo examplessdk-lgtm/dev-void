@@ -1,15 +1,40 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Plugin } from "vite";
+import type { DatabaseDialect } from "./config";
 import { voidLog, voidError } from "./log";
 
+function readDatabaseUrl(root: string): string | undefined {
+  const envPath = join(root, ".env.local");
+  if (!existsSync(envPath)) return undefined;
+  const content = readFileSync(envPath, "utf-8");
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIndex = trimmed.indexOf("=");
+    if (eqIndex === -1) continue;
+    const key = trimmed.slice(0, eqIndex).trim();
+    if (key !== "DATABASE_URL") continue;
+    let value = trimmed.slice(eqIndex + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    return value;
+  }
+  return undefined;
+}
+
 /**
- * Vite plugin that runs local D1 migrations on dev server startup.
- * Applies unapplied .sql files from the migrations/ directory
- * to the local SQLite database used by miniflare.
+ * Vite plugin that runs local migrations on dev server startup.
+ * For SQLite/D1: applies migrations to the local miniflare database.
+ * For PostgreSQL: connects via DATABASE_URL from .env.local.
  */
 export function migrationPlugin(
   root: string,
+  dialect: DatabaseDialect,
   databaseId = "local",
   persistRoot = join(root, ".void"),
 ): Plugin {
@@ -17,16 +42,38 @@ export function migrationPlugin(
     name: "void:migrations",
     apply: "serve",
 
-    async configureServer() {
+    async configureServer(server) {
       const migrationsDir = join(root, "db", "migrations");
       if (!existsSync(migrationsDir)) return;
 
       try {
-        const { runMigrations, getMiniflareDatabasePath } = await import("./migrations/runner");
-        const dbPath = getMiniflareDatabasePath(persistRoot, databaseId);
-        const applied = await runMigrations(migrationsDir, dbPath);
-        if (applied.length > 0) {
-          voidLog(`Applied ${applied.length} migration(s): ${applied.join(", ")}`);
+        if (dialect === "postgresql") {
+          const url = readDatabaseUrl(root);
+          if (!url) {
+            // Defer warning until after Vite prints "ready" so it's visible.
+            const warn = () => {
+              console.log();
+              voidError("DATABASE_URL not found in .env.local — skipping PostgreSQL migrations.");
+            };
+            if (server.httpServer) {
+              server.httpServer.once("listening", () => setTimeout(warn, 100));
+            } else {
+              warn();
+            }
+            return;
+          }
+          const { runPgMigrations } = await import("./migrations/runner-pg");
+          const applied = await runPgMigrations(migrationsDir, url);
+          if (applied.length > 0) {
+            voidLog(`Applied ${applied.length} migration(s): ${applied.join(", ")}`);
+          }
+        } else {
+          const { runMigrations, getMiniflareDatabasePath } = await import("./migrations/runner");
+          const dbPath = getMiniflareDatabasePath(persistRoot, databaseId);
+          const applied = await runMigrations(migrationsDir, dbPath);
+          if (applied.length > 0) {
+            voidLog(`Applied ${applied.length} migration(s): ${applied.join(", ")}`);
+          }
         }
       } catch (err) {
         voidError(`Migration error: ${err}`);

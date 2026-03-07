@@ -1,0 +1,65 @@
+import { collectMigrations } from "./collect";
+
+/**
+ * Minimal client interface satisfied by both pg.Client and PGlite.
+ */
+export interface PgClient {
+  query(text: string, params?: unknown[]): Promise<{ rows: any[] }>;
+}
+
+/**
+ * Apply unapplied SQL migrations via a connected PostgreSQL client.
+ * Each migration runs in its own transaction (BEGIN/COMMIT).
+ */
+export async function applyPgMigrations(
+  client: PgClient,
+  migrations: { name: string; sql: string }[],
+): Promise<string[]> {
+  if (migrations.length === 0) return [];
+
+  await client.query(
+    `CREATE TABLE IF NOT EXISTS _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
+  );
+
+  const existing = await client.query("SELECT name FROM _void_migrations");
+  const appliedSet = new Set(existing.rows.map((r: any) => r.name));
+
+  const pending = migrations.filter((m) => !appliedSet.has(m.name));
+  if (pending.length === 0) return [];
+
+  for (const m of pending) {
+    await client.query("BEGIN");
+    try {
+      await client.query(m.sql);
+      await client.query("INSERT INTO _void_migrations (name, applied_at) VALUES ($1, $2)", [
+        m.name,
+        new Date().toISOString(),
+      ]);
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    }
+  }
+
+  return pending.map((m) => m.name);
+}
+
+/**
+ * Apply unapplied SQL migrations to a PostgreSQL database.
+ * Each migration runs in its own transaction (BEGIN/COMMIT).
+ */
+export async function runPgMigrations(migrationsDir: string, url: string): Promise<string[]> {
+  const allMigrations = collectMigrations(migrationsDir);
+  if (allMigrations.length === 0) return [];
+
+  const { Client } = await import("pg");
+  const client = new Client({ connectionString: url });
+  await client.connect();
+
+  try {
+    return await applyPgMigrations(client, allMigrations);
+  } finally {
+    await client.end();
+  }
+}

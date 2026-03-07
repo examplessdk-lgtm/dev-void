@@ -11,6 +11,8 @@ import { voidWarn } from "./log";
 const drizzleD1Resolved = fileURLToPath(import.meta.resolve("drizzle-orm/d1"));
 const drizzleOrmResolved = fileURLToPath(import.meta.resolve("drizzle-orm"));
 const envModuleResolved = fileURLToPath(import.meta.resolve("void/_env"));
+const drizzleNodePgResolved = fileURLToPath(import.meta.resolve("drizzle-orm/node-postgres"));
+const pgResolved = fileURLToPath(import.meta.resolve("pg"));
 
 const VIRTUAL_DB_ID = "\0virtual:void-db";
 
@@ -23,7 +25,11 @@ const VIRTUAL_DB_ID = "\0virtual:void-db";
  * - Sets up `@schema` Vite alias for convenient imports.
  * - Updates `.void/tsconfig.json` with TypeScript paths.
  */
-export function drizzlePlugin(root: string, hasRouteTypes: boolean): Plugin {
+export function drizzlePlugin(
+  root: string,
+  hasRouteTypes: boolean,
+  dialect: "sqlite" | "postgresql" = "sqlite",
+): Plugin {
   const outDir = join(root, ".void");
   const schema = discoverSchema(root);
 
@@ -32,14 +38,17 @@ export function drizzlePlugin(root: string, hasRouteTypes: boolean): Plugin {
 
   // Generate db.d.ts if schema exists
   if (schema) {
-    generateDbDts(outDir, schema);
+    generateDbDts(outDir, schema, dialect);
   }
+
+  let isBuild = false;
 
   return {
     name: "void:drizzle",
     enforce: "pre",
 
-    config() {
+    config(_, env) {
+      isBuild = env.command === "build";
       if (!schema) return;
 
       return {
@@ -52,8 +61,14 @@ export function drizzlePlugin(root: string, hasRouteTypes: boolean): Plugin {
     },
 
     resolveId: {
-      filter: { id: /^(void\/db|@schema)/ },
+      filter: { id: /^(void\/db|@schema|pg$)/ },
       handler(id, importer) {
+        // Resolve pg from void's own deps during build so PG projects
+        // don't need pg as a direct dependency.
+        if (id === "pg" && isBuild && dialect === "postgresql" && importer === VIRTUAL_DB_ID) {
+          return pgResolved;
+        }
+
         // Only intercept void/db in server/worker environments (not client)
         if (id === "void/db" && this.environment?.name !== "client") {
           if (!schema) return; // Fall through to the real module (stub)
@@ -78,11 +93,53 @@ export function drizzlePlugin(root: string, hasRouteTypes: boolean): Plugin {
 
     load: {
       filter: { id: /^\0virtual:void-db$/ },
-      handler() {
+      handler(id) {
+        // void/db virtual module
         const schemaImport = JSON.stringify(schema!.path);
 
-        // Use absolute paths for drizzle-orm imports so they resolve in any
-        // project context (metaframeworks where drizzle-orm isn't a direct dep).
+        if (dialect === "postgresql") {
+          return `
+import { drizzle } from ${JSON.stringify(drizzleNodePgResolved)};
+import pg from "pg";
+import { getRuntimeBinding } from ${JSON.stringify(envModuleResolved)};
+import * as schema from ${schemaImport};
+export { sql, eq, ne, gt, gte, lt, lte, and, or, not, desc, asc, like, ilike, notLike, inArray, notInArray, isNull, isNotNull, between, notBetween, exists, notExists, count, sum, avg, min, max } from ${JSON.stringify(drizzleOrmResolved)};
+
+let _prodInstance;
+
+function getConnectionString() {
+  const url = getRuntimeBinding("DATABASE_URL");
+  if (url) return url;
+  const hd = getRuntimeBinding("HYPERDRIVE");
+  if (hd?.connectionString) return hd.connectionString;
+  throw new Error("PostgreSQL not configured. Add DATABASE_URL to .env.local for local dev, or configure Hyperdrive for production.");
+}
+
+function getInstance() {
+  // Local dev (DATABASE_URL): create a fresh Pool per query chain.
+  // workerd kills TCP sockets between requests, so pg.Pool's cached
+  // connections go stale and hang. Fresh Pool = fresh connection every time.
+  if (getRuntimeBinding("DATABASE_URL")) {
+    return drizzle(new pg.Pool({ connectionString: getRuntimeBinding("DATABASE_URL"), max: 1 }), { schema });
+  }
+  // Production (Hyperdrive): cache the instance — Hyperdrive handles pooling.
+  _prodInstance ??= drizzle(getConnectionString(), { schema });
+  return _prodInstance;
+}
+
+export const db = new Proxy({}, {
+  get(_, prop) {
+    return Reflect.get(getInstance(), prop);
+  },
+});
+
+export function createDb(connectionString) {
+  return drizzle(connectionString, { schema });
+}
+`;
+        }
+
+        // SQLite (default) — existing code
         return `
 import { drizzle } from ${JSON.stringify(drizzleD1Resolved)};
 import { requireRuntimeBinding } from ${JSON.stringify(envModuleResolved)};
@@ -125,7 +182,7 @@ export function createDb(d1) {
       const watchPath = schema.path;
       const regenerate = (path: string) => {
         if (path === watchPath || (schema.type === "directory" && path.startsWith(watchPath))) {
-          generateDbDts(outDir, schema);
+          generateDbDts(outDir, schema, dialect);
         }
       };
       server.watcher.on("change", regenerate);
@@ -143,23 +200,42 @@ export function createDb(d1) {
  * intentional — the old QueryClient types are gone and the new types
  * should reference the user's specific schema.
  */
-function generateDbDts(outDir: string, _schema: SchemaLocation): void {
+function generateDbDts(
+  outDir: string,
+  _schema: SchemaLocation,
+  dialect: "sqlite" | "postgresql",
+): void {
   mkdirSync(outDir, { recursive: true });
 
-  const lines = [
-    "// Auto-generated by void — do not edit",
-    '/// <reference types="@cloudflare/workers-types" />',
-    'declare module "void/db" {',
-    '  import type { DrizzleD1Database } from "void/db";',
-    '  import type * as schema from "@schema";',
-    "  type Schema = typeof schema;",
-    "  export const db: DrizzleD1Database<Schema>;",
-    "  export function createDb(d1: D1Database): DrizzleD1Database<Schema>;",
-    '  export { sql, eq, ne, gt, gte, lt, lte, and, or, not, desc, asc, like, ilike, notLike, inArray, notInArray, isNull, isNotNull, between, notBetween, exists, notExists, count, sum, avg, min, max } from "drizzle-orm";',
-    '  export type { DrizzleD1Database } from "drizzle-orm/d1";',
-    "}",
-    "",
-  ];
+  const lines =
+    dialect === "postgresql"
+      ? [
+          "// Auto-generated by void — do not edit",
+          'declare module "void/db" {',
+          '  import type { NodePgDatabase } from "drizzle-orm/node-postgres";',
+          '  import type * as schema from "@schema";',
+          "  type Schema = typeof schema;",
+          "  export const db: NodePgDatabase<Schema>;",
+          "  export function createDb(connectionString: string): NodePgDatabase<Schema>;",
+          '  export { sql, eq, ne, gt, gte, lt, lte, and, or, not, desc, asc, like, ilike, notLike, inArray, notInArray, isNull, isNotNull, between, notBetween, exists, notExists, count, sum, avg, min, max } from "drizzle-orm";',
+          '  export type { NodePgDatabase } from "drizzle-orm/node-postgres";',
+          "}",
+          "",
+        ]
+      : [
+          "// Auto-generated by void — do not edit",
+          '/// <reference types="@cloudflare/workers-types" />',
+          'declare module "void/db" {',
+          '  import type { DrizzleD1Database } from "void/db";',
+          '  import type * as schema from "@schema";',
+          "  type Schema = typeof schema;",
+          "  export const db: DrizzleD1Database<Schema>;",
+          "  export function createDb(d1: D1Database): DrizzleD1Database<Schema>;",
+          '  export { sql, eq, ne, gt, gte, lt, lte, and, or, not, desc, asc, like, ilike, notLike, inArray, notInArray, isNull, isNotNull, between, notBetween, exists, notExists, count, sum, avg, min, max } from "drizzle-orm";',
+          '  export type { DrizzleD1Database } from "drizzle-orm/d1";',
+          "}",
+          "",
+        ];
 
   writeFileSync(join(outDir, "db.d.ts"), lines.join("\n"));
 }

@@ -4,6 +4,7 @@ import { intro, outro, log, select, isCancel, cancel } from "@clack/prompts";
 import type { GenArgs } from "./gen-args";
 import { ensureProjectTsconfig } from "../codegen/project-tsconfig";
 import { cliTitle } from "./output";
+import { readConfig, getDatabaseDialect } from "../config";
 
 export async function runGenCommand(root: string, args: GenArgs): Promise<void> {
   console.log();
@@ -114,6 +115,47 @@ function drizzleImportsForColumns(columns: ColumnSpec[]): string[] {
         break;
       case "real":
         types.add("real");
+        break;
+      default:
+        types.add("text");
+    }
+  }
+  return [...types].sort();
+}
+
+function drizzleColumnDefPg(col: ColumnSpec): string {
+  const { name, type } = col;
+  switch (type) {
+    case "string":
+    case "text":
+      return `  ${name}: text("${name}").notNull(),`;
+    case "integer":
+      return `  ${name}: integer("${name}").notNull(),`;
+    case "boolean":
+      return `  ${name}: boolean("${name}").notNull().default(false),`;
+    case "real":
+      return `  ${name}: doublePrecision("${name}").notNull(),`;
+    default:
+      return `  ${name}: text("${name}"),`;
+  }
+}
+
+function drizzleImportsForColumnsPg(columns: ColumnSpec[]): string[] {
+  const types = new Set<string>(["text", "serial", "timestamp"]);
+  for (const col of columns) {
+    switch (col.type) {
+      case "string":
+      case "text":
+        types.add("text");
+        break;
+      case "integer":
+        types.add("integer");
+        break;
+      case "boolean":
+        types.add("boolean");
+        break;
+      case "real":
+        types.add("doublePrecision");
         break;
       default:
         types.add("text");
@@ -397,29 +439,52 @@ export const GET = defineHandler.withValidator({
 async function runModel(root: string, name: string, columns: ColumnSpec[]): Promise<void> {
   const validator = await resolveValidator(root);
 
+  const dialect = getDatabaseDialect(readConfig(root));
+
   const schemaDir = join(root, "db", "schema");
   const barrelPath = join(root, "db", "schema.ts");
   const modelPath = join(schemaDir, `${name}.ts`);
 
   // 1. Generate Drizzle table definition
-  const colDefs = columns.map((col) => drizzleColumnDef(col));
-  const columnImports = drizzleImportsForColumns(columns);
-  const allCols = [
-    `  id: integer("id").primaryKey({ autoIncrement: true }),`,
-    ...colDefs,
-    "  createdAt: text(\"created_at\").notNull().default(sql`(datetime('now'))`),",
-    "  updatedAt: text(\"updated_at\").notNull().default(sql`(datetime('now'))`),",
-  ];
+  let content: string;
+  if (dialect === "postgresql") {
+    const colDefs = columns.map((col) => drizzleColumnDefPg(col));
+    const columnImports = drizzleImportsForColumnsPg(columns);
+    const allCols = [
+      `  id: serial("id").primaryKey(),`,
+      ...colDefs,
+      `  createdAt: timestamp("created_at").notNull().defaultNow(),`,
+      `  updatedAt: timestamp("updated_at").notNull().defaultNow(),`,
+    ];
 
-  const content = [
-    `import { sqliteTable, ${columnImports.join(", ")} } from "void/schema-helpers";`,
-    `import { sql } from "void/db";`,
-    "",
-    `export const ${name} = sqliteTable("${name}", {`,
-    ...allCols,
-    "});",
-    "",
-  ].join("\n");
+    content = [
+      `import { pgTable, ${columnImports.join(", ")} } from "void/schema-pg";`,
+      "",
+      `export const ${name} = pgTable("${name}", {`,
+      ...allCols,
+      "});",
+      "",
+    ].join("\n");
+  } else {
+    const colDefs = columns.map((col) => drizzleColumnDef(col));
+    const columnImports = drizzleImportsForColumns(columns);
+    const allCols = [
+      `  id: integer("id").primaryKey({ autoIncrement: true }),`,
+      ...colDefs,
+      "  createdAt: text(\"created_at\").notNull().default(sql`(datetime('now'))`),",
+      "  updatedAt: text(\"updated_at\").notNull().default(sql`(datetime('now'))`),",
+    ];
+
+    content = [
+      `import { sqliteTable, ${columnImports.join(", ")} } from "void/schema-d1";`,
+      `import { sql } from "void/db";`,
+      "",
+      `export const ${name} = sqliteTable("${name}", {`,
+      ...allCols,
+      "});",
+      "",
+    ].join("\n");
+  }
 
   // Write the model file
   mkdirSync(schemaDir, { recursive: true });

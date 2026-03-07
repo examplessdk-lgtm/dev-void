@@ -48,7 +48,7 @@ describe("gen model", () => {
     });
 
     const schema = read("db/schema/posts.ts");
-    expect(schema).toContain('from "void/schema-helpers"');
+    expect(schema).toContain('from "void/schema-d1"');
     expect(schema).toContain("import { sqliteTable");
     expect(schema).toContain('export const posts = sqliteTable("posts"');
     expect(schema).toContain('id: integer("id").primaryKey({ autoIncrement: true })');
@@ -655,5 +655,83 @@ describe("gen queue", () => {
     await runGenCommand(TMP, { subcommand: "queue", name: "emails" });
 
     expect(read("queues/emails.ts")).toBe("// existing");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// gen model (postgresql)
+// ---------------------------------------------------------------------------
+
+describe("gen model (postgresql)", () => {
+  it("generates pgTable definition", async () => {
+    writePkg({ valibot: "^1.0.0" });
+    writeFileSync(join(TMP, "void.json"), JSON.stringify({ database: "pg" }));
+
+    await runGenCommand(TMP, {
+      subcommand: "model",
+      name: "posts",
+      columns: [
+        { name: "title", type: "string", nullable: false },
+        { name: "views", type: "integer", nullable: false },
+      ],
+    });
+
+    const schema = read("db/schema/posts.ts");
+    expect(schema).toContain("pgTable");
+    expect(schema).toContain('serial("id").primaryKey()');
+    expect(schema).toContain('timestamp("created_at").notNull().defaultNow()');
+    expect(schema).toContain('text("title").notNull()');
+    expect(schema).toContain('integer("views").notNull()');
+    // Should NOT contain SQLite-specific things
+    expect(schema).not.toContain("sqliteTable");
+    expect(schema).not.toContain("import { sql }");
+  });
+
+  it("generates boolean and real as pg types", async () => {
+    writePkg({ valibot: "^1.0.0" });
+    writeFileSync(join(TMP, "void.json"), JSON.stringify({ database: "pg" }));
+
+    await runGenCommand(TMP, {
+      subcommand: "model",
+      name: "items",
+      columns: [
+        { name: "active", type: "boolean", nullable: false },
+        { name: "price", type: "real", nullable: false },
+      ],
+    });
+
+    const schema = read("db/schema/items.ts");
+    expect(schema).toContain('boolean("active")');
+    expect(schema).toContain('doublePrecision("price")');
+  });
+
+  it("generates routes with correct imports for pg model", async () => {
+    writePkg({ valibot: "^1.0.0" });
+    writeFileSync(join(TMP, "void.json"), JSON.stringify({ database: "pg" }));
+
+    await runGenCommand(TMP, {
+      subcommand: "model",
+      name: "posts",
+      columns: [{ name: "title", type: "string", nullable: false }],
+    });
+
+    const route = read("routes/api/posts/index.ts");
+    expect(route).toContain('import { defineHandler } from "void"');
+    expect(route).toContain('import { db } from "void/db"');
+    expect(route).toContain('import { posts } from "@schema"');
+  });
+
+  it("creates barrel export for pg model", async () => {
+    writePkg({ valibot: "^1.0.0" });
+    writeFileSync(join(TMP, "void.json"), JSON.stringify({ database: "pg" }));
+
+    await runGenCommand(TMP, {
+      subcommand: "model",
+      name: "posts",
+      columns: [{ name: "title", type: "string", nullable: false }],
+    });
+
+    const barrel = read("db/schema.ts");
+    expect(barrel).toContain('export * from "./schema/posts"');
   });
 });

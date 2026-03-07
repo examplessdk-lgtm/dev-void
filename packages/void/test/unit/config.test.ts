@@ -8,6 +8,7 @@ import {
   normalizeAuth,
   resolveBindingNames,
   isNodeTarget,
+  getDatabaseDialect,
 } from "../../src/config";
 
 const tmpDir = join(import.meta.dirname, ".tmp-config-test");
@@ -637,6 +638,39 @@ describe("convertRedirectsConfig", () => {
       { source: "/a", destination: "/b", status: 302 },
       { source: "/c/*", destination: "/d/:splat", status: 308 },
     ]);
+  });
+});
+
+describe("database config", () => {
+  it("defaults to sqlite when omitted", () => {
+    setup("{}");
+    const config = readConfig(tmpDir);
+    expect(getDatabaseDialect(config)).toBe("sqlite");
+    cleanup();
+  });
+
+  it("defaults to sqlite for empty config", () => {
+    setup();
+    expect(getDatabaseDialect({})).toBe("sqlite");
+  });
+
+  it("accepts pg", () => {
+    setup(JSON.stringify({ database: "pg" }));
+    const config = readConfig(tmpDir);
+    expect(getDatabaseDialect(config)).toBe("postgresql");
+    cleanup();
+  });
+
+  it("rejects invalid value", () => {
+    setup(JSON.stringify({ database: "mysql" }));
+    expect(() => readConfig(tmpDir)).toThrow('"database" in void.json must be "pg"');
+    cleanup();
+  });
+
+  it("rejects object value", () => {
+    setup(JSON.stringify({ database: { dialect: "pg" } }));
+    expect(() => readConfig(tmpDir)).toThrow('"database" in void.json must be "pg"');
+    cleanup();
   });
 });
 

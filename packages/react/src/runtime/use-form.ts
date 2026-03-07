@@ -78,6 +78,7 @@ export function useForm(
   const [recentlySuccessful, setRecentlySuccessful] = useState(false);
 
   const defaultsRef = useRef({ ...defaults });
+  const dataRef = useRef({ ...defaults });
   const successTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isDirty = useMemo(() => {
@@ -87,21 +88,21 @@ export function useForm(
   }, [data]);
 
   const setData = useCallback((field: string, value: unknown) => {
-    setDataState((prev) => ({ ...prev, [field]: value }));
+    dataRef.current = { ...dataRef.current, [field]: value };
+    setDataState(dataRef.current);
   }, []);
 
   const reset = useCallback((...fields: string[]) => {
     if (fields.length === 0) {
-      setDataState({ ...defaultsRef.current });
+      dataRef.current = { ...defaultsRef.current };
     } else {
-      setDataState((prev) => {
-        const next = { ...prev };
-        for (const field of fields) {
-          next[field] = defaultsRef.current[field];
-        }
-        return next;
-      });
+      const next = { ...dataRef.current };
+      for (const field of fields) {
+        next[field] = defaultsRef.current[field];
+      }
+      dataRef.current = next;
     }
+    setDataState(dataRef.current);
   }, []);
 
   const clearErrors = useCallback((...fields: string[]) => {
@@ -129,7 +130,7 @@ export function useForm(
       try {
         const pageData = await router.visit(resolvedUrl, {
           method,
-          data: { ...data },
+          data: { ...dataRef.current },
           ...opts,
         });
 
@@ -140,7 +141,7 @@ export function useForm(
 
         setWasSuccessful(true);
         setRecentlySuccessful(true);
-        defaultsRef.current = { ...data };
+        defaultsRef.current = { ...dataRef.current };
         successTimeoutRef.current = setTimeout(() => {
           setRecentlySuccessful(false);
         }, 2000);
@@ -150,7 +151,7 @@ export function useForm(
         setProcessing(false);
       }
     },
-    [router, resolvedUrl, data],
+    [router, resolvedUrl],
   );
 
   return {

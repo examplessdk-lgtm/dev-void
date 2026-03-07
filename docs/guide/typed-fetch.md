@@ -111,9 +111,3 @@ export default defineRender(async (c, assetTags) => {
 **Automatic header forwarding**: `cookie` and `authorization` headers from the incoming request are automatically forwarded to subrequests, so authentication context is preserved. If you pass these headers explicitly, your values take precedence.
 
 **How it works**: In the browser, `fetch()` uses the normal HTTP client. In the worker, Void redirects the import to a virtual module that calls `app.fetch()` directly using the Hono app instance. AsyncLocalStorage threads the outer request context so headers and `waitUntil()` work correctly.
-
-## Using a Different ORM
-
-Void's built-in [database](./database.md) uses Drizzle ORM with D1, but you're not locked into it. Any ORM or query builder that works with D1 works with Void — just pass the D1 binding. See [ORMs and External Databases](../integrations/orms-and-external-dbs.md) for examples with Kysely, raw D1, and external databases.
-
-The typed fetch client works regardless of how your handler queries the database — it infers the response type from whatever the handler returns. This means Drizzle, Kysely, raw D1 queries, or any other approach all get the same end-to-end type safety on the client side.

@@ -9,7 +9,11 @@ import { discoverSchema, schemaSpecifier } from "./discover";
  *
  * @returns Absolute path to the written config file.
  */
-export function writeDrizzleConfig(root: string, dbPath: string): string {
+export function writeDrizzleConfig(
+  root: string,
+  dbPath: string,
+  dialect: "sqlite" | "postgresql" = "sqlite",
+): string {
   const schema = discoverSchema(root);
   if (!schema) {
     throw new Error('No Drizzle schema found. Create db/schema.ts or run "void gen model <name>".');
@@ -18,12 +22,20 @@ export function writeDrizzleConfig(root: string, dbPath: string): string {
   const outDir = join(root, ".void");
   mkdirSync(outDir, { recursive: true });
 
-  const config = {
-    dialect: "sqlite",
-    schema: schemaSpecifier(schema),
-    out: "./db/migrations",
-    dbCredentials: { url: dbPath },
-  };
+  const config =
+    dialect === "postgresql"
+      ? {
+          dialect: "postgresql",
+          schema: schemaSpecifier(schema),
+          out: "./db/migrations",
+          dbCredentials: { url: dbPath },
+        }
+      : {
+          dialect: "sqlite",
+          schema: schemaSpecifier(schema),
+          out: "./db/migrations",
+          dbCredentials: { url: dbPath },
+        };
 
   const configPath = join(outDir, "drizzle.config.json");
   writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");

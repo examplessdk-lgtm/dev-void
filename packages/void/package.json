@@ -58,10 +58,13 @@
       "types": "./dist/runtime/db.d.mts",
       "import": "./dist/runtime/db.mjs"
     },
-    "./schema-helpers": {
-      "types": "./dist/runtime/schema.d.mts",
-      "import": "./dist/runtime/schema.mjs",
-      "require": "./schema-helpers.cjs"
+    "./schema-d1": {
+      "types": "./dist/runtime/schema-d1.d.mts",
+      "import": "./dist/runtime/schema-d1.mjs"
+    },
+    "./schema-pg": {
+      "types": "./dist/runtime/schema-pg.d.mts",
+      "import": "./dist/runtime/schema-pg.mjs"
     },
     "./kv": {
       "types": "./dist/runtime/kv.d.mts",
@@ -162,17 +165,21 @@
     "better-sqlite3": "^12.6.2",
     "drizzle-kit": "^0.31.9",
     "drizzle-orm": "^0.45.1",
+    "pg": "^8.20.0",
     "wrangler": "catalog:"
   },
   "devDependencies": {
     "@clack/prompts": "catalog:",
+    "@electric-sql/pglite": "0.3.15",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "catalog:",
+    "@types/pg": "^8.18.0",
     "@typescript/native-preview": "catalog:",
     "arktype": "^2.1.29",
     "es-module-lexer": "^2.0.0",
     "estree-walker": "^3.0.3",
     "ofetch": "^2.0.0-alpha.3",
+    "pglite-server": "0.1.5",
     "picocolors": "^1.1.1",
     "tinyglobby": "^0.2.15",
     "tsdown": "catalog:",

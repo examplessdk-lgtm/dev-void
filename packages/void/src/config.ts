@@ -10,6 +10,9 @@ export type AuthProvider = "github" | "google" | "email";
 /** Redirect destination — string (302) or object with explicit status. */
 export type RedirectDestination = string | { to: string; status?: 301 | 302 | 307 | 308 };
 
+/** Supported database dialects (internal representation). */
+export type DatabaseDialect = "sqlite" | "postgresql";
+
 /** Curated wrangler fields that can be set via void.json. */
 export interface WranglerConfig {
   compatibility_date?: string;
@@ -49,6 +52,7 @@ export interface VoidConfig {
   inference?: InferenceConfig;
   remote?: boolean;
   worker?: WranglerConfig;
+  database?: "pg";
 }
 
 const CONFIG_FILE = "void.json";
@@ -58,6 +62,7 @@ const VALID_AUTH_PROVIDERS = new Set(["github", "google", "email"]);
 const VALID_APP_TYPES = new Set(["spa", "static", "void", "framework"]);
 const VALID_OUTPUTS = new Set(["server", "static"]);
 const VALID_REDIRECT_STATUSES = new Set([301, 302, 307, 308]);
+const VALID_DATABASE_VALUES = new Set(["pg"]);
 
 /** Old flat keys that have moved into namespaces. */
 const MIGRATION_ERRORS: Record<string, string> = {
@@ -398,6 +403,13 @@ export function readConfig(root: string): VoidConfig {
     }
   }
 
+  // Validate database
+  if (obj.database !== undefined) {
+    if (typeof obj.database !== "string" || !VALID_DATABASE_VALUES.has(obj.database)) {
+      throw new Error(`"database" in ${CONFIG_FILE} must be "pg"`);
+    }
+  }
+
   return obj as VoidConfig;
 }
 
@@ -439,6 +451,13 @@ export function normalizeAuth(auth: boolean | AuthProvider[] | undefined): AuthP
   if (auth === true) return ["email"];
   if (auth.length === 0) return null;
   return auth;
+}
+
+/**
+ * Get the database dialect from config. Defaults to "sqlite".
+ */
+export function getDatabaseDialect(config: VoidConfig): DatabaseDialect {
+  return config.database === "pg" ? "postgresql" : "sqlite";
 }
 
 /**
