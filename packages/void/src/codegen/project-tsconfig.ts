@@ -38,6 +38,11 @@ export function ensureProjectTsconfig(
       paths: {
         "@schema": isDir ? ["../db/schema/index.ts"] : ["../db/schema.ts"],
         "@schema/*": ["../db/schema/*"],
+        // Redirect void/db to the generated db.d.ts so TypeScript uses
+        // schema-aware types instead of the generic base module.
+        // (moduleResolution: "bundler" ignores ambient `declare module`
+        // when the module resolves to a real file — paths is the fix.)
+        "void/db": ["./db.d.ts"],
       },
     };
   }

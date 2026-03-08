@@ -4,7 +4,7 @@ import { fetch } from "void/client";
 export default function App() {
   const [hello, setHello] = useState<{ message: string; timestamp: number } | null>(null);
   const [users, setUsers] = useState<
-    { id: number; name: string; email: string; created_at: string | null }[]
+    { id: number; name: string; email: string; createdAt: string | null }[]
   >([]);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");

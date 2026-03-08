@@ -56,7 +56,7 @@ function deleteNote(id: number) {
           <td>{{ note.id }}</td>
           <td>{{ note.title }}</td>
           <td>{{ note.body }}</td>
-          <td>{{ note.created_at }}</td>
+          <td>{{ note.createdAt }}</td>
           <td>
             <button @click="deleteNote(note.id)" :disabled="deleteForm.processing">Delete</button>
           </td>

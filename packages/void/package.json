@@ -133,6 +133,10 @@
       "types": "./dist/runtime/env.d.mts",
       "import": "./dist/runtime/env.mjs"
     },
+    "./_db": {
+      "types": "./dist/runtime/db.d.mts",
+      "import": "./dist/runtime/db.mjs"
+    },
     "./vue": {
       "types": "./dist/runtime/vue.d.mts",
       "import": "./dist/runtime/vue.mjs"

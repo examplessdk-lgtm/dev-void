@@ -4,12 +4,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
+    "drizzle-valibot": "^0.4.2",
     "hono": "^4.11.9",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "valibot": "^1.0.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

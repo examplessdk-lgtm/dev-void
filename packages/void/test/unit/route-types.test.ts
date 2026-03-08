@@ -118,6 +118,19 @@ describe("generateRouteTypes", () => {
     expect(dts).toContain("StandardSchemaV1");
   });
 
+  it("includes export {} so declare module is an augmentation", () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+    const { dts } = generateRouteTypes(scan, "/project/routes", "/project/.void");
+
+    expect(dts).toContain("export {}");
+  });
+
   it("generates correct relative paths", () => {
     const scan: ScanResult = {
       routes: [

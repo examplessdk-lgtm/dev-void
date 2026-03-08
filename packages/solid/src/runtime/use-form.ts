@@ -27,27 +27,6 @@ export function useForm<U extends ActionUrl & string>(
   clearErrors(...fields: (keyof ResolveActionBody<U> & string)[]): void;
 };
 
-// Untyped fallback — manual generic for use without codegen
-export function useForm<T extends Record<string, unknown>>(
-  url: string,
-  defaults: T,
-  options?: { params?: Record<string, string> },
-): {
-  data: T;
-  setData: <K extends keyof T & string>(field: K, value: T[K]) => void;
-  errors: Partial<Record<keyof T & string, string>>;
-  processing: boolean;
-  isDirty: boolean;
-  wasSuccessful: boolean;
-  recentlySuccessful: boolean;
-  post(opts?: any): void;
-  put(opts?: any): void;
-  patch(opts?: any): void;
-  delete(opts?: any): void;
-  reset(...fields: (keyof T & string)[]): void;
-  clearErrors(...fields: (keyof T & string)[]): void;
-};
-
 export function useForm(
   url: string,
   defaults: Record<string, unknown>,

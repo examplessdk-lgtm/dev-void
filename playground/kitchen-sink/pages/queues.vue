@@ -63,7 +63,7 @@ function deleteResult(id: number) {
           <td>
             <code>{{ r.value }}</code>
           </td>
-          <td>{{ r.created_at }}</td>
+          <td>{{ r.createdAt }}</td>
           <td>
             <button @click="deleteResult(r.id)" :disabled="deleteForm.processing">Delete</button>
           </td>

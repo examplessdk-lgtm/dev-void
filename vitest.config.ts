@@ -24,7 +24,7 @@ export default defineConfig({
       {
         test: {
           name: "core-markdown",
-          maxWorkers: 3,
+          maxWorkers: 2,
           sequence: { groupOrder: 2 },
           include: [
             "packages/void/test/integration/**/*.test.ts",
@@ -36,7 +36,7 @@ export default defineConfig({
       {
         test: {
           name: "metaframeworks",
-          maxWorkers: 3,
+          maxWorkers: 2,
           sequence: { groupOrder: 2 },
           include: metaframeworks,
         },
@@ -44,7 +44,7 @@ export default defineConfig({
       {
         test: {
           name: "pages-react-vue",
-          maxWorkers: 3,
+          maxWorkers: 2,
           sequence: { groupOrder: 2 },
           include: [
             "packages/react/test/integration/**/*.test.ts",
@@ -55,7 +55,7 @@ export default defineConfig({
       {
         test: {
           name: "pages-svelte-solid",
-          maxWorkers: 3,
+          maxWorkers: 2,
           sequence: { groupOrder: 2 },
           include: [
             "packages/svelte/test/integration/**/*.test.ts",

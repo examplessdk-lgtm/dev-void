@@ -176,3 +176,49 @@ export default function DbPage({ users, posts }: Props) {
     </div>
   );
 }
+
+// --- Type tests (compile-time only, never executed) ---
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function _typeTests() {
+  const userForm = useForm("/?create-user", { name: "", email: "" });
+  const postForm = useForm("/?create-post", { title: "", body: "", authorId: 0 });
+
+  // @ts-expect-error — invalid action name
+  useForm("/?nonexistent-action", {});
+
+  // @ts-expect-error — missing required field "email"
+  useForm("/?create-user", { name: "" });
+
+  // @ts-expect-error — extra field not in validator
+  useForm("/?create-user", { name: "", email: "", bogus: true });
+
+  // @ts-expect-error — wrong field type (name should be string)
+  useForm("/?create-user", { name: 123, email: "" });
+
+  // @ts-expect-error — wrong field type (authorId should be number)
+  useForm("/?create-post", { title: "", body: "", authorId: "not-a-number" });
+
+  // @ts-expect-error — "bogus" is not a field on create-user body
+  userForm.setData("bogus", "value");
+
+  // @ts-expect-error — name should be string, not number
+  userForm.setData("name", 123);
+
+  // @ts-expect-error — "authorId" doesn't exist on create-user form
+  void userForm.data.authorId;
+
+  // @ts-expect-error — "bogus" is not a field on create-post body
+  postForm.setData("bogus", "value");
+
+  // @ts-expect-error — authorId should be number, not string
+  postForm.setData("authorId", "not-a-number");
+
+  // @ts-expect-error — invalid action name
+  action("/?nonexistent-action", {});
+
+  // @ts-expect-error — missing required field "id"
+  action("/?delete-user", {});
+
+  // @ts-expect-error — wrong field type (id should be number)
+  action("/?delete-user", { id: "not-a-number" });
+}

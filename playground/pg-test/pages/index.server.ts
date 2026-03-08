@@ -1,6 +1,7 @@
 import { defineHandler, type InferProps } from "void";
 import { db, eq, desc } from "void/db";
-import { users, posts } from "@schema";
+import { users, posts, insertUserSchema, insertPostSchema } from "@schema";
+import * as v from "valibot";
 
 export type Props = InferProps<typeof loader>;
 
@@ -21,28 +22,28 @@ export const loader = defineHandler(async () => {
 });
 
 export const actions = {
-  "create-user": defineHandler(async (c) => {
-    const { name, email } = await c.req.json<{ name: string; email: string }>();
-    await db.insert(users).values({ name, email });
+  "create-user": defineHandler.withValidator({
+    body: insertUserSchema,
+  })(async (_c, { body }) => {
+    await db.insert(users).values(body);
   }),
 
-  "delete-user": defineHandler(async (c) => {
-    const { id } = await c.req.json<{ id: number }>();
-    await db.delete(posts).where(eq(posts.authorId, id));
-    await db.delete(users).where(eq(users.id, id));
+  "delete-user": defineHandler.withValidator({
+    body: v.object({ id: v.number() }),
+  })(async (_c, { body }) => {
+    await db.delete(posts).where(eq(posts.authorId, body.id));
+    await db.delete(users).where(eq(users.id, body.id));
   }),
 
-  "create-post": defineHandler(async (c) => {
-    const { title, body, authorId } = await c.req.json<{
-      title: string;
-      body: string;
-      authorId: number;
-    }>();
-    await db.insert(posts).values({ title, body, authorId });
+  "create-post": defineHandler.withValidator({
+    body: insertPostSchema,
+  })(async (_c, { body }) => {
+    await db.insert(posts).values(body);
   }),
 
-  "delete-post": defineHandler(async (c) => {
-    const { id } = await c.req.json<{ id: number }>();
-    await db.delete(posts).where(eq(posts.id, id));
+  "delete-post": defineHandler.withValidator({
+    body: v.object({ id: v.number() }),
+  })(async (_c, { body }) => {
+    await db.delete(posts).where(eq(posts.id, body.id));
   }),
 };
