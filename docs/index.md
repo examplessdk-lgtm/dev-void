@@ -12,7 +12,7 @@ hero:
       link: ./guide/
     - theme: alt
       text: View on GitHub
-      link: https://github.com/voidzerodev/void
+      link: https://github.com/voidzero-dev/void
   image:
     src: /hero.svg
     alt: Void deployment platform
