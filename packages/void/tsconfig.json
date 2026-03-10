@@ -4,6 +4,10 @@
     "module": "ES2022",
     "lib": ["ES2022"],
     "moduleResolution": "bundler",
+    "paths": {
+      "*": ["./*"],
+      "void/routes": ["./src/routes-stub.ts"]
+    },
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

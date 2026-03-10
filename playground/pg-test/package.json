@@ -8,7 +8,6 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "drizzle-valibot": "^0.4.2",
     "hono": "^4.11.9",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

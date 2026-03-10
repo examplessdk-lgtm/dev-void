@@ -118,6 +118,25 @@ describe("packageBuild", () => {
     const manifest = JSON.parse(manifestRaw);
     expect(manifest.version).toBe(3);
   });
+
+  it("marks auth-enabled deploys in the manifest", () => {
+    const workerDir = join(TMP, "worker");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "index.js"), "export default {}");
+
+    const form = packageBuild(TMP, "worker", {
+      needsD1: false,
+      needsKV: false,
+      needsR2: false,
+      needsAuth: true,
+      needsQueues: false,
+      needsAI: false,
+    });
+
+    const manifestRaw = form.get("manifest") as string;
+    const manifest = JSON.parse(manifestRaw);
+    expect(manifest.auth).toBe(true);
+  });
 });
 
 describe("computeAssetHash", () => {

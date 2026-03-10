@@ -27,17 +27,11 @@ describe("createRemoteEnv", () => {
     expect(env.STORAGE).toBeInstanceOf(ProxyR2Bucket);
   });
 
-  it("replaces AUTH_KV with ProxyKVNamespace", () => {
-    const env = createRemoteEnv({ ...BASE_ENV, AUTH_KV: {} });
-    expect(env.AUTH_KV).toBeInstanceOf(ProxyKVNamespace);
-  });
-
   it("does not add bindings that are not in env", () => {
     const env = createRemoteEnv({ ...BASE_ENV });
     expect(env.DB).toBeUndefined();
     expect(env.KV).toBeUndefined();
     expect(env.STORAGE).toBeUndefined();
-    expect(env.AUTH_KV).toBeUndefined();
   });
 
   it("preserves other env properties", () => {
@@ -52,11 +46,9 @@ describe("createRemoteEnv", () => {
       DB: {},
       KV: {},
       STORAGE: {},
-      AUTH_KV: {},
     });
     expect(env.DB).toBeInstanceOf(ProxyD1Database);
     expect(env.KV).toBeInstanceOf(ProxyKVNamespace);
     expect(env.STORAGE).toBeInstanceOf(ProxyR2Bucket);
-    expect(env.AUTH_KV).toBeInstanceOf(ProxyKVNamespace);
   });
 });

@@ -5,10 +5,8 @@
  * virtual module that auto-wires the D1 binding with the user's schema.
  * This stub exists for the published npm package and type declarations.
  */
-import type { DrizzleD1Database } from "drizzle-orm/d1";
+import { drizzle as _drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import { requireRuntimeBinding } from "./env";
-
-const { drizzle: _drizzle } = await import("drizzle-orm/d1");
 
 // Re-export commonly used Drizzle utilities so consumers never need
 // to depend on drizzle-orm directly.
@@ -43,7 +41,6 @@ export {
   max,
 } from "drizzle-orm";
 export type { DrizzleD1Database } from "drizzle-orm/d1";
-export type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 /**
  * Create a Drizzle D1 instance from a custom D1 binding.

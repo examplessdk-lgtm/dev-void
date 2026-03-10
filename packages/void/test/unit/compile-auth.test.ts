@@ -17,166 +17,70 @@ const baseOptions = {
   reactRefresh: false,
 };
 
-const emailAuth: AuthCompileOptions = {
-  providers: ["email"],
-  sessionPath: "/resolved/auth/session.mjs",
-  passwordPath: "/resolved/auth/password.mjs",
-  schemaPath: "/resolved/auth/schema.mjs",
-  githubProviderPath: null,
-  googleProviderPath: null,
-  authRuntimePath: "/resolved/void/runtime/auth.mjs",
+const sqliteAuth: AuthCompileOptions = {
+  authRuntimePath: "/resolved/void/runtime/better-auth.mjs",
+  authConfigPath: null,
+  dialect: "sqlite",
+  providers: null,
 };
 
-const githubAuth: AuthCompileOptions = {
-  providers: ["github"],
-  sessionPath: "/resolved/auth/session.mjs",
-  passwordPath: null,
-  schemaPath: "/resolved/auth/schema.mjs",
-  githubProviderPath: "/resolved/oauth/github.mjs",
-  googleProviderPath: null,
-  authRuntimePath: "/resolved/void/runtime/auth.mjs",
+const pgAuth: AuthCompileOptions = {
+  authRuntimePath: "/resolved/void/runtime/better-auth.mjs",
+  authConfigPath: "/app/auth.ts",
+  dialect: "postgresql",
+  providers: ["email", "github"],
 };
 
-const allAuth: AuthCompileOptions = {
-  providers: ["github", "google", "email"],
-  sessionPath: "/resolved/auth/session.mjs",
-  passwordPath: "/resolved/auth/password.mjs",
-  schemaPath: "/resolved/auth/schema.mjs",
-  githubProviderPath: "/resolved/oauth/github.mjs",
-  googleProviderPath: "/resolved/oauth/google.mjs",
-  authRuntimePath: "/resolved/void/runtime/auth.mjs",
-};
-
-describe("compileRouteTable with auth", () => {
-  it("generates no auth code when auth is null", () => {
+describe("compileRouteTable auth integration", () => {
+  it("generates no auth code when auth is disabled", () => {
     const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
       ...baseOptions,
       auth: null,
     });
-    expect(code).not.toContain("parseSessionCookie");
-    expect(code).not.toContain("CREATE_AUTH_TABLES_SQL");
-    expect(code).not.toContain("/auth/me");
-    expect(code).not.toContain("/auth/logout");
+
+    expect(code).not.toContain("runVoidAuthMiddleware");
+    expect(code).not.toContain('"/api/auth"');
+    expect(code).not.toContain('"/auth/login"');
   });
 
-  it("generates session imports and middleware when auth is email-only", () => {
+  it("mounts Better Auth middleware and routes when auth is enabled", () => {
     const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
       ...baseOptions,
-      auth: emailAuth,
+      auth: sqliteAuth,
     });
-    // Imports
-    expect(code).toContain('from "/resolved/auth/session.mjs"');
-    expect(code).toContain("parseSessionCookie");
-    expect(code).toContain("buildSetCookieHeader");
-    expect(code).toContain("buildClearCookieHeader");
-    expect(code).toContain("generateSessionId");
-    expect(code).toContain("SESSION_TTL_SECONDS");
-    expect(code).toContain('from "/resolved/auth/schema.mjs"');
-    expect(code).toContain("CREATE_AUTH_TABLES_SQL");
-    expect(code).toContain("generateUserId");
-    expect(code).toContain('from "/resolved/auth/password.mjs"');
-    expect(code).toContain("hashPassword");
-    expect(code).toContain("verifyPassword");
-    // No OAuth imports
-    expect(code).not.toContain("githubAuth");
-    expect(code).not.toContain("googleAuth");
-  });
 
-  it("generates email register and login routes", () => {
-    const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
-      ...baseOptions,
-      auth: emailAuth,
-    });
-    expect(code).toContain('app.post("/auth/register"');
-    expect(code).toContain('app.post("/auth/login"');
-    expect(code).not.toContain('app.get("/auth/login/github"');
-    expect(code).not.toContain('app.get("/auth/login/google"');
-  });
-
-  it("generates GitHub OAuth route but no email routes for github-only", () => {
-    const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
-      ...baseOptions,
-      auth: githubAuth,
-    });
-    expect(code).toContain('app.get("/auth/login/github"');
-    expect(code).toContain('from "/resolved/oauth/github.mjs"');
-    expect(code).toContain("githubAuth");
+    expect(code).toContain('from "/resolved/void/runtime/better-auth.mjs"');
+    expect(code).toContain("runVoidAuthMiddleware");
+    expect(code).toContain("handleVoidAuthRequest");
+    expect(code).toContain('app.all("/api/auth"');
+    expect(code).toContain('app.all("/api/auth/*"');
     expect(code).not.toContain('app.post("/auth/register"');
     expect(code).not.toContain('app.post("/auth/login"');
-    expect(code).not.toContain("hashPassword");
+    expect(code).not.toContain('app.get("/auth/me"');
+    expect(code).not.toContain('app.post("/auth/logout"');
   });
 
-  it("generates all auth routes for all providers", () => {
+  it("passes the detected dialect into the auth helpers", () => {
     const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
       ...baseOptions,
-      auth: allAuth,
+      auth: pgAuth,
     });
-    expect(code).toContain('app.post("/auth/register"');
-    expect(code).toContain('app.post("/auth/login"');
-    expect(code).toContain('app.get("/auth/login/github"');
-    expect(code).toContain('app.get("/auth/login/google"');
-    expect(code).toContain('from "/resolved/oauth/github.mjs"');
-    expect(code).toContain('from "/resolved/oauth/google.mjs"');
+
+    expect(code).toContain('dialect: "postgresql"');
+    expect(code).toContain('providers: ["email","github"]');
   });
 
-  it("always generates /auth/me and /auth/logout when auth enabled", () => {
-    for (const auth of [emailAuth, githubAuth, allAuth]) {
-      const code = compileRouteTable(
-        emptyScan,
-        "/routes",
-        "/middleware",
-        "/crons",
-        "/queues",
-        null,
-        {
-          ...baseOptions,
-          auth,
-        },
-      );
-      expect(code).toContain('app.get("/auth/me"');
-      expect(code).toContain('app.post("/auth/logout"');
-    }
-  });
-
-  it("generates auth table creation middleware", () => {
+  it("imports and threads the user auth config when present", () => {
     const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
       ...baseOptions,
-      auth: emailAuth,
+      auth: pgAuth,
     });
-    expect(code).toContain("let authReady = false;");
-    expect(code).toContain("c.env.DB.prepare(CREATE_AUTH_TABLES_SQL).run()");
-    expect(code).toContain("authReady = true;");
+
+    expect(code).toContain('import __voidAuthConfig from "/app/auth.ts"');
+    expect(code).toContain("userConfig: __voidAuthConfig");
   });
 
-  it("generates session middleware that resolves auth user and sets context", () => {
-    const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
-      ...baseOptions,
-      auth: emailAuth,
-    });
-    expect(code).toContain("resolveAuthUserFromRequest");
-    expect(code).toContain("resolveAuthUserFromRequest(c.req.raw, c.env)");
-    expect(code).toContain('c.set("user"');
-    expect(code).toContain("authContext.run");
-  });
-
-  it("places auth middleware before user middleware", () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [{ order: 1, filePath: "01.logger.ts" }],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
-    const code = compileRouteTable(scan, "/routes", "/middleware", "/crons", "/queues", null, {
-      ...baseOptions,
-      auth: emailAuth,
-    });
-    const authReadyIdx = code.indexOf("let authReady");
-    const userMiddlewareIdx = code.indexOf("app.use(middleware0)");
-    expect(authReadyIdx).toBeLessThan(userMiddlewareIdx);
-  });
-
-  it("places auth routes after user middleware but before user routes", () => {
+  it("places auth middleware before user middleware and auth routes before user routes", () => {
     const scan: ScanResult = {
       routes: [
         {
@@ -193,101 +97,32 @@ describe("compileRouteTable with auth", () => {
       queues: [],
       pages: { pages: [], layouts: [], namedLayouts: [] },
     };
+
     const code = compileRouteTable(scan, "/routes", "/middleware", "/crons", "/queues", null, {
       ...baseOptions,
-      auth: emailAuth,
+      auth: sqliteAuth,
     });
+
+    const authMiddlewareIdx = code.indexOf("runVoidAuthMiddleware");
     const userMiddlewareIdx = code.indexOf("app.use(middleware0)");
-    const authRegisterIdx = code.indexOf('app.post("/auth/register"');
+    const authRouteIdx = code.indexOf('app.all("/api/auth"');
     const userRouteIdx = code.indexOf('app.get("/api/hello"');
-    expect(userMiddlewareIdx).toBeLessThan(authRegisterIdx);
-    expect(authRegisterIdx).toBeLessThan(userRouteIdx);
+
+    expect(authMiddlewareIdx).toBeLessThan(userMiddlewareIdx);
+    expect(userMiddlewareIdx).toBeLessThan(authRouteIdx);
+    expect(authRouteIdx).toBeLessThan(userRouteIdx);
   });
 
-  it("uses GITHUB_OAUTH_ID/SECRET env vars for GitHub OAuth", () => {
+  it("wires auth migrations into the in-worker migration route", () => {
     const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
       ...baseOptions,
-      auth: githubAuth,
+      auth: sqliteAuth,
+      migrationHandlerPath: "/resolved/migration-handler.mjs",
+      migrations: [{ name: "001_init.sql", sql: "select 1;" }],
+      migrationDialect: "sqlite",
     });
-    expect(code).toContain("c.env.GITHUB_OAUTH_ID");
-    expect(code).toContain("c.env.GITHUB_OAUTH_SECRET");
-    // Old env var names should not appear
-    expect(code).not.toContain("GITHUB_ID");
-    expect(code).not.toContain("GITHUB_SECRET");
-  });
 
-  it("uses GOOGLE_OAUTH_ID/SECRET env vars for Google OAuth", () => {
-    const googleAuth: AuthCompileOptions = {
-      providers: ["google"],
-      sessionPath: "/resolved/auth/session.mjs",
-      passwordPath: null,
-      schemaPath: "/resolved/auth/schema.mjs",
-      githubProviderPath: null,
-      googleProviderPath: "/resolved/oauth/google.mjs",
-      authRuntimePath: "/resolved/void/runtime/auth.mjs",
-    };
-    const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
-      ...baseOptions,
-      auth: googleAuth,
-    });
-    expect(code).toContain("c.env.GOOGLE_OAUTH_ID");
-    expect(code).toContain("c.env.GOOGLE_OAUTH_SECRET");
-    // Old env var names should not appear
-    expect(code).not.toContain("GOOGLE_ID");
-    expect(code).not.toContain("GOOGLE_SECRET");
-  });
-
-  it("generates env var guard for GitHub OAuth route", () => {
-    const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
-      ...baseOptions,
-      auth: githubAuth,
-    });
-    expect(code).toContain("!c.env.GITHUB_OAUTH_ID || !c.env.GITHUB_OAUTH_SECRET");
-    expect(code).toContain("GitHub OAuth not configured");
-  });
-
-  it("generates env var guard for Google OAuth route", () => {
-    const googleAuth: AuthCompileOptions = {
-      providers: ["google"],
-      sessionPath: "/resolved/auth/session.mjs",
-      passwordPath: null,
-      schemaPath: "/resolved/auth/schema.mjs",
-      githubProviderPath: null,
-      googleProviderPath: "/resolved/oauth/google.mjs",
-      authRuntimePath: "/resolved/void/runtime/auth.mjs",
-    };
-    const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
-      ...baseOptions,
-      auth: googleAuth,
-    });
-    expect(code).toContain("!c.env.GOOGLE_OAUTH_ID || !c.env.GOOGLE_OAUTH_SECRET");
-    expect(code).toContain("Google OAuth not configured");
-  });
-
-  it("returns 500 JSON with reason when OAuth secrets are missing", () => {
-    const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
-      ...baseOptions,
-      auth: allAuth,
-    });
-    // Both guards should return 500 with actionable error messages
-    expect(code).toContain(
-      'c.json({ error: "GitHub OAuth not configured. Set GITHUB_OAUTH_ID and GITHUB_OAUTH_SECRET secrets." }, 500)',
-    );
-    expect(code).toContain(
-      'c.json({ error: "Google OAuth not configured. Set GOOGLE_OAUTH_ID and GOOGLE_OAUTH_SECRET secrets." }, 500)',
-    );
-  });
-
-  it("passes OAuth credentials explicitly to provider middleware", () => {
-    const code = compileRouteTable(emptyScan, "/routes", "/middleware", "/crons", "/queues", null, {
-      ...baseOptions,
-      auth: allAuth,
-    });
-    // GitHub: credentials passed as config, not relying on env defaults
-    expect(code).toContain("client_id: c.env.GITHUB_OAUTH_ID");
-    expect(code).toContain("client_secret: c.env.GITHUB_OAUTH_SECRET");
-    // Google: credentials passed as config
-    expect(code).toContain("client_id: c.env.GOOGLE_OAUTH_ID");
-    expect(code).toContain("client_secret: c.env.GOOGLE_OAUTH_SECRET");
+    expect(code).toContain("runVoidAuthMigrations");
+    expect(code).toContain('app.post("/__void/migrate"');
   });
 });

@@ -1,105 +1,49 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { BetterAuthOptions, Session, User } from "better-auth";
 import type { Context, Env } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { parseSessionCookie } from "../auth/session";
 
-/** The authenticated user stored in the session and set on context by the auth middleware. */
-export interface AuthUser {
-  id: string;
-  /** The provider that created this account (`"email"`, `"github"`, or `"google"`). */
-  provider: string;
-  email: string | null;
-  name: string | null;
-  avatar_url: string | null;
+export type AuthUser = User;
+export type AuthSession = Session;
+
+export interface AuthState {
+  session: AuthSession;
+  user: AuthUser;
 }
 
-/**
- * Shared AsyncLocalStorage that holds the authenticated user for the current request.
- * Populated by:
- * - The Hono session middleware (Void apps)
- * - The deploy wrapper (meta-framework apps)
- */
-export const authContext: AsyncLocalStorage<{ user: AuthUser | null }> = new AsyncLocalStorage<{
-  user: AuthUser | null;
-}>();
+export interface VoidAuthConfigContext {
+  defaults: BetterAuthOptions;
+  env: Record<string, unknown>;
+  dialect: "sqlite" | "postgresql";
+  request: Request;
+}
+
+export type VoidAuthConfig =
+  | BetterAuthOptions
+  | ((ctx: VoidAuthConfigContext) => BetterAuthOptions);
 
 /**
- * Get the authenticated user for the current request.
- *
- * Works in both Void apps and meta-framework apps (e.g. TanStack Start, Nuxt)
- * as long as auth is enabled. Returns `null` if no user is authenticated or
- * if called outside a request context.
- *
- * ```ts
- * import { getUser } from "void/auth";
- *
- * const user = getUser();
- * if (user) {
- *   console.log(user.email);
- * }
- * ```
+ * Shared AsyncLocalStorage that holds the authenticated Better Auth state for the
+ * current request.
  */
+export const authContext: AsyncLocalStorage<{ user: AuthUser | null; state: AuthState | null }> =
+  new AsyncLocalStorage<{
+    user: AuthUser | null;
+    state: AuthState | null;
+  }>();
+
+export function defineAuth<T extends VoidAuthConfig>(config: T): T {
+  return config;
+}
+
 export function getUser(): AuthUser | null {
   return authContext.getStore()?.user ?? null;
 }
 
-function toAuthUser(session: {
-  userId: string;
-  provider: string;
-  email: string | null;
-  name: string | null;
-  avatar_url: string | null;
-}): AuthUser {
-  return {
-    id: session.userId,
-    provider: session.provider,
-    email: session.email,
-    name: session.name,
-    avatar_url: session.avatar_url,
-  };
+export function getSession(): AuthState | null {
+  return authContext.getStore()?.state ?? null;
 }
 
-/**
- * Resolve the authenticated user from the current request and AUTH_KV session store.
- *
- * Shared by:
- * - generated HTTP auth middleware
- * - generated WebSocket upgrade handling
- */
-export async function resolveAuthUserFromRequest(
-  request: Request,
-  env: { AUTH_KV?: KVNamespace } | undefined,
-): Promise<AuthUser | null> {
-  const sid = parseSessionCookie(request.headers.get("cookie"));
-  if (!sid || !env?.AUTH_KV) return null;
-
-  const session = await env.AUTH_KV.get(`session:${sid}`, "json");
-  if (
-    !session ||
-    typeof session !== "object" ||
-    !("expiresAt" in session) ||
-    typeof session.expiresAt !== "number" ||
-    session.expiresAt <= Date.now()
-  ) {
-    return null;
-  }
-
-  return toAuthUser(session as any);
-}
-
-/**
- * Extract the authenticated user from the request context, or throw a 401.
- *
- * Use this in route handlers to gate access to authenticated users:
- * ```ts
- * export default defineHandler((c) => {
- *   const user = requireAuth(c);
- *   return { user };
- * });
- * ```
- *
- * @throws {HTTPException} 401 if no user session is present.
- */
 export function requireAuth<E extends Env & { Variables: { user: AuthUser | null } }>(
   c: Context<E>,
 ): AuthUser {

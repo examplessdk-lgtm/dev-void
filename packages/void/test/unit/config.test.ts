@@ -5,7 +5,6 @@ import {
   readConfig,
   convertHeadersConfig,
   convertRedirectsConfig,
-  normalizeAuth,
   resolveBindingNames,
   isNodeTarget,
   getDatabaseDialect,
@@ -37,7 +36,6 @@ describe("readConfig", () => {
     setup(
       JSON.stringify({
         inference: {
-          auth: ["github", "email"],
           bindings: { db: true, kv: false },
           appType: "spa",
           outputDir: "dist",
@@ -55,7 +53,6 @@ describe("readConfig", () => {
       }),
     );
     const config = readConfig(tmpDir);
-    expect(config.inference?.auth).toEqual(["github", "email"]);
     expect(config.inference?.bindings).toEqual({ db: true, kv: false });
     expect(config.routing?.headers).toEqual({
       "/assets/*": ["Cache-Control: public, max-age=31536000, immutable"],
@@ -70,24 +67,24 @@ describe("readConfig", () => {
     cleanup();
   });
 
-  it("accepts auth as boolean true", () => {
-    setup(JSON.stringify({ inference: { auth: true } }));
-    const config = readConfig(tmpDir);
-    expect(config.inference?.auth).toBe(true);
-    cleanup();
-  });
-
-  it("accepts auth as boolean false", () => {
-    setup(JSON.stringify({ inference: { auth: false } }));
-    const config = readConfig(tmpDir);
-    expect(config.inference?.auth).toBe(false);
-    cleanup();
-  });
-
   it("accepts empty object", () => {
     setup("{}");
     const config = readConfig(tmpDir);
     expect(config).toEqual({});
+    cleanup();
+  });
+
+  it("accepts top-level auth providers", () => {
+    setup(JSON.stringify({ auth: { providers: ["email", "github", "discord"] } }));
+    const config = readConfig(tmpDir);
+    expect(config.auth?.providers).toEqual(["email", "github", "discord"]);
+    cleanup();
+  });
+
+  it("accepts an empty top-level auth object", () => {
+    setup(JSON.stringify({ auth: {} }));
+    const config = readConfig(tmpDir);
+    expect(config.auth).toEqual({});
     cleanup();
   });
 
@@ -110,15 +107,33 @@ describe("readConfig", () => {
     cleanup();
   });
 
-  it("throws on invalid auth provider", () => {
+  it("rejects inference.auth arrays", () => {
     setup(JSON.stringify({ inference: { auth: ["github", "twitter"] } }));
-    expect(() => readConfig(tmpDir)).toThrow("Invalid auth provider");
+    expect(() => readConfig(tmpDir)).toThrow(
+      '"inference.auth" in void.json is no longer supported',
+    );
     cleanup();
   });
 
-  it("throws on invalid auth type", () => {
+  it("rejects inference.auth regardless of type", () => {
     setup(JSON.stringify({ inference: { auth: "github" } }));
-    expect(() => readConfig(tmpDir)).toThrow("must be a boolean or an array");
+    expect(() => readConfig(tmpDir)).toThrow(
+      '"inference.auth" in void.json is no longer supported',
+    );
+    cleanup();
+  });
+
+  it("rejects unknown top-level auth providers", () => {
+    setup(JSON.stringify({ auth: { providers: ["email", "patreon"] } }));
+    expect(() => readConfig(tmpDir)).toThrow('"auth.providers" value "patreon"');
+    cleanup();
+  });
+
+  it("rejects duplicate top-level auth providers", () => {
+    setup(JSON.stringify({ auth: { providers: ["github", "github"] } }));
+    expect(() => readConfig(tmpDir)).toThrow(
+      '"auth.providers" in void.json must not contain duplicates',
+    );
     cleanup();
   });
 
@@ -339,9 +354,9 @@ describe("readConfig", () => {
 });
 
 describe("readConfig migration errors", () => {
-  it("throws migration error when old flat auth key is used", () => {
+  it("throws when auth is not an object", () => {
     setup(JSON.stringify({ auth: ["github"] }));
-    expect(() => readConfig(tmpDir)).toThrow('"auth" has moved to "inference.auth"');
+    expect(() => readConfig(tmpDir)).toThrow('"auth" in void.json must be an object');
     cleanup();
   });
 
@@ -506,28 +521,6 @@ describe("readConfig redirects", () => {
     setup(JSON.stringify({ routing: { redirects: { "/old": { to: "/new", status: 200 } } } }));
     expect(() => readConfig(tmpDir)).toThrow("must be 301, 302, 307, or 308");
     cleanup();
-  });
-});
-
-describe("normalizeAuth", () => {
-  it("returns null for undefined", () => {
-    expect(normalizeAuth(undefined)).toBeNull();
-  });
-
-  it("returns null for false", () => {
-    expect(normalizeAuth(false)).toBeNull();
-  });
-
-  it("returns [email] for true", () => {
-    expect(normalizeAuth(true)).toEqual(["email"]);
-  });
-
-  it("returns null for empty array", () => {
-    expect(normalizeAuth([])).toBeNull();
-  });
-
-  it("returns the array as-is", () => {
-    expect(normalizeAuth(["github", "google"])).toEqual(["github", "google"]);
   });
 });
 

@@ -12,6 +12,9 @@ All project-level configuration lives in a `void.json` file at the project root.
 {
   "$schema": "./node_modules/void/schema.json",
   "target": "cloudflare",
+  "auth": {
+    "providers": ["email", "github", "google"]
+  },
   "routing": {
     "revalidate": { "/": 60, "*": 30 },
     "headers": {
@@ -20,7 +23,6 @@ All project-level configuration lives in a `void.json` file at the project root.
     }
   },
   "inference": {
-    "auth": ["github", "google", "email"],
     "bindings": { "db": true, "kv": false },
     "appType": "spa",
     "outputDir": "dist"
@@ -35,6 +37,119 @@ All project-level configuration lives in a `void.json` file at the project root.
 Add the `$schema` field for autocomplete and validation in your editor.
 
 ## Fields
+
+### `auth`
+
+High-level Better Auth configuration.
+
+Use `auth.providers` to select which built-in auth providers Void should enable by default. Include `"email"` for email/password auth. Social providers read credentials from `AUTH_<PROVIDER>_CLIENT_ID` and `AUTH_<PROVIDER>_CLIENT_SECRET`.
+
+```json
+{
+  "auth": {
+    "providers": ["email", "github", "google", "discord"]
+  }
+}
+```
+
+If `auth` is omitted but auth is active via imports, Void enables email/password only. For provider-specific options, scopes, plugins, or custom OAuth flows, use a root `auth.ts` with `defineAuth(...)`.
+
+Supported values for `auth.providers`:
+
+- `email`
+- `apple`
+- `atlassian`
+- `cognito`
+- `discord`
+- `dropbox`
+- `facebook`
+- `figma`
+- `github`
+- `gitlab`
+- `google`
+- `huggingface`
+- `kakao`
+- `kick`
+- `line`
+- `linear`
+- `linkedin`
+- `microsoft`
+- `naver`
+- `notion`
+- `paybin`
+- `paypal`
+- `polar`
+- `railway`
+- `reddit`
+- `roblox`
+- `salesforce`
+- `slack`
+- `spotify`
+- `tiktok`
+- `twitch`
+- `twitter`
+- `vercel`
+- `vk`
+- `zoom`
+
+### `database`
+
+Database backend. Omit for D1/SQLite (default). Set to `"pg"` for PostgreSQL via Hyperdrive.
+
+```json
+{
+  "database": "pg"
+}
+```
+
+| Value       | Description                                           |
+| ----------- | ----------------------------------------------------- |
+| _(omitted)_ | D1 (SQLite) — fully managed by Void, no config needed |
+| `"pg"`      | PostgreSQL via Hyperdrive — bring your own database   |
+
+When using `"pg"`:
+
+- Add `DATABASE_URL` to `.env.local` for local development
+- Import schema helpers from `void/schema-pg` instead of `void/schema-d1`
+- `void/db` connects via Hyperdrive in production, direct connection locally
+- `void gen model` generates `pgTable` with `serial`, `timestamp`, etc.
+
+### `output`
+
+Output mode. Controls the default rendering strategy for pages.
+
+| Value                | Default prerender | Per-page override                | Prerender timing           |
+| -------------------- | ----------------- | -------------------------------- | -------------------------- |
+| `"server"` (default) | `false`           | `export const prerender = true`  | Deploy-time (platform ISR) |
+| `"static"`           | `true`            | `export const prerender = false` | Build-time (`vite build`)  |
+
+When set to `"static"`, all pages are prerendered at build time as static HTML files written to `dist/client/`. Individual pages can opt out with `export const prerender = false`. Dynamic pages (with route params) without a `getPrerenderPaths()` export are implicitly not prerendered.
+
+When omitted or set to `"server"`, pages are server-rendered on request. Individual pages can opt into deploy-time prerendering with `export const prerender = true`.
+
+```json
+{ "output": "static" }
+```
+
+### `remote`
+
+Use remote D1/KV/R2 bindings during local development instead of local miniflare. When enabled, the Void plugin replaces local bindings with proxy-backed versions that forward operations to your deployed project's real resources via the Void proxy.
+
+```json
+{ "remote": true }
+```
+
+**Requirements:**
+
+- Must be logged in (`void auth login`)
+- Must have a linked project (`void project link`)
+- Only affects D1 (`DB`), KV (`KV`), and R2 (`STORAGE`) bindings
+
+You can also enable remote mode via the `VOID_REMOTE=1` environment variable without modifying `void.json`:
+
+```bash
+VOID_REMOTE=1 pnpm dev
+```
 
 ### `target`
 
@@ -51,6 +166,24 @@ Non-CF targets disable CF bindings (`void/db`, `void/kv`, `void/auth`, `void/sto
 
 ```json
 { "target": "node" }
+```
+
+### `worker`
+
+Curated Cloudflare Workers configuration. Binding arrays (`d1_databases`, `kv_namespaces`, `r2_buckets`) are not allowed here — bindings are fully managed by void via inference and the `inference.bindings` field. Users wanting custom bindings should use a `wrangler.json` with real binding IDs and `wrangler deploy`.
+
+| Field                 | Type       | Description                            |
+| --------------------- | ---------- | -------------------------------------- |
+| `compatibility_date`  | `string`   | Cloudflare Workers compatibility date  |
+| `compatibility_flags` | `string[]` | Cloudflare Workers compatibility flags |
+
+```json
+{
+  "worker": {
+    "compatibility_date": "2025-12-01",
+    "compatibility_flags": ["nodejs_compat"]
+  }
+}
 ```
 
 ### `routing`
@@ -119,18 +252,6 @@ Paths to prerender as static HTML at deploy time. Each path must start with `/`.
 
 Configuration for build-time inference — how Void detects your app type, bindings, and build process.
 
-#### `inference.auth`
-
-Enable built-in auth routes and session management.
-
-- `true` — enables email-only auth.
-- An array of providers (`"github"`, `"google"`, `"email"`) — enables specific providers.
-- `false` or omitted — disables auth entirely.
-
-```json
-{ "inference": { "auth": ["github", "email"] } }
-```
-
 #### `inference.bindings`
 
 Explicitly control inferred Cloudflare bindings. If omitted, bindings are [automatically inferred](./resource-inference.md) by scanning your source files for binding usage. If provided, explicit values take precedence and inference is skipped entirely.
@@ -178,80 +299,3 @@ App type. If omitted, auto-detected on first deploy. See [Supported App Types](.
 #### `inference.outputDir`
 
 Output directory for static deploys, relative to the project root. Only relevant when `inference.appType` is `"spa"` or `"static"`. Defaults to `"dist"`.
-
-### `output`
-
-Output mode. Controls the default rendering strategy for pages.
-
-| Value                | Default prerender | Per-page override                | Prerender timing           |
-| -------------------- | ----------------- | -------------------------------- | -------------------------- |
-| `"server"` (default) | `false`           | `export const prerender = true`  | Deploy-time (platform ISR) |
-| `"static"`           | `true`            | `export const prerender = false` | Build-time (`vite build`)  |
-
-When set to `"static"`, all pages are prerendered at build time as static HTML files written to `dist/client/`. Individual pages can opt out with `export const prerender = false`. Dynamic pages (with route params) without a `getPrerenderPaths()` export are implicitly not prerendered.
-
-When omitted or set to `"server"`, pages are server-rendered on request. Individual pages can opt into deploy-time prerendering with `export const prerender = true`.
-
-```json
-{ "output": "static" }
-```
-
-### `remote`
-
-Use remote D1/KV/R2 bindings during local development instead of local miniflare. When enabled, the Void plugin replaces local bindings with proxy-backed versions that forward operations to your deployed project's real resources via the Void proxy.
-
-```json
-{ "remote": true }
-```
-
-**Requirements:**
-
-- Must be logged in (`void auth login`)
-- Must have a linked project (`void project link`)
-- Only affects D1 (`DB`), KV (`KV`, `AUTH_KV`), and R2 (`STORAGE`) bindings
-
-You can also enable remote mode via the `VOID_REMOTE=1` environment variable without modifying `void.json`:
-
-```bash
-VOID_REMOTE=1 pnpm dev
-```
-
-### `worker`
-
-Curated Cloudflare Workers configuration. Binding arrays (`d1_databases`, `kv_namespaces`, `r2_buckets`) are not allowed here — bindings are fully managed by void via inference and the `inference.bindings` field. Users wanting custom bindings should use a `wrangler.json` with real binding IDs and `wrangler deploy`.
-
-| Field                 | Type       | Description                            |
-| --------------------- | ---------- | -------------------------------------- |
-| `compatibility_date`  | `string`   | Cloudflare Workers compatibility date  |
-| `compatibility_flags` | `string[]` | Cloudflare Workers compatibility flags |
-
-```json
-{
-  "worker": {
-    "compatibility_date": "2025-12-01",
-    "compatibility_flags": ["nodejs_compat"]
-  }
-}
-```
-
-### `database`
-
-Database backend. Omit for D1/SQLite (default). Set to `"pg"` for PostgreSQL via Hyperdrive.
-
-```json
-{
-  "database": "pg"
-}
-```
-
-| Value       | Description                                           |
-| ----------- | ----------------------------------------------------- |
-| _(omitted)_ | D1 (SQLite) — fully managed by Void, no config needed |
-| `"pg"`      | PostgreSQL via Hyperdrive — bring your own database   |
-
-When using `"pg"`:
-
-- Add `DATABASE_URL` to `.env.local` for local development
-- Import schema helpers from `void/schema-pg` instead of `void/schema-d1`
-- `void/db` connects via Hyperdrive in production, direct connection locally
-- `void gen model` generates `pgTable` with `serial`, `timestamp`, etc.

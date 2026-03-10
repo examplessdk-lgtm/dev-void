@@ -8,17 +8,11 @@ import type { ScanResult } from "./scan";
  */
 const BINDING_HINT_SCRIPT = `<script type="module" src="/@id/virtual:void/binding-hint"></script>`;
 
-export type AuthProvider = "github" | "google" | "email";
-
 export interface AuthCompileOptions {
-  providers: AuthProvider[];
-  sessionPath: string;
-  passwordPath: string | null;
-  schemaPath: string;
-  githubProviderPath: string | null;
-  googleProviderPath: string | null;
-  /** Resolved path to void/auth — used to import the shared authContext ALS. */
   authRuntimePath: string;
+  authConfigPath: string | null;
+  dialect: "sqlite" | "postgresql";
+  providers: string[] | null;
 }
 
 export interface CompileOptions {
@@ -99,31 +93,23 @@ export function compileRouteTable(
   lines.push(`import { AsyncLocalStorage } from "node:async_hooks";`);
   lines.push(`import { Hono } from ${JSON.stringify(options.honoPath)};`);
   lines.push(`import { convertReturnValue } from ${JSON.stringify(options.responsePath)};`);
-  lines.push(`import { withRuntimeEnv } from ${JSON.stringify(options.runtimeEnvPath)};`);
+  if (options.nodeTarget) {
+    lines.push(`const withRuntimeEnv = (_env, fn) => fn();`);
+  } else {
+    lines.push(`import { withRuntimeEnv } from ${JSON.stringify(options.runtimeEnvPath)};`);
+  }
 
-  // Auth imports
   if (auth) {
-    lines.push(
-      `import { parseSessionCookie, buildSetCookieHeader, buildClearCookieHeader, generateSessionId, SESSION_TTL_SECONDS } from ${JSON.stringify(auth.sessionPath)};`,
-    );
-    lines.push(
-      `import { CREATE_AUTH_TABLES_SQL, generateUserId } from ${JSON.stringify(auth.schemaPath)};`,
-    );
-    if (auth.passwordPath) {
-      lines.push(
-        `import { hashPassword, verifyPassword } from ${JSON.stringify(auth.passwordPath)};`,
-      );
+    const authImports = ["runVoidAuthMiddleware", "handleVoidAuthRequest", "runVoidAuthMigrations"];
+    if (webSockets.length > 0) {
+      authImports.push("resolveVoidAuthState as __resolveVoidAuthState");
     }
-    if (auth.githubProviderPath) {
-      lines.push(`import { githubAuth } from ${JSON.stringify(auth.githubProviderPath)};`);
-    }
-    if (auth.googleProviderPath) {
-      lines.push(`import { googleAuth } from ${JSON.stringify(auth.googleProviderPath)};`);
-    }
-    lines.push(`import { authContext } from ${JSON.stringify(auth.authRuntimePath)};`);
     lines.push(
-      `import { resolveAuthUserFromRequest } from ${JSON.stringify(auth.authRuntimePath)};`,
+      `import { ${authImports.join(", ")} } from ${JSON.stringify(auth.authRuntimePath)};`,
     );
+    if (auth.authConfigPath) {
+      lines.push(`import __voidAuthConfig from ${JSON.stringify(auth.authConfigPath)};`);
+    }
   }
   if (webSockets.length > 0 && options.webSocketRuntimePath) {
     lines.push(
@@ -142,6 +128,13 @@ export function compileRouteTable(
     lines.push(`import websocket${i} from ${JSON.stringify(`${routesDir}/${route.filePath}`)};`);
   }
   lines.push("");
+
+  if (auth) {
+    lines.push(
+      `const __voidAuthOptions = { dialect: ${JSON.stringify(auth.dialect)}, providers: ${JSON.stringify(auth.providers)}, userConfig: ${auth.authConfigPath ? "__voidAuthConfig" : "undefined"} };`,
+    );
+    lines.push("");
+  }
 
   lines.push(`const app = new Hono();`);
   lines.push(`export const requestContext = new AsyncLocalStorage();`);
@@ -167,21 +160,9 @@ export function compileRouteTable(
     compileHeaderMiddleware(lines, options.headerRules);
   }
 
-  // Auth: ensure tables exist + session middleware
   if (auth) {
-    lines.push("let authReady = false;");
     lines.push("app.use(async (c, next) => {");
-    lines.push("  if (!authReady) {");
-    lines.push("    await c.env.DB.prepare(CREATE_AUTH_TABLES_SQL).run();");
-    lines.push("    authReady = true;");
-    lines.push("  }");
-    lines.push("  await next();");
-    lines.push("});");
-    lines.push("");
-    lines.push("app.use(async (c, next) => {");
-    lines.push("  const __user = await resolveAuthUserFromRequest(c.req.raw, c.env);");
-    lines.push('  if (__user) c.set("user", __user);');
-    lines.push("  await authContext.run({ user: __user }, next);");
+    lines.push("  return runVoidAuthMiddleware(c, next, __voidAuthOptions);");
     lines.push("});");
     lines.push("");
   }
@@ -194,9 +175,15 @@ export function compileRouteTable(
     lines.push("");
   }
 
-  // Auth routes
   if (auth) {
-    compileAuthRoutes(lines, auth);
+    lines.push('app.all("/api/auth", async (c) => {');
+    lines.push("  return handleVoidAuthRequest(c, __voidAuthOptions);");
+    lines.push("});");
+    lines.push("");
+    lines.push('app.all("/api/auth/*", async (c) => {');
+    lines.push("  return handleVoidAuthRequest(c, __voidAuthOptions);");
+    lines.push("});");
+    lines.push("");
   }
 
   // Register routes with lazy-loaded handlers (shared loader per file)
@@ -244,7 +231,7 @@ export function compileRouteTable(
             className: route.className,
             bindingName: route.bindingName,
           },
-        )});`,
+        )}, ${auth ? "__voidAuthOptions" : "undefined"}, ${auth ? "__resolveVoidAuthState" : "undefined"});`,
       );
     }
     lines.push("");
@@ -523,8 +510,8 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push("");
   }
 
-  // /__void/migrate handler — runs bundled D1 migrations in-worker (must precede wildcard)
-  if (options.migrationHandlerPath && options.migrations?.length) {
+  // /__void/migrate handler — runs bundled DB + auth migrations in-worker
+  if (options.migrationHandlerPath && (options.migrations?.length || auth)) {
     lines.push(
       `import { createMigrationHandler as __createMigrationHandler } from ${JSON.stringify(options.migrationHandlerPath)};`,
     );
@@ -532,11 +519,19 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push(
       `const __migrationDialect = ${JSON.stringify(options.migrationDialect ?? "sqlite")};`,
     );
-    lines.push("let __voidMigrationHandler;");
     lines.push('app.post("/__void/migrate", async (c) => {');
-    lines.push(
-      "  if (!__voidMigrationHandler) __voidMigrationHandler = __createMigrationHandler(c.env, __migrations, __migrationDialect);",
-    );
+    lines.push("  const __voidMigrationHandler = __createMigrationHandler(");
+    lines.push("    c.env,");
+    lines.push("    __migrations,");
+    lines.push("    __migrationDialect,");
+    if (auth) {
+      lines.push(
+        "    () => runVoidAuthMigrations(new Request(c.req.url), c.env, __voidAuthOptions),",
+      );
+    } else {
+      lines.push("    undefined,");
+    }
+    lines.push("  );");
     lines.push("  return __voidMigrationHandler(c.req.raw);");
     lines.push("});");
     lines.push("");
@@ -638,194 +633,6 @@ function compilePrerenderCollector(
   lines.push(`    });`);
   lines.push(`  });`);
   lines.push(`}`);
-  lines.push("");
-}
-
-function compileAuthRoutes(lines: string[], auth: AuthCompileOptions): void {
-  const hasEmail = auth.providers.includes("email");
-  const hasGitHub = auth.providers.includes("github");
-  const hasGoogle = auth.providers.includes("google");
-
-  if (hasEmail) {
-    // POST /auth/register
-    lines.push('app.post("/auth/register", async (c) => {');
-    lines.push("  const { email, password, name } = await c.req.json();");
-    lines.push(
-      '  if (!email || !password) return c.json({ error: "email and password required" }, 400);',
-    );
-    lines.push("  const existing = await c.env.DB.prepare(");
-    lines.push("    \"SELECT id FROM auth_users WHERE provider = 'email' AND provider_id = ?\"");
-    lines.push("  ).bind(email).first();");
-    lines.push('  if (existing) return c.json({ error: "email already registered" }, 409);');
-    lines.push("  const userId = generateUserId();");
-    lines.push("  const hash = await hashPassword(password);");
-    lines.push("  await c.env.DB.prepare(");
-    lines.push(
-      "    \"INSERT INTO auth_users (id, provider, provider_id, email, name, password_hash) VALUES (?, 'email', ?, ?, ?, ?)\"",
-    );
-    lines.push("  ).bind(userId, email, email, name ?? null, hash).run();");
-    lines.push("  const sessionId = generateSessionId();");
-    lines.push('  await c.env.AUTH_KV.put("session:" + sessionId, JSON.stringify({');
-    lines.push('    userId, provider: "email", email, name: name ?? null, avatar_url: null,');
-    lines.push("    createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_SECONDS * 1000,");
-    lines.push("  }), { expirationTtl: SESSION_TTL_SECONDS });");
-    lines.push('  const secure = new URL(c.req.url).protocol === "https:";');
-    lines.push("  const headers = new Headers();");
-    lines.push('  headers.set("Set-Cookie", buildSetCookieHeader(sessionId, secure));');
-    lines.push(
-      "  return c.json({ id: userId, email, name: name ?? null }, { status: 201, headers });",
-    );
-    lines.push("});");
-    lines.push("");
-
-    // POST /auth/login
-    lines.push('app.post("/auth/login", async (c) => {');
-    lines.push("  const { email, password } = await c.req.json();");
-    lines.push(
-      '  if (!email || !password) return c.json({ error: "email and password required" }, 400);',
-    );
-    lines.push("  const user = await c.env.DB.prepare(");
-    lines.push(
-      "    \"SELECT id, email, name, avatar_url, password_hash FROM auth_users WHERE provider = 'email' AND provider_id = ?\"",
-    );
-    lines.push("  ).bind(email).first();");
-    lines.push(
-      '  if (!user || !user.password_hash) return c.json({ error: "invalid credentials" }, 401);',
-    );
-    lines.push("  const valid = await verifyPassword(password, user.password_hash);");
-    lines.push('  if (!valid) return c.json({ error: "invalid credentials" }, 401);');
-    lines.push("  const sessionId = generateSessionId();");
-    lines.push('  await c.env.AUTH_KV.put("session:" + sessionId, JSON.stringify({');
-    lines.push(
-      '    userId: user.id, provider: "email", email: user.email, name: user.name, avatar_url: user.avatar_url,',
-    );
-    lines.push("    createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_SECONDS * 1000,");
-    lines.push("  }), { expirationTtl: SESSION_TTL_SECONDS });");
-    lines.push('  const secure = new URL(c.req.url).protocol === "https:";');
-    lines.push("  const headers = new Headers();");
-    lines.push('  headers.set("Set-Cookie", buildSetCookieHeader(sessionId, secure));');
-    lines.push(
-      "  return c.json({ id: user.id, email: user.email, name: user.name }, { headers });",
-    );
-    lines.push("});");
-    lines.push("");
-  }
-
-  if (hasGitHub) {
-    lines.push('app.get("/auth/login/github",');
-    lines.push("  (c, next) => {");
-    lines.push(
-      '    if (!c.env.GITHUB_OAUTH_ID || !c.env.GITHUB_OAUTH_SECRET) return c.json({ error: "GitHub OAuth not configured. Set GITHUB_OAUTH_ID and GITHUB_OAUTH_SECRET secrets." }, 500);',
-    );
-    lines.push("    return githubAuth({");
-    lines.push("      client_id: c.env.GITHUB_OAUTH_ID,");
-    lines.push("      client_secret: c.env.GITHUB_OAUTH_SECRET,");
-    lines.push('      scope: ["read:user", "user:email"],');
-    lines.push("      oauthApp: true,");
-    lines.push("    })(c, next);");
-    lines.push("  },");
-    lines.push("  async (c) => {");
-    lines.push('    const ghUser = c.get("user-github");');
-    lines.push("    const providerId = String(ghUser.id);");
-    lines.push("    let user = await c.env.DB.prepare(");
-    lines.push(
-      "      \"SELECT id, email, name, avatar_url FROM auth_users WHERE provider = 'github' AND provider_id = ?\"",
-    );
-    lines.push("    ).bind(providerId).first();");
-    lines.push("    if (!user) {");
-    lines.push("      const userId = generateUserId();");
-    lines.push("      await c.env.DB.prepare(");
-    lines.push(
-      "        \"INSERT INTO auth_users (id, provider, provider_id, email, name, avatar_url) VALUES (?, 'github', ?, ?, ?, ?)\"",
-    );
-    lines.push(
-      "      ).bind(userId, providerId, ghUser.email ?? null, ghUser.name ?? ghUser.login ?? null, ghUser.avatar_url ?? null).run();",
-    );
-    lines.push(
-      "      user = { id: userId, email: ghUser.email, name: ghUser.name ?? ghUser.login, avatar_url: ghUser.avatar_url };",
-    );
-    lines.push("    }");
-    lines.push("    const sessionId = generateSessionId();");
-    lines.push('    await c.env.AUTH_KV.put("session:" + sessionId, JSON.stringify({');
-    lines.push(
-      '      userId: user.id, provider: "github", email: user.email, name: user.name, avatar_url: user.avatar_url,',
-    );
-    lines.push("      createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_SECONDS * 1000,");
-    lines.push("    }), { expirationTtl: SESSION_TTL_SECONDS });");
-    lines.push('    const secure = new URL(c.req.url).protocol === "https:";');
-    lines.push("    return new Response(null, { status: 302, headers: {");
-    lines.push('      Location: "/", "Set-Cookie": buildSetCookieHeader(sessionId, secure)');
-    lines.push("    }});");
-    lines.push("  }");
-    lines.push(");");
-    lines.push("");
-  }
-
-  if (hasGoogle) {
-    lines.push('app.get("/auth/login/google",');
-    lines.push("  (c, next) => {");
-    lines.push(
-      '    if (!c.env.GOOGLE_OAUTH_ID || !c.env.GOOGLE_OAUTH_SECRET) return c.json({ error: "Google OAuth not configured. Set GOOGLE_OAUTH_ID and GOOGLE_OAUTH_SECRET secrets." }, 500);',
-    );
-    lines.push("    return googleAuth({");
-    lines.push("      client_id: c.env.GOOGLE_OAUTH_ID,");
-    lines.push("      client_secret: c.env.GOOGLE_OAUTH_SECRET,");
-    lines.push('      scope: ["openid", "email", "profile"],');
-    lines.push("    })(c, next);");
-    lines.push("  },");
-    lines.push("  async (c) => {");
-    lines.push('    const googleUser = c.get("user-google");');
-    lines.push("    const providerId = String(googleUser.id);");
-    lines.push("    let user = await c.env.DB.prepare(");
-    lines.push(
-      "      \"SELECT id, email, name, avatar_url FROM auth_users WHERE provider = 'google' AND provider_id = ?\"",
-    );
-    lines.push("    ).bind(providerId).first();");
-    lines.push("    if (!user) {");
-    lines.push("      const userId = generateUserId();");
-    lines.push("      await c.env.DB.prepare(");
-    lines.push(
-      "        \"INSERT INTO auth_users (id, provider, provider_id, email, name, avatar_url) VALUES (?, 'google', ?, ?, ?, ?)\"",
-    );
-    lines.push(
-      "      ).bind(userId, providerId, googleUser.email ?? null, googleUser.name ?? null, googleUser.picture ?? null).run();",
-    );
-    lines.push(
-      "      user = { id: userId, email: googleUser.email, name: googleUser.name, avatar_url: googleUser.picture };",
-    );
-    lines.push("    }");
-    lines.push("    const sessionId = generateSessionId();");
-    lines.push('    await c.env.AUTH_KV.put("session:" + sessionId, JSON.stringify({');
-    lines.push(
-      '      userId: user.id, provider: "google", email: user.email, name: user.name, avatar_url: user.avatar_url,',
-    );
-    lines.push("      createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_SECONDS * 1000,");
-    lines.push("    }), { expirationTtl: SESSION_TTL_SECONDS });");
-    lines.push('    const secure = new URL(c.req.url).protocol === "https:";');
-    lines.push("    return new Response(null, { status: 302, headers: {");
-    lines.push('      Location: "/", "Set-Cookie": buildSetCookieHeader(sessionId, secure)');
-    lines.push("    }});");
-    lines.push("  }");
-    lines.push(");");
-    lines.push("");
-  }
-
-  // GET /auth/me — always present when auth enabled
-  lines.push('app.get("/auth/me", (c) => {');
-  lines.push('  const user = c.get("user");');
-  lines.push('  if (!user) return c.json({ error: "unauthorized" }, 401);');
-  lines.push("  return c.json(user);");
-  lines.push("});");
-  lines.push("");
-
-  // POST /auth/logout — always present when auth enabled
-  lines.push('app.post("/auth/logout", async (c) => {');
-  lines.push('  const sid = parseSessionCookie(c.req.header("cookie"));');
-  lines.push('  if (sid) await c.env.AUTH_KV.delete("session:" + sid);');
-  lines.push("  return new Response(null, { status: 302, headers: {");
-  lines.push('    Location: "/", "Set-Cookie": buildClearCookieHeader()');
-  lines.push("  }});");
-  lines.push("});");
   lines.push("");
 }
 
@@ -1173,10 +980,12 @@ export function compileWorkerEntry(
   remote?: { remotePath: string; envPath: string },
   assetsDir = "assets",
   webSocketClasses: string[] = [],
+  runtimeEnvPath = "void/_env",
 ): string {
   const remotePath = remote?.remotePath;
+  const runtimeEnvImport = `import { withRuntimeEnv } from ${JSON.stringify(runtimeEnvPath)};\n`;
   const remoteImport = remote
-    ? `import { createRemoteEnv } from ${JSON.stringify(remote.remotePath)};\nimport { withRuntimeEnv } from ${JSON.stringify(remote.envPath)};\n`
+    ? `import { createRemoteEnv } from ${JSON.stringify(remote.remotePath)};\n`
     : "";
 
   // Asset fallthrough helper — if the app returns 404, check ASSETS binding
@@ -1202,33 +1011,27 @@ async function serveWithAssets(request, env, response) {
     ? `async (request, env, ctx) => {
   const ws = await __voidHandleWebSocket(request, env);
   if (ws) return ws;
-  if (env.__VOID_REMOTE === "1") {
-    env = createRemoteEnv(env);
+  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
+  return withRuntimeEnv(env, async () => {
     const internal = await __handleInternal(request, env, ctx);
     if (internal) return internal;
-    return serveWithAssets(request, env, await withRuntimeEnv(env, () => app.fetch(request, env, ctx)));
-  }
-  const internal = await __handleInternal(request, env, ctx);
-  if (internal) return internal;
-  return serveWithAssets(request, env, await app.fetch(request, env, ctx));
+    return serveWithAssets(request, env, await app.fetch(request, env, ctx));
+  });
 }`
     : `async (request, env, ctx) => {
   const ws = await __voidHandleWebSocket(request, env);
   if (ws) return ws;
-  const internal = await __handleInternal(request, env, ctx);
-  if (internal) return internal;
-  return serveWithAssets(request, env, await app.fetch(request, env, ctx));
+  return withRuntimeEnv(env, async () => {
+    const internal = await __handleInternal(request, env, ctx);
+    if (internal) return internal;
+    return serveWithAssets(request, env, await app.fetch(request, env, ctx));
+  });
 }`;
 
   const queueFetchCall = remotePath
-    ? `let __queueRes;
-  if (env.__VOID_REMOTE === "1") {
-    env = createRemoteEnv(env);
-    __queueRes = await withRuntimeEnv(env, () => app.fetch(req, env, ctx));
-  } else {
-    __queueRes = await app.fetch(req, env, ctx);
-  }`
-    : "const __queueRes = await app.fetch(req, env, ctx);";
+    ? `if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
+  const __queueRes = await withRuntimeEnv(env, () => app.fetch(req, env, ctx));`
+    : "const __queueRes = await withRuntimeEnv(env, () => app.fetch(req, env, ctx));";
 
   const queueDecisionCode = `const __qr = await __queueRes.json();
   if (__qr.decisions) {
@@ -1250,10 +1053,20 @@ async function serveWithAssets(request, env, response) {
   return Response.json({ paths });
 }`;
 
+  const scheduledHandler = remotePath
+    ? `async function handleScheduled(controller, env, ctx) {
+  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
+  return withRuntimeEnv(env, () => scheduled(controller, env, ctx));
+}`
+    : `async function handleScheduled(controller, env, ctx) {
+  return withRuntimeEnv(env, () => scheduled(controller, env, ctx));
+}`;
+
   if (hasQueues) {
     return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(", ")}` : ""} } from 'virtual:void-routes';
-${remoteImport}${assetHelper}
+${runtimeEnvImport}${remoteImport}${assetHelper}
 ${internalRouteHelper}
+${scheduledHandler}
 async function queue(batch, env, ctx) {
   const messages = [...batch.messages].map(m => ({
     id: m.id, timestamp: m.timestamp.toISOString(),
@@ -1269,13 +1082,14 @@ async function queue(batch, env, ctx) {
 }
 
 ${webSocketClasses.map((name) => `export { ${name} };`).join("\n")}
-export default { fetch: ${fetchHandler}, scheduled, queue };`;
+export default { fetch: ${fetchHandler}, scheduled: handleScheduled, queue };`;
   }
   return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(", ")}` : ""} } from 'virtual:void-routes';
-${remoteImport}${assetHelper}
+${runtimeEnvImport}${remoteImport}${assetHelper}
 ${internalRouteHelper}
+${scheduledHandler}
 ${webSocketClasses.map((name) => `export { ${name} };`).join("\n")}
-export default { fetch: ${fetchHandler}, scheduled };`;
+export default { fetch: ${fetchHandler}, scheduled: handleScheduled };`;
 }
 
 /**
@@ -1339,8 +1153,19 @@ serve({ fetch: app.fetch, port }, (info) => {
  * Same as compileWorkerClient but without cloudflare:workers dependency.
  * Calls app.fetch() directly (no HTTP round-trip) with ALS context forwarding.
  */
-export function compileNodeClient(): string {
+export function compileBrowserClient(
+  authClientPath: string,
+  fetchPath: string,
+  fetchStreamPath: string,
+): string {
+  return `export { fetch, FetchError } from ${JSON.stringify(fetchPath)};
+export { fetchStream, StreamError } from ${JSON.stringify(fetchStreamPath)};
+export { auth, createAuthClient } from ${JSON.stringify(authClientPath)};`;
+}
+
+export function compileNodeClient(authClientPath: string): string {
   return `import app, { requestContext } from "virtual:void-routes";
+export { auth, createAuthClient } from ${JSON.stringify(authClientPath)};
 
 export class FetchError extends Error {
   constructor(status, statusText, data) {
@@ -1476,7 +1301,7 @@ function compileHeaderMiddleware(lines: string[], rules: HeaderRule[]): void {
 export function compileWorkerClient(authClientPath: string): string {
   return `import app, { requestContext } from "virtual:void-routes";
 import { env } from "cloudflare:workers";
-export { auth, AuthError } from ${JSON.stringify(authClientPath)};
+export { auth, createAuthClient } from ${JSON.stringify(authClientPath)};
 
 export class FetchError extends Error {
   constructor(status, statusText, data) {

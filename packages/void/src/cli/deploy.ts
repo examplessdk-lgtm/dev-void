@@ -33,7 +33,6 @@ import { detectPreset, FRAMEWORK_PRESETS, type StaticPreset, type FrameworkPrese
 import {
   readConfig,
   resolveBindingNames,
-  type AuthProvider,
   type VoidConfig,
   getDatabaseDialect,
   isNodeTarget,
@@ -46,6 +45,7 @@ import { cliTitle } from "./output";
 import { parseHeadersFile, parseRedirectsFile } from "./headers";
 import { convertHeadersConfig, convertRedirectsConfig } from "../config";
 import type { AssetConfig, DeployEvent, HeaderRule, RedirectRule } from "./types";
+import { findVoidAuthConfig } from "../auth/config";
 
 export interface RunDeployOptions {
   projectSlug?: string;
@@ -361,6 +361,15 @@ async function runFrameworkDeploy(
     : undefined;
   const scanDirs = voidConfig.inference?.scanDirs ?? FRAMEWORK_SCAN_DIRS;
   const bindings = inferProjectBindings(root, inferenceOptions, scanDirs);
+  const authEnabled =
+    bindings.needsAuth || findVoidAuthConfig(root) !== null || voidConfig.auth !== undefined;
+
+  if (authEnabled) {
+    log.error(
+      "Void-managed Better Auth is only supported in Void apps. Use Better Auth's official integration for this framework instead.",
+    );
+    process.exit(1);
+  }
 
   // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects
   if (dialect === "postgresql" && bindings.needsD1) {
@@ -451,22 +460,13 @@ async function runFrameworkDeploy(
     }
   }
 
-  // 5. Resolve auth config (explicit config takes precedence, otherwise infer from source)
-  const authProviders: AuthProvider[] | null = voidConfig.inference?.auth
-    ? voidConfig.inference.auth === true
-      ? (["email", "github", "google"] as AuthProvider[])
-      : voidConfig.inference.auth
-    : bindings.needsAuth
-      ? ["email", "github", "google"]
-      : null;
-
-  // 7. Generate wrapper if needed (auth, crons, or queues present)
+  // 5. Generate wrapper if needed (crons or queues present)
   const rawJobs = scanJobsSync(root);
   const rawQueues = scanQueuesSync(root);
   const originalEntry = join(workerDir, fwPreset.workerMain);
 
   const wrapperFeatures: WrapperFeatures = {
-    auth: authProviders,
+    auth: null,
     crons: rawJobs,
     queues: rawQueues,
   };
@@ -645,9 +645,20 @@ async function runFullDeploy(
   const deployScanDirs =
     deployConfig.inference?.scanDirs ?? (isFrameworkMode ? FRAMEWORK_SCAN_DIRS : undefined);
   const bindings = inferProjectBindings(root, undefined, deployScanDirs);
+  const authEnabled =
+    bindings.needsAuth || findVoidAuthConfig(root) !== null || deployConfig.auth !== undefined;
+  const effectiveBindings =
+    authEnabled && !bindings.needsD1 ? { ...bindings, needsD1: true } : bindings;
+
+  if (isFrameworkMode && authEnabled) {
+    log.error(
+      "Void-managed Better Auth is only supported in Void apps. Use Better Auth's official integration for this framework instead.",
+    );
+    process.exit(1);
+  }
 
   // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects
-  if (dialect === "postgresql" && bindings.needsD1) {
+  if (dialect === "postgresql" && effectiveBindings.needsD1) {
     try {
       const resources = await client.getResources(config.projectId);
       const hasHyperdrive = resources.some((r: any) => r.type === "hyperdrive");
@@ -873,7 +884,7 @@ async function runFullDeploy(
   const formData = packageBuild(
     distDir,
     workerDirName,
-    bindings,
+    effectiveBindings,
     validatedMigrations,
     schedules,
     isSsr,

@@ -18,6 +18,5 @@ export function createRemoteEnv(env: Record<string, unknown>): Record<string, un
     ...(env.DB != null && { DB: new ProxyD1Database(client, "DB") }),
     ...(env.KV != null && { KV: new ProxyKVNamespace(client, "KV") }),
     ...(env.STORAGE != null && { STORAGE: new ProxyR2Bucket(client, "STORAGE") }),
-    ...(env.AUTH_KV != null && { AUTH_KV: new ProxyKVNamespace(client, "AUTH_KV") }),
   };
 }

@@ -31,18 +31,6 @@
       "types": "./dist/runtime/auth.d.mts",
       "import": "./dist/runtime/auth.mjs"
     },
-    "./auth/session": {
-      "types": "./dist/auth/session.d.mts",
-      "import": "./dist/auth/session.mjs"
-    },
-    "./auth/password": {
-      "types": "./dist/auth/password.d.mts",
-      "import": "./dist/auth/password.mjs"
-    },
-    "./auth/schema": {
-      "types": "./dist/auth/schema.d.mts",
-      "import": "./dist/auth/schema.mjs"
-    },
     "./validator": {
       "types": "./dist/runtime/validator.d.mts",
       "import": "./dist/runtime/validator.mjs"
@@ -54,6 +42,14 @@
       "types": "./dist/runtime/client.d.mts",
       "import": "./dist/runtime/client.mjs"
     },
+    "./runtime/fetch": {
+      "types": "./dist/runtime/fetch.d.mts",
+      "import": "./dist/runtime/fetch.mjs"
+    },
+    "./runtime/fetch-stream": {
+      "types": "./dist/runtime/fetch-stream.d.mts",
+      "import": "./dist/runtime/fetch-stream.mjs"
+    },
     "./ws": {
       "types": "./dist/runtime/ws.d.mts",
       "import": "./dist/runtime/ws.mjs"
@@ -61,6 +57,18 @@
     "./db": {
       "types": "./dist/runtime/db.d.mts",
       "import": "./dist/runtime/db.mjs"
+    },
+    "./drizzle-zod": {
+      "types": "./dist/runtime/drizzle-zod.d.mts",
+      "import": "./dist/runtime/drizzle-zod.mjs"
+    },
+    "./drizzle-valibot": {
+      "types": "./dist/runtime/drizzle-valibot.d.mts",
+      "import": "./dist/runtime/drizzle-valibot.mjs"
+    },
+    "./drizzle-arktype": {
+      "types": "./dist/runtime/drizzle-arktype.d.mts",
+      "import": "./dist/runtime/drizzle-arktype.mjs"
     },
     "./schema-d1": {
       "types": "./dist/runtime/schema-d1.d.mts",
@@ -101,6 +109,10 @@
     "./runtime/migration-handler": {
       "types": "./dist/runtime/migration-handler.d.mts",
       "import": "./dist/runtime/migration-handler.mjs"
+    },
+    "./runtime/migration-handler-pg": {
+      "types": "./dist/runtime/migration-handler-pg.d.mts",
+      "import": "./dist/runtime/migration-handler-pg.mjs"
     },
     "./runtime/ws-server": {
       "types": "./dist/runtime/ws-server.d.mts",
@@ -145,6 +157,10 @@
       "types": "./dist/runtime/db.d.mts",
       "import": "./dist/runtime/db.mjs"
     },
+    "./_db-pg": {
+      "types": "./dist/runtime/db-pg.d.mts",
+      "import": "./dist/runtime/db-pg.mjs"
+    },
     "./vue": {
       "types": "./dist/runtime/vue.d.mts",
       "import": "./dist/runtime/vue.mjs"
@@ -174,9 +190,13 @@
     "@cloudflare/workers-types": "catalog:",
     "@hono/oauth-providers": "^0.8.5",
     "@napi-rs/keyring": "1.2.0",
+    "better-auth": "^1.5.4",
     "better-sqlite3": "^12.6.2",
+    "drizzle-arktype": "^0.1.3",
     "drizzle-kit": "^0.31.9",
     "drizzle-orm": "^0.45.1",
+    "drizzle-valibot": "^0.4.2",
+    "drizzle-zod": "^0.8.3",
     "pg": "^8.20.0",
     "wrangler": "catalog:"
   },
@@ -205,8 +225,11 @@
     "@void-x/solid": "workspace:*",
     "@void-x/svelte": "workspace:*",
     "@void-x/vue": "workspace:*",
+    "arktype": ">=2.0.0",
     "hono": "^4.0.0",
-    "vite": "^8.0.0-beta.14"
+    "valibot": ">=1.0.0-beta.7",
+    "vite": "^8.0.0-beta.14",
+    "zod": "^3.25.0 || ^4.0.0"
   },
   "peerDependenciesMeta": {
     "@void-x/md": {
@@ -222,6 +245,15 @@
       "optional": true
     },
     "@void-x/solid": {
+      "optional": true
+    },
+    "arktype": {
+      "optional": true
+    },
+    "valibot": {
+      "optional": true
+    },
+    "zod": {
       "optional": true
     }
   }

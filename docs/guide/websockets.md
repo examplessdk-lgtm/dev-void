@@ -4,6 +4,10 @@ outline: deep
 
 # WebSockets
 
+::: warning ⚠️ Void Apps Only
+Void-managed WebSockets currently works only for Void apps. Meta-framework mode is not supported yet.
+:::
+
 Void supports typed WebSockets from file-based `.ws.ts` routes. Each WebSocket route compiles to a Cloudflare Durable Object, so the feature is currently Cloudflare-only. If you set `target` to `node`, `bun`, or `deno`, builds fail when `.ws.ts` routes are present.
 
 Use WebSockets for chat, presence, collaborative rooms, notifications, AI/live-log streaming, and other realtime flows where one connection target maps cleanly to one route instance.

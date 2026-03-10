@@ -53,6 +53,7 @@ export interface WebSocketManifestMeta {
 
 export interface DeployManifest {
   version: number;
+  auth?: boolean;
   bindings: {
     d1?: string[];
     kv?: string[];

@@ -1,6 +1,6 @@
 import { pgTable, serial, text, boolean, timestamp } from "void/schema-pg";
-import { createInsertSchema } from "drizzle-valibot";
-import { pipe, minLength, number } from "valibot";
+import { createInsertSchema } from "void/drizzle-valibot";
+import { minLength, pipe } from "valibot";
 
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
@@ -19,11 +19,12 @@ export const posts = pgTable("posts", {
   id: serial("id").primaryKey(),
   title: text("title").notNull(),
   body: text("body").notNull(),
-  authorId: serial("author_id").references(() => users.id),
+  authorId: serial("author_id")
+    .notNull()
+    .references(() => users.id),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
 export const insertPostSchema = createInsertSchema(posts, {
   title: (schema) => pipe(schema, minLength(1)),
-  authorId: () => number(),
 });

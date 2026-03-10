@@ -14,6 +14,12 @@ function createTempRoot(): string {
   return root;
 }
 
+function getHookHandler<T>(hook: T | { handler: T } | undefined): T {
+  if (typeof hook === "function") return hook;
+  if (hook && typeof hook === "object" && "handler" in hook) return hook.handler;
+  throw new Error("Expected Vite hook handler.");
+}
+
 describe("inferProjectBindings", () => {
   afterEach(() => {
     while (tempDirs.length > 0) {
@@ -49,9 +55,9 @@ describe("inferProjectBindings", () => {
     writeFileSync(
       join(root, "src", "App.tsx"),
       `
-      import { auth, AuthError } from "void/client";
+      import { auth } from "void/client";
       export default function App() {
-        auth.me();
+        auth.signIn;
       }
       `,
     );
@@ -222,6 +228,125 @@ describe("detectFramework", () => {
       expect(() =>
         handler?.call({} as never, { command: "serve" } as import("vite").ResolvedConfig),
       ).not.toThrow();
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  it("externalizes Cloudflare builtins for default worker builds", () => {
+    const root = createTempRoot();
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
+
+    try {
+      const plugins = voidPlugin();
+      const externalPlugin = plugins.find(
+        (plugin) => plugin.name === "void:cloudflare-builtins-external",
+      );
+      const config = getHookHandler(externalPlugin?.config) as (
+        this: object,
+        config: import("vite").UserConfig,
+        env: import("vite").ConfigEnv,
+      ) => import("vite").UserConfig | void;
+
+      expect(externalPlugin).toBeTruthy();
+      const result = config.call(
+        {} as never,
+        {},
+        {
+          command: "build",
+          mode: "production",
+        },
+      );
+
+      const rootExternal = result?.build?.rollupOptions?.external as unknown[];
+      expect(rootExternal).toBeTruthy();
+      expect(
+        rootExternal.some((value) => value instanceof RegExp && value.test("cloudflare:workers")),
+      ).toBe(true);
+      expect(result?.environments).toBeUndefined();
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  it("includes Cloudflare builtin externalization for class A frameworks", () => {
+    const root = createTempRoot();
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ dependencies: { "@tanstack/react-start": "^1.0.0" } }),
+    );
+
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
+
+    try {
+      const plugins = voidPlugin();
+      const externalPlugin = plugins.find(
+        (plugin) => plugin.name === "void:cloudflare-builtins-external",
+      );
+      const config = getHookHandler(externalPlugin?.config) as (
+        this: object,
+        config: import("vite").UserConfig,
+        env: import("vite").ConfigEnv,
+      ) => import("vite").UserConfig | void;
+
+      expect(externalPlugin).toBeTruthy();
+
+      const result = config.call({} as never, {}, { command: "build", mode: "production" });
+      const rootExternal = result?.build?.rollupOptions?.external as unknown[];
+      expect(rootExternal).toBeTruthy();
+      expect(
+        rootExternal.some((value) => value instanceof RegExp && value.test("cloudflare:workers")),
+      ).toBe(true);
+      expect(result?.environments).toBeUndefined();
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  it("externalizes Cloudflare builtins for class B/C server builds", () => {
+    const root = createTempRoot();
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ dependencies: { "@sveltejs/kit": "^2.0.0" } }),
+    );
+
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
+
+    try {
+      const plugins = voidPlugin();
+      const externalPlugin = plugins.find(
+        (plugin) => plugin.name === "void:cloudflare-builtins-external",
+      );
+      const config = getHookHandler(externalPlugin?.config) as (
+        this: object,
+        config: import("vite").UserConfig,
+        env: import("vite").ConfigEnv,
+      ) => import("vite").UserConfig | void;
+
+      expect(externalPlugin).toBeTruthy();
+      const result = config.call({} as never, {}, { command: "build", mode: "production" });
+      const rootExternal = result?.build?.rollupOptions?.external as unknown[];
+      expect(rootExternal).toBeTruthy();
+      expect(
+        rootExternal.some((value) => value instanceof RegExp && value.test("cloudflare:workers")),
+      ).toBe(true);
+      expect(result?.environments).toBeUndefined();
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  it("does not add Cloudflare builtin externalization for node targets", () => {
+    const root = createTempRoot();
+    writeFileSync(join(root, "void.json"), JSON.stringify({ target: "node" }));
+
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
+
+    try {
+      const plugins = voidPlugin();
+      expect(plugins.some((plugin) => plugin.name === "void:cloudflare-builtins-external")).toBe(
+        false,
+      );
     } finally {
       cwd.mockRestore();
     }

@@ -46,11 +46,12 @@ void init [--tsconfig] [--github] [--agents]
 Setup wizard for void projects (new or existing). If run in an empty directory, it scaffolds a starter app first. Then it walks through:
 
 1. **TypeScript** — creates or updates `tsconfig.json` (adds `extends .void/tsconfig.json` and `void/env` types)
-2. **Agent instructions** — detects agents once and injects instructions into `CLAUDE.md` or `AGENTS.md`
-3. **Skills** — links void skills using the same detected/selected agent context
-4. **MCP config** — writes MCP server config using the same detected/selected agent context
-5. **Demo code** — optionally scaffolds a migration, API route, and typed fetch example
-6. **GitHub Actions** — optionally creates `.github/workflows/deploy.yml` with the correct package manager commands
+2. **Database** — asks whether you want D1 (SQLite, zero-config default) or PostgreSQL (existing infra, write-heavy apps, complex queries). Picking PostgreSQL writes `"database": "pg"` to `void.json`; D1 remains implicit.
+3. **Agent instructions** — detects agents once and injects instructions into `CLAUDE.md` or `AGENTS.md`
+4. **Skills** — links void skills using the same detected/selected agent context
+5. **MCP config** — writes MCP server config using the same detected/selected agent context
+6. **Demo code** — optionally scaffolds a migration, API route, and typed fetch example
+7. **GitHub Actions** — optionally creates `.github/workflows/deploy.yml` with the correct package manager commands
 
 If no agent is detected, `void init` asks you to choose one from a short list (Claude, Cursor, Codex, Gemini CLI, Generic). That single choice is reused across all agent steps.
 

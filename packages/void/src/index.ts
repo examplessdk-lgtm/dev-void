@@ -18,21 +18,19 @@ import { scanWebSocketRoutesSync } from "./router/websocket";
 import { validateSsrEntry } from "./ssr/entry";
 import {
   readConfig,
-  normalizeAuth,
   resolveBindingNames,
   isNodeTarget,
   convertHeadersConfig,
   convertRedirectsConfig,
   getDatabaseDialect,
 } from "./config";
+import { findVoidAuthConfig } from "./auth/config";
 import { ensureWranglerNodejsAlsFlag, syncWranglerBindings } from "./cli/wrangler";
 import { restartPlugin } from "./plugin-restart";
 import { prerenderPlugin } from "./plugin-prerender";
 import { nodeTargetPlugin } from "./plugin-node-target";
 import { voidLog, voidWarn, voidError } from "./log";
 import { getToken, isStagingMode } from "./cli/auth";
-
-export type { AuthProvider } from "./config";
 
 /** Resolve the server entry module for a Class A framework. */
 function getFrameworkEntry(framework: Framework, root: string): string {
@@ -107,6 +105,25 @@ export default {
 /** Check whether a binding name already exists in a resolved bindings array. */
 function hasBinding(list: readonly { binding: string }[] | undefined, name: string): boolean {
   return Array.isArray(list) && list.some((b) => b.binding === name);
+}
+
+const CLOUDFLARE_BUILTIN_IMPORT = /^cloudflare:/;
+
+function createCloudflareBuiltinsExternalPlugin(): Plugin {
+  return {
+    name: "void:cloudflare-builtins-external",
+    config(_, env) {
+      if (env.command !== "build") return;
+
+      return {
+        build: {
+          rollupOptions: {
+            external: [CLOUDFLARE_BUILTIN_IMPORT],
+          },
+        },
+      };
+    },
+  };
 }
 
 type CredentialStatus =
@@ -251,6 +268,7 @@ export function voidPlugin(options?: {
   // Resolve root relative to CWD — this runs at config time
   const root = process.cwd();
   const config = readConfig(root);
+  const dialect = getDatabaseDialect(config);
   const detected = detectFramework(root);
   const framework = detected?.class === "a" ? (detected.name as Framework) : undefined;
 
@@ -260,6 +278,14 @@ export function voidPlugin(options?: {
     ? { bindings: config.inference.bindings }
     : undefined;
   const bindings = inferProjectBindings(root, inferenceOptions, scanDirs);
+  const authConfigPath = findVoidAuthConfig(root);
+  const authEnabled = bindings.needsAuth || authConfigPath !== null || config.auth !== undefined;
+
+  if (detected && authEnabled) {
+    throw new Error(
+      "Void-managed Better Auth is only supported in Void apps. Use Better Auth's official integration for this framework instead.",
+    );
+  }
 
   // Server-only void/* imports (db, kv, ai, etc.) must not pull in
   // cloudflare:workers or node: builtins when bundled for the browser.
@@ -308,7 +334,6 @@ export function voidPlugin(options?: {
   // voidPlugin() only provides DB type codegen, migration management, and
   // wrangler.jsonc binding sync for local dev.
   if (detected && (detected.class === "b" || detected.class === "c")) {
-    const hasAuth = normalizeAuth(config.inference?.auth) !== null;
     const bindingNames = resolveBindingNames(config.inference?.bindings);
     const frameworkPersistRoot = join(root, ".wrangler", "state");
 
@@ -332,7 +357,6 @@ export function voidPlugin(options?: {
       configResolved(resolvedConfig) {
         if (resolvedConfig.command !== "serve") return;
         const synced = syncWranglerBindings(root, bindings, {
-          auth: hasAuth,
           bindingNames,
           websockets: websocketRoutes,
         });
@@ -369,22 +393,16 @@ export function voidPlugin(options?: {
     };
 
     return [
+      createCloudflareBuiltinsExternalPlugin(),
       wranglerCompatPlugin,
       wranglerSyncPlugin,
       svelteKitHooksInjectPlugin,
       clientStubsPlugin,
-      drizzlePlugin(root, false, getDatabaseDialect(config)),
-      migrationPlugin(root, getDatabaseDialect(config), "local", frameworkPersistRoot),
+      drizzlePlugin(root, false, dialect),
+      migrationPlugin(root, dialect, "local", frameworkPersistRoot, {
+        enabled: false,
+      }),
     ];
-  }
-
-  // Phase 1: Determine auth providers from imports (sync, at plugin creation)
-  // Explicit config takes precedence over auto-detection.
-  let authProviders: AuthProvider[] | null;
-  if (config.inference?.auth !== undefined) {
-    authProviders = normalizeAuth(config.inference.auth);
-  } else {
-    authProviders = bindings.needsAuth ? ["email", "github", "google"] : null;
   }
 
   // Remote mode — use platform proxy for D1/KV/R2 instead of local miniflare.
@@ -428,22 +446,21 @@ export function voidPlugin(options?: {
   function mergeBindings(resolved: WorkerConfig): Partial<WorkerConfig> {
     const result: Record<string, unknown> = { ...workerConfig };
 
-    // D1 — auth requires a DB too
+    // D1 — auth requires the app DB only for sqlite apps
     const d1: Record<string, unknown>[] = [];
-    if ((bindings.needsD1 || authProviders) && !hasBinding(resolved.d1_databases, "DB")) {
+    if (
+      (bindings.needsD1 || (authEnabled && dialect === "sqlite")) &&
+      !hasBinding(resolved.d1_databases, "DB")
+    ) {
       d1.push({ binding: "DB", database_name: "default", database_id: "local" });
     }
     if (d1.length > 0) {
       result.d1_databases = [...(resolved.d1_databases ?? []), ...d1];
     }
 
-    // KV — auth needs AUTH_KV for sessions
     const kv: { binding: string; id: string }[] = [];
     if (bindings.needsKV && !hasBinding(resolved.kv_namespaces, "KV")) {
       kv.push({ binding: "KV", id: "local" });
-    }
-    if (authProviders && !hasBinding(resolved.kv_namespaces, "AUTH_KV")) {
-      kv.push({ binding: "AUTH_KV", id: "auth-local" });
     }
     if (kv.length > 0) {
       result.kv_namespaces = [...(resolved.kv_namespaces ?? []), ...kv];
@@ -536,7 +553,6 @@ export function voidPlugin(options?: {
 
   // Plugin that loads .env files and merges them into workerConfig.vars.
   // Runs before the Cloudflare plugin so vars are available as worker bindings.
-  // Phase 2: Also auto-detects OAuth providers from env vars.
   const envPlugin: Plugin = {
     name: "void:env",
     config(_, { mode, command }) {
@@ -560,18 +576,6 @@ export function voidPlugin(options?: {
       const assets = workerConfig.assets as { run_worker_first?: string[] } | undefined;
       if (command === "serve" && assets) {
         delete (assets as Record<string, unknown>).run_worker_first;
-      }
-
-      // Auto-detect OAuth providers from env vars (only if not explicitly configured)
-      if (config.inference?.auth === undefined) {
-        if (env.GITHUB_OAUTH_ID) {
-          authProviders ??= [];
-          if (!authProviders.includes("github")) authProviders.push("github");
-        }
-        if (env.GOOGLE_OAUTH_ID) {
-          authProviders ??= [];
-          if (!authProviders.includes("google")) authProviders.push("google");
-        }
       }
 
       // Minify worker bundles for smaller deploys (skip when output: "static"
@@ -646,34 +650,13 @@ export function voidPlugin(options?: {
           }
         }
       }
-
-      if (config.inference?.auth !== undefined) return;
-      let envHintShown = false;
-      const check = (path: string) => {
-        if (envHintShown) return;
-        if (!path.split("/").pop()?.startsWith(".env")) return;
-        try {
-          const content = readFileSync(path, "utf-8");
-          const providers: string[] = [];
-          if (/^GITHUB_OAUTH_ID=/m.test(content) && !authProviders?.includes("github"))
-            providers.push("GitHub");
-          if (/^GOOGLE_OAUTH_ID=/m.test(content) && !authProviders?.includes("google"))
-            providers.push("Google");
-          if (providers.length > 0) {
-            envHintShown = true;
-            voidWarn(`${providers.join(" and ")} OAuth credentials detected — restart to enable.`);
-          }
-        } catch {}
-      };
-      server.watcher.on("change", check);
-      server.watcher.on("add", check);
     },
   };
 
   // Binding watch plugin — detects new binding imports mid-session and
   // notifies the developer via terminal log + browser toast.
   const autoDetectBindings = !inferenceOptions;
-  const autoDetectAuth = config.inference?.auth === undefined;
+  const autoDetectAuth = !authEnabled;
   const bindingWatchPlugin: Plugin = {
     name: "void:binding-watch",
     apply: "serve",
@@ -695,7 +678,7 @@ export function voidPlugin(options?: {
             if (fileBindings.needsR2 && !bindings.needsR2) newBindings.push("R2 (void/storage)");
             if (fileBindings.needsAI && !bindings.needsAI) newBindings.push("AI (void/ai)");
           }
-          if (autoDetectAuth && fileBindings.needsAuth && !authProviders) {
+          if (autoDetectAuth && fileBindings.needsAuth) {
             newBindings.push("Auth (void/auth)");
           }
           if (newBindings.length > 0) {
@@ -764,6 +747,7 @@ export function voidPlugin(options?: {
         : undefined;
 
     return [
+      createCloudflareBuiltinsExternalPlugin(),
       restartPlugin(),
       bindingWatchPlugin,
       envPlugin,
@@ -785,10 +769,13 @@ export function voidPlugin(options?: {
 
   // Non-CF targets: skip binding inference, D1, migrations, wrangler
   if (isNodeTarget(config.target)) {
+    if (authEnabled) {
+      throw new Error(
+        "Void-managed Better Auth is only supported in Cloudflare Void apps. Use Better Auth directly for this target instead.",
+      );
+    }
     if (config.inference?.bindings)
       voidWarn('"inference.bindings" in void.json is ignored with target: "' + config.target + '"');
-    if (config.inference?.auth)
-      voidWarn('"inference.auth" in void.json is ignored with target: "' + config.target + '"');
     if (config.worker)
       voidWarn('"worker" in void.json is ignored with target: "' + config.target + '"');
     if (config.remote)
@@ -804,7 +791,7 @@ export function voidPlugin(options?: {
       restartPlugin(),
       envPlugin,
       routingPlugin(root, {
-        getAuth: () => null,
+        isAuthEnabled: () => false,
         headConfig: config.head,
         output: config.output,
         prerenderPaths: config.routing?.prerender,
@@ -820,7 +807,7 @@ export function voidPlugin(options?: {
   // PostgreSQL needs nodejs_compat for the `pg` driver (events, net, tls, dns, etc.)
   // Other apps only need nodejs_als for AsyncLocalStorage (isomorphic fetch context threading)
   const existingFlags = (workerConfig.compatibility_flags as string[] | undefined) ?? [];
-  const needsNodejsCompat = getDatabaseDialect(config) === "postgresql";
+  const needsNodejsCompat = dialect === "postgresql";
   if (needsNodejsCompat && !existingFlags.includes("nodejs_compat")) {
     workerConfig.compatibility_flags = [
       ...existingFlags.filter((f) => f !== "nodejs_als"),
@@ -856,19 +843,23 @@ export function voidPlugin(options?: {
   }
 
   return [
+    createCloudflareBuiltinsExternalPlugin(),
     restartPlugin(),
     bindingWatchPlugin,
     envPlugin,
     clientStubsPlugin,
     routingPlugin(root, {
-      getAuth: () => authProviders,
+      isAuthEnabled: () => authEnabled,
       headConfig: config.head,
       output: config.output,
       prerenderPaths: config.routing?.prerender,
       remoteMode,
     }),
-    drizzlePlugin(root, true, getDatabaseDialect(config)),
-    migrationPlugin(root, getDatabaseDialect(config)),
+    drizzlePlugin(root, true, dialect),
+    migrationPlugin(root, dialect, "local", join(root, ".void"), {
+      enabled: authEnabled,
+      configPath: authConfigPath,
+    }),
     prerenderPlugin(root, config),
     ...cloudflare({
       ...inspectorPortOption,
@@ -906,5 +897,3 @@ export type { QueueMap } from "./runtime/queues";
 export { defer } from "./pages/defer";
 export type { Deferred, InferProps } from "./pages/defer";
 export type { HeadDescriptor } from "./pages/head";
-
-type AuthProvider = import("./config").AuthProvider;

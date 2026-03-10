@@ -156,16 +156,17 @@ describe("inferBindingsFromSource", () => {
   it("detects import { auth } from 'void/client'", () => {
     const code = `
       import { auth } from "void/client";
-      const user = await auth.me();
+      await auth.signOut();
     `;
     const result = inferBindingsFromSource(code, "test.ts");
     expect(result.needsAuth).toBe(true);
   });
 
-  it("detects import { auth, AuthError } from 'void/client'", () => {
+  it("detects auth imports from 'void/client' alongside other client helpers", () => {
     const code = `
-      import { auth, AuthError } from "void/client";
-      const user = await auth.login({ email, password });
+      import { auth, fetch } from "void/client";
+      await auth.signIn.email({ email, password });
+      await fetch("/api/hello");
     `;
     const result = inferBindingsFromSource(code, "test.ts");
     expect(result.needsAuth).toBe(true);

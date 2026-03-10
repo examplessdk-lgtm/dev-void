@@ -32,6 +32,8 @@ bunx void init
 
 This scaffolds a starter Void app with an interactive setup flow.
 
+As part of `void init`, you'll choose a database: D1 is the zero-config default for prototyping and read-heavy apps, while PostgreSQL is better when you already have Postgres infrastructure or need heavier writes and more complex queries.
+
 <details>
 <summary style="cursor:pointer">
 💡 <b>Notes on <code>void</code> binary usage</b>

@@ -1,8 +1,16 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  unlinkSync,
+} from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { intro, outro, log, confirm, isCancel, cancel, note, select } from "@clack/prompts";
 import { ensureProjectTsconfig } from "../codegen/project-tsconfig";
+import { getDatabaseDialect, readConfig, type DatabaseDialect } from "../config";
 import { detectFramework, type DetectedFramework } from "../plugin-inference";
 import {
   SCAFFOLD_FILES,
@@ -94,6 +102,7 @@ const VITE_CONFIG_FILES = [
   "vite.config.cts",
   "vite.config.cjs",
 ];
+const VOID_CONFIG_FILE = "void.json";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -355,6 +364,70 @@ function setupWranglerConfig(root: string, framework: DetectedFramework): void {
   } else {
     log.success("wrangler.jsonc looks good");
   }
+}
+
+function writeVoidConfig(root: string, config: Record<string, unknown>): void {
+  writeFileSync(join(root, VOID_CONFIG_FILE), JSON.stringify(config, null, 2) + "\n");
+}
+
+function applyDatabaseDialect(root: string, dialect: DatabaseDialect): void {
+  const config = readConfig(root) as Record<string, unknown>;
+  const configPath = join(root, VOID_CONFIG_FILE);
+
+  if (dialect === "postgresql") {
+    if (config.database === "pg") {
+      log.info("PostgreSQL already configured in void.json");
+      return;
+    }
+
+    config.database = "pg";
+    writeVoidConfig(root, config);
+    log.success("Configured PostgreSQL in void.json");
+    return;
+  }
+
+  if (config.database !== "pg") {
+    log.info("Using default D1 (SQLite) configuration");
+    return;
+  }
+
+  delete config.database;
+
+  if (Object.keys(config).length === 0) {
+    unlinkSync(configPath);
+    log.success("Using default D1 (SQLite) configuration");
+    return;
+  }
+
+  writeVoidConfig(root, config);
+  log.success("Updated void.json to use the default D1 (SQLite) configuration");
+}
+
+async function setupDatabaseDialect(root: string): Promise<void> {
+  const currentDialect = getDatabaseDialect(readConfig(root));
+
+  const choice = await select({
+    message: "Choose a database for this project:",
+    options: [
+      {
+        value: "sqlite",
+        label: currentDialect === "sqlite" ? "D1 (SQLite) [current]" : "D1 (SQLite)",
+        hint: "Zero-config and fully managed by Void; best for prototyping and read-heavy apps.",
+      },
+      {
+        value: "postgresql",
+        label: currentDialect === "postgresql" ? "PostgreSQL [current]" : "PostgreSQL",
+        hint: "Bring your own Postgres via Hyperdrive; best for write-heavy apps, complex queries, or existing infra.",
+      },
+    ],
+  });
+
+  if (isCancel(choice)) {
+    cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
+  applyDatabaseDialect(root, choice as DatabaseDialect);
 }
 
 /** Get the dev command for a detected framework. */
@@ -881,14 +954,19 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     setupWranglerConfig(root, framework);
   }
 
-  // Steps 3–5: Agent instructions, skills, MCP config
+  // Step 3: Database dialect
+  if (!targeted) {
+    await setupDatabaseDialect(root);
+  }
+
+  // Steps 4–6: Agent instructions, skills, MCP config
   if (!targeted || initArgs?.agents) {
     const agentSetup = await resolveAgentSetup(root);
 
-    // Step 3: Agent instructions
+    // Step 4: Agent instructions
     injectAgentBlock(root, agentSetup.instructionFilePath);
 
-    // Step 4: Link skills
+    // Step 5: Link skills
     if (agentSetup.agents.length > 0) {
       const { linkSkillsForSpecificAgents } = await import("./skills");
       linkSkillsForSpecificAgents(root, agentSetup.agents);
@@ -896,11 +974,11 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
       log.info("Skills linking skipped for generic agent setup");
     }
 
-    // Step 5: MCP config
+    // Step 6: MCP config
     setupMcpConfig(root, agentSetup.agents);
   }
 
-  // Step 6: Demo code (only in full interactive flow, not for meta-frameworks)
+  // Step 7: Demo code (only in full interactive flow, not for meta-frameworks)
   if (!targeted && !framework) {
     if (state.hasRoutes || state.hasMigrations) {
       log.info("Project already has routes or migrations, skipping demo");
@@ -920,7 +998,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     }
   }
 
-  // Step 7: GitHub Actions
+  // Step 8: GitHub Actions
   if (!targeted || initArgs?.github) {
     const deployYmlPath = join(root, ".github", "workflows", "deploy.yml");
     if (existsSync(deployYmlPath)) {

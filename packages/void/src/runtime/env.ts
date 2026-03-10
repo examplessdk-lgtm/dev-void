@@ -5,15 +5,18 @@ export type RuntimeEnv = Record<string, unknown>;
 const envContext: AsyncLocalStorage<RuntimeEnv> = new AsyncLocalStorage<RuntimeEnv>();
 
 let cloudflareEnv: RuntimeEnv | undefined;
-try {
-  const mod = (await import("cloudflare:workers")) as unknown as { env?: unknown };
-  const maybeEnv = asEnv(mod.env);
-  if (maybeEnv) {
-    cloudflareEnv = maybeEnv;
-  }
-} catch {
-  // Not running in workerd.
-}
+// Don't await this import during module evaluation. Cloudflare validates
+// worker startup and rejects bundles with unsettled top-level await.
+void import("cloudflare:workers")
+  .then((mod) => {
+    const maybeEnv = asEnv((mod as { env?: unknown }).env);
+    if (maybeEnv) {
+      cloudflareEnv = maybeEnv;
+    }
+  })
+  .catch(() => {
+    // Not running in workerd.
+  });
 
 function asEnv(value: unknown): RuntimeEnv | null {
   if (typeof value !== "object" || value === null) return null;

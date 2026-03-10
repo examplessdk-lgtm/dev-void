@@ -1,11 +1,26 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
-import { join, dirname } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { loadEnv } from "vite";
 import { voidLog, voidWarn } from "./log";
 
 const PRERENDER_PATHS_ENDPOINT = "/__void/prerender-paths";
+
+type PrerenderWorkerModuleType = "ESModule" | "CommonJS" | "CompiledWasm" | "Text" | "Data";
+
+export interface PrerenderWorkerModule {
+  path: string;
+  type: PrerenderWorkerModuleType;
+  contents: string | Uint8Array;
+}
 
 export interface PrerenderResult {
   rendered: string[];
@@ -67,6 +82,88 @@ async function renderPrerenderPaths(
   return result;
 }
 
+function normalizeWorkerModulePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function resolveWorkerModuleType(relativePath: string): PrerenderWorkerModuleType | null {
+  const normalized = normalizeWorkerModulePath(relativePath);
+
+  if (normalized.includes("/.vite/") || normalized.startsWith(".vite/")) {
+    return null;
+  }
+  if (normalized === "wrangler.json" || normalized === "wrangler.jsonc") {
+    return null;
+  }
+  if (normalized.endsWith(".mjs") || normalized.endsWith(".js")) {
+    return "ESModule";
+  }
+  if (normalized.endsWith(".cjs")) {
+    return "CommonJS";
+  }
+  if (normalized.endsWith(".wasm")) {
+    return "CompiledWasm";
+  }
+  if (normalized.endsWith(".txt")) {
+    return "Text";
+  }
+  if (normalized.endsWith(".bin")) {
+    return "Data";
+  }
+
+  return null;
+}
+
+function collectFiles(dir: string): string[] {
+  const files: string[] = [];
+  const entries = readdirSync(dir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...collectFiles(fullPath));
+    } else {
+      files.push(fullPath);
+    }
+  }
+
+  return files;
+}
+
+export function collectPrerenderWorkerModules(
+  workerDir: string,
+  workerMain: string,
+): PrerenderWorkerModule[] {
+  const normalizedEntry = normalizeWorkerModulePath(workerMain);
+  type CollectedPrerenderWorkerModule = PrerenderWorkerModule & {
+    relativePath: string;
+  };
+
+  const modules: CollectedPrerenderWorkerModule[] = collectFiles(workerDir).flatMap((filePath) => {
+    const relativePath = normalizeWorkerModulePath(relative(workerDir, filePath));
+    const type = resolveWorkerModuleType(relativePath);
+    if (!type) return [];
+
+    const file = readFileSync(filePath);
+    const contents: PrerenderWorkerModule["contents"] =
+      type === "CompiledWasm" || type === "Data" ? new Uint8Array(file) : file.toString("utf-8");
+
+    return [{ path: filePath, relativePath, type, contents }];
+  });
+
+  modules.sort((a, b) => {
+    if (a.relativePath === normalizedEntry) return -1;
+    if (b.relativePath === normalizedEntry) return 1;
+    return a.relativePath.localeCompare(b.relativePath);
+  });
+
+  if (!modules.some((module) => module.relativePath === normalizedEntry)) {
+    throw new Error(`[void] worker entry "${normalizedEntry}" not found in ${workerDir}`);
+  }
+
+  return modules.map(({ relativePath: _relativePath, ...module }) => module);
+}
+
 async function createCloudflarePrerenderRunner(options: {
   root: string;
   workerDir: string;
@@ -80,7 +177,7 @@ async function createCloudflarePrerenderRunner(options: {
     throw new Error(`[void] wrangler.json not found in ${workerDir}`);
   }
   const wranglerConfig = JSON.parse(readFileSync(wranglerPath, "utf-8"));
-  const workerEntry = join(workerDir, wranglerConfig.main ?? "index.js");
+  const workerMain = wranglerConfig.main ?? "index.js";
 
   const env = loadEnv("production", root, "");
 
@@ -95,10 +192,8 @@ async function createCloudflarePrerenderRunner(options: {
   };
 
   const mfOptions: Record<string, unknown> = {
-    scriptPath: workerEntry,
-    modules: true,
+    modules: collectPrerenderWorkerModules(workerDir, workerMain),
     modulesRoot: workerDir,
-    modulesRules: [{ type: "ESModule", include: ["**/*.js", "**/*.mjs"] }],
     compatibilityDate: wranglerConfig.compatibility_date ?? "2024-01-01",
     compatibilityFlags: wranglerConfig.compatibility_flags ?? [],
     bindings: { ...wranglerConfig.vars, ...env },
@@ -106,7 +201,7 @@ async function createCloudflarePrerenderRunner(options: {
 
   if (clientDir) {
     mfOptions.serviceBindings = {
-      ASSETS(request: Request) {
+      [wranglerConfig.assets?.binding ?? "ASSETS"](request: Request) {
         const url = new URL(request.url);
         const filePath = join(clientDir, url.pathname);
         try {

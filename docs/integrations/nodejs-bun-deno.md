@@ -111,7 +111,7 @@ The following imports are **not available** with a non-CF target and produce a c
 | `void/db`      | D1 (SQL database)            |
 | `void/kv`      | KV (key-value storage)       |
 | `void/storage` | R2 (blob storage)            |
-| `void/auth`    | Built-in auth                |
+| `void/auth`    | Void-managed Better Auth     |
 | `void/ai`      | Workers AI                   |
 | `void/env`     | CF env type augmentation     |
 | `void/ws`      | Durable Objects + WebSockets |
@@ -135,10 +135,11 @@ The `void deploy` CLI deploys to the Void platform (Cloudflare). For non-CF targ
 These `void.json` fields are silently ignored (with a warning) when using a non-CF target:
 
 - `inference.bindings` — CF binding configuration
-- `inference.auth` — built-in auth (requires D1 + KV)
 - `remote` — remote binding proxy
 - `worker` — Cloudflare-specific config
 - `routing.revalidate` — edge caching (CF-only)
+
+If you enable auth through `void/auth`, `void/client`, or `auth.ts`, Void fails the build for non-CF targets. Use Better Auth directly for Node/Bun/Deno deployments.
 
 ## Example: API + Pages
 

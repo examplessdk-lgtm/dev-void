@@ -40,6 +40,8 @@ Void provides a first-class [Drizzle ORM](https://orm.drizzle.team) integration.
 
 Void supports two database backends. Both use the same Drizzle-based workflow for schema definition, querying, and migrations.
 
+`void init` asks which one you want. Choosing D1 keeps the default implicit; choosing PostgreSQL writes `"database": "pg"` to `void.json`.
+
 |            | [D1 (SQLite)](./database/d1) | [PostgreSQL](./database/postgresql)          |
 | ---------- | ---------------------------- | -------------------------------------------- |
 | Config     | Default (no config needed)   | `"database": "pg"` in `void.json`            |
@@ -224,7 +226,7 @@ Nuxt uses Nitro, which bundles server routes outside of Vite's plugin pipeline. 
 
 ## Schema-Derived Validators
 
-Instead of writing validator schemas by hand, you can derive them directly from your Drizzle tables using [`drizzle-zod`](https://orm.drizzle.team/docs/zod), [`drizzle-valibot`](https://orm.drizzle.team/docs/typebox), or [`drizzle-arktype`](https://orm.drizzle.team/docs/arktype). This keeps your validation in sync with your database schema automatically.
+Instead of writing validator schemas by hand, you can derive them directly from your Drizzle tables using Void's bundled adapter entrypoints: [`void/drizzle-zod`](../reference/api.md#subpath-exports), [`void/drizzle-valibot`](../reference/api.md#subpath-exports), and [`void/drizzle-arktype`](../reference/api.md#subpath-exports). These resolve through the same package boundary as `void/schema-*`, so the generated validators stay type-compatible with your tables automatically.
 
 ::: code-group
 
@@ -232,7 +234,7 @@ Instead of writing validator schemas by hand, you can derive them directly from 
 // db/schema.ts
 import { sqliteTable, text, integer } from "void/schema-d1";
 import { sql } from "void/db";
-import { createInsertSchema } from "drizzle-zod";
+import { createInsertSchema } from "void/drizzle-zod";
 
 export const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -253,7 +255,7 @@ export const insertUserSchema = createInsertSchema(users, {
 // db/schema.ts
 import { sqliteTable, text, integer } from "void/schema-d1";
 import { sql } from "void/db";
-import { createInsertSchema } from "drizzle-valibot";
+import { createInsertSchema } from "void/drizzle-valibot";
 import { pipe, minLength, email } from "valibot";
 
 export const users = sqliteTable("users", {
@@ -275,7 +277,7 @@ export const insertUserSchema = createInsertSchema(users, {
 // db/schema.ts
 import { sqliteTable, text, integer } from "void/schema-d1";
 import { sql } from "void/db";
-import { createInsertSchema } from "drizzle-arktype";
+import { createInsertSchema } from "void/drizzle-arktype";
 import { type } from "arktype";
 
 export const users = sqliteTable("users", {
@@ -321,14 +323,14 @@ Three functions are available:
 | `createSelectSchema` | Matches the shape of selected rows                                        |
 | `createUpdateSchema` | Like insert but all fields are optional (partial update)                  |
 
-Install whichever package matches your validator:
+Void already bundles the Drizzle adapters. Install the validator library itself if you use its direct APIs in your schema file:
 
 ```bash
-npm install drizzle-zod zod
+npm install zod
 # or
-npm install drizzle-valibot valibot
+npm install valibot
 # or
-npm install drizzle-arktype arktype
+npm install arktype
 ```
 
 ## CLI Commands

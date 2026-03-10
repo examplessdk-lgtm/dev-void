@@ -13,7 +13,7 @@ describe("compileWorkerClient", () => {
 
   it("re-exports auth helpers from resolved path", () => {
     const code = compileWorkerClient("/my/path/auth-client.mjs");
-    expect(code).toContain('export { auth, AuthError } from "/my/path/auth-client.mjs"');
+    expect(code).toContain('export { auth, createAuthClient } from "/my/path/auth-client.mjs"');
   });
 
   it("includes param interpolation logic", () => {

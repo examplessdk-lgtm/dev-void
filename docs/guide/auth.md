@@ -4,220 +4,179 @@ outline: deep
 
 # Authentication
 
-Void includes built-in authentication with cookie-based sessions, email/password login, and OAuth providers. Auth is auto-detected from your code — when you import `auth` from `void/client` or `requireAuth` from `void/auth`, auth routes and session middleware are generated automatically.
+::: warning ⚠️ Void Apps Only
+Void-managed auth currently works only for Void apps. Meta-framework mode is not supported yet.
+:::
 
-## Auto-Detection
+Void uses [Better Auth](https://www.better-auth.com/) as the auth engine for Void apps. Void owns the conventions and wiring; Better Auth owns the auth behavior.
 
-Auth is enabled automatically when Void detects:
+## Config
 
-1. **Import detection**: Importing `auth` from `void/client` or anything from `void/auth` enables email auth
-2. **OAuth from env vars**: Setting `GITHUB_OAUTH_ID` or `GOOGLE_OAUTH_ID` in `.env.local` adds the corresponding OAuth provider
+Auth turns on automatically when you:
 
-No configuration in `void.json` is needed. Just use the auth APIs and set up your OAuth credentials — everything else is handled for you.
+- import anything from `void/auth`
+- import `auth` from `void/client`
+- add `auth` to `void.json`
+- add a root-level `auth.ts` file
 
-You can also [configure auth explicitly](#explicit-configuration) in `void.json` under `inference.auth` to override auto-detection.
+The simplest setup is no config at all. Email/password auth is enabled by default.
 
-## Auth Routes
+Example:
 
-The following routes are generated based on your enabled providers:
+```json
+{
+  "auth": {
+    "providers": ["email", "google", "github"]
+  }
+}
+```
 
-| Route                | Method | Providers | Description                           |
-| -------------------- | ------ | --------- | ------------------------------------- |
-| `/auth/register`     | POST   | email     | Create a new account with password    |
-| `/auth/login`        | POST   | email     | Sign in with email and password       |
-| `/auth/login/github` | GET    | github    | Start GitHub OAuth flow               |
-| `/auth/login/google` | GET    | google    | Start Google OAuth flow               |
-| `/auth/me`           | GET    | all       | Return the current user (or 401)      |
-| `/auth/logout`       | POST   | all       | Clear the session cookie and sign out |
+Use `auth.providers` when you want to enable social providers explicitly. Provider credentials come from `AUTH_<PROVIDER>_CLIENT_ID` and `AUTH_<PROVIDER>_CLIENT_SECRET`.
 
-### Email/password
+See the full provider list in the [config reference](../reference/config.md#auth).
 
-Use the `auth` helpers from `void/client`:
+For example, `github` uses:
+
+- `AUTH_GITHUB_CLIENT_ID`
+- `AUTH_GITHUB_CLIENT_SECRET`
+
+## Client Usage
+
+`void/client` exports a preconfigured Better Auth client:
 
 ```ts
 import { auth } from "void/client";
 
-// Register a new user
-const user = await auth.register({
+await auth.signUp.email({
   email: "alice@example.com",
   password: "s3cret",
-  name: "Alice", // optional
+  name: "Alice",
 });
 
-// Sign in
-const user = await auth.login({
+await auth.signIn.email({
   email: "alice@example.com",
   password: "s3cret",
 });
+
+await auth.signOut();
 ```
 
-Both methods set a `__void_session` cookie on success and return the `AuthUser` object. They throw an `AuthError` on failure (wrong credentials, duplicate email, etc.).
+The exact client API comes from Better Auth. Void just preconfigures the client with `basePath: "/api/auth"`.
 
-### OAuth
+See the official [Better Auth client docs](https://www.better-auth.com/docs/concepts/client) for the full client API.
 
-For GitHub and Google, link directly to the login route:
+Framework-specific clients are selected automatically:
 
-```html
-<a href="/auth/login/github">Login with GitHub</a>
-<a href="/auth/login/google">Login with Google</a>
-```
+- React pages apps use `better-auth/react`
+- Vue pages apps use `better-auth/vue`
+- Svelte pages apps use `better-auth/svelte`
+- Solid pages apps use `better-auth/solid`
+- other Void apps use `better-auth/client`
 
-The user is redirected to the provider, then back to your app with a session cookie set.
+For advanced usage, `void/client` also exports `createAuthClient`.
 
-#### OAuth credentials
+## Server Usage
 
-OAuth providers require client credentials. Add them to [`.env.local`](./env-vars) for local development:
-
-```
-GITHUB_OAUTH_ID=your-github-client-id
-GITHUB_OAUTH_SECRET=your-github-client-secret
-GOOGLE_OAUTH_ID=your-google-client-id
-GOOGLE_OAUTH_SECRET=your-google-client-secret
-```
-
-For production, set these as secrets via `void secret put` or `void secret sync .env.local`.
-
-#### OAuth callback URLs
-
-The OAuth callback URL is the same as the login URL. Configure these in your OAuth app settings:
-
-| Provider | Dev callback URL                          | Production callback URL                       |
-| -------- | ----------------------------------------- | --------------------------------------------- |
-| GitHub   | `http://localhost:5173/auth/login/github` | `https://your-app.void.app/auth/login/github` |
-| Google   | `http://localhost:5173/auth/login/google` | `https://your-app.void.app/auth/login/google` |
-
-## Getting the Current User
-
-Use `getUser()` to read the authenticated user anywhere in your server code — route handlers, server functions, middleware, or meta-framework loaders:
+`void/auth` provides the server-side helpers:
 
 ```ts
-import { getUser } from "void/auth";
-
-const user = getUser(); // AuthUser | null
+import { getSession, getUser, requireAuth } from "void/auth";
 ```
 
-This works in both Void apps and [meta-framework apps](../integrations/frameworks/overview.md) (TanStack Start, SvelteKit, Nuxt, etc.). Returns `null` if not authenticated or if called outside a request context.
+- `getUser()` returns the current `AuthUser | null`
+- `getSession()` returns `{ user, session } | null`
+- `requireAuth(c)` returns the authenticated user or throws `401`
 
-## Protecting Routes
-
-Use `requireAuth()` to protect a route. It returns the authenticated user or throws a 401:
+Example:
 
 ```ts
-// routes/api/profile.ts
 import { defineHandler } from "void";
 import { requireAuth } from "void/auth";
 
 export const GET = defineHandler((c) => {
   const user = requireAuth(c);
-  return { user };
+  return { email: user.email };
 });
 ```
-
-For optional auth (don't throw if not logged in), use `getUser()` or read the user from context directly:
-
-```ts
-import { getUser } from "void/auth";
-
-export const GET = defineHandler((c) => {
-  const user = getUser(); // AuthUser | null
-  return { loggedIn: !!user };
-});
-```
-
-The session middleware runs on every request and populates the user for both `getUser()` and `c.get("user")`. `requireAuth()` is a convenience that throws if the value is null.
-
-### `getUser()` vs `requireAuth(c)`
-
-|                    | `getUser()`                                 | `requireAuth(c)`                |
-| ------------------ | ------------------------------------------- | ------------------------------- |
-| **Import**         | `void/auth`                                 | `void/auth`                     |
-| **Context needed** | None — reads from AsyncLocalStorage         | Hono `Context` (`c`)            |
-| **Returns**        | `AuthUser \| null`                          | `AuthUser` (throws 401 if null) |
-| **Works in**       | Void apps, meta-frameworks, any server code | Void app route handlers only    |
-
-Use `getUser()` when you don't have a Hono context or want optional auth. Use `requireAuth(c)` in Void app route handlers where you want a 401 thrown automatically.
 
 ### `AuthUser`
+
+`AuthUser` maps to Better Auth's core user type:
 
 ```ts
 interface AuthUser {
   id: string;
-  provider: string; // "email", "github", or "google"
-  email: string | null;
-  name: string | null;
-  avatar_url: string | null;
+  email: string;
+  emailVerified: boolean;
+  name: string;
+  image?: string | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 ```
 
-## Client Helpers
+### `AuthSession`
 
-`void/client` exports an `auth` object with helpers for all auth operations:
-
-```ts
-import { auth, AuthError } from "void/client";
-
-const user = await auth.register({ email, password, name }); // AuthUser
-const user = await auth.login({ email, password }); // AuthUser
-const user = await auth.me(); // AuthUser | null
-await auth.logout(); // void
-```
-
-`register` and `login` throw `AuthError` on failure. `me` returns `null` when not authenticated instead of throwing.
+`AuthSession` maps to Better Auth's core session type:
 
 ```ts
-try {
-  await auth.login({ email, password });
-} catch (e) {
-  if (e instanceof AuthError) {
-    console.log(e.status); // 401
-    console.log(e.message); // "Invalid credentials"
-  }
+interface AuthSession {
+  id: string;
+  token: string;
+  userId: string;
+  expiresAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+  ipAddress?: string | null;
+  userAgent?: string | null;
 }
 ```
 
-## Sessions
+## Behavior
 
-Sessions are stored in a KV namespace (`AUTH_KV`) with a 7-day TTL. The session ID is stored in an `HttpOnly`, `SameSite=Lax` cookie (`__void_session`).
+When auth is active, Void configures Better Auth with these conventions:
 
-To sign out:
+- mount path: `/api/auth/*`
+- email/password enabled by default unless `auth.providers` is set without `"email"`
+- `auth.providers` can enable any built-in Better Auth social provider
+- deployed apps need an auth secret via `BETTER_AUTH_SECRET`
+- D1/SQLite uses the app `DB` binding
+- PostgreSQL apps (`"database": "pg"`) use the app `HYPERDRIVE` binding
+
+Auth sessions live in the same database system as the rest of the app. `AUTH_KV` is no longer used.
+
+On Void Cloud, Void auto-creates `BETTER_AUTH_SECRET` for auth-enabled apps if you have not set `BETTER_AUTH_SECRET` yourself through project secrets.
+
+Localhost dev uses a built-in fallback secret automatically. Outside the managed Void Cloud deploy flow, set `BETTER_AUTH_SECRET` yourself.
+
+## Customization
+
+For advanced configuration, create `auth.ts` at the project root and export `defineAuth(...)`:
 
 ```ts
-await auth.logout();
+import { defineAuth } from "void/auth";
+
+export default defineAuth(({ defaults }) => ({
+  ...defaults,
+  trustedOrigins: ["https://example.com"],
+});
 ```
 
-This deletes the session from KV and clears the cookie.
+`defaults` already includes Void's conventions. Extend it explicitly instead of expecting a deep merge.
 
-## Explicit Configuration
+For the full set of available options, see the official [Better Auth options reference](https://www.better-auth.com/docs/reference/options).
 
-You can configure auth explicitly in `void.json` to override auto-detection:
+## Database and Migrations
 
-```json
-{
-  "inference": {
-    "auth": ["github", "google", "email"]
-  }
-}
-```
+Void manages Better Auth migrations as part of the normal Void migration flow:
 
-This enables all three providers. You can also pick a subset:
+- local dev bootstraps auth tables automatically
+- deploy runs auth migrations together with app migrations
+- users do not run a separate Better Auth CLI path
 
-```json
-{ "inference": { "auth": ["github"] } }
-```
+## Unsupported Modes
 
-Or set `true` for email-only:
+Void-managed Better Auth is supported only for Cloudflare Void apps in v1.
 
-```json
-{ "inference": { "auth": true } }
-```
-
-## How It Works
-
-Under the hood, auth is fully code-generated. When auth is enabled, the routing plugin:
-
-1. Provisions a D1 database (`c.env.DB`) and a KV namespace (`c.env.AUTH_KV`) for user and session storage
-2. Creates an `auth_users` table in D1 on first request
-3. Adds session middleware to the generated Hono app that parses the cookie, looks up the session in KV, and sets `c.get("user")`
-4. Generates route handlers for `/auth/*` based on your enabled providers
-
-Passwords are hashed with PBKDF2-SHA256 (310,000 iterations) using the Web Crypto API. OAuth uses [`@hono/oauth-providers`](https://github.com/honojs/middleware/tree/main/packages/oauth-providers) for GitHub and Google.
+- meta-framework mode should use Better Auth's official framework integrations directly
+- `target: "node" | "bun" | "deno"` should use Better Auth directly

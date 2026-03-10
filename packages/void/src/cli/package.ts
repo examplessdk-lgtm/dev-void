@@ -133,7 +133,8 @@ export function packageBuild(
 
   // Build manifest from inferred bindings
   const manifest: DeployManifest = { version: 3, bindings: {} };
-  if (bindings.needsD1) {
+  if (bindings.needsAuth) manifest.auth = true;
+  if (bindings.needsD1 || bindings.needsAuth) {
     if (dialect === "postgresql") {
       manifest.bindings.hyperdrive = ["HYPERDRIVE"];
     } else {
@@ -143,10 +144,6 @@ export function packageBuild(
   if (bindings.needsKV) manifest.bindings.kv = [options?.bindingNames?.kv ?? "KV"];
   if (bindings.needsR2) manifest.bindings.r2 = [options?.bindingNames?.r2 ?? "STORAGE"];
   if (bindings.needsAI) manifest.bindings.ai = true;
-  if (bindings.needsAuth) {
-    manifest.bindings.kv ??= [];
-    if (!manifest.bindings.kv.includes("AUTH_KV")) manifest.bindings.kv.push("AUTH_KV");
-  }
 
   // Add migration metadata to manifest + SQL content as FormData entries
   if (migrations && migrations.length > 0) {
@@ -334,7 +331,7 @@ export function packageFrameworkBuild(opts: {
 
   // Build manifest
   const manifest: DeployManifest = { version: 3, bindings: {} };
-  if (opts.bindings.needsD1) {
+  if (opts.bindings.needsD1 || opts.bindings.needsAuth) {
     if (opts.dialect === "postgresql") {
       manifest.bindings.hyperdrive = ["HYPERDRIVE"];
     } else {
@@ -344,10 +341,6 @@ export function packageFrameworkBuild(opts: {
   if (opts.bindings.needsKV) manifest.bindings.kv = [po?.bindingNames?.kv ?? "KV"];
   if (opts.bindings.needsR2) manifest.bindings.r2 = [po?.bindingNames?.r2 ?? "STORAGE"];
   if (opts.bindings.needsAI) manifest.bindings.ai = true;
-  if (opts.bindings.needsAuth) {
-    manifest.bindings.kv ??= [];
-    if (!manifest.bindings.kv.includes("AUTH_KV")) manifest.bindings.kv.push("AUTH_KV");
-  }
 
   if (opts.migrations && opts.migrations.length > 0) {
     manifest.migrations = {

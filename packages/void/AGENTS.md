@@ -31,7 +31,7 @@ Non-CF targets disable CF-only bindings (`void/db`, `void/kv`, `void/auth`, `voi
 ```
 src/
   index.ts                  # Main export: voidPlugin() → Plugin[]
-  config.ts                 # readConfig(), VoidConfig, convertHeadersConfig(), normalizeAuth()
+  config.ts                 # readConfig(), VoidConfig, convertHeadersConfig(), redirect/header helpers
   plugin-routing.ts         # Virtual module resolution, file watching, HMR, type codegen
   plugin-node-target.ts     # Non-CF deploy targets (Node.js, Bun, Deno) — binding guard, dev server, build entry
   plugin-inference.ts       # Binding inference orchestration (calls walk.ts)

@@ -1,5 +1,5 @@
 import type { Context, Env, MiddlewareHandler } from "hono";
-import type { AuthUser } from "./auth";
+import type { AuthSession, AuthUser } from "./auth";
 import type { HeadDescriptor } from "../pages/head";
 import { convertReturnValue } from "./response";
 import { runValidation, type ValidatorSlots, type HandlerInput } from "./validator";
@@ -7,12 +7,12 @@ import { runValidation, type ValidatorSlots, type HandlerInput } from "./validat
 /**
  * Hono environment type for Void workers.
  *
- * Includes all standard Cloudflare bindings (D1, KV, R2) and the
- * auth session KV namespace. The `Variables` bag carries the
- * authenticated user set by the auth middleware.
+ * Includes standard Cloudflare bindings plus request-scoped auth
+ * variables populated by Better Auth middleware.
  */
 export interface CloudContextVariables {
   user: AuthUser | null;
+  session: AuthSession | null;
   headDefaults?: import("../pages/head").HeadDescriptor;
   [key: string]: unknown;
 }
@@ -23,7 +23,6 @@ export interface CloudEnv extends Env {
     KV: KVNamespace;
     STORAGE: R2Bucket;
     AI: Ai;
-    AUTH_KV: KVNamespace;
     [key: string]: unknown;
   };
   Variables: CloudContextVariables;

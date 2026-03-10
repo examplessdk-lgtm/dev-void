@@ -6,6 +6,7 @@ import type { Plugin } from "vite";
 import { scanRoutes, type ScanResult } from "./router/scan";
 import {
   compileRouteTable,
+  compileBrowserClient,
   compileWorkerEntry,
   compileWorkerClient,
   compileNodeApp,
@@ -17,7 +18,7 @@ import {
 } from "./router/compile";
 import { generateRouteTypes } from "./codegen/route-types";
 import { generateQueueTypes } from "./codegen/queue-types";
-import type { AuthProvider } from "./index";
+import { findVoidAuthConfig } from "./auth/config";
 import {
   validateSsrEntries,
   SSR_SERVER_ENTRY_RELATIVE_PATHS,
@@ -26,9 +27,11 @@ import {
 
 const VIRTUAL_ROUTES_ID = "virtual:void-routes";
 const VIRTUAL_CLIENT_WORKER_ID = "virtual:void-client-worker";
+const VIRTUAL_CLIENT_BROWSER_ID = "virtual:void-client-browser";
 // Rolldown resolveId hook filters currently require RegExp for `id`.
-const RESOLVE_ID_FILTER = /^(virtual:void-(routes|client-worker)|void(\/client|\/queues)?)$/;
-const LOAD_ID_FILTER = /^virtual:void-(routes|client-worker)$/;
+const RESOLVE_ID_FILTER =
+  /^(virtual:void-(routes|client-worker|client-browser)|void(\/client|\/queues)?)$/;
+const LOAD_ID_FILTER = /^virtual:void-(routes|client-worker|client-browser)$/;
 
 /**
  * Vite plugin that provides file-based routing.
@@ -37,7 +40,7 @@ const LOAD_ID_FILTER = /^virtual:void-(routes|client-worker)$/;
  * - Watches for file changes and triggers HMR
  */
 interface RoutingPluginOptions {
-  getAuth: () => AuthProvider[] | null;
+  isAuthEnabled: () => boolean;
   headConfig?: import("./pages/head").HeadConfig;
   output?: "server" | "static";
   prerenderPaths?: string[];
@@ -50,12 +53,14 @@ interface RoutingPluginOptions {
 export function routingPlugin(root: string, options: RoutingPluginOptions): Plugin {
   let scan: ScanResult | null = null;
   let ssr: SsrCompileOptions | null = null;
+  let authConfigPath: string | null = null;
   const routesDir = join(root, "routes");
   const middlewareDir = join(root, "middleware");
   const jobsDir = join(root, "crons");
   const queuesDir = join(root, "queues");
   const pagesDir = join(root, "pages");
   const srcDir = join(root, "src");
+  const authConfigDir = root;
   const ssrEntryAbsPaths = new Set(
     [...SSR_SERVER_ENTRY_RELATIVE_PATHS, ...SSR_CLIENT_ENTRY_RELATIVE_PATHS].map((path) =>
       join(root, path),
@@ -76,6 +81,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
 
   async function rescan() {
     scan = await scanRoutes(root, { output: options.output });
+    authConfigPath = findVoidAuthConfig(root);
     const entries = validateSsrEntries(root);
     ssr = entries
       ? {
@@ -93,7 +99,10 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   const resolveFile = (specifier: string) => fileURLToPath(import.meta.resolve(specifier));
 
   const handlerFile = resolveFile("void/handler");
-  const authClientPath = join(dirname(resolveFile("void/client")), "auth-client.mjs");
+  const runtimeDir = dirname(resolveFile("void/client"));
+  const fetchPath = resolveFile("void/runtime/fetch");
+  const fetchStreamPath = resolveFile("void/runtime/fetch-stream");
+  let authClientPath = join(runtimeDir, "auth-client.mjs");
   const remote = options.remoteMode
     ? { remotePath: resolveFile("void/remote"), envPath: resolveFile("void/_env") }
     : undefined;
@@ -112,28 +121,48 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   };
 
   // Auth compile options are set up lazily in buildStart (after env plugin
-  // has run its config hook and authProviders is fully resolved).
+  // has run its config hook and the auth config file path is known).
   function resolveAuthCompileOptions(): void {
-    const providers = options.getAuth();
-    if (!providers) {
+    if (!options.isAuthEnabled() && !authConfigPath) {
       compileOptions.auth = null;
       return;
     }
-    const hasEmail = providers.includes("email");
-    const hasGitHub = providers.includes("github");
-    const hasGoogle = providers.includes("google");
+    const config = readConfig(root);
+    const dialect = getDatabaseDialect(config);
     compileOptions.auth = {
-      providers,
-      sessionPath: resolveFile("void/auth/session"),
-      passwordPath: hasEmail ? resolveFile("void/auth/password") : null,
-      schemaPath: resolveFile("void/auth/schema"),
-      githubProviderPath: hasGitHub ? resolveFile("@hono/oauth-providers/github") : null,
-      googleProviderPath: hasGoogle ? resolveFile("@hono/oauth-providers/google") : null,
-      authRuntimePath: resolveFile("void/auth"),
+      authRuntimePath:
+        dialect === "postgresql"
+          ? join(runtimeDir, "better-auth-pg.mjs")
+          : join(runtimeDir, "better-auth.mjs"),
+      authConfigPath,
+      dialect,
+      providers: config.auth?.providers ?? null,
     };
   }
 
   let resolvedConfig: import("vite").ResolvedConfig | null = null;
+
+  function resolveAuthClientPath(config: import("vite").ResolvedConfig): string {
+    if (config.plugins.some((plugin) => plugin.name === "void-react:pages")) {
+      return join(runtimeDir, "auth-client-react.mjs");
+    }
+    if (config.plugins.some((plugin) => plugin.name === "void-vue:pages")) {
+      return join(runtimeDir, "auth-client-vue.mjs");
+    }
+    if (config.plugins.some((plugin) => plugin.name === "void-svelte:pages")) {
+      return join(runtimeDir, "auth-client-svelte.mjs");
+    }
+    if (config.plugins.some((plugin) => plugin.name === "void-solid:pages")) {
+      return join(runtimeDir, "auth-client-solid.mjs");
+    }
+    return join(runtimeDir, "auth-client.mjs");
+  }
+
+  function isPotentialAuthConfigPath(path: string): boolean {
+    if (!path.startsWith(authConfigDir + "/")) return false;
+    const rel = path.slice(authConfigDir.length + 1);
+    return /^auth\.(c|m)?[jt]s$/.test(rel);
+  }
 
   function getPagesCompileOptions(): PagesCompileOptions | null {
     if (!scan || scan.pages.pages.length === 0) return null;
@@ -167,7 +196,10 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     writeFileSync(join(outDir, "app.ts"), compileNodeApp(options.target, compileOptions.honoPath));
     writeFileSync(join(outDir, "index.ts"), compileNodeServer(options.target));
   } else {
-    writeFileSync(join(outDir, "entry.ts"), compileWorkerEntry(false, remote));
+    writeFileSync(
+      join(outDir, "entry.ts"),
+      compileWorkerEntry(false, remote, undefined, undefined, compileOptions.runtimeEnvPath),
+    );
   }
 
   return {
@@ -175,6 +207,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     enforce: "pre",
     configResolved(config) {
       resolvedConfig = config;
+      authClientPath = resolveAuthClientPath(config);
       compileOptions.reactRefresh = config.plugins.some(
         (plugin) =>
           plugin.name === "vite:react-babel" ||
@@ -197,25 +230,28 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     },
 
     async buildStart() {
-      resolveAuthCompileOptions();
       await rescan();
       if (options.target && (scan?.websockets?.length ?? 0) > 0) {
         throw new Error("WebSocket routes require the default Cloudflare target.");
       }
+      resolveAuthCompileOptions();
       writeRouteTypes();
       writeQueueTypes();
 
       // Bundle migrations into the worker for CF targets (in-worker migration runner)
       if (!options.target) {
         const migrationsDir = join(root, "db", "migrations");
-        if (existsSync(migrationsDir)) {
+        if (existsSync(migrationsDir) || compileOptions.auth) {
           const { collectMigrations } = await import("./migrations/collect");
-          const migrations = collectMigrations(migrationsDir);
-          if (migrations.length > 0) {
-            compileOptions.migrationHandlerPath = resolveFile("void/runtime/migration-handler");
-            compileOptions.migrations = migrations;
-            compileOptions.migrationDialect = getDatabaseDialect(readConfig(root));
-          }
+          const migrations = existsSync(migrationsDir) ? collectMigrations(migrationsDir) : [];
+          const dialect = getDatabaseDialect(readConfig(root));
+          compileOptions.migrationHandlerPath = resolveFile(
+            dialect === "postgresql"
+              ? "void/runtime/migration-handler-pg"
+              : "void/runtime/migration-handler",
+          );
+          compileOptions.migrations = migrations;
+          compileOptions.migrationDialect = dialect;
         }
       }
       // Re-write entry with queue handler if needed
@@ -233,6 +269,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
             remote,
             resolvedConfig?.build.assetsDir,
             (scan!.websockets ?? []).map((route) => route.className),
+            compileOptions.runtimeEnvPath,
           ),
         );
       }
@@ -247,6 +284,9 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         if (id === VIRTUAL_CLIENT_WORKER_ID) {
           return VIRTUAL_CLIENT_WORKER_ID;
         }
+        if (id === VIRTUAL_CLIENT_BROWSER_ID) {
+          return VIRTUAL_CLIENT_BROWSER_ID;
+        }
         // Redirect bare "void" imports to the lightweight handler
         // subpath to avoid pulling the entire plugin into the Worker bundle.
         if (id === "void") {
@@ -256,10 +296,10 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         if (id === "void/queues") {
           return resolveFile("void/queues");
         }
-        // In worker environments, redirect void/client to the worker
-        // virtual module that calls app.fetch() directly (no HTTP round-trip).
-        if (id === "void/client" && this.environment?.name !== "client") {
-          return VIRTUAL_CLIENT_WORKER_ID;
+        if (id === "void/client") {
+          return this.environment?.name === "client"
+            ? VIRTUAL_CLIENT_BROWSER_ID
+            : VIRTUAL_CLIENT_WORKER_ID;
         }
       },
     },
@@ -267,9 +307,12 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     load: {
       filter: { id: LOAD_ID_FILTER },
       async handler(id) {
+        if (id === VIRTUAL_CLIENT_BROWSER_ID) {
+          return compileBrowserClient(authClientPath, fetchPath, fetchStreamPath);
+        }
         if (id === VIRTUAL_CLIENT_WORKER_ID) {
           if (options.target) {
-            return compileNodeClient();
+            return compileNodeClient(authClientPath);
           }
           return compileWorkerClient(authClientPath);
         }
@@ -299,7 +342,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           !path.startsWith(jobsDir) &&
           !path.startsWith(queuesDir) &&
           !path.startsWith(pagesDir) &&
-          !path.startsWith(srcDir)
+          !path.startsWith(srcDir) &&
+          !isPotentialAuthConfigPath(path)
         ) {
           return;
         }
@@ -326,6 +370,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
               remote,
               resolvedConfig?.build.assetsDir,
               (scan!.websockets ?? []).map((route) => route.className),
+              compileOptions.runtimeEnvPath,
             ),
           );
         }

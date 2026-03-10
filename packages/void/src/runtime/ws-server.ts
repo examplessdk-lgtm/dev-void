@@ -1,5 +1,6 @@
 import type { StandardSchemaV1 } from "../standard-schema";
-import { authContext, resolveAuthUserFromRequest, type AuthUser } from "./auth";
+import { authContext, type AuthState, type AuthUser } from "./auth";
+import type { VoidAuthEnv, VoidAuthRuntimeOptions } from "./better-auth-shared";
 import type { CloudEnv } from "./handler";
 import type {
   AnyWebSocketDefinition,
@@ -34,11 +35,18 @@ export interface WebSocketDurableObjectClass {
   new (state: DurableObjectState, env: Record<string, unknown>): WebSocketDurableObjectInstance;
 }
 
+type ResolveVoidAuthState = (
+  request: Request,
+  env: VoidAuthEnv,
+  runtime: VoidAuthRuntimeOptions,
+) => Promise<AuthState | null>;
+
 interface StoredConnection {
   id: string;
   params: Record<string, string>;
   roomId: string;
   user: AuthUser | null;
+  authState?: AuthState | null;
   state?: unknown;
 }
 
@@ -128,21 +136,31 @@ function parseIncomingMessage(message: string | ArrayBuffer | ArrayBufferView): 
   );
 }
 
-function withAuthUser<T>(user: AuthUser | null, fn: () => Promise<T> | T): Promise<T> {
-  return Promise.resolve(authContext.run({ user }, fn));
+function withAuthState<T>(state: AuthState | null, fn: () => Promise<T> | T): Promise<T> {
+  return Promise.resolve(authContext.run({ user: state?.user ?? null, state }, fn));
 }
 
 function getStoredConnection(webSocket: WebSocket): StoredConnection {
-  return ((
+  const stored = (
     webSocket as WebSocket & {
       deserializeAttachment?: () => StoredConnection | undefined;
     }
-  ).deserializeAttachment?.() ?? {
+  ).deserializeAttachment?.();
+
+  if (stored) {
+    return {
+      ...stored,
+      authState: stored.authState ?? null,
+    };
+  }
+
+  return {
     id: crypto.randomUUID(),
     params: {},
     roomId: "default",
     user: null,
-  }) as StoredConnection;
+    authState: null,
+  };
 }
 
 function setStoredConnection(webSocket: WebSocket, data: StoredConnection): void {
@@ -248,6 +266,8 @@ function assertDefinition(definition: AnyWebSocketDefinition): void {
 export function createWebSocketDurableObject(
   definition: AnyWebSocketDefinition,
   route: WebSocketRouteMeta,
+  authRuntime?: VoidAuthRuntimeOptions,
+  resolveAuthState?: ResolveVoidAuthState,
 ): WebSocketDurableObjectClass {
   assertDefinition(definition);
 
@@ -260,7 +280,11 @@ export function createWebSocketDurableObject(
     async fetch(request: Request): Promise<Response> {
       const params = getRouteMatch(request, route) ?? {};
       const roomId = buildWebSocketInstanceId(route, params);
-      const user = await resolveAuthUserFromRequest(request, this.env);
+      const authState =
+        authRuntime && resolveAuthState
+          ? await resolveAuthState(request, this.env as VoidAuthEnv, authRuntime)
+          : null;
+      const user = authState?.user ?? null;
       const upgrade = request.headers.get("upgrade");
 
       if (upgrade?.toLowerCase() === "websocket") {
@@ -272,6 +296,7 @@ export function createWebSocketDurableObject(
           params,
           roomId,
           user,
+          authState,
         };
         setStoredConnection(server, stored);
 
@@ -284,7 +309,7 @@ export function createWebSocketDurableObject(
             stored,
             definition.messages.server,
           );
-          const decision = await withAuthUser(user, () =>
+          const decision = await withAuthState(authState, () =>
             (definition as RoomDefinition).onBeforeConnect?.(ctx),
           );
           if (decision instanceof Response) return decision;
@@ -297,7 +322,7 @@ export function createWebSocketDurableObject(
             stored,
             definition.messages.server,
           );
-          const decision = await withAuthUser(user, () =>
+          const decision = await withAuthState(authState, () =>
             (definition as SocketDefinition).onBeforeConnect?.(ctx),
           );
           if (decision instanceof Response) return decision;
@@ -314,7 +339,7 @@ export function createWebSocketDurableObject(
             stored,
             definition.messages.server,
           );
-          await withAuthUser(user, () => (definition as RoomDefinition).onConnect?.(ctx));
+          await withAuthState(authState, () => (definition as RoomDefinition).onConnect?.(ctx));
         } else {
           const ctx = createSocketContext<any>(
             this.state,
@@ -324,7 +349,7 @@ export function createWebSocketDurableObject(
             stored,
             definition.messages.server,
           );
-          await withAuthUser(user, () => (definition as SocketDefinition).onConnect?.(ctx));
+          await withAuthState(authState, () => (definition as SocketDefinition).onConnect?.(ctx));
         }
 
         return new Response(null, { status: 101, webSocket: client });
@@ -339,6 +364,7 @@ export function createWebSocketDurableObject(
         params,
         roomId,
         user,
+        authState,
       };
 
       if (definition.__kind === "room") {
@@ -351,7 +377,7 @@ export function createWebSocketDurableObject(
           stored,
           definition.messages.server,
         );
-        return withAuthUser(user, () => (definition as RoomDefinition).onRequest!(ctx));
+        return withAuthState(authState, () => (definition as RoomDefinition).onRequest!(ctx));
       }
 
       const fakeSocket = new WebSocketPair()[1];
@@ -363,7 +389,7 @@ export function createWebSocketDurableObject(
         stored,
         definition.messages.server,
       );
-      return withAuthUser(user, () => (definition as SocketDefinition).onRequest!(ctx));
+      return withAuthState(authState, () => (definition as SocketDefinition).onRequest!(ctx));
     }
 
     async webSocketMessage(
@@ -398,7 +424,7 @@ export function createWebSocketDurableObject(
           stored,
           definition.messages.server,
         );
-        await withAuthUser(stored.user, () =>
+        await withAuthState(stored.authState ?? null, () =>
           (definition as RoomDefinition).onMessage?.(ctx, result.value as never),
         );
       } else {
@@ -410,7 +436,7 @@ export function createWebSocketDurableObject(
           stored,
           definition.messages.server,
         );
-        await withAuthUser(stored.user, () =>
+        await withAuthState(stored.authState ?? null, () =>
           (definition as SocketDefinition).onMessage?.(ctx, result.value as never),
         );
       }
@@ -434,7 +460,7 @@ export function createWebSocketDurableObject(
           stored,
           definition.messages.server,
         );
-        await withAuthUser(stored.user, () =>
+        await withAuthState(stored.authState ?? null, () =>
           (definition as RoomDefinition).onClose?.(ctx, { code, reason, wasClean }),
         );
       } else {
@@ -446,7 +472,7 @@ export function createWebSocketDurableObject(
           stored,
           definition.messages.server,
         );
-        await withAuthUser(stored.user, () =>
+        await withAuthState(stored.authState ?? null, () =>
           (definition as SocketDefinition).onClose?.(ctx, { code, reason, wasClean }),
         );
       }

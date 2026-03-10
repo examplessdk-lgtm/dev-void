@@ -164,6 +164,24 @@ describe("compileRouteTable", () => {
     expect(code).toContain("export default app");
   });
 
+  it("does not import runtime env helpers for node targets", () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+
+    const code = compileRouteTable(scan, "/routes", "/middleware", "/crons", "/queues", null, {
+      ...testOptions,
+      nodeTarget: true,
+    });
+
+    expect(code).not.toContain(`import { withRuntimeEnv }`);
+    expect(code).toContain("const withRuntimeEnv = (_env, fn) => fn();");
+  });
+
   it("adds SSR fallback handler when ssr entry is provided", () => {
     const scan: ScanResult = {
       routes: [],
@@ -329,8 +347,11 @@ describe("compileWorkerEntry", () => {
     expect(code).toContain(
       "import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket } from 'virtual:void-routes'",
     );
+    expect(code).toContain('import { withRuntimeEnv } from "void/_env"');
     expect(code).toContain("serveWithAssets");
+    expect(code).toContain("return withRuntimeEnv(env, async () => {");
     expect(code).toContain("export default { fetch:");
+    expect(code).toContain("scheduled: handleScheduled");
     expect(code).not.toContain("queue");
   });
 
@@ -348,11 +369,13 @@ describe("compileWorkerEntry", () => {
     const code = compileWorkerEntry(true);
 
     expect(code).toContain("async function queue(batch, env, ctx)");
+    expect(code).toContain("async function handleScheduled(controller, env, ctx)");
     expect(code).toContain("serveWithAssets");
-    expect(code).toContain("scheduled, queue }");
+    expect(code).toContain("scheduled: handleScheduled, queue }");
     expect(code).toContain("/__queue");
     expect(code).toContain("batch.queue");
     expect(code).toContain("m.timestamp.toISOString()");
+    expect(code).toContain("withRuntimeEnv(env, () => app.fetch(req, env, ctx))");
   });
 
   it("omits queue() export when hasQueues=false", () => {
@@ -382,6 +405,22 @@ describe("compileWorkerEntry", () => {
 
     expect(code).toContain('"/_astro/"');
     expect(code).not.toContain('"/assets/"');
+  });
+
+  it("wraps remote-mode fetch and scheduled handlers with resolved runtime env", () => {
+    const code = compileWorkerEntry(
+      false,
+      { remotePath: "/resolved/remote.mjs", envPath: "/resolved/env-legacy.mjs" },
+      "assets",
+      [],
+      "/resolved/env.mjs",
+    );
+
+    expect(code).toContain('import { withRuntimeEnv } from "/resolved/env.mjs"');
+    expect(code).toContain('import { createRemoteEnv } from "/resolved/remote.mjs"');
+    expect(code).toContain('if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);');
+    expect(code).toContain("return withRuntimeEnv(env, async () => {");
+    expect(code).toContain("return withRuntimeEnv(env, () => scheduled(controller, env, ctx));");
   });
 });
 

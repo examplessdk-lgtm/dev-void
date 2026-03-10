@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { useRouter } from "void/vue";
-import { auth, AuthError } from "void/client";
+import { auth } from "void/client";
 import type { Props } from "./auth.server";
 
 defineProps<Props>();
@@ -22,42 +22,38 @@ function showResponse(label: string, data: unknown) {
 
 async function handleRegister() {
   try {
-    const u = await auth.register({
+    const u = await auth.signUp.email({
       email: regEmail.value,
       password: regPassword.value,
-      name: regName.value || undefined,
+      name: regName.value,
     });
-    showResponse("POST /auth/register (200)", u);
+    showResponse("signUp.email (200)", u);
     regEmail.value = "";
     regPassword.value = "";
     regName.value = "";
     router.reload();
   } catch (err) {
-    if (err instanceof AuthError) {
-      showResponse(`POST /auth/register (${err.status})`, err.data);
-    }
+    showResponse("signUp.email (error)", err);
   }
 }
 
 async function handleLogin() {
   try {
-    const u = await auth.login({
+    const u = await auth.signIn.email({
       email: loginEmail.value,
       password: loginPassword.value,
     });
-    showResponse("POST /auth/login (200)", u);
+    showResponse("signIn.email (200)", u);
     loginEmail.value = "";
     loginPassword.value = "";
     router.reload();
   } catch (err) {
-    if (err instanceof AuthError) {
-      showResponse(`POST /auth/login (${err.status})`, err.data);
-    }
+    showResponse("signIn.email (error)", err);
   }
 }
 
 async function handleLogout() {
-  await auth.logout();
+  await auth.signOut();
   response.value = "Logged out";
   router.reload();
 }
@@ -71,7 +67,13 @@ async function handleProfile() {
 <template>
   <div>
     <h1>Auth</h1>
-    <p>Authentication via <code>void/auth</code> + <code>void/client</code>.</p>
+    <p>
+      Authentication via <code>void/auth</code> + <code>void/client</code> with
+      <code>auth.providers</code> configured in <code>void.json</code>.
+    </p>
+    <p>
+      This playground enables <code>email</code> only by default so it works without OAuth secrets.
+    </p>
 
     <div
       style="display: flex; align-items: center; border-bottom: 1px solid #ccc; margin-bottom: 15px"
@@ -106,7 +108,12 @@ async function handleProfile() {
       </button>
       <span style="margin-left: auto; padding: 8px 0; font-size: 0.9em">
         <template v-if="user">
-          <strong>{{ user.name || user.email || user.id }}</strong> ({{ user.provider }}) &mdash;
+          <strong>{{ user.name || user.email || user.id }}</strong>
+          <span style="opacity: 0.7">
+            ({{ user.emailVerified ? "email verified" : "email unverified" }})
+          </span>
+          <span v-if="session" style="opacity: 0.7"> session {{ session.id }}</span>
+          &mdash;
           <button @click="handleLogout">Logout</button>
         </template>
         <template v-else>Not logged in</template>
@@ -124,11 +131,6 @@ async function handleProfile() {
         </div>
         <button type="submit" style="margin-top: 5px">Login</button>
       </form>
-
-      <h2>OAuth</h2>
-      <a href="/auth/login/github"><button type="button">Login with GitHub</button></a>
-      {{ " " }}
-      <a href="/auth/login/google"><button type="button">Login with Google</button></a>
     </section>
 
     <section v-if="tab === 'register'">
@@ -141,7 +143,7 @@ async function handleProfile() {
           <input v-model="regPassword" type="password" placeholder="Password" required />
         </div>
         <div style="margin-top: 5px">
-          <input v-model="regName" type="text" placeholder="Name (optional)" />
+          <input v-model="regName" type="text" placeholder="Name" required />
         </div>
         <button type="submit" style="margin-top: 5px">Register</button>
       </form>
@@ -153,6 +155,19 @@ async function handleProfile() {
       <h2>Protected Route</h2>
       <button @click="handleProfile">GET /api/profile</button>
       <p>Tests <code>requireAuth()</code> — returns 401 if not logged in.</p>
+    </section>
+
+    <section>
+      <h2>Adding OAuth Providers</h2>
+      <p>
+        Add providers to <code>void.json</code>, for example
+        <code>["email", "github", "google"]</code>.
+      </p>
+      <p>
+        Then set <code>AUTH_GITHUB_CLIENT_ID</code> / <code>AUTH_GITHUB_CLIENT_SECRET</code> or the
+        matching <code>AUTH_&lt;PROVIDER&gt;_CLIENT_ID</code> /
+        <code>AUTH_&lt;PROVIDER&gt;_CLIENT_SECRET</code> env vars.
+      </p>
     </section>
 
     <section v-if="response">

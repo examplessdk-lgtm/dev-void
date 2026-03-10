@@ -197,14 +197,11 @@ describe("syncWranglerBindings", () => {
     expect(parsed.r2_buckets).toEqual([{ binding: "STORAGE", bucket_name: "default" }]);
   });
 
-  it("adds AUTH_KV when auth is enabled", () => {
+  it("does not add auth-specific bindings", () => {
     setup("wrangler.jsonc", '{ "name": "test" }');
-    syncWranglerBindings(tmpDir, noBindings, { auth: true });
+    syncWranglerBindings(tmpDir, { ...noBindings, needsAuth: true });
     const parsed = JSON.parse(readFileSync(join(tmpDir, "wrangler.jsonc"), "utf-8"));
-    expect(parsed.d1_databases).toEqual([
-      { binding: "DB", database_name: "default", database_id: "local" },
-    ]);
-    expect(parsed.kv_namespaces).toEqual([{ binding: "AUTH_KV", id: "auth-local" }]);
+    expect(parsed).toEqual({ name: "test" });
   });
 
   it("uses custom binding names", () => {

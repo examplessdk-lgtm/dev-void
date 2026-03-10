@@ -37,6 +37,7 @@ export function migrationPlugin(
   dialect: DatabaseDialect,
   databaseId = "local",
   persistRoot = join(root, ".void"),
+  auth?: { enabled: boolean; configPath?: string | null },
 ): Plugin {
   return {
     name: "void:migrations",
@@ -44,10 +45,11 @@ export function migrationPlugin(
 
     async configureServer(server) {
       const migrationsDir = join(root, "db", "migrations");
-      if (!existsSync(migrationsDir)) return;
+      const hasSqlMigrations = existsSync(migrationsDir);
+      if (!hasSqlMigrations && !auth?.enabled) return;
 
       try {
-        if (dialect === "postgresql") {
+        if (hasSqlMigrations && dialect === "postgresql") {
           const url = readDatabaseUrl(root);
           if (!url) {
             // Defer warning until after Vite prints "ready" so it's visible.
@@ -67,13 +69,19 @@ export function migrationPlugin(
           if (applied.length > 0) {
             voidLog(`Applied ${applied.length} migration(s): ${applied.join(", ")}`);
           }
-        } else {
+        } else if (hasSqlMigrations) {
           const { runMigrations, getMiniflareDatabasePath } = await import("./migrations/runner");
           const dbPath = getMiniflareDatabasePath(persistRoot, databaseId);
           const applied = await runMigrations(migrationsDir, dbPath);
           if (applied.length > 0) {
             voidLog(`Applied ${applied.length} migration(s): ${applied.join(", ")}`);
           }
+        }
+
+        if (auth?.enabled) {
+          const { runLocalVoidAuthMigrations } = await import("./auth/node");
+          await runLocalVoidAuthMigrations(root, dialect, persistRoot, databaseId, auth.configPath);
+          voidLog("Applied Better Auth migrations");
         }
       } catch (err) {
         voidError(`Migration error: ${err}`);

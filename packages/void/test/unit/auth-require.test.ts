@@ -15,10 +15,12 @@ describe("requireAuth", () => {
   it("returns user when present", () => {
     const user: AuthUser = {
       id: "u1",
-      provider: "email",
+      createdAt: new Date("2026-03-09T00:00:00Z"),
+      updatedAt: new Date("2026-03-09T00:00:00Z"),
       email: "test@test.com",
+      emailVerified: true,
       name: "Test",
-      avatar_url: null,
+      image: null,
     };
     expect(requireAuth(mockContext(user))).toBe(user);
   });

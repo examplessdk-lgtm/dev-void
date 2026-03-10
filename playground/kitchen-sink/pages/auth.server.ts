@@ -1,8 +1,12 @@
 import { defineHandler, type InferProps } from "void";
+import { getSession } from "void/auth";
 
 export type Props = InferProps<typeof loader>;
 
-export const loader = defineHandler((c) => {
-  const user = c.get("user");
-  return { user: user ?? null };
+export const loader = defineHandler(() => {
+  const auth = getSession();
+  return {
+    user: auth?.user ?? null,
+    session: auth?.session ?? null,
+  };
 });

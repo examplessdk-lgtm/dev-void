@@ -3,9 +3,7 @@ import { join } from "node:path";
 import type { HeaderRule, RedirectRule } from "./cli/types";
 export type { RedirectRule };
 import type { HeadConfig } from "./pages/head";
-
-/** Supported authentication providers. */
-export type AuthProvider = "github" | "google" | "email";
+import { VOID_AUTH_PROVIDERS, isVoidAuthProvider, type VoidAuthProvider } from "./auth/providers";
 
 /** Redirect destination — string (302) or object with explicit status. */
 export type RedirectDestination = string | { to: string; status?: 301 | 302 | 307 | 308 };
@@ -27,9 +25,8 @@ export interface RoutingConfig {
   redirects?: Record<string, RedirectDestination>;
 }
 
-/** Inference configuration — bindings, auth, scanDirs, build, outputDir, appType. */
+/** Inference configuration — bindings, scanDirs, build, outputDir, appType. */
 export interface InferenceConfig {
-  auth?: boolean | AuthProvider[];
   bindings?: {
     db?: boolean | string;
     kv?: boolean | string;
@@ -42,11 +39,17 @@ export interface InferenceConfig {
   appType?: "spa" | "static" | "void" | "framework";
 }
 
+/** Auth configuration — high-level provider selection for Better Auth defaults. */
+export interface AuthConfig {
+  providers?: VoidAuthProvider[];
+}
+
 /** Shape of the `void.json` config file. All fields optional. */
 export interface VoidConfig {
   $schema?: string;
   target?: "cloudflare" | "node" | "bun" | "deno";
   output?: "server" | "static";
+  auth?: AuthConfig;
   head?: HeadConfig;
   routing?: RoutingConfig;
   inference?: InferenceConfig;
@@ -58,7 +61,6 @@ export interface VoidConfig {
 const CONFIG_FILE = "void.json";
 
 const VALID_TARGETS = new Set(["cloudflare", "node", "bun", "deno"]);
-const VALID_AUTH_PROVIDERS = new Set(["github", "google", "email"]);
 const VALID_APP_TYPES = new Set(["spa", "static", "void", "framework"]);
 const VALID_OUTPUTS = new Set(["server", "static"]);
 const VALID_REDIRECT_STATUSES = new Set([301, 302, 307, 308]);
@@ -66,7 +68,6 @@ const VALID_DATABASE_VALUES = new Set(["pg"]);
 
 /** Old flat keys that have moved into namespaces. */
 const MIGRATION_ERRORS: Record<string, string> = {
-  auth: '"auth" has moved to "inference.auth"',
   bindings: '"bindings" has moved to "inference.bindings"',
   build: '"build" has moved to "inference.build"',
   scanDirs: '"scanDirs" has moved to "inference.scanDirs"',
@@ -125,6 +126,45 @@ export function readConfig(root: string): VoidConfig {
   if (obj.output !== undefined) {
     if (typeof obj.output !== "string" || !VALID_OUTPUTS.has(obj.output)) {
       throw new Error(`"output" in ${CONFIG_FILE} must be one of: server, static`);
+    }
+  }
+
+  // Validate auth
+  if (obj.auth !== undefined) {
+    if (typeof obj.auth !== "object" || obj.auth === null || Array.isArray(obj.auth)) {
+      throw new Error(`"auth" in ${CONFIG_FILE} must be an object`);
+    }
+
+    const auth = obj.auth as Record<string, unknown>;
+    for (const key of Object.keys(auth)) {
+      if (key !== "providers") {
+        throw new Error(`Unknown key "auth.${key}" in ${CONFIG_FILE}. Valid: providers`);
+      }
+    }
+
+    if (auth.providers !== undefined) {
+      if (!Array.isArray(auth.providers)) {
+        throw new Error(`"auth.providers" in ${CONFIG_FILE} must be an array of strings`);
+      }
+      if (auth.providers.length === 0) {
+        throw new Error(`"auth.providers" in ${CONFIG_FILE} must not be empty`);
+      }
+
+      const seen = new Set<string>();
+      for (const provider of auth.providers) {
+        if (typeof provider !== "string") {
+          throw new Error(`"auth.providers" in ${CONFIG_FILE} must be an array of strings`);
+        }
+        if (!isVoidAuthProvider(provider)) {
+          throw new Error(
+            `"auth.providers" value "${provider}" in ${CONFIG_FILE} must be one of: ${VOID_AUTH_PROVIDERS.join(", ")}`,
+          );
+        }
+        if (seen.has(provider)) {
+          throw new Error(`"auth.providers" in ${CONFIG_FILE} must not contain duplicates`);
+        }
+        seen.add(provider);
+      }
     }
   }
 
@@ -293,21 +333,10 @@ export function readConfig(root: string): VoidConfig {
     }
     const inf = obj.inference as Record<string, unknown>;
 
-    // Validate inference.auth
     if (inf.auth !== undefined) {
-      if (typeof inf.auth === "boolean") {
-        // ok
-      } else if (Array.isArray(inf.auth)) {
-        for (const p of inf.auth) {
-          if (typeof p !== "string" || !VALID_AUTH_PROVIDERS.has(p)) {
-            throw new Error(`Invalid auth provider in ${CONFIG_FILE}: ${JSON.stringify(p)}`);
-          }
-        }
-      } else {
-        throw new Error(
-          `"inference.auth" in ${CONFIG_FILE} must be a boolean or an array of providers`,
-        );
-      }
+      throw new Error(
+        `"inference.auth" in ${CONFIG_FILE} is no longer supported; use auth.ts or import from "void/auth"/"void/client" instead`,
+      );
     }
 
     // Validate inference.bindings
@@ -441,16 +470,6 @@ export function resolveBindingNames(
     hasCustom = true;
   }
   return hasCustom ? names : undefined;
-}
-
-/**
- * Normalize the `auth` config field into a concrete provider list or null.
- */
-export function normalizeAuth(auth: boolean | AuthProvider[] | undefined): AuthProvider[] | null {
-  if (!auth) return null;
-  if (auth === true) return ["email"];
-  if (auth.length === 0) return null;
-  return auth;
 }
 
 /**

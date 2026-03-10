@@ -18,6 +18,59 @@
       "enum": ["server", "static"],
       "description": "Output mode. \"server\" (default) serves all pages dynamically. \"static\" prerenders all pages at build time, writing HTML files to dist/client/."
     },
+    "auth": {
+      "type": "object",
+      "description": "High-level Better Auth configuration. Use this to select built-in auth providers; use auth.ts for advanced Better Auth options.",
+      "properties": {
+        "providers": {
+          "type": "array",
+          "description": "Auth providers to enable. Include \"email\" for email/password auth. Social providers use standardized env vars like AUTH_GITHUB_CLIENT_ID and AUTH_GITHUB_CLIENT_SECRET.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "email",
+              "apple",
+              "atlassian",
+              "cognito",
+              "discord",
+              "dropbox",
+              "facebook",
+              "figma",
+              "github",
+              "gitlab",
+              "google",
+              "huggingface",
+              "kakao",
+              "kick",
+              "line",
+              "linear",
+              "linkedin",
+              "microsoft",
+              "naver",
+              "notion",
+              "paybin",
+              "paypal",
+              "polar",
+              "railway",
+              "reddit",
+              "roblox",
+              "salesforce",
+              "slack",
+              "spotify",
+              "tiktok",
+              "twitch",
+              "twitter",
+              "vercel",
+              "vk",
+              "zoom"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
     "head": {
       "type": "object",
       "description": "Default <head> tags for all pages. Page-level head() exports override these defaults.",
@@ -148,22 +201,8 @@
     },
     "inference": {
       "type": "object",
-      "description": "Inference configuration — bindings, auth, scanDirs, build, outputDir, appType.",
+      "description": "Inference configuration — bindings, scanDirs, build, outputDir, appType.",
       "properties": {
-        "auth": {
-          "description": "Enable built-in auth routes and session management. `true` enables email-only auth. An array enables specific providers.",
-          "oneOf": [
-            { "type": "boolean" },
-            {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "enum": ["github", "google", "email"]
-              },
-              "uniqueItems": true
-            }
-          ]
-        },
         "bindings": {
           "type": "object",
           "description": "Explicitly control inferred Cloudflare bindings. If omitted, bindings are inferred by scanning source files.",

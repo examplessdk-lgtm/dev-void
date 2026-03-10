@@ -80,7 +80,6 @@ export function syncWranglerBindings(
   root: string,
   bindings: InferredBindings,
   options?: {
-    auth?: boolean;
     bindingNames?: { d1?: string; kv?: string; r2?: string };
     websockets?: WebSocketRouteDefinition[];
   },
@@ -112,7 +111,7 @@ export function syncWranglerBindings(
 
   // D1
   const d1Name = options?.bindingNames?.d1 ?? "DB";
-  if (bindings.needsD1 || options?.auth) {
+  if (bindings.needsD1) {
     const existing = (parsed.d1_databases as { binding: string }[] | undefined) ?? [];
     if (!existing.some((b) => b.binding === d1Name)) {
       parsed.d1_databases = [
@@ -129,15 +128,6 @@ export function syncWranglerBindings(
     const existing = (parsed.kv_namespaces as { binding: string }[] | undefined) ?? [];
     if (!existing.some((b) => b.binding === kvName)) {
       parsed.kv_namespaces = [...existing, { binding: kvName, id: "local" }];
-      modified = true;
-    }
-  }
-
-  // AUTH_KV for auth sessions
-  if (options?.auth) {
-    const existing = (parsed.kv_namespaces as { binding: string }[] | undefined) ?? [];
-    if (!existing.some((b) => b.binding === "AUTH_KV")) {
-      parsed.kv_namespaces = [...existing, { binding: "AUTH_KV", id: "auth-local" }];
       modified = true;
     }
   }

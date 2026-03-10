@@ -17,7 +17,7 @@ defineProps<Props>();
       <li><Link href="/queues">Queues</Link> — Message queues</li>
       <li><Link href="/env">Env</Link> — Environment bindings</li>
       <li><Link href="/revalidate">Revalidate</Link> — ISR revalidation</li>
-      <li><Link href="/auth">Auth</Link> — Email + OAuth authentication</li>
+      <li><Link href="/auth">Auth</Link> — Better Auth with explicit providers</li>
     </ul>
   </div>
 </template>
