@@ -63,8 +63,9 @@ export interface FrameworkPreset {
  * Known output conventions for meta-frameworks.
  * Keyed by the framework name from `detectFramework()`.
  *
- * Class A frameworks (tanstack-start, react-router, vinext) use `vite build`
- * and have their output structure determined by the framework's Vite plugin.
+ * Class A frameworks (tanstack-start, react-router, vinext) use the project's
+ * Vite-compatible build command (`vite build` or `vp build`) and have their
+ * output structure determined by the framework's Vite plugin.
  *
  * Class B/C frameworks (sveltekit, nuxt, astro) use their own build CLI
  * and have framework-specific output conventions.
@@ -127,6 +128,26 @@ export interface StaticPreset {
 }
 
 /**
+ * Resolve a project-local command, rewriting `vite` to `vp` when the project
+ * depends on Vite+ and preferring node_modules/.bin when available.
+ */
+export function resolveProjectCommand(root: string, command: string): string {
+  const [bin, ...args] = command.trim().split(/\s+/);
+  const resolvedBin = localBin(root, resolveCommandBin(root, bin));
+  return args.length > 0 ? `${resolvedBin} ${args.join(" ")}` : resolvedBin;
+}
+
+/**
+ * Format a user-facing command string, rewriting `vite` to `vp` when the
+ * project depends on Vite+ without expanding to an absolute local bin path.
+ */
+export function formatProjectCommand(root: string, command: string): string {
+  const [bin, ...args] = command.trim().split(/\s+/);
+  const formattedBin = resolveCommandBin(root, bin);
+  return args.length > 0 ? `${formattedBin} ${args.join(" ")}` : formattedBin;
+}
+
+/**
  * Detect a static deploy preset based on the project root.
  * Returns null when the project requires a full worker deploy.
  */
@@ -152,10 +173,8 @@ export function detectPreset(
         const overrides = preset.resolve?.(root);
         const cmd = overrides?.buildCommand ?? preset.buildCommand;
         const out = overrides?.outputDir ?? preset.outputDir;
-        const bin = cmd.split(" ")[0];
-        const args = cmd.slice(bin.length);
         return {
-          buildCommand: `${localBin(root, bin)}${args}`,
+          buildCommand: resolveProjectCommand(root, cmd),
           outputDir: resolve(root, out),
           appType: preset.appType,
         };
@@ -168,10 +187,10 @@ export function detectPreset(
     return null;
   }
 
-  // 4. Vite in deps → static SPA
-  if (pkg && hasVite(pkg)) {
+  // 4. Vite/Vite+ in deps → static SPA
+  if (pkg && hasViteLike(pkg)) {
     return {
-      buildCommand: `${localBin(root, "vite")} build`,
+      buildCommand: resolveProjectCommand(root, "vite build"),
       outputDir: resolve(root, "dist"),
       appType: "spa",
     };
@@ -206,6 +225,13 @@ function localBin(root: string, name: string): string {
   return existsSync(bin) ? bin : name;
 }
 
+function resolveCommandBin(root: string, name: string): string {
+  if (name === "vite") {
+    return detectViteBinary(root);
+  }
+  return name;
+}
+
 function readPackageJson(root: string): Record<string, unknown> | null {
   try {
     return JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
@@ -221,8 +247,20 @@ function getAllDeps(pkg: Record<string, unknown>): Record<string, string> {
   };
 }
 
-function hasVite(pkg: Record<string, unknown>): boolean {
-  return "vite" in getAllDeps(pkg);
+function hasViteLike(pkg: Record<string, unknown>): boolean {
+  const deps = getAllDeps(pkg);
+  return "vite" in deps || "vite-plus" in deps;
+}
+
+function detectViteBinary(root: string): "vite" | "vp" {
+  const pkg = readPackageJson(root);
+  if (pkg) {
+    const deps = getAllDeps(pkg);
+    if ("vite-plus" in deps) {
+      return "vp";
+    }
+  }
+  return "vite";
 }
 
 /**

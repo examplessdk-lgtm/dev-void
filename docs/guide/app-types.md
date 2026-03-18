@@ -76,14 +76,14 @@ At the edge, the resolution order is:
 
 When running `void deploy` and no `inference.appType` is set in `void.json`, the detection logic runs in this order:
 
-| Priority | Condition                                                                                 | Type                          |
-| -------- | ----------------------------------------------------------------------------------------- | ----------------------------- |
-| 1        | `--dir` flag                                                                              | Static (or SPA with `--spa`)  |
-| 2        | Known SSG in dependencies (`vitepress`, `@docusaurus/core`)                               | Static, builds with SSG CLI   |
-| 3        | `@tanstack/react-start`, `@react-router/dev`, `@sveltejs/kit`, `nuxt`, or `astro` in deps | Framework                     |
-| 4        | Backend files exist (`routes/`, `pages/`, `middleware/`, `crons/`, `queues/`, SSR entry)  | Void app                      |
-| 5        | `vite` in dependencies, no backend files                                                  | SPA, builds with `vite build` |
-| 6        | `dist/index.html` or `./index.html` exists                                                | Static (no build step)        |
+| Priority | Condition                                                                                 | Type                                        |
+| -------- | ----------------------------------------------------------------------------------------- | ------------------------------------------- |
+| 1        | `--dir` flag                                                                              | Static (or SPA with `--spa`)                |
+| 2        | Known SSG in dependencies (`vitepress`, `@docusaurus/core`)                               | Static, builds with SSG CLI                 |
+| 3        | `@tanstack/react-start`, `@react-router/dev`, `@sveltejs/kit`, `nuxt`, or `astro` in deps | Framework                                   |
+| 4        | Backend files exist (`routes/`, `pages/`, `middleware/`, `crons/`, `queues/`, SSR entry)  | Void app                                    |
+| 5        | `vite` or `vite-plus` in dependencies, no backend files                                   | SPA, builds with `vite build` or `vp build` |
+| 6        | `dist/index.html` or `./index.html` exists                                                | Static (no build step)                      |
 
 ## Explicit Configuration
 

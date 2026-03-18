@@ -20,6 +20,7 @@ import {
   SCAFFOLD_GITIGNORE_LINES,
   type ScaffoldFramework,
 } from "./template";
+import { formatProjectCommand } from "./preset";
 import {
   detectAgents,
   getAgentById,
@@ -482,15 +483,15 @@ async function promptScaffoldFramework(): Promise<ScaffoldFramework> {
 }
 
 /** Get the dev command for a detected framework. */
-function getDevCommand(framework?: DetectedFramework): string {
-  if (!framework) return "vite dev";
+function getDevCommand(root: string, framework?: DetectedFramework): string {
+  if (!framework) return formatProjectCommand(root, "vite dev");
   switch (framework.name) {
     case "nuxt":
       return "nuxt dev";
     case "astro":
       return "astro dev";
     default:
-      return "vite dev";
+      return formatProjectCommand(root, "vite dev");
   }
 }
 
@@ -732,8 +733,9 @@ function scaffoldPagesApp(
   applyDatabaseDialect(root, dialect);
 
   if (dialect === "postgresql") {
+    const devCommand = getDevCommand(root);
     note(
-      "Add DATABASE_URL to .env.local before running `vite dev`.\n" +
+      `Add DATABASE_URL to .env.local before running \`${devCommand}\`.\n` +
         "Void uses that direct connection for local PostgreSQL development.",
       "PostgreSQL local dev",
     );
@@ -745,6 +747,8 @@ function scaffoldPagesApp(
 }
 
 function scaffoldDemo(root: string): void {
+  const devCommand = getDevCommand(root);
+
   // Migration
   mkdirSync(join(root, "db", "migrations"), { recursive: true });
   writeFileSync(
@@ -812,7 +816,7 @@ console.log(posts);
 
   note(
     "SQL migration → DB types → Route handler → Route types → Typed fetch\n\n" +
-      "Run `vite dev` and open src/demo.ts to see the types in action.\n" +
+      `Run \`${devCommand}\` and open src/demo.ts to see the types in action.\n` +
       "Try changing the migration or handler — types update automatically.",
     "Type Safety Demo",
   );
@@ -1118,5 +1122,5 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     }
   }
 
-  outro(`Run \`${getDevCommand(framework)}\` to start developing`);
+  outro(`Run \`${getDevCommand(root, framework)}\` to start developing`);
 }

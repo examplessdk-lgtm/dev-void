@@ -133,6 +133,15 @@ describe("resolveDistDir", () => {
       'Build output directory "build" not found',
     );
   });
+
+  it("uses the resolved build command in framework error messages", () => {
+    const root = mkdtempSync(join(tmpdir(), "void-test-"));
+    tempDirs.push(root);
+
+    expect(() => resolveDistDir(root, FRAMEWORK_PRESETS.sveltekit, "vp build")).toThrow(
+      'Run "vp build" first.',
+    );
+  });
 });
 
 describe("resolveWorkerDirName", () => {
@@ -178,6 +187,17 @@ describe("resolveWorkerDirName", () => {
 
     expect(() => resolveWorkerDirName(buildDir, FRAMEWORK_PRESETS["react-router"])).toThrow(
       'Worker output not found at "build/server"',
+    );
+  });
+
+  it("uses the resolved build command when worker output is missing", () => {
+    const root = mkdtempSync(join(tmpdir(), "void-test-"));
+    tempDirs.push(root);
+    const dist = join(root, "dist");
+    mkdirSync(dist, { recursive: true });
+
+    expect(() => resolveWorkerDirName(dist, FRAMEWORK_PRESETS.sveltekit, "vp build")).toThrow(
+      'Run "vp build" first.',
     );
   });
 
