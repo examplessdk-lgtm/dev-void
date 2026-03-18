@@ -239,9 +239,12 @@ export async function runLogin(provider = "github"): Promise<string> {
       const loginUrl = `${apiUrl}/auth/login?redirect=${encodeURIComponent(redirect)}&provider=${provider}`;
 
       // Open browser with platform detection
-      const platform = process.platform;
-      const cmd = platform === "darwin" ? "open" : platform === "win32" ? "start" : "xdg-open";
-      exec(`${cmd} "${loginUrl}"`);
+      if (process.platform === "win32") {
+        // `start` treats the first quoted arg as window title, pass empty title
+        exec(`start "" "${loginUrl}"`);
+      } else {
+        exec(`${process.platform === "darwin" ? "open" : "xdg-open"} "${loginUrl}"`);
+      }
     });
 
     // 5-minute timeout
