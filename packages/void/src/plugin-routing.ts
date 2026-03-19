@@ -247,12 +247,11 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     },
     config(_, env) {
       if (env.command === "serve" && options.isAuthEnabled()) {
-        // Pre-include better-auth client subpaths in SSR dep optimization
-        // so Vite doesn't discover them lazily on first auth page load,
-        // which triggers a disruptive program reload. We resolve absolute
-        // paths via import.meta.resolve because better-auth is a dep of
-        // void (not the user's project), so bare specifiers fail under
-        // pnpm's strict hoisting.
+        // Alias better-auth client subpaths to absolute file paths so
+        // Vite can resolve them during SSR without the bare specifiers
+        // needing to be hoisted into the user's node_modules (pnpm
+        // strict mode). Without this, Vite discovers them lazily on
+        // first auth page load, triggering a disruptive program reload.
         const betterAuthSubpaths = ["client", "react", "vue", "svelte", "solid"];
         const resolvedAliases = betterAuthSubpaths.flatMap((sub) => {
           try {
@@ -261,14 +260,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
             return [];
           }
         });
-        return {
-          resolve: { alias: resolvedAliases },
-          ssr: {
-            optimizeDeps: {
-              include: betterAuthSubpaths.map((sub) => `better-auth/${sub}`),
-            },
-          },
-        };
+        return { resolve: { alias: resolvedAliases } };
       }
 
       const entries = validateSsrEntries(root);
