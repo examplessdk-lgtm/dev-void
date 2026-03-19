@@ -128,7 +128,7 @@ function buildAddColumnSql(
   fieldName: string,
   field: VoidAuthMigrationField,
 ): string {
-  const ifNotExists = schema.dialect === "postgresql" ? " IF NOT EXISTS" : "";
+  const ifNotExists = " IF NOT EXISTS";
   return `ALTER TABLE ${quoteIdentifier(tableName)} ADD COLUMN${ifNotExists} ${buildColumnDefinition(
     schema.dialect,
     schema,
