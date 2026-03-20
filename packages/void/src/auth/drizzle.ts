@@ -91,7 +91,7 @@ function resolveSchemaUserConfig(
     });
   }
 
-  return userConfig;
+  return { ...defaults, ...userConfig };
 }
 
 function resolveSchemaOptions(

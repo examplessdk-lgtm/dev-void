@@ -179,7 +179,7 @@ function resolveUserConfig(
     return userConfig({ defaults, request, env, dialect });
   }
 
-  return userConfig;
+  return { ...defaults, ...userConfig };
 }
 
 function assertRuntimeDialect(runtime: VoidAuthRuntimeOptions, dialect: VoidAuthDialect): void {
