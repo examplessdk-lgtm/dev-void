@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { readConfig, getDatabaseDialect } from "./config";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnv, type Plugin } from "vite";
 import { scanRoutes, type ScanResult } from "./router/scan";
@@ -205,6 +205,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         : undefined;
     return {
       pagesDir,
+      pagesDirRelative: relative(root, pagesDir).replaceAll("\\", "/"),
       protocolPath: resolveFile("void/pages-protocol"),
       headPath: resolveFile("void/pages-head"),
       clientEntryId: "virtual:void-pages-client",

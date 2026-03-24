@@ -116,19 +116,20 @@ export async function handlePageGet(
   getAssetTags: (
     req: Request,
     env: any,
+    componentId: string,
   ) => Promise<{ css: string; preloads: string; body: string }>,
   configHead?: HeadConfig,
   island?: boolean,
 ): Promise<Response> {
   const shared = c.get("shared") || {};
 
-  // Run loader and check for redirect/non-data responses before extracting props
+  // Run loader and check for redirect/error responses before extracting props
   let props: Record<string, unknown> = {};
   if (handler) {
     const result = await handler(c);
     if (result instanceof Response) {
       const status = result.status;
-      if (status >= 300 && status < 400) return result;
+      if (status >= 300) return result;
     }
     props = await extractProps(result);
   }
@@ -211,7 +212,7 @@ export async function handlePageGet(
     );
   }
 
-  const assetTags = await getAssetTags(c.req.raw, c.env);
+  const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
   const html = await renderFn(pageObj, assetTags);
 
   if (!hasDeferred) {
@@ -250,6 +251,7 @@ export async function handlePageMutation(
   getAssetTags: (
     req: Request,
     env: any,
+    componentId: string,
   ) => Promise<{ css: string; preloads: string; body: string }>,
   configHead?: HeadConfig,
   island?: boolean,
@@ -285,7 +287,7 @@ export async function handlePageMutation(
       const props = stripDeferred(rawProps);
       const pageObj = buildMutationPageObj(props, e.errors);
       if (isPagesRequest(c)) return pageJsonResponse(pageObj);
-      const assetTags = await getAssetTags(c.req.raw, c.env);
+      const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
       return new Response(await renderFn(pageObj, assetTags), {
         headers: { "content-type": "text/html; charset=utf-8", ...POWERED_BY },
       });
@@ -309,7 +311,7 @@ export async function handlePageMutation(
       const props = stripDeferred(rawProps);
       const pageObj = buildMutationPageObj(props, errors);
       if (isPagesRequest(c)) return pageJsonResponse(pageObj);
-      const assetTags = await getAssetTags(c.req.raw, c.env);
+      const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
       return new Response(await renderFn(pageObj, assetTags), {
         headers: { "content-type": "text/html; charset=utf-8", ...POWERED_BY },
       });
@@ -326,7 +328,7 @@ export async function handlePageMutation(
   const props = stripDeferred(rawProps);
   const pageObj = buildMutationPageObj(props, null);
   if (isPagesRequest(c)) return pageJsonResponse(pageObj);
-  const assetTags = await getAssetTags(c.req.raw, c.env);
+  const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
   return new Response(await renderFn(pageObj, assetTags), {
     headers: { "content-type": "text/html; charset=utf-8", ...POWERED_BY },
   });

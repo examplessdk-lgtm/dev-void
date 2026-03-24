@@ -1,6 +1,7 @@
 import type { HeaderRule, RedirectRule } from "../cli/types";
 import type { VoidAuthProvider } from "../auth/providers";
 import type { ScanResult } from "./scan";
+import { resolveLayoutIds } from "../pages/layout-resolution";
 
 /**
  * Script tag injected into dev HTML to load the binding-hint virtual module.
@@ -59,6 +60,8 @@ export interface SsrCompileOptions {
 export interface PagesCompileOptions {
   /** Absolute path to pages/ directory */
   pagesDir: string;
+  /** Pages directory relative to Vite root, e.g. "pages" — used for manifest key lookup */
+  pagesDirRelative: string;
   /** Absolute path to void/pages-protocol module */
   protocolPath: string;
   /** Absolute path to void/pages-head module */
@@ -715,6 +718,71 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   lines.push(`  return Array.from(seen);`);
   lines.push(`}`);
   lines.push("");
+  // Build manifest-key mapping for each page and its layout chain
+  // so CSS collection can be scoped to the active route only
+  const relPagesDir = pages.pagesDirRelative;
+  const pageCssKeys: Record<string, string[]> = {};
+  for (const page of scan.pages.pages) {
+    const keys = [`${relPagesDir}/${page.componentPath}`];
+    const layoutIds = resolveLayoutIds(page, scan.pages.layouts, scan.pages.namedLayouts);
+    for (const layoutId of layoutIds) {
+      // Map layout IDs back to file paths
+      const layout = scan.pages.layouts.find(
+        (l) => (l.directory ? `${l.directory}/layout` : "layout") === layoutId,
+      );
+      if (layout) {
+        keys.push(`${relPagesDir}/${layout.filePath}`);
+        continue;
+      }
+      const named = scan.pages.namedLayouts.find((nl) => {
+        const id = nl.directory ? `${nl.directory}/_layouts/${nl.name}` : `_layouts/${nl.name}`;
+        return id === layoutId;
+      });
+      if (named) {
+        keys.push(`${relPagesDir}/${named.filePath}`);
+      }
+    }
+    pageCssKeys[page.componentId] = keys;
+  }
+  lines.push(`const PAGE_CSS_KEYS = ${JSON.stringify(pageCssKeys)};`);
+  lines.push("");
+
+  lines.push(`function collectRouteCss(manifest, entryId, pageKeys) {`);
+  lines.push(`  const cssFiles = new Set();`);
+  lines.push(`  const visited = new Set();`);
+  lines.push(`  const toVisit = [entryId];`);
+  lines.push(`  while (toVisit.length > 0) {`);
+  lines.push(`    const id = toVisit.pop();`);
+  lines.push(`    if (visited.has(id)) continue;`);
+  lines.push(`    visited.add(id);`);
+  lines.push(`    const chunk = manifest[id];`);
+  lines.push(`    if (!chunk) continue;`);
+  lines.push(`    if (Array.isArray(chunk.css)) {`);
+  lines.push(`      for (const f of chunk.css) cssFiles.add(f);`);
+  lines.push(`    }`);
+  lines.push(`    if (Array.isArray(chunk.imports)) {`);
+  lines.push(`      for (const i of chunk.imports) toVisit.push(i);`);
+  lines.push(`    }`);
+  lines.push(`  }`);
+  lines.push(`  for (const key of pageKeys) {`);
+  lines.push(`    const stack = [key];`);
+  lines.push(`    while (stack.length > 0) {`);
+  lines.push(`      const id = stack.pop();`);
+  lines.push(`      if (visited.has(id)) continue;`);
+  lines.push(`      visited.add(id);`);
+  lines.push(`      const chunk = manifest[id];`);
+  lines.push(`      if (!chunk) continue;`);
+  lines.push(`      if (Array.isArray(chunk.css)) {`);
+  lines.push(`        for (const f of chunk.css) cssFiles.add(f);`);
+  lines.push(`      }`);
+  lines.push(`      if (Array.isArray(chunk.imports)) {`);
+  lines.push(`        for (const i of chunk.imports) stack.push(i);`);
+  lines.push(`      }`);
+  lines.push(`    }`);
+  lines.push(`  }`);
+  lines.push(`  return cssFiles;`);
+  lines.push(`}`);
+  lines.push("");
   lines.push(`async function loadPagesManifest(request, env) {`);
   lines.push(`  if (cachedPagesManifest) return cachedPagesManifest;`);
   lines.push(
@@ -732,7 +800,7 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   lines.push(`  return cachedPagesManifest;`);
   lines.push(`}`);
   lines.push("");
-  lines.push(`async function getPagesAssetTags(request, env) {`);
+  lines.push(`async function getPagesAssetTags(request, env, componentId) {`);
   lines.push(`  const manifest = await loadPagesManifest(request, env);`);
   lines.push(`  if (!manifest || typeof manifest !== "object") {`);
   lines.push(`    if (!import.meta.env.DEV) return { css: "", preloads: "", body: "" };`);
@@ -743,14 +811,12 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   lines.push(`    return { css: "", preloads: "", body: "" };`);
   lines.push(`  }`);
   lines.push(`  const ids = collectPagesManifestFiles(manifest, PAGES_CLIENT_ENTRY_ID);`);
-  lines.push(`  const cssFiles = new Set();`);
+  lines.push(`  const pageKeys = componentId ? (PAGE_CSS_KEYS[componentId] || []) : [];`);
+  lines.push(`  const cssFiles = collectRouteCss(manifest, PAGES_CLIENT_ENTRY_ID, pageKeys);`);
   lines.push(`  const preloadFiles = new Set();`);
   lines.push(`  for (const id of ids) {`);
   lines.push(`    const chunk = manifest[id];`);
   lines.push(`    if (!chunk || typeof chunk !== "object") continue;`);
-  lines.push(`    if (Array.isArray(chunk.css)) {`);
-  lines.push(`      for (const cssFile of chunk.css) cssFiles.add(cssFile);`);
-  lines.push(`    }`);
   lines.push(`    if (id !== PAGES_CLIENT_ENTRY_ID && typeof chunk.file === "string") {`);
   lines.push(`      preloadFiles.add(chunk.file);`);
   lines.push(`    }`);
@@ -803,7 +869,7 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
     lines.push(`  return { css: "", preloads, body: bodyTag };`);
     lines.push(`}`);
     lines.push("");
-    lines.push(`async function getIslandsAssetTags(request, env) {`);
+    lines.push(`async function getIslandsAssetTags(request, env, componentId) {`);
     lines.push(`  const manifest = await loadPagesManifest(request, env);`);
     lines.push(`  if (!manifest || typeof manifest !== "object") {`);
     lines.push(`    if (!import.meta.env.DEV) return { css: "", preloads: "", body: "" };`);
@@ -822,14 +888,21 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
       lines.push(`    for (const mdId of mdIds) ids.push(mdId);`);
       lines.push(`  }`);
     }
-    lines.push(`  const cssFiles = new Set();`);
+    // Collect route-scoped CSS (page + layout chunks) plus static-import CSS
+    lines.push(`  const pageKeys = componentId ? (PAGE_CSS_KEYS[componentId] || []) : [];`);
+    lines.push(`  const cssFiles = collectRouteCss(manifest, ISLANDS_CLIENT_ENTRY_ID, pageKeys);`);
+    if (pages.mdClientEntryId) {
+      // Also collect CSS from the md client entry's static imports
+      lines.push(`  if (mdEntry && typeof mdEntry.file === "string") {`);
+      lines.push(`    const mdKeys = [];`);
+      lines.push(`    const mdCss = collectRouteCss(manifest, MD_CLIENT_ENTRY_ID, mdKeys);`);
+      lines.push(`    for (const f of mdCss) cssFiles.add(f);`);
+      lines.push(`  }`);
+    }
     lines.push(`  const preloadFiles = new Set();`);
     lines.push(`  for (const id of ids) {`);
     lines.push(`    const chunk = manifest[id];`);
     lines.push(`    if (!chunk || typeof chunk !== "object") continue;`);
-    lines.push(`    if (Array.isArray(chunk.css)) {`);
-    lines.push(`      for (const cssFile of chunk.css) cssFiles.add(cssFile);`);
-    lines.push(`    }`);
     // Exclude entry points from preloads (they get their own <script> tags)
     const excludeFromPreload = pages.mdClientEntryId
       ? `id !== ISLANDS_CLIENT_ENTRY_ID && id !== MD_CLIENT_ENTRY_ID`
