@@ -285,6 +285,15 @@ export function createVoidAuthRuntime(
     databaseOverride?: NonNullable<BetterAuthOptions["database"]>,
     disposeOverride?: () => Promise<void>,
   ): Promise<void> {
+    // Skip auth for internal routes (cron, queue, migration, binding proxy).
+    // Still set user/session to null so downstream middleware that checks
+    // these context variables gets the expected sentinel (not undefined).
+    if (c.req.path.startsWith("/__")) {
+      c.set("user", null);
+      c.set("session", null);
+      return next();
+    }
+
     const { auth, dispose } = await createVoidAuth(
       c.req.raw,
       c.env as VoidAuthEnv,
