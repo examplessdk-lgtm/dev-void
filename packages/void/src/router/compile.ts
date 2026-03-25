@@ -1056,8 +1056,10 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   lines.push(`}`);
   lines.push("");
 
-  // Global error handler — serves custom 500.html if available
+  // Global error handler — preserve HTTPException responses (e.g. 401 from requireAuth),
+  // serve custom 500.html for unexpected errors
   lines.push(`app.onError((err, c) => {`);
+  lines.push(`  if ("getResponse" in err) return err.getResponse();`);
   lines.push(`  console.error(err);`);
   lines.push(`  return serveCustomErrorPage(c, 500, "Internal Server Error");`);
   lines.push(`});`);
@@ -1074,6 +1076,11 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   // Try static assets for any path (not just dot-containing last segments)
   lines.push(`  const assetRes = await fetchPagesAsset(c);`);
   lines.push(`  if (assetRes.status !== 404) return assetRes;`);
+  // If path has a file extension (e.g. /missing.css), don't fall through to SPA —
+  // serve 404 so the browser doesn't try to parse HTML as CSS/JS/image
+  lines.push(`  if (/\\/[^/]+\\.[^/]+$/.test(path)) {`);
+  lines.push(`    return serveCustomErrorPage(c, 404, "Not Found");`);
+  lines.push(`  }`);
   // SPA fallback — try rendering the index page, but catch errors gracefully
   lines.push(`  try {`);
   lines.push(
