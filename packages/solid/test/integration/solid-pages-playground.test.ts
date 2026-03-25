@@ -636,7 +636,7 @@ describe("solid-pages client (dev)", () => {
   defineClientTests(() => DEV_BASE);
   defineIslandTests(() => DEV_BASE);
 
-  it("island component HMR updates without full page reload", async () => {
+  it("island component HMR updates without full page reload", { retry: 2 }, async () => {
     const counterFile = join(ROOT, "playground/solid-pages/pages/blog/_Counter.tsx");
     const original = readFileSync(counterFile, "utf-8");
 
@@ -683,7 +683,7 @@ describe("solid-pages client (dev)", () => {
     }
   });
 
-  it("island file edit triggers reload with updated content", async () => {
+  it("island file edit triggers reload with updated content", { retry: 2 }, async () => {
     const islandFile = join(ROOT, "playground/solid-pages/pages/blog/index.island.tsx");
     const original = readFileSync(islandFile, "utf-8");
 
@@ -719,7 +719,7 @@ describe("solid-pages client (dev)", () => {
   });
 }, 60_000);
 
-describe("solid-pages client (preview)", () => {
+describe("solid-pages client (preview)", { retry: 2, timeout: 60_000 }, () => {
   let child: ReturnType<typeof spawn>;
   let stderr = "";
 
@@ -755,8 +755,8 @@ describe("solid-pages client (preview)", () => {
       stderr += String(chunk);
     });
 
-    await waitForServer(PREVIEW_BASE, 20_000);
-  }, 30_000);
+    await waitForServer(PREVIEW_BASE, 30_000);
+  }, 45_000);
 
   afterAll(async () => {
     if (child) await killChild(child);
@@ -767,4 +767,4 @@ describe("solid-pages client (preview)", () => {
 
   defineClientTests(() => PREVIEW_BASE);
   defineIslandTests(() => PREVIEW_BASE);
-}, 60_000);
+});

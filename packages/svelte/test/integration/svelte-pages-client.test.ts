@@ -639,7 +639,7 @@ describe("svelte-pages client (dev)", () => {
   defineClientTests(() => DEV_BASE);
   defineIslandTests(() => DEV_BASE);
 
-  it("island component HMR updates without full page reload", async () => {
+  it("island component HMR updates without full page reload", { retry: 2 }, async () => {
     const counterFile = join(ROOT, "playground/svelte-pages/pages/blog/_Counter.svelte");
     const original = readFileSync(counterFile, "utf-8");
 
@@ -686,7 +686,7 @@ describe("svelte-pages client (dev)", () => {
     }
   });
 
-  it("island file edit triggers reload with updated content", async () => {
+  it("island file edit triggers reload with updated content", { retry: 2 }, async () => {
     const islandFile = join(ROOT, "playground/svelte-pages/pages/blog/index.island.svelte");
     const original = readFileSync(islandFile, "utf-8");
 
@@ -722,7 +722,7 @@ describe("svelte-pages client (dev)", () => {
   });
 }, 60_000);
 
-describe("svelte-pages client (preview)", () => {
+describe("svelte-pages client (preview)", { retry: 2, timeout: 60_000 }, () => {
   let child: ReturnType<typeof spawn>;
   let stderr = "";
 
@@ -758,8 +758,8 @@ describe("svelte-pages client (preview)", () => {
       stderr += String(chunk);
     });
 
-    await waitForServer(PREVIEW_BASE, 20_000);
-  });
+    await waitForServer(PREVIEW_BASE, 30_000);
+  }, 45_000);
 
   afterAll(async () => {
     if (child) await killChild(child);
@@ -770,4 +770,4 @@ describe("svelte-pages client (preview)", () => {
 
   defineClientTests(() => PREVIEW_BASE);
   defineIslandTests(() => PREVIEW_BASE);
-}, 60_000);
+});

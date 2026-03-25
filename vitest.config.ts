@@ -1,4 +1,7 @@
+import { availableParallelism } from "node:os";
 import { defineConfig } from "vitest/config";
+
+const maxWorkers = process.env.CI ? 2 : Math.max(2, Math.floor(availableParallelism() * 0.75));
 
 const metaframeworks = [
   "packages/void/test/integration/astro.test.ts",
@@ -24,43 +27,43 @@ export default defineConfig({
       {
         test: {
           name: "core-markdown",
-          maxWorkers: 2,
           sequence: { groupOrder: 2 },
           include: [
             "packages/void/test/integration/**/*.test.ts",
             "packages/md/test/integration/**/*.test.ts",
           ],
           exclude: metaframeworks,
+          maxWorkers,
         },
       },
       {
         test: {
           name: "metaframeworks",
-          maxWorkers: 2,
           sequence: { groupOrder: 2 },
           include: metaframeworks,
+          maxWorkers,
         },
       },
       {
         test: {
           name: "pages-react-vue",
-          maxWorkers: 2,
           sequence: { groupOrder: 2 },
           include: [
             "packages/react/test/integration/**/*.test.ts",
             "packages/vue/test/integration/**/*.test.ts",
           ],
+          maxWorkers,
         },
       },
       {
         test: {
           name: "pages-svelte-solid",
-          maxWorkers: 2,
           sequence: { groupOrder: 2 },
           include: [
             "packages/svelte/test/integration/**/*.test.ts",
             "packages/solid/test/integration/**/*.test.ts",
           ],
+          maxWorkers,
         },
       },
     ],

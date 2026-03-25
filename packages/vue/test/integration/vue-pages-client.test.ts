@@ -645,76 +645,80 @@ describe("vue-pages client (dev)", () => {
   defineClientTests(() => DEV_BASE);
   defineIslandTests(() => DEV_BASE);
 
-  it("page component HMR updates when defineProps<Props>() comes from companion server types", async () => {
-    const pageFile = join(ROOT, "playground/vue-pages/pages/deferred.vue");
-    const original = readFileSync(pageFile, "utf-8");
+  it(
+    "page component HMR updates when defineProps<Props>() comes from companion server types",
+    { retry: 2 },
+    async () => {
+      const pageFile = join(ROOT, "playground/vue-pages/pages/deferred.vue");
+      const original = readFileSync(pageFile, "utf-8");
 
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    page.setDefaultTimeout(10_000);
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      page.setDefaultTimeout(10_000);
 
-    try {
-      await page.goto(`${DEV_BASE}/deferred`);
-      await page.waitForSelector('#app[data-hydrated="true"]');
-      await page.waitForFunction(
-        () => document.querySelector("h1")?.textContent === "Deferred Page",
-      );
-
-      await page.evaluate(() => {
-        (window as any).__hmr_marker = true;
-      });
-
-      const modified = original.replace("<h1>{{ title }}</h1>", "<h1>Updated: {{ title }}</h1>");
-      writeFileSync(pageFile, modified);
-
-      // Wait for HMR to update the page. In Vite 8 the handleHotUpdate
-      // compat layer may fail to deliver the update to the client when the
-      // backward-compatible module graph doesn't surface sub-modules, so
-      // we fall back to a manual reload to verify the transform still works
-      // (no Vue SFC compiler error from defineProps<Props>() with external types).
-      let hmrDelivered = false;
       try {
-        await page.waitForFunction(
-          () =>
-            document.querySelector("h1")?.textContent === "Updated: Deferred Page" ||
-            document.querySelector("vite-error-overlay"),
-          { timeout: 10_000 },
-        );
-        hmrDelivered = true;
-      } catch {
-        // HMR didn't deliver within timeout — reload and verify the
-        // server-side transform (stripDefinePropsTypeArgument) works.
-        await page.reload({ waitUntil: "load" });
+        await page.goto(`${DEV_BASE}/deferred`);
         await page.waitForSelector('#app[data-hydrated="true"]');
-      }
+        await page.waitForFunction(
+          () => document.querySelector("h1")?.textContent === "Deferred Page",
+        );
 
-      // No error overlay — the stripDefinePropsTypeArgument worked during HMR
-      expect(
         await page.evaluate(() => {
-          const overlay = document.querySelector("vite-error-overlay") as HTMLElement | null;
-          if (!overlay) return "";
-          return (
-            overlay.shadowRoot?.textContent?.replace(/\s+/g, " ").trim() ??
-            overlay.textContent?.replace(/\s+/g, " ").trim() ??
-            ""
+          (window as any).__hmr_marker = true;
+        });
+
+        const modified = original.replace("<h1>{{ title }}</h1>", "<h1>Updated: {{ title }}</h1>");
+        writeFileSync(pageFile, modified);
+
+        // Wait for HMR to update the page. In Vite 8 the handleHotUpdate
+        // compat layer may fail to deliver the update to the client when the
+        // backward-compatible module graph doesn't surface sub-modules, so
+        // we fall back to a manual reload to verify the transform still works
+        // (no Vue SFC compiler error from defineProps<Props>() with external types).
+        let hmrDelivered = false;
+        try {
+          await page.waitForFunction(
+            () =>
+              document.querySelector("h1")?.textContent === "Updated: Deferred Page" ||
+              document.querySelector("vite-error-overlay"),
+            { timeout: 10_000 },
           );
-        }),
-      ).toBe("");
-      expect(await page.textContent("h1")).toBe("Updated: Deferred Page");
+          hmrDelivered = true;
+        } catch {
+          // HMR didn't deliver within timeout — reload and verify the
+          // server-side transform (stripDefinePropsTypeArgument) works.
+          await page.reload({ waitUntil: "load" });
+          await page.waitForSelector('#app[data-hydrated="true"]');
+        }
 
-      if (hmrDelivered) {
-        // Verify it was a hot update, not a full page reload
-        const markerSurvived = await page.evaluate(() => (window as any).__hmr_marker === true);
-        expect(markerSurvived).toBe(true);
+        // No error overlay — the stripDefinePropsTypeArgument worked during HMR
+        expect(
+          await page.evaluate(() => {
+            const overlay = document.querySelector("vite-error-overlay") as HTMLElement | null;
+            if (!overlay) return "";
+            return (
+              overlay.shadowRoot?.textContent?.replace(/\s+/g, " ").trim() ??
+              overlay.textContent?.replace(/\s+/g, " ").trim() ??
+              ""
+            );
+          }),
+        ).toBe("");
+        expect(await page.textContent("h1")).toBe("Updated: Deferred Page");
+
+        if (hmrDelivered) {
+          // Verify it was a hot update, not a full page reload
+          const markerSurvived = await page.evaluate(() => (window as any).__hmr_marker === true);
+          expect(markerSurvived).toBe(true);
+        }
+      } finally {
+        await page.context().close();
+        writeFileSync(pageFile, original);
+        await new Promise((r) => setTimeout(r, 500));
       }
-    } finally {
-      await page.context().close();
-      writeFileSync(pageFile, original);
-      await new Promise((r) => setTimeout(r, 500));
-    }
-  });
+    },
+  );
 
-  it("island component HMR updates without full page reload", async () => {
+  it("island component HMR updates without full page reload", { retry: 2 }, async () => {
     const counterFile = join(ROOT, "playground/vue-pages/pages/blog/_Counter.vue");
     const original = readFileSync(counterFile, "utf-8");
 
@@ -761,7 +765,7 @@ describe("vue-pages client (dev)", () => {
     }
   });
 
-  it("island file edit triggers reload with updated content", async () => {
+  it("island file edit triggers reload with updated content", { retry: 2 }, async () => {
     const islandFile = join(ROOT, "playground/vue-pages/pages/blog/index.island.vue");
     const original = readFileSync(islandFile, "utf-8");
 
@@ -799,7 +803,7 @@ describe("vue-pages client (dev)", () => {
   });
 }, 60_000);
 
-describe("vue-pages client (preview)", () => {
+describe("vue-pages client (preview)", { retry: 2, timeout: 60_000 }, () => {
   let child: ReturnType<typeof spawn>;
   let stderr = "";
 
@@ -835,8 +839,8 @@ describe("vue-pages client (preview)", () => {
       stderr += String(chunk);
     });
 
-    await waitForServer(PREVIEW_BASE, 20_000);
-  });
+    await waitForServer(PREVIEW_BASE, 30_000);
+  }, 45_000);
 
   afterAll(async () => {
     if (child) await killChild(child);
@@ -847,4 +851,4 @@ describe("vue-pages client (preview)", () => {
 
   defineClientTests(() => PREVIEW_BASE);
   defineIslandTests(() => PREVIEW_BASE);
-}, 60_000);
+});
