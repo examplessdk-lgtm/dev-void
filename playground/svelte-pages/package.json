@@ -14,8 +14,8 @@
     "valibot": "^1.0.0"
   },
   "devDependencies": {
+    "@typescript/native-preview": "catalog:",
     "@void/svelte": "workspace:*",
-    "typescript": "~5.8.3",
     "vite": "catalog:",
     "void": "workspace:*"
   }

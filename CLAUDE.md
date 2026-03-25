@@ -43,13 +43,13 @@ pnpm test                           # Run vitest (unit + integration tests)
 pnpm test packages/void             # Only test the core plugin
 pnpm lint                           # oxlint
 pnpm fmt                            # oxfmt --write .
-pnpm check                          # Typecheck all packages (tsc --noEmit)
+pnpm check                          # Typecheck all packages (tsgo --noEmit)
 pnpm -C packages/vue typecheck      # Typecheck a specific package
 ```
 
 ## Monorepo Structure
 
-pnpm workspaces. Shared dependency versions use the **pnpm catalog** in `pnpm-workspace.yaml` (typescript, tsdown, vite, @cloudflare/workers-types, wrangler). Make sure to run `pnpm install` after making package structure changes.
+pnpm workspaces. Shared dependency versions use the **pnpm catalog** in `pnpm-workspace.yaml` (`@typescript/native-preview`, tsdown, vite, @cloudflare/workers-types, wrangler). Make sure to run `pnpm install` after making package structure changes.
 
 | Package                                          | npm name       | Purpose                                                        |
 | ------------------------------------------------ | -------------- | -------------------------------------------------------------- |

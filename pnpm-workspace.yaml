@@ -8,7 +8,7 @@ catalog:
   "@clack/prompts": ^1.0.1
   "@cloudflare/workers-types": ^4.20260214.0
   "@types/node": ^24.10.0
-  "@typescript/native-preview": latest
+  "@typescript/native-preview": 7.0.0-dev.20260324.1
   tsdown: ^0.20.3
   vite: ^8.0.0
   wrangler: ^4.68.1

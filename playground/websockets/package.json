@@ -17,8 +17,8 @@
   "devDependencies": {
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@typescript/native-preview": "catalog:",
     "@void/react": "workspace:*",
-    "typescript": "~5.8.3",
     "vite": "catalog:",
     "void": "workspace:*"
   }
