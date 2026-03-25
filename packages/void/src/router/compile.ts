@@ -1083,14 +1083,10 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   lines.push(`  if (/\\/[^/]+\\.[^/]+$/.test(path)) {`);
   lines.push(`    return serveCustomErrorPage(c, 404, "Not Found");`);
   lines.push(`  }`);
-  // SPA fallback — try rendering the index page, but catch errors gracefully
-  lines.push(`  try {`);
+  // SPA fallback — render the index page; errors propagate to app.onError (500)
   lines.push(
-    `    return await handlePageGet(undefined, undefined, c, "index", renderPage, getPagesAssetTags, __voidHeadConfig);`,
+    `  return handlePageGet(undefined, undefined, c, "index", renderPage, getPagesAssetTags, __voidHeadConfig);`,
   );
-  lines.push(`  } catch {`);
-  lines.push(`    return serveCustomErrorPage(c, 404, "Not Found");`);
-  lines.push(`  }`);
   lines.push(`});`);
   lines.push("");
 }
