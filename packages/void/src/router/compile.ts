@@ -1040,19 +1040,48 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   lines.push(`}`);
   lines.push("");
 
-  // Page fallback — renders index page for unmatched non-API, non-asset paths.
+  // Custom error page helper — serves {status}.html from static assets (e.g. 404.html, 500.html)
+  lines.push(`async function serveCustomErrorPage(c, status, fallbackText) {`);
+  lines.push(`  const assets = c.env?.ASSETS;`);
+  lines.push(`  if (assets && typeof assets.fetch === "function") {`);
+  lines.push(`    const errReq = new Request(new URL("/" + status + ".html", c.req.url));`);
+  lines.push(`    const errRes = await assets.fetch(errReq);`);
+  lines.push(`    if (errRes.ok) {`);
+  lines.push(
+    `      return new Response(errRes.body, { status, headers: { "content-type": "text/html; charset=utf-8" } });`,
+  );
+  lines.push(`    }`);
+  lines.push(`  }`);
+  lines.push(`  return new Response(fallbackText, { status });`);
+  lines.push(`}`);
+  lines.push("");
+
+  // Global error handler — serves custom 500.html if available
+  lines.push(`app.onError((err, c) => {`);
+  lines.push(`  console.error(err);`);
+  lines.push(`  return serveCustomErrorPage(c, 500, "Internal Server Error");`);
+  lines.push(`});`);
+  lines.push("");
+
+  // Page fallback — for unmatched non-API paths, try static assets first,
+  // then attempt to render the index page as an SPA fallback.
   // Uses notFound (not get("*")) so Vite's module pipeline can serve .vue/.ts files in dev.
   lines.push(`app.notFound(async (c) => {`);
   lines.push(`  const path = c.req.path;`);
   lines.push(`  if (path === "/api" || path.startsWith("/api/")) {`);
   lines.push(`    return c.text("Not Found", 404);`);
   lines.push(`  }`);
-  lines.push(`  if (/\\/[^/]+\\.[^/]+$/.test(path)) {`);
-  lines.push(`    return fetchPagesAsset(c);`);
-  lines.push(`  }`);
+  // Try static assets for any path (not just dot-containing last segments)
+  lines.push(`  const assetRes = await fetchPagesAsset(c);`);
+  lines.push(`  if (assetRes.status !== 404) return assetRes;`);
+  // SPA fallback — try rendering the index page, but catch errors gracefully
+  lines.push(`  try {`);
   lines.push(
-    `  return handlePageGet(undefined, undefined, c, "index", renderPage, getPagesAssetTags, __voidHeadConfig);`,
+    `    return await handlePageGet(undefined, undefined, c, "index", renderPage, getPagesAssetTags, __voidHeadConfig);`,
   );
+  lines.push(`  } catch {`);
+  lines.push(`    return serveCustomErrorPage(c, 404, "Not Found");`);
+  lines.push(`  }`);
   lines.push(`});`);
   lines.push("");
 }
