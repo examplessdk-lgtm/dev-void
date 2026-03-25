@@ -1042,16 +1042,18 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
 
   // Custom error page helper — serves {status}.html from static assets (e.g. 404.html, 500.html)
   lines.push(`async function serveCustomErrorPage(c, status, fallbackText) {`);
-  lines.push(`  const assets = c.env?.ASSETS;`);
-  lines.push(`  if (assets && typeof assets.fetch === "function") {`);
-  lines.push(`    const errReq = new Request(new URL("/" + status + ".html", c.req.url));`);
-  lines.push(`    const errRes = await assets.fetch(errReq);`);
-  lines.push(`    if (errRes.ok) {`);
+  lines.push(`  try {`);
+  lines.push(`    const assets = c.env?.ASSETS;`);
+  lines.push(`    if (assets && typeof assets.fetch === "function") {`);
+  lines.push(`      const errReq = new Request(new URL("/" + status + ".html", c.req.url));`);
+  lines.push(`      const errRes = await assets.fetch(errReq);`);
+  lines.push(`      if (errRes.ok) {`);
   lines.push(
-    `      return new Response(errRes.body, { status, headers: { "content-type": "text/html; charset=utf-8" } });`,
+    `        return new Response(errRes.body, { status, headers: { "content-type": "text/html; charset=utf-8" } });`,
   );
+  lines.push(`      }`);
   lines.push(`    }`);
-  lines.push(`  }`);
+  lines.push(`  } catch {}`);
   lines.push(`  return new Response(fallbackText, { status });`);
   lines.push(`}`);
   lines.push("");
