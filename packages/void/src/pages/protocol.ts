@@ -1,6 +1,7 @@
 import { ValidationError } from "./validation-error";
 import { DEFERRED, separateDeferred, type ResolvedDeferredGroup } from "./defer";
 import { resolveHead, type HeadDescriptor, type HeadConfig } from "./head";
+import { isConvertedResponse } from "../runtime/response";
 
 export { ValidationError };
 
@@ -127,9 +128,17 @@ export async function handlePageGet(
   let props: Record<string, unknown> = {};
   if (handler) {
     const result = await handler(c);
-    if (result instanceof Response) {
-      const status = result.status;
-      if (status >= 300) return result;
+    // Responses from convertReturnValue (withValidator/middleware paths) always
+    // flow through to extractProps — they wrap plain return values (objects as
+    // 200 JSON, null/undefined as 204, strings as text/html) and must be
+    // unwrapped as page props.
+    //
+    // User-returned Responses: pass through errors/redirects (>= 300) and
+    // non-JSON 200s (file downloads, streams). JSON 200s are still extracted
+    // as props for backward compat with loaders using c.json().
+    if (result instanceof Response && !isConvertedResponse(result)) {
+      const ct = result.headers.get("content-type") || "";
+      if (result.status >= 300 || !ct.includes("application/json")) return result;
     }
     props = await extractProps(result);
   }

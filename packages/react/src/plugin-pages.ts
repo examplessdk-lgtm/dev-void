@@ -139,12 +139,9 @@ ${generateComponentManifest(scan, pagesDir)}
 const PREAMBLE_SCRIPT = ${JSON.stringify(preambleScript)};
 
 function serializePageData(pageObj) {
-  return JSON.stringify(pageObj)
-    .replaceAll("<", "\\u003c")
-    .replaceAll(">", "\\u003e")
-    .replaceAll("&", "\\u0026")
-    .replaceAll("\u2028", "\\u2028")
-    .replaceAll("\u2029", "\\u2029");
+  return JSON.stringify(pageObj).replace(/[<>&\\u2028\\u2029]/g, function(c) {
+    return String.fromCharCode(92) + "u" + c.charCodeAt(0).toString(16).padStart(4, "0");
+  });
 }
 
 export async function renderPage(pageObj, assetTags) {
