@@ -16,6 +16,7 @@ export function ensureProjectTsconfig(
   hasRouteTypes?: boolean,
   hasDb?: boolean,
   hasSchema?: boolean,
+  options: { redirectDbModule?: boolean } = {},
 ): void {
   const outDir = join(root, ".void");
   mkdirSync(outDir, { recursive: true });
@@ -30,13 +31,15 @@ export function ensureProjectTsconfig(
   const tsconfig: Record<string, unknown> = { files };
 
   if (hasDb) {
-    const paths: Record<string, string[]> = {
+    const paths: Record<string, string[]> = {};
+
+    if (options.redirectDbModule !== false) {
       // Redirect void/db to the generated db.d.ts so TypeScript uses
       // schema-aware types instead of the generic base module.
       // (moduleResolution: "bundler" ignores ambient `declare module`
       // when the module resolves to a real file — paths is the fix.)
-      "void/db": ["./db.d.ts"],
-    };
+      paths["void/db"] = ["./db.d.ts"];
+    }
 
     if (hasSchema) {
       // Determine whether schema is a file or directory

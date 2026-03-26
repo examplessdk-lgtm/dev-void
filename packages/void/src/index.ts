@@ -720,6 +720,7 @@ export function voidPlugin(options?: {
     // all other Class A frameworks and vinext Pages Router use plain SSR.
     const viteEnvironment: { name: string; childEnvironments?: string[] } =
       framework === "vinext-app" ? { name: "rsc", childEnvironments: ["ssr"] } : { name: "ssr" };
+    const redirectDbTypePaths = framework !== "vinext-app" && framework !== "vinext-pages";
 
     // vinext injects vite-tsconfig-paths which spams warnings for every
     // tsconfig that extends a non-existent .void/tsconfig.json. Void
@@ -752,7 +753,10 @@ export function voidPlugin(options?: {
       bindingWatchPlugin,
       envPlugin,
       clientStubsPlugin,
-      drizzlePlugin(root, false, getDatabaseDialect(config), { forceVirtualDb: authEnabled }),
+      drizzlePlugin(root, false, getDatabaseDialect(config), {
+        forceVirtualDb: authEnabled,
+        redirectDbTypePaths,
+      }),
       migrationPlugin(root, getDatabaseDialect(config)),
       ...(vinextCompat ? [vinextCompat] : []),
       ...cloudflare({

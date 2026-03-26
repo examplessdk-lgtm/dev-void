@@ -106,4 +106,14 @@ describe("drizzlePlugin db typing generation", () => {
     expect(code).not.toContain("import * as schema");
     expect(code).toContain("drizzle(getConnectionString())");
   });
+
+  it("can keep void/db off tsconfig paths for metaframeworks that materialize aliases", () => {
+    const root = createProjectRoot();
+
+    drizzlePlugin(root, false, "sqlite", { redirectDbTypePaths: false });
+
+    const tsconfig = JSON.parse(readFileSync(join(root, ".void", "tsconfig.json"), "utf8"));
+    expect(tsconfig.compilerOptions.paths["void/db"]).toBeUndefined();
+    expect(tsconfig.compilerOptions.paths["@schema"]).toEqual(["../db/schema.ts"]);
+  });
 });
