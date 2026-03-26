@@ -7,7 +7,7 @@ outline: deep
 Void supports framework-agnostic SSR via explicit server and client entries. This is for advanced use cases where you want full control over rendering and hydration.
 
 ::: tip
-For most apps, [Pages Routing](./pages-routing/overview) handles SSR automatically — no entry files or hydration code needed.
+For most apps, [Pages Routing](./pages-routing/overview) handles SSR automatically. You do not need entry files or hydration code.
 :::
 
 ## Required entries

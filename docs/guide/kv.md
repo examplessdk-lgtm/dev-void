@@ -100,8 +100,8 @@ Maps have the same methods as the base client (`get`, `put`, `delete`, `list`, `
 
 The KV client is a thin wrapper over the Cloudflare KV API that adds two things:
 
-1. **Auto serialization** — `put()` calls `JSON.stringify()` on non-string values. `get()` calls `JSON.parse()` with a fallback to the raw string for values that aren't JSON. This means you can store and retrieve objects without manual serialization.
+1. **Auto serialization:** `put()` calls `JSON.stringify()` on non-string values. `get()` calls `JSON.parse()` with a fallback to the raw string for values that are not JSON. You can store and retrieve objects without manual serialization.
 
-2. **Typed maps** — `kv.map<T>(prefix)` returns a scoped client where all keys are prefixed with `"prefix:"` and values are typed as `T`. This is useful for organizing related data (sessions, cache entries, feature flags) without manually managing key prefixes.
+2. **Typed maps:** `kv.map<T>(prefix)` returns a scoped client where all keys are prefixed with `"prefix:"` and values are typed as `T`. This is useful for organizing related data such as sessions, cache entries, and feature flags without manually managing prefixes.
 
 > **Escape hatch:** The `kv` client covers the most common KV operations. For advanced use cases like `getWithMetadata` with specific cache behaviors, you can access the raw `KVNamespace` binding via `c.env.KV` in a route handler.

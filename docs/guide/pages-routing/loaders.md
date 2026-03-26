@@ -4,7 +4,7 @@ outline: deep
 
 # Loaders & Props
 
-Every page can have a companion `.server.ts` file that exports a `loader`. Server handlers use the exact same `defineHandler` API as [server routes](../server-routing.md) — you get the same typed `c.env` bindings and Hono context methods.
+Every page can have a companion `.server.ts` file that exports a `loader`. Server handlers use the same `defineHandler` API as [server routes](../server-routing.md), so you get the same typed `c.env` bindings and Hono context methods.
 
 ## Defining a Loader
 
@@ -109,7 +109,7 @@ export default function UsersPage(props: Props) {
 
 ## Deferred Props
 
-Loaders sometimes need to fetch data that's slow — analytics, external APIs, AI inference. `defer()` lets you return a placeholder immediately so the page renders fast, then streams the real data as it resolves:
+Loaders sometimes need to fetch slower data such as analytics, external API responses, or AI inference. `defer()` lets you return a placeholder immediately so the page renders quickly, then streams the real data when it resolves:
 
 ```ts
 // pages/dashboard.server.ts
@@ -121,17 +121,17 @@ import { projects } from "@schema";
 export type Props = InferProps<typeof loader>;
 
 export const loader = defineHandler(async (c) => {
-  const allProjects = await db.select().from(projects); // fast — returns immediately
+  const allProjects = await db.select().from(projects); // fast, returns immediately
   return {
     projects: allProjects,
     usage: defer(async () => {
-      return await fetchUsageMetrics(); // slow — streams when ready
+      return await fetchUsageMetrics(); // slow, streams when ready
     }),
   };
 });
 ```
 
-The page renders immediately with `projects` available. The `usage` prop starts in a loading state and resolves once the deferred function completes — no waterfall, no blocking.
+The page renders immediately with `projects` available. The `usage` prop starts in a loading state and resolves once the deferred function completes, so there is no waterfall and no blocking render.
 
 ### Handling Deferred State
 
@@ -144,7 +144,7 @@ type Deferred<T> =
   | { loading: false; value: null; error: Error }; // rejected
 ```
 
-Check `loading` first, then `error` — TypeScript narrows `value` to `T` in the resolved branch:
+Check `loading` first, then `error`. TypeScript narrows `value` to `T` in the resolved branch:
 
 ::: code-group
 
@@ -224,12 +224,12 @@ export default function Dashboard(props: Props) {
 
 ### How Streaming Works
 
-On the initial page load (SSR), the page renders with deferred props in their loading state. As each deferred function resolves, the server streams an inline `<script>` tag that delivers the data — no extra HTTP request needed. On SPA navigation, deferred data streams via NDJSON over the same response.
+On the initial page load (SSR), the page renders with deferred props in their loading state. As each deferred function resolves, the server streams an inline `<script>` tag that delivers the data, so no extra HTTP request is needed. On SPA navigation, deferred data streams via NDJSON over the same response.
 
 ### Deferred Props After Mutations
 
 ::: info
-When a mutation (form submission / action) runs, the loader re-runs to provide fresh props — but deferred props cannot stream over a mutation response. The client automatically preserves the last resolved value for each deferred prop, so the UI continues to display the previous data. The values refresh on the next full page load or SPA navigation (GET).
+When a mutation runs, the loader runs again to provide fresh props, but deferred props cannot stream over a mutation response. The client preserves the last resolved value for each deferred prop, so the UI keeps showing the previous data until the next full page load or SPA navigation.
 :::
 
 ### Grouped Deferred Props

@@ -14,18 +14,18 @@ This detects your coding agent, links skills into its configuration directory, w
 
 ## Skills
 
-Skills give your coding agent structured knowledge about Void — how to use the CLI, build apps, work with routes, databases, auth, and more. They are symlinked from the `void` package into your agent's skills directory so they stay version-matched with your installed Void version.
+Skills give your coding agent structured knowledge about Void, including how to use the CLI, build apps, work with routes, databases, auth, and more. They are symlinked from the `void` package into the agent's skills directory, so they stay version-matched with your installed Void version.
 
 Void ships two skills:
 
-- **`void`** — Main development skill. Routes agent requests to the right documentation for CLI commands, routing, pages, database, auth, deployment, and more.
-- **`migrate-vite-cloudflare-to-void`** — Migration skill for converting existing `@cloudflare/vite-plugin` apps to Void.
+- **`void`:** main development skill. Routes agent requests to the right documentation for CLI commands, routing, pages, database, auth, deployment, and more.
+- **`migrate-vite-cloudflare-to-void`:** migration skill for converting existing `@cloudflare/vite-plugin` apps to Void.
 
 Skills are linked automatically by `void init --agents`. For Claude Code, they are symlinked into `.claude/skills/`. Other agents that support skills will have them linked to their respective directories.
 
 ## MCP
 
-Void ships with a built-in [MCP](https://modelcontextprotocol.io/) server that runs locally via stdio. It provides three tools — `list_pages`, `get_page`, and `search_docs` — giving your AI agent full access to the Void documentation, version-matched and offline-capable.
+Void ships with a built-in [MCP](https://modelcontextprotocol.io/) server that runs locally over stdio. It provides three tools: `list_pages`, `get_page`, and `search_docs`. Together they give your AI agent full access to the Void documentation, version-matched and usable offline.
 
 ```sh
 npx void mcp

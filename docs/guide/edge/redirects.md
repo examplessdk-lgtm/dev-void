@@ -57,12 +57,12 @@ Meta-frameworks may generate a `_redirects` file during build. Void parses this 
 
 - Framework-generated rules are applied **before** `void.json` rules. Since the last match wins, `routing.redirects` in `void.json` takes precedence.
 - Only 3xx redirect rules are included. Rewrite rules (status `200`) in `_redirects` files are ignored.
-- The `_redirects` file is not uploaded as a static asset — its contents are parsed and included in the manifest only.
+- The `_redirects` file is not uploaded as a static asset. Its contents are parsed and included in the manifest only.
 
 ## How redirects work
 
 1. `void deploy` reads redirect rules from the framework `_redirects` file (if present) and `routing.redirects` in `void.json`, then includes them in the deploy manifest.
 2. The platform stores the rules in the KV routing entry for your project.
-3. The dispatch worker checks redirect rules before any worker invocation — matching requests receive a redirect response immediately.
+3. The dispatch worker checks redirect rules before any worker invocation, so matching requests get a redirect response immediately.
 
 Because rules are evaluated at the edge before invoking the worker, redirects add no latency to the request path.

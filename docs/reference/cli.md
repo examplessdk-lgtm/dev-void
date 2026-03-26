@@ -6,6 +6,8 @@ outline: deep
 
 `void` is a local binary from the installed `void` package.
 
+Use this page as a command reference. If you are setting up a project for the first time, start with [Quickstart](../guide/quickstart.md) and come back here when you need exact command behavior or flags.
+
 ## Cheat Sheet
 
 | Command                           | Purpose                                             |
@@ -27,7 +29,7 @@ outline: deep
 
 ## Binary Invocation
 
-Outside of npm scripts, you need to invoke `void` with `npx`, `pnpm`, `yarn`, or `bunx`. For brevity, docs show unprefixed `void` usage — just remember it needs a binary runner.
+Outside npm scripts, invoke `void` with `npx`, `pnpm`, `yarn`, or `bunx`. For readability, the docs show unprefixed `void` commands. In practice, you still need a binary runner unless the executable is already on your `PATH`.
 
 Alternatively, you can add `./node_modules/.bin` to your `PATH` so that you can invoke `void` directly when you are in the root directory of your app.
 
@@ -49,13 +51,13 @@ If run in a scaffoldable empty directory, `void init` first asks which Pages fra
 
 After that, the full interactive flow walks through:
 
-1. **TypeScript** — creates or updates `tsconfig.json` (adds `extends .void/tsconfig.json` and `void/env` types)
-2. **Database** — asks whether you want D1 (SQLite, zero-config default) or PostgreSQL (existing infra, write-heavy apps, complex queries). Picking PostgreSQL writes `"database": "pg"` to `void.json`; D1 remains implicit.
-3. **Agent instructions** — detects agents once and injects instructions into `CLAUDE.md` or `AGENTS.md`
-4. **Skills** — links void skills using the same detected/selected agent context
-5. **MCP config** — writes MCP server config using the same detected/selected agent context
-6. **Demo code** — for existing non-Pages projects, optionally scaffolds a `db/migrations/` + API route + typed fetch example
-7. **GitHub Actions** — optionally creates `.github/workflows/deploy.yml` with the correct package manager commands
+1. **TypeScript:** creates or updates `tsconfig.json`, including `extends .void/tsconfig.json` and `void/env` types.
+2. **Database:** asks whether you want D1 or PostgreSQL. Choosing PostgreSQL writes `"database": "pg"` to `void.json`; D1 stays implicit.
+3. **Agent instructions:** detects agents once and injects instructions into `CLAUDE.md` or `AGENTS.md`.
+4. **Skills:** links Void skills using the same detected or selected agent context.
+5. **MCP config:** writes MCP server config using that same agent context.
+6. **Demo code:** for existing non-Pages projects, optionally scaffolds a `db/migrations/` directory plus an API route and typed fetch example.
+7. **GitHub Actions:** optionally creates `.github/workflows/deploy.yml` with the right package manager commands.
 
 If no agent is detected, `void init` asks you to choose one from a short list (Claude, Cursor, Codex, Gemini CLI, Generic). That single choice is reused across all agent steps.
 
@@ -73,7 +75,7 @@ Flags can be combined. When any flag is provided, only the specified steps run a
 
 ### `void auth login`
 
-OAuth login (GitHub or Google — you choose at the prompt). Saves token to `~/.void/config.json`.
+OAuth login. You choose GitHub or Google at the prompt, and the token is saved to `~/.void/config.json`.
 
 ### `void auth logout`
 
@@ -112,11 +114,11 @@ void project logs [--filter <text>] [--range <duration>] [--deployment <id>]
 
 Show runtime logs from the deployed project. Uses the linked project from `.void/project.json`.
 
-| Flag                 | Purpose                                                                                                         | Default |
-| -------------------- | --------------------------------------------------------------------------------------------------------------- | ------- |
-| `--range <duration>` | How far back to look. Format: `<number><unit>` (m/h/d). Max 7d.                                                 | `1h`    |
-| `--filter <text>`    | Case-insensitive text match against log/exception messages. Shows full request entry when any log line matches. | —       |
-| `--deployment <id>`  | Filter logs to a specific deployment ID.                                                                        | —       |
+| Flag                 | Purpose                                                                                                                | Default |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------- |
+| `--range <duration>` | How far back to look. Format: `<number><unit>` (m/h/d). Max 7d.                                                        | `1h`    |
+| `--filter <text>`    | Case-insensitive text match against log or exception messages. Shows the full request entry when any log line matches. | none    |
+| `--deployment <id>`  | Filter logs to a specific deployment ID.                                                                               | none    |
 
 Output shows one line per request (`HH:MM:SS METHOD URL STATUS`) with indented console log and exception lines beneath. Errors and exceptions are colored red, warnings yellow.
 
@@ -242,12 +244,12 @@ void gen model posts title:string body:text published:boolean
 
 Creates:
 
-- `db/migrations/NNN_create_posts.sql` — CREATE TABLE with `id` (autoincrement), your columns, and `created_at`
-- `routes/api/posts/index.ts` — GET (list all) + POST (insert with validation)
-- `routes/api/posts/[id].ts` — GET by id with 404 handling
+- `db/migrations/NNN_create_posts.sql`: `CREATE TABLE` with `id` (autoincrement), your columns, and `created_at`
+- `routes/api/posts/index.ts`: `GET` for list and `POST` for insert with validation
+- `routes/api/posts/[id].ts`: `GET` by id with `404` handling
 - Regenerated `.void/db.d.ts`
 
-The generated routes automatically detect your validation library from `package.json` (valibot, zod, or arktype). If none is found, you'll be prompted to choose one or skip validation. See [Database — Scaffolding](../guide/database.md#scaffolding) for the full type mapping.
+The generated routes automatically detect your validation library from `package.json` (`valibot`, `zod`, or `arktype`). If none is found, you will be prompted to choose one or skip validation. See [Database: Scaffolding](../guide/database.md#scaffolding) for the full type mapping.
 
 Column format: `name:type` or `name:type?` (nullable). Types: `string`, `text`, `datetime`, `integer`, `boolean`, `real`, `blob`.
 
@@ -306,9 +308,9 @@ Scaffold SSR entry points and a minimal App component for your framework.
 
 Creates three files:
 
-- `src/main.ssr.{tsx,ts}` — server entry with `defineRender`
-- `src/main.client.{tsx,ts}` — client entry with hydration
-- `src/App.{tsx,vue,svelte}` — minimal interactive component
+- `src/main.ssr.{tsx,ts}`: server entry with `defineRender`
+- `src/main.client.{tsx,ts}`: client entry with hydration
+- `src/App.{tsx,vue,svelte}`: minimal interactive component
 
 If no flag is provided, the framework is auto-detected from `package.json` dependencies.
 
@@ -414,15 +416,15 @@ Project resolution for domain commands follows the same order as deploy (`--proj
 
 Runs all agent setup steps:
 
-1. **Instructions** — detects agents once and injects Void framework instructions with versioned markers
-2. **Skills** — links skills for that same detected/selected agent context
-3. **MCP config** — writes MCP server config for that same detected/selected agent context (or prints generic MCP JSON for Generic mode)
+1. **Instructions:** detects agents once and injects Void framework instructions with versioned markers.
+2. **Skills:** links skills for the same detected or selected agent context.
+3. **MCP config:** writes MCP server config for that same context, or prints generic MCP JSON in Generic mode.
 
 If no agent is detected, `void init --agents` asks you to choose from Claude Code, Cursor, Codex, Gemini CLI, or Generic.
 
 ## Environment variables
 
-| Variable       | Purpose                                                | Default |
-| -------------- | ------------------------------------------------------ | ------- |
-| `VOID_TOKEN`   | Auth token override (instead of saved config)          | —       |
-| `VOID_PROJECT` | Default project slug for deploy/secret/delete commands | —       |
+| Variable       | Purpose                                                      | Default |
+| -------------- | ------------------------------------------------------------ | ------- |
+| `VOID_TOKEN`   | Auth token override instead of saved config                  | none    |
+| `VOID_PROJECT` | Default project slug for deploy, secret, and delete commands | none    |

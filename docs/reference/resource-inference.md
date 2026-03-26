@@ -4,15 +4,15 @@ outline: deep
 
 # Resource Inference
 
-Void automatically detects which Cloudflare resources your project uses, and provisions bindings by scanning your source files at startup. No manual configuration is needed — just use a resource in your code and Void provisions it for local development.
+Void automatically detects which Cloudflare resources your project uses by scanning source files at startup. In most cases, there is no manual configuration. Use a resource in code, and Void provisions the matching binding for local development.
 
 ## How It Works
 
 When `voidPlugin()` initializes, it synchronously scans your source files using a three-tier approach optimized for speed:
 
-1. **Import detection** — uses `es-module-lexer` to check for `void/*` imports (fastest, no AST parsing)
-2. **Regex pre-check** — tests for `env.DB`, `env.KV`, etc. patterns to skip files that don't use bindings
-3. **AST confirmation** — only when the regex matches, parses the full AST to confirm `c.env.DB` or `env.DB` member expressions
+1. **Import detection:** uses `es-module-lexer` to check for `void/*` imports. This is the fastest pass and does not require AST parsing.
+2. **Regex pre-check:** tests for patterns such as `env.DB` and `env.KV` so files without bindings can be skipped early.
+3. **AST confirmation:** when the regex matches, parses the full AST to confirm `c.env.DB` or `env.DB` member expressions.
 
 This runs once before plugins initialize, so the results are available to configure the Cloudflare Vite plugin.
 
@@ -24,7 +24,7 @@ This runs once before plugins initialize, so the results are available to config
 | `KV`      | `KVNamespace` | `import { kv } from "void/kv"`                                            | `env.KV` or `c.env.KV`           |
 | `STORAGE` | `R2Bucket`    | `import { storage } from "void/storage"`                                  | `env.STORAGE` or `c.env.STORAGE` |
 | `AI`      | `Ai`          | `import { ai } from "void/ai"`                                            | `env.AI` or `c.env.AI`           |
-| Auth      | —             | `import { ... } from "void/auth"` or `import { auth } from "void/client"` | —                                |
+| Auth      | none          | `import { ... } from "void/auth"` or `import { auth } from "void/client"` | none                             |
 | `QUEUE_*` | `Queue`       | `import { ... } from "void/queue"`                                        | `env.QUEUE_*`                    |
 
 Auth detection also triggers when importing the `auth` specifier from `void/client` (but not when importing only `fetch`).
@@ -62,8 +62,8 @@ For SvelteKit, Nuxt, and Astro, add `voidPlugin()` to the framework's Vite confi
 
 Regardless of mode, these are always checked:
 
-- **SSR entry** (`src/main.ssr.ts` or equivalent) — for SSR apps that access bindings during rendering
-- **`src/`** — always scanned for auth imports, unless `src/` is already in the scan list (framework mode)
+- **SSR entry** such as `src/main.ssr.ts`, for SSR apps that access bindings during rendering
+- **`src/`**, which is always scanned for auth imports unless it is already in the scan list for framework mode
 
 ## Custom Scan Directories
 
@@ -77,7 +77,7 @@ If your project organizes code in non-standard directories, you can override whi
 }
 ```
 
-Paths are relative to the project root. When `inference.scanDirs` is set, it replaces the default directories entirely — the defaults for the current mode are not merged in. The SSR entry and `src/` auth scan still apply regardless.
+Paths are relative to the project root. When `inference.scanDirs` is set, it replaces the default directories entirely. Defaults for the current mode are not merged in. The SSR entry and `src/` auth scan still apply either way.
 
 ## Explicit Binding Overrides
 
@@ -96,7 +96,7 @@ If inference doesn't match your setup, you can skip it entirely and declare bind
 }
 ```
 
-When `inference.bindings` is set, explicit values take full precedence — inference is skipped entirely.
+When `inference.bindings` is set, explicit values take full precedence and inference is skipped entirely.
 
 ## File Types
 

@@ -18,7 +18,7 @@ Void apps default to Cloudflare Workers, but you can target Node.js, Bun, or Den
 | `"bun"`  | [`Bun.serve()`](https://bun.sh/docs/api/http)                             | `hono/bun`                       |
 | `"deno"` | [`Deno.serve()`](https://docs.deno.com/runtime/fundamentals/http_server/) | `hono/deno`                      |
 
-All three produce the same project structure and use the same Hono-based routing — only the HTTP server and static file middleware differ.
+All three produce the same project structure and use the same Hono-based routing. The only difference is the HTTP server and static file middleware.
 
 ## Getting Started
 
@@ -43,7 +43,7 @@ npm install @hono/node-server
 npx vite dev
 ```
 
-The dev server runs your Hono routes in Node.js via Vite's SSR module loading — the same hot-reload experience as the Cloudflare target, but without workerd.
+The dev server runs your Hono routes in Node.js through Vite's SSR module loading. You get the same hot-reload experience as the Cloudflare target, but without `workerd`.
 
 ### 4. Build and run
 
@@ -82,8 +82,8 @@ dist/
       ...
 ```
 
-- **`app.js`** — exports the Hono app instance. Use this for programmatic embedding, testing, or custom server setups.
-- **`index.js`** — imports `app.js` and starts the server. This is what you run in production.
+- **`app.js`:** exports the Hono app instance. Use it for programmatic embedding, testing, or custom server setups.
+- **`index.js`:** imports `app.js` and starts the server. This is what you run in production.
 
 `vite preview` also uses `app.js` to serve your built app locally.
 
@@ -128,16 +128,16 @@ You can still define [cron jobs](../guide/jobs.md) in `crons/` and they will com
 
 ### No `void deploy`
 
-The `void deploy` CLI deploys to the Void platform (Cloudflare). For non-CF targets, you build with `vite build` and deploy the `dist/` directory using your hosting provider's workflow — Docker, systemd, PM2, Fly.io, Railway, or any Node.js host.
+The `void deploy` CLI deploys to the Void platform on Cloudflare. For non-CF targets, build with `vite build` and deploy the `dist/` directory using your hosting provider's workflow, whether that is Docker, systemd, PM2, Fly.io, Railway, or any other Node.js host.
 
 ### Ignored config fields
 
 These `void.json` fields are silently ignored (with a warning) when using a non-CF target:
 
-- `inference.bindings` — CF binding configuration
-- `remote` — remote binding proxy
-- `worker` — Cloudflare-specific config
-- `routing.revalidate` — edge caching (CF-only)
+- `inference.bindings`: Cloudflare binding configuration
+- `remote`: remote binding proxy
+- `worker`: Cloudflare-specific config
+- `routing.revalidate`: edge caching, only on Cloudflare
 
 If you enable auth through `void/auth`, `void/client`, or `auth.ts`, Void fails the build for non-CF targets. Use Better Auth directly for Node/Bun/Deno deployments.
 

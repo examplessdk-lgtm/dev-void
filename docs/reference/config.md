@@ -6,7 +6,9 @@ outline: deep
 
 ## Config File Format
 
-All project-level configuration lives in a `void.json` file at the project root. Every field is optional — missing file means all defaults.
+Use this page as the exact reference for `void.json`. If you are still learning how the pieces fit together, start in the guide first and come back here when you need field-by-field details.
+
+All project-level configuration lives in a `void.json` file at the project root. Every field is optional. If the file is missing, Void uses the defaults.
 
 ```json
 {
@@ -102,10 +104,10 @@ Database backend. Omit for D1/SQLite (default). Set to `"pg"` for PostgreSQL via
 }
 ```
 
-| Value       | Description                                           |
-| ----------- | ----------------------------------------------------- |
-| _(omitted)_ | D1 (SQLite) — fully managed by Void, no config needed |
-| `"pg"`      | PostgreSQL via Hyperdrive — bring your own database   |
+| Value       | Description                                             |
+| ----------- | ------------------------------------------------------- |
+| _(omitted)_ | D1 (SQLite), fully managed by Void with no extra config |
+| `"pg"`      | PostgreSQL via Hyperdrive; bring your own database      |
 
 When using `"pg"`:
 
@@ -121,7 +123,7 @@ Site-wide HTML `<head>` defaults for pages mode. Sets a title template, default 
 | Field           | Type                     | Description                                                      |
 | --------------- | ------------------------ | ---------------------------------------------------------------- |
 | `title`         | `string`                 | Default page title (overridden by page `head()`)                 |
-| `titleTemplate` | `string`                 | Wraps the resolved title — `%s` is replaced with the page title  |
+| `titleTemplate` | `string`                 | Wraps the resolved title. `%s` is replaced with the page title.  |
 | `meta`          | `Array<object>`          | Default `<meta>` tags (deduped by `name`/`property`, page wins)  |
 | `link`          | `Array<object>`          | Default `<link>` tags (concatenated: config, middleware, page)   |
 | `script`        | `Array<object>`          | Default `<script>` tags (concatenated: config, middleware, page) |
@@ -185,12 +187,12 @@ VOID_REMOTE=1 pnpm dev
 
 Deploy target runtime. Defaults to `"cloudflare"`.
 
-| Value          | Description                                           |
-| -------------- | ----------------------------------------------------- |
-| `"cloudflare"` | Cloudflare Workers (default) — full platform features |
-| `"node"`       | Node.js — uses `@hono/node-server`                    |
-| `"bun"`        | Bun — uses `Bun.serve()`                              |
-| `"deno"`       | Deno — uses `Deno.serve()`                            |
+| Value          | Description                                               |
+| -------------- | --------------------------------------------------------- |
+| `"cloudflare"` | Cloudflare Workers (default), with full platform features |
+| `"node"`       | Node.js, using `@hono/node-server`                        |
+| `"bun"`        | Bun, using `Bun.serve()`                                  |
+| `"deno"`       | Deno, using `Deno.serve()`                                |
 
 Non-CF targets disable CF bindings (`void/db`, `void/kv`, `void/auth`, `void/storage`, `void/ai`, `void/env`, `void/ws`). Importing any of these with a non-CF target produces a compile-time error. File-based routing, middleware, and `void/client` all work normally.
 
@@ -200,7 +202,7 @@ Non-CF targets disable CF bindings (`void/db`, `void/kv`, `void/auth`, `void/sto
 
 ### `worker`
 
-Curated Cloudflare Workers configuration. Binding arrays (`d1_databases`, `kv_namespaces`, `r2_buckets`) are not allowed here — bindings are fully managed by void via inference and the `inference.bindings` field. Users wanting custom bindings should use a `wrangler.json` with real binding IDs and `wrangler deploy`.
+Curated Cloudflare Workers configuration. Binding arrays such as `d1_databases`, `kv_namespaces`, and `r2_buckets` are not allowed here because Void manages bindings through inference and `inference.bindings`. If you need custom bindings with real IDs, use a `wrangler.json` and `wrangler deploy`.
 
 | Field                 | Type       | Description                            |
 | --------------------- | ---------- | -------------------------------------- |
@@ -218,7 +220,7 @@ Curated Cloudflare Workers configuration. Binding arrays (`d1_databases`, `kv_na
 
 ### `routing`
 
-Routing and edge configuration — headers, redirects, and caching.
+Routing and edge configuration for headers, redirects, and caching.
 
 #### `routing.headers`
 
@@ -252,7 +254,7 @@ URL redirects. Keys are source URL patterns, values are destination strings (302
 
 #### `routing.revalidate`
 
-ISR revalidation TTL in seconds — global or per-path. See [Revalidation](../guide/edge/revalidation.md) for details.
+ISR revalidation TTL in seconds, either globally or per path. See [Revalidation](../guide/edge/revalidation.md) for details.
 
 ```json
 {
@@ -280,7 +282,7 @@ Paths to prerender as static HTML at deploy time. Each path must start with `/`.
 
 ### `inference`
 
-Configuration for build-time inference — how Void detects your app type, bindings, and build process.
+Configuration for build-time inference, including how Void detects your app type, bindings, and build process.
 
 #### `inference.bindings`
 
@@ -321,10 +323,10 @@ Override which directories are scanned for [binding inference](./resource-infere
 
 App type. If omitted, auto-detected on first deploy. See [Supported App Types](../guide/app-types.md).
 
-- `"void"` — worker + assets (API routes, SSR, jobs)
-- `"framework"` — meta framework (TanStack Start, React Router, SvelteKit, Nuxt, Astro)
-- `"static"` — fully rendered HTML files (VitePress, plain HTML, external tools). Non-matching paths return `404.html` or a 404 response.
-- `"spa"` — static with SPA fallback. All non-file paths fall back to `index.html` with a 200 status, so client-side routing works out of the box.
+- `"void"`: worker plus assets, including API routes, SSR, and jobs
+- `"framework"`: a meta-framework app such as TanStack Start, React Router, SvelteKit, Nuxt, or Astro
+- `"static"`: fully rendered HTML files from VitePress, plain HTML, or external tools. Non-matching paths return `404.html` or a 404 response.
+- `"spa"`: static output with SPA fallback. Non-file paths fall back to `index.html` with a `200` status so client-side routing works out of the box.
 
 #### `inference.outputDir`
 

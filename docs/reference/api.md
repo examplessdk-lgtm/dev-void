@@ -4,7 +4,7 @@ outline: deep
 
 # API Reference
 
-All public exports of the `void` package.
+This page is the source of truth for public `void` exports. Use it when you already know what feature you want and need the exact import, signature, or return type.
 
 ## Plugin
 
@@ -446,15 +446,15 @@ try {
 
 The typed client is built on [ofetch](https://github.com/unjs/ofetch) with a typed route layer on top. Key differences from native `fetch`:
 
-| Behavior               | Native `fetch`                                       | `void/client` `fetch`                                                                                                     |
-| ---------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| **Return type**        | `Promise<Response>` — you call `.json()` yourself    | `Promise<T>` — auto-parses JSON, returns the typed result directly (`undefined` for 204)                                  |
-| **Error handling**     | Resolves on any HTTP status; you check `response.ok` | Throws `FetchError` on non-2xx responses                                                                                  |
-| **URL construction**   | Raw URL string                                       | Route path with `:param` interpolation from `options.params` + query string from `options.query`                          |
-| **Body serialization** | Manual `JSON.stringify()` + `Content-Type` header    | Auto-serializes `options.body` as JSON and sets `Content-Type: application/json`                                          |
-| **Type safety**        | Accepts any URL/method                               | Constrains paths to `RouteMap` keys and methods to those defined per route — invalid combinations are compile-time errors |
-| **Retry**              | None                                                 | Auto-retries on 408, 429, and 5xx (configurable via `retry` option)                                                       |
-| **Timeout**            | None                                                 | Configurable via `timeout` option                                                                                         |
+| Behavior               | Native `fetch`                                       | `void/client` `fetch`                                                                                                  |
+| ---------------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **Return type**        | `Promise<Response>`, so you call `.json()` yourself  | `Promise<T>`, which auto-parses JSON and returns the typed result directly (`undefined` for `204`)                     |
+| **Error handling**     | Resolves on any HTTP status; you check `response.ok` | Throws `FetchError` on non-2xx responses                                                                               |
+| **URL construction**   | Raw URL string                                       | Route path with `:param` interpolation from `options.params` + query string from `options.query`                       |
+| **Body serialization** | Manual `JSON.stringify()` + `Content-Type` header    | Auto-serializes `options.body` as JSON and sets `Content-Type: application/json`                                       |
+| **Type safety**        | Accepts any URL or method                            | Constrains paths to `RouteMap` keys and methods to those defined per route. Invalid combinations fail at compile time. |
+| **Retry**              | None                                                 | Auto-retries on 408, 429, and 5xx (configurable via `retry` option)                                                    |
+| **Timeout**            | None                                                 | Configurable via `timeout` option                                                                                      |
 
 `headers` and `signal` are passed through to the underlying fetch unchanged.
 
@@ -583,7 +583,7 @@ interface HeadDescriptor {
 
 ### `RouteMap`
 
-Empty stub interface augmented at build time by the generated `.void/routes.d.ts`. Contains the full type information for all routes, methods, inputs, and outputs — used by the typed `fetch` client.
+Empty stub interface augmented at build time by the generated `.void/routes.d.ts`. It contains the full type information for routes, methods, inputs, and outputs, and the typed `fetch` client reads from it.
 
 ```ts
 import type { RouteMap } from "void/routes";
@@ -599,7 +599,7 @@ Importing `"void/env"` provides global Cloudflare environment types:
 
 Declares the `Cloudflare.Env` namespace with `DB: D1Database`, `KV: KVNamespace`, and `STORAGE: R2Bucket`.
 
-For handler context variables (`c.set()` / `c.get()`), augment [`CloudContextVariables`](#cloudcontextvariables) — this is separate from `Cloudflare.Env`, which types the worker bindings. Framework adaptors (`@void/vue`, `@void/react`, `@void/svelte`) also augment `CloudContextVariables` to add the `shared` key used by `useShared()`.
+For handler context variables such as `c.set()` and `c.get()`, augment [`CloudContextVariables`](#cloudcontextvariables). This is separate from `Cloudflare.Env`, which types worker bindings. Framework adapters such as `@void/vue`, `@void/react`, and `@void/svelte` also augment `CloudContextVariables` to add the `shared` key used by `useShared()`.
 
 ## Framework Adaptors
 
@@ -609,7 +609,7 @@ Framework adaptors for [Pages Routing](../guide/pages-routing/overview). Each ad
 
 #### `voidVue(options?)`
 
-Imported from `"@void/vue/plugin"`. Returns an array of Vite plugins that handle Vue SFC compilation and SSR/hydration entry generation. Includes `@vitejs/plugin-vue` — no need to install or configure it separately.
+Imported from `"@void/vue/plugin"`. Returns an array of Vite plugins that handle Vue SFC compilation and SSR or hydration entry generation. It already includes `@vitejs/plugin-vue`, so you do not need to install or configure that separately.
 
 ```ts
 import { voidVue } from "@void/vue/plugin";
@@ -648,7 +648,7 @@ Imported from `"@void/vue"`.
 
 #### `voidReact(options?)`
 
-Imported from `"@void/react/plugin"`. Returns an array of Vite plugins that handle SSR/hydration entry generation. Includes `@vitejs/plugin-react` — no need to install or configure it separately.
+Imported from `"@void/react/plugin"`. Returns an array of Vite plugins that handle SSR and hydration entry generation. It already includes `@vitejs/plugin-react`, so you do not need to install or configure that separately.
 
 ```ts
 import { voidReact } from "@void/react/plugin";
@@ -686,7 +686,7 @@ Imported from `"@void/react"`.
 
 #### `voidSvelte(options?)`
 
-Imported from `"@void/svelte/plugin"`. Returns an array of Vite plugins that handle SSR/hydration entry generation for Svelte 5. Includes `@sveltejs/vite-plugin-svelte` — no need to install or configure it separately.
+Imported from `"@void/svelte/plugin"`. Returns an array of Vite plugins that handle SSR and hydration entry generation for Svelte 5. It already includes `@sveltejs/vite-plugin-svelte`, so you do not need to install or configure that separately.
 
 ```ts
 import { voidSvelte } from "@void/svelte/plugin";
@@ -733,11 +733,11 @@ Imported from `"@void/svelte"`.
 | `void/ws`              | `defineRoom`, `defineWebSocket`, `connect`, WebSocket context and connection types                                                                               |
 | `void/response`        | `convertReturnValue`                                                                                                                                             |
 | `void/validator`       | `runValidation`, `ValidatorSlots`, `HandlerInput`                                                                                                                |
-| `void/drizzle-zod`     | Re-exports [`drizzle-zod`](https://orm.drizzle.team/docs/zod) — schema-derived Zod validators for Drizzle tables                                                 |
-| `void/drizzle-valibot` | Re-exports [`drizzle-valibot`](https://orm.drizzle.team/docs/typebox) — schema-derived Valibot validators for Drizzle tables                                     |
-| `void/drizzle-arktype` | Re-exports [`drizzle-arktype`](https://orm.drizzle.team/docs/arktype) — schema-derived ArkType validators for Drizzle tables                                     |
-| `void/schema-d1`       | Re-exports [`drizzle-orm/sqlite-core`](https://orm.drizzle.team/docs/column-types/sqlite) — D1 table/column builders                                             |
-| `void/schema-pg`       | Re-exports [`drizzle-orm/pg-core`](https://orm.drizzle.team/docs/column-types/pg) — PostgreSQL table/column builders                                             |
+| `void/drizzle-zod`     | Re-exports [`drizzle-zod`](https://orm.drizzle.team/docs/zod) for schema-derived Zod validators for Drizzle tables                                               |
+| `void/drizzle-valibot` | Re-exports [`drizzle-valibot`](https://orm.drizzle.team/docs/typebox) for schema-derived Valibot validators for Drizzle tables                                   |
+| `void/drizzle-arktype` | Re-exports [`drizzle-arktype`](https://orm.drizzle.team/docs/arktype) for schema-derived ArkType validators for Drizzle tables                                   |
+| `void/schema-d1`       | Re-exports [`drizzle-orm/sqlite-core`](https://orm.drizzle.team/docs/column-types/sqlite) for D1 table and column builders                                       |
+| `void/schema-pg`       | Re-exports [`drizzle-orm/pg-core`](https://orm.drizzle.team/docs/column-types/pg) for PostgreSQL table and column builders                                       |
 | `void/db`              | `db` ([Drizzle D1](https://orm.drizzle.team/docs/get-started/d1-new) instance), `createDb`, query operators (`eq`, `and`, `or`, `desc`, `like`, `inArray`, etc.) |
 | `void/routes`          | `RouteMap` and `WebSocketRouteMap` stubs (types only)                                                                                                            |
 | `void/queues`          | `queues` proxy for sending messages to typed queues                                                                                                              |

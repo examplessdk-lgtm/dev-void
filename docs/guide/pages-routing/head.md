@@ -54,7 +54,7 @@ Set site-wide head defaults in `void.json`:
 }
 ```
 
-`titleTemplate` wraps the page title — `%s` is replaced with whatever `head()` returns as `title`. A page returning `{ title: "About" }` with the template above produces `<title>About | My Site</title>`.
+`titleTemplate` wraps the page title. `%s` is replaced with whatever `head()` returns as `title`. A page returning `{ title: "About" }` with the template above produces `<title>About | My Site</title>`.
 
 ## Middleware Defaults
 
@@ -81,14 +81,14 @@ export default defineMiddleware(async (c, next) => {
 
 When multiple layers provide head data, they merge with this precedence:
 
-| Field       | Behavior                                                                                                      |
-| ----------- | ------------------------------------------------------------------------------------------------------------- |
-| `title`     | Page wins. `titleTemplate` from config wraps the winning title.                                               |
-| `meta`      | Deduplicates by `name` or `property` — page overrides same-key entries. Non-conflicting entries are appended. |
-| `link`      | Concatenated: config first, then middleware, then page.                                                       |
-| `script`    | Concatenated: config first, then middleware, then page.                                                       |
-| `htmlAttrs` | Shallow merge, page wins conflicts.                                                                           |
-| `bodyAttrs` | Shallow merge, page wins conflicts.                                                                           |
+| Field       | Behavior                                                                                                             |
+| ----------- | -------------------------------------------------------------------------------------------------------------------- |
+| `title`     | Page wins. `titleTemplate` from config wraps the winning title.                                                      |
+| `meta`      | Deduplicates by `name` or `property`. Page entries override matching keys, and non-conflicting entries are appended. |
+| `link`      | Concatenated: config first, then middleware, then page.                                                              |
+| `script`    | Concatenated: config first, then middleware, then page.                                                              |
+| `htmlAttrs` | Shallow merge, page wins conflicts.                                                                                  |
+| `bodyAttrs` | Shallow merge, page wins conflicts.                                                                                  |
 
 ## HeadDescriptor Shape
 
@@ -110,7 +110,7 @@ interface HeadDescriptor {
 
 ## Markdown Auto-Head
 
-Markdown pages (`.md` files) automatically generate head tags from frontmatter — no `.server.ts` needed:
+Markdown pages (`.md` files) automatically generate head tags from frontmatter. You do not need a `.server.ts` file:
 
 ```md
 ---
@@ -125,6 +125,6 @@ This produces `<title>Getting Started</title>` and `<meta name="description" con
 
 ## Client-Side Updates
 
-On SPA navigation, head tags update automatically. The framework tracks managed tags with a `data-void-head` attribute — previous tags are removed and new ones inserted on each navigation, keeping `document.title` and meta tags in sync without a full page reload.
+On SPA navigation, head tags update automatically. The framework tracks managed tags with a `data-void-head` attribute. Previous tags are removed and new ones are inserted on each navigation, which keeps `document.title` and your meta tags in sync without a full page reload.
 
-`script`, `htmlAttrs`, and `bodyAttrs` are SSR-only — they are not re-applied on client-side navigation.
+`script`, `htmlAttrs`, and `bodyAttrs` are SSR-only. They are not re-applied on client-side navigation.

@@ -91,29 +91,20 @@ const integrationLinks = {
   items: integrationItems,
 };
 
-const resourcesLinks = {
-  text: "Resources",
-  items: [
-    { text: "Recipes", link: "/recipes/", activeMatch: "/recipes/" },
-    { text: "Examples", link: "/examples/", activeMatch: "/examples/" },
-    { text: "Roadmap", link: "/roadmap/", activeMatch: "/roadmap/" },
-    { text: "Blog", link: "https://voidzero.dev/blog" },
-  ],
-};
-
 const socialLinks = [
   { icon: "x", link: "https://x.com/voidcloudhq" },
   { icon: "discord", link: "https://discord.gg/cC6TEVFKSx" },
   { icon: "github", link: "https://github.com/voidzero-dev/void" },
 ];
 
-const platformLinks = {
-  text: "Platform",
+const companyLinks = {
+  text: "Company",
   items: [
     { text: "Company", link: "https://voidzero.dev" },
-    { text: "Features", link: "/platform/features" },
-    { text: "Pricing", link: "/platform/pricing" },
-    { text: "Enterprise", link: "/platform/enterprise" },
+    { text: "Blog", link: "https://voidzero.dev/blog" },
+    { text: "Terms of Service", link: "https://voidzero.dev/legal/terms" },
+    { text: "Privacy Policy", link: "https://voidzero.dev/legal/privacy" },
+    { text: "Acceptable Use Policy", link: "https://voidzero.dev/legal/acceptable-use" },
   ],
 };
 
@@ -147,8 +138,6 @@ export default extendConfig(
         { text: "Guide", link: "/guide/", activeMatch: "/guide/" },
         referenceLinks,
         integrationLinks,
-        // resourcesLinks,
-        // platformLinks,
         // { text: "Dashboard", link: "https://dash.void.cloud" },
       ],
 
@@ -301,18 +290,17 @@ export default extendConfig(
             ],
           },
           {
-            title: "Resources",
-            items: resourcesLinks.items,
+            title: "Open Source",
+            items: [
+              { text: "Vite", link: "https://vite.dev" },
+              { text: "Vitest", link: "https://vitest.dev" },
+              { text: "Rolldown", link: "https://rolldown.rs" },
+              { text: "Oxc", link: "https://oxc.rs" },
+            ],
           },
           {
-            title: "Platform",
-            items: [
-              ...platformLinks.items,
-              // {
-              //   text: "Dashboard",
-              //   link: "https://dash.void.cloud",
-              // },
-            ],
+            title: companyLinks.text,
+            items: companyLinks.items,
           },
         ],
         social: socialLinks,

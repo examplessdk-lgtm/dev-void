@@ -4,7 +4,7 @@ outline: deep
 
 # View Transitions
 
-Pages mode supports the browser's native [View Transition API](https://developer.mozilla.org/en-US/docs/Web/API/View_Transition_API) for animated page transitions. When enabled, navigations are wrapped in `document.startViewTransition()`, giving you a smooth cross-fade between pages by default — customizable entirely via CSS.
+Pages mode supports the browser's native [View Transition API](https://developer.mozilla.org/en-US/docs/Web/API/View_Transition_API) for animated page transitions. When enabled, navigations are wrapped in `document.startViewTransition()`, which gives you a smooth cross-fade between pages by default. You can customize the effect entirely with CSS.
 
 ## Enabling View Transitions
 
@@ -42,7 +42,7 @@ export default defineConfig({
 
 :::
 
-This enables view transitions for all navigations — `Link` clicks, programmatic `router.visit()` calls, and browser back/forward.
+This enables view transitions for all navigations, including `Link` clicks, programmatic `router.visit()` calls, and browser back or forward.
 
 ## Per-Link Override
 
@@ -136,5 +136,5 @@ Assign `view-transition-name` to elements that should animate independently (e.g
 ```
 
 ::: tip
-View transitions are progressive enhancement — browsers that don't support the API fall back to instant navigation with no errors.
+View transitions are progressive enhancement. Browsers that do not support the API fall back to instant navigation with no errors.
 :::

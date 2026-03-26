@@ -91,4 +91,4 @@ To get a deploy token, run `void auth token` to copy it to your clipboard, then 
 
 If you prefer to deploy directly to your own Cloudflare account instead of using Void's managed platform, see the [Cloudflare integration guide](../integrations/cloudflare.md).
 
-To deploy to Node.js, Bun, or Deno instead of Cloudflare, set [`target`](../reference/config.md) in `void.json`. This builds a standalone server you can run anywhere — Docker, Railway, Fly.io, etc. Note that these alternative targets do not have access to Void platform features like D1, KV, R2, built-in auth, Workers AI, or cron scheduling. See the [Node.js, Bun, and Deno guide](../integrations/nodejs-bun-deno.md).
+To deploy to Node.js, Bun, or Deno instead of Cloudflare, set [`target`](../reference/config.md) in `void.json`. This builds a standalone server you can run anywhere, including Docker, Railway, and Fly.io. These targets do not have access to Void platform features such as D1, KV, R2, built-in auth, Workers AI, or cron scheduling. See the [Node.js, Bun, and Deno guide](../integrations/nodejs-bun-deno.md).
