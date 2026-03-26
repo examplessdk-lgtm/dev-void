@@ -1,8 +1,8 @@
-import { ofetch, FetchError } from "ofetch";
-import type { RouteMap } from "void/routes";
-
+import { ofetch } from "ofetch";
+import { FetchError } from "./fetch-error";
 export { FetchError as StreamError };
 
+import type { RouteMap } from "void/routes";
 type MethodsOf<P extends keyof RouteMap> = keyof RouteMap[P] & string;
 type InputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteMap[P][M] extends {
   input: infer I;

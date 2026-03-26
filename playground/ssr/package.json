@@ -8,7 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "hono": "^4.11.9",
+    "hono": "^4.12.9",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
@@ -16,7 +16,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@typescript/native-preview": "catalog:",
-    "@vitejs/plugin-react": "^5.1.4",
+    "@vitejs/plugin-react": "^6.0.1",
     "vite": "catalog:",
     "void": "workspace:*"
   }

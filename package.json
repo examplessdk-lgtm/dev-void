@@ -23,26 +23,15 @@
   "devDependencies": {
     "@typescript/native-preview": "catalog:",
     "husky": "^9.1.7",
-    "lint-staged": "^16.2.7",
-    "oxfmt": "^0.32.0",
-    "oxlint": "^1.47.0",
+    "lint-staged": "^16.4.0",
+    "oxfmt": "^0.42.0",
+    "oxlint": "^1.57.0",
     "playwright": "^1.58.2",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.1"
   },
   "lint-staged": {
     "*": "oxfmt --no-error-on-unmatched-pattern",
     "*.{js,jsx,ts,tsx,mjs,cjs}": "oxlint"
   },
-  "packageManager": "pnpm@10.29.3",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild",
-      "workerd"
-    ],
-    "overrides": {
-      "vite": "catalog:",
-      "esbuild": "^0.27.3"
-    }
-  }
+  "packageManager": "pnpm@10.29.3"
 }

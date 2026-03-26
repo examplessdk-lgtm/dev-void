@@ -11,7 +11,7 @@ import type { SubcommandDef, SubcommandResult } from "./subcommand-prompt";
 import { secretSubcommands, parseSecretArgs } from "./secret-args";
 import { dbSubcommands, parseDbArgs } from "./db-args";
 import { genSubcommands, parseGenArgs } from "./gen-args";
-import { domainSubcommands, parseDomainArgs } from "./domain";
+import { domainSubcommands, parseDomainArgs } from "./domain-args";
 import { categoryTitle, helpLine, pc, sectionTitle } from "./output";
 import { getPackageDir } from "./agents";
 import { asciiArts } from "./ascii";
