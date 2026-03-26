@@ -21,6 +21,30 @@ afterAll(async () => {
   await browser?.close();
 });
 
+async function prepareForViteHmr(page: Page) {
+  await page.addInitScript(() => {
+    const marker = "__void_vite_connected";
+    const patched = "__void_vite_console_patched";
+    if ((window as any)[patched]) return;
+
+    const originalDebug = console.debug.bind(console);
+    console.debug = (...args: unknown[]) => {
+      if (args.some((arg) => typeof arg === "string" && arg.includes("[vite] connected."))) {
+        (window as any)[marker] = true;
+      }
+      originalDebug(...args);
+    };
+
+    (window as any)[patched] = true;
+  });
+}
+
+async function waitForViteHmr(page: Page) {
+  await page.waitForFunction(() => (window as any).__void_vite_connected === true, {
+    timeout: 15_000,
+  });
+}
+
 function defineClientTests(getBase: () => string) {
   let BASE: string;
   beforeAll(() => {
@@ -657,8 +681,10 @@ describe("vue-pages client (dev)", () => {
       page.setDefaultTimeout(10_000);
 
       try {
+        await prepareForViteHmr(page);
         await page.goto(`${DEV_BASE}/deferred`);
         await page.waitForSelector('#app[data-hydrated="true"]');
+        await waitForViteHmr(page);
         await page.waitForFunction(
           () => document.querySelector("h1")?.textContent === "Deferred Page",
         );
@@ -727,8 +753,10 @@ describe("vue-pages client (dev)", () => {
     page.setDefaultTimeout(10_000);
 
     try {
+      await prepareForViteHmr(page);
       await page.goto(`${DEV_BASE}/blog`);
       await page.waitForSelector('[data-island][data-hydrated="true"]');
+      await waitForViteHmr(page);
 
       // Interact to establish client state — count becomes 1
       await page.click("button:has-text('Increment')");
@@ -748,7 +776,7 @@ describe("vue-pages client (dev)", () => {
       // Wait for HMR to update the component text
       await page.waitForFunction(
         () => document.querySelector('[data-testid="count"]')?.textContent?.startsWith("Total:"),
-        { timeout: 10_000 },
+        { timeout: 15_000 },
       );
 
       // No full page reload — window marker should still be set
