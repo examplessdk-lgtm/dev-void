@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveDistDir, resolveWorkerDirName } from "../../src/cli/deploy";
+import {
+  resolveDistDir,
+  resolveStaticBuildCommand,
+  resolveWorkerDirName,
+} from "../../src/cli/deploy";
 import { FRAMEWORK_PRESETS } from "../../src/cli/preset";
 import {
   getRequestedProjectSlug,
@@ -141,6 +145,35 @@ describe("resolveDistDir", () => {
     expect(() => resolveDistDir(root, FRAMEWORK_PRESETS.sveltekit, "vp build")).toThrow(
       'Run "vp build" first.',
     );
+  });
+});
+
+describe("resolveStaticBuildCommand", () => {
+  it("uses inference.build when provided", () => {
+    expect(
+      resolveStaticBuildCommand(
+        {
+          buildCommand: "vite build",
+          outputDir: "/tmp/dist",
+          appType: "static",
+        },
+        "pnpm build",
+      ),
+    ).toBe("pnpm build");
+  });
+
+  it("keeps explicit --dir deploys buildless even when inference.build is set", () => {
+    expect(
+      resolveStaticBuildCommand(
+        {
+          buildCommand: null,
+          outputDir: "/tmp/dist",
+          appType: "static",
+        },
+        "pnpm build",
+        true,
+      ),
+    ).toBeNull();
   });
 });
 

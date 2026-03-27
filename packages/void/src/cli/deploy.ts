@@ -204,6 +204,14 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
   const gitCommit = options?.skipBuild ? null : getGitCommit(root);
 
   if (preset) {
+    preset = {
+      ...preset,
+      buildCommand: resolveStaticBuildCommand(
+        preset,
+        voidConfig.inference?.build,
+        Boolean(options?.dir),
+      ),
+    };
     await runStaticDeploy(
       root,
       config,
@@ -218,6 +226,15 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
   } else {
     await runFullDeploy(root, config, client, undefined, options?.skipBuild, gitCommit);
   }
+}
+
+export function resolveStaticBuildCommand(
+  preset: StaticPreset,
+  buildOverride?: string,
+  hasExplicitDir = false,
+): string | null {
+  if (hasExplicitDir) return null;
+  return buildOverride ?? preset.buildCommand;
 }
 
 async function streamDeploy(

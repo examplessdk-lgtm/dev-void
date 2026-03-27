@@ -305,7 +305,7 @@ Custom names are used in the deploy manifest and in wrangler binding sync for lo
 
 #### `inference.build`
 
-Override the build command. Useful for frameworks with their own CLIs (Nuxt, Astro) or custom build scripts. If omitted, the CLI uses the framework's default build command.
+Override the build command. Useful for frameworks with their own CLIs (Nuxt, Astro) or static apps with custom build scripts. If omitted, the CLI uses the detected default build command for the current app type.
 
 ```json
 { "inference": { "build": "nuxt build --preset cloudflare-module" } }

@@ -148,6 +148,22 @@ describe("detectPreset", () => {
     });
   });
 
+  it("prefers the project build script for plain Vite SPAs", () => {
+    const root = setupProject({
+      pkg: {
+        dependencies: { vite: "^6.0.0" },
+        scripts: { build: "vite build && node scripts/postbuild.js" },
+      },
+      files: { "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" },
+    });
+    const result = detectPreset(root);
+    expect(result).toEqual({
+      buildCommand: "pnpm build",
+      outputDir: resolve(root, "dist"),
+      appType: "spa",
+    });
+  });
+
   it("detects Vite+ SPA (no backend files)", () => {
     const root = setupProject({
       pkg: { devDependencies: { "vite-plus": "^1.0.0" } },

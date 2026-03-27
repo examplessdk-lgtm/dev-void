@@ -189,8 +189,9 @@ export function detectPreset(
 
   // 4. Vite/Vite+ in deps → static SPA
   if (pkg && hasViteLike(pkg)) {
+    const buildCommand = resolveProjectScriptCommand(root, "build");
     return {
-      buildCommand: resolveProjectCommand(root, "vite build"),
+      buildCommand: buildCommand ?? resolveProjectCommand(root, "vite build"),
       outputDir: resolve(root, "dist"),
       appType: "spa",
     };
@@ -245,6 +246,31 @@ function getAllDeps(pkg: Record<string, unknown>): Record<string, string> {
     ...((pkg.dependencies as Record<string, string>) ?? {}),
     ...((pkg.devDependencies as Record<string, string>) ?? {}),
   };
+}
+
+function detectPackageManager(root: string): "pnpm" | "yarn" | "bun" | "npm" {
+  if (existsSync(join(root, "pnpm-lock.yaml"))) return "pnpm";
+  if (existsSync(join(root, "yarn.lock"))) return "yarn";
+  if (existsSync(join(root, "bun.lock")) || existsSync(join(root, "bun.lockb"))) return "bun";
+  return "npm";
+}
+
+function resolveProjectScriptCommand(root: string, scriptName: string): string | null {
+  const pkg = readPackageJson(root);
+  const script = pkg?.scripts;
+  if (!script || typeof script !== "object" || Array.isArray(script)) return null;
+  if (typeof (script as Record<string, unknown>)[scriptName] !== "string") return null;
+
+  switch (detectPackageManager(root)) {
+    case "pnpm":
+      return `pnpm ${scriptName}`;
+    case "yarn":
+      return `yarn ${scriptName}`;
+    case "bun":
+      return `bun run ${scriptName}`;
+    default:
+      return `npm run ${scriptName}`;
+  }
 }
 
 function hasViteLike(pkg: Record<string, unknown>): boolean {
