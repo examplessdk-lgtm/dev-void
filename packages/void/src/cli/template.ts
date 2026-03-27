@@ -8,7 +8,7 @@ export const SCAFFOLD_GITIGNORE_LINES = [
 ] as const;
 
 export type ScaffoldFramework = "react" | "vue" | "svelte" | "solid";
-export type ScaffoldDatabaseDialect = "sqlite" | "postgresql";
+export type ScaffoldStarterMode = "sqlite" | "postgresql" | "static";
 
 export const SCAFFOLD_BASE_DEPENDENCIES = {
   hono: "^4.11.9",
@@ -137,11 +137,22 @@ export function getScaffoldTsconfigCompilerOptions(
 
 export function createPagesStarterTemplate(options: {
   framework: ScaffoldFramework;
-  dialect: ScaffoldDatabaseDialect;
+  starterMode: ScaffoldStarterMode;
   voidVersion: string;
 }): PagesStarterTemplate {
-  const { framework, dialect, voidVersion } = options;
+  const { framework, starterMode, voidVersion } = options;
   const config = SCAFFOLD_FRAMEWORKS[framework];
+  const files: Record<string, string> = {
+    "vite.config.ts": getViteConfig(config),
+    [`pages/index.${config.pageExtension}`]: getIndexPage(framework, starterMode),
+  };
+
+  if (starterMode !== "static") {
+    files["pages/index.server.ts"] = getIndexServer();
+    files["routes/api/hello.ts"] = getHelloRoute(config.label, starterMode);
+    files["db/schema.ts"] = getSchemaFile(starterMode);
+    files["db/migrations/0000_initial.sql"] = getMigrationFile(starterMode);
+  }
 
   return {
     scripts: {
@@ -159,14 +170,7 @@ export function createPagesStarterTemplate(options: {
       [config.adapterPackage]: config.adapterVersion,
       ...config.devDependencies,
     },
-    files: {
-      "vite.config.ts": getViteConfig(config),
-      [`pages/index.${config.pageExtension}`]: getIndexPage(framework),
-      "pages/index.server.ts": getIndexServer(),
-      "routes/api/hello.ts": getHelloRoute(config.label, dialect),
-      "db/schema.ts": getSchemaFile(dialect),
-      "db/migrations/0000_initial.sql": getMigrationFile(dialect),
-    },
+    files,
   };
 }
 
@@ -195,8 +199,11 @@ export const loader = defineHandler(async () => {
 `;
 }
 
-function getHelloRoute(frameworkLabel: string, dialect: ScaffoldDatabaseDialect): string {
-  const databaseLabel = dialect === "postgresql" ? "PostgreSQL" : "D1";
+function getHelloRoute(
+  frameworkLabel: string,
+  starterMode: Exclude<ScaffoldStarterMode, "static">,
+): string {
+  const databaseLabel = starterMode === "postgresql" ? "PostgreSQL" : "D1";
   return `import { defineHandler } from "void";
 
 export const GET = defineHandler(() => {
@@ -209,8 +216,8 @@ export const GET = defineHandler(() => {
 `;
 }
 
-function getSchemaFile(dialect: ScaffoldDatabaseDialect): string {
-  if (dialect === "postgresql") {
+function getSchemaFile(starterMode: Exclude<ScaffoldStarterMode, "static">): string {
+  if (starterMode === "postgresql") {
     return `import { pgTable, serial, text, timestamp } from "void/schema-pg";
 
 export const messages = pgTable("messages", {
@@ -232,8 +239,8 @@ export const messages = sqliteTable("messages", {
 `;
 }
 
-function getMigrationFile(dialect: ScaffoldDatabaseDialect): string {
-  if (dialect === "postgresql") {
+function getMigrationFile(starterMode: Exclude<ScaffoldStarterMode, "static">): string {
+  if (starterMode === "postgresql") {
     return `CREATE TABLE IF NOT EXISTS messages (
   id SERIAL PRIMARY KEY,
   text TEXT NOT NULL,
@@ -254,7 +261,62 @@ INSERT INTO messages (text) VALUES ('Hello from Void');
 `;
 }
 
-function getIndexPage(framework: ScaffoldFramework): string {
+function getIndexPage(framework: ScaffoldFramework, starterMode: ScaffoldStarterMode): string {
+  if (starterMode === "static") {
+    switch (framework) {
+      case "react":
+        return `export default function HomePage() {
+  return (
+    <main>
+      <h1>Welcome to Void</h1>
+      <p>This starter is running in Pages mode with no database or server code yet.</p>
+      <p>
+        Add <code>pages/*.server.ts</code>, <code>routes/</code>, or <code>void/db</code> when
+        you want to grow into full-stack features.
+      </p>
+    </main>
+  );
+}
+`;
+      case "vue":
+        return `<template>
+  <main>
+    <h1>Welcome to Void</h1>
+    <p>This starter is running in Pages mode with no database or server code yet.</p>
+    <p>
+      Add <code>pages/*.server.ts</code>, <code>routes/</code>, or <code>void/db</code> when you
+      want to grow into full-stack features.
+    </p>
+  </main>
+</template>
+`;
+      case "svelte":
+        return `<main>
+  <h1>Welcome to Void</h1>
+  <p>This starter is running in Pages mode with no database or server code yet.</p>
+  <p>
+    Add <code>pages/*.server.ts</code>, <code>routes/</code>, or <code>void/db</code> when you
+    want to grow into full-stack features.
+  </p>
+</main>
+`;
+      case "solid":
+        return `export default function HomePage() {
+  return (
+    <main>
+      <h1>Welcome to Void</h1>
+      <p>This starter is running in Pages mode with no database or server code yet.</p>
+      <p>
+        Add <code>pages/*.server.ts</code>, <code>routes/</code>, or <code>void/db</code> when
+        you want to grow into full-stack features.
+      </p>
+    </main>
+  );
+}
+`;
+    }
+  }
+
   switch (framework) {
     case "react":
       return `import type { Props } from "./index.server";

@@ -32,9 +32,7 @@ bunx void init
 
 This scaffolds a Pages-mode starter with an interactive setup flow.
 
-As part of `void init`, you'll choose a Pages framework (React, Vue, Svelte, or Solid) and a database. The scaffold writes a framework-specific `vite.config.ts`, a `pages/` home page with a `.server.ts` loader companion, `db/schema.ts`, `db/migrations/0000_initial.sql`, and `routes/api/hello.ts`.
-
-For the database, D1 is the zero-config default for prototyping and read-heavy apps, while PostgreSQL is better when you already have Postgres infrastructure or need heavier writes and more complex queries.
+As part of `void init`, you'll choose a Pages framework (React, Vue, Svelte, or Solid) and a starter type. D1 is the default top option and scaffolds a DB-backed page loader, schema, migration, and API route. PostgreSQL scaffolds the same starter and writes `"database": "pg"` to `void.json`. Static Pages skips the database and server starter files so you can start with static content and add Void features later.
 
 <details>
 <summary style="cursor:pointer">

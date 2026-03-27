@@ -12,7 +12,7 @@ Pages mode is also entirely optional - you can use any client-side router to bui
 
 ## Setup
 
-If you start in a scaffoldable empty directory, `void init` can generate this setup for you: it asks whether you want React, Vue, Svelte, or Solid Pages mode and writes the adapter-aware `vite.config.ts`, `pages/`, and `db/` starter files.
+If you start in a scaffoldable empty directory, `void init` can generate this setup for you: it asks whether you want React, Vue, Svelte, or Solid Pages mode, then lets you pick a D1 starter, a PostgreSQL starter, or Static Pages. The database-backed starters write the adapter-aware `vite.config.ts`, `pages/`, and `db/` starter files; Static Pages writes just the basic `pages/` setup so you can grow into server features later.
 
 If you're adding Pages mode manually, install a framework adapter alongside `void`:
 

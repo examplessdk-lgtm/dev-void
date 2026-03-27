@@ -47,12 +47,12 @@ void init [--tsconfig] [--github] [--agents]
 
 Setup wizard for void projects (new or existing).
 
-If run in a scaffoldable empty directory, `void init` first asks which Pages framework to scaffold (React, Vue, Svelte, or Solid), then asks which database to use (D1 or PostgreSQL). It writes a framework-specific `vite.config.ts`, a `pages/` home page plus `.server.ts` loader, `db/schema.ts`, `db/migrations/0000_initial.sql`, and `routes/api/hello.ts`.
+If run in a scaffoldable empty directory, `void init` first asks which Pages framework to scaffold (React, Vue, Svelte, or Solid), then asks which starter you want: D1, PostgreSQL, or Static Pages. The D1 and PostgreSQL starters write a framework-specific `vite.config.ts`, a `pages/` home page plus `.server.ts` loader, `db/schema.ts`, `db/migrations/0000_initial.sql`, and `routes/api/hello.ts`. The Static Pages starter writes just the framework-specific `vite.config.ts` and a `pages/` home page so you can add server features later.
 
 After that, the full interactive flow walks through:
 
 1. **TypeScript:** creates or updates `tsconfig.json`, including `extends .void/tsconfig.json` and `void/env` types.
-2. **Database:** asks whether you want D1 or PostgreSQL. Choosing PostgreSQL writes `"database": "pg"` to `void.json`; D1 stays implicit.
+2. **Database:** asks whether you want D1, PostgreSQL, or no database yet. Choosing PostgreSQL writes `"database": "pg"` to `void.json`; D1 stays implicit; choosing no database leaves config unchanged so you can add data features later.
 3. **Agent instructions:** detects agents once and injects instructions into `CLAUDE.md` or `AGENTS.md`.
 4. **Skills:** links Void skills using the same detected or selected agent context.
 5. **MCP config:** writes MCP server config using that same agent context.

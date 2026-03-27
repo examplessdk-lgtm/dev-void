@@ -40,7 +40,7 @@ Void provides a first-class [Drizzle ORM](https://orm.drizzle.team) integration.
 
 Void supports two database backends. Both use the same Drizzle-based workflow for schema definition, querying, and migrations.
 
-`void init` asks which one you want. Choosing D1 keeps the default implicit; choosing PostgreSQL writes `"database": "pg"` to `void.json`.
+`void init` can start you with D1, PostgreSQL, or no database yet. Choosing D1 keeps the default implicit; choosing PostgreSQL writes `"database": "pg"` to `void.json`; choosing no database lets you start with static Pages and adopt data features later.
 
 |            | [D1 (SQLite)](./database/d1) | [PostgreSQL](./database/postgresql)          |
 | ---------- | ---------------------------- | -------------------------------------------- |

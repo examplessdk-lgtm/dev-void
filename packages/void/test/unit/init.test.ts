@@ -89,7 +89,7 @@ describe("isScaffoldableEmptyProject", () => {
     });
   });
 
-  it("scaffolds a React Pages starter in an empty directory", async () => {
+  it("scaffolds a React Pages starter with D1 in an empty directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "void-init-"));
     try {
       mockSelect
@@ -198,20 +198,59 @@ describe("isScaffoldableEmptyProject", () => {
         },
       ]);
 
-      const databasePrompt = mockSelect.mock.calls[1]?.[0];
-      expect(databasePrompt.message).toBe("Choose a database for this project:");
-      expect(databasePrompt.options).toEqual([
+      const starterPrompt = mockSelect.mock.calls[1]?.[0];
+      expect(starterPrompt.message).toBe("Choose a Pages starter:");
+      expect(starterPrompt.options).toEqual([
         {
           value: "sqlite",
-          label: "D1 (SQLite) [current]",
-          hint: "Zero-config and fully managed by Void; best for prototyping and read-heavy apps.",
+          label: "D1 (SQLite)",
+          hint: "Recommended starter. Scaffolds a DB-backed page, schema, migration, and API route.",
         },
         {
           value: "postgresql",
           label: "PostgreSQL",
-          hint: "Bring your own Postgres via Hyperdrive; best for write-heavy apps, complex queries, or existing infra.",
+          hint: 'Scaffolds the same starter with PostgreSQL and writes "database": "pg" to void.json.',
+        },
+        {
+          value: "static",
+          label: "Static Pages",
+          hint: "No database or server starter files yet. Good for content sites; add Void features later.",
         },
       ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("scaffolds a static Pages starter without database files", async () => {
+    const root = mkdtempSync(join(tmpdir(), "void-init-"));
+    try {
+      mockSelect
+        .mockResolvedValueOnce("react")
+        .mockResolvedValueOnce("static")
+        .mockResolvedValueOnce("generic");
+      mockConfirm.mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
+      expect(pkg.dependencies.react).toBeDefined();
+      expect(pkg.dependencies["react-dom"]).toBeDefined();
+      expect(pkg.dependencies.hono).toBeDefined();
+      expect(pkg.devDependencies.void).toBeDefined();
+      expect(pkg.devDependencies["@void/react"]).toBeDefined();
+
+      expect(readFileSync(join(root, "pages", "index.tsx"), "utf-8")).toContain(
+        "no database or server code yet",
+      );
+
+      expect(() => readFileSync(join(root, "pages", "index.server.ts"), "utf-8")).toThrow();
+      expect(() => readFileSync(join(root, "routes", "api", "hello.ts"), "utf-8")).toThrow();
+      expect(() => readFileSync(join(root, "db", "schema.ts"), "utf-8")).toThrow();
+      expect(() =>
+        readFileSync(join(root, "db", "migrations", "0000_initial.sql"), "utf-8"),
+      ).toThrow();
+      expect(() => readFileSync(join(root, "void.json"), "utf-8")).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -258,6 +297,68 @@ describe("isScaffoldableEmptyProject", () => {
           prerender: ["/"],
         },
       });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("removes the pg config when choosing no database yet", async () => {
+    const root = mkdtempSync(join(tmpdir(), "void-init-"));
+    try {
+      writeFileSync(join(root, "void.json"), JSON.stringify({ database: "pg" }, null, 2) + "\n");
+      mockSelect.mockResolvedValueOnce("none").mockResolvedValueOnce("generic");
+      mockConfirm.mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      expect(() => readFileSync(join(root, "void.json"), "utf-8")).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("defaults the database prompt to D1 when no database is configured", async () => {
+    const root = mkdtempSync(join(tmpdir(), "void-init-"));
+    try {
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify(
+          {
+            name: "my-app",
+            devDependencies: {
+              void: "^0.0.1",
+              vite: "^8.0.0",
+            },
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+      mockSelect.mockResolvedValueOnce("none").mockResolvedValueOnce("generic");
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      const databasePrompt = mockSelect.mock.calls[0]?.[0];
+      expect(databasePrompt.message).toBe("Choose a database setup for this project:");
+      expect(databasePrompt.initialValue).toBe("sqlite");
+      expect(databasePrompt.options).toEqual([
+        {
+          value: "sqlite",
+          label: "D1 (SQLite)",
+          hint: "Zero-config and fully managed by Void; best for prototyping and read-heavy apps.",
+        },
+        {
+          value: "postgresql",
+          label: "PostgreSQL",
+          hint: "Bring your own Postgres via Hyperdrive; best for write-heavy apps, complex queries, or existing infra.",
+        },
+        {
+          value: "none",
+          label: "No Database Yet",
+          hint: "Skip database setup for now. You can add D1 or PostgreSQL later as your app grows.",
+        },
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
