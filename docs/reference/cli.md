@@ -58,6 +58,7 @@ After that, the full interactive flow walks through:
 5. **MCP config:** writes MCP server config using that same agent context.
 6. **Demo code:** for existing non-Pages projects, optionally scaffolds a `db/migrations/` directory plus an API route and typed fetch example.
 7. **GitHub Actions:** optionally creates `.github/workflows/deploy.yml` with the right package manager commands.
+8. **Project setup:** optionally logs you in, lets you select or create a project, and writes `.void/project.json` so your first deploy can just be `void deploy`.
 
 If no agent is detected, `void init` asks you to choose one from a short list (Claude, Cursor, Codex, Gemini CLI, Generic). That single choice is reused across all agent steps.
 
@@ -76,6 +77,8 @@ Flags can be combined. When any flag is provided, only the specified steps run a
 ### `void auth login`
 
 OAuth login. You choose GitHub or Google at the prompt, and the token is saved to `~/.void/config.json`.
+
+This is optional if you already completed auth during the interactive `void init` flow.
 
 ### `void auth logout`
 
@@ -167,6 +170,8 @@ Project resolution precedence:
 3. linked project in `.void/project.json`
 
 If no project is linked and no override is provided, CLI prompts to link or create one.
+
+That fallback is mainly for projects that skipped Void project setup during `void init`.
 
 ## Database
 

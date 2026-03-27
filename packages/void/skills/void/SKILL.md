@@ -13,9 +13,7 @@ Docs in this skill are bundled from `docs/` during `void` package build and live
 
 ## Command Naming
 
-Use `void` in examples and commands in this skill.
-
-- `void` and `void` are equivalent binaries. Prefer `void`.
+Use `void` in examples and commands in this skill. For first-time setup, prefer `void init` followed by `void deploy`; `void init` can handle auth and project linking interactively.
 
 ## No-Args Behavior
 

@@ -30,6 +30,7 @@ import {
   type McpConfigTarget,
 } from "./agents";
 import { cliTitle } from "./output";
+import { maybeSetupDeployProject } from "./deploy-setup";
 
 export interface InitArgs {
   tsconfig: boolean;
@@ -1199,6 +1200,10 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
         setupGithubActions(root, state);
       }
     }
+  }
+
+  if (!targeted) {
+    await maybeSetupDeployProject(root);
   }
 
   outro(`Run \`${getDevCommand(root, framework)}\` to start developing`);

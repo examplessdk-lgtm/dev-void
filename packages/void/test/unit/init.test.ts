@@ -1,11 +1,18 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isScaffoldableEmptyProject, runInitCommand } from "../../src/cli/init";
 
 const mockSelect = vi.fn();
 const mockConfirm = vi.fn();
+const mockText = vi.fn();
+const mockGetToken = vi.fn();
+const mockRunLogin = vi.fn();
+const mockSaveToken = vi.fn();
+const mockIsStagingMode = vi.fn();
+const mockListProjects = vi.fn();
+const mockCreateProject = vi.fn();
 
 vi.mock("@clack/prompts", () => ({
   intro: vi.fn(),
@@ -14,8 +21,30 @@ vi.mock("@clack/prompts", () => ({
   log: { success: vi.fn(), warn: vi.fn(), error: vi.fn(), info: vi.fn(), step: vi.fn() },
   confirm: (...args: unknown[]) => mockConfirm(...args),
   select: (...args: unknown[]) => mockSelect(...args),
+  text: (...args: unknown[]) => mockText(...args),
+  spinner: () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }),
   isCancel: (value: unknown) => value === Symbol.for("cancel"),
   cancel: vi.fn(),
+}));
+
+vi.mock("../../src/cli/auth", () => ({
+  getToken: (...args: unknown[]) => mockGetToken(...args),
+  runLogin: (...args: unknown[]) => mockRunLogin(...args),
+  saveToken: (...args: unknown[]) => mockSaveToken(...args),
+  isStagingMode: (...args: unknown[]) => mockIsStagingMode(...args),
+  getSiteDomain: () => "void.app",
+}));
+
+vi.mock("../../src/cli/client", () => ({
+  PlatformClient: class {
+    listProjects(...args: unknown[]) {
+      return mockListProjects(...args);
+    }
+
+    createProject(...args: unknown[]) {
+      return mockCreateProject(...args);
+    }
+  },
 }));
 
 function withTempDir(run: (root: string) => void): void {
@@ -30,6 +59,21 @@ function withTempDir(run: (root: string) => void): void {
 afterEach(() => {
   mockSelect.mockReset();
   mockConfirm.mockReset();
+  mockText.mockReset();
+  mockGetToken.mockReset();
+  mockRunLogin.mockReset();
+  mockSaveToken.mockReset();
+  mockIsStagingMode.mockReset();
+  mockListProjects.mockReset();
+  mockCreateProject.mockReset();
+});
+
+beforeEach(() => {
+  mockGetToken.mockReturnValue(null);
+  mockRunLogin.mockResolvedValue("token_123");
+  mockIsStagingMode.mockReturnValue(false);
+  mockListProjects.mockResolvedValue([]);
+  mockCreateProject.mockResolvedValue({ id: "proj_123", slug: "my-app" });
 });
 
 describe("isScaffoldableEmptyProject", () => {
@@ -96,7 +140,7 @@ describe("isScaffoldableEmptyProject", () => {
         .mockResolvedValueOnce("react")
         .mockResolvedValueOnce("sqlite")
         .mockResolvedValueOnce("generic");
-      mockConfirm.mockResolvedValueOnce(false);
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
 
@@ -128,10 +172,12 @@ describe("isScaffoldableEmptyProject", () => {
         "CREATE TABLE IF NOT EXISTS messages",
       );
 
-      expect(() => readFileSync(join(root, "routes", "api", "hello.get.ts"), "utf-8")).toThrow();
-      expect(() => readFileSync(join(root, "index.html"), "utf-8")).toThrow();
-      expect(() => readFileSync(join(root, "src", "main.ts"), "utf-8")).toThrow();
-      expect(() => readFileSync(join(root, "void.json"), "utf-8")).toThrow();
+      expect(() => readFileSync(join(root, "routes", "api", "hello.get.ts"), "utf-8")).toThrow(
+        /ENOENT/,
+      );
+      expect(() => readFileSync(join(root, "index.html"), "utf-8")).toThrow(/ENOENT/);
+      expect(() => readFileSync(join(root, "src", "main.ts"), "utf-8")).toThrow(/ENOENT/);
+      expect(() => readFileSync(join(root, "void.json"), "utf-8")).toThrow(/ENOENT/);
 
       const tsconfig = JSON.parse(readFileSync(join(root, "tsconfig.json"), "utf-8"));
       expect(tsconfig.compilerOptions.jsx).toBe("react-jsx");
@@ -149,7 +195,7 @@ describe("isScaffoldableEmptyProject", () => {
         .mockResolvedValueOnce("vue")
         .mockResolvedValueOnce("postgresql")
         .mockResolvedValueOnce("generic");
-      mockConfirm.mockResolvedValueOnce(false);
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
 
@@ -261,11 +307,14 @@ describe("isScaffoldableEmptyProject", () => {
     try {
       writeFileSync(join(root, "void.json"), JSON.stringify({ database: "pg" }, null, 2) + "\n");
       mockSelect.mockResolvedValueOnce("sqlite").mockResolvedValueOnce("generic");
-      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+      mockConfirm
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false);
 
       await runInitCommand(root);
 
-      expect(() => readFileSync(join(root, "void.json"), "utf-8")).toThrow();
+      expect(() => readFileSync(join(root, "void.json"), "utf-8")).toThrow(/ENOENT/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -288,7 +337,10 @@ describe("isScaffoldableEmptyProject", () => {
         ) + "\n",
       );
       mockSelect.mockResolvedValueOnce("sqlite").mockResolvedValueOnce("generic");
-      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+      mockConfirm
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false);
 
       await runInitCommand(root);
 
@@ -301,7 +353,6 @@ describe("isScaffoldableEmptyProject", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
-
   it("removes the pg config when choosing no database yet", async () => {
     const root = mkdtempSync(join(tmpdir(), "void-init-"));
     try {
@@ -312,6 +363,74 @@ describe("isScaffoldableEmptyProject", () => {
       await runInitCommand(root);
 
       expect(() => readFileSync(join(root, "void.json"), "utf-8")).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("can log in and create a project during init", async () => {
+    const root = mkdtempSync(join(tmpdir(), "void-init-"));
+    try {
+      mockSelect
+        .mockResolvedValueOnce("react")
+        .mockResolvedValueOnce("sqlite")
+        .mockResolvedValueOnce("generic")
+        .mockResolvedValueOnce("github");
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      mockText.mockResolvedValueOnce("my-live-app");
+      mockCreateProject.mockResolvedValueOnce({ id: "proj_live", slug: "my-live-app" });
+
+      await runInitCommand(root);
+
+      expect(mockConfirm.mock.calls[1]?.[0]).toMatchObject({
+        message: "Set up your Void project now? (log in + link project)",
+      });
+      expect(mockRunLogin).toHaveBeenCalledWith("github");
+      expect(mockSaveToken).toHaveBeenCalledWith("token_123");
+      expect(mockListProjects).toHaveBeenCalledOnce();
+      expect(mockCreateProject).toHaveBeenCalledWith("my-live-app");
+      expect(JSON.parse(readFileSync(join(root, ".void", "project.json"), "utf-8"))).toEqual({
+        projectId: "proj_live",
+        slug: "my-live-app",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("can link an existing project during init without re-authenticating", async () => {
+    const root = mkdtempSync(join(tmpdir(), "void-init-"));
+    try {
+      mockGetToken.mockReturnValue("existing_token");
+      mockListProjects.mockResolvedValueOnce([
+        {
+          id: "proj_456",
+          user_id: "user_1",
+          slug: "existing-app",
+          type: "worker",
+          created_at: "2026-03-27T00:00:00.000Z",
+          custom_domain: null,
+        },
+      ]);
+      mockSelect
+        .mockResolvedValueOnce("react")
+        .mockResolvedValueOnce("sqlite")
+        .mockResolvedValueOnce("generic")
+        .mockResolvedValueOnce("proj_456");
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+      await runInitCommand(root);
+
+      expect(mockConfirm.mock.calls[1]?.[0]).toMatchObject({
+        message: "Link your Void project now?",
+      });
+      expect(mockRunLogin).not.toHaveBeenCalled();
+      expect(mockSaveToken).not.toHaveBeenCalled();
+      expect(mockCreateProject).not.toHaveBeenCalled();
+      expect(JSON.parse(readFileSync(join(root, ".void", "project.json"), "utf-8"))).toEqual({
+        projectId: "proj_456",
+        slug: "existing-app",
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

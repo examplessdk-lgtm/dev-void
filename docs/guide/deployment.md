@@ -11,11 +11,11 @@ Void apps run on Cloudflare's infrastructure but you don't need to use your own 
 ### First deploy
 
 ```bash
-void auth login         # OAuth via GitHub or Google
+void init               # can handle auth + project setup during onboarding
 void deploy             # auto-detects app type, builds, deploys
 ```
 
-On first deploy, the CLI prompts you to create or select a project. The project link is saved to `.void/project.json` for subsequent deploys.
+If you skipped Void project setup during `void init`, you can still run `void auth login` manually. On first deploy, the CLI will prompt you to create or select a project if none is linked yet. The project link is saved to `.void/project.json` for subsequent deploys.
 
 ### Migrations
 
