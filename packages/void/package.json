@@ -17,149 +17,184 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.mts",
-      "import": "./dist/index.mjs"
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.mjs"
     },
     "./handler": {
       "types": "./dist/runtime/handler.d.mts",
-      "import": "./dist/runtime/handler.mjs"
+      "import": "./dist/runtime/handler.mjs",
+      "require": "./dist/runtime/handler.mjs"
     },
     "./response": {
       "types": "./dist/runtime/response.d.mts",
-      "import": "./dist/runtime/response.mjs"
+      "import": "./dist/runtime/response.mjs",
+      "require": "./dist/runtime/response.mjs"
     },
     "./auth": {
       "types": "./dist/runtime/auth.d.mts",
-      "import": "./dist/runtime/auth.mjs"
+      "import": "./dist/runtime/auth.mjs",
+      "require": "./dist/runtime/auth.mjs"
     },
     "./validator": {
       "types": "./dist/runtime/validator.d.mts",
-      "import": "./dist/runtime/validator.mjs"
+      "import": "./dist/runtime/validator.mjs",
+      "require": "./dist/runtime/validator.mjs"
     },
     "./routes": {
       "types": "./dist/routes-stub.d.mts"
     },
     "./client": {
       "types": "./dist/runtime/client.d.mts",
-      "import": "./dist/runtime/client.mjs"
+      "import": "./dist/runtime/client.mjs",
+      "require": "./dist/runtime/client.mjs"
     },
     "./runtime/fetch": {
       "types": "./dist/runtime/fetch.d.mts",
-      "import": "./dist/runtime/fetch.mjs"
+      "import": "./dist/runtime/fetch.mjs",
+      "require": "./dist/runtime/fetch.mjs"
     },
     "./runtime/fetch-stream": {
       "types": "./dist/runtime/fetch-stream.d.mts",
-      "import": "./dist/runtime/fetch-stream.mjs"
+      "import": "./dist/runtime/fetch-stream.mjs",
+      "require": "./dist/runtime/fetch-stream.mjs"
     },
     "./ws": {
       "types": "./dist/runtime/ws.d.mts",
-      "import": "./dist/runtime/ws.mjs"
+      "import": "./dist/runtime/ws.mjs",
+      "require": "./dist/runtime/ws.mjs"
     },
     "./db": {
       "types": "./dist/runtime/db.d.mts",
-      "import": "./dist/runtime/db.mjs"
+      "import": "./dist/runtime/db.mjs",
+      "require": "./dist/runtime/db.mjs"
     },
     "./drizzle-zod": {
       "types": "./dist/runtime/drizzle-zod.d.mts",
-      "import": "./dist/runtime/drizzle-zod.mjs"
+      "import": "./dist/runtime/drizzle-zod.mjs",
+      "require": "./dist/runtime/drizzle-zod.mjs"
     },
     "./drizzle-valibot": {
       "types": "./dist/runtime/drizzle-valibot.d.mts",
-      "import": "./dist/runtime/drizzle-valibot.mjs"
+      "import": "./dist/runtime/drizzle-valibot.mjs",
+      "require": "./dist/runtime/drizzle-valibot.mjs"
     },
     "./drizzle-arktype": {
       "types": "./dist/runtime/drizzle-arktype.d.mts",
-      "import": "./dist/runtime/drizzle-arktype.mjs"
+      "import": "./dist/runtime/drizzle-arktype.mjs",
+      "require": "./dist/runtime/drizzle-arktype.mjs"
     },
     "./schema-d1": {
       "types": "./dist/runtime/schema-d1.d.mts",
-      "import": "./dist/runtime/schema-d1.mjs"
+      "import": "./dist/runtime/schema-d1.mjs",
+      "require": "./dist/runtime/schema-d1.mjs"
     },
     "./schema-pg": {
       "types": "./dist/runtime/schema-pg.d.mts",
-      "import": "./dist/runtime/schema-pg.mjs"
+      "import": "./dist/runtime/schema-pg.mjs",
+      "require": "./dist/runtime/schema-pg.mjs"
     },
     "./kv": {
       "types": "./dist/runtime/kv.d.mts",
-      "import": "./dist/runtime/kv.mjs"
+      "import": "./dist/runtime/kv.mjs",
+      "require": "./dist/runtime/kv.mjs"
     },
     "./queues": {
       "types": "./dist/runtime/queues.d.mts",
-      "import": "./dist/runtime/queues.mjs"
+      "import": "./dist/runtime/queues.mjs",
+      "require": "./dist/runtime/queues.mjs"
     },
     "./storage": {
       "types": "./dist/runtime/storage.d.mts",
-      "import": "./dist/runtime/storage.mjs"
+      "import": "./dist/runtime/storage.mjs",
+      "require": "./dist/runtime/storage.mjs"
     },
     "./isr": {
       "types": "./dist/runtime/isr.d.mts",
-      "import": "./dist/runtime/isr.mjs"
+      "import": "./dist/runtime/isr.mjs",
+      "require": "./dist/runtime/isr.mjs"
     },
     "./ai": {
       "types": "./dist/runtime/ai.d.mts",
-      "import": "./dist/runtime/ai.mjs"
+      "import": "./dist/runtime/ai.mjs",
+      "require": "./dist/runtime/ai.mjs"
     },
     "./remote": {
       "types": "./dist/runtime/remote/index.d.mts",
-      "import": "./dist/runtime/remote/index.mjs"
+      "import": "./dist/runtime/remote/index.mjs",
+      "require": "./dist/runtime/remote/index.mjs"
     },
     "./remote/binding-handler": {
       "types": "./dist/runtime/remote/binding-handler.d.mts",
-      "import": "./dist/runtime/remote/binding-handler.mjs"
+      "import": "./dist/runtime/remote/binding-handler.mjs",
+      "require": "./dist/runtime/remote/binding-handler.mjs"
     },
     "./runtime/migration-handler": {
       "types": "./dist/runtime/migration-handler.d.mts",
-      "import": "./dist/runtime/migration-handler.mjs"
+      "import": "./dist/runtime/migration-handler.mjs",
+      "require": "./dist/runtime/migration-handler.mjs"
     },
     "./runtime/migration-handler-pg": {
       "types": "./dist/runtime/migration-handler-pg.d.mts",
-      "import": "./dist/runtime/migration-handler-pg.mjs"
+      "import": "./dist/runtime/migration-handler-pg.mjs",
+      "require": "./dist/runtime/migration-handler-pg.mjs"
     },
     "./runtime/ws-server": {
       "types": "./dist/runtime/ws-server.d.mts",
-      "import": "./dist/runtime/ws-server.mjs"
+      "import": "./dist/runtime/ws-server.mjs",
+      "require": "./dist/runtime/ws-server.mjs"
     },
     "./pages": {
       "types": "./dist/pages/index.d.mts",
-      "import": "./dist/pages/index.mjs"
+      "import": "./dist/pages/index.mjs",
+      "require": "./dist/pages/index.mjs"
     },
     "./pages-protocol": {
       "types": "./dist/pages/protocol.d.mts",
-      "import": "./dist/pages/protocol.mjs"
+      "import": "./dist/pages/protocol.mjs",
+      "require": "./dist/pages/protocol.mjs"
     },
     "./pages-head": {
       "types": "./dist/pages/head.d.mts",
-      "import": "./dist/pages/head.mjs"
+      "import": "./dist/pages/head.mjs",
+      "require": "./dist/pages/head.mjs"
     },
     "./pages-head-client": {
       "types": "./dist/pages/head-client.d.mts",
-      "import": "./dist/pages/head-client.mjs"
+      "import": "./dist/pages/head-client.mjs",
+      "require": "./dist/pages/head-client.mjs"
     },
     "./pages-prefetch": {
       "types": "./dist/pages/prefetch.d.mts",
-      "import": "./dist/pages/prefetch.mjs"
+      "import": "./dist/pages/prefetch.mjs",
+      "require": "./dist/pages/prefetch.mjs"
     },
     "./pages-client": {
       "types": "./dist/pages/client.d.mts",
-      "import": "./dist/pages/client.mjs"
+      "import": "./dist/pages/client.mjs",
+      "require": "./dist/pages/client.mjs"
     },
     "./pages-islands-plugin": {
       "types": "./dist/pages/islands-plugin.d.mts",
-      "import": "./dist/pages/islands-plugin.mjs"
+      "import": "./dist/pages/islands-plugin.mjs",
+      "require": "./dist/pages/islands-plugin.mjs"
     },
     "./env": {
       "types": "./env.d.ts"
     },
     "./_env": {
       "types": "./dist/runtime/env.d.mts",
-      "import": "./dist/runtime/env.mjs"
+      "import": "./dist/runtime/env.mjs",
+      "require": "./dist/runtime/env.mjs"
     },
     "./_db": {
       "types": "./dist/runtime/db.d.mts",
-      "import": "./dist/runtime/db.mjs"
+      "import": "./dist/runtime/db.mjs",
+      "require": "./dist/runtime/db.mjs"
     },
     "./_db-pg": {
       "types": "./dist/runtime/db-pg.d.mts",
-      "import": "./dist/runtime/db-pg.mjs"
+      "import": "./dist/runtime/db-pg.mjs",
+      "require": "./dist/runtime/db-pg.mjs"
     }
   },
   "scripts": {
