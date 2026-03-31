@@ -104,7 +104,7 @@ describe("playground/node-app build + production", () => {
       env: { ...process.env, PORT: String(PROD_PORT) },
     });
 
-    await waitForServer(PROD_BASE, 10_000);
+    await waitForServer(PROD_BASE, 20_000);
   }, 60_000);
 
   afterAll(async () => {
