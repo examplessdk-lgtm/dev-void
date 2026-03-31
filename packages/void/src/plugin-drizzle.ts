@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import type { Plugin } from "vite";
+import { normalizePath, type Plugin } from "vite";
 import { discoverSchema, type SchemaLocation } from "./drizzle/discover";
 import { ensureProjectTsconfig } from "./codegen/project-tsconfig";
 import { voidWarn } from "./log";
@@ -89,8 +89,16 @@ export function drizzlePlugin(
           // (virtual:void-db imports the schema, which imports void/db).
           // Schema files only need SQL helpers, not the runtime DB instance.
           if (schema && importer) {
-            if (schema.type === "file" && importer === schema.path) return VIRTUAL_SCHEMA_DB_ID;
-            if (schema.type === "directory" && importer.startsWith(schema.path)) {
+            // Normalize separators for Windows — Vite uses forward slashes,
+            // but schema.path from Node's path.join uses backslashes on Windows.
+            const normalizedImporter = normalizePath(importer);
+            const normalizedSchemaPath = normalizePath(schema.path);
+            if (schema.type === "file" && normalizedImporter === normalizedSchemaPath)
+              return VIRTUAL_SCHEMA_DB_ID;
+            if (
+              schema.type === "directory" &&
+              normalizedImporter.startsWith(normalizedSchemaPath)
+            ) {
               return VIRTUAL_SCHEMA_DB_ID;
             }
           }
