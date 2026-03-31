@@ -39,12 +39,12 @@ You can set different TTLs for different URL patterns using an object:
 }
 ```
 
-Rules are matched in order — first match wins. The `*` glob matches any characters including `/`.
+Rules are matched in order, and the first match wins. The `*` glob matches any characters including `/`.
 
 Special values:
 
-- `31536000` (1 year) — effectively cached until the next deploy (deploys clear the ISR cache)
-- `0` — never cached, always rendered by the worker (equivalent to plain SSR for that path)
+- `31536000` (1 year): effectively cached until the next deploy, since deploys clear the ISR cache
+- `0`: never cached and always rendered by the worker, which is equivalent to plain SSR for that path
 
 ## Per-page revalidation (Pages mode)
 
@@ -72,13 +72,13 @@ When multiple sources set a revalidate TTL, the most specific wins:
 
 ## How revalidation works
 
-1. **First request** — no cache entry. The worker renders the page (blocking), the response is returned, and the result is written to KV in the background.
+1. **First request:** there is no cache entry yet. The worker renders the page, returns the response, and writes the result to KV in the background.
 
-2. **Subsequent requests (fresh)** — the cached response is served from the edge cache or KV. No worker call.
+2. **Subsequent requests (fresh):** the cached response is served from the edge cache or KV. No worker call is needed.
 
-3. **Subsequent requests (stale)** — the stale cached response is served immediately, and the worker re-renders in the background. The next request gets the fresh version.
+3. **Subsequent requests (stale):** the stale cached response is served immediately, and the worker re-renders in the background. The next request gets the fresh version.
 
-This means users never wait for a stale page to re-render — they always get an instant response.
+This means users never wait for a stale page to re-render. They always get an immediate response.
 
 ## Per-response TTL override
 
@@ -93,8 +93,8 @@ export const GET = defineHandler(async (c) => {
 });
 ```
 
-- `x-revalidate: 0` — skip caching for this response
-- `x-revalidate: 300` — cache for 5 minutes instead of the default
+- `x-revalidate: 0`: skip caching for this response
+- `x-revalidate: 300`: cache for 5 minutes instead of the default
 
 Only successful responses (2xx) are cached.
 

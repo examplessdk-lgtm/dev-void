@@ -12,6 +12,7 @@ const testOptions = {
 
 const pagesOptions: PagesCompileOptions = {
   pagesDir: "/project/pages",
+  pagesDirRelative: "pages",
   protocolPath: "/resolved/void/pages/protocol.mjs",
   headPath: "/resolved/void/pages/head.mjs",
   clientEntryId: "virtual:void-pages-client",
@@ -389,5 +390,7 @@ describe("compileRouteTable with pages", () => {
     expect(code).toContain("getPagesAssetTags");
     expect(code).toContain("loadPagesManifest");
     expect(code).toContain("getPagesDevClientTags");
+    expect(code).toContain("collectRouteCss");
+    expect(code).toContain("PAGE_CSS_KEYS");
   });
 });

@@ -56,7 +56,7 @@ Define custom response headers in [`void.json`](../../reference/config) using th
 
 ## Scope
 
-Header rules apply to **all responses** served through the dispatch worker — static assets, SSR pages, and API routes. They do not apply to:
+Header rules apply to **all responses** served through the dispatch worker, including static assets, SSR pages, and API routes. They do not apply to:
 
 - Hashed asset cache hits (these use immutable caching set by the dispatch worker itself)
 - ISR cache responses (these have their own cache-control headers)
@@ -66,7 +66,7 @@ Header rules apply to **all responses** served through the dispatch worker — s
 Meta-frameworks like SvelteKit, Nuxt, and Astro generate a `_headers` file with cache rules for their hashed asset directories. Void automatically parses this file during deploy and merges the rules into the deploy manifest.
 
 - Framework-generated rules are applied **before** `void.json` rules. Since the last match wins, `routing.headers` in `void.json` takes precedence and can override framework defaults.
-- The `_headers` file is not uploaded as a static asset — its contents are parsed and included in the manifest only.
+- The `_headers` file is not uploaded as a static asset. Its contents are parsed and included in the manifest only.
 
 No configuration is needed. If the framework generates a `_headers` file, it is picked up automatically.
 
@@ -76,4 +76,4 @@ No configuration is needed. If the framework generates a `_headers` file, it is 
 2. The platform stores the rules in the KV routing entry for your project.
 3. The dispatch worker applies matching rules to static responses before edge caching.
 
-Because rules are evaluated at the edge, there is no latency cost — headers are applied inline before the response is returned and cached.
+Because rules are evaluated at the edge, there is no extra latency cost. Headers are applied inline before the response is returned and cached.

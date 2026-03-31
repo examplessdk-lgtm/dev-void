@@ -165,11 +165,11 @@ export default function Layout(props: { children: JSX.Element }) {
 
 :::
 
-When a page renders, the layout wraps it — the page component is injected as the layout's children (React/Solid/Svelte) or slot (Vue):
+When a page renders, the layout wraps it. The page component is injected as the layout's children in React, Solid, and Svelte, or as a slot in Vue:
 
 <img src="./layout-nesting.svg" alt="Layout nesting diagram: pages/layout wraps pages/users/layout wraps pages/users/[id] page component" style="max-width: 520px; width: 100%;" />
 
-Layouts nest automatically and persist across navigations within their subtree — component state is preserved.
+Layouts nest automatically and persist across navigations within their subtree, so component state is preserved.
 
 ## Named Layouts
 
@@ -298,7 +298,7 @@ layout: "!landing"
 # Standalone Landing Page
 ```
 
-Only `_layouts/landing` wraps this page — the root layout is skipped entirely.
+Only `_layouts/landing` wraps this page, and the root layout is skipped entirely.
 
 ## Shared Data
 
@@ -321,7 +321,7 @@ export default defineMiddleware(async (c, next) => {
 });
 ```
 
-Access it on the client with `useShared()` — the return type is inferred from your augmentation:
+Access it on the client with `useShared()`. The return type is inferred from your augmentation:
 
 ::: code-group
 
@@ -359,4 +359,4 @@ export default function Page() {
 
 :::
 
-Shared data is separate from page props — props come from the loader, `useShared()` returns global data from middleware. See [Type Safety](../type-safety.md#context-variables) for more on augmenting `CloudContextVariables`.
+Shared data is separate from page props. Props come from the loader, while `useShared()` returns global data from middleware. See [Type Safety](../type-safety.md#context-variables) for more on augmenting `CloudContextVariables`.

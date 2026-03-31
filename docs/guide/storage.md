@@ -35,7 +35,7 @@ for (const obj of listed.objects) {
 const head = await storage.head("uploads/photo.jpg");
 ```
 
-The `storage` object is a full `R2Bucket` — every method from the [Cloudflare R2 API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/) is available with no wrapping or abstraction.
+The `storage` object is a full `R2Bucket`. Every method from the [Cloudflare R2 API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/) is available directly, with no wrapper layer.
 
 ## Serving Files
 
@@ -64,4 +64,4 @@ export const GET = defineHandler(async (c) => {
 
 Unlike the [database](./database.md) and [KV](./kv.md) clients, `storage` doesn't add any abstraction over the underlying API. The R2 API is already well-designed for direct use, so `storage` is simply a lazy reference to `env.STORAGE` that you can import without manually accessing bindings.
 
-The `createStorage()` factory exists for testing and for frameworks that manage their own routing — it accepts an `R2Bucket` and returns it directly.
+The `createStorage()` factory exists for testing and for frameworks that manage their own routing. It accepts an `R2Bucket` and returns it directly.

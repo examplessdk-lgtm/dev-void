@@ -96,6 +96,8 @@ export default defineConfig({
   clean: true,
   plugins: [stripUseAsmPlugin(), injectWorkersTypesReferencePlugin()],
   external: [
+    // This module is augmented by users, keep it as external so tsdown does not rewrite it.
+    "void/routes",
     "vite",
     "@cloudflare/vite-plugin",
     "better-sqlite3",

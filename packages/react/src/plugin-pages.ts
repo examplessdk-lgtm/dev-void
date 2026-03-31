@@ -138,8 +138,10 @@ ${generateComponentManifest(scan, pagesDir)}
 
 const PREAMBLE_SCRIPT = ${JSON.stringify(preambleScript)};
 
-function escapeAttr(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+function serializePageData(pageObj) {
+  return JSON.stringify(pageObj).replace(/[<>&\\u2028\\u2029]/g, function(c) {
+    return String.fromCharCode(92) + "u" + c.charCodeAt(0).toString(16).padStart(4, "0");
+  });
 }
 
 export async function renderPage(pageObj, assetTags) {
@@ -171,7 +173,7 @@ export async function renderPage(pageObj, assetTags) {
   );
 
   const html = renderToString(element);
-  const pageData = escapeAttr(JSON.stringify(pageObj));
+  const pageData = serializePageData(pageObj);
   const headHtml = pageObj.head ? renderHeadToString(pageObj.head) : "";
   const htmlAttrs = pageObj.head ? renderHtmlAttrs(pageObj.head) : "";
   const bodyAttrs = pageObj.head ? renderBodyAttrs(pageObj.head) : "";
@@ -180,7 +182,8 @@ export async function renderPage(pageObj, assetTags) {
 <html\${htmlAttrs}>
 <head>\${headHtml}\${PREAMBLE_SCRIPT}\${assetTags.css}\${assetTags.preloads}</head>
 <body\${bodyAttrs}>
-  <div id="app" data-page="\${pageData}">\${html}</div>
+  <script id="__VOID_PAGE_DATA__" type="application/json">\${pageData}</script>
+  <div id="app">\${html}</div>
   \${assetTags.body}
 </body>
 </html>\`;

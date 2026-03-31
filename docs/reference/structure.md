@@ -65,7 +65,7 @@ const voidItems = [
 
 ## Overview
 
-A Void app uses file-based conventions to define routes, pages, middleware, and more. All directories are optional — use only what you need.
+A Void app uses file-based conventions to define routes, pages, middleware, and more. All directories are optional, so you only need the pieces your app actually uses.
 
 <FileTree :items="items" />
 
@@ -89,7 +89,7 @@ Full-stack server-rendered pages with co-located data loading. Available with Vu
 
 <PagesFileTree />
 
-- **`.server.ts` files** export `loader` (GET data) and `action` (mutations) — paired with the page component of the same name
+- **`.server.ts` files** export `loader` for `GET` data and `action` for mutations, paired with the page component of the same name
 - **Layouts** nest automatically and persist across navigations
 - **Markdown** pages are supported with frontmatter
 
@@ -109,9 +109,9 @@ Each file exports a `defineMiddleware()` handler. Use middleware to set shared c
 
 <FileTree :items="dbItems" default-expanded />
 
-- `db/schema.ts` — your Drizzle table definitions (source of truth for DB types)
-- `db/schema/` — optional: split tables into separate files and re-export from `db/schema.ts`
-- `db/migrations/` — generated SQL migration files, applied in order on deploy
+- `db/schema.ts`: your Drizzle table definitions and the source of truth for DB types
+- `db/schema/`: optional. Split tables into separate files and re-export them from `db/schema.ts`
+- `db/migrations/`: generated SQL migration files, applied in order on deploy
 
 Generate schema with `void gen model` or write it by hand. Generate migrations with `void db generate`.
 
@@ -147,7 +147,7 @@ export default defineQueue(async (batch, env) => {
 
 ## `src/`
 
-Shared application code — components, utilities, types. This directory has no special convention; organize it however you like.
+Shared application code such as components, utilities, and types. This directory has no special convention, so organize it however you like.
 
 ## `public/`
 
@@ -161,14 +161,14 @@ Auto-generated directory (gitignored). Contains:
 
 ## Config Files
 
-| File                    | Purpose                                                                                                                                            |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `vite.config.ts`        | Vite configuration — must include `voidPlugin()`                                                                                                   |
-| `void.json`             | Optional Void config — [routing](/reference/config#routing), [inference](/reference/config#inference), [worker settings](/reference/config#worker) |
-| `tsconfig.json`         | TypeScript config — extends `.void/tsconfig.json` for auto-generated types                                                                         |
-| `.env`                  | Public environment variables (committed)                                                                                                           |
-| `.env.local`            | Secret variables for local dev (gitignored)                                                                                                        |
-| `.env.production`       | Public production variables (committed)                                                                                                            |
-| `.env.production.local` | Production secrets for local testing (gitignored)                                                                                                  |
+| File                    | Purpose                                                                                                                                                  |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vite.config.ts`        | Vite configuration. Must include `voidPlugin()`.                                                                                                         |
+| `void.json`             | Optional Void config for [routing](/reference/config#routing), [inference](/reference/config#inference), and [worker settings](/reference/config#worker) |
+| `tsconfig.json`         | TypeScript config. Extend `.void/tsconfig.json` for auto-generated types.                                                                                |
+| `.env`                  | Public environment variables (committed)                                                                                                                 |
+| `.env.local`            | Secret variables for local dev (gitignored)                                                                                                              |
+| `.env.production`       | Public production variables (committed)                                                                                                                  |
+| `.env.production.local` | Production secrets for local testing (gitignored)                                                                                                        |
 
 See [Environment Variables](/guide/env-vars) for the full env file loading order.

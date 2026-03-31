@@ -5,7 +5,7 @@ import type { Plugin } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 /** Imports that require CF bindings and are not available in Node.js mode. */
-export const CF_ONLY_IMPORTS = [
+export const CF_ONLY_IMPORTS: string[] = [
   "void/db",
   "void/kv",
   "void/auth",

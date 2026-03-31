@@ -39,7 +39,14 @@ import { scanWebSocketRoutesSync } from "../router/websocket";
 import { validateSsrEntry } from "../ssr/entry";
 import { scanPages } from "../pages/scan";
 import { collectPrerenderPaths, collectPrerenderPathsNode } from "../prerender";
-import { detectPreset, FRAMEWORK_PRESETS, type StaticPreset, type FrameworkPreset } from "./preset";
+import {
+  detectPreset,
+  FRAMEWORK_PRESETS,
+  formatProjectCommand,
+  resolveProjectCommand,
+  type StaticPreset,
+  type FrameworkPreset,
+} from "./preset";
 import {
   readConfig,
   resolveBindingNames,
@@ -197,6 +204,14 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
   const gitCommit = options?.skipBuild ? null : getGitCommit(root);
 
   if (preset) {
+    preset = {
+      ...preset,
+      buildCommand: resolveStaticBuildCommand(
+        preset,
+        voidConfig.inference?.build,
+        Boolean(options?.dir),
+      ),
+    };
     await runStaticDeploy(
       root,
       config,
@@ -211,6 +226,15 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
   } else {
     await runFullDeploy(root, config, client, undefined, options?.skipBuild, gitCommit);
   }
+}
+
+export function resolveStaticBuildCommand(
+  preset: StaticPreset,
+  buildOverride?: string,
+  hasExplicitDir = false,
+): string | null {
+  if (hasExplicitDir) return null;
+  return buildOverride ?? preset.buildCommand;
 }
 
 async function streamDeploy(
@@ -341,10 +365,13 @@ async function runFrameworkDeploy(
   const dialect = getDatabaseDialect(voidConfig);
 
   // 1. Build
+  const buildCmd = voidConfig.inference?.build ?? formatProjectCommand(root, fwPreset.buildCommand);
   if (!skipBuild) {
-    const buildCmd = voidConfig.inference?.build ?? fwPreset.buildCommand;
     log.step(`Building (${buildCmd})...`);
-    execSync(buildCmd, { cwd: root, stdio: "inherit" });
+    execSync(voidConfig.inference?.build ?? resolveProjectCommand(root, fwPreset.buildCommand), {
+      cwd: root,
+      stdio: "inherit",
+    });
   }
 
   // 2. Verify output paths
@@ -362,9 +389,7 @@ async function runFrameworkDeploy(
   const redirectRules: RedirectRule[] = [...(fwRedirectRules ?? []), ...(cfgRedirectRules ?? [])];
 
   if (!existsSync(workerDir)) {
-    log.error(
-      `Worker output not found at "${fwPreset.workerDir}". Run "${fwPreset.buildCommand}" first.`,
-    );
+    log.error(`Worker output not found at "${fwPreset.workerDir}". Run "${buildCmd}" first.`);
     process.exit(1);
   }
 
@@ -573,12 +598,10 @@ async function runFullDeploy(
 ): Promise<void> {
   // 3. Build (child process to avoid Vite API side effects on bundle output)
   if (!skipBuild) {
-    log.step("Building...");
-    const viteBin = fileURLToPath(
-      new URL("bin/vite.js", import.meta.resolve("vite/package.json")).href,
-    );
+    const buildCmd = formatProjectCommand(root, "vite build");
+    log.step(`Building (${buildCmd})...`);
     try {
-      execFileSync(process.execPath, [viteBin, "build"], { cwd: root, stdio: "inherit" });
+      execSync(resolveProjectCommand(root, "vite build"), { cwd: root, stdio: "inherit" });
     } catch (err: any) {
       process.exit(err.status ?? 1);
     }
@@ -586,7 +609,10 @@ async function runFullDeploy(
 
   // 4. Resolve build output paths from build artifacts (avoids re-resolving
   // Vite config in the main process — plugins only run once inside the build)
-  const distDir = resolveDistDir(root, fwPreset);
+  const frameworkBuildCmd = fwPreset
+    ? formatProjectCommand(root, fwPreset.buildCommand)
+    : undefined;
+  const distDir = resolveDistDir(root, fwPreset, frameworkBuildCmd);
 
   // Detect non-default assetsDir from Vite client manifest for _headers generation
   let assetsPrefix = "assets";
@@ -679,7 +705,7 @@ async function runFullDeploy(
       process.exit(1);
     }
   }
-  const workerDirName = resolveWorkerDirName(distDir, fwPreset);
+  const workerDirName = resolveWorkerDirName(distDir, fwPreset, frameworkBuildCmd);
 
   const schedules = scanJobsSync(root).flatMap((job) =>
     job.crons.map((cron) => ({
@@ -1137,7 +1163,11 @@ function loadDeployEnv(root: string): Record<string, string> {
  *
  * For non-framework (Void app) deploys, defaults to "dist".
  */
-export function resolveDistDir(root: string, fwPreset?: FrameworkPreset): string {
+export function resolveDistDir(
+  root: string,
+  fwPreset?: FrameworkPreset,
+  buildCommand?: string,
+): string {
   if (fwPreset) {
     // Derive the top-level build dir from the preset's workerDir
     // e.g. "build/server" → "build", "dist/ssr" → "dist"
@@ -1145,7 +1175,7 @@ export function resolveDistDir(root: string, fwPreset?: FrameworkPreset): string
     const distDir = join(root, topDir);
     if (!existsSync(distDir)) {
       throw new Error(
-        `Build output directory "${topDir}" not found. Run "${fwPreset.buildCommand}" first.`,
+        `Build output directory "${topDir}" not found. Run "${buildCommand ?? fwPreset.buildCommand}" first.`,
       );
     }
     return distDir;
@@ -1161,7 +1191,11 @@ export function resolveDistDir(root: string, fwPreset?: FrameworkPreset): string
  *
  * For non-framework (Void app) deploys, probes for known subdirectories.
  */
-export function resolveWorkerDirName(distDir: string, fwPreset?: FrameworkPreset): string {
+export function resolveWorkerDirName(
+  distDir: string,
+  fwPreset?: FrameworkPreset,
+  buildCommand?: string,
+): string {
   if (fwPreset) {
     // Derive the subdirectory from the preset's workerDir
     // e.g. "build/server" → "server", "dist/ssr" → "ssr"
@@ -1169,7 +1203,7 @@ export function resolveWorkerDirName(distDir: string, fwPreset?: FrameworkPreset
     const subDir = parts.slice(1).join("/");
     if (!existsSync(join(distDir, subDir))) {
       throw new Error(
-        `Worker output not found at "${fwPreset.workerDir}". Run "${fwPreset.buildCommand}" first.`,
+        `Worker output not found at "${fwPreset.workerDir}". Run "${buildCommand ?? fwPreset.buildCommand}" first.`,
       );
     }
     return subDir;

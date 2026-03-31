@@ -4,7 +4,7 @@ outline: deep
 
 # TanStack Start
 
-[TanStack Start](https://tanstack.com/start/latest) is a Vite-based full-stack React framework. `voidPlugin()` composes directly with the TanStack Start plugin in the Vite pipeline — no separate adapter needed.
+[TanStack Start](https://tanstack.com/start/latest) is a Vite-based full-stack React framework. `voidPlugin()` composes directly with the TanStack Start plugin in the Vite pipeline, so there is no separate adapter to install.
 
 ## Setup
 

@@ -4,7 +4,7 @@ outline: deep
 
 # AI
 
-Void provides a typed AI client powered by Cloudflare's [AI Gateway](https://developers.cloudflare.com/ai-gateway/), supporting both [Workers AI](https://developers.cloudflare.com/workers-ai/) models and third-party providers (OpenAI, Anthropic, Google, etc.) via bring-your-own-key. Import `ai` from `void/ai` and run inference models directly from your route handlers — all usage is metered via Void.
+Void provides a typed AI client powered by Cloudflare's [AI Gateway](https://developers.cloudflare.com/ai-gateway/). It supports both [Workers AI](https://developers.cloudflare.com/workers-ai/) models and third-party providers such as OpenAI, Anthropic, and Google through bring-your-own-key credentials. Import `ai` from `void/ai` and run inference directly from your route handlers. Usage is metered through Void.
 
 ```ts
 import { ai } from "void/ai";
@@ -29,11 +29,11 @@ export const POST = defineHandler(async (c) => {
 });
 ```
 
-You can use any model available on [Workers AI](https://developers.cloudflare.com/workers-ai/models/) — text generation, image classification, embeddings, translation, and more.
+You can use any model available on [Workers AI](https://developers.cloudflare.com/workers-ai/models/), including text generation, image classification, embeddings, translation, and more.
 
 ## Streaming
 
-Use `ai.stream()` to get a streaming response with SSE headers — ready to return directly from a route handler:
+Use `ai.stream()` to get a streaming response with SSE headers that you can return directly from a route handler:
 
 ```ts
 import { defineHandler } from "void";
@@ -73,11 +73,11 @@ const result = await ai.toMarkdown([{ name: "document.pdf", blob: pdfBytes }]);
 
 AI requires Void credentials for local development. Run `void auth login` and `void project link` (or follow the interactive setup during `vite dev`) to connect your project.
 
-Once linked, credentials are injected automatically as worker bindings — no manual configuration needed. All inference traffic routes through the Void AI proxy over HTTPS, so usage is tracked and metered the same way as in production.
+Once linked, credentials are injected automatically as worker bindings. You do not need to configure them by hand. All inference traffic goes through the Void AI proxy over HTTPS, so usage is tracked and metered the same way it is in production.
 
 ## Usage Limits
 
-Workers AI usage is metered in [**neurons**](https://developers.cloudflare.com/workers-ai/platform/pricing/) — Cloudflare's unit for inference cost. Usage resets at the start of each billing cycle.
+Workers AI usage is metered in [**neurons**](https://developers.cloudflare.com/workers-ai/platform/pricing/), which is Cloudflare's unit for inference cost. Usage resets at the start of each billing cycle.
 
 | Plan | Included      | At limit                           |
 | ---- | ------------- | ---------------------------------- |
@@ -89,7 +89,7 @@ On the **free tier**, AI requests return a `429` error once the limit is reached
 
 ## Third-Party Providers (BYOK)
 
-You can use models from OpenAI, Anthropic, Google, and other providers by passing a `provider/model` identifier. Bring your own API key — add it as a project secret, and Void handles the rest. Third-party inference is billed directly by the provider — Void does not mark up API calls. All requests still route through AI Gateway for usage tracking on the dashboard.
+You can use models from OpenAI, Anthropic, Google, and other providers by passing a `provider/model` identifier. Bring your own API key, add it as a project secret, and Void handles the rest. Third-party inference is billed directly by the provider, and Void does not mark up API calls. Requests still route through AI Gateway so usage shows up on the dashboard.
 
 ### Usage
 
@@ -111,7 +111,7 @@ export const POST = defineHandler(async (c) => {
 
 The same `ai.run()` and `ai.stream()` methods work for both Workers AI and third-party models. The framework detects the provider from the model string and routes the request through [AI Gateway](https://developers.cloudflare.com/ai-gateway/) automatically.
 
-The options follow each provider's conventions — all third-party providers use the OpenAI-compatible chat completions format (`messages`, `max_tokens`, `temperature`, etc.). TypeScript narrows the input and return types based on the model string: Workers AI models get per-model typed inputs from `@cloudflare/workers-types`, while third-party models (`"provider/model"`) get `ChatCompletionInputs` and `ChatCompletionResponse`.
+The options follow each provider's conventions. All third-party providers use the OpenAI-compatible chat completions format, including `messages`, `max_tokens`, and `temperature`. TypeScript narrows the input and return types based on the model string: Workers AI models get per-model typed inputs from `@cloudflare/workers-types`, while third-party models such as `"provider/model"` get `ChatCompletionInputs` and `ChatCompletionResponse`.
 
 ### Provider Key Convention
 
@@ -158,7 +158,7 @@ If the key is missing at runtime, `ai.run()` throws a descriptive error telling 
 
 ### Streaming with Third-Party Models
 
-`ai.stream()` works the same way — the response is always SSE regardless of provider:
+`ai.stream()` works the same way. The response is always SSE regardless of provider:
 
 ```ts
 export const POST = defineHandler(async (c) => {

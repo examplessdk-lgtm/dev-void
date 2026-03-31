@@ -138,17 +138,17 @@ This makes cookie-authenticated sockets work without re-parsing the session manu
 
 Both `defineRoom()` and `defineWebSocket()` support:
 
-- `onBeforeConnect(ctx)` — return a `Response` to reject the upgrade
-- `onConnect(ctx)` — runs after the socket is accepted
-- `onMessage(ctx, event)` — receives the validated client event
-- `onClose(ctx, details)` — receives `{ code, reason, wasClean }`
-- `onRequest(ctx)` — handles ordinary HTTP requests to the same path
+- `onBeforeConnect(ctx)`: return a `Response` to reject the upgrade
+- `onConnect(ctx)`: runs after the socket is accepted
+- `onMessage(ctx, event)`: receives the validated client event
+- `onClose(ctx, details)`: receives `{ code, reason, wasClean }`
+- `onRequest(ctx)`: handles ordinary HTTP requests to the same path
 
 Every hook receives a context with:
 
-- `ctx.id` — deterministic route instance id
-- `ctx.params` — matched route params
-- `ctx.user` — resolved auth user or `null`
+- `ctx.id`: deterministic route instance id
+- `ctx.params`: matched route params
+- `ctx.user`: resolved auth user or `null`
 - `ctx.request`
 - `ctx.env`
 - `ctx.storage`

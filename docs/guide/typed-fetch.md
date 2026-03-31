@@ -11,10 +11,10 @@ Void ships a typed `fetch` client that knows every route in your app. Import it 
 ```ts
 import { fetch } from "void/client";
 
-// GET — return type inferred from your handler
+// GET: return type inferred from your handler
 const users = await fetch("/api/users");
 
-// POST — body type-checked against your handler's validator
+// POST: body type-checked against your handler's validator
 await fetch("/api/users", {
   method: "POST",
   body: { name: "Alice", email: "alice@example.com" },
@@ -26,16 +26,16 @@ const user = await fetch("/api/users/:id", {
 });
 ```
 
-No type annotations needed — everything is inferred from your route handlers.
+No type annotations needed. Everything is inferred from your route handlers.
 
 ## What Gets Type-Checked
 
 The client constrains every part of the request:
 
-- **Paths** — only routes defined in `routes/` are accepted. Typos are compile-time errors.
-- **Methods** — only methods exported from the route file are allowed. If a file only exports `GET`, passing `method: "POST"` is an error.
-- **Body, query, params** — when your handler uses [`defineHandler.withValidator()`](./server-routing.md#validation), the validator schemas become the input types. The client enforces them at the call site.
-- **Response type** — the return type matches what your handler returns, after [JSON serialization](./type-safety.md#serialization).
+- **Paths:** only routes defined in `routes/` are accepted. Typos fail at compile time.
+- **Methods:** only methods exported from the route file are allowed. If a file only exports `GET`, passing `method: "POST"` is an error.
+- **Body, query, params:** when your handler uses [`defineHandler.withValidator()`](./server-routing.md#validation), validator schemas become the input types and the client enforces them at the call site.
+- **Response type:** the return type matches what your handler returns after [JSON serialization](./type-safety.md#serialization).
 
 ## Query Parameters
 
@@ -49,7 +49,7 @@ export const GET = defineHandler.withValidator({
   return { results: [], term: query.q };
 });
 
-// Client — query is type-checked
+// Client: query is type-checked
 const data = await fetch("/api/search", {
   query: { q: "hello" },
 });
@@ -90,7 +90,7 @@ try {
 
 ## Isomorphic Fetch During SSR
 
-`fetch()` from `void/client` works seamlessly during server-side rendering and inside route handlers — no HTTP round-trip is needed. In the worker environment, `fetch()` calls your Hono app directly via `app.fetch()`, skipping the network entirely.
+`fetch()` from `void/client` works during server-side rendering and inside route handlers without an HTTP round-trip. In the worker environment, it calls your Hono app directly through `app.fetch()` and skips the network entirely.
 
 ```ts
 // src/main.ssr.tsx
@@ -98,7 +98,7 @@ import { fetch } from "void/client";
 import { defineRender } from "void";
 
 export default defineRender(async (c, assetTags) => {
-  // This calls your API route directly — no HTTP request
+  // This calls your API route directly with no HTTP request
   const data = await fetch("/api/users");
 
   const html = renderToString(<App users={data} />);

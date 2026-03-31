@@ -19,6 +19,8 @@ npm install -D void
 npx void init
 ```
 
+The full interactive `void init` flow can scaffold a starter, configure local project files, log you in, and link or create your Void project so the next step is just `npx void deploy`.
+
 ```ts
 // vite.config.ts
 import { defineConfig } from "vite";

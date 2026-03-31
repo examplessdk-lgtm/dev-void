@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveDistDir, resolveWorkerDirName } from "../../src/cli/deploy";
+import {
+  resolveDistDir,
+  resolveStaticBuildCommand,
+  resolveWorkerDirName,
+} from "../../src/cli/deploy";
 import { FRAMEWORK_PRESETS } from "../../src/cli/preset";
 import {
   getRequestedProjectSlug,
@@ -133,6 +137,44 @@ describe("resolveDistDir", () => {
       'Build output directory "build" not found',
     );
   });
+
+  it("uses the resolved build command in framework error messages", () => {
+    const root = mkdtempSync(join(tmpdir(), "void-test-"));
+    tempDirs.push(root);
+
+    expect(() => resolveDistDir(root, FRAMEWORK_PRESETS.sveltekit, "vp build")).toThrow(
+      'Run "vp build" first.',
+    );
+  });
+});
+
+describe("resolveStaticBuildCommand", () => {
+  it("uses inference.build when provided", () => {
+    expect(
+      resolveStaticBuildCommand(
+        {
+          buildCommand: "vite build",
+          outputDir: "/tmp/dist",
+          appType: "static",
+        },
+        "pnpm build",
+      ),
+    ).toBe("pnpm build");
+  });
+
+  it("keeps explicit --dir deploys buildless even when inference.build is set", () => {
+    expect(
+      resolveStaticBuildCommand(
+        {
+          buildCommand: null,
+          outputDir: "/tmp/dist",
+          appType: "static",
+        },
+        "pnpm build",
+        true,
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("resolveWorkerDirName", () => {
@@ -178,6 +220,17 @@ describe("resolveWorkerDirName", () => {
 
     expect(() => resolveWorkerDirName(buildDir, FRAMEWORK_PRESETS["react-router"])).toThrow(
       'Worker output not found at "build/server"',
+    );
+  });
+
+  it("uses the resolved build command when worker output is missing", () => {
+    const root = mkdtempSync(join(tmpdir(), "void-test-"));
+    tempDirs.push(root);
+    const dist = join(root, "dist");
+    mkdirSync(dist, { recursive: true });
+
+    expect(() => resolveWorkerDirName(dist, FRAMEWORK_PRESETS.sveltekit, "vp build")).toThrow(
+      'Run "vp build" first.',
     );
   });
 

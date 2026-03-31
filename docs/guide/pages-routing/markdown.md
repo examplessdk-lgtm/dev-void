@@ -140,9 +140,9 @@ Welcome to Void. Here's an interactive demo:
 <Counter />
 ```
 
-- **`<script>` block** — extracted before markdown compilation. Island imports use `with { island: "..." }` syntax (see [islands](./islands)). Any other code in the block becomes a [client script](#client-scripts) that runs in the browser.
-- **Frontmatter** — YAML metadata between `---` fences. Accessible in layouts via [`useFrontmatter()`](#frontmatter-access).
-- **Body** — standard markdown + GFM. Uppercase tags (`<Counter />`) reference imported components and render as islands.
+- **`<script>` block:** extracted before markdown compilation. Island imports use `with { island: "..." }` syntax (see [islands](./islands)). Any other code in the block becomes a [client script](#client-scripts) that runs in the browser.
+- **Frontmatter:** YAML metadata between `---` fences. Layouts can read it through [`useFrontmatter()`](#frontmatter-access).
+- **Body:** standard markdown plus GFM. Uppercase tags such as `<Counter />` reference imported components and render as islands.
 
 ## Client Scripts
 
@@ -165,8 +165,8 @@ Published: <span class="date"></span>
 
 In this example:
 
-- `Counter` is an island — SSR'd and hydrated on the client
-- `date-fns` and the `querySelector` call are client code — bundled and run on page load
+- `Counter` is an island, so it is SSR'd and hydrated on the client
+- `date-fns` and the `querySelector` call are client code, so they are bundled and run on page load
 
 Each page's client script is code-split into its own chunk via dynamic import, so only the current page's script is loaded. Pages without client code ship zero extra JS.
 
@@ -178,7 +178,7 @@ Markdown pages live in `pages/` alongside regular pages and route the same way:
 
 <FileTree :items="mdFileItems" adapter-tabs default-expanded />
 
-A `.md` file inherits layouts, supports companion `.server.ts` files for dynamic data, and [auto-prerenders](/guide/edge/prerendering) when static — the same rules as any other page.
+A `.md` file inherits layouts, supports companion `.server.ts` files for dynamic data, and [auto-prerenders](/guide/edge/prerendering) when static. The rules are the same as any other page.
 
 ## Frontmatter Access
 
@@ -269,7 +269,7 @@ The markdown plugin provides a minimal default theme. Unlike Vitepress, this the
 
 ### Full theme (reset + baseline + content)
 
-For standalone markdown sites that need a complete stylesheet — includes a modern CSS reset, baseline body styles, and all markdown content styles:
+For standalone markdown sites that need a complete stylesheet, use this package. It includes a modern CSS reset, baseline body styles, and all markdown content styles:
 
 ```css
 @import "@void/md/theme.css";
@@ -277,7 +277,7 @@ For standalone markdown sites that need a complete stylesheet — includes a mod
 
 ### Content only (scoped to `.void-md`)
 
-For embedding markdown in an existing app that already has its own reset and global styles — only includes the `.void-md`-scoped content styles:
+For embedding markdown in an existing app that already has its own reset and global styles, use this one. It only includes the `.void-md`-scoped content styles:
 
 ```css
 @import "@void/md/theme-content.css";
@@ -295,10 +295,10 @@ Wrap your markdown content in a `.void-md` element to scope the styles:
 
 The theme covers:
 
-- **Prose** — headings, paragraphs, lists, blockquotes, tables, inline code, links, horizontal rules, task lists, `<kbd>`, `<mark>`, definition lists, footnotes. Dark mode via `prefers-color-scheme` and `data-theme` attribute.
-- **Code blocks** — Shiki dual-theme highlighting (light/dark), CSS-driven switching, zero JS.
-- **Containers** — `:::tip`, `:::warning`, `:::danger`, `:::info`, `:::details` styles.
-- **GitHub alerts** — `> [!NOTE]`, `> [!TIP]`, `> [!WARNING]`, etc.
+- **Prose:** headings, paragraphs, lists, blockquotes, tables, inline code, links, horizontal rules, task lists, `<kbd>`, `<mark>`, definition lists, and footnotes. Dark mode works through `prefers-color-scheme` and the `data-theme` attribute.
+- **Code blocks:** Shiki dual-theme highlighting with CSS-driven switching and zero JS.
+- **Containers:** styles for `:::tip`, `:::warning`, `:::danger`, `:::info`, and `:::details`.
+- **GitHub alerts:** support for `> [!NOTE]`, `> [!TIP]`, `> [!WARNING]`, and similar syntax.
 
 ### CSS Variables
 
@@ -313,15 +313,15 @@ All styles are customizable via CSS variables set on `.void-md`. Override them t
 
 | Variable            | Light default                                                                  | Dark default | Description                                                            |
 | ------------------- | ------------------------------------------------------------------------------ | ------------ | ---------------------------------------------------------------------- |
-| `--vmd-font-body`   | `system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`                     | —            | Body font stack                                                        |
-| `--vmd-font-mono`   | `ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace` | —            | Monospace font stack                                                   |
+| `--vmd-font-body`   | `system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`                     | default      | Body font stack                                                        |
+| `--vmd-font-mono`   | `ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace` | default      | Monospace font stack                                                   |
 | `--vmd-text`        | `#1a1a2e`                                                                      | `#e2e8f0`    | Primary text color                                                     |
 | `--vmd-text-muted`  | `#64748b`                                                                      | `#94a3b8`    | Secondary/muted text (blockquotes, line numbers, footnotes)            |
 | `--vmd-link`        | `#2563eb`                                                                      | `#60a5fa`    | Link color                                                             |
 | `--vmd-link-hover`  | `#1d4ed8`                                                                      | `#93bbfd`    | Link hover color                                                       |
 | `--vmd-border`      | `#e2e8f0`                                                                      | `#334155`    | Borders (h2 underline, tables, inline code, `<kbd>`, horizontal rules) |
 | `--vmd-bg-soft`     | `#f8fafc`                                                                      | `#1e293b`    | Soft background (table headers, inline code, code blocks, `<kbd>`)     |
-| `--vmd-line-height` | `1.75`                                                                         | —            | Body line height                                                       |
+| `--vmd-line-height` | `1.75`                                                                         | default      | Body line height                                                       |
 
 Dark mode values apply automatically via `prefers-color-scheme: dark` (auto mode) and `[data-theme="dark"]` (explicit toggle). To force light mode on a dark-preference system, set `data-theme="light"` on `<html>`.
 
@@ -378,7 +378,7 @@ Custom titles work too: `::: tip Pro Tip`.
 
 ### Syntax Highlighting
 
-Code blocks are highlighted at build time via [Shiki](https://shiki.style) with dual light/dark themes (default: `github-light` / `github-dark`). No client-side JavaScript is needed — theme switching is pure CSS.
+Code blocks are highlighted at build time with [Shiki](https://shiki.style) using dual light and dark themes by default: `github-light` and `github-dark`. No client-side JavaScript is needed because theme switching is pure CSS.
 
 ### Line Highlighting
 
@@ -410,7 +410,7 @@ export function hello() {
 
 ### Copy Button
 
-Code blocks include a copy button (the only feature requiring client JS — a ~200 byte inline script for the clipboard API). It is injected only when code blocks are present.
+Code blocks include a copy button. That is the only feature here that needs client-side JS, and it only adds a roughly 200 byte inline script for the clipboard API. The script is injected only when code blocks are present.
 
 ### Line Numbers
 

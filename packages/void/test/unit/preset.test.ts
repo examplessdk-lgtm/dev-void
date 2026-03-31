@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { detectPreset } from "../../src/cli/preset";
+import { detectPreset, formatProjectCommand, resolveProjectCommand } from "../../src/cli/preset";
 
 const TMP = join(import.meta.dirname, ".tmp-preset");
 
@@ -148,6 +148,34 @@ describe("detectPreset", () => {
     });
   });
 
+  it("prefers the project build script for plain Vite SPAs", () => {
+    const root = setupProject({
+      pkg: {
+        dependencies: { vite: "^6.0.0" },
+        scripts: { build: "vite build && node scripts/postbuild.js" },
+      },
+      files: { "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" },
+    });
+    const result = detectPreset(root);
+    expect(result).toEqual({
+      buildCommand: "pnpm build",
+      outputDir: resolve(root, "dist"),
+      appType: "spa",
+    });
+  });
+
+  it("detects Vite+ SPA (no backend files)", () => {
+    const root = setupProject({
+      pkg: { devDependencies: { "vite-plus": "^1.0.0" } },
+    });
+    const result = detectPreset(root);
+    expect(result).toEqual({
+      buildCommand: "vp build",
+      outputDir: resolve(root, "dist"),
+      appType: "spa",
+    });
+  });
+
   it("detects pre-built dist/index.html as static", () => {
     const root = setupProject({
       files: { "dist/index.html": "<html></html>" },
@@ -178,5 +206,37 @@ describe("detectPreset", () => {
     });
     const result = detectPreset(root);
     expect(result).toBeNull();
+  });
+});
+
+describe("project Vite commands", () => {
+  it("formats Vite commands with vp when Vite+ is installed", () => {
+    const root = setupProject({
+      pkg: { devDependencies: { "vite-plus": "^1.0.0" } },
+    });
+
+    expect(formatProjectCommand(root, "vite dev")).toBe("vp dev");
+    expect(formatProjectCommand(root, "vite build")).toBe("vp build");
+    expect(formatProjectCommand(root, "vite preview")).toBe("vp preview");
+  });
+
+  it("resolves Vite+ commands to the local vp binary", () => {
+    const root = setupProject({
+      pkg: { devDependencies: { "vite-plus": "^1.0.0" } },
+      files: { "node_modules/.bin/vp": "" },
+    });
+
+    expect(resolveProjectCommand(root, "vite build")).toBe(
+      `${join(root, "node_modules", ".bin", "vp")} build`,
+    );
+  });
+
+  it("keeps plain Vite commands unchanged", () => {
+    const root = setupProject({
+      pkg: { devDependencies: { vite: "^6.0.0" } },
+    });
+
+    expect(formatProjectCommand(root, "vite dev")).toBe("vite dev");
+    expect(resolveProjectCommand(root, "vite build")).toBe("vite build");
   });
 });

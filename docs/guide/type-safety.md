@@ -4,16 +4,16 @@ outline: deep
 
 # Type Safety
 
-Void provides end-to-end type safety across your entire stack. Types are derived from your source code and Drizzle schema — nothing is manually written or duplicated.
+Void provides end-to-end type safety across the stack. Types come from your source code and Drizzle schema, so you are not hand-writing or duplicating interfaces.
 
 ## The Type Pipeline
 
 <img src="./type-pipeline.svg" alt="Type pipeline: Drizzle schema flows to DB types, branching into route handlers (typed fetch), page loaders (component props), and page actions (useForm / action())" style="max-width: 720px; width: 100%;" />
 
 1. **Database types** come from your [Drizzle schema](./database.md#schema-definition). Column types are known at compile time.
-2. **Route handlers** — return types and validator schemas become the generated `RouteMap`, consumed by the [typed fetch](./typed-fetch) client.
-3. **Page loaders** — return types flow into page components as props via `InferProps`.
-4. **Page actions** — validator schemas flow into `useForm` and `action()` for typed data, errors, and URL autocomplete.
+2. **Route handlers:** return types and validator schemas become the generated `RouteMap`, which the [typed fetch](./typed-fetch) client consumes.
+3. **Page loaders:** return types flow into page components as props via `InferProps`.
+4. **Page actions:** validator schemas flow into `useForm` and `action()` for typed data, errors, and URL autocomplete.
 
 All generated types live in `.void/` and update automatically when source files or schema change.
 
@@ -36,7 +36,7 @@ export const POST = defineHandler.withValidator({
 ```
 
 ```ts
-// Client — types inferred from handlers above
+// Client: types inferred from handlers above
 const users = await fetch("/api/users");
 //    ↑ { name: string; email: string }[]
 
@@ -69,11 +69,11 @@ defineProps<Props>(); // ← { users: { id: number; name: string; ... }[] }
 </script>
 ```
 
-No manual interface needed — props stay in sync with whatever the loader returns.
+No manual interface is needed. Props stay in sync with whatever the loader returns.
 
 ## Action → useForm
 
-When a page action uses `withValidator()`, the body schema flows through to `useForm` — typed `data`, typed `errors` keys, and URL autocomplete:
+When a page action uses `withValidator()`, the body schema flows through to `useForm`. That gives you typed `data`, typed `errors` keys, and URL autocomplete:
 
 ```ts
 // pages/users/create.server.ts
@@ -92,7 +92,7 @@ form.errors.email; // ✓ string | undefined
 form.errors.foo; // ✗ TypeScript error
 ```
 
-[Named actions](./pages-routing/actions-and-forms#named-actions) get the same treatment — the `?actionName` suffix selects per-action types:
+[Named actions](./pages-routing/actions-and-forms#named-actions) work the same way. The `?actionName` suffix selects the right types for that action:
 
 ```ts
 const updateForm = useForm("/users/:id?update", { name: "" }, { params: { id } });
@@ -142,7 +142,7 @@ export default defineMiddleware(async (c, next) => {
 });
 ```
 
-Now `c.get("requestId")` returns `string` everywhere — no assertions needed. Multiple augmentations across files are [merged together](https://www.typescriptlang.org/docs/handbook/declaration-merging.html).
+Now `c.get("requestId")` returns `string` everywhere, with no assertion needed. Multiple augmentations across files are [merged together](https://www.typescriptlang.org/docs/handbook/declaration-merging.html).
 
 ## Setup
 

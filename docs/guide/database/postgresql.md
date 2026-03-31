@@ -4,13 +4,13 @@ outline: deep
 
 # PostgreSQL
 
-Void supports PostgreSQL via [Cloudflare Hyperdrive](https://developers.cloudflare.com/hyperdrive/). Bring your own Postgres database — Void handles connection pooling and deployment wiring through the same Drizzle-based workflow as D1.
+Void supports PostgreSQL via [Cloudflare Hyperdrive](https://developers.cloudflare.com/hyperdrive/). You bring the Postgres database, and Void handles connection pooling plus deployment wiring through the same Drizzle-based workflow used for D1.
 
 ## What is Hyperdrive?
 
 Hyperdrive is Cloudflare's connection pooling and caching layer for PostgreSQL. It maintains persistent connections from the edge to your database, dramatically reducing connection latency. Instead of establishing a new TCP + TLS connection on every request, your Worker reuses pooled connections through Hyperdrive.
 
-Void manages the Hyperdrive configuration automatically — you just provide a connection string.
+Void manages the Hyperdrive configuration automatically. You only provide the connection string.
 
 ## Configuration
 
@@ -43,7 +43,7 @@ Your project uses PostgreSQL. Enter your connection string:
 > postgres://user:password@host:5432/mydb
 ```
 
-Void provisions a Hyperdrive configuration and stores only the config ID — your connection string is passed directly to Cloudflare's API and is never stored by Void.
+Void provisions a Hyperdrive configuration and stores only the config ID. Your connection string is sent directly to Cloudflare's API and is never stored by Void.
 
 You can also set the connection string ahead of time with `void db set-url`.
 
@@ -83,7 +83,7 @@ void db migrate
 void db status
 ```
 
-The key difference is that PostgreSQL supports **transactional DDL** — each migration is wrapped in `BEGIN`/`COMMIT`, so a failed migration is fully rolled back rather than leaving the database in a partial state.
+The main difference is that PostgreSQL supports **transactional DDL**. Each migration is wrapped in `BEGIN` and `COMMIT`, so a failure rolls back the whole migration instead of leaving the database half-updated.
 
 ## Deploy Workflow
 

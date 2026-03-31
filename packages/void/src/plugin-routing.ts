@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { readConfig, getDatabaseDialect } from "./config";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnv, type Plugin } from "vite";
 import { scanRoutes, type ScanResult } from "./router/scan";
@@ -205,6 +205,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         : undefined;
     return {
       pagesDir,
+      pagesDirRelative: relative(root, pagesDir).replaceAll("\\", "/"),
       protocolPath: resolveFile("void/pages-protocol"),
       headPath: resolveFile("void/pages-head"),
       clientEntryId: "virtual:void-pages-client",
@@ -246,6 +247,23 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       );
     },
     config(_, env) {
+      if (env.command === "serve" && options.isAuthEnabled()) {
+        // Alias better-auth client subpaths to absolute file paths so
+        // Vite can resolve them during SSR without the bare specifiers
+        // needing to be hoisted into the user's node_modules (pnpm
+        // strict mode). Without this, Vite discovers them lazily on
+        // first auth page load, triggering a disruptive program reload.
+        const betterAuthSubpaths = ["client", "react", "vue", "svelte", "solid"];
+        const resolvedAliases = betterAuthSubpaths.flatMap((sub) => {
+          try {
+            return [{ find: `better-auth/${sub}`, replacement: resolveFile(`better-auth/${sub}`) }];
+          } catch {
+            return [];
+          }
+        });
+        return { resolve: { alias: resolvedAliases } };
+      }
+
       const entries = validateSsrEntries(root);
       if (!entries || env.command !== "build") return;
 

@@ -33,11 +33,11 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "@sveltejs/vite-plugin-svelte": "^6.2.4"
+    "@sveltejs/vite-plugin-svelte": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "svelte": "^5.53.2",
+    "svelte": "^5.55.0",
     "tsdown": "catalog:",
     "vite": "catalog:",
     "void": "workspace:*"

@@ -180,8 +180,13 @@ import { renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from "void/pages
 
 ${generateComponentManifest(scan, pagesDir)}
 
-function escapeAttr(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+function serializePageData(pageObj) {
+  return JSON.stringify(pageObj)
+    .replaceAll("<", "\\u003c")
+    .replaceAll(">", "\\u003e")
+    .replaceAll("&", "\\u0026")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
 }
 
 function patchProps(comp, props) {
@@ -215,7 +220,7 @@ export async function renderPage(pageObj, assetTags) {
   });
 
   const html = await renderToString(app);
-  const pageData = escapeAttr(JSON.stringify(pageObj));
+  const pageData = serializePageData(pageObj);
   const headHtml = pageObj.head ? renderHeadToString(pageObj.head) : "";
   const htmlAttrs = pageObj.head ? renderHtmlAttrs(pageObj.head) : "";
   const bodyAttrs = pageObj.head ? renderBodyAttrs(pageObj.head) : "";
@@ -224,7 +229,8 @@ export async function renderPage(pageObj, assetTags) {
 <html\${htmlAttrs}>
 <head>\${headHtml}\${assetTags.css}\${assetTags.preloads}</head>
 <body\${bodyAttrs}>
-  <div id="app" data-page="\${pageData}">\${html}</div>
+  <script id="__VOID_PAGE_DATA__" type="application/json">\${pageData}</script>
+  <div id="app">\${html}</div>
   \${assetTags.body}
 </body>
 </html>\`;

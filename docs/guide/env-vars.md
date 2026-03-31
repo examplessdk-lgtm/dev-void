@@ -39,6 +39,6 @@ To push local secrets to production, use [`void secret sync`](../reference/cli#v
 
 **Dev** (`vite dev`): All `.env` files are loaded, including `.env.local` and `.env.production.local`. Secrets are available locally via `c.env`.
 
-**Deploy** (`void deploy`): Only `.env` and `.env.production` are included in the deploy manifest as `plain_text` bindings. `.local` files (`.env.local`, `.env.production.local`) are excluded — they are for local secrets only.
+**Deploy** (`void deploy`): only `.env` and `.env.production` are included in the deploy manifest as `plain_text` bindings. `.local` files such as `.env.local` and `.env.production.local` are excluded because they are meant for local secrets only.
 
 **Production secrets**: Use [`void secret put`](../reference/cli#void-secret-put) or [`void secret sync`](../reference/cli#void-secret-sync) to set secret bindings on your deployed worker. These are stored as encrypted `secret_text` bindings, not plain text.

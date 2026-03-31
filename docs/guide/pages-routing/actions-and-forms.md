@@ -31,7 +31,7 @@ export const action = defineHandler.withValidator({
 
 ## Named Actions
 
-When a page needs multiple mutations — for example, updating and deleting a user on the same page — export `actions` (plural) instead of `action`:
+When a page needs multiple mutations, such as updating and deleting a user on the same page, export `actions` (plural) instead of `action`:
 
 ```ts
 // pages/users/edit.server.ts
@@ -75,7 +75,7 @@ export const actions = {
 
 ## `useForm`
 
-`useForm` handles form submissions, loading state, and validation errors. It is **fully typed end-to-end** — the URL autocompletes to pages that have an action, `form.data` is typed to match the action's validator schema, and `form.errors` keys are constrained to the body's field names. No manual type annotations needed.
+`useForm` handles form submissions, loading state, and validation errors. It is **fully typed end to end**. The URL autocompletes to pages that have an action, `form.data` matches the action validator schema, and `form.errors` keys are constrained to the body field names.
 
 First, define the action in your server handler:
 
@@ -201,7 +201,7 @@ export default function CreateUser() {
 
 :::
 
-The types are inferred from your action's `withValidator()` schema in the companion `.server.ts` file. If no validator is defined, the body type falls back to `Record<string, unknown>` — you still get URL autocomplete either way.
+The types are inferred from your action's `withValidator()` schema in the companion `.server.ts` file. If no validator is defined, the body type falls back to `Record<string, unknown>`, and you still get URL autocomplete.
 
 ### `useForm` API
 
@@ -236,11 +236,11 @@ const form = useForm("/users/:id?update", { name: "" }, { params: { id } });
 form.put(); // submits to /users/42?update
 ```
 
-The URL, body fields, and error keys are all typed per-action — each named action gets its own validator schema. See [Type Safety — Action → useForm](../type-safety#action-useform) for the full typing story.
+The URL, body fields, and error keys are typed per action. Each named action gets its own validator schema. See [Type Safety: Action -> useForm](../type-safety#action-useform) for the full typing story.
 
 ## `action()` Helper
 
-For one-shot mutations that don't need form state (dirty tracking, reset, field-level errors), use `action()` instead of `useForm`. It sends a request to a page action and triggers an Inertia page update, just like `useForm` — but without the reactive form object:
+For one-shot mutations that do not need form state such as dirty tracking, reset, or field-level errors, use `action()` instead of `useForm`. It sends a request to a page action and triggers an Inertia page update, just like `useForm`, but without the reactive form object:
 
 ```ts
 import { useForm, action } from "@void/react"; // or "@void/vue", "@void/svelte", "@void/solid"
@@ -252,11 +252,11 @@ const form = useForm("/?create-user", { name: "", email: "" });
 await action("/?delete-user", { id: 42 });
 ```
 
-`action()` is useful in event handlers — button clicks, confirmation dialogs, or anywhere you want to call a server action without managing form state.
+`action()` is useful in event handlers such as button clicks, confirmation dialogs, or any place where you want to call a server action without managing form state.
 
 ## Validation Errors
 
-When an action throws a `ValidationError` (or validation fails via `withValidator`), the errors are automatically available on `form.errors` — no manual error handling needed.
+When an action throws a `ValidationError`, or validation fails through `withValidator`, the errors are automatically available on `form.errors`. You do not need to wire that up manually.
 
 Actions can throw `ValidationError` for custom validation logic:
 
@@ -272,11 +272,11 @@ export const action = defineHandler(async (c) => {
 });
 ```
 
-Or use `withValidator()` for automatic schema-based validation — errors are returned in the same format.
+Or use `withValidator()` for automatic schema-based validation. Errors are returned in the same format.
 
 ## File Uploads
 
-`useForm` automatically detects `File`, `Blob`, and `FileList` values in form data and sends the request as `multipart/form-data` instead of JSON. No configuration needed — just set a file on the form data and submit.
+`useForm` automatically detects `File`, `Blob`, and `FileList` values in form data and sends the request as `multipart/form-data` instead of JSON. No extra configuration is needed. Set a file on the form data and submit.
 
 ::: code-group
 

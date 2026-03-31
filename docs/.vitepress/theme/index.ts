@@ -9,6 +9,7 @@ import "virtual:group-icons.css";
 import "./styles.css";
 import CodeGroupSync from "./CodeGroupSync.vue";
 import DocFooter from "./DocFooter.vue";
+import AlphaBanner from "./AlphaBanner.vue";
 
 import logoDark from "./void-dark.svg";
 import logoLight from "./void-light.svg";
@@ -59,6 +60,7 @@ export default {
   extends: BaseTheme,
   Layout() {
     return h(BaseTheme.Layout, null, {
+      "doc-before": () => h(AlphaBanner),
       "aside-ads-before": () => h(AsideCredit),
       "layout-bottom": () => [h(DocFooter), h(CodeGroupSync)],
     });

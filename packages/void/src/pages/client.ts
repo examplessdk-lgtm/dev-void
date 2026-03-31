@@ -55,6 +55,8 @@ export interface PageRouterConfig {
   prefetchDefaultCacheFor: CacheForResult;
 }
 
+const PAGE_DATA_SCRIPT_ID = "__VOID_PAGE_DATA__";
+
 // --- Form utilities ---
 
 export function isFile(value: unknown): boolean {
@@ -130,6 +132,20 @@ export async function createPageRouter(config: PageRouterConfig): Promise<{
   } = config;
 
   const _prefetchCache = new PrefetchCache();
+
+  function readInitialPageData(appEl: HTMLElement): any {
+    const scriptEl = document.getElementById(PAGE_DATA_SCRIPT_ID);
+    if (scriptEl?.textContent) {
+      return JSON.parse(scriptEl.textContent);
+    }
+
+    const legacyData = appEl.getAttribute("data-page");
+    if (legacyData) {
+      return JSON.parse(legacyData);
+    }
+
+    throw new Error("Missing initial page payload");
+  }
 
   async function resolveComponent(id: string) {
     const loader = components[id];
@@ -506,7 +522,7 @@ export async function createPageRouter(config: PageRouterConfig): Promise<{
   // --- Initialization ---
 
   const appEl = document.getElementById("app")!;
-  const initialPageData = JSON.parse(appEl.getAttribute("data-page")!);
+  const initialPageData = readInitialPageData(appEl);
 
   const [initialComponent, initialLayouts] = await Promise.all([
     resolveComponent(initialPageData.component),

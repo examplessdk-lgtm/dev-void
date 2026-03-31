@@ -45,7 +45,7 @@ function mixedItems(ext) {
 
 # Islands
 
-Islands mode is a partial hydration architecture inspired by [Astro](https://docs.astro.build/en/concepts/islands/). Instead of hydrating the entire page on the client, only the interactive components — "islands" — ship JavaScript to the browser. The rest of the page stays as static, server-rendered HTML.
+Islands mode is a partial hydration architecture inspired by [Astro](https://docs.astro.build/en/concepts/islands/). Instead of hydrating the whole page on the client, only the interactive components, or "islands," ship JavaScript to the browser. The rest of the page stays as static server-rendered HTML.
 
 This gives you the best of both worlds: fast initial page loads with minimal client-side JavaScript, plus rich interactivity exactly where you need it.
 
@@ -57,9 +57,9 @@ Islands mode builds on top of [Pages Routing](./overview). You need a working Pa
 
 Islands mode is a good fit when:
 
-- **Most of your page is static content** — blog posts, marketing pages, documentation
-- **Only a few components need interactivity** — a counter, a form, a live widget
-- **Performance is critical** — you want near-zero JavaScript for static content
+- **Most of your page is static content:** blog posts, marketing pages, or documentation
+- **Only a few components need interactivity:** a counter, a form, or a live widget
+- **Performance is critical:** you want near-zero JavaScript for static content
 
 If your entire page is interactive (dashboards, apps with lots of client state), stick with regular [Pages Routing](./overview).
 
@@ -73,8 +73,8 @@ The `.island` suffix tells Void to:
 
 1. **Server-render the full page** as static HTML (no `data-page` attribute, no client-side router)
 2. **Only hydrate** the components you explicitly mark as islands
-3. **Skip the Inertia protocol** — navigation between island pages uses full-page loads
-4. **Auto-prerender** — island pages with no `loader` and no dynamic params are automatically [prerendered](/guide/edge/prerendering) at deploy time. Opt out with `export const prerender = false` in the companion `.server.ts` file.
+3. **Skip the Inertia protocol:** navigation between island pages uses full page loads
+4. **Auto-prerender:** island pages with no `loader` and no dynamic params are automatically [prerendered](/guide/edge/prerendering) at deploy time. Opt out with `export const prerender = false` in the companion `.server.ts` file.
 
 ## Marking Components as Islands
 
@@ -163,7 +163,7 @@ export default function BlogIndex(props) {
 
 :::
 
-Components imported _without_ the `island` attribute are rendered as static HTML only — no JavaScript is sent to the browser for them.
+Components imported _without_ the `island` attribute are rendered as static HTML only. No JavaScript is sent to the browser for them.
 
 ::: warning TypeScript configuration
 Import attributes require `"module": "ESNext"` in your `tsconfig.json`:
@@ -214,11 +214,11 @@ export const action = defineHandler(async (c) => {
 });
 ```
 
-The key difference: when a regular page action succeeds, the Inertia protocol redirects and the client-side router fetches fresh props as JSON. In island pages, there is no client-side router — successful actions result in a full page reload or redirect via `window.location`.
+The key difference is what happens after a successful action. On a regular page, the Inertia protocol redirects and the client-side router fetches fresh props as JSON. On an island page, there is no client-side router, so successful actions cause a full page reload or a redirect through `window.location`.
 
 ## Forms
 
-Island pages cannot use `useForm` (which depends on the client-side router). Use `useIslandForm` instead — it has the same API but uses `fetch()` directly:
+Island pages cannot use `useForm` because it depends on the client-side router. Use `useIslandForm` instead. It has the same API, but it uses `fetch()` directly:
 
 ::: code-group
 
@@ -381,7 +381,7 @@ Island pages do not have a client-side router. Use regular `<a>` tags for naviga
 // ✅ Use regular links in island pages
 <a href="/blog/my-post">Read more</a>
 
-// ❌ Don't use <Link> — there's no client-side router to handle it
+// ❌ Don't use <Link>; there is no client-side router to handle it
 <Link href="/blog/my-post">Read more</Link>
 ```
 
@@ -389,7 +389,7 @@ When navigating _from_ a regular page to an island page (e.g., via `<Link>`), th
 
 ## Layouts
 
-Island pages support [layouts](./layouts) the same way as regular pages. The layout wraps the page during server rendering. However, layout components in island pages are **static only** — they are not hydrated on the client.
+Island pages support [layouts](./layouts) the same way as regular pages. The layout wraps the page during server rendering. Layout components in island pages are **static only**, so they are not hydrated on the client.
 
 ## Mixing Island and Regular Pages
 

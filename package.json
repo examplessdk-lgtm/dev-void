@@ -2,47 +2,36 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "pnpm -F './packages/**' --parallel build",
     "build:all": "pnpm build && pnpm -F './playground/**' --parallel build",
     "build:core": "pnpm -F void build",
     "build:docs": "pnpm -F docs build",
-    "test": "vitest --run",
-    "test:unit": "vitest --run --project unit",
+    "build": "pnpm -F './packages/**' --parallel build",
+    "check": "pnpm -r --parallel typecheck",
+    "deploy:docs": "pnpm -F docs run deploy --project void-docs",
+    "deploy:staging:docs": "pnpm -F docs run deploy --project void-docs-staging",
+    "dev:docs": "cd docs && pnpm dev",
+    "fmt": "oxfmt --write .",
+    "lint": "oxlint",
+    "prepare": "husky",
     "test:integration": "vitest --run --project core-markdown",
     "test:metaframeworks": "vitest --run --project metaframeworks",
     "test:pages:react-vue": "vitest --run --project pages-react-vue",
     "test:pages:svelte-solid": "vitest --run --project pages-svelte-solid",
-    "lint": "oxlint",
-    "fmt": "oxfmt --write .",
-    "check": "pnpm -r --parallel typecheck",
-    "docs": "cd docs && vitepress dev",
-    "deploy:docs": "pnpm -F docs run deploy --project void-docs",
-    "deploy:staging:docs": "pnpm -F docs run deploy --project void-docs-staging",
-    "prepare": "husky"
+    "test:unit": "vitest --run --project unit",
+    "test": "vitest --run"
   },
   "devDependencies": {
     "@typescript/native-preview": "catalog:",
     "husky": "^9.1.7",
-    "lint-staged": "^16.2.7",
-    "oxfmt": "^0.32.0",
-    "oxlint": "^1.47.0",
+    "lint-staged": "^16.4.0",
+    "oxfmt": "^0.42.0",
+    "oxlint": "^1.57.0",
     "playwright": "^1.58.2",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.1"
   },
   "lint-staged": {
     "*": "oxfmt --no-error-on-unmatched-pattern",
     "*.{js,jsx,ts,tsx,mjs,cjs}": "oxlint"
   },
-  "packageManager": "pnpm@10.29.3",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild",
-      "workerd"
-    ],
-    "overrides": {
-      "vite": "catalog:",
-      "esbuild": "^0.27.3"
-    }
-  }
+  "packageManager": "pnpm@10.29.3"
 }

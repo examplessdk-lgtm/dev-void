@@ -21,7 +21,7 @@ npm install -D void
 npx void init
 ```
 
-This scaffolds a starter app with an interactive setup flow. Then:
+This scaffolds a starter app with an interactive setup flow and can also log you in and link or create your deploy project. Then:
 
 ```sh
 npm run dev          # local dev with workerd runtime

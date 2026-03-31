@@ -574,7 +574,8 @@ describe("handlePageGet with deferred props", () => {
     }));
 
     const renderFn = vi.fn(
-      async (pageObj: any) => `<div id="app" data-page='${JSON.stringify(pageObj)}'></div>`,
+      async (pageObj: any) =>
+        `<script id="__VOID_PAGE_DATA__" type="application/json">${JSON.stringify(pageObj)}</script><div id="app"></div>`,
     );
 
     const response = await handlePageGet(
@@ -587,7 +588,7 @@ describe("handlePageGet with deferred props", () => {
     );
 
     const text = await response.text();
-    expect(text).toContain("data-page=");
+    expect(text).toContain("__VOID_PAGE_DATA__");
     expect(text).toContain('"deferred":["usage"]');
     expect(text).toContain('window.__resolveDeferred("usage",');
     expect(text).toContain('"requests":100');

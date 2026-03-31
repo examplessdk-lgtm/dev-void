@@ -35,8 +35,8 @@ function readDatabaseUrl(root: string): string | undefined {
 export function migrationPlugin(
   root: string,
   dialect: DatabaseDialect,
-  databaseId = "local",
-  persistRoot = join(root, ".void"),
+  databaseId: string = "local",
+  persistRoot: string = join(root, ".void"),
   auth?: { enabled: boolean; configPath?: string | null },
 ): Plugin {
   return {

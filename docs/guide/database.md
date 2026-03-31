@@ -32,7 +32,7 @@ const dbFileItems = [
 
 # Database
 
-Void provides a first-class [Drizzle ORM](https://orm.drizzle.team) integration. Define your schema as TypeScript, import a pre-wired Drizzle instance from `void/db`, and start querying — no extra install needed.
+Void provides a first-class [Drizzle ORM](https://orm.drizzle.team) integration. Define your schema in TypeScript, import the pre-wired Drizzle instance from `void/db`, and start querying. You do not need an extra install.
 
 <FileTree :items="dbFileItems" default-expanded />
 
@@ -40,7 +40,7 @@ Void provides a first-class [Drizzle ORM](https://orm.drizzle.team) integration.
 
 Void supports two database backends. Both use the same Drizzle-based workflow for schema definition, querying, and migrations.
 
-`void init` asks which one you want. Choosing D1 keeps the default implicit; choosing PostgreSQL writes `"database": "pg"` to `void.json`.
+`void init` can start you with D1, PostgreSQL, or no database yet. Choosing D1 keeps the default implicit; choosing PostgreSQL writes `"database": "pg"` to `void.json`; choosing no database lets you start with static Pages and adopt data features later.
 
 |            | [D1 (SQLite)](./database/d1) | [PostgreSQL](./database/postgresql)          |
 | ---------- | ---------------------------- | -------------------------------------------- |
@@ -86,7 +86,7 @@ export const users = pgTable("users", {
 
 :::
 
-Everything ships with `void` — there is nothing extra to install. You don't have to write this by hand — use `void gen model` or let your coding agent generate it.
+Everything ships with `void`, so there is nothing extra to install. You also do not have to write this by hand. Use `void gen model` or let your coding agent generate it.
 
 You can also split your schema across multiple files under `db/schema/` and re-export from a barrel file:
 
@@ -112,7 +112,7 @@ import { users } from "@schema";
 ```
 
 ::: info What is `@schema`?
-`@schema` is a Vite path alias that the Void plugin configures automatically to point to your `db/schema.ts` file (or `db/schema/` directory). You don't need to set it up — just use it to import your table definitions.
+`@schema` is a Vite path alias that the Void plugin configures automatically. It points to your `db/schema.ts` file, or `db/schema/` if you split tables across files. You can just use it to import table definitions.
 :::
 
 ### List rows
@@ -301,7 +301,7 @@ export const insertUserSchema = createInsertSchema(users, {
 
 :::
 
-`createInsertSchema` generates a validator that matches `$inferInsert` — columns with defaults or auto-increments become optional, `NOT NULL` columns are required. The optional second argument refines individual columns — either via a callback that receives the auto-generated schema, or by passing a type directly to override the field.
+`createInsertSchema` generates a validator that matches `$inferInsert`. Columns with defaults or auto-increments become optional, while `NOT NULL` columns stay required. The optional second argument lets you refine individual columns, either with a callback that receives the generated schema or by passing a type directly to override a field.
 
 Use the derived schema in your route handlers with [`withValidator()`](./server-routing.md#validation):
 
@@ -321,11 +321,11 @@ export const POST = defineHandler.withValidator({
 
 Three functions are available:
 
-| Function             | Purpose                                                                   |
-| -------------------- | ------------------------------------------------------------------------- |
-| `createInsertSchema` | Validates insert data — excludes auto-generated columns, applies defaults |
-| `createSelectSchema` | Matches the shape of selected rows                                        |
-| `createUpdateSchema` | Like insert but all fields are optional (partial update)                  |
+| Function             | Purpose                                                                       |
+| -------------------- | ----------------------------------------------------------------------------- |
+| `createInsertSchema` | Validates insert data, excluding auto-generated columns and applying defaults |
+| `createSelectSchema` | Matches the shape of selected rows                                            |
+| `createUpdateSchema` | Like insert but all fields are optional (partial update)                      |
 
 Void already bundles the Drizzle adapters. Install the validator library itself if you use its direct APIs in your schema file:
 
@@ -356,7 +356,7 @@ See the [CLI reference](../reference/cli.md#database) for details.
 
 ## Scaffolding
 
-The `void gen model` command scaffolds a Drizzle table definition and updates your barrel export. It generates dialect-appropriate code — `sqliteTable` for D1, `pgTable` for PostgreSQL:
+The `void gen model` command scaffolds a Drizzle table definition and updates your barrel export. It generates dialect-appropriate code: `sqliteTable` for D1 and `pgTable` for PostgreSQL.
 
 ```bash
 void gen model post title:string body:text published:boolean
@@ -364,9 +364,9 @@ void gen model post title:string body:text published:boolean
 
 This creates:
 
-1. `db/schema/post.ts` — a Drizzle table definition with `id`, `createdAt`, `updatedAt`, and your columns
+1. `db/schema/post.ts`: a Drizzle table definition with `id`, `createdAt`, `updatedAt`, and your columns
 2. Updates `db/schema.ts` with `export * from "./schema/post"`
-3. `routes/api/posts/index.ts` — GET (list) + POST (insert with validation)
-4. `routes/api/posts/[id].ts` — GET by id with 404 handling
+3. `routes/api/posts/index.ts`: `GET` for list and `POST` for insert with validation
+4. `routes/api/posts/[id].ts`: `GET` by id with `404` handling
 
 See the [CLI reference](../reference/cli.md#code-generation) for the full list of generators.

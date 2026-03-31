@@ -8,11 +8,11 @@
   },
   "dependencies": {
     "@sveltejs/adapter-cloudflare": "^7.2.8",
-    "@sveltejs/kit": "^2.53.1",
-    "svelte": "^5.53.3"
+    "@sveltejs/kit": "^2.55.0",
+    "svelte": "^5.55.0"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^5.1.0",
+    "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@typescript/native-preview": "catalog:",
     "vite": "catalog:",
     "void": "workspace:*"

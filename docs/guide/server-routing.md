@@ -12,7 +12,7 @@ Create route handlers in `routes/**/*.ts`. Each file maps to a URL path based on
 
 <RoutesFileTree />
 
-Dynamic segments use brackets: `[id]` becomes a route parameter, `[...slug]` becomes a catch-all. Files or directories starting with `_` are ignored. Directories wrapped in parentheses like `(admin)` are route groups — they organize files without affecting the URL.
+Dynamic segments use brackets: `[id]` becomes a route parameter and `[...slug]` becomes a catch-all. Files or directories starting with `_` are ignored. Directories wrapped in parentheses like `(admin)` are route groups. They help organize files without changing the URL.
 
 You can add a `.dev` or `.prod` suffix before the extension (e.g. `debug.dev.ts`) to include a route only in that environment.
 
@@ -46,7 +46,7 @@ export const POST = defineHandler(async (c) => {
 });
 ```
 
-The `db` helper provides a typed query API over D1 — see [Database](./database.md) for the full API.
+The `db` helper provides a typed query API over D1. See [Database](./database.md) for the full API.
 
 ## `defineHandler`
 
@@ -71,7 +71,7 @@ Return values are automatically converted:
 
 ## Validation
 
-`defineHandler.withValidator()` adds input validation for `body`, `query`, and/or `params`. The recommended approach is to derive validators from your [Drizzle schema](./database.md#schema-derived-validators) — this keeps validation in sync with your database automatically:
+`defineHandler.withValidator()` adds input validation for `body`, `query`, and `params`. The recommended approach is to derive validators from your [Drizzle schema](./database.md#schema-derived-validators), which keeps validation in sync with the database.
 
 ```ts
 // routes/api/users/index.ts
@@ -87,7 +87,7 @@ export const POST = defineHandler.withValidator({
 });
 ```
 
-See [Database — Schema-Derived Validators](./database.md#schema-derived-validators) for how to set up `createInsertSchema` with column refinements.
+See [Database: Schema-Derived Validators](./database.md#schema-derived-validators) for how to set up `createInsertSchema` with column refinements.
 
 You can validate multiple slots at once:
 
@@ -141,9 +141,9 @@ When validation fails, a `400` response is returned with structured error detail
 }
 ```
 
-No extra dependencies are required — Void inlines the Standard Schema types. You only need your chosen schema library.
+No extra dependencies are required. Void inlines the Standard Schema types, so you only need your chosen schema library.
 
-Validator schemas also power the [typed fetch client](./typed-fetch.md) — `body`, `query`, and `params` types are enforced at the call site.
+Validator schemas also power the [typed fetch client](./typed-fetch.md), so `body`, `query`, and `params` types are enforced at the call site.
 
 ## Middleware
 
@@ -209,7 +209,7 @@ export default defineMiddleware(async (c, next) => {
 });
 ```
 
-Now every route handler can call `c.get("requestId")` and get `string` back — no type assertion needed. See [Type Safety](./type-safety.md#context-variables) for more details.
+Now every route handler can call `c.get("requestId")` and get `string` back, with no type assertion needed. See [Type Safety](./type-safety.md#context-variables) for more details.
 
 ### Per-route middleware
 

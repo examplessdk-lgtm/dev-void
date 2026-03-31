@@ -5,6 +5,10 @@ npx void init
 
 During `void init`, first choose a Pages framework (React, Vue, Svelte, or Solid), then choose D1 for a zero-config, fully managed default or PostgreSQL if you already have Postgres infrastructure or expect heavier writes and more complex queries.
 
+At the end of the interactive flow, `void init` can also log you in and link or create your Void project so your first deploy is just:
+
+void deploy
+
 Database workflow: define Drizzle tables in `db/schema.ts`, import `db` from `void/db` and tables from `@schema`. Use `void db push` to prototype (applies schema directly, no migration files). Use `void db generate` when ready to create production migration files in `db/migrations/`. `drizzle-orm` and `drizzle-kit` ship with void — no extra install needed. Scaffold new tables with `void gen model <name> [columns...]`.
 
 Now ask me what I want to build.

@@ -33,7 +33,7 @@ export default defineMiddleware(cache({ cacheName: "my-app", cacheControl: "max-
 ```
 
 ```ts
-// routes/api/webhooks/stripe.ts — per-route usage
+// routes/api/webhooks/stripe.ts (per-route usage)
 import { defineHandler } from "void";
 import { bearerAuth } from "hono/bearer-auth";
 

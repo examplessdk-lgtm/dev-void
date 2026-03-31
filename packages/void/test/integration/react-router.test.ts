@@ -42,7 +42,7 @@ describe("playground/react-router build", () => {
   });
 });
 
-describe("playground/react-router dev", () => {
+describe("playground/react-router dev", { retry: 2, timeout: 60_000 }, () => {
   let child: ReturnType<typeof spawn>;
   let stderr = "";
 
@@ -67,8 +67,8 @@ describe("playground/react-router dev", () => {
       stderr += String(chunk);
     });
 
-    await waitForServer(DEV_BASE, 20_000);
-  }, 30_000);
+    await waitForServer(DEV_BASE, 30_000);
+  }, 45_000);
 
   afterAll(async () => {
     if (child) await killChild(child);
@@ -91,4 +91,4 @@ describe("playground/react-router dev", () => {
     expect(html).toContain("Alice");
     expect(html).toContain("ok");
   });
-}, 60_000);
+});

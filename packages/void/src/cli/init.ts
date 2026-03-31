@@ -19,7 +19,9 @@ import {
   SCAFFOLD_FRAMEWORK_OPTIONS,
   SCAFFOLD_GITIGNORE_LINES,
   type ScaffoldFramework,
+  type ScaffoldStarterMode,
 } from "./template";
+import { formatProjectCommand } from "./preset";
 import {
   detectAgents,
   getAgentById,
@@ -28,6 +30,7 @@ import {
   type McpConfigTarget,
 } from "./agents";
 import { cliTitle } from "./output";
+import { maybeSetupDeployProject } from "./deploy-setup";
 
 export interface InitArgs {
   tsconfig: boolean;
@@ -106,6 +109,7 @@ const VITE_CONFIG_FILES = [
   "vite.config.cjs",
 ];
 const VOID_CONFIG_FILE = "void.json";
+type DatabaseSetupChoice = DatabaseDialect | "none";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -407,9 +411,32 @@ function writeVoidConfig(root: string, config: Record<string, unknown>): void {
   writeFileSync(join(root, VOID_CONFIG_FILE), JSON.stringify(config, null, 2) + "\n");
 }
 
-function applyDatabaseDialect(root: string, dialect: DatabaseDialect): void {
+function clearConfiguredDatabase(
+  root: string,
+  messages: { unchanged: string; updated: string },
+): void {
   const config = readConfig(root) as Record<string, unknown>;
   const configPath = join(root, VOID_CONFIG_FILE);
+
+  if (config.database !== "pg") {
+    log.info(messages.unchanged);
+    return;
+  }
+
+  delete config.database;
+
+  if (Object.keys(config).length === 0) {
+    unlinkSync(configPath);
+    log.success(messages.updated);
+    return;
+  }
+
+  writeVoidConfig(root, config);
+  log.success(messages.updated);
+}
+
+function applyDatabaseDialect(root: string, dialect: DatabaseDialect): void {
+  const config = readConfig(root) as Record<string, unknown>;
 
   if (dialect === "postgresql") {
     if (config.database === "pg") {
@@ -423,38 +450,56 @@ function applyDatabaseDialect(root: string, dialect: DatabaseDialect): void {
     return;
   }
 
-  if (config.database !== "pg") {
-    log.info("Using default D1 (SQLite) configuration");
-    return;
-  }
-
-  delete config.database;
-
-  if (Object.keys(config).length === 0) {
-    unlinkSync(configPath);
-    log.success("Using default D1 (SQLite) configuration");
-    return;
-  }
-
-  writeVoidConfig(root, config);
-  log.success("Updated void.json to use the default D1 (SQLite) configuration");
+  clearConfiguredDatabase(root, {
+    unchanged: "Using default D1 (SQLite) configuration",
+    updated: "Updated void.json to use the default D1 (SQLite) configuration",
+  });
 }
 
-async function setupDatabaseDialect(root: string): Promise<DatabaseDialect> {
-  const currentDialect = getDatabaseDialect(readConfig(root));
+function detectDatabaseSetup(root: string): DatabaseSetupChoice {
+  if (getDatabaseDialect(readConfig(root)) === "postgresql") {
+    return "postgresql";
+  }
+  if (
+    hasDrizzleSchema(root) ||
+    existsSync(join(root, "db", "migrations")) ||
+    existsSync(join(root, "migrations"))
+  ) {
+    return "sqlite";
+  }
+  return "none";
+}
 
+function applyDatabaseSetup(root: string, choice: DatabaseSetupChoice): void {
+  if (choice === "none") {
+    clearConfiguredDatabase(root, {
+      unchanged: "No database configured yet",
+      updated: "Removed database config from void.json",
+    });
+    return;
+  }
+
+  applyDatabaseDialect(root, choice);
+}
+
+async function promptStarterMode(): Promise<ScaffoldStarterMode> {
   const choice = await select({
-    message: "Choose a database for this project:",
+    message: "Choose a Pages starter:",
     options: [
       {
         value: "sqlite",
-        label: currentDialect === "sqlite" ? "D1 (SQLite) [current]" : "D1 (SQLite)",
-        hint: "Zero-config and fully managed by Void; best for prototyping and read-heavy apps.",
+        label: "D1 (SQLite)",
+        hint: "Recommended starter. Scaffolds a DB-backed page, schema, migration, and API route.",
       },
       {
         value: "postgresql",
-        label: currentDialect === "postgresql" ? "PostgreSQL [current]" : "PostgreSQL",
-        hint: "Bring your own Postgres via Hyperdrive; best for write-heavy apps, complex queries, or existing infra.",
+        label: "PostgreSQL",
+        hint: 'Scaffolds the same starter with PostgreSQL and writes "database": "pg" to void.json.',
+      },
+      {
+        value: "static",
+        label: "Static Pages",
+        hint: "No database or server starter files yet. Good for content sites; add Void features later.",
       },
     ],
   });
@@ -464,7 +509,7 @@ async function setupDatabaseDialect(root: string): Promise<DatabaseDialect> {
     process.exit(0);
   }
 
-  return choice as DatabaseDialect;
+  return choice as ScaffoldStarterMode;
 }
 
 async function promptScaffoldFramework(): Promise<ScaffoldFramework> {
@@ -481,16 +526,50 @@ async function promptScaffoldFramework(): Promise<ScaffoldFramework> {
   return choice as ScaffoldFramework;
 }
 
+async function promptDatabaseSetup(root: string): Promise<DatabaseSetupChoice> {
+  const currentSetup = detectDatabaseSetup(root);
+  const initialValue = currentSetup === "none" ? "sqlite" : currentSetup;
+
+  const choice = await select({
+    message: "Choose a database setup for this project:",
+    initialValue,
+    options: [
+      {
+        value: "sqlite",
+        label: currentSetup === "sqlite" ? "D1 (SQLite) [current]" : "D1 (SQLite)",
+        hint: "Zero-config and fully managed by Void; best for prototyping and read-heavy apps.",
+      },
+      {
+        value: "postgresql",
+        label: currentSetup === "postgresql" ? "PostgreSQL [current]" : "PostgreSQL",
+        hint: "Bring your own Postgres via Hyperdrive; best for write-heavy apps, complex queries, or existing infra.",
+      },
+      {
+        value: "none",
+        label: "No Database Yet",
+        hint: "Skip database setup for now. You can add D1 or PostgreSQL later as your app grows.",
+      },
+    ],
+  });
+
+  if (isCancel(choice)) {
+    cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
+  return choice as DatabaseSetupChoice;
+}
+
 /** Get the dev command for a detected framework. */
-function getDevCommand(framework?: DetectedFramework): string {
-  if (!framework) return "vite dev";
+function getDevCommand(root: string, framework?: DetectedFramework): string {
+  if (!framework) return formatProjectCommand(root, "vite dev");
   switch (framework.name) {
     case "nuxt":
       return "nuxt dev";
     case "astro":
       return "astro dev";
     default:
-      return "vite dev";
+      return formatProjectCommand(root, "vite dev");
   }
 }
 
@@ -640,12 +719,12 @@ function scaffoldPagesApp(
   root: string,
   packageManager: ProjectState["packageManager"],
   framework: ScaffoldFramework,
-  dialect: DatabaseDialect,
+  starterMode: ScaffoldStarterMode,
 ): void {
   const packageJsonPath = join(root, "package.json");
   const template = createPagesStarterTemplate({
     framework,
-    dialect,
+    starterMode,
     voidVersion: getOwnVersion(),
   });
   let pkg: Record<string, any> = {};
@@ -729,11 +808,14 @@ function scaffoldPagesApp(
   }
 
   ensureGitignore(root);
-  applyDatabaseDialect(root, dialect);
+  if (starterMode !== "static") {
+    applyDatabaseDialect(root, starterMode);
+  }
 
-  if (dialect === "postgresql") {
+  if (starterMode === "postgresql") {
+    const devCommand = getDevCommand(root);
     note(
-      "Add DATABASE_URL to .env.local before running `vite dev`.\n" +
+      `Add DATABASE_URL to .env.local before running \`${devCommand}\`.\n` +
         "Void uses that direct connection for local PostgreSQL development.",
       "PostgreSQL local dev",
     );
@@ -745,6 +827,8 @@ function scaffoldPagesApp(
 }
 
 function scaffoldDemo(root: string): void {
+  const devCommand = getDevCommand(root);
+
   // Migration
   mkdirSync(join(root, "db", "migrations"), { recursive: true });
   writeFileSync(
@@ -812,7 +896,7 @@ console.log(posts);
 
   note(
     "SQL migration → DB types → Route handler → Route types → Typed fetch\n\n" +
-      "Run `vite dev` and open src/demo.ts to see the types in action.\n" +
+      `Run \`${devCommand}\` and open src/demo.ts to see the types in action.\n` +
       "Try changing the migration or handler — types update automatically.",
     "Type Safety Demo",
   );
@@ -1029,8 +1113,8 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   if (!targeted && !framework && isScaffoldableEmptyProject(root)) {
     log.info("Empty project detected. Scaffolding a Pages starter...");
     scaffoldedPagesFramework = await promptScaffoldFramework();
-    const dialect = await setupDatabaseDialect(root);
-    scaffoldPagesApp(root, preScaffoldState.packageManager, scaffoldedPagesFramework, dialect);
+    const starterMode = await promptStarterMode();
+    scaffoldPagesApp(root, preScaffoldState.packageManager, scaffoldedPagesFramework, starterMode);
     didScaffoldStarter = true;
   }
 
@@ -1056,7 +1140,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
 
   // Step 3: Database dialect
   if (!targeted && !didScaffoldStarter) {
-    applyDatabaseDialect(root, await setupDatabaseDialect(root));
+    applyDatabaseSetup(root, await promptDatabaseSetup(root));
   }
 
   // Steps 4–6: Agent instructions, skills, MCP config
@@ -1118,5 +1202,9 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     }
   }
 
-  outro(`Run \`${getDevCommand(framework)}\` to start developing`);
+  if (!targeted) {
+    await maybeSetupDeployProject(root);
+  }
+
+  outro(`Run \`${getDevCommand(root, framework)}\` to start developing`);
 }

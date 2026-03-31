@@ -1,6 +1,7 @@
 import { ValidationError } from "./validation-error";
 import { DEFERRED, separateDeferred, type ResolvedDeferredGroup } from "./defer";
 import { resolveHead, type HeadDescriptor, type HeadConfig } from "./head";
+import { isConvertedResponse } from "../runtime/response";
 
 export { ValidationError };
 
@@ -116,19 +117,28 @@ export async function handlePageGet(
   getAssetTags: (
     req: Request,
     env: any,
+    componentId: string,
   ) => Promise<{ css: string; preloads: string; body: string }>,
   configHead?: HeadConfig,
   island?: boolean,
 ): Promise<Response> {
   const shared = c.get("shared") || {};
 
-  // Run loader and check for redirect/non-data responses before extracting props
+  // Run loader and check for redirect/error responses before extracting props
   let props: Record<string, unknown> = {};
   if (handler) {
     const result = await handler(c);
-    if (result instanceof Response) {
-      const status = result.status;
-      if (status >= 300 && status < 400) return result;
+    // Responses from convertReturnValue (withValidator/middleware paths) always
+    // flow through to extractProps — they wrap plain return values (objects as
+    // 200 JSON, null/undefined as 204, strings as text/html) and must be
+    // unwrapped as page props.
+    //
+    // User-returned Responses: pass through errors/redirects (>= 300) and
+    // non-JSON 200s (file downloads, streams). JSON 200s are still extracted
+    // as props for backward compat with loaders using c.json().
+    if (result instanceof Response && !isConvertedResponse(result)) {
+      const ct = result.headers.get("content-type") || "";
+      if (result.status >= 300 || !ct.includes("application/json")) return result;
     }
     props = await extractProps(result);
   }
@@ -211,14 +221,13 @@ export async function handlePageGet(
     );
   }
 
-  const assetTags = await getAssetTags(c.req.raw, c.env);
+  const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
   const html = await renderFn(pageObj, assetTags);
 
   if (!hasDeferred) {
     return new Response(html, {
       headers: {
         "content-type": "text/html; charset=utf-8",
-        "x-void-page-data": JSON.stringify(pageObj),
         ...POWERED_BY,
       },
     });
@@ -251,6 +260,7 @@ export async function handlePageMutation(
   getAssetTags: (
     req: Request,
     env: any,
+    componentId: string,
   ) => Promise<{ css: string; preloads: string; body: string }>,
   configHead?: HeadConfig,
   island?: boolean,
@@ -286,7 +296,7 @@ export async function handlePageMutation(
       const props = stripDeferred(rawProps);
       const pageObj = buildMutationPageObj(props, e.errors);
       if (isPagesRequest(c)) return pageJsonResponse(pageObj);
-      const assetTags = await getAssetTags(c.req.raw, c.env);
+      const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
       return new Response(await renderFn(pageObj, assetTags), {
         headers: { "content-type": "text/html; charset=utf-8", ...POWERED_BY },
       });
@@ -310,7 +320,7 @@ export async function handlePageMutation(
       const props = stripDeferred(rawProps);
       const pageObj = buildMutationPageObj(props, errors);
       if (isPagesRequest(c)) return pageJsonResponse(pageObj);
-      const assetTags = await getAssetTags(c.req.raw, c.env);
+      const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
       return new Response(await renderFn(pageObj, assetTags), {
         headers: { "content-type": "text/html; charset=utf-8", ...POWERED_BY },
       });
@@ -327,7 +337,7 @@ export async function handlePageMutation(
   const props = stripDeferred(rawProps);
   const pageObj = buildMutationPageObj(props, null);
   if (isPagesRequest(c)) return pageJsonResponse(pageObj);
-  const assetTags = await getAssetTags(c.req.raw, c.env);
+  const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
   return new Response(await renderFn(pageObj, assetTags), {
     headers: { "content-type": "text/html; charset=utf-8", ...POWERED_BY },
   });

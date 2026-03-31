@@ -10,8 +10,8 @@ import { resolveVoidAuthMigrationSchema } from "./drizzle";
 export async function runLocalVoidAuthMigrations(
   root: string,
   dialect: VoidAuthDialect,
-  persistRoot = join(root, ".void"),
-  databaseId = "local",
+  persistRoot: string = join(root, ".void"),
+  databaseId: string = "local",
   configPath: string | null = findVoidAuthConfig(root),
 ): Promise<void> {
   const authConfig = await loadVoidAuthConfig(configPath);

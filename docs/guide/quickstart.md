@@ -32,9 +32,11 @@ bunx void init
 
 This scaffolds a Pages-mode starter with an interactive setup flow.
 
-As part of `void init`, you'll choose a Pages framework (React, Vue, Svelte, or Solid) and a database. The scaffold writes a framework-specific `vite.config.ts`, a `pages/` home page with a `.server.ts` loader companion, `db/schema.ts`, `db/migrations/0000_initial.sql`, and `routes/api/hello.ts`.
+As part of `void init`, you'll choose a Pages framework (React, Vue, Svelte, or Solid) and a starter type. D1 is the default top option and scaffolds a DB-backed page loader, schema, migration, and API route. PostgreSQL scaffolds the same starter and writes `"database": "pg"` to `void.json`. Static Pages skips the database and server starter files so you can start with static content and add Void features later.
 
-For the database, D1 is the zero-config default for prototyping and read-heavy apps, while PostgreSQL is better when you already have Postgres infrastructure or need heavier writes and more complex queries.
+At the end of the full interactive flow, `void init` can also handle Void project setup by logging you in and linking or creating your Void project. That means the default first-time path is just `void init`, then `void deploy`.
+
+For the database-backed starters, D1 is the zero-config default for prototyping and read-heavy apps, while PostgreSQL is better when you already have Postgres infrastructure or need heavier writes and more complex queries.
 
 <details>
 <summary style="cursor:pointer">
@@ -143,11 +145,13 @@ Then visit:
 - App: `http://localhost:5173`
 - API route: `http://localhost:5173/api/hello`
 
-### 3. Log in
+### 3. Finish Void project setup if you skipped it during `void init`
 
 ```sh
 void auth login
 ```
+
+If you already logged in and linked a project during `void init`, you can skip this step.
 
 ### 4. Deploy
 
@@ -191,7 +195,7 @@ void deploy
 On first deploy, Void will:
 
 - build your app
-- create or link a project
+- create or link a project if you did not already do that during `void init`
 - provision required resources (for example D1/KV/R2 when inferred)
 - deploy to `https://<slug>.void.app`
 
@@ -200,6 +204,6 @@ Right now, only deploys via the CLI is supported. To setup push-to-deploy GitHub
 ## Next steps
 
 - To understand what kind of apps are supported: [Supported App Types](./app-types)
-- [Server Routing](./server-routing) — dynamic params, middleware, and validation
-- [Database](./database) — queries, migrations, and generated types
-- [Type Safety](./type-safety) — end-to-end typed fetch client
+- [Server Routing](./server-routing): dynamic params, middleware, and validation
+- [Database](./database): queries, migrations, and generated types
+- [Type Safety](./type-safety): end-to-end typed fetch client

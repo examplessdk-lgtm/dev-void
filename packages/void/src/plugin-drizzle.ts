@@ -21,6 +21,7 @@ const DRIZZLE_OPERATORS =
 
 interface DrizzlePluginOptions {
   forceVirtualDb?: boolean;
+  redirectDbTypePaths?: boolean;
 }
 
 /**
@@ -44,7 +45,9 @@ export function drizzlePlugin(
   const hasDbRuntime = schema != null || options.forceVirtualDb === true;
 
   // Always write tsconfig (for routes.d.ts, queues.d.ts, etc.)
-  ensureProjectTsconfig(root, hasRouteTypes, hasDbRuntime, schema != null);
+  ensureProjectTsconfig(root, hasRouteTypes, hasDbRuntime, schema != null, {
+    redirectDbModule: options.redirectDbTypePaths,
+  });
 
   // Generate db.d.ts when void/db is available, even without a user schema.
   if (hasDbRuntime) {

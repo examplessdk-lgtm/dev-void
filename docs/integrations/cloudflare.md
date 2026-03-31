@@ -120,14 +120,14 @@ You can set non-binding wrangler fields like `compatibility_date` and `compatibi
 }
 ```
 
-For environment variables, use `.env` files instead of `worker.vars` — Void automatically loads `.env` files via Vite's `loadEnv` and merges them into the worker's `vars` bindings:
+For environment variables, use `.env` files instead of `worker.vars`. Void automatically loads `.env` files through Vite's `loadEnv` and merges them into the worker's `vars` bindings:
 
 ```bash
 # .env
 API_URL=https://api.example.com
 ```
 
-Binding arrays (`d1_databases`, `kv_namespaces`, `r2_buckets`) are not allowed in the `worker` field — bindings are fully managed by Void. To use custom bindings with real resource IDs, add a `wrangler.jsonc` to your project root instead. See [Wrangler config merging](#wrangler-config-merging) for how Void handles this.
+Binding arrays such as `d1_databases`, `kv_namespaces`, and `r2_buckets` are not allowed in the `worker` field because Void manages bindings for you. If you need custom bindings with real resource IDs, add a `wrangler.jsonc` to the project root instead. See [Wrangler config merging](#wrangler-config-merging) for details.
 
 ## Wrangler config merging
 
@@ -152,7 +152,7 @@ In this mode, Void does **not** modify your `wrangler.jsonc` file on disk. The m
 
 ### Adapter-based frameworks (SvelteKit, Nuxt, Astro)
 
-When using SvelteKit, Nuxt, or Astro, the framework's own Cloudflare adapter owns the worker build and dev server. Void does **not** provide the `@cloudflare/vite-plugin` — instead, it only contributes DB type codegen, migration management, and binding sync.
+When using SvelteKit, Nuxt, or Astro, the framework's own Cloudflare adapter owns the worker build and dev server. Void does **not** provide `@cloudflare/vite-plugin` in that setup. It only contributes DB type codegen, migration management, and binding sync.
 
 Because Void doesn't control the CF plugin in this mode, it can't merge bindings via a config callback. Instead, on dev startup Void syncs inferred bindings directly to your `wrangler.jsonc` file on disk:
 

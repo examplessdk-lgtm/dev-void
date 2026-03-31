@@ -4,7 +4,7 @@ outline: deep
 
 # React Router v7
 
-[React Router v7](https://reactrouter.com/) is a Vite-based full-stack React framework. `voidPlugin()` composes directly with the React Router plugin in the Vite pipeline — no separate adapter needed.
+[React Router v7](https://reactrouter.com/) is a Vite-based full-stack React framework. `voidPlugin()` composes directly with the React Router plugin in the Vite pipeline, so there is no separate adapter to install.
 
 ## Setup
 

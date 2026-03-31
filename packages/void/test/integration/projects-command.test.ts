@@ -88,9 +88,9 @@ describe("runProjectsCommand", () => {
       headers: { Authorization: "Bearer test-token" },
     });
     expect(out).toContain("star-tracker");
-    expect(out).toContain("https://star-tracker.void.app");
+    expect(out).toContain("https://star-tracker.staging.void.app");
     expect(out).toContain("todo-app");
-    expect(out).toContain("https://todo-app.void.app");
+    expect(out).toContain("https://todo-app.staging.void.app");
   });
 
   it("prints a friendly message when there are no projects", async () => {

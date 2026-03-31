@@ -27,15 +27,15 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "@shikijs/engine-javascript": "^3.23.0",
-    "@shikijs/transformers": "^3.23.0",
+    "@shikijs/engine-javascript": "^4.0.2",
+    "@shikijs/transformers": "^4.0.2",
     "gray-matter": "^4.0.3",
-    "markdown-exit": "^1.0.0-beta.8",
+    "markdown-exit": "1.0.0-beta.9",
     "markdown-it-anchor": "^9.2.0",
     "markdown-it-attrs": "^4.3.1",
     "markdown-it-container": "^4.0.0",
     "markdown-it-emoji": "^3.0.0",
-    "shiki": "^3.23.0",
+    "shiki": "^4.0.2",
     "tinyglobby": "^0.2.15"
   },
   "devDependencies": {
@@ -43,7 +43,7 @@
     "tsdown": "catalog:",
     "vite": "catalog:",
     "void": "workspace:*",
-    "vue": "^3.5.0"
+    "vue": "^3.5.31"
   },
   "peerDependencies": {
     "vite": "catalog:",

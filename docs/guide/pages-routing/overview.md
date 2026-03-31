@@ -6,13 +6,13 @@ outline: deep
 
 Pages routing provides the server-rendered, components-as-pages, collocated-data-loading routing system that is seen in many existing JavaScript meta frameworks. However, pages routing in Void is different from most in that it is **rendering framework agnostic.** It is built on patterns inspired by [Inertia.js](https://inertiajs.com/): The server returns the data, and the component receives it as props. The client-side routing logic is minimal, allowing Void to support any rendering framework Vite can support. Today, React, Vue, Svelte, and Solid have first-party adapters.
 
-Pages mode activates when a `pages/` directory exists. It coexists with `routes/` — use `pages/` for UI pages and `routes/` for APIs. Components in `pages/` will be server-rendered, which means **they will run in both Cloudflare Workers and browsers**.
+Pages mode activates when a `pages/` directory exists. It coexists with `routes/`. Use `pages/` for UI pages and `routes/` for APIs. Components in `pages/` are server-rendered, which means **they run in both Cloudflare Workers and browsers**.
 
 Pages mode is also entirely optional - you can use any client-side router to build a pure client-side SPA that interacts with the backend API via the [typed fetch](../typed-fetch.md) utility.
 
 ## Setup
 
-If you start in a scaffoldable empty directory, `void init` can generate this setup for you: it asks whether you want React, Vue, Svelte, or Solid Pages mode and writes the adapter-aware `vite.config.ts`, `pages/`, and `db/` starter files.
+If you start in a scaffoldable empty directory, `void init` can generate this setup for you: it asks whether you want React, Vue, Svelte, or Solid Pages mode, then lets you pick a D1 starter, a PostgreSQL starter, or Static Pages. The database-backed starters write the adapter-aware `vite.config.ts`, `pages/`, and `db/` starter files; Static Pages writes just the basic `pages/` setup so you can grow into server features later.
 
 If you're adding Pages mode manually, install a framework adapter alongside `void`:
 
@@ -86,20 +86,20 @@ export default defineConfig({
 
 :::
 
-That's it — no SSR entry, no client entry, no hydration boilerplate. The adapter generates everything.
+That is the full setup. You do not need an SSR entry, a client entry, or hydration boilerplate because the adapter generates them for you.
 
 Each adapter plugin includes the framework's Vite plugin (`@vitejs/plugin-react`, `@vitejs/plugin-vue`, `@sveltejs/vite-plugin-svelte`, `vite-plugin-solid`) so you don't need to install or configure it separately. Pass framework plugin options via `voidReact({ react: { ... } })`, `voidVue({ vue: { ... } })`, `voidSvelte({ svelte: { ... } })`, or `voidSolid({ solid: { ... } })` if needed.
 
 ## Directory Structure
 
-Pages can be flat files (`about.vue`) or use directory-based routing (`about/index.vue`) — both map to the same route:
+Pages can be flat files such as `about.vue` or directory-based routes such as `about/index.vue`. Both map to the same route:
 
 <PagesFileTree />
 
 Each page can have a companion `.server.ts` file that runs exclusively on the server. It can export:
 
-- A [**loader**](./loaders) — runs on GET, returns data that becomes the page component's props
-- [**Actions**](./actions-and-forms) — handle mutations (POST, PUT, PATCH, DELETE) from forms and programmatic calls. Export a single `action` or multiple [named actions](./actions-and-forms#named-actions) for pages with several mutations
+- A [**loader**](./loaders), which runs on `GET` and returns the data that becomes the page component's props
+- [**Actions**](./actions-and-forms), which handle mutations from forms and programmatic calls. Export a single `action` or multiple [named actions](./actions-and-forms#named-actions) when a page has several mutations
 
 File-based routing rules are the same as [server routing](../server-routing.md): `[param]` for dynamic segments, `[...param]` for catch-all, `(group)/` for route groups.
 
@@ -113,7 +113,7 @@ Pages uses an Inertia-style protocol under the hood:
 | Subsequent navigation | JSON with component name + props. Client component swap or re-render. |
 | Form submission       | Runs action, then returns fresh props or a redirect.                  |
 
-This means the first page load is server-rendered for SEO and performance, and all subsequent navigations feel instant — no full page reloads.
+This means the first page load is server-rendered for SEO and performance, while later navigations stay fast without full page reloads.
 
 Use the `Link` component for SPA navigation between pages. It renders an `<a>` tag that intercepts clicks and navigates without a full page reload:
 

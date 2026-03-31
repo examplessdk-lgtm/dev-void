@@ -4,7 +4,7 @@ outline: deep
 
 # Edge Prerendering
 
-You can instruct Void to prerender a page so that the page is served immediately from the cache after a new deploy. Prerendering happens on the platform at deploy time — the platform invokes the uploaded worker and writes results to the edge cache.
+You can instruct Void to prerender a page so it is served from cache immediately after a new deploy. Prerendering happens on the platform at deploy time. The platform invokes the uploaded worker and writes the result to the edge cache.
 
 - [Markdown pages](../pages-routing/markdown.md) are auto-prerendered.
 - [Island pages](../pages-routing/islands) with no companion loader and no dynamic params are also auto-prerendered.
@@ -80,4 +80,4 @@ Just be aware that if no new deploy happens before the revalidate expires, the f
 - Prerender happens once per deployment, before traffic is routed to the new version. Prerendered pages are cached at the edge.
 - Each deploy clears the ISR cache. The deployment shows `"prerendering"` during this phase.
 - Only paths with a positive revalidate TTL are prerendered (TTL `0` is skipped).
-- Prerender failures are logged but never block the deploy — the page will be rendered on the first request as usual.
+- Prerender failures are logged but never block the deploy. The page will render on the first request as usual.

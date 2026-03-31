@@ -64,7 +64,13 @@ describe("playground/kitchen-sink", () => {
     });
 
     await waitForServer(BASE, 20_000);
-  }, 30_000);
+
+    // Warm up: the first request triggers Vite SSR dep optimization
+    // (drizzle-orm, vue, hono, etc.) which causes multiple program
+    // reloads. Wait for the reloads to settle before running tests.
+    await fetch(BASE).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }, 40_000);
 
   afterAll(async () => {
     if (child) await killChild(child);

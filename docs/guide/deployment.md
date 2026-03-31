@@ -11,11 +11,11 @@ Void apps run on Cloudflare's infrastructure but you don't need to use your own 
 ### First deploy
 
 ```bash
-void auth login         # OAuth via GitHub or Google
+void init               # can handle auth + project setup during onboarding
 void deploy             # auto-detects app type, builds, deploys
 ```
 
-On first deploy, the CLI prompts you to create or select a project. The project link is saved to `.void/project.json` for subsequent deploys.
+If you skipped Void project setup during `void init`, you can still run `void auth login` manually. On first deploy, the CLI will prompt you to create or select a project if none is linked yet. The project link is saved to `.void/project.json` for subsequent deploys.
 
 ### Migrations
 
@@ -91,4 +91,4 @@ To get a deploy token, run `void auth token` to copy it to your clipboard, then 
 
 If you prefer to deploy directly to your own Cloudflare account instead of using Void's managed platform, see the [Cloudflare integration guide](../integrations/cloudflare.md).
 
-To deploy to Node.js, Bun, or Deno instead of Cloudflare, set [`target`](../reference/config.md) in `void.json`. This builds a standalone server you can run anywhere — Docker, Railway, Fly.io, etc. Note that these alternative targets do not have access to Void platform features like D1, KV, R2, built-in auth, Workers AI, or cron scheduling. See the [Node.js, Bun, and Deno guide](../integrations/nodejs-bun-deno.md).
+To deploy to Node.js, Bun, or Deno instead of Cloudflare, set [`target`](../reference/config.md) in `void.json`. This builds a standalone server you can run anywhere, including Docker, Railway, and Fly.io. These targets do not have access to Void platform features such as D1, KV, R2, built-in auth, Workers AI, or cron scheduling. See the [Node.js, Bun, and Deno guide](../integrations/nodejs-bun-deno.md).

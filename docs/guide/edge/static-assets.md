@@ -8,7 +8,7 @@ Void serves static assets through Cloudflare's global edge network with sensible
 
 ## Hashed assets
 
-Files in Vite's `build.assetsDir` (default `assets/`) are produced with content hashes in the filename (e.g. `assets/app-Ab3xK9.js`). These are immutable — the filename changes whenever the content changes — so they get aggressive caching:
+Files in Vite's `build.assetsDir` (default `assets/`) are produced with content hashes in the filename, such as `assets/app-Ab3xK9.js`. These files are immutable because the filename changes whenever the content changes, so they get aggressive caching:
 
 ```
 Cache-Control: public, max-age=31536000, immutable
@@ -27,13 +27,13 @@ export default defineConfig({
 });
 ```
 
-If `build.assetsDir` is set to `""` (empty string — hashed files at the root), the optimization is skipped since there's no directory-based way to distinguish hashed from non-hashed files.
+If `build.assetsDir` is set to `""`, meaning hashed files live at the root, the optimization is skipped because there is no directory-based way to distinguish hashed from non-hashed files.
 
 Void also includes presets for where supported meta frameworks (Astro, Nuxt, SvelteKit, etc.) place their hashed assets, so framework-generated assets enjoy optimal caching out of the box.
 
 ## Non-hashed assets
 
-Everything else (`index.html`, `favicon.ico`, `/about`, etc.) is edge-cached using deploy-versioned cache keys. On each deploy, the version changes and all previous cache entries are automatically invalidated — no purge needed.
+Everything else such as `index.html`, `favicon.ico`, and `/about` is edge-cached using deploy-versioned cache keys. On each deploy, the version changes and previous cache entries are invalidated automatically, so there is nothing to purge.
 
 ```
 Cache-Control: public, s-maxage=31536000, max-age=0, must-revalidate
@@ -43,12 +43,12 @@ Cached at the edge until the next deploy. Browsers always revalidate on the next
 
 **What gets cached:**
 
-- All GET requests for non-SSR projects (SPA/static sites) — every path is static
+- All `GET` requests for non-SSR projects such as SPAs and static sites
 - GET requests with file extensions (`.ico`, `.png`, `.css`, etc.) in SSR projects
 
 **What does NOT get cached:**
 
-- `/api/*` routes — always hit the worker
+- `/api/*` routes, which always hit the worker
 - SSR-rendered pages (paths without file extensions in SSR projects)
 - Non-GET requests
 - Non-2xx responses
@@ -59,7 +59,7 @@ If your worker serves dynamic content at a URL that looks static (e.g., a dynami
 
 ## ETags and 304 Not Modified
 
-All static asset responses include an `ETag` header derived from the file's content hash in R2. When a browser revalidates a cached resource, it sends `If-None-Match` with the previous ETag. If the file hasn't changed, the edge returns a **304 Not Modified** with no body — saving bandwidth and speeding up page loads.
+All static asset responses include an `ETag` header derived from the file's content hash in R2. When a browser revalidates a cached resource, it sends `If-None-Match` with the previous ETag. If the file has not changed, the edge returns **304 Not Modified** with no body. That saves bandwidth and speeds up page loads.
 
 This happens automatically for all static assets. No configuration is needed.
 
@@ -69,4 +69,4 @@ You can override caching headers or add your own for any static asset path using
 
 ## API routes and SSR pages
 
-API responses (`/api/*`) and SSR-rendered pages (paths without file extensions) always hit the worker — they are **not** edge-cached by the dispatch layer.
+API responses (`/api/*`) and SSR-rendered pages without file extensions always hit the worker. They are **not** edge-cached by the dispatch layer.

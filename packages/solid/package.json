@@ -32,11 +32,11 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "vite-plugin-solid": "^2.11.10"
+    "vite-plugin-solid": "^2.11.11"
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "solid-js": "^1.9.11",
+    "solid-js": "^1.9.12",
     "tsdown": "catalog:",
     "vite": "catalog:",
     "void": "workspace:*"

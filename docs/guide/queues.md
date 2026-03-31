@@ -8,9 +8,9 @@ Void supports Cloudflare Queues for asynchronous message processing from a top-l
 
 ## Defining queues
 
-Create files in `queues/**/*.ts` (`.mts`, `.js`, `.mjs` also supported). The queue name is inferred from the filename — `queues/emails.ts` creates a queue named `"emails"`, and `queues/order/notifications.ts` creates `"order/notifications"`.
+Create files in `queues/**/*.ts`; `.mts`, `.js`, and `.mjs` also work. The queue name is inferred from the filename. For example, `queues/emails.ts` creates a queue named `"emails"`, and `queues/order/notifications.ts` creates `"order/notifications"`.
 
-Each queue file should export a default handler wrapped with [`defineQueue`](../reference/api.md#definequeuet-handler). The generic `<T>` parameter defines the message body type — this is the type of each `msg.body` in the batch and is used by the typed `queues` proxy for `send()` calls.
+Each queue file should export a default handler wrapped with [`defineQueue`](../reference/api.md#definequeuet-handler). The generic `<T>` parameter defines the message body type. That is the type of each `msg.body` in the batch, and it is also used by the typed `queues` proxy for `send()` calls.
 
 ```ts
 // queues/emails.ts
@@ -42,7 +42,7 @@ import { queues } from "void/queues";
 
 export const POST = defineHandler(async (c) => {
   const order = await c.req.json();
-  // Fully typed — body must match the
+  // Fully typed: body must match the
   // Message interface from queues/emails.ts
   await queues.emails.send({
     to: order.email,
@@ -71,12 +71,12 @@ export default defineQueue<Message>(async (batch, env) => {
 });
 ```
 
-- `msg.ack()` — Acknowledge the message (remove from queue)
-- `msg.retry(options?)` — Retry the message, optionally with `{ delaySeconds }` delay
-- `batch.ackAll()` — Acknowledge all messages in the batch
-- `batch.retryAll(options?)` — Retry all messages in the batch
+- `msg.ack()`: acknowledge the message and remove it from the queue
+- `msg.retry(options?)`: retry the message, optionally with a `{ delaySeconds }` delay
+- `batch.ackAll()`: acknowledge all messages in the batch
+- `batch.retryAll(options?)`: retry all messages in the batch
 
-The first call wins per message — calling `ack()` after `retry()` (or vice versa) on the same message is a no-op. Messages with no explicit decision are implicitly acknowledged if the handler succeeds, or retried if it throws.
+The first call wins for each message. Calling `ack()` after `retry()`, or the reverse, does nothing. Messages with no explicit decision are acknowledged if the handler succeeds, or retried if it throws.
 
 The `timestamp` field on each message is a `Date` object.
 
@@ -105,10 +105,10 @@ export default defineQueue<Message>(async (batch, env) => {
 });
 ```
 
-- `maxBatchSize` — Maximum number of messages per batch (default: 10)
-- `maxBatchTimeout` — Maximum seconds to wait before delivering an incomplete batch (default: 5)
-- `maxRetries` — Maximum number of retries before a message is dead-lettered (default: 3)
-- `retryDelay` — Seconds to wait between retries (default: 0)
+- `maxBatchSize`: maximum number of messages per batch (default `10`)
+- `maxBatchTimeout`: maximum seconds to wait before delivering an incomplete batch (default `5`)
+- `maxRetries`: maximum number of retries before a message is dead-lettered (default `3`)
+- `retryDelay`: seconds to wait between retries (default `0`)
 
 ## Deployment behavior
 

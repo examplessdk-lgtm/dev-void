@@ -24,7 +24,7 @@ Add a provider to `void.json`. Email/password is the default, so the simplest co
 }
 ```
 
-You can also skip this step entirely — auth activates automatically when you import from `void/auth` or `void/client`.
+You can also skip this step entirely. Auth activates automatically when you import from `void/auth` or `void/client`.
 
 ### 2. Sign up and sign in
 
