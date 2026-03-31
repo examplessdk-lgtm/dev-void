@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, relative } from "node:path";
+import { pathToFileURL } from "node:url";
 import { loadEnv } from "vite";
 import { voidLog, voidWarn } from "./log";
 
@@ -184,7 +185,7 @@ async function createCloudflarePrerenderRunner(options: {
   const wranglerUrl = import.meta.resolve("wrangler/package.json");
   const require = createRequire(wranglerUrl);
   const miniflarePath = require.resolve("miniflare");
-  const { Miniflare } = (await import(miniflarePath)) as {
+  const { Miniflare } = (await import(pathToFileURL(miniflarePath).href)) as {
     Miniflare: new (options: Record<string, unknown>) => {
       dispatchFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
       dispose(): Promise<void>;
