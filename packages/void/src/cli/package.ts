@@ -42,7 +42,7 @@ export function collectAndHashAssets(dir: string): {
   try {
     const files = collectFiles(dir);
     for (const filePath of files) {
-      const relativePath = "/" + relative(dir, filePath);
+      const relativePath = "/" + toSlash(relative(dir, filePath));
       const content = readFileSync(filePath);
       assetManifest[relativePath] = {
         hash: computeAssetHash(content),
@@ -287,7 +287,7 @@ export function packageStaticBuild(
 
   const files = collectFiles(outputDir);
   for (const filePath of files) {
-    const relativePath = relative(outputDir, filePath);
+    const relativePath = toSlash(relative(outputDir, filePath));
     if (neededAssets && !neededAssets.has("/" + relativePath)) continue;
     const content = readFileSync(filePath);
     formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
@@ -397,7 +397,7 @@ export function packageFrameworkBuild(opts: {
   // Worker files
   const workerFiles = collectFiles(opts.workerDir);
   for (const filePath of workerFiles) {
-    const relativePath = relative(opts.workerDir, filePath);
+    const relativePath = toSlash(relative(opts.workerDir, filePath));
     if (!isWorkerModule(relativePath)) continue;
     const content = readFileSync(filePath);
     formData.append(`worker:${relativePath}`, new Blob([content]), relativePath);
@@ -409,7 +409,7 @@ export function packageFrameworkBuild(opts: {
     for (const filePath of assetFiles) {
       // Skip worker files when workerDir overlaps with assetsDir
       if (isOverlap && filePath.replace(/\\/g, "/").startsWith(workerDirNorm)) continue;
-      const relativePath = relative(opts.assetsDir, filePath);
+      const relativePath = toSlash(relative(opts.assetsDir, filePath));
       if (opts.neededAssets && !opts.neededAssets.has("/" + relativePath)) continue;
       const content = readFileSync(filePath);
       formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
