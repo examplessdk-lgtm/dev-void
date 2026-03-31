@@ -13,6 +13,7 @@ import type {
   WebSocketManifestMeta,
 } from "./types";
 import type { WebSocketRouteDefinition } from "../router/websocket";
+import { toSlash } from "../shared/utils";
 
 /**
  * Compute a CF-compatible asset hash: SHA-256, first 32 hex chars.
@@ -223,7 +224,7 @@ export function packageBuild(
   const workerDir = join(distDir, workerDirName);
   const workerFiles = collectFiles(workerDir);
   for (const filePath of workerFiles) {
-    const relativePath = relative(workerDir, filePath);
+    const relativePath = toSlash(relative(workerDir, filePath));
     if (!isWorkerModule(relativePath)) continue;
     const content = readFileSync(filePath);
     formData.append(`worker:${relativePath}`, new Blob([content]), relativePath);
@@ -234,7 +235,7 @@ export function packageBuild(
   try {
     const clientFiles = collectFiles(clientDir);
     for (const filePath of clientFiles) {
-      const relativePath = relative(clientDir, filePath);
+      const relativePath = toSlash(relative(clientDir, filePath));
       if (neededAssets && !neededAssets.has("/" + relativePath)) continue;
       const content = readFileSync(filePath);
       formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
