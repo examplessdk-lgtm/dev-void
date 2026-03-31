@@ -1032,6 +1032,9 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
 
   // Asset fallback — delegates to env.ASSETS binding (static files from dist/client)
   lines.push(`async function fetchPagesAsset(c) {`);
+  lines.push(`  if (c.req.method !== "GET" && c.req.method !== "HEAD") {`);
+  lines.push(`    return new Response("Not Found", { status: 404 });`);
+  lines.push(`  }`);
   lines.push(`  const assets = c.env?.ASSETS;`);
   lines.push(`  if (!assets || typeof assets.fetch !== "function") {`);
   lines.push(`    return new Response("Not Found", { status: 404 });`);
@@ -1073,6 +1076,9 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   lines.push(`app.notFound(async (c) => {`);
   lines.push(`  const path = c.req.path;`);
   lines.push(`  if (path === "/api" || path.startsWith("/api/")) {`);
+  lines.push(`    return c.text("Not Found", 404);`);
+  lines.push(`  }`);
+  lines.push(`  if (c.req.method !== "GET" && c.req.method !== "HEAD") {`);
   lines.push(`    return c.text("Not Found", 404);`);
   lines.push(`  }`);
   // Try static assets for any path (not just dot-containing last segments)
@@ -1125,7 +1131,7 @@ export function compileWorkerEntry(
   // Safe for workers without ASSETS binding (env.ASSETS check short-circuits).
   const assetHelper = `
 async function serveWithAssets(request, env, response) {
-  if (response.status !== 404 || !env.ASSETS) return response;
+  if (response.status !== 404 || !env.ASSETS || (request.method !== "GET" && request.method !== "HEAD")) return response;
   const asset = await env.ASSETS.fetch(request);
   if (asset.status === 404) return response;
   const res = new Response(asset.body, asset);
