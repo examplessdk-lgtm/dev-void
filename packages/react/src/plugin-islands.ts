@@ -1,4 +1,4 @@
-import type { Plugin } from "vite";
+import { normalizePath, type Plugin } from "vite";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve, relative } from "node:path";
 import { scanPages, resolveEffectiveLayoutChain } from "void/pages";
@@ -76,7 +76,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
               const strategy = m[2].slice(1, -1);
               const absPath = resolveSpecifier(spec, importerDir, COMPONENT_EXTENSIONS);
               if (absPath) {
-                const islandId = relative(root, absPath).replace(/\.[^.]+$/, "");
+                const islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, "");
                 islandManifest.set(islandId, {
                   componentPath: absPath,
                   islandId,
@@ -198,7 +198,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
             // Resolve to absolute path for the island manifest
             const absPath = resolveSpecifier(spec, importerDir, COMPONENT_EXTENSIONS);
             if (absPath) {
-              const islandId = relative(root, absPath).replace(/\.[^.]+$/, "");
+              const islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, "");
               islandManifest.set(islandId, {
                 componentPath: absPath,
                 islandId,
@@ -206,7 +206,9 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
               });
             }
 
-            const islandId = absPath ? relative(root, absPath).replace(/\.[^.]+$/, "") : spec;
+            const islandId = absPath
+              ? normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, "")
+              : spec;
 
             // Replace the import with a renamed import
             const replacement = `import ${rawName} from ${specRaw}`;

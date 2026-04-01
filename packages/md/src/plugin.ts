@@ -1,4 +1,4 @@
-import type { Plugin, ResolvedConfig, ViteDevServer } from "vite";
+import { normalizePath, type Plugin, type ResolvedConfig, type ViteDevServer } from "vite";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -297,7 +297,7 @@ export function useFrontmatter() { return useContext(FrontmatterContext) ?? {}; 
           }
           for (const imp of islandImports) {
             const absPath = resolve(dirname(_id), imp.specifier);
-            imp.islandId = relative(root, absPath).replace(/\.[^.]+$/, "");
+            imp.islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, "");
           }
 
           const { compile } = await import("./compile");
