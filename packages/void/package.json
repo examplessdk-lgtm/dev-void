@@ -180,6 +180,7 @@
     "drizzle-valibot": "^0.4.2",
     "drizzle-zod": "^0.8.3",
     "hono": "^4.12.9",
+    "jsonc-parser": "3.3.1",
     "pg": "^8.20.0",
     "wrangler": "catalog:"
   },

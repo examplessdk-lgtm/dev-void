@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { parse, type ParseError } from "jsonc-parser";
 import type { InferredBindings } from "../inference/walk";
 import type { VoidConfig } from "../config";
 import type { WebSocketRouteDefinition } from "../router/websocket";
@@ -210,41 +211,11 @@ export function ensureWranglerNodejsAlsFlag(root: string): boolean {
   return true;
 }
 
-/**
- * Minimal JSONC parser — strips single-line (`//`) and multi-line comments
- * before parsing as JSON. Handles comments inside strings correctly.
- */
 function parseJsonc(text: string): Record<string, unknown> {
-  let result = "";
-  let i = 0;
-  while (i < text.length) {
-    // String literal — copy verbatim
-    if (text[i] === '"') {
-      const start = i;
-      i++; // skip opening quote
-      while (i < text.length && text[i] !== '"') {
-        if (text[i] === "\\") i++; // skip escaped char
-        i++;
-      }
-      i++; // skip closing quote
-      result += text.slice(start, i);
-      continue;
-    }
-    // Single-line comment
-    if (text[i] === "/" && text[i + 1] === "/") {
-      i += 2;
-      while (i < text.length && text[i] !== "\n") i++;
-      continue;
-    }
-    // Multi-line comment
-    if (text[i] === "/" && text[i + 1] === "*") {
-      i += 2;
-      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++;
-      i += 2; // skip */
-      continue;
-    }
-    result += text[i];
-    i++;
+  const errors: ParseError[] = [];
+  const result = parse(text, errors);
+  if (errors.length > 0) {
+    throw new SyntaxError("Failed to parse JSONC");
   }
-  return JSON.parse(result);
+  return result;
 }

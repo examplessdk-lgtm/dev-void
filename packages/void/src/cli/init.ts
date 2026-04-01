@@ -7,6 +7,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { parse, type ParseError } from "jsonc-parser";
 import { parseArgs } from "node:util";
 import { intro, outro, log, confirm, isCancel, cancel, note, select } from "@clack/prompts";
 import { ensureProjectTsconfig } from "../codegen/project-tsconfig";
@@ -362,9 +363,10 @@ function setupWranglerConfig(root: string, framework: DetectedFramework): void {
     if (existsSync(p)) {
       configPath = p;
       try {
-        // Use dynamic import-free JSONC parsing — strip comments, then JSON.parse
         const raw = readFileSync(p, "utf-8");
-        parsed = JSON.parse(raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, ""));
+        const errors: ParseError[] = [];
+        parsed = parse(raw, errors);
+        if (errors.length > 0) throw new SyntaxError("Failed to parse JSONC");
       } catch {
         // unparseable — start fresh
       }
