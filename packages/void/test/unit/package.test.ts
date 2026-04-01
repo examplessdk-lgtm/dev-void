@@ -5,6 +5,7 @@ import { hash as blake3hash } from "blake3-jit";
 import {
   packageBuild,
   packageStaticBuild,
+  packageFrameworkBuild,
   computeAssetHash,
   collectAndHashAssets,
 } from "../../src/cli/package";
@@ -311,5 +312,116 @@ describe("packageStaticBuild asset exclusion", () => {
     }
 
     expect(assetKeys.sort()).toEqual(["app.js", "index.html"]);
+  });
+});
+
+describe("_worker.js safety guard", () => {
+  it("throws when _worker.js file exists without .assetsignore", () => {
+    writeFileSync(join(TMP, "index.html"), "<html></html>");
+    writeFileSync(join(TMP, "_worker.js"), "export default {}");
+
+    expect(() => packageStaticBuild(TMP, "static")).toThrow(
+      "Uploading _worker.js file as an asset",
+    );
+  });
+
+  it("throws when _worker.js directory exists without .assetsignore", () => {
+    mkdirSync(join(TMP, "_worker.js"), { recursive: true });
+    writeFileSync(join(TMP, "index.html"), "<html></html>");
+    writeFileSync(join(TMP, "_worker.js", "index.js"), "export default {}");
+
+    expect(() => packageStaticBuild(TMP, "static")).toThrow(
+      "Uploading _worker.js directory as an asset",
+    );
+  });
+
+  it("allows _worker.js when .assetsignore exists (even if empty)", () => {
+    writeFileSync(join(TMP, "index.html"), "<html></html>");
+    writeFileSync(join(TMP, "_worker.js"), "export default {}");
+    writeFileSync(join(TMP, ".assetsignore"), "");
+
+    // Does not throw — .assetsignore presence means the user is aware
+    const form = packageStaticBuild(TMP, "static");
+    const assetKeys: string[] = [];
+    for (const [key] of form.entries()) {
+      if (key.startsWith("asset:")) {
+        assetKeys.push(key.slice("asset:".length));
+      }
+    }
+    // _worker.js is included because .assetsignore doesn't exclude it
+    expect(assetKeys).toContain("_worker.js");
+  });
+
+  it("excludes _worker.js when .assetsignore lists it", () => {
+    writeFileSync(join(TMP, "index.html"), "<html></html>");
+    writeFileSync(join(TMP, "_worker.js"), "export default {}");
+    writeFileSync(join(TMP, ".assetsignore"), "_worker.js");
+
+    const form = packageStaticBuild(TMP, "static");
+    const assetKeys: string[] = [];
+    for (const [key] of form.entries()) {
+      if (key.startsWith("asset:")) {
+        assetKeys.push(key.slice("asset:".length));
+      }
+    }
+    expect(assetKeys).not.toContain("_worker.js");
+    expect(assetKeys).toContain("index.html");
+  });
+
+  it("guards collectAndHashAssets against _worker.js too", () => {
+    writeFileSync(join(TMP, "index.html"), "<html></html>");
+    writeFileSync(join(TMP, "_worker.js"), "export default {}");
+
+    expect(() => collectAndHashAssets(TMP)).toThrow("Uploading _worker.js file as an asset");
+  });
+
+  it("guards packageBuild client assets against _worker.js", () => {
+    // Set up worker dir so packageBuild doesn't fail
+    const workerDir = join(TMP, "worker");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "index.js"), "export default {}");
+    // Put _worker.js in client dir
+    const clientDir = join(TMP, "client");
+    mkdirSync(clientDir, { recursive: true });
+    writeFileSync(join(clientDir, "index.html"), "<html></html>");
+    writeFileSync(join(clientDir, "_worker.js"), "export default {}");
+
+    expect(() =>
+      packageBuild(TMP, "worker", {
+        needsD1: false,
+        needsKV: false,
+        needsR2: false,
+        needsAuth: false,
+        needsQueues: false,
+        needsAI: false,
+      }),
+    ).toThrow("Uploading _worker.js file as an asset");
+  });
+
+  it("guards packageFrameworkBuild assets against _worker.js", () => {
+    const workerDir = join(TMP, "server");
+    const assetsDir = join(TMP, "public");
+    mkdirSync(workerDir, { recursive: true });
+    mkdirSync(assetsDir, { recursive: true });
+    writeFileSync(join(workerDir, "index.js"), "export default {}");
+    writeFileSync(join(assetsDir, "index.html"), "<html></html>");
+    writeFileSync(join(assetsDir, "_worker.js"), "export default {}");
+
+    expect(() =>
+      packageFrameworkBuild({
+        frameworkName: "test",
+        workerDir,
+        workerMain: "index.js",
+        assetsDir,
+        bindings: {
+          needsD1: false,
+          needsKV: false,
+          needsR2: false,
+          needsAuth: false,
+          needsQueues: false,
+          needsAI: false,
+        },
+      }),
+    ).toThrow("Uploading _worker.js file as an asset");
   });
 });

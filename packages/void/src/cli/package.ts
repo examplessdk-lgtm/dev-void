@@ -35,19 +35,45 @@ export function computeAssetHash(content: Buffer, filePath: string): string {
  * and any patterns listed in a .assetsignore file. Matches Wrangler's
  * createAssetsIgnoreFunction from workers-shared/utils/helpers.ts.
  */
-function createAssetsIgnoreFunction(dir: string): (relativePath: string) => boolean {
+function createAssetsIgnoreFunction(dir: string): {
+  isIgnored: (relativePath: string) => boolean;
+  assetsIgnoreFilePresent: boolean;
+} {
   const patterns = ["/.assetsignore", "/_redirects", "/_headers"];
   const assetsIgnorePath = join(dir, ".assetsignore");
+  let assetsIgnoreFilePresent = false;
   if (existsSync(assetsIgnorePath)) {
+    assetsIgnoreFilePresent = true;
     const content = readFileSync(assetsIgnorePath, "utf-8");
     patterns.push(...content.split("\n"));
   }
   const ig = ignore().add(patterns);
   // ignore library expects relative paths without leading /
-  return (relativePath: string) => {
+  const isIgnored = (relativePath: string) => {
     const normalized = relativePath.startsWith("/") ? relativePath.slice(1) : relativePath;
     return ig.test(normalized).ignored;
   };
+  return { isIgnored, assetsIgnoreFilePresent };
+}
+
+/**
+ * Guard against accidentally uploading _worker.js as a static asset.
+ * Matches Wrangler's errorOnLegacyPagesWorkerJSAsset behavior:
+ * throws only when no .assetsignore file exists (if .assetsignore is present
+ * but doesn't exclude _worker.js, the user intentionally wants to upload it).
+ */
+function checkWorkerJsAsset(relativePath: string, assetsIgnoreFilePresent: boolean): void {
+  if (assetsIgnoreFilePresent) return;
+  const name = relativePath.startsWith("/") ? relativePath.slice(1) : relativePath;
+  if (name === "_worker.js" || name.startsWith("_worker.js/")) {
+    const type = name === "_worker.js" ? "file" : "directory";
+    throw new Error(
+      `Uploading _worker.js ${type} as an asset. ` +
+        `This could expose private server-side code to the public Internet. ` +
+        `If this is unintended, remove it or add a .assetsignore file containing "_worker.js". ` +
+        `If intentional, add an empty .assetsignore file to suppress this error.`,
+    );
+  }
 }
 
 export interface AssetManifestEntry {
@@ -67,11 +93,12 @@ export function collectAndHashAssets(dir: string): {
   const assetFiles = new Map<string, Buffer>();
 
   try {
-    const isIgnored = createAssetsIgnoreFunction(dir);
+    const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(dir);
     const files = collectFiles(dir);
     for (const filePath of files) {
       const relativePath = "/" + toSlash(relative(dir, filePath));
       if (isIgnored(relativePath)) continue;
+      checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
       const content = readFileSync(filePath);
       assetManifest[relativePath] = {
         hash: computeAssetHash(content, filePath),
@@ -79,8 +106,14 @@ export function collectAndHashAssets(dir: string): {
       };
       assetFiles.set(relativePath, content);
     }
-  } catch {
-    // Directory doesn't exist — no assets
+  } catch (err) {
+    // Only swallow directory-not-found errors; re-throw everything else
+    // (e.g. _worker.js safety guard)
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+      // Directory doesn't exist — no assets
+    } else {
+      throw err;
+    }
   }
 
   return { assetManifest, assetFiles };
@@ -262,17 +295,22 @@ export function packageBuild(
   // Add client assets
   const clientDir = join(distDir, "client");
   try {
-    const isIgnored = createAssetsIgnoreFunction(clientDir);
+    const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(clientDir);
     const clientFiles = collectFiles(clientDir);
     for (const filePath of clientFiles) {
       const relativePath = toSlash(relative(clientDir, filePath));
       if (isIgnored("/" + relativePath)) continue;
+      checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
       if (neededAssets && !neededAssets.has("/" + relativePath)) continue;
       const content = readFileSync(filePath);
       formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
     }
-  } catch {
-    // No client directory — API-only project
+  } catch (err) {
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+      // No client directory — API-only project
+    } else {
+      throw err;
+    }
   }
 
   if (neededAssets) formData.append("preflight", "true");
@@ -316,11 +354,12 @@ export function packageStaticBuild(
 
   formData.append("manifest", JSON.stringify(manifest));
 
-  const isIgnored = createAssetsIgnoreFunction(outputDir);
+  const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(outputDir);
   const files = collectFiles(outputDir);
   for (const filePath of files) {
     const relativePath = toSlash(relative(outputDir, filePath));
     if (isIgnored("/" + relativePath)) continue;
+    checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
     if (neededAssets && !neededAssets.has("/" + relativePath)) continue;
     const content = readFileSync(filePath);
     formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
@@ -438,19 +477,24 @@ export function packageFrameworkBuild(opts: {
 
   // Asset files
   try {
-    const isIgnored = createAssetsIgnoreFunction(opts.assetsDir);
+    const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(opts.assetsDir);
     const assetFiles = collectFiles(opts.assetsDir);
     for (const filePath of assetFiles) {
       // Skip worker files when workerDir overlaps with assetsDir
       if (isOverlap && filePath.replace(/\\/g, "/").startsWith(workerDirNorm)) continue;
       const relativePath = toSlash(relative(opts.assetsDir, filePath));
       if (isIgnored("/" + relativePath)) continue;
+      checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
       if (opts.neededAssets && !opts.neededAssets.has("/" + relativePath)) continue;
       const content = readFileSync(filePath);
       formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
     }
-  } catch {
-    // No assets directory
+  } catch (err) {
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+      // No assets directory
+    } else {
+      throw err;
+    }
   }
 
   if (opts.neededAssets) formData.append("preflight", "true");
