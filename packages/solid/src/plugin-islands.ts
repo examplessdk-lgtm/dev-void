@@ -300,7 +300,7 @@ function generateIslandRenderer(
   if (isDev && islandCssMap.size > 0) {
     const cssMapObj: Record<string, string[]> = {};
     for (const [compId, paths] of islandCssMap) {
-      cssMapObj[compId] = paths.map((p) => "/" + relative(viteRoot, p) + ".css");
+      cssMapObj[compId] = paths.map((p) => "/" + normalizePath(relative(viteRoot, p)) + ".css");
     }
     cssMapCode = `const __cssPaths = ${JSON.stringify(cssMapObj)};`;
   }
