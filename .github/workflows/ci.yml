@@ -23,10 +23,12 @@ jobs:
       - run: pnpm check
 
   test:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [blacksmith-4vcpu-ubuntu-2404, windows-latest]
+        suite: [unit, core-markdown, metaframeworks, pages-react-vue, pages-svelte-solid]
         include:
           - suite: unit
             script: test:unit
@@ -52,6 +54,9 @@ jobs:
       - run: pnpm build
 
       - run: pnpm exec playwright install --with-deps chromium
-        if: matrix.suite == 'core-markdown' || matrix.suite == 'metaframeworks' || startsWith(matrix.suite, 'pages-')
+        if: matrix.suite != 'unit' && !contains(matrix.os, 'windows')
+
+      - run: pnpm exec playwright install chromium
+        if: matrix.suite != 'unit' && contains(matrix.os, 'windows')
 
       - run: pnpm ${{ matrix.script }}${{ matrix.retry && format(' --retry {0}', matrix.retry) || '' }}
