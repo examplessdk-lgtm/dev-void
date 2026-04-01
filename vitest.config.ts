@@ -34,6 +34,11 @@ export default defineConfig({
           ],
           exclude: metaframeworks,
           maxWorkers,
+          // kitchen-sink.test.ts (dev server) and kitchen-sink-build.test.ts
+          // (build) both use playground/kitchen-sink/. The build test deletes
+          // .void/ before running, which destroys miniflare persistence that
+          // the dev server depends on. Serialize to prevent the conflict.
+          fileParallelism: false,
         },
       },
       {

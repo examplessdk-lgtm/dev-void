@@ -67,7 +67,20 @@ describe("playground/kitchen-sink", () => {
     // vue, hono, etc.) which causes multiple program reloads. Wait until
     // the server returns valid SSR HTML instead of sleeping a fixed time.
     await waitForServer(BASE, 60_000, { expectBody: "Kitchen Sink" });
-  }, 90_000);
+
+    // Warm up the client-side module graph. waitForServer only exercises
+    // the SSR path (Node fetch → HTML). The first *browser* page load
+    // triggers Vite's client-side dep optimization and module transformation
+    // for Vue, drizzle-orm, better-auth, valibot, etc. On CI this can
+    // easily exceed 10s. Do it here so individual tests start with a warm cache.
+    const warmupPage = await (await browser.newContext()).newPage();
+    try {
+      await warmupPage.goto(BASE + "/", { timeout: 30_000 });
+      await warmupPage.waitForSelector('#app[data-hydrated="true"]', { timeout: 30_000 });
+    } finally {
+      await warmupPage.context().close();
+    }
+  }, 120_000);
 
   afterAll(async () => {
     if (child) await killChild(child);
