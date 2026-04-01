@@ -11,5 +11,5 @@ export default defineConfig({
   format: "esm",
   dts: true,
   clean: true,
-  external: ["vue", "vue/server-renderer", "vite", "void", "@vitejs/plugin-vue"],
+  external: ["vue", "vue/server-renderer", "vite", "void", "void/*", "@vitejs/plugin-vue"],
 });

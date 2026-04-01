@@ -13,6 +13,7 @@ export default defineConfig({
     "react-dom/client",
     "vite",
     "void",
+    "void/*",
     "@vitejs/plugin-react",
   ],
 });

@@ -54,5 +54,28 @@ export function ensureProjectTsconfig(
     tsconfig.compilerOptions = { paths };
   }
 
+  if (includeRoutes) {
+    const compilerOptions = (tsconfig.compilerOptions ??= {}) as {
+      paths?: Record<string, string[]>;
+    };
+    const paths = (compilerOptions.paths ??= {});
+
+    // moduleResolution: "bundler" prefers the resolved package file for
+    // void/routes, so point it at the generated declaration module directly.
+    paths["void/routes"] = ["./routes.d.ts"];
+  }
+
+  if (includeQueues) {
+    const compilerOptions = (tsconfig.compilerOptions ??= {}) as {
+      paths?: Record<string, string[]>;
+    };
+    const paths = (compilerOptions.paths ??= {});
+
+    // Same issue as void/routes: with moduleResolution "bundler", TypeScript
+    // prefers the package export file unless we point it at the generated
+    // project-local declaration module.
+    paths["void/queues"] = ["./queues.d.ts"];
+  }
+
   writeFileSync(join(outDir, "tsconfig.json"), JSON.stringify(tsconfig, null, 2) + "\n");
 }

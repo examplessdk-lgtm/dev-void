@@ -32,6 +32,22 @@ bunx void init
 
 This scaffolds a Pages-mode starter with an interactive setup flow.
 
+:::info Private beta via GitHub Packages
+Keep imports in your app on `void` and `@void/*`. For the private beta, only the installed package identities change:
+
+```sh
+npm install -D void@npm:@void-sdk/void
+npm install -D @void/react@npm:@void-sdk/react
+```
+
+```ini
+@void-sdk:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
+```
+
+Use the same alias pattern for `@void/vue`, `@void/svelte`, `@void/solid`, and `@void/md` when needed.
+:::
+
 As part of `void init`, you'll choose a Pages framework (React, Vue, Svelte, or Solid) and a starter type. D1 is the default top option and scaffolds a DB-backed page loader, schema, migration, and API route. PostgreSQL scaffolds the same starter and writes `"database": "pg"` to `void.json`. Static Pages skips the database and server starter files so you can start with static content and add Void features later.
 
 At the end of the full interactive flow, `void init` can also handle Void project setup by logging you in and linking or creating your Void project. That means the default first-time path is just `void init`, then `void deploy`.

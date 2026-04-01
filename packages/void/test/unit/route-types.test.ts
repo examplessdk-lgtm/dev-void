@@ -273,7 +273,8 @@ describe("generateRouteTypes", () => {
 
     const { dts } = generateRouteTypes(scan, "/project/routes", "/project/.void", "/project/pages");
 
-    expect(dts).not.toContain("PageActionMap");
+    expect(dts).toContain("export interface PageActionMap {}");
+    expect(dts).not.toContain('"/about"');
   });
 
   it("generates PageActionMap with named actions", () => {
@@ -305,7 +306,7 @@ describe("generateRouteTypes", () => {
     expect(dts).toContain('"/users"');
     expect(dts).toContain("[K in keyof");
     expect(dts).toContain('["actions"]');
-    expect(dts).not.toContain('["action"]');
+    expect(dts).toContain('ParseActionUrl<U>["action"]');
   });
 
   it("generates PageActionMap for named actions with dynamic params", () => {
@@ -392,6 +393,7 @@ describe("generateRouteTypes", () => {
 
     const { dts } = generateRouteTypes(scan, "/project/routes", "/project/.void");
 
-    expect(dts).not.toContain("PageActionMap");
+    expect(dts).toContain("export interface PageActionMap {}");
+    expect(dts).not.toContain('"/users"');
   });
 });

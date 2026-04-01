@@ -15,8 +15,8 @@
   },
   "devDependencies": {
     "@typescript/native-preview": "catalog:",
-    "@void/svelte": "workspace:*",
+    "@void/svelte": "workspace:@void-sdk/svelte@*",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   }
 }

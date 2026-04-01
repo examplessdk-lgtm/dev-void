@@ -6,6 +6,8 @@
     "moduleResolution": "bundler",
     "paths": {
       "*": ["./*"],
+      "void": ["./src/index.ts"],
+      "void/*": ["./src/*"],
       "void/routes": ["./src/routes-stub.ts"]
     },
     "strict": true,

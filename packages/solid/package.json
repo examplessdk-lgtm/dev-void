@@ -1,5 +1,5 @@
 {
-  "name": "@void/solid",
+  "name": "@void-sdk/solid",
   "version": "0.0.1",
   "files": [
     "dist",
@@ -26,6 +26,9 @@
       "default": "./src/runtime/prefetch.ts"
     }
   },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
@@ -39,11 +42,11 @@
     "solid-js": "^1.9.12",
     "tsdown": "catalog:",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   },
   "peerDependencies": {
     "solid-js": "^1.9.0",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   }
 }

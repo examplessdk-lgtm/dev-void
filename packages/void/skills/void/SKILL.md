@@ -15,6 +15,8 @@ Docs in this skill are bundled from `docs/` during `void` package build and live
 
 Use `void` in examples and commands in this skill. For first-time setup, prefer `void init` followed by `void deploy`; `void init` can handle auth and project linking interactively.
 
+During the GitHub Packages private beta, keep using `void` and `@void/*` in code examples. Installation may use npm aliases such as `void@npm:@void-sdk/void`.
+
 ## No-Args Behavior
 
 If invoked without a concrete task, do a brief app status check and report:

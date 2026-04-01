@@ -72,6 +72,62 @@ export function generateRouteTypes(
   lines.push("");
 
   lines.push('declare module "void/routes" {');
+  lines.push("  export interface RouteMap {}");
+  lines.push("  export interface WebSocketRouteMap {}");
+  lines.push("  export interface PageActionMap {}");
+  lines.push("");
+  lines.push(
+    "  export type ParseActionUrl<U extends string> = U extends `${infer Base}?${infer Action}` ? {",
+  );
+  lines.push("    base: Base;");
+  lines.push("    action: Action;");
+  lines.push("  } : {");
+  lines.push("    base: U;");
+  lines.push("    action: never;");
+  lines.push("  };");
+  lines.push("");
+  lines.push("  export type ResolveActionBody<U extends string> =");
+  lines.push('    ParseActionUrl<U>["base"] extends keyof PageActionMap');
+  lines.push('      ? ParseActionUrl<U>["action"] extends never');
+  lines.push('        ? PageActionMap[ParseActionUrl<U>["base"]] extends { body: infer B }');
+  lines.push("          ? B");
+  lines.push("          : Record<string, unknown>");
+  lines.push('        : PageActionMap[ParseActionUrl<U>["base"]] extends { actions: infer A }');
+  lines.push('          ? ParseActionUrl<U>["action"] extends keyof A');
+  lines.push('            ? A[ParseActionUrl<U>["action"]] extends { body: infer B }');
+  lines.push("              ? B");
+  lines.push("              : Record<string, unknown>");
+  lines.push("            : never");
+  lines.push("          : never");
+  lines.push("      : Record<string, unknown>;");
+  lines.push("");
+  lines.push("  export type ResolveActionParams<U extends string> =");
+  lines.push('    ParseActionUrl<U>["base"] extends keyof PageActionMap');
+  lines.push('      ? PageActionMap[ParseActionUrl<U>["base"]] extends { params: infer P }');
+  lines.push("        ? P");
+  lines.push("        : never");
+  lines.push("      : never;");
+  lines.push("");
+  lines.push("  export type HasActionParams<U extends string> =");
+  lines.push("    ResolveActionParams<U> extends Record<string, string> ? true : false;");
+  lines.push("");
+  lines.push("  export type ActionFormOptions<U extends string> =");
+  lines.push(
+    "    HasActionParams<U> extends true ? { params: ResolveActionParams<U> } : { params?: never };",
+  );
+  lines.push("");
+  lines.push("  export type ActionUrl =");
+  lines.push("    | {");
+  lines.push(
+    "        [K in keyof PageActionMap]: PageActionMap[K] extends { body: any } ? K : never;",
+  );
+  lines.push("      }[keyof PageActionMap]");
+  lines.push("    | {");
+  lines.push("        [K in keyof PageActionMap]: PageActionMap[K] extends { actions: infer A }");
+  lines.push("          ? `${K & string}?${keyof A & string}`");
+  lines.push("          : never;");
+  lines.push("      }[keyof PageActionMap]");
+  lines.push("");
   lines.push("  interface RouteMap {");
 
   for (const route of scan.routes) {

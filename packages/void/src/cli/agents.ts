@@ -7,7 +7,7 @@ export function getPackageDir(): string {
   for (let i = 0; i < 5; i++) {
     if (existsSync(join(dir, "package.json"))) {
       const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
-      if (pkg.name === "void") return dir;
+      if (pkg.name === "void" || pkg.name === "@void-sdk/void") return dir;
     }
     dir = join(dir, "..");
   }

@@ -21,6 +21,24 @@ npm install -D void
 npx void init
 ```
 
+## Private Beta
+
+For the GitHub Packages private beta, keep your code imports on `void` and `@void/*`, but install the beta packages with npm aliases:
+
+```sh
+npm install -D void@npm:@void-sdk/void
+npm install -D @void/react@npm:@void-sdk/react
+```
+
+Add this to your project `.npmrc`:
+
+```ini
+@void-sdk:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
+```
+
+Framework and support packages follow the same pattern, for example `@void/vue@npm:@void-sdk/vue`, `@void/svelte@npm:@void-sdk/svelte`, `@void/solid@npm:@void-sdk/solid`, and `@void/md@npm:@void-sdk/md`.
+
 This scaffolds a starter app with an interactive setup flow and can also log you in and link or create your deploy project. Then:
 
 ```sh
@@ -78,11 +96,11 @@ pnpm docs              # local docs dev server
 
 Deploy and publish workflows require three GitHub environments:
 
-| Environment | Trigger   | Secret       | Purpose                                        |
-| ----------- | --------- | ------------ | ---------------------------------------------- |
-| `Prod`      | `prod`    | `VOID_TOKEN` | Auth token for `void deploy` (production docs) |
-| `Staging`   | `main`    | `VOID_TOKEN` | Auth token for `void deploy` (staging docs)    |
-| `Release`   | `v*` tags | `NPM_TOKEN`  | npm publish token (with provenance)            |
+| Environment | Trigger | Secret              | Purpose                                                                        |
+| ----------- | ------- | ------------------- | ------------------------------------------------------------------------------ |
+| `Prod`      | `prod`  | `VOID_TOKEN`        | Auth token for `void deploy` (production docs)                                 |
+| `Staging`   | `main`  | `VOID_TOKEN`        | Auth token for `void deploy` (staging docs)                                    |
+| `Release`   | `v*`    | `GH_PACKAGES_TOKEN` | GitHub Packages private beta publish token via `.github/workflows/publish.yml` |
 
 Note both prod and staging docs are self-hosted on the **production** environment of the platform, so `VOID_TOKEN` for both Prod and Staging envs should be issued from the production API.
 

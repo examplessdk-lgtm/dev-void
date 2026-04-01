@@ -1,5 +1,5 @@
 {
-  "name": "void",
+  "name": "@void-sdk/void",
   "version": "0.2.0",
   "bin": {
     "void": "dist/cli/cli.mjs"
@@ -14,6 +14,23 @@
     "README.md"
   ],
   "type": "module",
+  "imports": {
+    "#self": "./dist/index.mjs",
+    "#self/_env": "./dist/runtime/env.mjs",
+    "#self/client": "./dist/runtime/client.mjs",
+    "#self/handler": "./dist/runtime/handler.mjs",
+    "#self/pages-head": "./dist/pages/head.mjs",
+    "#self/pages-protocol": "./dist/pages/protocol.mjs",
+    "#self/queues": "./dist/runtime/queues.mjs",
+    "#self/remote": "./dist/runtime/remote/index.mjs",
+    "#self/remote/binding-handler": "./dist/runtime/remote/binding-handler.mjs",
+    "#self/response": "./dist/runtime/response.mjs",
+    "#self/runtime/fetch": "./dist/runtime/fetch.mjs",
+    "#self/runtime/fetch-stream": "./dist/runtime/fetch-stream.mjs",
+    "#self/runtime/migration-handler": "./dist/runtime/migration-handler.mjs",
+    "#self/runtime/migration-handler-pg": "./dist/runtime/migration-handler-pg.mjs",
+    "#self/runtime/ws-server": "./dist/runtime/ws-server.mjs"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.mts",
@@ -162,6 +179,9 @@
       "import": "./dist/runtime/db-pg.mjs"
     }
   },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "scripts": {
     "build": "node scripts/sync-skill-docs.mjs && tsdown",
     "dev": "tsdown --watch",
@@ -206,30 +226,30 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
-    "@void/md": "workspace:*",
-    "@void/react": "workspace:*",
-    "@void/solid": "workspace:*",
-    "@void/svelte": "workspace:*",
-    "@void/vue": "workspace:*",
+    "@void-sdk/md": "workspace:*",
+    "@void-sdk/react": "workspace:*",
+    "@void-sdk/solid": "workspace:*",
+    "@void-sdk/svelte": "workspace:*",
+    "@void-sdk/vue": "workspace:*",
     "arktype": ">=2.0.0",
     "valibot": ">=1.0.0-beta.7",
     "vite": "^8.0.0",
     "zod": "^3.25.0 || ^4.0.0"
   },
   "peerDependenciesMeta": {
-    "@void/md": {
+    "@void-sdk/md": {
       "optional": true
     },
-    "@void/vue": {
+    "@void-sdk/vue": {
       "optional": true
     },
-    "@void/react": {
+    "@void-sdk/react": {
       "optional": true
     },
-    "@void/svelte": {
+    "@void-sdk/svelte": {
       "optional": true
     },
-    "@void/solid": {
+    "@void-sdk/solid": {
       "optional": true
     },
     "arktype": {

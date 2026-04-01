@@ -26,7 +26,7 @@ async function newPage(): Promise<Page> {
 }
 
 async function waitForHydration(page: Page) {
-  await page.waitForSelector('#app[data-hydrated="true"]');
+  await page.waitForSelector('#app[data-hydrated="true"]', { timeout: 20_000 });
 }
 
 describe("playground/kitchen-sink", () => {
@@ -65,17 +65,19 @@ describe("playground/kitchen-sink", () => {
 
     // The first request triggers Vite SSR dep optimization (drizzle-orm,
     // vue, hono, etc.) which causes multiple program reloads. Wait until
-    // the server returns valid SSR HTML instead of sleeping a fixed time.
+    // the server returns valid SSR HTML, then warm the client graph with a
+    // real browser navigation so the first hydration assertion is not racing
+    // cold dev transforms.
     await waitForServer(BASE, 60_000, { expectBody: "Kitchen Sink" });
 
     // Warm up the client-side module graph. waitForServer only exercises
-    // the SSR path (Node fetch → HTML). The first *browser* page load
-    // triggers Vite's client-side dep optimization and module transformation
-    // for Vue, drizzle-orm, better-auth, valibot, etc. On CI this can
-    // easily exceed 10s. Do it here so individual tests start with a warm cache.
-    const warmupPage = await (await browser.newContext()).newPage();
+    // the SSR path (Node fetch → HTML). The first browser page load triggers
+    // Vite's client-side dep optimization and module transformation for the
+    // app and its heavier dependencies. On CI this can easily exceed 10s, so
+    // do it here and give the warmup a larger timeout budget.
+    const warmupPage = await newPage();
     try {
-      await warmupPage.goto(BASE + "/", { timeout: 30_000 });
+      await warmupPage.goto(`${BASE}/`, { timeout: 30_000 });
       await warmupPage.waitForSelector('#app[data-hydrated="true"]', { timeout: 30_000 });
     } finally {
       await warmupPage.context().close();

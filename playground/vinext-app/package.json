@@ -18,6 +18,6 @@
     "@types/react-dom": "^19.2.3",
     "@typescript/native-preview": "catalog:",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   }
 }

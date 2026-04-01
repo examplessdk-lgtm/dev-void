@@ -15,6 +15,6 @@
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@typescript/native-preview": "catalog:",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   }
 }

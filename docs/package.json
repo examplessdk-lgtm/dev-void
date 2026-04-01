@@ -15,6 +15,6 @@
     "reka-ui": "2.9.2",
     "vitepress": "2.0.0-alpha.16",
     "vitepress-plugin-group-icons": "^1.7.1",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   }
 }

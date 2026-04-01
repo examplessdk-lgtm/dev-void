@@ -19,6 +19,24 @@ npm install -D void
 npx void init
 ```
 
+## Private Beta Install
+
+For the GitHub Packages private beta, keep importing `void` and `@void/*` in source code, but install the beta artifacts with npm aliases:
+
+```bash
+npm install -D void@npm:@void-sdk/void
+npm install -D @void/react@npm:@void-sdk/react
+```
+
+Project `.npmrc`:
+
+```ini
+@void-sdk:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
+```
+
+Use the same alias pattern for the other adapters and `@void/md`.
+
 The full interactive `void init` flow can scaffold a starter, configure local project files, log you in, and link or create your Void project so the next step is just `npx void deploy`.
 
 ```ts

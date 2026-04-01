@@ -100,27 +100,30 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   // 3. Virtual modules have no filesystem location for relative resolution
   const resolveFile = (specifier: string) => fileURLToPath(import.meta.resolve(specifier));
 
-  const handlerFile = resolveFile("void/handler");
-  const runtimeDir = dirname(resolveFile("void/client"));
-  const fetchPath = resolveFile("void/runtime/fetch");
-  const fetchStreamPath = resolveFile("void/runtime/fetch-stream");
+  const handlerFile = resolveFile("#self/handler");
+  const runtimeDir = dirname(resolveFile("#self/client"));
+  const fetchPath = resolveFile("#self/runtime/fetch");
+  const fetchStreamPath = resolveFile("#self/runtime/fetch-stream");
   const drizzleAdapterPath = resolveFile("better-auth/adapters/drizzle");
   let authClientPath = join(runtimeDir, "auth-client.mjs");
   const remote = options.remoteMode
-    ? { remotePath: resolveFile("void/remote"), envPath: resolveFile("void/_env") }
+    ? {
+        remotePath: resolveFile("#self/remote"),
+        envPath: resolveFile("#self/_env"),
+      }
     : undefined;
   const compileOptions: CompileOptions = {
     honoPath: resolveFile("hono"),
-    responsePath: resolveFile("void/response"),
-    runtimeEnvPath: resolveFile("void/_env"),
-    webSocketRuntimePath: resolveFile("void/runtime/ws-server"),
+    responsePath: resolveFile("#self/response"),
+    runtimeEnvPath: resolveFile("#self/_env"),
+    webSocketRuntimePath: resolveFile("#self/runtime/ws-server"),
     reactRefresh: false,
     auth: null,
     nodeTarget: !!options.target,
     headerRules: options.headerRules,
     redirectRules: options.redirectRules,
     explicitPrerenderPaths: options.prerenderPaths,
-    bindingHandlerPath: options.target ? undefined : resolveFile("void/remote/binding-handler"),
+    bindingHandlerPath: options.target ? undefined : resolveFile("#self/remote/binding-handler"),
   };
 
   // Auth compile options are set up lazily in buildStart (after env plugin
@@ -206,8 +209,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     return {
       pagesDir,
       pagesDirRelative: relative(root, pagesDir).replaceAll("\\", "/"),
-      protocolPath: resolveFile("void/pages-protocol"),
-      headPath: resolveFile("void/pages-head"),
+      protocolPath: resolveFile("#self/pages-protocol"),
+      headPath: resolveFile("#self/pages-head"),
       clientEntryId: "virtual:void-pages-client",
       islandClientEntryId: hasIslandPages ? "virtual:void-islands-client" : undefined,
       mdClientEntryId,
@@ -296,8 +299,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           const dialect = getDatabaseDialect(readConfig(root));
           compileOptions.migrationHandlerPath = resolveFile(
             dialect === "postgresql"
-              ? "void/runtime/migration-handler-pg"
-              : "void/runtime/migration-handler",
+              ? "#self/runtime/migration-handler-pg"
+              : "#self/runtime/migration-handler",
           );
           compileOptions.migrations = migrations;
           compileOptions.migrationDialect = dialect;
@@ -343,7 +346,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         }
         // Redirect void/queues to the built runtime module
         if (id === "void/queues") {
-          return resolveFile("void/queues");
+          return resolveFile("#self/queues");
         }
         if (id === "void/client") {
           return this.environment?.name === "client"

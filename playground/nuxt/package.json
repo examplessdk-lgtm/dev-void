@@ -12,7 +12,7 @@
   "devDependencies": {
     "@typescript/native-preview": "catalog:",
     "vite": "catalog:",
-    "void": "workspace:*",
+    "void": "workspace:@void-sdk/void@*",
     "wrangler": "catalog:"
   }
 }

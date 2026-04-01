@@ -3,6 +3,18 @@ Void is a fullstack Vite framework and deployment platform for Cloudflare. In an
 npm install -D void
 npx void init
 
+During the private beta, install the packages from GitHub Packages with aliases instead:
+
+npm install -D void@npm:@void-sdk/void
+npm install -D @void/react@npm:@void-sdk/react
+
+and configure:
+
+@void-sdk:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
+
+Keep source imports on `void` and `@void/*`.
+
 During `void init`, first choose a Pages framework (React, Vue, Svelte, or Solid), then choose D1 for a zero-config, fully managed default or PostgreSQL if you already have Postgres infrastructure or expect heavier writes and more complex queries.
 
 At the end of the interactive flow, `void init` can also log you in and link or create your Void project so your first deploy is just:

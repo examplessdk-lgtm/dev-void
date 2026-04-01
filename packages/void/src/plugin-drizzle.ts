@@ -10,7 +10,7 @@ import { voidWarn } from "./log";
 // (including metaframeworks where drizzle-orm isn't a direct dependency).
 const drizzleD1Resolved = fileURLToPath(import.meta.resolve("drizzle-orm/d1"));
 const drizzleOrmResolved = fileURLToPath(import.meta.resolve("drizzle-orm"));
-const envModuleResolved = fileURLToPath(import.meta.resolve("void/_env"));
+const envModuleResolved = fileURLToPath(import.meta.resolve("#self/_env"));
 const drizzleNodePgResolved = fileURLToPath(import.meta.resolve("drizzle-orm/node-postgres"));
 const pgResolved = fileURLToPath(import.meta.resolve("pg"));
 
