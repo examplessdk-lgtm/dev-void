@@ -26,7 +26,11 @@ export async function getPort(): Promise<number> {
   return port;
 }
 
-export async function waitForServer(url: string, timeoutMs: number): Promise<void> {
+export async function waitForServer(
+  url: string,
+  timeoutMs: number,
+  options?: { expectBody?: string },
+): Promise<void> {
   // Release the held port so the child process can bind to it.
   // This is called right after spawn(), minimizing the TOCTOU window.
   const urlPort = Number(new URL(url).port);
@@ -41,7 +45,11 @@ export async function waitForServer(url: string, timeoutMs: number): Promise<voi
   while (Date.now() - start < timeoutMs) {
     try {
       const response = await fetch(url);
-      if (response.status > 0) return;
+      if (response.status > 0) {
+        if (!options?.expectBody) return;
+        const body = await response.text();
+        if (body.includes(options.expectBody)) return;
+      }
     } catch {
       // retry
     }

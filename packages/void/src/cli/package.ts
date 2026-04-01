@@ -1,6 +1,7 @@
-import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { extname, join, relative } from "node:path";
+import { hash as blake3hash } from "blake3-jit";
+import ignore from "ignore";
 import type { InferredBindings } from "../inference/walk";
 import type { MigrationFile } from "../migrations/validate";
 import type {
@@ -15,12 +16,38 @@ import type {
 import type { WebSocketRouteDefinition } from "../router/websocket";
 import { toSlash } from "../shared/utils";
 
+const textEncoder = new TextEncoder();
+
 /**
- * Compute a CF-compatible asset hash: SHA-256, first 32 hex chars.
+ * Compute a CF-compatible asset hash: BLAKE3 of base64(content) + extension,
+ * first 32 hex chars. Matches Wrangler's hashFile algorithm exactly.
  * Must match the API's computeAssetHash algorithm exactly.
  */
-export function computeAssetHash(content: Buffer): string {
-  return createHash("sha256").update(content).digest("hex").slice(0, 32);
+export function computeAssetHash(content: Buffer, filePath: string): string {
+  const base64 = content.toString("base64");
+  const ext = extname(filePath).substring(1);
+  const input = textEncoder.encode(base64 + ext);
+  return Buffer.from(blake3hash(input)).toString("hex").slice(0, 32);
+}
+
+/**
+ * Create a filter function that excludes .assetsignore, _headers, _redirects,
+ * and any patterns listed in a .assetsignore file. Matches Wrangler's
+ * createAssetsIgnoreFunction from workers-shared/utils/helpers.ts.
+ */
+function createAssetsIgnoreFunction(dir: string): (relativePath: string) => boolean {
+  const patterns = ["/.assetsignore", "/_redirects", "/_headers"];
+  const assetsIgnorePath = join(dir, ".assetsignore");
+  if (existsSync(assetsIgnorePath)) {
+    const content = readFileSync(assetsIgnorePath, "utf-8");
+    patterns.push(...content.split("\n"));
+  }
+  const ig = ignore().add(patterns);
+  // ignore library expects relative paths without leading /
+  return (relativePath: string) => {
+    const normalized = relativePath.startsWith("/") ? relativePath.slice(1) : relativePath;
+    return ig.test(normalized).ignored;
+  };
 }
 
 export interface AssetManifestEntry {
@@ -40,12 +67,14 @@ export function collectAndHashAssets(dir: string): {
   const assetFiles = new Map<string, Buffer>();
 
   try {
+    const isIgnored = createAssetsIgnoreFunction(dir);
     const files = collectFiles(dir);
     for (const filePath of files) {
       const relativePath = "/" + toSlash(relative(dir, filePath));
+      if (isIgnored(relativePath)) continue;
       const content = readFileSync(filePath);
       assetManifest[relativePath] = {
-        hash: computeAssetHash(content),
+        hash: computeAssetHash(content, filePath),
         size: content.length,
       };
       assetFiles.set(relativePath, content);
@@ -233,9 +262,11 @@ export function packageBuild(
   // Add client assets
   const clientDir = join(distDir, "client");
   try {
+    const isIgnored = createAssetsIgnoreFunction(clientDir);
     const clientFiles = collectFiles(clientDir);
     for (const filePath of clientFiles) {
       const relativePath = toSlash(relative(clientDir, filePath));
+      if (isIgnored("/" + relativePath)) continue;
       if (neededAssets && !neededAssets.has("/" + relativePath)) continue;
       const content = readFileSync(filePath);
       formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
@@ -285,9 +316,11 @@ export function packageStaticBuild(
 
   formData.append("manifest", JSON.stringify(manifest));
 
+  const isIgnored = createAssetsIgnoreFunction(outputDir);
   const files = collectFiles(outputDir);
   for (const filePath of files) {
     const relativePath = toSlash(relative(outputDir, filePath));
+    if (isIgnored("/" + relativePath)) continue;
     if (neededAssets && !neededAssets.has("/" + relativePath)) continue;
     const content = readFileSync(filePath);
     formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
@@ -405,11 +438,13 @@ export function packageFrameworkBuild(opts: {
 
   // Asset files
   try {
+    const isIgnored = createAssetsIgnoreFunction(opts.assetsDir);
     const assetFiles = collectFiles(opts.assetsDir);
     for (const filePath of assetFiles) {
       // Skip worker files when workerDir overlaps with assetsDir
       if (isOverlap && filePath.replace(/\\/g, "/").startsWith(workerDirNorm)) continue;
       const relativePath = toSlash(relative(opts.assetsDir, filePath));
+      if (isIgnored("/" + relativePath)) continue;
       if (opts.neededAssets && !opts.neededAssets.has("/" + relativePath)) continue;
       const content = readFileSync(filePath);
       formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { hash as blake3hash } from "blake3-jit";
 import {
   packageBuild,
   packageStaticBuild,
@@ -141,30 +142,69 @@ describe("packageBuild", () => {
 
 describe("computeAssetHash", () => {
   it("returns a 32-char hex string", () => {
-    const hash = computeAssetHash(Buffer.from("hello world"));
+    const hash = computeAssetHash(Buffer.from("hello world"), "test.html");
     expect(hash).toHaveLength(32);
     expect(hash).toMatch(/^[0-9a-f]{32}$/);
   });
 
-  it("returns consistent hashes for same content", () => {
-    const a = computeAssetHash(Buffer.from("test content"));
-    const b = computeAssetHash(Buffer.from("test content"));
+  it("returns consistent hashes for same content and path", () => {
+    const a = computeAssetHash(Buffer.from("test content"), "file.js");
+    const b = computeAssetHash(Buffer.from("test content"), "file.js");
     expect(a).toBe(b);
   });
 
   it("returns different hashes for different content", () => {
-    const a = computeAssetHash(Buffer.from("content a"));
-    const b = computeAssetHash(Buffer.from("content b"));
+    const a = computeAssetHash(Buffer.from("content a"), "file.js");
+    const b = computeAssetHash(Buffer.from("content b"), "file.js");
     expect(a).not.toBe(b);
   });
 
-  it("matches Web Crypto API output", async () => {
-    const content = Buffer.from("cross-compat test");
-    const cliHash = computeAssetHash(content);
+  it("returns different hashes for same content with different extensions", () => {
+    const content = Buffer.from("identical bytes");
+    const hashHtml = computeAssetHash(content, "file.html");
+    const hashJs = computeAssetHash(content, "file.js");
+    const hashNoExt = computeAssetHash(content, "file");
+    expect(hashHtml).not.toBe(hashJs);
+    expect(hashHtml).not.toBe(hashNoExt);
+    expect(hashJs).not.toBe(hashNoExt);
+  });
 
-    const digest = await crypto.subtle.digest("SHA-256", content);
-    const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    const apiHash = hex.slice(0, 32);
+  it("matches Wrangler's BLAKE3 hash algorithm", () => {
+    // Wrangler computes: blake3(base64(content) + extension).hex().slice(0, 32)
+    const content = Buffer.from("cross-compat test");
+    const filePath = "test.txt";
+    const cliHash = computeAssetHash(content, filePath);
+
+    // Reproduce Wrangler's algorithm directly
+    const base64 = content.toString("base64");
+    const ext = "txt";
+    const input = new TextEncoder().encode(base64 + ext);
+    const digest = blake3hash(input);
+    const wranglerHash = Buffer.from(digest).toString("hex").slice(0, 32);
+
+    expect(cliHash).toBe(wranglerHash);
+  });
+
+  it("matches API-side hash for same input", () => {
+    // The API uses arrayBufferToBase64 + blake3-jit — verify cross-compatibility
+    const content = Buffer.from("api compat test");
+    const filePath = "styles.css";
+    const cliHash = computeAssetHash(content, filePath);
+
+    // Simulate API-side: ArrayBuffer → base64 via btoa(String.fromCharCode)
+    const bytes = new Uint8Array(content);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const apiBase64 = btoa(binary);
+    const ext = "css";
+    const input = new TextEncoder().encode(apiBase64 + ext);
+    const digest = blake3hash(input);
+    const apiHash = [...digest]
+      .slice(0, 16)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
 
     expect(cliHash).toBe(apiHash);
   });
@@ -189,6 +229,30 @@ describe("collectAndHashAssets", () => {
 
     expect(Object.keys(assetManifest)).toHaveLength(0);
     expect(assetFiles.size).toBe(0);
+  });
+
+  it("excludes _headers, _redirects, and .assetsignore from manifest", () => {
+    writeFileSync(join(TMP, "index.html"), "<html></html>");
+    writeFileSync(join(TMP, "_headers"), "/* X-Frame-Options: DENY");
+    writeFileSync(join(TMP, "_redirects"), "/old /new 301");
+    writeFileSync(join(TMP, ".assetsignore"), "");
+
+    const { assetManifest, assetFiles } = collectAndHashAssets(TMP);
+
+    expect(Object.keys(assetManifest)).toEqual(["/index.html"]);
+    expect(assetFiles.size).toBe(1);
+  });
+
+  it("honors custom .assetsignore patterns", () => {
+    mkdirSync(join(TMP, "secret"), { recursive: true });
+    writeFileSync(join(TMP, "index.html"), "<html></html>");
+    writeFileSync(join(TMP, "draft.txt"), "draft");
+    writeFileSync(join(TMP, "secret", "key.pem"), "secret");
+    writeFileSync(join(TMP, ".assetsignore"), "*.txt\nsecret/");
+
+    const { assetManifest } = collectAndHashAssets(TMP);
+
+    expect(Object.keys(assetManifest)).toEqual(["/index.html"]);
   });
 });
 
@@ -227,5 +291,25 @@ describe("packageStaticBuild with neededAssets", () => {
 
     expect(assetKeys.sort()).toEqual(["a.html", "b.js"]);
     expect(form.get("preflight")).toBeNull();
+  });
+});
+
+describe("packageStaticBuild asset exclusion", () => {
+  it("excludes _headers and _redirects from packaged assets", () => {
+    writeFileSync(join(TMP, "index.html"), "<html></html>");
+    writeFileSync(join(TMP, "app.js"), "console.log()");
+    writeFileSync(join(TMP, "_headers"), "/* X-Test: 1");
+    writeFileSync(join(TMP, "_redirects"), "/old /new 301");
+
+    const form = packageStaticBuild(TMP, "static");
+
+    const assetKeys: string[] = [];
+    for (const [key] of form.entries()) {
+      if (key.startsWith("asset:")) {
+        assetKeys.push(key.slice("asset:".length));
+      }
+    }
+
+    expect(assetKeys.sort()).toEqual(["app.js", "index.html"]);
   });
 });
