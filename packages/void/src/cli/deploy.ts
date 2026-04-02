@@ -23,7 +23,7 @@ import {
   packageFrameworkBuild,
   collectAndHashAssets,
 } from "./package";
-import { PlatformClient } from "./client";
+import { isExpiredTokenError, PlatformClient } from "./client";
 import {
   inferProjectBindings,
   FRAMEWORK_SCAN_DIRS,
@@ -59,6 +59,7 @@ import { readWranglerCompat } from "./wrangler";
 import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from "./wrapper";
 import type { WrapperFeatures } from "./wrapper";
 import { getRequestedProjectSlug, resolveProjectBySlug, inferDefaultSlug } from "./resolve-project";
+import { promptForLoginToken } from "./login";
 import { cliTitle } from "./output";
 import { parseHeadersFile, parseRedirectsFile } from "./headers";
 import { convertHeadersConfig, convertRedirectsConfig } from "../config";
@@ -87,144 +88,175 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
   console.log();
   intro(cliTitle("deploy"));
 
-  // 1. Auth
-  const token = getToken();
-  if (!token) {
-    log.error("No auth token found. Run `void auth login` first.");
-    process.exit(1);
-  }
-
-  const client = new PlatformClient(token);
-
-  // 2. Resolve target project (CLI flag > env var > linked project file)
-  const requestedProjectSlug = getRequestedProjectSlug(options);
-  let config: ProjectConfig | null = null;
-
-  if (requestedProjectSlug) {
-    const projects = await client.listProjects();
-    config = resolveProjectBySlug(projects, requestedProjectSlug);
-
-    if (!config) {
-      if (!process.stdin.isTTY) {
-        // CI: auto-create when --project is explicitly specified
-        config = await createNewProject(root, client, requestedProjectSlug);
-      } else {
-        const shouldCreate = await confirm({
-          message: `Project "${requestedProjectSlug}" does not exist. Create it?`,
-        });
-        if (isCancel(shouldCreate) || !shouldCreate) {
-          log.info("Deploy cancelled.");
-          process.exit(0);
-        }
-
-        config = await createNewProject(root, client, requestedProjectSlug);
-      }
-    }
-  } else {
-    config = readProjectConfig(root);
-  }
-
-  if (!config) {
-    const projects = await client.listProjects();
-
-    if (projects.length > 0) {
-      // User has existing projects — let them choose
-      const result = await promptProjectSelection(projects, "Select a project to deploy to:");
-
-      if (result.action === "select") {
-        config = { projectId: result.project.id, slug: result.project.slug };
-        writeProjectConfig(root, config);
-        log.step(`Linked to ${config.slug}`);
-      } else {
-        const slug = await promptProjectSlug(inferDefaultSlug(root));
-        config = await createNewProject(root, client, slug);
-      }
-    } else {
-      const slug = await promptProjectSlug(inferDefaultSlug(root));
-      config = await createNewProject(root, client, slug);
-    }
-  }
-
-  // 3. Resolve deploy app type: void.json > CLI flags > auto-detection
-  const voidConfig = readConfig(root);
-
-  // Check for known framework first
-  const detected = detectFramework(root);
-  if (detected) {
-    const gitCommit = options?.skipBuild ? null : getGitCommit(root);
-    const fwPreset = FRAMEWORK_PRESETS[detected.name];
-    if (detected.class === "b" || detected.class === "c") {
-      if (!fwPreset) {
-        log.error(`No deploy preset found for framework "${detected.name}".`);
+  let reauthenticated = false;
+  while (true) {
+    try {
+      // 1. Auth
+      const token = getToken();
+      if (!token) {
+        log.error("No auth token found. Run `void auth login` first.");
         process.exit(1);
       }
-      await runFrameworkDeploy(
-        root,
-        config,
-        client,
-        detected,
-        fwPreset,
-        voidConfig,
-        options?.skipBuild,
-        gitCommit,
-      );
-    } else {
-      // Class A: preset is optional (e.g. vinext probes at runtime)
-      await runFullDeploy(root, config, client, fwPreset, options?.skipBuild, gitCommit, detected);
-    }
-    return;
-  }
 
-  let preset: StaticPreset | null = null;
+      const client = new PlatformClient(token);
 
-  const appType = voidConfig.inference?.appType;
-  if (appType && appType !== "void" && appType !== "framework") {
-    // void.json has an explicit static app type
-    const outputDir = voidConfig.inference?.outputDir;
-    preset = {
-      buildCommand: null,
-      outputDir: outputDir ? resolve(root, outputDir) : join(root, "dist"),
-      appType,
-    };
-    // Re-detect build command (config stores app type, not command)
-    const detectedPreset = detectPreset(root, { dir: options?.dir, spa: options?.spa });
-    if (detectedPreset) {
-      preset.buildCommand = detectedPreset.buildCommand;
-      if (!outputDir) {
-        preset.outputDir = detectedPreset.outputDir;
+      // 2. Resolve target project (CLI flag > env var > linked project file)
+      const requestedProjectSlug = getRequestedProjectSlug(options);
+      let config: ProjectConfig | null = null;
+
+      if (requestedProjectSlug) {
+        const projects = await client.listProjects();
+        config = resolveProjectBySlug(projects, requestedProjectSlug);
+
+        if (!config) {
+          if (!process.stdin.isTTY) {
+            // CI: auto-create when --project is explicitly specified
+            config = await createNewProject(root, client, requestedProjectSlug);
+          } else {
+            const shouldCreate = await confirm({
+              message: `Project "${requestedProjectSlug}" does not exist. Create it?`,
+            });
+            if (isCancel(shouldCreate) || !shouldCreate) {
+              log.info("Deploy cancelled.");
+              process.exit(0);
+            }
+
+            config = await createNewProject(root, client, requestedProjectSlug);
+          }
+        }
+      } else {
+        config = readProjectConfig(root);
       }
+
+      if (!config) {
+        const projects = await client.listProjects();
+
+        if (projects.length > 0) {
+          // User has existing projects — let them choose
+          const result = await promptProjectSelection(projects, "Select a project to deploy to:");
+
+          if (result.action === "select") {
+            config = { projectId: result.project.id, slug: result.project.slug };
+            writeProjectConfig(root, config);
+            log.step(`Linked to ${config.slug}`);
+          } else {
+            const slug = await promptProjectSlug(inferDefaultSlug(root));
+            config = await createNewProject(root, client, slug);
+          }
+        } else {
+          const slug = await promptProjectSlug(inferDefaultSlug(root));
+          config = await createNewProject(root, client, slug);
+        }
+      }
+
+      // 3. Resolve deploy app type: void.json > CLI flags > auto-detection
+      const voidConfig = readConfig(root);
+
+      // Check for known framework first
+      const detected = detectFramework(root);
+      if (detected) {
+        const gitCommit = options?.skipBuild ? null : getGitCommit(root);
+        const fwPreset = FRAMEWORK_PRESETS[detected.name];
+        if (detected.class === "b" || detected.class === "c") {
+          if (!fwPreset) {
+            log.error(`No deploy preset found for framework "${detected.name}".`);
+            process.exit(1);
+          }
+          await runFrameworkDeploy(
+            root,
+            config,
+            client,
+            detected,
+            fwPreset,
+            voidConfig,
+            options?.skipBuild,
+            gitCommit,
+          );
+        } else {
+          // Class A: preset is optional (e.g. vinext probes at runtime)
+          await runFullDeploy(
+            root,
+            config,
+            client,
+            fwPreset,
+            options?.skipBuild,
+            gitCommit,
+            detected,
+          );
+        }
+        return;
+      }
+
+      let preset: StaticPreset | null = null;
+
+      const appType = voidConfig.inference?.appType;
+      if (appType && appType !== "void" && appType !== "framework") {
+        // void.json has an explicit static app type
+        const outputDir = voidConfig.inference?.outputDir;
+        preset = {
+          buildCommand: null,
+          outputDir: outputDir ? resolve(root, outputDir) : join(root, "dist"),
+          appType,
+        };
+        // Re-detect build command (config stores app type, not command)
+        const detectedPreset = detectPreset(root, { dir: options?.dir, spa: options?.spa });
+        if (detectedPreset) {
+          preset.buildCommand = detectedPreset.buildCommand;
+          if (!outputDir) {
+            preset.outputDir = detectedPreset.outputDir;
+          }
+        }
+      } else if (!appType) {
+        // No configured app type — detect from CLI flags + project structure
+        preset = detectPreset(root, { dir: options?.dir, spa: options?.spa });
+      }
+      // appType === "void" or "framework" → preset stays null → full deploy
+
+      // Detect git commit before build (only when not skipping build)
+      const gitCommit = options?.skipBuild ? null : getGitCommit(root);
+
+      if (preset) {
+        preset = {
+          ...preset,
+          buildCommand: resolveStaticBuildCommand(
+            preset,
+            voidConfig.inference?.build,
+            Boolean(options?.dir),
+          ),
+        };
+        await runStaticDeploy(
+          root,
+          config,
+          client,
+          preset,
+          options?.skipBuild,
+          gitCommit,
+          undefined,
+          convertHeadersConfig(voidConfig.routing?.headers) ?? [],
+          convertRedirectsConfig(voidConfig.routing?.redirects) ?? [],
+        );
+      } else {
+        await runFullDeploy(root, config, client, undefined, options?.skipBuild, gitCommit);
+      }
+      return;
+    } catch (error) {
+      if (isExpiredTokenError(error)) {
+        if (getTokenSource() === "ci") {
+          throw new Error(
+            "`VOID_TOKEN` is invalid or expired. Generate a new token and try again.",
+          );
+        }
+        if (!process.stdin.isTTY || reauthenticated) {
+          throw new Error("Auth token expired. Run `void auth login` and try again.");
+        }
+        log.warn("Auth token expired. Re-authenticating...");
+        await promptForLoginToken();
+        log.success("Re-authenticated. Retrying deploy...");
+        reauthenticated = true;
+        continue;
+      }
+      throw error;
     }
-  } else if (!appType) {
-    // No configured app type — detect from CLI flags + project structure
-    preset = detectPreset(root, { dir: options?.dir, spa: options?.spa });
-  }
-  // appType === "void" or "framework" → preset stays null → full deploy
-
-  // Detect git commit before build (only when not skipping build)
-  const gitCommit = options?.skipBuild ? null : getGitCommit(root);
-
-  if (preset) {
-    preset = {
-      ...preset,
-      buildCommand: resolveStaticBuildCommand(
-        preset,
-        voidConfig.inference?.build,
-        Boolean(options?.dir),
-      ),
-    };
-    await runStaticDeploy(
-      root,
-      config,
-      client,
-      preset,
-      options?.skipBuild,
-      gitCommit,
-      undefined,
-      convertHeadersConfig(voidConfig.routing?.headers) ?? [],
-      convertRedirectsConfig(voidConfig.routing?.redirects) ?? [],
-    );
-  } else {
-    await runFullDeploy(root, config, client, undefined, options?.skipBuild, gitCommit);
   }
 }
 

@@ -1,6 +1,47 @@
 import { getApiUrl } from "./auth";
 import type { DeployEvent } from "./types";
 
+type PlatformErrorPayload = {
+  error?: string;
+  message?: string;
+};
+
+function parsePlatformErrorBody(body: string): PlatformErrorPayload | null {
+  try {
+    const parsed = JSON.parse(body);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as PlatformErrorPayload;
+  } catch {
+    return null;
+  }
+}
+
+export class PlatformApiError extends Error {
+  status: number;
+  body: string;
+  code?: string;
+
+  constructor(action: string, status: number, body: string) {
+    super(`${action}: ${status} ${body}`);
+    this.name = "PlatformApiError";
+    this.status = status;
+    this.body = body;
+    const parsed = parsePlatformErrorBody(body);
+    this.code = parsed?.error ?? parsed?.message;
+  }
+}
+
+async function throwPlatformApiError(action: string, res: Response): Promise<never> {
+  throw new PlatformApiError(action, res.status, await res.text());
+}
+
+export function isExpiredTokenError(error: unknown): boolean {
+  if (error instanceof PlatformApiError) {
+    return error.status === 401 && error.code === "invalid or expired token";
+  }
+  return false;
+}
+
 export interface ProjectResponse {
   id: string;
   user_id: string;
@@ -90,8 +131,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to fetch user info: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to fetch user info", res);
     }
 
     return res.json();
@@ -105,8 +145,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to list projects: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to list projects", res);
     }
 
     return res.json();
@@ -120,8 +159,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to list deployments: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to list deployments", res);
     }
 
     return res.json();
@@ -141,8 +179,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Rollback failed: ${res.status} ${body}`);
+      await throwPlatformApiError("Rollback failed", res);
     }
 
     return res.json();
@@ -159,8 +196,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to create project: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to create project", res);
     }
 
     return res.json();
@@ -182,12 +218,15 @@ export class PlatformClient {
       });
 
       if (!res.ok) {
+        const error = new PlatformApiError("Preflight failed", res.status, await res.text());
+        if (isExpiredTokenError(error)) throw error;
         // Preflight not supported or error — fall back to uploading everything
         return { needed: Object.keys(assetManifest), total, skipped: 0 };
       }
 
       return res.json();
-    } catch {
+    } catch (error) {
+      if (isExpiredTokenError(error)) throw error;
       // Network error — fall back to uploading everything
       return { needed: Object.keys(assetManifest), total, skipped: 0 };
     }
@@ -203,8 +242,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Deploy failed: ${res.status} ${body}`);
+      await throwPlatformApiError("Deploy failed", res);
     }
 
     const reader = res.body!.getReader();
@@ -235,8 +273,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to list secrets: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to list secrets", res);
     }
 
     return res.json();
@@ -256,8 +293,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to set secret: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to set secret", res);
     }
 
     return res.json();
@@ -272,8 +308,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to delete project: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to delete project", res);
     }
 
     return res.json();
@@ -289,8 +324,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to get migration status: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to get migration status", res);
     }
 
     return res.json();
@@ -307,8 +341,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to add domain: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to add domain", res);
     }
 
     return res.json();
@@ -322,8 +355,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to list domains: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to list domains", res);
     }
 
     return res.json();
@@ -337,8 +369,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to get domain status: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to get domain status", res);
     }
 
     return res.json();
@@ -353,8 +384,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to remove domain: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to remove domain", res);
     }
 
     return res.json();
@@ -372,8 +402,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to delete secret: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to delete secret", res);
     }
 
     return res.json();
@@ -387,8 +416,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to get resources: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to get resources", res);
     }
 
     return res.json();
@@ -405,8 +433,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to provision database: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to provision database", res);
     }
 
     return res.json();
@@ -423,8 +450,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to update database URL: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to update database URL", res);
     }
 
     return res.json();
@@ -449,8 +475,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to fetch logs: ${res.status} ${body}`);
+      await throwPlatformApiError("Failed to fetch logs", res);
     }
 
     const json = (await res.json()) as { data: LogEntry[] };

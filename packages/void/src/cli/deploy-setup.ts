@@ -1,39 +1,10 @@
-import { cancel, confirm, isCancel, log, select, spinner } from "@clack/prompts";
+import { cancel, confirm, isCancel, log } from "@clack/prompts";
 import { PlatformClient } from "./client";
-import { getToken, isStagingMode, runLogin, saveToken } from "./auth";
+import { getToken, isStagingMode } from "./auth";
+import { promptForLoginToken } from "./login";
 import { promptProjectSelection, promptProjectSlug } from "./prompt";
 import { inferDefaultSlug } from "./resolve-project";
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from "./project";
-
-async function promptForLoginToken(): Promise<string> {
-  const provider = await select({
-    message: "Choose a login provider:",
-    options: [
-      { value: "github", label: "GitHub" },
-      { value: "google", label: "Google" },
-    ],
-  });
-
-  if (isCancel(provider)) {
-    cancel("Setup cancelled.");
-    process.exit(0);
-  }
-
-  const providerName = provider === "github" ? "GitHub" : "Google";
-  const s = spinner();
-  s.start(`Opening browser for ${providerName} login...`);
-
-  try {
-    const token = await runLogin(provider);
-    saveToken(token);
-    s.stop("Logged in!");
-    log.success(isStagingMode() ? "Staging token saved." : "Token saved.");
-    return token;
-  } catch (error) {
-    s.stop("Login failed");
-    throw error;
-  }
-}
 
 async function ensureToken(): Promise<string> {
   const existing = getToken();
@@ -41,7 +12,9 @@ async function ensureToken(): Promise<string> {
     return existing;
   }
 
-  return promptForLoginToken();
+  const token = await promptForLoginToken();
+  log.success(isStagingMode() ? "Staging token saved." : "Token saved.");
+  return token;
 }
 
 async function createProject(
