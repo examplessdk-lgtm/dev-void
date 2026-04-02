@@ -1,4 +1,4 @@
-import type { ViteDevServer } from "vite";
+import { normalizePath, type ViteDevServer } from "vite";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { resolveEffectiveLayoutChain } from "./scan";
@@ -175,13 +175,14 @@ export function configureIslandCssServer(
   rebuildCssMap: () => void,
 ): void {
   server.watcher.on("change", (path) => {
-    if (!islandCssFiles.has(path)) return;
+    const normalizedPath = normalizePath(path);
+    if (!islandCssFiles.has(normalizedPath)) return;
     rebuildCssMap();
     for (const env of Object.values(server.environments)) {
       const mod = env.moduleGraph.getModuleById("\0" + ISLANDS_RENDERER_ID);
       if (mod) env.moduleGraph.invalidateModule(mod);
     }
-    const cssMod = server.environments.client?.moduleGraph.getModuleById(path + ".css");
+    const cssMod = server.environments.client?.moduleGraph.getModuleById(normalizedPath + ".css");
     if (cssMod) server.environments.client.moduleGraph.invalidateModule(cssMod);
   });
 
@@ -189,7 +190,7 @@ export function configureIslandCssServer(
     if (!req.url) return next();
     const url = req.url.split("?")[0];
     if (!url.endsWith(".css")) return next();
-    const srcPath = resolve(viteRoot, url.slice(1, -4));
+    const srcPath = normalizePath(resolve(viteRoot, url.slice(1, -4)));
     if (!islandCssFiles.has(srcPath)) return next();
     try {
       const result = await server.environments.client.transformRequest(url);

@@ -90,7 +90,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
           for (const page of pageScan.pages) {
             if (!page.island) continue;
             if (/\.(tsx|jsx)$/.test(page.componentPath)) {
-              islandCssFiles.add(resolve(pagesDir, page.componentPath));
+              islandCssFiles.add(normalizePath(resolve(pagesDir, page.componentPath)));
             }
             const layoutChain = resolveEffectiveLayoutChain(
               page,
@@ -98,7 +98,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
               pageScan.namedLayouts,
             );
             for (const layout of layoutChain) {
-              islandCssFiles.add(resolve(pagesDir, layout.filePath));
+              islandCssFiles.add(normalizePath(resolve(pagesDir, layout.filePath)));
             }
           }
 
@@ -116,10 +116,10 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
           // Virtual island CSS modules — no \0 prefix so Vite CSS pipeline processes them.
           // Return absolute path so CSS @import resolution uses the correct directory.
           if (source.endsWith(".css")) {
-            const srcPath = source.slice(0, -4);
+            const srcPath = normalizePath(source.slice(0, -4));
             if (islandCssFiles.has(srcPath)) return srcPath + ".css";
             if (srcPath.startsWith("/")) {
-              const absPath = resolve(viteRoot, srcPath.slice(1));
+              const absPath = normalizePath(resolve(viteRoot, srcPath.slice(1)));
               if (islandCssFiles.has(absPath)) return absPath + ".css";
             }
           }
