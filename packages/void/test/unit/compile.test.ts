@@ -400,6 +400,26 @@ describe("compileWorkerEntry", () => {
     expect(code).not.toContain("cache.put");
   });
 
+  it("serveWithAssets skips non-GET/HEAD requests to avoid body-reuse crash", () => {
+    const code = compileWorkerEntry();
+
+    // Must guard against POST/PUT/etc — their body is consumed by app.fetch()
+    // and passing the original request to env.ASSETS.fetch() would throw
+    // "Cannot reconstruct a Request with a used body"
+    expect(code).toContain('request.method !== "GET" && request.method !== "HEAD"');
+  });
+
+  it("serveWithAssets creates a fresh Request for ASSETS.fetch to avoid body-reuse", () => {
+    const code = compileWorkerEntry();
+
+    // Must not pass the original request to env.ASSETS.fetch() because
+    // app.fetch() may have marked it as disturbed. Use new Request(url) instead.
+    expect(code).toContain(
+      "env.ASSETS.fetch(new Request(request.url, { method: request.method, headers: request.headers }))",
+    );
+    expect(code).not.toMatch(/env\.ASSETS\.fetch\(request\)/);
+  });
+
   it("uses custom assetsDir in serveWithAssets path check", () => {
     const code = compileWorkerEntry(false, undefined, "_astro");
 

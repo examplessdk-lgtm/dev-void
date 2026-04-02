@@ -1132,7 +1132,7 @@ export function compileWorkerEntry(
   const assetHelper = `
 async function serveWithAssets(request, env, response) {
   if (response.status !== 404 || !env.ASSETS || (request.method !== "GET" && request.method !== "HEAD")) return response;
-  const asset = await env.ASSETS.fetch(request);
+  const asset = await env.ASSETS.fetch(new Request(request.url, { method: request.method, headers: request.headers }));
   if (asset.status === 404) return response;
   const res = new Response(asset.body, asset);
   if (new URL(request.url).pathname.startsWith(${JSON.stringify("/" + assetsDir + "/")})) {
