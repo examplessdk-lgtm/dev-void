@@ -29,7 +29,7 @@ export async function getPort(): Promise<number> {
 export async function waitForServer(
   url: string,
   timeoutMs: number,
-  options?: { expectBody?: string },
+  options?: { expectBody?: string; isAlive?: () => boolean },
 ): Promise<void> {
   // Release the held port so the child process can bind to it.
   // This is called right after spawn(), minimizing the TOCTOU window.
@@ -43,6 +43,9 @@ export async function waitForServer(
 
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
+    if (options?.isAlive && !options.isAlive()) {
+      throw new Error(`Server process exited while waiting for ${url}`);
+    }
     try {
       const response = await fetch(url);
       if (response.status > 0) {

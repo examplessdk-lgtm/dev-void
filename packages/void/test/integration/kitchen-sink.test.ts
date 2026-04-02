@@ -1,13 +1,14 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { getPort, waitForServer, killChild } from "../../../../test/integration-helpers";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..", "..");
-let DEV_PORT: number;
-let BASE: string;
 
+let PORT: number;
+let BASE: string;
 let browser: Browser;
 
 beforeAll(async () => {
@@ -31,12 +32,22 @@ async function waitForHydration(page: Page) {
 
 describe("playground/kitchen-sink", () => {
   let child: ReturnType<typeof spawn>;
-  let stderr = "";
 
   beforeAll(async () => {
-    DEV_PORT = await getPort();
-    BASE = `http://127.0.0.1:${DEV_PORT}`;
+    PORT = await getPort();
+    BASE = `http://127.0.0.1:${PORT}`;
 
+    // Build first — deterministic, all deps resolved at build time.
+    // Eliminates the dev-mode dep optimization cascade that caused
+    // flaky CI failures (server crashes, hydration timeouts).
+    const pg = join(ROOT, "playground/kitchen-sink");
+    rmSync(join(pg, "dist"), { recursive: true, force: true });
+    execSync("pnpm --dir playground/kitchen-sink build", {
+      cwd: ROOT,
+      stdio: "pipe",
+    });
+
+    // Start preview server — pre-built assets, no lazy optimization.
     child = spawn(
       "pnpm",
       [
@@ -44,51 +55,33 @@ describe("playground/kitchen-sink", () => {
         "playground/kitchen-sink",
         "exec",
         "vite",
+        "preview",
         "--host",
         "127.0.0.1",
         "--port",
-        String(DEV_PORT),
+        String(PORT),
       ],
       {
         cwd: ROOT,
         stdio: ["ignore", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: "false",
-        },
       },
     );
 
-    child.stderr!.on("data", (chunk: Buffer) => {
-      stderr += String(chunk);
-    });
+    await waitForServer(BASE, 30_000, { expectBody: "Kitchen Sink" });
 
-    // The first request triggers Vite SSR dep optimization (drizzle-orm,
-    // vue, hono, etc.) which causes multiple program reloads. Wait until
-    // the server returns valid SSR HTML, then warm the client graph with a
-    // real browser navigation so the first hydration assertion is not racing
-    // cold dev transforms.
-    await waitForServer(BASE, 60_000, { expectBody: "Kitchen Sink" });
+    // Preview mode doesn't auto-run migrations (dev mode's migrationPlugin
+    // handles this via configureServer). Apply them directly to the local
+    // D1 database so pages that query DB/Auth tables work.
+    const { runMigrations, getMiniflareDatabasePath } = await import("../../src/migrations/runner");
+    const dbPath = getMiniflareDatabasePath(join(pg, ".void"), "local");
+    await runMigrations(join(pg, "db", "migrations"), dbPath);
 
-    // Warm up the client-side module graph. waitForServer only exercises
-    // the SSR path (Node fetch → HTML). The first browser page load triggers
-    // Vite's client-side dep optimization and module transformation for the
-    // app and its heavier dependencies. On CI this can easily exceed 10s, so
-    // do it here and give the warmup a larger timeout budget.
-    const warmupPage = await newPage();
-    try {
-      await warmupPage.goto(`${BASE}/`, { timeout: 30_000 });
-      await warmupPage.waitForSelector('#app[data-hydrated="true"]', { timeout: 30_000 });
-    } finally {
-      await warmupPage.context().close();
-    }
+    const { runLocalVoidAuthMigrations } = await import("../../src/auth/node");
+    await runLocalVoidAuthMigrations(pg, "sqlite", join(pg, ".void"), "local", null);
   }, 120_000);
 
   afterAll(async () => {
     if (child) await killChild(child);
-    if (stderr.includes("error when starting dev server")) {
-      throw new Error(stderr);
-    }
   });
 
   // -- SSR + SPA navigation --
@@ -424,5 +417,5 @@ describe("playground/kitchen-sink", () => {
     }
   });
 
-  // Cron: skipped — __scheduled endpoint is only available via wrangler, not Vite dev
+  // Cron: skipped — __scheduled endpoint is only available via wrangler, not Vite dev/preview
 }, 120_000);

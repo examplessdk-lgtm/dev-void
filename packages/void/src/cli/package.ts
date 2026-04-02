@@ -197,7 +197,8 @@ export function packageBuild(
   // Build manifest from inferred bindings
   const manifest: DeployManifest = { version: 3, bindings: {} };
   if (bindings.needsAuth) manifest.auth = true;
-  if (bindings.needsD1 || bindings.needsAuth) {
+  const hasMigrations = migrations && migrations.length > 0;
+  if (bindings.needsD1 || bindings.needsAuth || hasMigrations) {
     if (dialect === "postgresql") {
       manifest.bindings.hyperdrive = ["HYPERDRIVE"];
     } else {
@@ -404,7 +405,8 @@ export function packageFrameworkBuild(opts: {
 
   // Build manifest
   const manifest: DeployManifest = { version: 3, bindings: {} };
-  if (opts.bindings.needsD1 || opts.bindings.needsAuth) {
+  const hasMigrations = opts.migrations && opts.migrations.length > 0;
+  if (opts.bindings.needsD1 || opts.bindings.needsAuth || hasMigrations) {
     if (opts.dialect === "postgresql") {
       manifest.bindings.hyperdrive = ["HYPERDRIVE"];
     } else {

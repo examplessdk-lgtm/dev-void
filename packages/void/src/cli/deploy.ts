@@ -409,8 +409,24 @@ async function runFrameworkDeploy(
     process.exit(1);
   }
 
+  assertDeploySchemaDriftFree(root, dialect);
+
+  // 4. Collect migrations (before Hyperdrive check so migrations can gate provisioning)
+  const migrationsDir = join(root, "db", "migrations");
+  const rawMigrations = collectMigrations(migrationsDir);
+  let validatedMigrations;
+  if (rawMigrations.length > 0) {
+    try {
+      validatedMigrations = validateMigrations(rawMigrations);
+      log.info(`Found ${validatedMigrations.length} migration(s)`);
+    } catch (err: any) {
+      log.error(err.message);
+      process.exit(1);
+    }
+  }
+
   // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects
-  if (dialect === "postgresql" && bindings.needsD1) {
+  if (dialect === "postgresql" && (bindings.needsD1 || rawMigrations.length > 0)) {
     try {
       const resources = await client.getResources(config.projectId);
       const hasHyperdrive = resources.some((r: any) => r.type === "hyperdrive");
@@ -434,22 +450,6 @@ async function runFrameworkDeploy(
       }
     } catch {
       // Resources endpoint not available
-    }
-  }
-
-  assertDeploySchemaDriftFree(root, dialect);
-
-  // 4. Collect migrations
-  const migrationsDir = join(root, "db", "migrations");
-  const rawMigrations = collectMigrations(migrationsDir);
-  let validatedMigrations;
-  if (rawMigrations.length > 0) {
-    try {
-      validatedMigrations = validateMigrations(rawMigrations);
-      log.info(`Found ${validatedMigrations.length} migration(s)`);
-    } catch (err: any) {
-      log.error(err.message);
-      process.exit(1);
     }
   }
 
@@ -651,8 +651,37 @@ async function runFullDeploy(
     process.exit(1);
   }
 
-  // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects
-  if (dialect === "postgresql" && effectiveBindings.needsD1) {
+  // Collect header rules: parse user/framework _headers file + void.json config
+  const clientDir = join(distDir, "client");
+  const userHeaderRules = existsSync(clientDir) ? parseHeadersFile(clientDir) : undefined;
+  const cfgHeaderRules = convertHeadersConfig(deployConfig.routing?.headers);
+  const headerRules: HeaderRule[] = [...(userHeaderRules ?? []), ...(cfgHeaderRules ?? [])];
+
+  // Collect redirect rules: parse user/framework _redirects file + void.json config
+  const userRedirectRules = existsSync(clientDir) ? parseRedirectsFile(clientDir) : undefined;
+  const cfgRedirectRules = convertRedirectsConfig(deployConfig.routing?.redirects);
+  const redirectRules: RedirectRule[] = [...(userRedirectRules ?? []), ...(cfgRedirectRules ?? [])];
+
+  assertDeploySchemaDriftFree(root, dialect);
+
+  // 7. Collect and validate migrations (before Hyperdrive check so migrations can gate provisioning)
+  const migrationsDir = join(root, "db", "migrations");
+  const rawMigrations = collectMigrations(migrationsDir);
+  let validatedMigrations;
+  if (rawMigrations.length > 0) {
+    try {
+      validatedMigrations = validateMigrations(rawMigrations);
+      log.info(`Found ${validatedMigrations.length} migration(s)`);
+    } catch (err: any) {
+      log.error(err.message);
+      process.exit(1);
+    }
+  }
+
+  // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects.
+  // Migrations on disk also gate this — even if inference says needsD1: false,
+  // packageBuild will add the hyperdrive binding when migrations are present.
+  if (dialect === "postgresql" && (effectiveBindings.needsD1 || rawMigrations.length > 0)) {
     try {
       const resources = await client.getResources(config.projectId);
       const hasHyperdrive = resources.some((r: any) => r.type === "hyperdrive");
@@ -676,33 +705,6 @@ async function runFullDeploy(
       }
     } catch {
       // Resources endpoint not available — Hyperdrive will be checked at deploy time
-    }
-  }
-
-  // Collect header rules: parse user/framework _headers file + void.json config
-  const clientDir = join(distDir, "client");
-  const userHeaderRules = existsSync(clientDir) ? parseHeadersFile(clientDir) : undefined;
-  const cfgHeaderRules = convertHeadersConfig(deployConfig.routing?.headers);
-  const headerRules: HeaderRule[] = [...(userHeaderRules ?? []), ...(cfgHeaderRules ?? [])];
-
-  // Collect redirect rules: parse user/framework _redirects file + void.json config
-  const userRedirectRules = existsSync(clientDir) ? parseRedirectsFile(clientDir) : undefined;
-  const cfgRedirectRules = convertRedirectsConfig(deployConfig.routing?.redirects);
-  const redirectRules: RedirectRule[] = [...(userRedirectRules ?? []), ...(cfgRedirectRules ?? [])];
-
-  assertDeploySchemaDriftFree(root, dialect);
-
-  // 7. Collect and validate migrations
-  const migrationsDir = join(root, "db", "migrations");
-  const rawMigrations = collectMigrations(migrationsDir);
-  let validatedMigrations;
-  if (rawMigrations.length > 0) {
-    try {
-      validatedMigrations = validateMigrations(rawMigrations);
-      log.info(`Found ${validatedMigrations.length} migration(s)`);
-    } catch (err: any) {
-      log.error(err.message);
-      process.exit(1);
     }
   }
   const workerDirName = resolveWorkerDirName(distDir, fwPreset, frameworkBuildCmd);

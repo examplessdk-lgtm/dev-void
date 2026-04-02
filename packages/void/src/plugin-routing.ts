@@ -264,6 +264,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
             return [];
           }
         });
+
         return { resolve: { alias: resolvedAliases } };
       }
 
