@@ -7,6 +7,7 @@ import { generateComponentManifest } from "./pages-manifest";
 import {
   resolveSpecifier,
   needsIslandClientBundle,
+  rewriteCssImportForVirtualModule,
   fileHasCssImports,
   extractCssImports,
   rebuildIslandCssMap as rebuildIslandCssMapShared,
@@ -397,7 +398,7 @@ function generateIslandClientEntry(
       cssImportRe.lastIndex = 0;
       let match;
       while ((match = cssImportRe.exec(content)) !== null) {
-        lines.push(match[0].trim() + ";");
+        lines.push(rewriteCssImportForVirtualModule(match[0], match[1], file));
       }
     }
   }

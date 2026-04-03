@@ -6,6 +6,7 @@ import type { PageScanResult } from "void/pages";
 import {
   resolveSpecifier,
   needsIslandClientBundle,
+  rewriteCssImportForVirtualModule,
   rebuildIslandCssMap as rebuildIslandCssMapShared,
   computePagesNeedingClientJS as computePagesNeedingClientJSShared,
   configureIslandCssServer,
@@ -442,7 +443,7 @@ function generateIslandClientEntry(
       // Extract JS-style CSS imports (e.g. import "@void/md/theme.css")
       cssImportRe.lastIndex = 0;
       while ((match = cssImportRe.exec(content)) !== null) {
-        lines.push(match[0].trim() + ";");
+        lines.push(rewriteCssImportForVirtualModule(match[0], match[1], file));
       }
     }
   }
