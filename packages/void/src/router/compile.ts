@@ -101,8 +101,11 @@ export function compileRouteTable(
   lines.push(`import { convertReturnValue } from ${JSON.stringify(options.responsePath)};`);
   if (options.nodeTarget) {
     lines.push(`const withRuntimeEnv = (_env, fn) => fn();`);
+    lines.push(`const getRuntimeEnv = () => undefined;`);
   } else {
-    lines.push(`import { withRuntimeEnv } from ${JSON.stringify(options.runtimeEnvPath)};`);
+    lines.push(
+      `import { withRuntimeEnv, getRuntimeEnv } from ${JSON.stringify(options.runtimeEnvPath)};`,
+    );
   }
 
   if (auth) {
@@ -475,6 +478,14 @@ window.__vite_plugin_react_preamble_installed__ = true;
 
   if (scan.jobs.length > 0) {
     lines.push('app.post("/__scheduled", async (c) => {');
+    lines.push("  const __env = getRuntimeEnv();");
+    lines.push("  const __expected = __env?.__VOID_PROXY_TOKEN;");
+    lines.push("  if (__expected) {");
+    lines.push('    const __token = c.req.header("x-void-internal");');
+    lines.push(
+      '    if (!__token || __token !== __expected) return c.json({ error: "unauthorized" }, 401);',
+    );
+    lines.push("  }");
     lines.push("  const { cron, scheduledTime } = await c.req.json();");
     lines.push("  const controller = { cron, scheduledTime, noRetry() {} };");
     lines.push("  await scheduled(controller, c.env, c.executionCtx);");
@@ -489,6 +500,14 @@ window.__vite_plugin_react_preamble_installed__ = true;
     }
     lines.push("");
     lines.push('app.post("/__queue", async (c) => {');
+    lines.push("  const __env = getRuntimeEnv();");
+    lines.push("  const __expected = __env?.__VOID_PROXY_TOKEN;");
+    lines.push("  if (__expected) {");
+    lines.push('    const __token = c.req.header("x-void-internal");');
+    lines.push(
+      '    if (!__token || __token !== __expected) return c.json({ error: "unauthorized" }, 401);',
+    );
+    lines.push("  }");
     lines.push("  const payload = await c.req.json();");
     lines.push("  const queueSuffix = payload.queue;");
     lines.push("  const __decisions = new Map();");
@@ -545,13 +564,14 @@ window.__vite_plugin_react_preamble_installed__ = true;
       `const __migrationDialect = ${JSON.stringify(options.migrationDialect ?? "sqlite")};`,
     );
     lines.push('app.post("/__void/migrate", async (c) => {');
+    lines.push("  const __rawEnv = getRuntimeEnv();");
     lines.push("  const __voidMigrationHandler = __createMigrationHandler(");
-    lines.push("    c.env,");
+    lines.push("    __rawEnv,");
     lines.push("    __migrations,");
     lines.push("    __migrationDialect,");
     if (auth) {
       lines.push(
-        `    () => runVoidAuthMigrations(new Request(c.req.url), c.env, __voidAuthOptions${
+        `    () => runVoidAuthMigrations(new Request(c.req.url), __rawEnv, __voidAuthOptions${
           auth.authSchemaPath ? ", __voidAuthMigrationSchema" : ""
         }),`,
       );
@@ -571,7 +591,9 @@ window.__vite_plugin_react_preamble_installed__ = true;
     );
     lines.push("let __voidBindingApp;");
     lines.push('app.all("/__void/*", async (c) => {');
-    lines.push("  if (!__voidBindingApp) __voidBindingApp = __createBindingHandler(c.env);");
+    lines.push(
+      "  if (!__voidBindingApp) __voidBindingApp = __createBindingHandler(getRuntimeEnv());",
+    );
     lines.push("  const url = new URL(c.req.url);");
     lines.push("  url.pathname = url.pathname.slice(7);");
     lines.push("  return __voidBindingApp.fetch(new Request(url.toString(), c.req.raw));");
@@ -1125,6 +1147,32 @@ export function compileWorkerEntry(
     ? `import { createRemoteEnv } from ${JSON.stringify(remote.remotePath)};\n`
     : "";
 
+  // Filter internal platform bindings so user code cannot access them via c.env.
+  // The original env is preserved for framework internals (withRuntimeEnv, etc.).
+  const filterBindingsHelper = `
+function __filterInternalBindings(env) {
+  return new Proxy(env, {
+    get(target, prop, receiver) {
+      if (typeof prop === "string" && (prop.startsWith("__VOID_") || prop.startsWith("__PROJECT_"))) return undefined;
+      return Reflect.get(target, prop, receiver);
+    },
+    has(target, prop) {
+      if (typeof prop === "string" && (prop.startsWith("__VOID_") || prop.startsWith("__PROJECT_"))) return false;
+      return Reflect.has(target, prop);
+    },
+    ownKeys(target) {
+      return Reflect.ownKeys(target).filter(
+        (key) => typeof key !== "string" || (!key.startsWith("__VOID_") && !key.startsWith("__PROJECT_"))
+      );
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      if (typeof prop === "string" && (prop.startsWith("__VOID_") || prop.startsWith("__PROJECT_"))) return undefined;
+      return Reflect.getOwnPropertyDescriptor(target, prop);
+    },
+  });
+}
+`;
+
   // Asset fallthrough helper — if the app returns 404, check ASSETS binding
   // for static files and set cache headers. Edge caching of hashed assets
   // happens at the dispatch layer (see design doc 0042).
@@ -1149,26 +1197,30 @@ async function serveWithAssets(request, env, response) {
   const ws = await __voidHandleWebSocket(request, env);
   if (ws) return ws;
   if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
+  const userEnv = __filterInternalBindings(env);
   return withRuntimeEnv(env, async () => {
     const internal = await __handleInternal(request, env, ctx);
     if (internal) return internal;
-    return serveWithAssets(request, env, await app.fetch(request, env, ctx));
+    return serveWithAssets(request, env, await app.fetch(request, userEnv, ctx));
   });
 }`
     : `async (request, env, ctx) => {
   const ws = await __voidHandleWebSocket(request, env);
   if (ws) return ws;
+  const userEnv = __filterInternalBindings(env);
   return withRuntimeEnv(env, async () => {
     const internal = await __handleInternal(request, env, ctx);
     if (internal) return internal;
-    return serveWithAssets(request, env, await app.fetch(request, env, ctx));
+    return serveWithAssets(request, env, await app.fetch(request, userEnv, ctx));
   });
 }`;
 
   const queueFetchCall = remotePath
     ? `if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
-  const __queueRes = await withRuntimeEnv(env, () => app.fetch(req, env, ctx));`
-    : "const __queueRes = await withRuntimeEnv(env, () => app.fetch(req, env, ctx));";
+  const __queueUserEnv = __filterInternalBindings(env);
+  const __queueRes = await withRuntimeEnv(env, () => app.fetch(req, __queueUserEnv, ctx));`
+    : `const __queueUserEnv = __filterInternalBindings(env);
+  const __queueRes = await withRuntimeEnv(env, () => app.fetch(req, __queueUserEnv, ctx));`;
 
   const queueDecisionCode = `const __qr = await __queueRes.json();
   if (__qr.decisions) {
@@ -1193,15 +1245,17 @@ async function serveWithAssets(request, env, response) {
   const scheduledHandler = remotePath
     ? `async function handleScheduled(controller, env, ctx) {
   if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
-  return withRuntimeEnv(env, () => scheduled(controller, env, ctx));
+  const userEnv = __filterInternalBindings(env);
+  return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
 }`
     : `async function handleScheduled(controller, env, ctx) {
-  return withRuntimeEnv(env, () => scheduled(controller, env, ctx));
+  const userEnv = __filterInternalBindings(env);
+  return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
 }`;
 
   if (hasQueues) {
     return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(", ")}` : ""} } from 'virtual:void-routes';
-${runtimeEnvImport}${remoteImport}${assetHelper}
+${runtimeEnvImport}${remoteImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${scheduledHandler}
 async function queue(batch, env, ctx) {
@@ -1209,9 +1263,11 @@ async function queue(batch, env, ctx) {
     id: m.id, timestamp: m.timestamp.toISOString(),
     body: m.body, attempts: m.attempts,
   }));
+  const __queueHeaders = { "Content-Type": "application/json" };
+  if (env.__VOID_PROXY_TOKEN) __queueHeaders["x-void-internal"] = env.__VOID_PROXY_TOKEN;
   const req = new Request("https://localhost/__queue", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: __queueHeaders,
     body: JSON.stringify({ queue: batch.queue, messages }),
   });
   ${queueFetchCall}
@@ -1222,7 +1278,7 @@ ${webSocketClasses.map((name) => `export { ${name} };`).join("\n")}
 export default { fetch: ${fetchHandler}, scheduled: handleScheduled, queue };`;
   }
   return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(", ")}` : ""} } from 'virtual:void-routes';
-${runtimeEnvImport}${remoteImport}${assetHelper}
+${runtimeEnvImport}${remoteImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${scheduledHandler}
 ${webSocketClasses.map((name) => `export { ${name} };`).join("\n")}

@@ -163,6 +163,16 @@ function generateWrapperSource(
     lines.push("async function wrappedFetch(request, env, ctx) {");
     lines.push("  const url = new URL(request.url);");
     lines.push('  if (request.method === "POST" && url.pathname === "/__scheduled") {');
+    lines.push("    const __expected = env.__VOID_PROXY_TOKEN;");
+    lines.push("    if (__expected) {");
+    lines.push('      const __token = request.headers.get("x-void-internal");');
+    lines.push("      if (!__token || __token !== __expected) {");
+    lines.push("        return new Response(JSON.stringify({ error: 'unauthorized' }), {");
+    lines.push("          status: 401,");
+    lines.push('          headers: { "Content-Type": "application/json" },');
+    lines.push("        });");
+    lines.push("      }");
+    lines.push("    }");
     lines.push("    try {");
     lines.push("      const { cron, scheduledTime } = await request.json();");
     lines.push("      const controller = { cron, scheduledTime, noRetry() {} };");

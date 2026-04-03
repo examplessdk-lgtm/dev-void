@@ -164,6 +164,26 @@ describe("compileRouteTable", () => {
     expect(code).toContain("export default app");
   });
 
+  it("provides getRuntimeEnv fallback returning undefined for node targets", () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+
+    const code = compileRouteTable(scan, "/routes", "/middleware", "/crons", "/queues", null, {
+      ...testOptions,
+      nodeTarget: true,
+    });
+
+    // Node targets cannot use the CF runtime env, so getRuntimeEnv must be a no-op
+    expect(code).toContain("const getRuntimeEnv = () => undefined");
+    // Must NOT import getRuntimeEnv from the env module
+    expect(code).not.toContain("import { withRuntimeEnv, getRuntimeEnv }");
+  });
+
   it("does not import runtime env helpers for node targets", () => {
     const scan: ScanResult = {
       routes: [],
@@ -297,6 +317,74 @@ describe("compileRouteTable", () => {
     expect(code).not.toContain("/__queue");
   });
 
+  it("generates /__scheduled auth guard with getRuntimeEnv and x-void-internal check", () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [{ filePath: "sync.ts", name: "sync", crons: ["0 * * * *"] }],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+
+    const code = compileRouteTable(
+      scan,
+      "/routes",
+      "/middleware",
+      "/crons",
+      "/queues",
+      null,
+      testOptions,
+    );
+
+    // The /__scheduled handler must read the platform token from runtime env
+    expect(code).toContain('app.post("/__scheduled"');
+    expect(code).toContain("const __env = getRuntimeEnv()");
+    expect(code).toContain("const __expected = __env?.__VOID_PROXY_TOKEN");
+    // Must check the x-void-internal header
+    expect(code).toContain('c.req.header("x-void-internal")');
+    // Must return 401 for missing/invalid token
+    expect(code).toContain(
+      'if (!__token || __token !== __expected) return c.json({ error: "unauthorized" }, 401)',
+    );
+  });
+
+  it("generates /__queue auth guard with getRuntimeEnv and x-void-internal check", () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [
+        {
+          filePath: "emails.ts",
+          name: "emails",
+          bindingName: "QUEUE_EMAILS",
+        },
+      ],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+
+    const code = compileRouteTable(
+      scan,
+      "/routes",
+      "/middleware",
+      "/crons",
+      "/queues",
+      null,
+      testOptions,
+    );
+
+    // The /__queue handler must read the platform token from runtime env
+    expect(code).toContain('app.post("/__queue"');
+    expect(code).toContain("const __env = getRuntimeEnv()");
+    expect(code).toContain("const __expected = __env?.__VOID_PROXY_TOKEN");
+    // Must check the x-void-internal header
+    expect(code).toContain('c.req.header("x-void-internal")');
+    // Must return 401 for missing/invalid token
+    expect(code).toContain(
+      'if (!__token || __token !== __expected) return c.json({ error: "unauthorized" }, 401)',
+    );
+  });
+
   it("generates websocket durable object exports and proxy routes", () => {
     const scan: ScanResult = {
       routes: [],
@@ -375,7 +463,7 @@ describe("compileWorkerEntry", () => {
     expect(code).toContain("/__queue");
     expect(code).toContain("batch.queue");
     expect(code).toContain("m.timestamp.toISOString()");
-    expect(code).toContain("withRuntimeEnv(env, () => app.fetch(req, env, ctx))");
+    expect(code).toContain("withRuntimeEnv(env, () => app.fetch(req, __queueUserEnv, ctx))");
   });
 
   it("omits queue() export when hasQueues=false", () => {
@@ -427,6 +515,36 @@ describe("compileWorkerEntry", () => {
     expect(code).not.toContain('"/assets/"');
   });
 
+  it("includes x-void-internal header in native queue handler", () => {
+    const code = compileWorkerEntry(true);
+
+    // The queue handler must forward the platform auth token to the internal /__queue request
+    expect(code).toContain("const __queueHeaders");
+    expect(code).toContain(
+      'if (env.__VOID_PROXY_TOKEN) __queueHeaders["x-void-internal"] = env.__VOID_PROXY_TOKEN',
+    );
+    expect(code).toContain("/__queue");
+  });
+
+  it("passes filtered env (userEnv) not raw env to scheduled handler", () => {
+    const code = compileWorkerEntry();
+
+    // handleScheduled must filter internal bindings before passing to user code
+    expect(code).toContain("async function handleScheduled(controller, env, ctx)");
+    expect(code).toContain("const userEnv = __filterInternalBindings(env)");
+    expect(code).toContain("scheduled(controller, userEnv, ctx)");
+    // Must NOT pass raw env to scheduled()
+    expect(code).not.toMatch(/scheduled\(controller,\s*env,\s*ctx\)/);
+  });
+
+  it("filters internal bindings in queue fetch call", () => {
+    const code = compileWorkerEntry(true);
+
+    // Queue handler must also use filtered env
+    expect(code).toContain("const __queueUserEnv = __filterInternalBindings(env)");
+    expect(code).toContain("app.fetch(req, __queueUserEnv, ctx)");
+  });
+
   it("wraps remote-mode fetch and scheduled handlers with resolved runtime env", () => {
     const code = compileWorkerEntry(
       false,
@@ -440,7 +558,9 @@ describe("compileWorkerEntry", () => {
     expect(code).toContain('import { createRemoteEnv } from "/resolved/remote.mjs"');
     expect(code).toContain('if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);');
     expect(code).toContain("return withRuntimeEnv(env, async () => {");
-    expect(code).toContain("return withRuntimeEnv(env, () => scheduled(controller, env, ctx));");
+    expect(code).toContain(
+      "return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));",
+    );
   });
 });
 

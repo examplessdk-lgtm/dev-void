@@ -134,7 +134,7 @@ describe("compileRouteTable auth integration", () => {
 
     expect(code).toContain("runVoidAuthMigrations");
     expect(code).toContain(
-      "runVoidAuthMigrations(new Request(c.req.url), c.env, __voidAuthOptions, __voidAuthMigrationSchema)",
+      "runVoidAuthMigrations(new Request(c.req.url), __rawEnv, __voidAuthOptions, __voidAuthMigrationSchema)",
     );
     expect(code).toContain('app.post("/__void/migrate"');
   });
