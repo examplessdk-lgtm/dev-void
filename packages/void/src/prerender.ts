@@ -246,11 +246,18 @@ async function createCloudflarePrerenderRunner(options: {
   }
 
   const mf = new Miniflare(mfOptions);
+  const allBindings = mfOptions.bindings as Record<string, unknown> | undefined;
+  const proxyToken = allBindings?.__VOID_PROXY_TOKEN as string | undefined;
 
   return {
     async collectPaths(): Promise<string[]> {
+      const headers: Record<string, string> = {};
+      if (proxyToken) headers["x-void-internal"] = proxyToken;
       return readPrerenderPathsResponse(
-        await mf.dispatchFetch(`http://localhost${PRERENDER_PATHS_ENDPOINT}`, { method: "POST" }),
+        await mf.dispatchFetch(`http://localhost${PRERENDER_PATHS_ENDPOINT}`, {
+          method: "POST",
+          headers,
+        }),
       );
     },
     async fetchPath(path: string): Promise<Response> {
@@ -335,8 +342,10 @@ if (!fetch) {
 }
 
 async function collectPaths() {
+  const headers = {};
+  if (process.env.__VOID_PROXY_TOKEN) headers["x-void-internal"] = process.env.__VOID_PROXY_TOKEN;
   const response = await fetch(
-    new Request("http://localhost${PRERENDER_PATHS_ENDPOINT}", { method: "POST" }),
+    new Request("http://localhost${PRERENDER_PATHS_ENDPOINT}", { method: "POST", headers }),
   );
   if (!response.ok) {
     throw new Error("Failed to collect prerender paths: HTTP " + response.status);

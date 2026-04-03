@@ -1,4 +1,4 @@
-import { getRuntimeEnv, type RuntimeEnv } from "./env";
+import { getRawRuntimeEnv, type RuntimeEnv } from "./env-raw";
 import {
   PROVIDER_KEY_MAP,
   type ThirdPartyModel,
@@ -43,7 +43,7 @@ function getProxyUrl(runtimeEnv: RuntimeEnv): string {
 }
 
 function resolveBackend(): AiBackend {
-  const runtimeEnv = getRuntimeEnv();
+  const runtimeEnv = getRawRuntimeEnv();
 
   // Priority 1: Service binding (production via Void)
   const proxy = runtimeEnv.__VOID_PROXY as Fetcher | undefined;

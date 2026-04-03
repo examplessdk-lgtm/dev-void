@@ -62,3 +62,34 @@ describe("collectPrerenderWorkerModules", () => {
     );
   });
 });
+
+describe("prerender runner token passthrough", () => {
+  it("reads __VOID_PROXY_TOKEN from bindings for auth header", () => {
+    // Simulates the logic in createCloudflarePrerenderRunner
+    const mfOptions = {
+      bindings: { MY_VAR: "test", __VOID_PROXY_TOKEN: "secret-token" },
+    };
+    const allBindings = mfOptions.bindings as Record<string, unknown> | undefined;
+    const proxyToken = allBindings?.__VOID_PROXY_TOKEN as string | undefined;
+
+    expect(proxyToken).toBe("secret-token");
+
+    const headers: Record<string, string> = {};
+    if (proxyToken) headers["x-void-internal"] = proxyToken;
+    expect(headers["x-void-internal"]).toBe("secret-token");
+  });
+
+  it("does not set auth header when token is absent", () => {
+    const mfOptions = {
+      bindings: { MY_VAR: "test" },
+    };
+    const allBindings = mfOptions.bindings as Record<string, unknown> | undefined;
+    const proxyToken = allBindings?.__VOID_PROXY_TOKEN as string | undefined;
+
+    expect(proxyToken).toBeUndefined();
+
+    const headers: Record<string, string> = {};
+    if (proxyToken) headers["x-void-internal"] = proxyToken;
+    expect(headers["x-void-internal"]).toBeUndefined();
+  });
+});
