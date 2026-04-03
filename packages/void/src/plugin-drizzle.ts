@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { normalizePath, type Plugin } from "vite";
 import { discoverSchema, type SchemaLocation } from "./drizzle/discover";
 import { ensureProjectTsconfig } from "./codegen/project-tsconfig";
@@ -89,16 +89,11 @@ export function drizzlePlugin(
           // (virtual:void-db imports the schema, which imports void/db).
           // Schema files only need SQL helpers, not the runtime DB instance.
           if (schema && importer) {
-            // Normalize separators for Windows — Vite uses forward slashes,
-            // but schema.path from Node's path.join uses backslashes on Windows.
+            // Normalize separators for Windows compatibility
             const normalizedImporter = normalizePath(importer);
-            const normalizedSchemaPath = normalizePath(schema.path);
-            if (schema.type === "file" && normalizedImporter === normalizedSchemaPath)
+            if (schema.type === "file" && normalizedImporter === schema.path)
               return VIRTUAL_SCHEMA_DB_ID;
-            if (
-              schema.type === "directory" &&
-              normalizedImporter.startsWith(normalizedSchemaPath)
-            ) {
+            if (schema.type === "directory" && normalizedImporter.startsWith(schema.path)) {
               return VIRTUAL_SCHEMA_DB_ID;
             }
           }
@@ -110,7 +105,7 @@ export function drizzlePlugin(
         // where Vite's config-level resolve.alias may not be applied.
         if (schema && (id === "@schema" || id.startsWith("@schema/"))) {
           if (id === "@schema") return schema.path;
-          return join(schema.path, id.slice("@schema/".length));
+          return posix.join(schema.path, id.slice("@schema/".length));
         }
       },
     },
