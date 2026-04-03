@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { execSync, spawn } from "node:child_process";
+import { execSync } from "node:child_process";
+import spawn from "cross-spawn";
 import { join } from "node:path";
 import { rmSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";

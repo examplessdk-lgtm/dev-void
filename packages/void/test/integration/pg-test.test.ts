@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { spawn } from "node:child_process";
+import spawn from "cross-spawn";
 import { join } from "node:path";
 import { once } from "node:events";
 import { PGlite } from "@electric-sql/pglite";

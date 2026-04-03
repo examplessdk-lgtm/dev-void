@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { execSync, spawn } from "node:child_process";
+import { execSync } from "node:child_process";
+import spawn from "cross-spawn";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getPort, waitForServer, killChild } from "../../../../test/integration-helpers";

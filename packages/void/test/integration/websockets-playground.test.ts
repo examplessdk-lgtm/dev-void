@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { spawn } from "node:child_process";
+import spawn from "cross-spawn";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import { getPort, killChild, waitForServer } from "../../../../test/integration-helpers";
