@@ -19,7 +19,7 @@ export function resolveSpecifier(
   importerDir: string,
   extensions: string[],
 ): string | null {
-  const base = resolve(importerDir, specifier);
+  const base = normalizePath(resolve(importerDir, specifier));
   for (const ext of extensions) {
     if (existsSync(base + ext)) return base + ext;
   }
