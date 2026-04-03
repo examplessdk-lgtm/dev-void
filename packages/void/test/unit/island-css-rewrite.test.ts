@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
-import { describe, it, expect } from "vitest";
 import { normalizePath } from "vite";
+import { describe, it, expect } from "vitest";
 import { rewriteCssImportForVirtualModule } from "../../src/pages/islands-plugin";
 
 /** Resolve a POSIX-style absolute path to a platform-correct path with forward slashes. */
