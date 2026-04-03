@@ -94,7 +94,7 @@ export default defineConfig({
 - If the app no longer uses direct Wrangler workflows, remove `wrangler.jsonc`.
 - Remove direct `wrangler` dependency/devDependency from `package.json` when it is only used for old deploy/dev scripts.
 - Remove or rewrite npm scripts that call `wrangler` directly (for example old deploy/publish scripts).
-- Keep Wrangler only if the project still has explicit non-Vite-Cloud workflows that require it.
+- Keep Wrangler only if the project still has explicit non-Void workflows that require it.
 
 ## Routing behavior reference (use during file conversion)
 
