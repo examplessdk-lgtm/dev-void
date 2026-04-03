@@ -1,6 +1,6 @@
 import { normalizePath, type ViteDevServer } from "vite";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { resolveEffectiveLayoutChain } from "./scan";
 import type { PageScanResult } from "./types";
 
@@ -19,7 +19,7 @@ export function resolveSpecifier(
   importerDir: string,
   extensions: string[],
 ): string | null {
-  const base = resolve(importerDir, specifier);
+  const base = normalizePath(resolve(importerDir, specifier));
   for (const ext of extensions) {
     if (existsSync(base + ext)) return base + ext;
   }
@@ -73,6 +73,22 @@ export function fileHasCssImports(filePath: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Rewrite a matched CSS import line so relative specifiers resolve from the
+ * virtual module. Absolute and bare specifiers are kept as-is.
+ */
+export function rewriteCssImportForVirtualModule(
+  matchedLine: string,
+  specifier: string,
+  sourceFilePath: string,
+): string {
+  if (specifier.startsWith(".")) {
+    const absPath = normalizePath(resolve(dirname(sourceFilePath), specifier));
+    return `import ${JSON.stringify(absPath)};`;
+  }
+  return matchedLine.trim() + ";";
 }
 
 /** Extract CSS import statements from a file and return them as @import rules. */

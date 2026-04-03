@@ -515,8 +515,11 @@ async function runFrameworkDeploy(
     log.info("Wrapper generated");
   }
 
-  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > default)
-  const wranglerCompat = readWranglerCompat(root, voidConfig);
+  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > build output > default)
+  // Use the original workerDir (not actualWorkerDir) because bundleEntry() may
+  // reassign actualWorkerDir to a temporary output — the plugin-generated
+  // wrangler.json with correct compat settings lives in the original build output.
+  const wranglerCompat = readWranglerCompat(root, voidConfig, workerDir);
 
   // 9. Resolve revalidate + prerender from void.json
   const revalidate = voidConfig.routing?.revalidate;
@@ -837,8 +840,8 @@ async function runFullDeploy(
             persistDir: join(root, ".void"),
           });
 
-  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > default)
-  const wranglerCompat = readWranglerCompat(root, deployConfig);
+  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > build output > default)
+  const wranglerCompat = readWranglerCompat(root, deployConfig, join(distDir, workerDirName));
 
   // 9. Load .env vars for production (excludes .local files)
   const envVars = loadDeployEnv(root);

@@ -134,6 +134,102 @@ describe("readWranglerCompat", () => {
     setup("wrangler.json", '{ "compatibility_date": "2026-02" }');
     expect(() => readWranglerCompat(tmpDir)).toThrow("YYYY-MM-DD format");
   });
+
+  it("falls back to build output wrangler.json when no project config exists", () => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    mkdirSync(tmpDir, { recursive: true });
+    const buildDir = join(tmpDir, "dist", "ssr");
+    mkdirSync(buildDir, { recursive: true });
+    writeFileSync(
+      join(buildDir, "wrangler.json"),
+      JSON.stringify({
+        compatibility_date: "2026-03-29",
+        compatibility_flags: ["nodejs_als"],
+      }),
+    );
+    expect(readWranglerCompat(tmpDir, undefined, buildDir)).toEqual({
+      compatibilityDate: "2026-03-29",
+      compatibilityFlags: ["nodejs_als"],
+    });
+  });
+
+  it("project wrangler.json takes priority over build output", () => {
+    setup(
+      "wrangler.json",
+      JSON.stringify({
+        compatibility_date: "2026-04-01",
+        compatibility_flags: ["nodejs_compat"],
+      }),
+    );
+    const buildDir = join(tmpDir, "dist", "ssr");
+    mkdirSync(buildDir, { recursive: true });
+    writeFileSync(
+      join(buildDir, "wrangler.json"),
+      JSON.stringify({
+        compatibility_date: "2026-03-29",
+        compatibility_flags: ["nodejs_als"],
+      }),
+    );
+    expect(readWranglerCompat(tmpDir, undefined, buildDir)).toEqual({
+      compatibilityDate: "2026-04-01",
+      compatibilityFlags: ["nodejs_compat"],
+    });
+  });
+
+  it("void.json takes priority over both project and build output", () => {
+    setup(
+      "wrangler.json",
+      JSON.stringify({ compatibility_date: "2026-01-01", compatibility_flags: ["flag_a"] }),
+    );
+    const buildDir = join(tmpDir, "dist", "ssr");
+    mkdirSync(buildDir, { recursive: true });
+    writeFileSync(
+      join(buildDir, "wrangler.json"),
+      JSON.stringify({ compatibility_date: "2026-02-01", compatibility_flags: ["flag_b"] }),
+    );
+    const config: VoidConfig = {
+      worker: { compatibility_date: "2026-06-01", compatibility_flags: ["flag_c"] },
+    };
+    expect(readWranglerCompat(tmpDir, config, buildDir)).toEqual({
+      compatibilityDate: "2026-06-01",
+      compatibilityFlags: ["flag_c"],
+    });
+  });
+
+  it("build output date used when project has no date but build output does", () => {
+    setup("wrangler.json", '{ "name": "test" }');
+    const buildDir = join(tmpDir, "dist", "ssr");
+    mkdirSync(buildDir, { recursive: true });
+    writeFileSync(
+      join(buildDir, "wrangler.json"),
+      JSON.stringify({ compatibility_date: "2026-03-29" }),
+    );
+    expect(readWranglerCompat(tmpDir, undefined, buildDir)).toEqual({
+      compatibilityDate: "2026-03-29",
+    });
+  });
+
+  it("build output flags used when project has no flags but build output does", () => {
+    setup("wrangler.json", '{ "compatibility_date": "2026-04-01" }');
+    const buildDir = join(tmpDir, "dist", "ssr");
+    mkdirSync(buildDir, { recursive: true });
+    writeFileSync(
+      join(buildDir, "wrangler.json"),
+      JSON.stringify({ compatibility_flags: ["nodejs_als"] }),
+    );
+    expect(readWranglerCompat(tmpDir, undefined, buildDir)).toEqual({
+      compatibilityDate: "2026-04-01",
+      compatibilityFlags: ["nodejs_als"],
+    });
+  });
+
+  it("ignores missing build output directory gracefully", () => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    mkdirSync(tmpDir, { recursive: true });
+    expect(readWranglerCompat(tmpDir, undefined, join(tmpDir, "nonexistent"))).toEqual({
+      compatibilityDate: DEFAULT_COMPAT_DATE,
+    });
+  });
 });
 
 const noBindings: InferredBindings = {
