@@ -1,5 +1,5 @@
 ---
-name: migrate-voidflare-to-void
+name: migrate-cloudflare-to-void
 description: Migrate an existing Vite app using @cloudflare/vite-plugin to Vite + void. Use when a project already runs on Cloudflare Workers but needs Void file-based routes, inferred bindings, and void deploy workflow.
 ---
 
