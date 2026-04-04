@@ -8,7 +8,7 @@ export { ValidationError };
 const POWERED_BY = { "X-Powered-By": "Void" } as const;
 
 /** Escape characters that are unsafe inside inline <script> tags to prevent XSS. */
-function safeJsonStringify(value: unknown): string {
+export function safeJsonStringify(value: unknown): string {
   const json = JSON.stringify(value) ?? "null";
   return json
     .replaceAll("<", "\\u003c")

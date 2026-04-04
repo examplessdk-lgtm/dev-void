@@ -1,17 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { safeJsonStringify } from "../../src/pages/protocol";
 
-// Test the safeJsonStringify behavior by simulating the deferred output
-describe("deferred data XSS prevention", () => {
-  function safeJsonStringify(value: unknown): string {
-    const json = JSON.stringify(value) ?? "null";
-    return json
-      .replaceAll("<", "\\u003c")
-      .replaceAll(">", "\\u003e")
-      .replaceAll("&", "\\u0026")
-      .replaceAll("\u2028", "\\u2028")
-      .replaceAll("\u2029", "\\u2029");
-  }
-
+describe("deferred data XSS prevention (real implementation)", () => {
   it("escapes </script> in string values", () => {
     const malicious = { name: "</script><script>alert(1)</script>" };
     const result = safeJsonStringify(malicious);
