@@ -62,3 +62,13 @@ jobs:
         if: matrix.suite != 'unit' && contains(matrix.os, 'windows')
 
       - run: pnpm ${{ matrix.script }}${{ matrix.retry && format(' --retry {0}', matrix.retry) || '' }}
+
+  done:
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - lint-and-check
+      - test
+    steps:
+      - run: exit 1
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
