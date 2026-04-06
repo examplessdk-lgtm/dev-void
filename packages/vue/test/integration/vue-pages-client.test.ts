@@ -765,6 +765,9 @@ describe("vue-pages client (dev)", () => {
         () => document.querySelector('[data-testid="count"]')?.textContent === "Count: 1",
       );
 
+      // Wait a bit for reactive state to stabilize before HMR (Windows can be slower)
+      await new Promise((r) => setTimeout(r, 200));
+
       // Set a window marker to detect full page reload
       await page.evaluate(() => {
         (window as any).__hmr_marker = true;
