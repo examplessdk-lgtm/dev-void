@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { execSync, spawn } from "node:child_process";
+import { execSync } from "node:child_process";
+import spawn from "cross-spawn";
 import { join } from "node:path";
 import { readFileSync, writeFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
@@ -763,6 +764,9 @@ describe("vue-pages client (dev)", () => {
       await page.waitForFunction(
         () => document.querySelector('[data-testid="count"]')?.textContent === "Count: 1",
       );
+
+      // Wait a bit for reactive state to stabilize before HMR (Windows can be slower)
+      await new Promise((r) => setTimeout(r, 200));
 
       // Set a window marker to detect full page reload
       await page.evaluate(() => {

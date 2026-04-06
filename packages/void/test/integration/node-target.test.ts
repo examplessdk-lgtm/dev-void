@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { execSync, spawn } from "node:child_process";
+import { execSync } from "node:child_process";
+import spawn from "cross-spawn";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { getPort, waitForServer, killChild } from "../../../../test/integration-helpers";
 
-const ROOT = new URL("../../../..", import.meta.url).pathname;
+const ROOT = join(import.meta.dirname, "..", "..", "..", "..");
 let DEV_PORT: number;
 let DEV_BASE: string;
 let PROD_PORT: number;

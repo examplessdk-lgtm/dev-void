@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { spawn } from "node:child_process";
+import spawn from "cross-spawn";
 import { join } from "node:path";
 import { getPort, waitForServer, killChild } from "../../../../test/integration-helpers";
 

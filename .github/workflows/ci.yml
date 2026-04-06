@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled]
   workflow_call:
 
 jobs:
@@ -23,10 +24,13 @@ jobs:
       - run: pnpm check
 
   test:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # Windows runs on main pushes and PRs labeled "test: windows"
+        os: '${{ (github.event_name == ''push'' || contains(github.event.pull_request.labels.*.name, ''test: windows'')) && fromJSON(''["blacksmith-4vcpu-ubuntu-2404","windows-latest"]'') || fromJSON(''["blacksmith-4vcpu-ubuntu-2404"]'') }}'
+        suite: [unit, core-markdown, metaframeworks, pages-react-vue, pages-svelte-solid]
         include:
           - suite: unit
             script: test:unit
@@ -52,6 +56,19 @@ jobs:
       - run: pnpm build
 
       - run: pnpm exec playwright install --with-deps chromium
-        if: matrix.suite == 'core-markdown' || matrix.suite == 'metaframeworks' || startsWith(matrix.suite, 'pages-')
+        if: matrix.suite != 'unit' && !contains(matrix.os, 'windows')
+
+      - run: pnpm exec playwright install chromium
+        if: matrix.suite != 'unit' && contains(matrix.os, 'windows')
 
       - run: pnpm ${{ matrix.script }}${{ matrix.retry && format(' --retry {0}', matrix.retry) || '' }}
+
+  done:
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - lint-and-check
+      - test
+    steps:
+      - run: exit 1
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}

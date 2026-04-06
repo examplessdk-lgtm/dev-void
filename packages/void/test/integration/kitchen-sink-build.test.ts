@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { spawnSync } from "node:child_process";
+import spawn from "cross-spawn";
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { toSlash } from "../../src/shared/utils";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..", "..");
 const PLAYGROUND = "playground/kitchen-sink";
@@ -15,7 +16,7 @@ describe("playground/kitchen-sink build", () => {
     rmSync(join(pg, "dist"), { recursive: true, force: true });
     rmSync(join(pg, ".void"), { recursive: true, force: true });
 
-    const result = spawnSync("pnpm", ["--dir", PLAYGROUND, "build"], {
+    const result = spawn.sync("pnpm", ["--dir", PLAYGROUND, "build"], {
       cwd: ROOT,
       encoding: "utf8",
       maxBuffer: 10 * 1024 * 1024,
@@ -51,7 +52,7 @@ describe("playground/kitchen-sink build", () => {
 function collectFiles(dir: string): string[] {
   const files: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const entryPath = join(dir, entry.name);
+    const entryPath = toSlash(join(dir, entry.name));
     if (entry.isDirectory()) {
       files.push(...collectFiles(entryPath));
     } else {

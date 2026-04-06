@@ -21,7 +21,9 @@
     "test": "vitest --run"
   },
   "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
     "@typescript/native-preview": "catalog:",
+    "cross-spawn": "^7.0.6",
     "husky": "^9.1.7",
     "lint-staged": "^16.4.0",
     "oxfmt": "^0.42.0",
