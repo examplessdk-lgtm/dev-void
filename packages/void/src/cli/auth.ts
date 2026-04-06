@@ -66,17 +66,15 @@ function writeConfig(config: Config): void {
 }
 
 export function isStagingMode(): boolean {
-  const config = readConfig();
-  if (config.staging === false) return false;
-  return true;
+  return readConfig().staging === true || !!process.env.STAGING;
 }
 
 export function setStagingMode(on: boolean): void {
   const config = readConfig();
   if (on) {
-    delete config.staging;
+    config.staging = true;
   } else {
-    config.staging = false;
+    delete config.staging;
   }
   writeConfig(config);
 }

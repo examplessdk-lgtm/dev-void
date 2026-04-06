@@ -1,15 +1,20 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const tempHomes: string[] = [];
 
-function setIsolatedHome(): void {
+function setIsolatedHome(opts?: { staging?: boolean }): void {
   const dir = mkdtempSync(join(tmpdir(), "void-home-"));
   tempHomes.push(dir);
   process.env.HOME = dir;
   process.env.USERPROFILE = dir;
+  if (opts?.staging) {
+    const configDir = join(dir, ".void");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "config.json"), JSON.stringify({ staging: true }));
+  }
 }
 
 async function importRunProjectsCommand() {
@@ -56,7 +61,7 @@ describe("runProjectsCommand", () => {
   });
 
   it("prints projects for the authenticated user", async () => {
-    setIsolatedHome();
+    setIsolatedHome({ staging: true });
     process.env.VOID_TOKEN = "test-token";
     process.env.VOID_API_URL = "https://api.example.test";
 

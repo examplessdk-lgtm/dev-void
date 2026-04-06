@@ -112,7 +112,7 @@ Internal-only staging toggle (`void staging on|off`) that switches the CLI to us
 When staging mode is active:
 
 - **Token**: reads/writes `stagingToken` in `~/.void/config.json` instead of `token`
-- **API URL**: defaults to `https://api.staging.void.cloud` (unless overridden by `VOID_API_URL` or `api` config field)
+- **API URL**: defaults to `https://api.void.cloud` (prod); when staging is active, uses `https://api.staging.void.cloud` (unless overridden by `VOID_API_URL` or `api` config field)
 - **Banner**: prints a yellow `⚠ STAGING MODE` banner before every command
 
 Activation: `void staging on` sets `"staging": true` in config. `STAGING` env var also activates it. `void staging off` removes the field. `void staging` (no arg) prints current status.
