@@ -2,6 +2,7 @@ import type { HeaderRule, RedirectRule } from "../cli/types";
 import type { VoidAuthProvider } from "../auth/providers";
 import type { ScanResult } from "./scan";
 import { resolveLayoutIds } from "../pages/layout-resolution";
+import { INTERNAL_BINDING_PREFIXES } from "../runtime/env-raw";
 
 /**
  * Script tag injected into dev HTML to load the binding-hint virtual module.
@@ -475,6 +476,11 @@ window.__vite_plugin_react_preamble_installed__ = true;
 
   if (scan.jobs.length > 0) {
     lines.push('app.post("/__scheduled", async (c) => {');
+    lines.push('  const __token = c.req.header("x-void-internal");');
+    lines.push("  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;");
+    lines.push("  if (!(__expected ? __token === __expected : __token === __VOID_BUILD_KEY)) {");
+    lines.push('    return c.json({ error: "unauthorized" }, 401);');
+    lines.push("  }");
     lines.push("  const { cron, scheduledTime } = await c.req.json();");
     lines.push("  const controller = { cron, scheduledTime, noRetry() {} };");
     lines.push("  await scheduled(controller, c.env, c.executionCtx);");
@@ -488,8 +494,9 @@ window.__vite_plugin_react_preamble_installed__ = true;
       lines.push(`const queue${i}Name = ${JSON.stringify(scan.queues[i].name)};`);
     }
     lines.push("");
-    lines.push('app.post("/__queue", async (c) => {');
-    lines.push("  const payload = await c.req.json();");
+    // Queue dispatch as a standalone function — called directly by native queue handler
+    // and via the authenticated HTTP route. No global mutable state needed.
+    lines.push("export async function __processQueue(payload, env) {");
     lines.push("  const queueSuffix = payload.queue;");
     lines.push("  const __decisions = new Map();");
     lines.push("  function __wrapMsg(m) {");
@@ -524,13 +531,26 @@ window.__vite_plugin_react_preamble_installed__ = true;
       lines.push(
         `      const mod = await import(${JSON.stringify(`${queuesDir}/${q.filePath}`)});`,
       );
-      lines.push("      if (typeof mod.default === 'function') await mod.default(batch, c.env);");
+      lines.push("      if (typeof mod.default === 'function') await mod.default(batch, env);");
     }
     lines.push("    }");
     lines.push("  } catch { __ok = false; }");
     lines.push(
-      "  return c.json({ ok: __ok, ...(__decisions.size > 0 ? { decisions: Object.fromEntries(__decisions) } : {}) });",
+      "  return { ok: __ok, ...(__decisions.size > 0 ? { decisions: Object.fromEntries(__decisions) } : {}) };",
     );
+    lines.push("}");
+    lines.push("");
+
+    // HTTP route — unconditionally requires token (same as /__scheduled)
+    lines.push('app.post("/__queue", async (c) => {');
+    lines.push('  const __token = c.req.header("x-void-internal");');
+    lines.push("  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;");
+    lines.push("  if (!(__expected ? __token === __expected : __token === __VOID_BUILD_KEY)) {");
+    lines.push('    return c.json({ error: "unauthorized" }, 401);');
+    lines.push("  }");
+    lines.push("  const payload = await c.req.json();");
+    lines.push("  const result = await __processQueue(payload, c.env);");
+    lines.push("  return c.json(result);");
     lines.push("});");
     lines.push("");
   }
@@ -546,12 +566,12 @@ window.__vite_plugin_react_preamble_installed__ = true;
     );
     lines.push('app.post("/__void/migrate", async (c) => {');
     lines.push("  const __voidMigrationHandler = __createMigrationHandler(");
-    lines.push("    c.env,");
+    lines.push("    __getRawEnv(),");
     lines.push("    __migrations,");
     lines.push("    __migrationDialect,");
     if (auth) {
       lines.push(
-        `    () => runVoidAuthMigrations(new Request(c.req.url), c.env, __voidAuthOptions${
+        `    () => runVoidAuthMigrations(new Request(c.req.url), __getRawEnv(), __voidAuthOptions${
           auth.authSchemaPath ? ", __voidAuthMigrationSchema" : ""
         }),`,
       );
@@ -571,7 +591,9 @@ window.__vite_plugin_react_preamble_installed__ = true;
     );
     lines.push("let __voidBindingApp;");
     lines.push('app.all("/__void/*", async (c) => {');
-    lines.push("  if (!__voidBindingApp) __voidBindingApp = __createBindingHandler(c.env);");
+    lines.push(
+      "  if (!__voidBindingApp) __voidBindingApp = __createBindingHandler(__getRawEnv());",
+    );
     lines.push("  const url = new URL(c.req.url);");
     lines.push("  url.pathname = url.pathname.slice(7);");
     lines.push("  return __voidBindingApp.fetch(new Request(url.toString(), c.req.raw));");
@@ -579,6 +601,16 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push("");
   }
 
+  // Request-scoped raw env — safe for concurrent requests (uses ALS, not a module global).
+  // The worker entry wraps each request in __withRawEnv(env, fn). Internal route handlers
+  // read it via __getRawEnv() which returns the per-request value from AsyncLocalStorage.
+  lines.push("const __rawEnvStore = new AsyncLocalStorage();");
+  lines.push("export function __withRawEnv(env, fn) { return __rawEnvStore.run(env, fn); }");
+  lines.push("function __getRawEnv() { return __rawEnvStore.getStore(); }");
+  // Build-time key for internal route auth when __VOID_PROXY_TOKEN is absent.
+  // Embedded in the compiled route table — only same-build callers know it.
+  lines.push(`export const __VOID_BUILD_KEY = ${JSON.stringify(crypto.randomUUID())};`);
+  lines.push("");
   lines.push(`export default app;`);
 
   return lines.join("\n");
@@ -1125,6 +1157,39 @@ export function compileWorkerEntry(
     ? `import { createRemoteEnv } from ${JSON.stringify(remote.remotePath)};\n`
     : "";
 
+  // Filter internal platform bindings so user code cannot access them via c.env.
+  // The original env is preserved for framework internals (withRuntimeEnv, etc.).
+  // Prefixes derived from INTERNAL_BINDING_PREFIXES (shared with env.ts).
+  const prefixCheck = INTERNAL_BINDING_PREFIXES.map(
+    (p) => `prop.startsWith(${JSON.stringify(p)})`,
+  ).join(" || ");
+  const prefixCheckNeg = INTERNAL_BINDING_PREFIXES.map(
+    (p) => `!key.startsWith(${JSON.stringify(p)})`,
+  ).join(" && ");
+  const filterBindingsHelper = `
+function __filterInternalBindings(env) {
+  return new Proxy(env, {
+    get(target, prop, receiver) {
+      if (typeof prop === "string" && (${prefixCheck})) return undefined;
+      return Reflect.get(target, prop, receiver);
+    },
+    has(target, prop) {
+      if (typeof prop === "string" && (${prefixCheck})) return false;
+      return Reflect.has(target, prop);
+    },
+    ownKeys(target) {
+      return Reflect.ownKeys(target).filter(
+        (key) => typeof key !== "string" || (${prefixCheckNeg})
+      );
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      if (typeof prop === "string" && (${prefixCheck})) return undefined;
+      return Reflect.getOwnPropertyDescriptor(target, prop);
+    },
+  });
+}
+`;
+
   // Asset fallthrough helper — if the app returns 404, check ASSETS binding
   // for static files and set cache headers. Edge caching of hashed assets
   // happens at the dispatch layer (see design doc 0042).
@@ -1149,28 +1214,66 @@ async function serveWithAssets(request, env, response) {
   const ws = await __voidHandleWebSocket(request, env);
   if (ws) return ws;
   if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
-  return withRuntimeEnv(env, async () => {
-    const internal = await __handleInternal(request, env, ctx);
-    if (internal) return internal;
-    return serveWithAssets(request, env, await app.fetch(request, env, ctx));
+  return __withRawEnv(env, () => {
+    const userEnv = __filterInternalBindings(env);
+    return withRuntimeEnv(env, async () => {
+      const internal = await __handleInternal(request, env, ctx);
+      if (internal) return internal;
+      return serveWithAssets(request, env, await app.fetch(request, userEnv, ctx));
+    });
   });
 }`
     : `async (request, env, ctx) => {
   const ws = await __voidHandleWebSocket(request, env);
   if (ws) return ws;
-  return withRuntimeEnv(env, async () => {
-    const internal = await __handleInternal(request, env, ctx);
-    if (internal) return internal;
-    return serveWithAssets(request, env, await app.fetch(request, env, ctx));
+  return __withRawEnv(env, () => {
+    const userEnv = __filterInternalBindings(env);
+    return withRuntimeEnv(env, async () => {
+      const internal = await __handleInternal(request, env, ctx);
+      if (internal) return internal;
+      return serveWithAssets(request, env, await app.fetch(request, userEnv, ctx));
+    });
   });
 }`;
 
-  const queueFetchCall = remotePath
-    ? `if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
-  const __queueRes = await withRuntimeEnv(env, () => app.fetch(req, env, ctx));`
-    : "const __queueRes = await withRuntimeEnv(env, () => app.fetch(req, env, ctx));";
+  const internalRouteHelper = `async function __handleInternal(request, env, ctx) {
+  const url = new URL(request.url);
+  if (request.method !== "POST" || url.pathname !== "/__void/prerender-paths") return null;
+  const __expected = env.__VOID_PROXY_TOKEN;
+  if (__expected) {
+    const __token = request.headers.get("x-void-internal");
+    if (!__token || __token !== __expected) {
+      return Response.json({ error: "unauthorized" }, { status: 401 });
+    }
+  }
+  const paths = await __voidCollectPrerenderPaths(request, env, ctx);
+  return Response.json({ paths });
+}`;
 
-  const queueDecisionCode = `const __qr = await __queueRes.json();
+  const scheduledHandler = remotePath
+    ? `async function handleScheduled(controller, env, ctx) {
+  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
+  const userEnv = __filterInternalBindings(env);
+  return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
+}`
+    : `async function handleScheduled(controller, env, ctx) {
+  const userEnv = __filterInternalBindings(env);
+  return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
+}`;
+
+  if (hasQueues) {
+    return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv, __processQueue${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(", ")}` : ""} } from 'virtual:void-routes';
+${runtimeEnvImport}${remoteImport}${filterBindingsHelper}${assetHelper}
+${internalRouteHelper}
+${scheduledHandler}
+async function queue(batch, env, ctx) {${remotePath ? `\n  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);` : ""}
+  const userEnv = __filterInternalBindings(env);
+  const messages = [...batch.messages].map(m => ({
+    id: m.id, timestamp: m.timestamp.toISOString(),
+    body: m.body, attempts: m.attempts,
+  }));
+  const payload = { queue: batch.queue, messages };
+  const __qr = await __withRawEnv(env, () => withRuntimeEnv(env, () => __processQueue(payload, userEnv)));
   if (__qr.decisions) {
     const __msgMap = new Map();
     for (const m of batch.messages) __msgMap.set(m.id, m);
@@ -1181,48 +1284,14 @@ async function serveWithAssets(request, env, response) {
       else if (d.action === "retry") m.retry(d.delaySeconds != null ? { delaySeconds: d.delaySeconds } : undefined);
     }
   }
-  if (!__qr.ok) throw new Error("Queue handler failed");`;
-
-  const internalRouteHelper = `async function __handleInternal(request, env, ctx) {
-  const url = new URL(request.url);
-  if (request.method !== "POST" || url.pathname !== "/__void/prerender-paths") return null;
-  const paths = await __voidCollectPrerenderPaths(request, env, ctx);
-  return Response.json({ paths });
-}`;
-
-  const scheduledHandler = remotePath
-    ? `async function handleScheduled(controller, env, ctx) {
-  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
-  return withRuntimeEnv(env, () => scheduled(controller, env, ctx));
-}`
-    : `async function handleScheduled(controller, env, ctx) {
-  return withRuntimeEnv(env, () => scheduled(controller, env, ctx));
-}`;
-
-  if (hasQueues) {
-    return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(", ")}` : ""} } from 'virtual:void-routes';
-${runtimeEnvImport}${remoteImport}${assetHelper}
-${internalRouteHelper}
-${scheduledHandler}
-async function queue(batch, env, ctx) {
-  const messages = [...batch.messages].map(m => ({
-    id: m.id, timestamp: m.timestamp.toISOString(),
-    body: m.body, attempts: m.attempts,
-  }));
-  const req = new Request("https://localhost/__queue", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ queue: batch.queue, messages }),
-  });
-  ${queueFetchCall}
-  ${queueDecisionCode}
+  if (!__qr.ok) throw new Error("Queue handler failed");
 }
 
 ${webSocketClasses.map((name) => `export { ${name} };`).join("\n")}
 export default { fetch: ${fetchHandler}, scheduled: handleScheduled, queue };`;
   }
-  return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(", ")}` : ""} } from 'virtual:void-routes';
-${runtimeEnvImport}${remoteImport}${assetHelper}
+  return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(", ")}` : ""} } from 'virtual:void-routes';
+${runtimeEnvImport}${remoteImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${scheduledHandler}
 ${webSocketClasses.map((name) => `export { ${name} };`).join("\n")}
@@ -1247,6 +1316,11 @@ import innerApp, { __voidCollectPrerenderPaths } from "virtual:void-routes";
 
 const app = new Hono();
 app.post("/__void/prerender-paths", async (c) => {
+  const __expected = c.env?.__VOID_PROXY_TOKEN;
+  if (__expected) {
+    const __token = c.req.header("x-void-internal");
+    if (!__token || __token !== __expected) return c.json({ error: "unauthorized" }, 401);
+  }
   const paths = await __voidCollectPrerenderPaths(c.req.raw);
   return c.json({ paths });
 });

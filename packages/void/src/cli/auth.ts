@@ -229,6 +229,9 @@ export async function runLogin(provider = "github"): Promise<string> {
       resolve(token);
     });
 
+    // Close immediately after callback — don't wait for keep-alive timeout
+    server.on("connection", (socket) => socket.unref());
+
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
       if (!addr || typeof addr === "string") {

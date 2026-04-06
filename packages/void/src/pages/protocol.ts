@@ -7,6 +7,17 @@ export { ValidationError };
 
 const POWERED_BY = { "X-Powered-By": "Void" } as const;
 
+/** Escape characters that are unsafe inside inline <script> tags to prevent XSS. */
+export function safeJsonStringify(value: unknown): string {
+  const json = JSON.stringify(value) ?? "null";
+  return json
+    .replaceAll("<", "\\u003c")
+    .replaceAll(">", "\\u003e")
+    .replaceAll("&", "\\u0026")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
+}
+
 export interface PageObject {
   component: string;
   props: Record<string, unknown>;
@@ -240,9 +251,9 @@ export async function handlePageGet(
     c,
     "text/html; charset=utf-8",
     (group, data) =>
-      `\n<script>window.__resolveDeferred?window.__resolveDeferred(${JSON.stringify(group)},${JSON.stringify(data)}):(window.__deferredQueue??=[]).push([${JSON.stringify(group)},${JSON.stringify(data)}])</script>`,
+      `\n<script>window.__resolveDeferred?window.__resolveDeferred(${safeJsonStringify(group)},${safeJsonStringify(data)}):(window.__deferredQueue??=[]).push([${safeJsonStringify(group)},${safeJsonStringify(data)}])</script>`,
     (group, error) =>
-      `\n<script>window.__rejectDeferred?window.__rejectDeferred(${JSON.stringify(group)},${JSON.stringify(error)}):(window.__deferredQueue??=[]).push([${JSON.stringify(group)},0,${JSON.stringify(error)}])</script>`,
+      `\n<script>window.__rejectDeferred?window.__rejectDeferred(${safeJsonStringify(group)},${safeJsonStringify(error)}):(window.__deferredQueue??=[]).push([${safeJsonStringify(group)},0,${safeJsonStringify(error)}])</script>`,
   );
 }
 
