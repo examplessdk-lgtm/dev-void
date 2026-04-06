@@ -548,7 +548,7 @@ async function runFrameworkDeploy(
   // Preflight: hash assets and check which ones changed
   s.start("Checking for changes...");
   const { assetManifest } = collectAndHashAssets(assetsDir);
-  const { needed, skipped } = await client.preflight(config.projectId, assetManifest);
+  const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
   s.stop("Checked for changes");
 
   if (skipped > 0) {
@@ -858,7 +858,7 @@ async function runFullDeploy(
   // Preflight: hash assets and check which ones changed
   s.start("Checking for changes...");
   const { assetManifest } = collectAndHashAssets(clientDir);
-  const { needed, skipped } = await client.preflight(config.projectId, assetManifest);
+  const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
   s.stop("Checked for changes");
 
   if (skipped > 0) {

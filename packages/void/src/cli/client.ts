@@ -205,6 +205,7 @@ export class PlatformClient {
   async preflight(
     projectId: string,
     assetManifest: Record<string, { hash: string; size: number }>,
+    hasWorker?: boolean,
   ): Promise<{ needed: string[]; total: number; skipped: number }> {
     const total = Object.keys(assetManifest).length;
     try {
@@ -214,7 +215,7 @@ export class PlatformClient {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.token}`,
         },
-        body: JSON.stringify({ assetManifest }),
+        body: JSON.stringify({ assetManifest, ...(hasWorker && { hasWorker }) }),
       });
 
       if (!res.ok) {
