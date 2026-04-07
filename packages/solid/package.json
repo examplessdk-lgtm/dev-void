@@ -32,6 +32,7 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
+    "prepublishOnly": "node ../../scripts/rewrite-package-manifest.ts",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
