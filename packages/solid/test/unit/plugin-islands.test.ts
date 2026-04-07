@@ -1,0 +1,118 @@
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { islandsPlugin } from "../../src/plugin-islands";
+
+const TMP = join(import.meta.dirname, "__tmp_islands_plugin__");
+const PAGES_DIR = join(TMP, "pages");
+
+function writeFile(relativePath: string, content: string): void {
+  const full = join(PAGES_DIR, relativePath);
+  mkdirSync(join(full, ".."), { recursive: true });
+  writeFileSync(full, content);
+}
+
+function setupPlugin() {
+  const plugins = islandsPlugin(PAGES_DIR);
+  const plugin = plugins[0];
+
+  const config = { root: TMP, command: "build" as const, plugins: [] };
+  (plugin as any).configResolved(config);
+
+  return {
+    async buildStart() {
+      await (plugin as any).buildStart.call({});
+    },
+    loadClientEntry(): string | undefined {
+      return (plugin as any).load.handler("\0virtual:void-islands-client");
+    },
+  };
+}
+
+describe("islandsPlugin — layout island import scanning", () => {
+  beforeEach(() => {
+    mkdirSync(PAGES_DIR, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(TMP, { recursive: true, force: true });
+  });
+
+  it("pre-scans island imports from island layouts into the manifest", async () => {
+    writeFile(
+      "blog/layout.island.tsx",
+      `import Counter from "../_components/Counter" with { island: "load" }
+export default function Layout(props) { return <div><Counter />{props.children}</div>; }`,
+    );
+    writeFile(
+      "blog/index.island.tsx",
+      `export default function Blog() { return <div>Blog</div>; }`,
+    );
+    writeFile(
+      "_components/Counter.tsx",
+      `export default function Counter() { return <button>0</button>; }`,
+    );
+
+    const { buildStart, loadClientEntry } = setupPlugin();
+    await buildStart();
+    const clientEntry = loadClientEntry();
+
+    expect(clientEntry).toBeDefined();
+    expect(clientEntry).toContain("pages/_components/Counter");
+  });
+
+  it("pre-scans island imports from island pages into the manifest", async () => {
+    writeFile(
+      "index.island.tsx",
+      `import Toggle from "./Toggle" with { island: "idle" }
+export default function Home() { return <Toggle />; }`,
+    );
+    writeFile("Toggle.tsx", `export default function Toggle() { return <button>off</button>; }`);
+
+    const { buildStart, loadClientEntry } = setupPlugin();
+    await buildStart();
+    const clientEntry = loadClientEntry();
+
+    expect(clientEntry).toBeDefined();
+    expect(clientEntry).toContain("pages/Toggle");
+  });
+
+  it("includes island imports from both pages and layouts", async () => {
+    writeFile(
+      "app/layout.island.tsx",
+      `import Nav from "../_components/Nav" with { island: "load" }
+export default function Layout(props) { return <div><Nav />{props.children}</div>; }`,
+    );
+    writeFile(
+      "app/index.island.tsx",
+      `import Widget from "../_components/Widget" with { island: "idle" }
+export default function Index() { return <Widget />; }`,
+    );
+    writeFile("_components/Nav.tsx", `export default function Nav() { return <nav />; }`);
+    writeFile("_components/Widget.tsx", `export default function Widget() { return <div />; }`);
+
+    const { buildStart, loadClientEntry } = setupPlugin();
+    await buildStart();
+    const clientEntry = loadClientEntry();
+
+    expect(clientEntry).toBeDefined();
+    expect(clientEntry).toContain("pages/_components/Nav");
+    expect(clientEntry).toContain("pages/_components/Widget");
+  });
+
+  it("skips non-island layouts during pre-scan", async () => {
+    writeFile(
+      "layout.tsx",
+      `import Sidebar from "./Sidebar" with { island: "load" }
+export default function Layout(props) { return <div>{props.children}</div>; }`,
+    );
+    writeFile("index.island.tsx", `export default function Home() { return <div>Home</div>; }`);
+    writeFile("Sidebar.tsx", `export default function Sidebar() { return <aside />; }`);
+
+    const { buildStart, loadClientEntry } = setupPlugin();
+    await buildStart();
+    const clientEntry = loadClientEntry();
+
+    expect(clientEntry).not.toContain("Sidebar");
+  });
+});
