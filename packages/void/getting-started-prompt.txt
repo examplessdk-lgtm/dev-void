@@ -17,11 +17,12 @@ Store the token in your user ~/.npmrc:
 Then install:
 
 npm install -D void@npm:@void-sdk/void
-npm install -D @void/react@npm:@void-sdk/react
 
 Then run:
 
 npx void init
+
+In an empty directory, `void init` will add the matching Pages adapter and starter dependencies after you choose a framework.
 
 During `void init`, first choose a Pages framework (React, Vue, Svelte, or Solid), then choose D1 for a zero-config, fully managed default or PostgreSQL if you already have Postgres infrastructure or expect heavier writes and more complex queries.
 

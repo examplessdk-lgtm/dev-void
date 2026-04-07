@@ -19,7 +19,7 @@ routes/api/
 middleware/
   01.shared.ts              # Sets shared context data (appName)
 migrations/
-  001_create_users.sql      # Users table schema
+  0000_create_users.sql      # Users table schema
 ```
 
 ## Features

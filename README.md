@@ -35,25 +35,23 @@ Void is currently in private preview. To install it for the first time:
 //npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
 ```
 
-4. Install the preview packages using package aliases:
+4. Install the preview CLI using a package alias:
 
 ```sh
 npm install -D void@npm:@void-sdk/void
-npm install -D @void/react@npm:@void-sdk/react
 ```
 
-For example, the resulting `package.json` entries look like this:
+For example, the resulting `package.json` entry looks like this:
 
 ```json
 {
   "devDependencies": {
-    "@void/react": "npm:@void-sdk/react@VERSION",
     "void": "npm:@void-sdk/void@VERSION"
   }
 }
 ```
 
-Framework and support packages follow the same alias pattern: `@void/vue@npm:@void-sdk/vue`, `@void/svelte@npm:@void-sdk/svelte`, `@void/solid@npm:@void-sdk/solid`, and `@void/md@npm:@void-sdk/md`.
+When you run `void init` in an empty directory, it scaffolds the starter and adds the matching framework adapter plus Vite dependencies for you. Framework and support packages still follow the same alias pattern when you add them manually later: `@void/react@npm:@void-sdk/react`, `@void/vue@npm:@void-sdk/vue`, `@void/svelte@npm:@void-sdk/svelte`, `@void/solid@npm:@void-sdk/solid`, and `@void/md@npm:@void-sdk/md`.
 
 Then run:
 

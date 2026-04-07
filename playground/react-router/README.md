@@ -13,7 +13,7 @@ app/
     users.tsx             # Users page — D1 query via loader
     smoke.tsx             # Smoke test — D1 + KV via void/db and void/kv
 migrations/
-  001_create_users.sql    # Users table with sample data
+  0000_create_users.sql    # Users table with sample data
 ```
 
 ## Features

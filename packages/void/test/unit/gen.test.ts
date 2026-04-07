@@ -353,17 +353,17 @@ describe("gen migration", () => {
   it("generates numbered migration file", async () => {
     await runGenCommand(TMP, { subcommand: "migration", name: "add_avatar_to_users" });
 
-    const sql = read("db/migrations/001_add_avatar_to_users.sql");
+    const sql = read("db/migrations/0000_add_avatar_to_users.sql");
     expect(sql).toBe("-- add_avatar_to_users\n");
   });
 
   it("auto-numbers with zero-padded prefix after existing migrations", async () => {
     mkdirSync(join(TMP, "db", "migrations"), { recursive: true });
-    writeFileSync(join(TMP, "db/migrations/005_something.sql"), "");
+    writeFileSync(join(TMP, "db/migrations/0005_something.sql"), "");
 
     await runGenCommand(TMP, { subcommand: "migration", name: "another" });
 
-    expect(existsSync(join(TMP, "db/migrations/006_another.sql"))).toBe(true);
+    expect(existsSync(join(TMP, "db/migrations/0006_another.sql"))).toBe(true);
     // Verify padding — "6_another.sql" should not exist
     expect(existsSync(join(TMP, "db/migrations/6_another.sql"))).toBe(false);
   });
@@ -374,7 +374,7 @@ describe("gen migration", () => {
 
     await runGenCommand(TMP, { subcommand: "migration", name: "first" });
 
-    expect(existsSync(join(TMP, "db/migrations/001_first.sql"))).toBe(true);
+    expect(existsSync(join(TMP, "db/migrations/0000_first.sql"))).toBe(true);
   });
 });
 

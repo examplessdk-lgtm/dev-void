@@ -27,7 +27,7 @@ export default defineConfig({
       {
         test: {
           name: "core-markdown",
-          sequence: { groupOrder: 2 },
+          sequence: { groupOrder: 3 },
           include: [
             "packages/void/test/integration/**/*.test.ts",
             "packages/md/test/integration/**/*.test.ts",

@@ -33,12 +33,11 @@ export const SCAFFOLD_FRAMEWORK_OPTIONS = [
 interface ScaffoldFrameworkConfig {
   label: string;
   adapterPackage: string;
-  adapterVersion: string;
   adapterImport: string;
   adapterPlugin: string;
   pageExtension: string;
   dependencies: Record<string, string>;
-  devDependencies: Record<string, string>;
+  devDependencies?: Record<string, string>;
   tsconfigCompilerOptions: Record<string, string>;
 }
 
@@ -46,7 +45,6 @@ export const SCAFFOLD_FRAMEWORKS: Record<ScaffoldFramework, ScaffoldFrameworkCon
   react: {
     label: "React",
     adapterPackage: "@void/react",
-    adapterVersion: "^0.0.1",
     adapterImport: "voidReact",
     adapterPlugin: "@void/react/plugin",
     pageExtension: "tsx",
@@ -65,7 +63,6 @@ export const SCAFFOLD_FRAMEWORKS: Record<ScaffoldFramework, ScaffoldFrameworkCon
   vue: {
     label: "Vue",
     adapterPackage: "@void/vue",
-    adapterVersion: "^0.0.1",
     adapterImport: "voidVue",
     adapterPlugin: "@void/vue/plugin",
     pageExtension: "vue",
@@ -80,7 +77,6 @@ export const SCAFFOLD_FRAMEWORKS: Record<ScaffoldFramework, ScaffoldFrameworkCon
   svelte: {
     label: "Svelte",
     adapterPackage: "@void/svelte",
-    adapterVersion: "^0.0.1",
     adapterImport: "voidSvelte",
     adapterPlugin: "@void/svelte/plugin",
     pageExtension: "svelte",
@@ -93,7 +89,6 @@ export const SCAFFOLD_FRAMEWORKS: Record<ScaffoldFramework, ScaffoldFrameworkCon
   solid: {
     label: "Solid",
     adapterPackage: "@void/solid",
-    adapterVersion: "^0.0.1",
     adapterImport: "voidSolid",
     adapterPlugin: "@void/solid/plugin",
     pageExtension: "tsx",
@@ -115,6 +110,14 @@ export interface PagesStarterTemplate {
   files: Record<string, string>;
 }
 
+function toPreviewPackageName(publicPackageName: string): string {
+  if (publicPackageName === "void") return "@void-sdk/void";
+  if (publicPackageName.startsWith("@void/")) {
+    return publicPackageName.replace(/^@void\//, "@void-sdk/");
+  }
+  return publicPackageName;
+}
+
 export function detectScaffoldFrameworkFromDependencies(
   deps: Record<string, unknown>,
 ): ScaffoldFramework | undefined {
@@ -122,7 +125,7 @@ export function detectScaffoldFrameworkFromDependencies(
     ScaffoldFramework,
     ScaffoldFrameworkConfig,
   ][]) {
-    if (config.adapterPackage in deps) {
+    if (config.adapterPackage in deps || toPreviewPackageName(config.adapterPackage) in deps) {
       return framework;
     }
   }
@@ -138,9 +141,10 @@ export function getScaffoldTsconfigCompilerOptions(
 export function createPagesStarterTemplate(options: {
   framework: ScaffoldFramework;
   starterMode: ScaffoldStarterMode;
-  voidVersion: string;
+  voidPackageSpec: string;
+  adapterPackageSpec: string;
 }): PagesStarterTemplate {
-  const { framework, starterMode, voidVersion } = options;
+  const { framework, starterMode, voidPackageSpec, adapterPackageSpec } = options;
   const config = SCAFFOLD_FRAMEWORKS[framework];
   const files: Record<string, string> = {
     "vite.config.ts": getViteConfig(config),
@@ -165,9 +169,9 @@ export function createPagesStarterTemplate(options: {
       ...config.dependencies,
     },
     devDependencies: {
-      void: `^${voidVersion}`,
+      void: voidPackageSpec,
       ...SCAFFOLD_BASE_DEV_DEPENDENCIES,
-      [config.adapterPackage]: config.adapterVersion,
+      [config.adapterPackage]: adapterPackageSpec,
       ...config.devDependencies,
     },
     files,

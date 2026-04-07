@@ -8,6 +8,30 @@ export interface AppliedMigration {
   applied_at: string;
 }
 
+function toBetterSqlite3Error(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.includes("Could not locate the bindings file")) {
+    return error instanceof Error ? error : new Error(message);
+  }
+
+  return new Error(
+    "better-sqlite3 is installed but its native binding was not built. " +
+      "Add it to your 'onlyBuiltDependencies' and run `pnpm rebuild better-sqlite3`. See https://pnpm.io/settings#onlybuiltdependencies",
+  );
+}
+
+export async function openSqliteDatabase(
+  dbPath: string,
+  options?: Record<string, unknown>,
+): Promise<any> {
+  try {
+    const Database = (await import("better-sqlite3")).default;
+    return new Database(dbPath, options);
+  } catch (error) {
+    throw toBetterSqlite3Error(error);
+  }
+}
+
 /**
  * Read the list of applied migrations from the local SQLite database.
  * Returns [] if the DB file or tracking table doesn't exist.
@@ -17,8 +41,7 @@ export async function getAppliedMigrations(dbPath: string): Promise<AppliedMigra
     return [];
   }
 
-  const Database = (await import("better-sqlite3")).default;
-  const db = new Database(dbPath, { readonly: true });
+  const db = await openSqliteDatabase(dbPath, { readonly: true });
 
   try {
     const table = db
@@ -72,8 +95,7 @@ export async function runMigrations(migrationsDir: string, dbPath: string): Prom
 
   mkdirSync(dirname(dbPath), { recursive: true });
 
-  const Database = (await import("better-sqlite3")).default;
-  const db = new Database(dbPath);
+  const db = await openSqliteDatabase(dbPath);
 
   try {
     // Create tracking table if it doesn't exist

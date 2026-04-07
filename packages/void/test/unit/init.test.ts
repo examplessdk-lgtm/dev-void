@@ -104,6 +104,28 @@ describe("isScaffoldableEmptyProject", () => {
     });
   });
 
+  it("returns true when only void and a single Pages adapter are installed", () => {
+    withTempDir((root) => {
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify(
+          {
+            name: "my-app",
+            devDependencies: {
+              void: "npm:@void-sdk/void@^0.2.3",
+              "@void/react": "npm:@void-sdk/react@^0.2.3",
+            },
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+      writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+
+      expect(isScaffoldableEmptyProject(root)).toBe(true);
+    });
+  });
+
   it("returns false when app files already exist", () => {
     withTempDir((root) => {
       mkdirSync(join(root, "src"), { recursive: true });
@@ -297,6 +319,83 @@ describe("isScaffoldableEmptyProject", () => {
         readFileSync(join(root, "db", "migrations", "0000_initial.sql"), "utf-8"),
       ).toThrow();
       expect(() => readFileSync(join(root, "void.json"), "utf-8")).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("creates .gitignore with Void defaults during targeted setup", async () => {
+    const root = mkdtempSync(join(tmpdir(), "void-init-"));
+    try {
+      await runInitCommand(root, { tsconfig: true, github: false, agents: false });
+
+      const gitignore = readFileSync(join(root, ".gitignore"), "utf-8");
+      expect(gitignore).toContain("node_modules");
+      expect(gitignore).toContain(".void");
+      expect(gitignore).toContain(".wrangler");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("appends missing Void defaults to an existing .gitignore", async () => {
+    const root = mkdtempSync(join(tmpdir(), "void-init-"));
+    try {
+      writeFileSync(join(root, ".gitignore"), "node_modules\ncustom-cache\n");
+
+      await runInitCommand(root, { tsconfig: true, github: false, agents: false });
+
+      const gitignore = readFileSync(join(root, ".gitignore"), "utf-8");
+      expect(gitignore).toContain("custom-cache");
+      expect(gitignore).toContain(".void");
+      expect(gitignore).toContain(".wrangler");
+      expect(gitignore.match(/^node_modules$/gm)).toHaveLength(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the preinstalled adapter to scaffold an empty project", async () => {
+    const root = mkdtempSync(join(tmpdir(), "void-init-"));
+    try {
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify(
+          {
+            name: "my-app",
+            private: true,
+            devDependencies: {
+              void: "npm:@void-sdk/void@^0.2.3",
+              "@void/react": "npm:@void-sdk/react@^0.2.3",
+            },
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+      writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+
+      mockSelect.mockResolvedValueOnce("sqlite").mockResolvedValueOnce("generic");
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
+      expect(pkg.scripts.dev).toBe("vite");
+      expect(pkg.devDependencies.void).toBe("npm:@void-sdk/void@^0.2.3");
+      expect(pkg.devDependencies["@void/react"]).toBe("npm:@void-sdk/react@^0.2.3");
+      expect(pkg.pnpm.onlyBuiltDependencies).toEqual(
+        expect.arrayContaining(["better-sqlite3", "esbuild", "workerd"]),
+      );
+
+      const reactViteConfig = readFileSync(join(root, "vite.config.ts"), "utf-8");
+      expect(reactViteConfig).toContain('from "@void/react/plugin"');
+      expect(reactViteConfig).toContain("voidReact()");
+
+      expect(mockSelect.mock.calls[0]?.[0].message).toBe("Choose a Pages starter:");
+      expect(mockSelect).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: "Choose a Pages framework to scaffold:" }),
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

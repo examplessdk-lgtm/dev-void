@@ -311,11 +311,10 @@ async function runSeed(
     return;
   }
 
-  const { getMiniflareDatabasePath } = await import("../migrations/runner");
+  const { getMiniflareDatabasePath, openSqliteDatabase } = await import("../migrations/runner");
   const persistRoot = join(root, ".void");
   const dbPath = getMiniflareDatabasePath(persistRoot, "local");
-  const Database = (await import("better-sqlite3")).default;
-  const db = new Database(dbPath);
+  const db = await openSqliteDatabase(dbPath);
   try {
     db.exec(sql);
   } finally {
@@ -347,7 +346,7 @@ async function runExecute(
     return;
   }
 
-  const { getMiniflareDatabasePath } = await import("../migrations/runner");
+  const { getMiniflareDatabasePath, openSqliteDatabase } = await import("../migrations/runner");
   const persistRoot = join(root, ".void");
   const dbPath = getMiniflareDatabasePath(persistRoot, "local");
 
@@ -358,8 +357,7 @@ async function runExecute(
 
   const sql = file ? readFileSync(join(root, file), "utf-8") : command!;
 
-  const Database = (await import("better-sqlite3")).default;
-  const db = new Database(dbPath);
+  const db = await openSqliteDatabase(dbPath);
   try {
     const trimmed = sql.trimStart();
     if (/^SELECT\b/i.test(trimmed)) {
@@ -577,7 +575,7 @@ async function runExport(
     return;
   }
 
-  const { getMiniflareDatabasePath } = await import("../migrations/runner");
+  const { getMiniflareDatabasePath, openSqliteDatabase } = await import("../migrations/runner");
   const persistRoot = join(root, ".void");
   const dbPath = getMiniflareDatabasePath(persistRoot, "local");
 
@@ -586,8 +584,7 @@ async function runExport(
     process.exit(1);
   }
 
-  const Database = (await import("better-sqlite3")).default;
-  const db = new Database(dbPath, { readonly: true });
+  const db = await openSqliteDatabase(dbPath, { readonly: true });
   try {
     let tables: string[];
     if (args.table) {

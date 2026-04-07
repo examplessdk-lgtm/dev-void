@@ -44,17 +44,17 @@ function writeIfNotExists(filePath: string, content: string): boolean {
 
 function getNextMigrationNumber(migrationsDir: string): string {
   if (!existsSync(migrationsDir)) {
-    return "001";
+    return "0000";
   }
   const files = readdirSync(migrationsDir).filter((f) => f.endsWith(".sql") && f !== "seed.sql");
-  let max = 0;
+  let max = -1;
   for (const file of files) {
     const match = file.match(/^(\d+)/);
     if (match) {
       max = Math.max(max, Number(match[1]));
     }
   }
-  return String(max + 1).padStart(3, "0");
+  return String(max + 1).padStart(4, "0");
 }
 
 function getNextMiddlewareNumber(middlewareDir: string): string {

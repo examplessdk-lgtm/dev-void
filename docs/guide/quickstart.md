@@ -25,48 +25,43 @@ Void is currently in private preview. Keep imports in your app on `void` and `@v
 //npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
 ```
 
-4. Install Void from GitHub Packages using package aliases:
+4. Install the Void CLI from GitHub Packages using a package alias:
 
 `npm`
 
 ```sh
 npm install -D void@npm:@void-sdk/void
-npm install -D @void/react@npm:@void-sdk/react
 ```
 
 `pnpm`
 
 ```sh
 pnpm add -D void@npm:@void-sdk/void
-pnpm add -D @void/react@npm:@void-sdk/react
 ```
 
 `yarn`
 
 ```sh
 yarn add -D void@npm:@void-sdk/void
-yarn add -D @void/react@npm:@void-sdk/react
 ```
 
 `bun`
 
 ```sh
 bun add -D void@npm:@void-sdk/void
-bun add -D @void/react@npm:@void-sdk/react
 ```
 
-Your `package.json` will then contain aliases like:
+Your `package.json` will then contain an alias like:
 
 ```json
 {
   "devDependencies": {
-    "@void/react": "npm:@void-sdk/react@VERSION",
     "void": "npm:@void-sdk/void@VERSION"
   }
 }
 ```
 
-Use the same alias pattern for `@void/vue`, `@void/svelte`, `@void/solid`, and `@void/md` when needed.
+In an empty directory, `void init` adds the matching Pages adapter and starter dependencies after you choose a framework. Use the same alias pattern for `@void/react`, `@void/vue`, `@void/svelte`, `@void/solid`, and `@void/md` when you add them manually later.
 
 As part of `void init`, you'll choose a Pages framework (React, Vue, Svelte, or Solid) and a starter type. D1 is the default top option and scaffolds a DB-backed page loader, schema, migration, and API route. PostgreSQL scaffolds the same starter and writes `"database": "pg"` to `void.json`. Static Pages skips the database and server starter files so you can start with static content and add Void features later.
 

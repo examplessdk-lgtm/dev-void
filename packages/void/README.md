@@ -33,14 +33,13 @@ Void is currently in private preview. To install it for the first time, keep imp
 //npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
 ```
 
-4. Install the preview packages using package aliases:
+4. Install the preview CLI using a package alias:
 
 ```bash
 npm install -D void@npm:@void-sdk/void
-npm install -D @void/react@npm:@void-sdk/react
 ```
 
-Use the same alias pattern for the other adapters and `@void/md`.
+If you run `void init` in an empty directory, the scaffold flow adds the matching Pages adapter and Vite dependencies for you. Use the same alias pattern for the other adapters and `@void/md` when you add them manually later.
 
 Then run `npx void init`. The full interactive flow can scaffold a starter, configure local project files, log you in, and link or create your Void project so the next step is just `npx void deploy`.
 

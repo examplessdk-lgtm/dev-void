@@ -17,6 +17,7 @@ import {
   createPagesStarterTemplate,
   detectScaffoldFrameworkFromDependencies,
   getScaffoldTsconfigCompilerOptions,
+  SCAFFOLD_FRAMEWORKS,
   SCAFFOLD_FRAMEWORK_OPTIONS,
   SCAFFOLD_GITIGNORE_LINES,
   type ScaffoldFramework,
@@ -101,6 +102,21 @@ const EMPTY_PROJECT_ALLOWED_ENTRIES = new Set([
   ".zencoder",
 ]);
 
+const PNPM_ONLY_BUILT_DEPENDENCIES = ["better-sqlite3", "esbuild", "workerd"] as const;
+
+const EMPTY_PROJECT_ALLOWED_PACKAGES = new Set([
+  "void",
+  "@void-sdk/void",
+  "@void/react",
+  "@void/vue",
+  "@void/svelte",
+  "@void/solid",
+  "@void-sdk/react",
+  "@void-sdk/vue",
+  "@void-sdk/svelte",
+  "@void-sdk/solid",
+]);
+
 const VITE_CONFIG_FILES = [
   "vite.config.ts",
   "vite.config.js",
@@ -157,7 +173,7 @@ export function isScaffoldableEmptyProject(root: string): boolean {
     ...(asRecord(pkg.dependencies) ?? {}),
     ...(asRecord(pkg.devDependencies) ?? {}),
   };
-  if (Object.keys(deps).some((dep) => dep !== "void")) return false;
+  if (Object.keys(deps).some((dep) => !EMPTY_PROJECT_ALLOWED_PACKAGES.has(dep))) return false;
 
   const scripts = asRecord(pkg.scripts) ?? {};
   if (Object.keys(scripts).some((name) => name !== "test")) return false;
@@ -223,6 +239,91 @@ function detectPagesFramework(root: string): ScaffoldFramework | undefined {
   } catch {
     return undefined;
   }
+}
+
+function readPackageJson(root: string): Record<string, any> | undefined {
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
+    return asRecord(pkg) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getDeclaredDependencySpec(root: string, packageName: string): string | undefined {
+  const pkg = readPackageJson(root);
+  if (!pkg) return undefined;
+
+  const dependencies = asRecord(pkg.dependencies);
+  if (typeof dependencies?.[packageName] === "string") {
+    return dependencies[packageName] as string;
+  }
+
+  const devDependencies = asRecord(pkg.devDependencies);
+  if (typeof devDependencies?.[packageName] === "string") {
+    return devDependencies[packageName] as string;
+  }
+
+  return undefined;
+}
+
+function toPreviewPackageName(publicPackageName: string): string {
+  if (publicPackageName === "void") return "@void-sdk/void";
+  if (publicPackageName.startsWith("@void/")) {
+    return publicPackageName.replace(/^@void\//, "@void-sdk/");
+  }
+  return publicPackageName;
+}
+
+function toAliasedPreviewSpec(
+  previewPackageName: string,
+  spec: string,
+  fallbackVersion: string,
+): string {
+  if (spec.startsWith("npm:")) {
+    return spec.replace(/@void-sdk\/[^@]+/, previewPackageName);
+  }
+  if (spec.startsWith("workspace:")) {
+    return spec.replace(/@void-sdk\/[^@]+/, previewPackageName);
+  }
+  if (spec.startsWith("catalog:")) {
+    return spec;
+  }
+  return `npm:${previewPackageName}@${spec || `^${fallbackVersion}`}`;
+}
+
+function usesPreviewPackageAliases(root: string): boolean {
+  const publicVoidSpec = getDeclaredDependencySpec(root, "void");
+  if (typeof publicVoidSpec === "string" && publicVoidSpec.includes("@void-sdk/void")) {
+    return true;
+  }
+
+  return typeof getDeclaredDependencySpec(root, "@void-sdk/void") === "string";
+}
+
+function resolveScaffoldDependencySpec(
+  root: string,
+  packageName: string,
+  fallbackVersion: string,
+): string {
+  const explicit = getDeclaredDependencySpec(root, packageName);
+  if (explicit) {
+    return explicit;
+  }
+
+  const previewPackageName = toPreviewPackageName(packageName);
+  const previewSpec = getDeclaredDependencySpec(root, previewPackageName);
+  if (previewSpec) {
+    return toAliasedPreviewSpec(previewPackageName, previewSpec, fallbackVersion);
+  }
+
+  const existingVoidSpec =
+    getDeclaredDependencySpec(root, "void") ?? getDeclaredDependencySpec(root, "@void-sdk/void");
+  if (packageName !== "void" && existingVoidSpec && usesPreviewPackageAliases(root)) {
+    return toAliasedPreviewSpec(previewPackageName, existingVoidSpec, fallbackVersion);
+  }
+
+  return `^${fallbackVersion}`;
 }
 
 function setupTsconfig(
@@ -717,6 +818,26 @@ function ensureGitignore(root: string): void {
   log.success("Updated .gitignore with Void defaults");
 }
 
+function ensurePnpmBuiltDependencies(pkg: Record<string, any>): void {
+  if (!pkg.pnpm || typeof pkg.pnpm !== "object" || Array.isArray(pkg.pnpm)) {
+    pkg.pnpm = {};
+  }
+
+  const onlyBuiltDependencies = Array.isArray(pkg.pnpm.onlyBuiltDependencies)
+    ? pkg.pnpm.onlyBuiltDependencies.filter(
+        (value: unknown): value is string => typeof value === "string",
+      )
+    : [];
+
+  for (const dependency of PNPM_ONLY_BUILT_DEPENDENCIES) {
+    if (!onlyBuiltDependencies.includes(dependency)) {
+      onlyBuiltDependencies.push(dependency);
+    }
+  }
+
+  pkg.pnpm.onlyBuiltDependencies = onlyBuiltDependencies;
+}
+
 function scaffoldPagesApp(
   root: string,
   packageManager: ProjectState["packageManager"],
@@ -727,7 +848,12 @@ function scaffoldPagesApp(
   const template = createPagesStarterTemplate({
     framework,
     starterMode,
-    voidVersion: getOwnVersion(),
+    voidPackageSpec: resolveScaffoldDependencySpec(root, "void", getOwnVersion()),
+    adapterPackageSpec: resolveScaffoldDependencySpec(
+      root,
+      SCAFFOLD_FRAMEWORKS[framework].adapterPackage,
+      getOwnVersion(),
+    ),
   });
   let pkg: Record<string, any> = {};
 
@@ -802,6 +928,10 @@ function scaffoldPagesApp(
     ensureDependency("devDependencies", name, version);
   }
 
+  if (packageManager === "pnpm") {
+    ensurePnpmBuiltDependencies(pkg);
+  }
+
   writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + "\n");
   log.success("Updated package.json with starter scripts and dependencies");
 
@@ -834,7 +964,7 @@ function scaffoldDemo(root: string): void {
   // Migration
   mkdirSync(join(root, "db", "migrations"), { recursive: true });
   writeFileSync(
-    join(root, "db", "migrations", "001_create_posts.sql"),
+    join(root, "db", "migrations", "0000_create_posts.sql"),
     `CREATE TABLE IF NOT EXISTS posts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL,
@@ -843,7 +973,7 @@ function scaffoldDemo(root: string): void {
 );
 `,
   );
-  log.success("Created db/migrations/001_create_posts.sql");
+  log.success("Created db/migrations/0000_create_posts.sql");
 
   mkdirSync(join(root, "db"), { recursive: true });
   writeFileSync(
@@ -1105,6 +1235,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   const targeted = Boolean(initArgs && (initArgs.tsconfig || initArgs.github || initArgs.agents));
   const framework = detectFramework(root);
   const preScaffoldState = detectProjectState(root);
+  const detectedPagesFramework = detectPagesFramework(root);
   let scaffoldedPagesFramework: ScaffoldFramework | undefined;
   let didScaffoldStarter = false;
 
@@ -1114,7 +1245,14 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
 
   if (!targeted && !framework && isScaffoldableEmptyProject(root)) {
     log.info("Empty project detected. Scaffolding a Pages starter...");
-    scaffoldedPagesFramework = await promptScaffoldFramework();
+    if (detectedPagesFramework) {
+      scaffoldedPagesFramework = detectedPagesFramework;
+      log.info(
+        `Detected ${SCAFFOLD_FRAMEWORKS[detectedPagesFramework].label} adapter in package.json`,
+      );
+    } else {
+      scaffoldedPagesFramework = await promptScaffoldFramework();
+    }
     const starterMode = await promptStarterMode();
     scaffoldPagesApp(root, preScaffoldState.packageManager, scaffoldedPagesFramework, starterMode);
     didScaffoldStarter = true;
@@ -1134,6 +1272,8 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     const hasSchema = hasDrizzleSchema(root);
     ensureProjectTsconfig(root, undefined, hasSchema, hasSchema);
   }
+
+  ensureGitignore(root);
 
   // Step 2: Wrangler config (class B/C meta-frameworks)
   if (framework) {
