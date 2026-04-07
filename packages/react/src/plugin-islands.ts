@@ -64,15 +64,21 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
           // Pre-scan island pages to populate the manifest eagerly.
           // This is needed because the client build may load the virtual
           // islands-client entry before island page transforms run.
-          for (const page of pageScan.pages) {
-            if (!page.island) continue;
-            const filePath = resolve(pagesDir, page.componentPath);
+          const importAttrRe =
+            /import\s+\w+\s+from\s+("[^"]+"|'[^']+')\s+with\s*\{\s*island\s*:\s*("[^"]+"|'[^']+')\s*\}/g;
+          // Scan both pages AND layouts for island imports
+          const filesToScan: { filePath: string; island: boolean }[] = [
+            ...pageScan.pages.map((p: any) => ({ filePath: p.componentPath, island: p.island })),
+            ...pageScan.layouts.map((l: any) => ({ filePath: l.filePath, island: l.island })),
+          ];
+          for (const entry of filesToScan) {
+            if (!entry.island) continue;
+            const filePath = resolve(pagesDir, entry.filePath);
             const code = readFileSync(filePath, "utf-8");
             const importerDir = dirname(filePath);
-            const re =
-              /import\s+\w+\s+from\s+("[^"]+"|'[^']+')\s+with\s*\{\s*island\s*:\s*("[^"]+"|'[^']+')\s*\}/g;
+            importAttrRe.lastIndex = 0;
             let m;
-            while ((m = re.exec(code)) !== null) {
+            while ((m = importAttrRe.exec(code)) !== null) {
               const spec = m[1].slice(1, -1);
               const strategy = m[2].slice(1, -1);
               const absPath = resolveSpecifier(spec, importerDir, COMPONENT_EXTENSIONS);
