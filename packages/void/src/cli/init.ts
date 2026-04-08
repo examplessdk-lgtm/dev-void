@@ -1028,6 +1028,9 @@ function scaffoldPagesApp(
 
   if (packageManager === 'pnpm') {
     ensurePnpmBuiltDependencies(pkg);
+    if (!pkg.packageManager || typeof pkg.packageManager !== 'string') {
+      pkg.packageManager = 'pnpm@10.33.0';
+    }
   }
 
   writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n');
