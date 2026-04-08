@@ -25,4 +25,8 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
     const { runDeleteCommand } = await import('./delete');
     return runDeleteCommand(root, args.name || undefined, { force: args.force });
   }
+  if (args.subcommand === 'purge-cache') {
+    const { runPurgeCacheCommand } = await import('./cache');
+    return runPurgeCacheCommand(root);
+  }
 }

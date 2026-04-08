@@ -465,6 +465,23 @@ export class PlatformClient {
     return res.json();
   }
 
+  async purgeCache(projectId: string): Promise<{ purged: number }> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/revalidate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({ all: true }),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Cache purge failed', res);
+    }
+
+    return res.json();
+  }
+
   async getLogs(
     projectId: string,
     since: string,

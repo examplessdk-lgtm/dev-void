@@ -11,6 +11,7 @@ export const projectSubcommands: SubcommandDef[] = [
     arg: '[name]',
     description: 'Delete a project (omit name to delete linked project)',
   },
+  { name: 'purge-cache', description: 'Purge all cached pages' },
 ];
 
 export type ProjectArgs =
@@ -19,7 +20,8 @@ export type ProjectArgs =
   | { subcommand: 'list' }
   | { subcommand: 'logs'; filter: string; range: string; deployment: string }
   | { subcommand: 'rollback'; deployId: string }
-  | { subcommand: 'delete'; name: string; force: boolean };
+  | { subcommand: 'delete'; name: string; force: boolean }
+  | { subcommand: 'purge-cache' };
 
 export function parseProjectArgs(args: string[]): ProjectArgs {
   const [subcommand, ...rest] = args;
@@ -90,5 +92,12 @@ export function parseProjectArgs(args: string[]): ProjectArgs {
     return { subcommand, name, force };
   }
 
-  throw new Error('Error: Usage: void project <status|link|list|logs|rollback|delete>');
+  if (subcommand === 'purge-cache') {
+    if (rest.length > 0) {
+      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+    }
+    return { subcommand };
+  }
+
+  throw new Error('Error: Usage: void project <status|link|list|logs|rollback|delete|purge-cache>');
 }
