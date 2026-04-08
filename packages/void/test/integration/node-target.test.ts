@@ -95,11 +95,11 @@ describe('playground/node-app build + production', () => {
   let child: ReturnType<typeof spawn>;
 
   beforeAll(async () => {
-    PROD_PORT = await getPort();
-    PROD_BASE = `http://127.0.0.1:${PROD_PORT}`;
-
     rmSync(join(ROOT, 'playground/node-app/dist'), { recursive: true, force: true });
     execSync('pnpm --dir playground/node-app build', { cwd: ROOT, stdio: 'pipe' });
+
+    PROD_PORT = await getPort();
+    PROD_BASE = `http://127.0.0.1:${PROD_PORT}`;
 
     child = spawn('node', ['dist/ssr/index.js'], {
       cwd: join(ROOT, 'playground/node-app'),
@@ -107,7 +107,9 @@ describe('playground/node-app build + production', () => {
       env: { ...process.env, PORT: String(PROD_PORT) },
     });
 
-    await waitForServer(PROD_BASE, 20_000);
+    await waitForServer(PROD_BASE, 20_000, {
+      isAlive: () => child.exitCode === null,
+    });
   }, 60_000);
 
   afterAll(async () => {

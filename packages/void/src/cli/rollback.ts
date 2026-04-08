@@ -1,7 +1,7 @@
 import { intro, outro, log, select, confirm, isCancel, cancel, spinner } from '@clack/prompts';
 import { getToken } from './auth';
 import { PlatformClient } from './client';
-import { cliTitle, dim, pc } from './output';
+import { cliTitle, dim, ensureUtc, pc } from './output';
 import { readProjectConfig } from './project';
 
 export async function runRollbackCommand(root: string, deployId?: string): Promise<void> {
@@ -119,7 +119,7 @@ function formatAge(deployedAt: string | null): string {
   if (!deployedAt) {
     return '';
   }
-  const diffMs = Date.now() - new Date(deployedAt).getTime();
+  const diffMs = Date.now() - new Date(ensureUtc(deployedAt)).getTime();
   if (diffMs < 60_000) {
     return 'just now';
   }

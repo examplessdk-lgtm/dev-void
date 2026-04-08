@@ -298,13 +298,13 @@ describe('markdown-blog playground', () => {
     let stderr = '';
 
     beforeAll(async () => {
-      PREVIEW_PORT = await getPort();
-      PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
-
       execSync('pnpm --dir playground/markdown-blog build', {
         cwd: ROOT,
         stdio: 'pipe',
       });
+
+      PREVIEW_PORT = await getPort();
+      PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
 
       child = spawn(
         'pnpm',
@@ -329,7 +329,9 @@ describe('markdown-blog playground', () => {
         stderr += String(chunk);
       });
 
-      await waitForServer(PREVIEW_BASE, 20_000);
+      await waitForServer(PREVIEW_BASE, 20_000, {
+        isAlive: () => child.exitCode === null,
+      });
     }, 60_000);
 
     afterAll(async () => {

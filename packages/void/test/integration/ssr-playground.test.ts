@@ -84,11 +84,11 @@ describe('playground/ssr build + preview', () => {
   let stderr = '';
 
   beforeAll(async () => {
-    PREVIEW_PORT = await getPort();
-    PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
-
     rmSync(join(ROOT, 'playground/ssr/dist'), { recursive: true, force: true });
     execSync('pnpm --dir playground/ssr build', { cwd: ROOT, stdio: 'pipe' });
+
+    PREVIEW_PORT = await getPort();
+    PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
 
     child = spawn(
       'pnpm',
@@ -113,7 +113,9 @@ describe('playground/ssr build + preview', () => {
       stderr += String(chunk);
     });
 
-    await waitForServer(PREVIEW_BASE, 20_000);
+    await waitForServer(PREVIEW_BASE, 20_000, {
+      isAlive: () => child.exitCode === null,
+    });
   }, 60_000);
 
   afterAll(async () => {

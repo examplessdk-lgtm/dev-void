@@ -1,7 +1,7 @@
 import { intro, outro, log } from '@clack/prompts';
 import { getToken } from './auth';
 import { PlatformClient, type DeploymentResponse } from './client';
-import { cliTitle, dim, pc, tablePrefix } from './output';
+import { cliTitle, dim, ensureUtc, pc, tablePrefix } from './output';
 import { readProjectConfig } from './project';
 import { resolveProjectBySlug } from './resolve-project';
 
@@ -159,7 +159,7 @@ function formatDeploymentRow(
 
 function formatRelativeTime(iso: string): string {
   const now = Date.now();
-  const then = new Date(iso).getTime();
+  const then = new Date(ensureUtc(iso)).getTime();
   const diffMs = now - then;
 
   if (diffMs < 0) {

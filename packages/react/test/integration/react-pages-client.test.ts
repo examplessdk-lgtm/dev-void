@@ -794,13 +794,13 @@ describe('react-pages client (preview)', { retry: 2, timeout: 60_000 }, () => {
   let stderr = '';
 
   beforeAll(async () => {
-    PREVIEW_PORT = await getPort();
-    PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
-
     execSync('pnpm --dir playground/react-pages build', {
       cwd: ROOT,
       stdio: 'pipe',
     });
+
+    PREVIEW_PORT = await getPort();
+    PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
 
     child = spawn(
       'pnpm',
@@ -825,7 +825,9 @@ describe('react-pages client (preview)', { retry: 2, timeout: 60_000 }, () => {
       stderr += String(chunk);
     });
 
-    await waitForServer(PREVIEW_BASE, 30_000);
+    await waitForServer(PREVIEW_BASE, 30_000, {
+      isAlive: () => child.exitCode === null,
+    });
   }, 45_000);
 
   afterAll(async () => {
