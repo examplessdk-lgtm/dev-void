@@ -781,7 +781,7 @@ function setupGithubActions(root: string, state: ProjectState): void {
   log.success("Created .github/workflows/deploy.yml");
 
   note(
-    "1. Run: void token\n" +
+    "1. Run: npx void auth token\n" +
       "2. In your repo → Settings → Secrets → Actions → New secret\n" +
       "3. Name: VOID_TOKEN, paste the token as value",
     "Add your deploy token as a GitHub secret",
