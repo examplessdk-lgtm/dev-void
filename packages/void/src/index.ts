@@ -580,6 +580,9 @@ export function voidPlugin(options?: {
   const envPlugin: Plugin = {
     name: 'void:env',
     config(_, { mode, command }) {
+      // Exclude the .void cache directory from the file watcher so that
+      // miniflare SQLite writes don't trigger infinite HMR refreshes.
+      const ignored = ['**/.void/**'];
       // loadEnv with prefix "" returns .env file vars AND all process.env vars.
       // Filter out shell env pollution (MANPATH, PATH, HOME, etc.) by keeping only
       // vars that are new or have a different value than the shell environment.
@@ -602,15 +605,20 @@ export function voidPlugin(options?: {
         delete (assets as Record<string, unknown>).run_worker_first;
       }
 
+      const watchConfig = { server: { watch: { ignored } } };
+
       // Minify worker bundles for smaller deploys (skip when output: "static"
       // because prerendering runs the SSR bundle in Miniflare, which cannot
       // resolve template-literal dynamic imports produced by the minifier)
       if (!isNodeTarget(config.target) && config.output !== 'static') {
         const envNames = framework === 'vinext-app' ? ['rsc', 'ssr'] : ['ssr'];
         return {
+          ...watchConfig,
           environments: Object.fromEntries(envNames.map((n) => [n, { build: { minify: true } }])),
         };
       }
+
+      return watchConfig;
     },
     configureServer(server) {
       // Defer status messages until after Vite prints "ready" so they're visible.
