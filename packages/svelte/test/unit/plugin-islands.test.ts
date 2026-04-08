@@ -110,6 +110,31 @@ import Widget from "../_components/Widget.svelte" with { island: "idle" }
     expect(clientEntry).toContain("pages/_components/Widget");
   });
 
+  it("pre-scans island imports from named island layouts into the manifest", async () => {
+    writeFile(
+      "_layouts/sidebar.island.svelte",
+      `<script>
+import Clock from "../_components/Clock.svelte" with { island: "load" }
+</script>
+<Clock /><slot />`,
+    );
+    writeFile("_components/Clock.svelte", `<span>12:00</span>`);
+    writeFile(
+      "index.island.svelte",
+      `<script context="module">
+export const layout = "sidebar"
+</script>
+<p>Home</p>`,
+    );
+
+    const { buildStart, loadClientEntry } = setupPlugin();
+    await buildStart();
+    const clientEntry = loadClientEntry();
+
+    expect(clientEntry).toBeDefined();
+    expect(clientEntry).toContain("pages/_components/Clock");
+  });
+
   it("skips non-island layouts during pre-scan", async () => {
     writeFile(
       "layout.svelte",

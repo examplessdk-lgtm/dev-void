@@ -78,6 +78,10 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
           const filesToScan: { filePath: string; island: boolean }[] = [
             ...pageScan.pages.map((p: any) => ({ filePath: p.componentPath, island: p.island })),
             ...pageScan.layouts.map((l: any) => ({ filePath: l.filePath, island: l.island })),
+            ...pageScan.namedLayouts.map((nl: any) => ({
+              filePath: nl.filePath,
+              island: nl.island,
+            })),
           ];
           for (const entry of filesToScan) {
             if (!entry.island) continue;

@@ -100,6 +100,30 @@ export default function Index() { return <Widget />; }`,
     expect(clientEntry).toContain("pages/_components/Widget");
   });
 
+  it("pre-scans island imports from named island layouts into the manifest", async () => {
+    writeFile(
+      "_layouts/sidebar.island.tsx",
+      `import Clock from "../_components/Clock" with { island: "load" }
+export default function Sidebar(props) { return <div><Clock />{props.children}</div>; }`,
+    );
+    writeFile(
+      "_components/Clock.tsx",
+      `export default function Clock() { return <span>12:00</span>; }`,
+    );
+    writeFile(
+      "index.island.tsx",
+      `export const layout = "sidebar"
+export default function Home() { return <div>Home</div>; }`,
+    );
+
+    const { buildStart, loadClientEntry } = setupPlugin();
+    await buildStart();
+    const clientEntry = loadClientEntry();
+
+    expect(clientEntry).toBeDefined();
+    expect(clientEntry).toContain("pages/_components/Clock");
+  });
+
   it("skips non-island layouts during pre-scan", async () => {
     writeFile(
       "layout.tsx",
