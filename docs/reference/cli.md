@@ -25,6 +25,7 @@ Use this page as a command reference. If you are setting up a project for the fi
 | `void project link`               | Link directory to a project                         |
 | `void project logs`               | Show runtime logs from deployed project             |
 | `void project rollback`           | Roll back to a previous deployment                  |
+| `void project purge-cache`        | Purge all cached pages                              |
 | `void init`                       | Setup wizard (Pages scaffold, tsconfig, agents, CI) |
 
 ## Binary Invocation
@@ -143,6 +144,10 @@ Only **retained** deployments can be rolled back to. The number of retained depl
 Permanently delete a project and all its resources (databases, KV namespaces, R2 buckets, deployments). Requires typing the project slug to confirm.
 
 If `[name]` is omitted, uses the linked project.
+
+### `void project purge-cache`
+
+Purge all cached pages for the linked project. The edge cache will clear within seconds.
 
 ## Deploy
 
