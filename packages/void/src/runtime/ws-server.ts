@@ -501,7 +501,7 @@ function getStub(
 ) {
   const binding = env[route.bindingName] as DurableObjectNamespace | undefined;
   if (!binding) {
-    throw new Error(`Missing Durable Object binding "${route.bindingName}"`);
+    return null;
   }
   const id = binding.idFromName(buildWebSocketInstanceId(route, params));
   return binding.get(id);
@@ -521,7 +521,11 @@ export async function handleWebSocketUpgrade(
     if (!params) {
       continue;
     }
-    return getStub(env, route, params).fetch(request);
+    const stub = getStub(env, route, params);
+    if (!stub) {
+      return new Response(`Missing Durable Object binding "${route.bindingName}"`, { status: 503 });
+    }
+    return stub.fetch(request);
   }
 
   return null;
@@ -533,5 +537,9 @@ export async function forwardWebSocketRequest(
   route: WebSocketRouteMeta,
 ): Promise<Response> {
   const params = getRouteMatch(request, route) ?? {};
-  return getStub(env, route, params).fetch(request);
+  const stub = getStub(env, route, params);
+  if (!stub) {
+    return new Response(`Missing Durable Object binding "${route.bindingName}"`, { status: 503 });
+  }
+  return stub.fetch(request);
 }
