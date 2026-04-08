@@ -3,8 +3,9 @@ import { getToken } from './auth';
 import { PlatformClient } from './client';
 import { cliTitle, dim } from './output';
 import { readProjectConfig } from './project';
+import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project';
 
-export async function runPurgeCacheCommand(root: string): Promise<void> {
+export async function runPurgeCacheCommand(root: string, projectSlug?: string): Promise<void> {
   console.log();
   intro(cliTitle('project purge-cache'));
 
@@ -14,18 +15,31 @@ export async function runPurgeCacheCommand(root: string): Promise<void> {
     process.exit(1);
   }
 
-  const linked = readProjectConfig(root);
-  if (!linked) {
-    log.error('No linked project. Run `void project link` first.');
-    process.exit(1);
+  const client = new PlatformClient(token);
+  const requestedSlug = getRequestedProjectSlug({ projectSlug });
+  let projectId: string;
+  if (requestedSlug) {
+    const projects = await client.listProjects();
+    const config = resolveProjectBySlug(projects, requestedSlug);
+    if (!config) {
+      log.error(`No project found with slug "${requestedSlug}".`);
+      process.exit(1);
+    }
+    projectId = config.projectId;
+  } else {
+    const linked = readProjectConfig(root);
+    if (!linked) {
+      log.error('No linked project. Run `void project link` first.');
+      process.exit(1);
+    }
+    projectId = linked.projectId;
   }
 
-  const client = new PlatformClient(token);
   const s = spinner();
   s.start('Purging cache...');
 
   try {
-    const result = await client.purgeCache(linked.projectId);
+    const result = await client.purgeCache(projectId);
     s.stop('Cache purged.');
     log.success(`Purged ${result.purged} cached page(s).`);
   } catch (err) {

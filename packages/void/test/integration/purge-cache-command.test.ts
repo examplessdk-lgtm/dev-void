@@ -101,6 +101,65 @@ describe('runPurgeCacheCommand', () => {
     expect(out).toContain('5 cached page(s)');
   });
 
+  it('purges cache using --project slug', async () => {
+    setIsolatedHome();
+    process.env.VOID_TOKEN = 'test-token';
+    process.env.VOID_API_URL = 'https://api.example.test';
+
+    const root = mkdtempSync(join(tmpdir(), 'void-root-'));
+    tempRoots.push(root);
+
+    let callCount = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      callCount++;
+      if (callCount === 1) {
+        return Response.json([{ id: 'proj_456', slug: 'other-app' }]);
+      }
+      return Response.json({ purged: 3 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const capture = captureOutput();
+    const runPurgeCacheCommand = await importRunPurgeCacheCommand();
+    await runPurgeCacheCommand(root, 'other-app');
+    const out = capture.output();
+    capture.restore();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      'https://api.example.test/projects/proj_456/revalidate',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(out).toContain('3 cached page(s)');
+  });
+
+  it('exits with error when --project slug not found', async () => {
+    setIsolatedHome();
+    process.env.VOID_TOKEN = 'test-token';
+    process.env.VOID_API_URL = 'https://api.example.test';
+
+    const root = mkdtempSync(join(tmpdir(), 'void-root-'));
+    tempRoots.push(root);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json([])),
+    );
+
+    const capture = captureOutput();
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit:${code ?? 0}`);
+    }) as never);
+
+    const runPurgeCacheCommand = await importRunPurgeCacheCommand();
+    await expect(runPurgeCacheCommand(root, 'nonexistent')).rejects.toThrow('process.exit:1');
+    const out = capture.output();
+    capture.restore();
+
+    expect(out).toContain('No project found with slug "nonexistent"');
+    expect(exitSpy).toHaveBeenCalled();
+  });
+
   it('exits with error when not logged in', async () => {
     setIsolatedHome();
 

@@ -46,7 +46,7 @@ function printHelp() {
       helpLine('void project logs [--filter] [--range]', 'Show runtime logs from deployed project'),
       helpLine('void project rollback [deployId]', 'Roll back to a previous deployment'),
       helpLine('void project delete [name]', 'Delete a project and all its resources'),
-      helpLine('void project purge-cache', 'Purge all cached pages'),
+      helpLine('void project purge-cache [--project]', 'Purge all cached pages'),
       '',
       categoryTitle('secrets'),
       helpLine('void secret list', 'List project secrets'),

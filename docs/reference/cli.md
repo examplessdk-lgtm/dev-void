@@ -147,7 +147,13 @@ If `[name]` is omitted, uses the linked project.
 
 ### `void project purge-cache`
 
+```
+void project purge-cache [--project <name>]
+```
+
 Purge all cached pages for the linked project. The edge cache will clear within seconds.
+
+If `--project` is provided, purges that project's cache instead of the linked project.
 
 ## Deploy
 

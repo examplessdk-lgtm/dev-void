@@ -27,6 +27,6 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
   }
   if (args.subcommand === 'purge-cache') {
     const { runPurgeCacheCommand } = await import('./cache');
-    return runPurgeCacheCommand(root);
+    return runPurgeCacheCommand(root, args.projectSlug || undefined);
   }
 }
