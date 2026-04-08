@@ -435,6 +435,76 @@ describe("playground/kitchen-sink", () => {
     expect(res.status).toBe(404);
   });
 
+  it("returns 404 for dot-prefixed directory segments like /.well-known/traffic-advice", async () => {
+    const res = await fetch(`${BASE}/.well-known/traffic-advice`);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for /.git/HEAD", async () => {
+    const res = await fetch(`${BASE}/.git/HEAD`);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for /.htaccess", async () => {
+    const res = await fetch(`${BASE}/.htaccess`);
+    expect(res.status).toBe(404);
+  });
+
+  // File extension paths caught by last-segment dot check
+  it("returns 404 for /wp-login.php", async () => {
+    const res = await fetch(`${BASE}/wp-login.php`);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for /xmlrpc.php", async () => {
+    const res = await fetch(`${BASE}/xmlrpc.php`);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for /robots.txt", async () => {
+    const res = await fetch(`${BASE}/robots.txt`);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for /favicon.ico", async () => {
+    const res = await fetch(`${BASE}/favicon.ico`);
+    expect(res.status).toBe(404);
+  });
+
+  // Bot probes — single-segment paths without dots, caught by notFound fallback
+  it("returns 404 for /wp-admin", async () => {
+    const res = await fetch(`${BASE}/wp-admin`);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for /phpmyadmin", async () => {
+    const res = await fetch(`${BASE}/phpmyadmin`);
+    expect(res.status).toBe(404);
+  });
+
+  // Multi-segment unknown paths
+  it("returns 404 for /foo/bar/baz", async () => {
+    const res = await fetch(`${BASE}/foo/bar/baz`);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for /wp-content/plugins/exploit", async () => {
+    const res = await fetch(`${BASE}/wp-content/plugins/exploit`);
+    expect(res.status).toBe(404);
+  });
+
+  // API prefix returns 404 text (not HTML)
+  it("returns 404 for unknown API routes", async () => {
+    const res = await fetch(`${BASE}/api/nonexistent`);
+    expect(res.status).toBe(404);
+  });
+
+  // Non-GET methods to unknown paths
+  it("returns 404 for POST to unknown paths", async () => {
+    const res = await fetch(`${BASE}/nonexistent`, { method: "POST" });
+    expect(res.status).toBe(404);
+  });
+
   it("redirects trailing slash to non-trailing-slash path", async () => {
     const res = await fetch(`${BASE}/wp-content/`, { redirect: "manual" });
     expect(res.status).toBe(301);

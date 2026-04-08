@@ -1216,7 +1216,11 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   // Try static assets for any path (not just dot-containing last segments)
   lines.push(`  const assetRes = await fetchPagesAsset(c);`);
   lines.push(`  if (assetRes.status !== 404) return assetRes;`);
-  // If the last path segment contains a dot (e.g. style.css, .env, .htaccess),
+  // Dot-prefixed path segments (/.well-known/, /.env, /.git/) are never pages — 404
+  lines.push(`  if (path.includes("/.")) {`);
+  lines.push(`    return serveCustomErrorPage(c, 404, "Not Found");`);
+  lines.push(`  }`);
+  // If the last path segment contains a dot (e.g. style.css, favicon.ico),
   // treat it as a file request — serve 404 so the browser doesn't parse HTML as a file
   lines.push(`  const lastSeg = path.substring(path.lastIndexOf("/") + 1);`);
   lines.push(`  if (lastSeg.includes(".")) {`);
@@ -1229,10 +1233,19 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   lines.push(`    url.pathname = path.slice(0, -1);`);
   lines.push(`    return Response.redirect(url.href, 301);`);
   lines.push(`  }`);
-  // SPA fallback — render the index page; errors propagate to app.onError (500)
+  // All page routes are registered as explicit Hono handlers above.
+  // Any path reaching here is genuinely unknown — try rendering the index
+  // page (for a nice client-side 404 UI) but always return 404 status.
+  // The try/catch hides server errors from handlePageGet (e.g. index
+  // component crashing on missing loader props).
+  lines.push(`  try {`);
   lines.push(
-    `  return handlePageGet(undefined, undefined, c, "index", renderPage, getPagesAssetTags, __voidHeadConfig);`,
+    `    const res = await handlePageGet(undefined, undefined, c, "index", renderPage, getPagesAssetTags, __voidHeadConfig);`,
   );
+  lines.push(`    return new Response(res.body, { status: 404, headers: res.headers });`);
+  lines.push(`  } catch {`);
+  lines.push(`    return serveCustomErrorPage(c, 404, "Not Found");`);
+  lines.push(`  }`);
   lines.push(`});`);
   lines.push("");
 }

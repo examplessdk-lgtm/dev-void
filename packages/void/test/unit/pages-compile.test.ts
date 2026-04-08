@@ -201,6 +201,17 @@ describe("compileRouteTable with pages", () => {
     expect(code).toContain("app.notFound(");
     // Should skip API routes
     expect(code).toContain('path.startsWith("/api/")');
+    // Dot-prefixed segments (/.well-known, /.env, /.git) → 404
+    expect(code).toContain('path.includes("/.")');
+    // Last segment with dot (style.css, wp-login.php) → 404
+    expect(code).toContain('lastSeg.includes(".")');
+    // Trailing slash redirect
+    expect(code).toContain('path.endsWith("/")');
+    // notFound fallback: try render index as 404, catch errors
+    expect(code).toContain("try {");
+    expect(code).toContain("{ status: 404, headers: res.headers }");
+    expect(code).toContain("} catch {");
+    expect(code).toContain('serveCustomErrorPage(c, 404, "Not Found")');
   });
 
   it("embeds the default self-contained error page helper", () => {
