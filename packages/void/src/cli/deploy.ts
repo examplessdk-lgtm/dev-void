@@ -777,6 +777,7 @@ async function runFullDeploy(
     ...(q.maxBatchTimeout != null && { maxBatchTimeout: q.maxBatchTimeout }),
   }));
   const hasPages = existsSync(join(root, 'pages'));
+  const hasRoutes = existsSync(join(root, 'routes'));
   const isSsr = isFrameworkMode
     ? true
     : Boolean(validateSsrEntry(root)) || (hasPages && deployConfig.output !== 'static');
@@ -892,7 +893,7 @@ async function runFullDeploy(
     effectiveBindings,
     validatedMigrations,
     schedules,
-    isSsr,
+    isSsr || hasRoutes,
     isFrameworkMode ? detected!.name : undefined,
     revalidate,
     envVars,
