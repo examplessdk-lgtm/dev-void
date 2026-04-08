@@ -1,3 +1,4 @@
+import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
 import { parseRouteFilename } from '../../src/router/parse-filename';
 
@@ -84,16 +85,37 @@ describe('parseRouteFilename', () => {
   describe('catch-all', () => {
     it('named catch-all', () => {
       const r = parseRouteFilename('hello/[...name].ts');
-      expect(r.pattern).toBe('/hello/**:name');
+      expect(r.pattern).toBe('/hello/:name{.+}');
       expect(r.params).toEqual(['name']);
       expect(r.catchAll).toBe(true);
     });
 
     it('unnamed catch-all (404)', () => {
       const r = parseRouteFilename('[...].ts');
-      expect(r.pattern).toBe('/**');
+      expect(r.pattern).toBe('/*');
       expect(r.params).toEqual([]);
       expect(r.catchAll).toBe(true);
+    });
+  });
+
+  describe('catch-all patterns work with Hono', () => {
+    it('unnamed catch-all matches any path', async () => {
+      const { pattern } = parseRouteFilename('[...].ts');
+      const app = new Hono();
+      app.get(pattern, (c) => c.text('ok'));
+
+      const res = await app.request('/any/deep/path');
+      expect(res.status).toBe(200);
+    });
+
+    it('named catch-all captures path param', async () => {
+      const { pattern } = parseRouteFilename('files/[...path].ts');
+      const app = new Hono();
+      app.get(pattern, (c) => c.text(c.req.param('path')!));
+
+      const res = await app.request('/files/a/b/c');
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('a/b/c');
     });
   });
 

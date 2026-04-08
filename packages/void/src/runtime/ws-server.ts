@@ -63,12 +63,12 @@ function matchRoute(
     const patternSegment = patternSegments[i]!;
     const pathSegment = pathSegments[i];
 
-    if (patternSegment === '**') {
+    if (patternSegment === '*') {
       return { matched: true, params };
     }
 
-    if (patternSegment.startsWith('**:')) {
-      params[patternSegment.slice(3)] = decodeURIComponent(pathSegments.slice(i).join('/'));
+    if (patternSegment.endsWith('{.+}') && patternSegment.startsWith(':')) {
+      params[patternSegment.slice(1, -4)] = decodeURIComponent(pathSegments.slice(i).join('/'));
       return { matched: true, params };
     }
 

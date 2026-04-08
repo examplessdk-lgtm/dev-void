@@ -145,7 +145,7 @@ describe('scanPages', () => {
     const patterns = result.pages.map((p) => p.pattern);
     // Static routes first (/about, /), then dynamic (/:id), then catch-all
     expect(patterns.indexOf('/about')).toBeLessThan(patterns.indexOf('/:id'));
-    expect(patterns.indexOf('/:id')).toBeLessThan(patterns.indexOf('/**:slug'));
+    expect(patterns.indexOf('/:id')).toBeLessThan(patterns.indexOf('/:slug{.+}'));
   });
 
   it('handles .tsx components', async () => {

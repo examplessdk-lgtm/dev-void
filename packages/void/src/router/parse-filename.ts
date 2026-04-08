@@ -71,9 +71,9 @@ function parsePath(relativePath: string, isWebSocketRoute: boolean): RouteDefini
       catchAll = true;
       if (paramName) {
         params.push(paramName);
-        return `**:${paramName}`;
+        return `:${paramName}{.+}`;
       }
-      return '**';
+      return '*';
     }
     // [param] - single dynamic param
     if (segment.startsWith('[') && segment.endsWith(']')) {
@@ -105,7 +105,7 @@ function parsePath(relativePath: string, isWebSocketRoute: boolean): RouteDefini
  * 2. Check for env suffix (.dev, .prod) → strip and record
  * 3. Strip trailing "index" segment
  * 4. Remove route group directories: (groupname)
- * 5. Convert [param] → :param, [...param] → **:param, [...] → **
+ * 5. Convert [param] → :param, [...param] → :param{.+}, [...] → *
  * 6. Prefix with /
  */
 export function parseRouteFilename(relativePath: string): RouteDefinition {

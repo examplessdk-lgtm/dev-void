@@ -127,7 +127,7 @@ Applied in order to a path relative to `routes/`:
 2. Strip env suffix (`.dev`, `.prod`)
 3. Strip trailing `index`
 4. Remove route group dirs `(groupname)`
-5. Convert `[param]` → `:param`, `[...param]` → `**:param`, `[...]` → `**`
+5. Convert `[param]` → `:param`, `[...param]` → `:param{.+}`, `[...]` → `*`
 6. Prefix with `/`
 
 HTTP methods are determined by **named exports** in each file (detected by `detect-exports.ts` via `parseSync`), not by filename suffixes. Files/dirs starting with `_` are ignored by the scanner.

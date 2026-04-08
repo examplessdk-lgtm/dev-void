@@ -74,7 +74,7 @@ describe('scanRoutes', () => {
 
     const result = await scanRoutes(TMP);
     expect(result.routes[0].pattern).toBe('/api/hello');
-    expect(result.routes[1].pattern).toBe('/**');
+    expect(result.routes[1].pattern).toBe('/*');
   });
 
   it('discovers cron jobs from crons directory', async () => {
