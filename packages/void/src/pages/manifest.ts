@@ -68,7 +68,11 @@ export function generateComponentManifest(scan: PageScanResult, pagesDir: string
 
 function patternToRegex(pattern: string): string {
   const re = pattern
+    // Escape all regex-special characters except those used by route syntax (: * /)
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/, '(.*)') // wildcard *
     .replace(/:[^/{}]+\{\.\+\}/g, '(.+)') // catch-all :path{.+}
-    .replace(/:[^/]+/g, '([^/]+)'); // dynamic :param
-  return `/^${re.replace(/\//g, '\\/')}$/`;
+    .replace(/:[^/]+/g, '([^/]+)') // dynamic :param
+    .replace(/\//g, '\\/'); // escape forward slashes
+  return `/^${re}$/`;
 }
