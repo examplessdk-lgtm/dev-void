@@ -6,6 +6,7 @@ import {
   readdirSync,
   unlinkSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { basename, dirname, join } from "node:path";
 import { parse, type ParseError } from "jsonc-parser";
 import { parseArgs } from "node:util";
@@ -838,12 +839,37 @@ function ensurePnpmBuiltDependencies(pkg: Record<string, any>): void {
   pkg.pnpm.onlyBuiltDependencies = onlyBuiltDependencies;
 }
 
+function installProjectDependencies(
+  root: string,
+  packageManager: ProjectState["packageManager"],
+): void {
+  log.step(`Installing dependencies with ${packageManager}`);
+
+  const result = spawnSync(packageManager, ["install"], {
+    cwd: root,
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    throw new Error(
+      `${packageManager} install failed with exit code ${result.status ?? "unknown"}`,
+    );
+  }
+
+  log.success(`Installed dependencies with ${packageManager}`);
+}
+
 function scaffoldPagesApp(
   root: string,
   packageManager: ProjectState["packageManager"],
   framework: ScaffoldFramework,
   starterMode: ScaffoldStarterMode,
-): void {
+): boolean {
   const packageJsonPath = join(root, "package.json");
   const template = createPagesStarterTemplate({
     framework,
@@ -953,9 +979,7 @@ function scaffoldPagesApp(
     );
   }
 
-  if (dependencyAdded) {
-    log.info(`Run \`${packageManager} install\` to install the new dependencies.`);
-  }
+  return dependencyAdded;
 }
 
 function scaffoldDemo(root: string): void {
@@ -1238,6 +1262,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   const detectedPagesFramework = detectPagesFramework(root);
   let scaffoldedPagesFramework: ScaffoldFramework | undefined;
   let didScaffoldStarter = false;
+  let scaffoldAddedDependencies = false;
 
   if (framework) {
     log.info(`Detected ${framework.name} framework`);
@@ -1254,7 +1279,12 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
       scaffoldedPagesFramework = await promptScaffoldFramework();
     }
     const starterMode = await promptStarterMode();
-    scaffoldPagesApp(root, preScaffoldState.packageManager, scaffoldedPagesFramework, starterMode);
+    scaffoldAddedDependencies = scaffoldPagesApp(
+      root,
+      preScaffoldState.packageManager,
+      scaffoldedPagesFramework,
+      starterMode,
+    );
     didScaffoldStarter = true;
   }
 
@@ -1346,6 +1376,10 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
 
   if (!targeted) {
     await maybeSetupDeployProject(root);
+  }
+
+  if (scaffoldAddedDependencies) {
+    installProjectDependencies(root, state.packageManager);
   }
 
   outro(`Run \`${getDevCommand(root, framework)}\` to start developing`);

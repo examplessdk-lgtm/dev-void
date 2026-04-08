@@ -1,6 +1,6 @@
 {
   "name": "create-void",
-  "version": "0.2.4",
+  "version": "0.2.6",
   "private": true,
   "bin": {
     "create-void": "dist/index.mjs"

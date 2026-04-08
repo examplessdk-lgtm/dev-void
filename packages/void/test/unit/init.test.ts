@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isScaffoldableEmptyProject, runInitCommand } from "../../src/cli/init";
 
+const mockSpawnSync = vi.fn();
 const mockSelect = vi.fn();
 const mockConfirm = vi.fn();
 const mockText = vi.fn();
@@ -47,6 +48,10 @@ vi.mock("../../src/cli/client", () => ({
   },
 }));
 
+vi.mock("node:child_process", () => ({
+  spawnSync: (...args: unknown[]) => mockSpawnSync(...args),
+}));
+
 function withTempDir(run: (root: string) => void): void {
   const root = mkdtempSync(join(tmpdir(), "void-init-"));
   try {
@@ -57,6 +62,7 @@ function withTempDir(run: (root: string) => void): void {
 }
 
 afterEach(() => {
+  mockSpawnSync.mockReset();
   mockSelect.mockReset();
   mockConfirm.mockReset();
   mockText.mockReset();
@@ -69,6 +75,7 @@ afterEach(() => {
 });
 
 beforeEach(() => {
+  mockSpawnSync.mockReturnValue({ status: 0 });
   mockGetToken.mockReturnValue(null);
   mockRunLogin.mockResolvedValue("token_123");
   mockIsStagingMode.mockReturnValue(false);
@@ -395,6 +402,15 @@ describe("isScaffoldableEmptyProject", () => {
       expect(mockSelect.mock.calls[0]?.[0].message).toBe("Choose a Pages starter:");
       expect(mockSelect).not.toHaveBeenCalledWith(
         expect.objectContaining({ message: "Choose a Pages framework to scaffold:" }),
+      );
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        "pnpm",
+        ["install"],
+        expect.objectContaining({
+          cwd: root,
+          stdio: "inherit",
+          shell: process.platform === "win32",
+        }),
       );
     } finally {
       rmSync(root, { recursive: true, force: true });

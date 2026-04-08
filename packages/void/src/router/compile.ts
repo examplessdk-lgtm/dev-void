@@ -1216,10 +1216,18 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   // Try static assets for any path (not just dot-containing last segments)
   lines.push(`  const assetRes = await fetchPagesAsset(c);`);
   lines.push(`  if (assetRes.status !== 404) return assetRes;`);
-  // If path has a file extension (e.g. /missing.css), don't fall through to SPA —
-  // serve 404 so the browser doesn't try to parse HTML as CSS/JS/image
-  lines.push(`  if (/\\/[^/]+\\.[^/]+$/.test(path)) {`);
+  // If the last path segment contains a dot (e.g. style.css, .env, .htaccess),
+  // treat it as a file request — serve 404 so the browser doesn't parse HTML as a file
+  lines.push(`  const lastSeg = path.substring(path.lastIndexOf("/") + 1);`);
+  lines.push(`  if (lastSeg.includes(".")) {`);
   lines.push(`    return serveCustomErrorPage(c, 404, "Not Found");`);
+  lines.push(`  }`);
+  // Non-root trailing slash — page routes never have trailing slashes,
+  // so redirect /foo/ → /foo (301) instead of falling into the SPA fallback
+  lines.push(`  if (path !== "/" && path.endsWith("/")) {`);
+  lines.push(`    const url = new URL(c.req.url);`);
+  lines.push(`    url.pathname = path.slice(0, -1);`);
+  lines.push(`    return Response.redirect(url.href, 301);`);
   lines.push(`  }`);
   // SPA fallback — render the index page; errors propagate to app.onError (500)
   lines.push(

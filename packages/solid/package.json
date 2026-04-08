@@ -1,6 +1,6 @@
 {
   "name": "@void-sdk/solid",
-  "version": "0.2.4",
+  "version": "0.2.6",
   "files": [
     "dist",
     "src/runtime"
@@ -32,7 +32,6 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
-    "prepublishOnly": "node ../../scripts/rewrite-package-manifest.ts",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {

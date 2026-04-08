@@ -1,6 +1,6 @@
 {
   "name": "@void-sdk/void",
-  "version": "0.2.4",
+  "version": "0.2.6",
   "bin": {
     "void": "dist/cli/cli.mjs"
   },
@@ -220,7 +220,6 @@
   "scripts": {
     "build": "node scripts/sync-skill-docs.mjs && tsdown",
     "dev": "tsdown --watch",
-    "prepublishOnly": "node ../../scripts/rewrite-package-manifest.ts",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
