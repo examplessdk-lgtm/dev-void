@@ -418,5 +418,27 @@ describe("playground/kitchen-sink", () => {
     }
   });
 
+  // -- 404 handling --
+
+  it("returns 404 for paths with standard file extensions", async () => {
+    const res = await fetch(`${BASE}/missing.css`);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for dotfiles like /.env", async () => {
+    const res = await fetch(`${BASE}/.env`);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for nested dotfiles like /laravel/.env", async () => {
+    const res = await fetch(`${BASE}/laravel/.env`);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for paths with trailing slash", async () => {
+    const res = await fetch(`${BASE}/wp-content/`, { redirect: "manual" });
+    expect(res.status).not.toBe(500);
+  });
+
   // Cron: skipped — __scheduled endpoint is only available via wrangler, not Vite dev/preview
 }, 120_000);
