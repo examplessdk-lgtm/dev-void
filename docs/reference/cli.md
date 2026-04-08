@@ -169,7 +169,7 @@ Project resolution precedence:
 2. `VOID_PROJECT`
 3. linked project in `.void/project.json`
 
-If no project is linked and no override is provided, CLI prompts to link or create one.
+If no project is linked and no override is provided, CLI prompts to link or create one. In CI (non-TTY), `void deploy` errors out instead — set `VOID_PROJECT` or pass `--project <slug>`.
 
 That fallback is mainly for projects that skipped Void project setup during `void init`.
 

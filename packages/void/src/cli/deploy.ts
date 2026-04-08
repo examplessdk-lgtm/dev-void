@@ -128,6 +128,13 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
         config = readProjectConfig(root);
       }
 
+      if (!config && !process.stdin.isTTY) {
+        log.error(
+          'No project specified. Set `VOID_PROJECT`, pass `--project <slug>`, or commit `.void/project.json`.',
+        );
+        process.exit(1);
+      }
+
       if (!config) {
         const projects = await client.listProjects();
 
