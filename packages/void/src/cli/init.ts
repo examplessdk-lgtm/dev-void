@@ -365,7 +365,12 @@ function setupTsconfig(
     // Case C: existing tsconfig — check and offer fixes
     let tsconfig: any;
     try {
-      tsconfig = JSON.parse(readFileSync(tsconfigPath, 'utf-8'));
+      const raw = readFileSync(tsconfigPath, 'utf-8');
+      const errors: ParseError[] = [];
+      tsconfig = parse(raw, errors);
+      if (errors.length > 0) {
+        throw new SyntaxError('Failed to parse tsconfig.json');
+      }
     } catch {
       log.warn('Could not parse tsconfig.json, skipping');
       return;
