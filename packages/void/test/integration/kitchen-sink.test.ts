@@ -435,9 +435,10 @@ describe("playground/kitchen-sink", () => {
     expect(res.status).toBe(404);
   });
 
-  it("returns 404 for paths with trailing slash", async () => {
+  it("redirects trailing slash to non-trailing-slash path", async () => {
     const res = await fetch(`${BASE}/wp-content/`, { redirect: "manual" });
-    expect(res.status).not.toBe(500);
+    expect(res.status).toBe(301);
+    expect(res.headers.get("location")).toContain("/wp-content");
   });
 
   // Cron: skipped — __scheduled endpoint is only available via wrangler, not Vite dev/preview

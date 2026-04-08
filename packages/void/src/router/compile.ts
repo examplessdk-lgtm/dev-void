@@ -1222,6 +1222,13 @@ function compilePageRoutes(lines: string[], scan: ScanResult, pages: PagesCompil
   lines.push(`  if (lastSeg.includes(".")) {`);
   lines.push(`    return serveCustomErrorPage(c, 404, "Not Found");`);
   lines.push(`  }`);
+  // Non-root trailing slash — page routes never have trailing slashes,
+  // so redirect /foo/ → /foo (301) instead of falling into the SPA fallback
+  lines.push(`  if (path !== "/" && path.endsWith("/")) {`);
+  lines.push(`    const url = new URL(c.req.url);`);
+  lines.push(`    url.pathname = path.slice(0, -1);`);
+  lines.push(`    return Response.redirect(url.href, 301);`);
+  lines.push(`  }`);
   // SPA fallback — render the index page; errors propagate to app.onError (500)
   lines.push(
     `  return handlePageGet(undefined, undefined, c, "index", renderPage, getPagesAssetTags, __voidHeadConfig);`,
