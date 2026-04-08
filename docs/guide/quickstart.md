@@ -63,7 +63,7 @@ Your `package.json` will then contain an alias like:
 
 In an empty directory, `void init` adds the matching Pages adapter and starter dependencies after you choose a framework. Use the same alias pattern for `@void/react`, `@void/vue`, `@void/svelte`, `@void/solid`, and `@void/md` when you add them manually later.
 
-As part of `void init`, you'll choose a Pages framework (React, Vue, Svelte, or Solid) and a starter type. D1 is the default top option and scaffolds a DB-backed page loader, schema, migration, and API route. PostgreSQL scaffolds the same starter and writes `"database": "pg"` to `void.json`. Static Pages skips the database and server starter files so you can start with static content and add Void features later.
+As part of `void init`, you'll choose a Pages framework (React, Vue, Svelte, or Solid) and a starter type. D1 is the default top option and scaffolds a DB-backed page loader, schema, generated migration, `db/seed.sql`, and API route. PostgreSQL scaffolds the same starter and writes `"database": "pg"` to `void.json`. Static Pages skips the database and server starter files so you can start with static content and add Void features later.
 
 After installation, run the setup flow:
 

@@ -8,11 +8,13 @@ import {
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse, type ParseError } from "jsonc-parser";
 import { parseArgs } from "node:util";
 import { intro, outro, log, confirm, isCancel, cancel, note, select } from "@clack/prompts";
 import { ensureProjectTsconfig } from "../codegen/project-tsconfig";
 import { getDatabaseDialect, readConfig, type DatabaseDialect } from "../config";
+import { writeDrizzleConfig } from "../drizzle/config";
 import { detectFramework, type DetectedFramework } from "../plugin-inference";
 import {
   createPagesStarterTemplate,
@@ -104,6 +106,7 @@ const EMPTY_PROJECT_ALLOWED_ENTRIES = new Set([
 ]);
 
 const PNPM_ONLY_BUILT_DEPENDENCIES = ["better-sqlite3", "esbuild", "workerd"] as const;
+const drizzleKitBin = join(fileURLToPath(import.meta.resolve("drizzle-kit")), "..", "bin.cjs");
 
 const EMPTY_PROJECT_ALLOWED_PACKAGES = new Set([
   "void",
@@ -593,12 +596,12 @@ async function promptStarterMode(): Promise<ScaffoldStarterMode> {
       {
         value: "sqlite",
         label: "D1 (SQLite)",
-        hint: "Recommended starter. Scaffolds a DB-backed page, schema, migration, and API route.",
+        hint: "Recommended starter. Scaffolds a DB-backed page, schema, generated migration, seed file, and API route.",
       },
       {
         value: "postgresql",
         label: "PostgreSQL",
-        hint: 'Scaffolds the same starter with PostgreSQL and writes "database": "pg" to void.json.',
+        hint: 'Scaffolds the same starter with PostgreSQL, a generated migration, a seed file, and writes "database": "pg" to void.json.',
       },
       {
         value: "static",
@@ -862,6 +865,41 @@ function installProjectDependencies(
   }
 
   log.success(`Installed dependencies with ${packageManager}`);
+}
+
+export function generateStarterMigration(
+  root: string,
+  starterMode: Exclude<ScaffoldStarterMode, "static">,
+): void {
+  const dialect = starterMode === "postgresql" ? "postgresql" : "sqlite";
+  const configPath = writeDrizzleConfig(
+    root,
+    dialect === "postgresql" ? "postgresql://dummy" : ":memory:",
+    dialect,
+  );
+
+  log.step("Generating initial Drizzle migration");
+  const result = spawnSync(process.execPath, [drizzleKitBin, "generate", "--config", configPath], {
+    cwd: root,
+    stdio: "pipe",
+    encoding: "utf-8",
+    shell: process.platform === "win32",
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    const detail = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    throw new Error(
+      ["Failed to generate the starter database migration.", ...(detail ? [detail] : [])].join(
+        "\n\n",
+      ),
+    );
+  }
+
+  log.success("Generated initial Drizzle migration");
 }
 
 function scaffoldPagesApp(
@@ -1261,6 +1299,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   const preScaffoldState = detectProjectState(root);
   const detectedPagesFramework = detectPagesFramework(root);
   let scaffoldedPagesFramework: ScaffoldFramework | undefined;
+  let scaffoldedStarterMode: Exclude<ScaffoldStarterMode, "static"> | undefined;
   let didScaffoldStarter = false;
   let scaffoldAddedDependencies = false;
 
@@ -1285,6 +1324,9 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
       scaffoldedPagesFramework,
       starterMode,
     );
+    if (starterMode !== "static") {
+      scaffoldedStarterMode = starterMode;
+    }
     didScaffoldStarter = true;
   }
 
@@ -1380,6 +1422,9 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
 
   if (scaffoldAddedDependencies) {
     installProjectDependencies(root, state.packageManager);
+  }
+  if (scaffoldedStarterMode) {
+    generateStarterMigration(root, scaffoldedStarterMode);
   }
 
   outro(`Run \`${getDevCommand(root, framework)}\` to start developing`);

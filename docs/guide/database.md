@@ -20,11 +20,11 @@ const dbFileItems = [
         name: "migrations/",
         description: "Generated SQL migration files",
         children: [
-          { name: "0000_initial.sql" },
+          { name: "0000_*.sql" },
           { name: "0001_add_posts.sql" },
         ],
       },
-      { name: "seed.ts", description: "Seed script (optional)" },
+      { name: "seed.sql", description: "Seed SQL for local development (optional)" },
     ],
   },
 ]

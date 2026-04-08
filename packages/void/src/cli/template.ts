@@ -155,7 +155,7 @@ export function createPagesStarterTemplate(options: {
     files["pages/index.server.ts"] = getIndexServer();
     files["routes/api/hello.ts"] = getHelloRoute(config.label, starterMode);
     files["db/schema.ts"] = getSchemaFile(starterMode);
-    files["db/migrations/0000_initial.sql"] = getMigrationFile(starterMode);
+    files["db/seed.sql"] = getSeedFile();
   }
 
   return {
@@ -243,24 +243,8 @@ export const messages = sqliteTable("messages", {
 `;
 }
 
-function getMigrationFile(starterMode: Exclude<ScaffoldStarterMode, "static">): string {
-  if (starterMode === "postgresql") {
-    return `CREATE TABLE IF NOT EXISTS messages (
-  id SERIAL PRIMARY KEY,
-  text TEXT NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT now()
-);
-
-INSERT INTO messages (text) VALUES ('Hello from Void');
-`;
-  }
-
-  return `CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  text TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
+function getSeedFile(): string {
+  return `-- Seed starter content for local development.
 INSERT INTO messages (text) VALUES ('Hello from Void');
 `;
 }
@@ -336,15 +320,22 @@ export default function HomePage({ messages }: Props) {
       <p>
         API example: <a href="/api/hello">/api/hello</a>
       </p>
-      <ul>
-        {messages.map((message) => (
-          <li key={message.id}>
-            <strong>{message.text}</strong>
-            <br />
-            <small>{String(message.createdAt)}</small>
-          </li>
-        ))}
-      </ul>
+      {messages.length === 0 ? (
+        <p>
+          No messages yet. Run <code>void db seed</code> to load the sample row from
+          <code> db/seed.sql</code>.
+        </p>
+      ) : (
+        <ul>
+          {messages.map((message) => (
+            <li key={message.id}>
+              <strong>{message.text}</strong>
+              <br />
+              <small>{String(message.createdAt)}</small>
+            </li>
+          ))}
+        </ul>
+      )}
     </main>
   );
 }
@@ -366,7 +357,11 @@ defineProps<Props>();
     <p>
       API example: <a href="/api/hello">/api/hello</a>
     </p>
-    <ul>
+    <p v-if="messages.length === 0">
+      No messages yet. Run <code>void db seed</code> to load the sample row from
+      <code>db/seed.sql</code>.
+    </p>
+    <ul v-else>
       <li v-for="message in messages" :key="message.id">
         <strong>{{ message.text }}</strong>
         <br />
@@ -392,15 +387,22 @@ defineProps<Props>();
   <p>
     API example: <a href="/api/hello">/api/hello</a>
   </p>
-  <ul>
-    {#each messages as message (message.id)}
-      <li>
-        <strong>{message.text}</strong>
-        <br />
-        <small>{String(message.createdAt)}</small>
-      </li>
-    {/each}
-  </ul>
+  {#if messages.length === 0}
+    <p>
+      No messages yet. Run <code>void db seed</code> to load the sample row from
+      <code>db/seed.sql</code>.
+    </p>
+  {:else}
+    <ul>
+      {#each messages as message (message.id)}
+        <li>
+          <strong>{message.text}</strong>
+          <br />
+          <small>{String(message.createdAt)}</small>
+        </li>
+      {/each}
+    </ul>
+  {/if}
 </main>
 `;
     case "solid":
@@ -417,15 +419,22 @@ export default function HomePage(props: Props) {
       <p>
         API example: <a href="/api/hello">/api/hello</a>
       </p>
-      <ul>
-        {props.messages.map((message) => (
-          <li>
-            <strong>{message.text}</strong>
-            <br />
-            <small>{String(message.createdAt)}</small>
-          </li>
-        ))}
-      </ul>
+      {props.messages.length === 0 ? (
+        <p>
+          No messages yet. Run <code>void db seed</code> to load the sample row from
+          <code> db/seed.sql</code>.
+        </p>
+      ) : (
+        <ul>
+          {props.messages.map((message) => (
+            <li>
+              <strong>{message.text}</strong>
+              <br />
+              <small>{String(message.createdAt)}</small>
+            </li>
+          ))}
+        </ul>
+      )}
     </main>
   );
 }

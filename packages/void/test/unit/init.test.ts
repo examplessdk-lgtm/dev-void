@@ -1,4 +1,12 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -61,6 +69,57 @@ function withTempDir(run: (root: string) => void): void {
   }
 }
 
+function writeMockGeneratedMigration(root: string): void {
+  const schema = readFileSync(join(root, "db", "schema.ts"), "utf-8");
+  const isPostgres = schema.includes('from "void/schema-pg"');
+  const migrationsDir = join(root, "db", "migrations");
+  const metaDir = join(migrationsDir, "meta");
+  mkdirSync(metaDir, { recursive: true });
+
+  writeFileSync(
+    join(migrationsDir, "0000_generated.sql"),
+    isPostgres
+      ? `CREATE TABLE "messages" (
+  "id" serial PRIMARY KEY NOT NULL,
+  "text" text NOT NULL,
+  "created_at" timestamp DEFAULT now() NOT NULL
+);
+`
+      : `CREATE TABLE \`messages\` (
+  \`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+  \`text\` text NOT NULL,
+  \`created_at\` text DEFAULT (datetime('now')) NOT NULL
+);
+`,
+  );
+  writeFileSync(
+    join(metaDir, "_journal.json"),
+    JSON.stringify(
+      {
+        version: "7",
+        dialect: isPostgres ? "postgresql" : "sqlite",
+        entries: [{ idx: 0, version: "6", when: 0, tag: "0000_generated", breakpoints: true }],
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  writeFileSync(
+    join(metaDir, "0000_snapshot.json"),
+    JSON.stringify({ version: "6", dialect: isPostgres ? "postgresql" : "sqlite" }, null, 2) + "\n",
+  );
+}
+
+function listMigrationSqlFiles(root: string): string[] {
+  const migrationsDir = join(root, "db", "migrations");
+  if (!existsSync(migrationsDir)) {
+    return [];
+  }
+  return readdirSync(migrationsDir)
+    .filter((entry) => entry.endsWith(".sql"))
+    .sort();
+}
+
 afterEach(() => {
   mockSpawnSync.mockReset();
   mockSelect.mockReset();
@@ -75,7 +134,20 @@ afterEach(() => {
 });
 
 beforeEach(() => {
-  mockSpawnSync.mockReturnValue({ status: 0 });
+  mockSpawnSync.mockImplementation((command, args, options) => {
+    if (
+      command === process.execPath &&
+      Array.isArray(args) &&
+      args[1] === "generate" &&
+      options &&
+      typeof options === "object" &&
+      "cwd" in options &&
+      typeof options.cwd === "string"
+    ) {
+      writeMockGeneratedMigration(options.cwd);
+    }
+    return { status: 0, stdout: "", stderr: "" };
+  });
   mockGetToken.mockReturnValue(null);
   mockRunLogin.mockResolvedValue("token_123");
   mockIsStagingMode.mockReturnValue(false);
@@ -197,9 +269,14 @@ describe("isScaffoldableEmptyProject", () => {
       expect(readFileSync(join(root, "db", "schema.ts"), "utf-8")).toContain(
         'from "void/schema-d1"',
       );
-      expect(readFileSync(join(root, "db", "migrations", "0000_initial.sql"), "utf-8")).toContain(
-        "CREATE TABLE IF NOT EXISTS messages",
+      expect(readFileSync(join(root, "db", "seed.sql"), "utf-8")).toContain("INSERT INTO messages");
+      expect(listMigrationSqlFiles(root)).toEqual(["0000_generated.sql"]);
+      expect(readFileSync(join(root, "db", "migrations", "0000_generated.sql"), "utf-8")).toContain(
+        "CREATE TABLE",
       );
+      expect(
+        readFileSync(join(root, "db", "migrations", "meta", "_journal.json"), "utf-8"),
+      ).toContain('"entries"');
 
       expect(() => readFileSync(join(root, "routes", "api", "hello.get.ts"), "utf-8")).toThrow(
         /ENOENT/,
@@ -207,6 +284,9 @@ describe("isScaffoldableEmptyProject", () => {
       expect(() => readFileSync(join(root, "index.html"), "utf-8")).toThrow(/ENOENT/);
       expect(() => readFileSync(join(root, "src", "main.ts"), "utf-8")).toThrow(/ENOENT/);
       expect(() => readFileSync(join(root, "void.json"), "utf-8")).toThrow(/ENOENT/);
+      expect(() =>
+        readFileSync(join(root, "db", "migrations", "0000_initial.sql"), "utf-8"),
+      ).toThrow(/ENOENT/);
 
       const tsconfig = JSON.parse(readFileSync(join(root, "tsconfig.json"), "utf-8"));
       expect(tsconfig.compilerOptions.jsx).toBe("react-jsx");
@@ -244,8 +324,10 @@ describe("isScaffoldableEmptyProject", () => {
       expect(readFileSync(join(root, "db", "schema.ts"), "utf-8")).toContain(
         'from "void/schema-pg"',
       );
-      expect(readFileSync(join(root, "db", "migrations", "0000_initial.sql"), "utf-8")).toContain(
-        "SERIAL PRIMARY KEY",
+      expect(readFileSync(join(root, "db", "seed.sql"), "utf-8")).toContain("INSERT INTO messages");
+      expect(listMigrationSqlFiles(root)).toEqual(["0000_generated.sql"]);
+      expect(readFileSync(join(root, "db", "migrations", "0000_generated.sql"), "utf-8")).toContain(
+        'CREATE TABLE "messages"',
       );
 
       const frameworkPrompt = mockSelect.mock.calls[0]?.[0];
@@ -279,12 +361,12 @@ describe("isScaffoldableEmptyProject", () => {
         {
           value: "sqlite",
           label: "D1 (SQLite)",
-          hint: "Recommended starter. Scaffolds a DB-backed page, schema, migration, and API route.",
+          hint: "Recommended starter. Scaffolds a DB-backed page, schema, generated migration, seed file, and API route.",
         },
         {
           value: "postgresql",
           label: "PostgreSQL",
-          hint: 'Scaffolds the same starter with PostgreSQL and writes "database": "pg" to void.json.',
+          hint: 'Scaffolds the same starter with PostgreSQL, a generated migration, a seed file, and writes "database": "pg" to void.json.',
         },
         {
           value: "static",
@@ -322,8 +404,9 @@ describe("isScaffoldableEmptyProject", () => {
       expect(() => readFileSync(join(root, "pages", "index.server.ts"), "utf-8")).toThrow();
       expect(() => readFileSync(join(root, "routes", "api", "hello.ts"), "utf-8")).toThrow();
       expect(() => readFileSync(join(root, "db", "schema.ts"), "utf-8")).toThrow();
+      expect(() => readFileSync(join(root, "db", "seed.sql"), "utf-8")).toThrow();
       expect(() =>
-        readFileSync(join(root, "db", "migrations", "0000_initial.sql"), "utf-8"),
+        readFileSync(join(root, "db", "migrations", "0000_generated.sql"), "utf-8"),
       ).toThrow();
       expect(() => readFileSync(join(root, "void.json"), "utf-8")).toThrow();
     } finally {

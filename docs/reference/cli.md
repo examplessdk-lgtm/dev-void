@@ -47,7 +47,7 @@ void init [--tsconfig] [--github] [--agents]
 
 Setup wizard for void projects (new or existing).
 
-If run in a scaffoldable empty directory, `void init` scaffolds a Pages starter. If a single Pages adapter is already installed, it reuses that framework; otherwise it asks which framework to scaffold (React, Vue, Svelte, or Solid). It then asks which starter you want: D1, PostgreSQL, or Static Pages. The D1 and PostgreSQL starters write a framework-specific `vite.config.ts`, a `pages/` home page plus `.server.ts` loader, `db/schema.ts`, `db/migrations/0000_initial.sql`, and `routes/api/hello.ts`. The Static Pages starter writes just the framework-specific `vite.config.ts` and a `pages/` home page so you can add server features later.
+If run in a scaffoldable empty directory, `void init` scaffolds a Pages starter. If a single Pages adapter is already installed, it reuses that framework; otherwise it asks which framework to scaffold (React, Vue, Svelte, or Solid). It then asks which starter you want: D1, PostgreSQL, or Static Pages. The D1 and PostgreSQL starters write a framework-specific `vite.config.ts`, a `pages/` home page plus `.server.ts` loader, `db/schema.ts`, `db/seed.sql`, a generated initial migration under `db/migrations/`, and `routes/api/hello.ts`. The Static Pages starter writes just the framework-specific `vite.config.ts` and a `pages/` home page so you can add server features later.
 
 After that, the full interactive flow walks through:
 
