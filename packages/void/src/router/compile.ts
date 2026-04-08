@@ -1361,6 +1361,11 @@ async function serveWithAssets(request, env, response) {
 
   const internalRouteHelper = `async function __handleInternal(request, env, ctx) {
   const url = new URL(request.url);
+  // Readiness probe — platform polls this to confirm the worker is live after WfP upload.
+  // Handled here (before app.fetch) so user middleware cannot block it.
+  if (request.method === "GET" && url.pathname === "/__void/ready") {
+    return Response.json({ ready: true });
+  }
   if (request.method !== "POST" || url.pathname !== "/__void/prerender-paths") return null;
   const __expected = env.__VOID_PROXY_TOKEN;
   if (__expected) {
