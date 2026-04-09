@@ -28,6 +28,7 @@ import { convertHeadersConfig, convertRedirectsConfig } from '../config';
 import { scanJobsSync } from '../crons/scan';
 import { writeDrizzleConfig } from '../drizzle/config';
 import { discoverSchema } from '../drizzle/discover';
+import { voidWarn } from '../log';
 import { collectMigrations } from '../migrations/collect';
 import { validateMigrations } from '../migrations/validate';
 import { scanPages } from '../pages/scan';
@@ -40,6 +41,7 @@ import {
 import { collectPrerenderPaths, collectPrerenderPathsNode } from '../prerender';
 import { scanQueuesSync } from '../queues/scan';
 import { scanWebSocketRoutesSync } from '../router/websocket';
+import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env';
 import { validateSsrEntry } from '../ssr/entry';
 import { getToken, getTokenSource } from './auth';
 import { isExpiredTokenError, PlatformClient } from './client';
@@ -653,7 +655,14 @@ async function runFullDeploy(
     const buildCmd = formatProjectCommand(root, 'vite build');
     log.step(`Building (${buildCmd})...`);
     try {
-      execSync(resolveProjectCommand(root, 'vite build'), { cwd: root, stdio: 'inherit' });
+      // Pass VOID_DEPLOY_PROJECT_ID so plugin-prerender (running inside this
+      // child vite build) can resolve the Void projectId without relying on
+      // .void/project.json, which may be stale or absent under `--project <slug>`.
+      execSync(resolveProjectCommand(root, 'vite build'), {
+        cwd: root,
+        stdio: 'inherit',
+        env: { ...process.env, VOID_DEPLOY_PROJECT_ID: config.projectId },
+      });
     } catch (err: any) {
       process.exit(err.status ?? 1);
     }
@@ -858,6 +867,12 @@ async function runFullDeploy(
             workerDir: join(distDir, workerDirName),
             clientDir,
             persistDir: join(root, '.void'),
+            // Match the runtime remote-mode switch so getPrerenderPaths()
+            // reads real D1/KV/R2 during deploy-time path discovery when
+            // the project is in remote mode. Without this the manifest
+            // would be built from local bindings even for remote projects.
+            remoteMode: resolveRemoteMode(deployConfig.remote),
+            projectId: config.projectId,
           });
 
   // 8. Read wrangler compat settings (void.json > wrangler.jsonc > build output > default)
@@ -1220,7 +1235,13 @@ function loadDeployEnv(root: string): Record<string, string> {
       env[key] = value;
     }
   }
-  return env;
+  const { sanitized, stripped } = stripInternalEnvKeys(env);
+  if (stripped.length > 0) {
+    voidWarn(
+      `Ignoring internal env keys from .env files: ${stripped.join(', ')}. These are reserved for Void runtime use and will not be shipped in the deploy manifest.`,
+    );
+  }
+  return sanitized;
 }
 
 /**

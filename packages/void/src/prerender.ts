@@ -11,7 +11,10 @@ import { createRequire } from 'node:module';
 import { dirname, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadEnv } from 'vite';
+import { getToken, isStagingMode } from './cli/auth';
 import { voidLog, voidWarn } from './log';
+import { filterLoadedEnv, stripInternalEnvKeys } from './shared/env';
+import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy';
 
 const PRERENDER_PATHS_ENDPOINT = '/__void/prerender-paths';
 
@@ -171,13 +174,51 @@ export function collectPrerenderWorkerModules(
   return modules.map(({ relativePath: _relativePath, ...module }) => module);
 }
 
+export interface PrerenderBindingsInput {
+  wranglerVars: Record<string, unknown> | undefined;
+  env: Record<string, string>;
+  voidToken: string | null | undefined;
+  voidProjectId: string | undefined;
+  voidStaging: boolean;
+  remoteMode: boolean | undefined;
+}
+
+export function buildPrerenderBindings(input: PrerenderBindingsInput): Record<string, unknown> {
+  const { sanitized: wranglerVars, stripped: wranglerStripped } = stripInternalEnvKeys(
+    input.wranglerVars,
+  );
+  const { sanitized: env, stripped: envStripped } = stripInternalEnvKeys(input.env);
+  const allStripped = [...new Set([...wranglerStripped, ...envStripped])];
+  if (allStripped.length > 0) {
+    voidWarn(
+      `Ignoring internal env keys in prerender inputs: ${allStripped.join(', ')}. These are reserved for Void runtime use.`,
+    );
+  }
+
+  const voidBindings: Record<string, string> = {};
+  if (input.voidToken && input.voidProjectId) {
+    voidBindings.__VOID_TOKEN = input.voidToken;
+    voidBindings.__VOID_PROJECT_ID = input.voidProjectId;
+    if (input.voidStaging) {
+      voidBindings.__VOID_STAGING = '1';
+    }
+    voidBindings.__VOID_PROXY_URL = input.voidStaging ? STAGING_PROXY_URL : DEFAULT_PROXY_URL;
+    if (input.remoteMode) {
+      voidBindings.__VOID_REMOTE = '1';
+    }
+  }
+  return { ...wranglerVars, ...env, ...voidBindings };
+}
+
 async function createCloudflarePrerenderRunner(options: {
   root: string;
   workerDir: string;
   persistDir: string;
   clientDir?: string;
+  remoteMode?: boolean;
+  projectId?: string;
 }) {
-  const { root, workerDir, persistDir, clientDir } = options;
+  const { root, workerDir, persistDir, clientDir, remoteMode } = options;
 
   const wranglerPath = join(workerDir, 'wrangler.json');
   if (!existsSync(wranglerPath)) {
@@ -186,7 +227,39 @@ async function createCloudflarePrerenderRunner(options: {
   const wranglerConfig = JSON.parse(readFileSync(wranglerPath, 'utf-8'));
   const workerMain = wranglerConfig.main ?? 'index.js';
 
-  const env = loadEnv('production', root, '');
+  const env = filterLoadedEnv(loadEnv('production', root, ''));
+
+  // Resolve Void projectId via a three-level chain:
+  //   1. explicit options.projectId — passed from runFullDeploy so the
+  //      `void deploy --project <slug>` flow works even when the in-memory
+  //      config hasn't been persisted to .void/project.json yet.
+  //   2. VOID_DEPLOY_PROJECT_ID env var — crosses the process boundary for
+  //      the static-output path, where plugin-prerender's closeBundle runs
+  //      inside the vite build subprocess and can't see the parent's config.
+  //   3. .void/project.json — existing on-disk fallback for linked projects.
+  const voidToken = getToken();
+  let voidProjectId: string | undefined = options.projectId;
+  if (!voidProjectId) {
+    voidProjectId = process.env.VOID_DEPLOY_PROJECT_ID || undefined;
+  }
+  if (!voidProjectId) {
+    const projectJsonPath = join(root, '.void', 'project.json');
+    try {
+      voidProjectId = JSON.parse(readFileSync(projectJsonPath, 'utf-8')).projectId;
+    } catch {
+      // No linked project — prerender without Void credentials.
+    }
+  }
+  const voidStaging = isStagingMode();
+
+  const bindings = buildPrerenderBindings({
+    wranglerVars: wranglerConfig.vars,
+    env,
+    voidToken,
+    voidProjectId,
+    voidStaging,
+    remoteMode,
+  });
 
   const wranglerUrl = import.meta.resolve('wrangler/package.json');
   const require = createRequire(wranglerUrl);
@@ -203,7 +276,7 @@ async function createCloudflarePrerenderRunner(options: {
     modulesRoot: workerDir,
     compatibilityDate: wranglerConfig.compatibility_date ?? '2024-01-01',
     compatibilityFlags: wranglerConfig.compatibility_flags ?? [],
-    bindings: { ...wranglerConfig.vars, ...env },
+    bindings,
   };
 
   if (clientDir) {
@@ -282,6 +355,8 @@ export async function collectPrerenderPaths(options: {
   workerDir: string;
   persistDir: string;
   clientDir?: string;
+  remoteMode?: boolean;
+  projectId?: string;
 }): Promise<string[]> {
   const runner = await createCloudflarePrerenderRunner(options);
   try {
@@ -301,6 +376,8 @@ export async function prerenderPages(options: {
   workerDir: string;
   clientDir: string;
   persistDir: string;
+  remoteMode?: boolean;
+  projectId?: string;
 }): Promise<PrerenderRunResult> {
   const runner = await createCloudflarePrerenderRunner(options);
   try {
@@ -323,7 +400,19 @@ type NodeRunnerConfig =
   | { mode: 'collect-and-render'; ssrDir: string; clientDir: string };
 
 async function runNodePrerenderRunner<T>(root: string, config: NodeRunnerConfig): Promise<T> {
-  const env = loadEnv('production', root, '');
+  // Mirror the sanitization pipeline used by envPlugin.config (index.ts),
+  // buildPrerenderBindings (CF runner), and loadDeployEnv (deploy.ts): strip
+  // any internal Void keys a user may have placed in .env.production so they
+  // can't shadow or pollute the child process env via the `...env` spread
+  // below. Consistency matters — all sites that ingest user .env files must
+  // run the same sanitizer, or drift will reintroduce the leak.
+  const filtered = filterLoadedEnv(loadEnv('production', root, ''));
+  const { sanitized: env, stripped } = stripInternalEnvKeys(filtered);
+  if (stripped.length > 0) {
+    voidWarn(
+      `Ignoring internal env keys from .env files in Node prerender runner: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
+    );
+  }
   const runnerPath = join(root, '.void', 'prerender-runner.mjs');
   mkdirSync(dirname(runnerPath), { recursive: true });
   writeFileSync(

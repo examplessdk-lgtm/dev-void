@@ -4,6 +4,7 @@ import { resolveDistDir, resolveWorkerDirName } from './cli/deploy';
 import { isNodeTarget, type VoidConfig } from './config';
 import { voidLog, voidWarn, setShowTimestamp } from './log';
 import { prerenderPages, prerenderPagesNode } from './prerender';
+import { resolveRemoteMode } from './shared/env';
 
 /**
  * Vite plugin that prerenders pages at build time when `output: "static"`.
@@ -41,12 +42,17 @@ export function prerenderPlugin(root: string, config: VoidConfig): Plugin {
         const persistDir = join(root, '.void');
         const workerDirName = resolveWorkerDirName(distDir);
         const workerDir = join(distDir, workerDirName);
+        const remoteMode = resolveRemoteMode(config.remote);
 
         result = await prerenderPages({
           root,
           workerDir,
           clientDir,
           persistDir,
+          remoteMode,
+          // closeBundle runs inside the vite build subprocess, so the parent
+          // deploy process's in-memory projectId only crosses via env var.
+          projectId: process.env.VOID_DEPLOY_PROJECT_ID || undefined,
         });
       }
 

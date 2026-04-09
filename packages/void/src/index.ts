@@ -30,6 +30,8 @@ import { restartPlugin } from './plugin-restart';
 import { routingPlugin } from './plugin-routing';
 import { scanQueuesSync } from './queues/scan';
 import { scanWebSocketRoutesSync } from './router/websocket';
+import { filterLoadedEnv, resolveRemoteMode, stripInternalEnvKeys } from './shared/env';
+import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy';
 import { validateSsrEntry } from './ssr/entry';
 
 /** Resolve the server entry module for a Class A framework. */
@@ -161,8 +163,6 @@ function readVoidDevCredentials(root: string): CredentialStatus {
 
 const DEFAULT_API_URL = 'https://api.void.cloud';
 const STAGING_API_URL = 'https://api.staging.void.cloud';
-const DEFAULT_PROXY_URL = 'https://proxy.void.cloud';
-const STAGING_PROXY_URL = 'https://proxy.staging.void.cloud';
 
 /**
  * Interactive AI setup prompt shown during dev server startup when the user
@@ -428,11 +428,15 @@ export function voidPlugin(options?: {
   }
 
   // Remote mode — use platform proxy for D1/KV/R2 instead of local miniflare.
-  const remoteMode = config.remote === true || process.env.VOID_REMOTE === '1';
+  const remoteMode = resolveRemoteMode(config.remote);
 
   // Core worker config — always set by voidPlugin (main, triggers, assets).
   // Bindings are handled separately in the config function below.
   const workerConfig: Record<string, unknown> = {};
+
+  // Tracks whether vite is running in dev or build mode. Set early in
+  // envPlugin.config so mergeBindings can gate credential injection on 'serve'.
+  let viteCommand: 'serve' | 'build' = 'build';
 
   // Merge curated wrangler fields from void.json
   if (config.worker?.compatibility_date) {
@@ -543,7 +547,7 @@ export function voidPlugin(options?: {
 
     // AI — in local dev, inject VC credentials for HTTPS proxy path.
     // In production, the platform adds a __VOID_PROXY service binding instead.
-    if (bindings.needsAI) {
+    if (viteCommand === 'serve' && bindings.needsAI) {
       const credentials = readVoidDevCredentials(root);
       if (credentials.status === 'ok') {
         // Prefer HTTPS proxy — inject credentials, skip direct AI binding
@@ -560,7 +564,11 @@ export function voidPlugin(options?: {
     // Remote bindings — inject proxy credentials when remote mode is enabled.
     // In remote mode, D1/KV/R2 bindings are replaced with proxy-backed versions
     // that forward operations to the platform proxy over HTTPS.
-    if (remoteMode && (bindings.needsD1 || bindings.needsKV || bindings.needsR2)) {
+    if (
+      viteCommand === 'serve' &&
+      remoteMode &&
+      (bindings.needsD1 || bindings.needsKV || bindings.needsR2)
+    ) {
       const credentials = readVoidDevCredentials(root);
       if (credentials.status === 'ok') {
         const vars = (result.vars as Record<string, string>) ?? {};
@@ -580,19 +588,21 @@ export function voidPlugin(options?: {
   const envPlugin: Plugin = {
     name: 'void:env',
     config(_, { mode, command }) {
+      viteCommand = command;
       // Exclude the .void cache directory from the file watcher so that
       // miniflare SQLite writes don't trigger infinite HMR refreshes.
       const ignored = ['**/.void/**'];
       // loadEnv with prefix "" returns .env file vars AND all process.env vars.
-      // Filter out shell env pollution (MANPATH, PATH, HOME, etc.) by keeping only
-      // vars that are new or have a different value than the shell environment.
-      const shellKeys = new Set(Object.keys(process.env));
-      const loaded = loadEnv(mode, root, '');
-      const env: Record<string, string> = {};
-      for (const [key, value] of Object.entries(loaded)) {
-        if (!shellKeys.has(key) || process.env[key] !== value) {
-          env[key] = value;
-        }
+      // filterLoadedEnv strips shell pollution (PATH, HOME, etc.) so only
+      // .env-file vars reach worker bindings. stripInternalEnvKeys then
+      // removes any internal Void keys a user may have set in their .env
+      // files, so they can't hijack credential-shaped worker bindings.
+      const filtered = filterLoadedEnv(loadEnv(mode, root, ''));
+      const { sanitized: env, stripped } = stripInternalEnvKeys(filtered);
+      if (stripped.length > 0) {
+        voidWarn(
+          `Ignoring internal env keys from .env files: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
+        );
       }
       workerConfig.vars = { ...(workerConfig.vars as Record<string, string> | undefined), ...env };
 

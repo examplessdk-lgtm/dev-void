@@ -112,9 +112,15 @@ export function getToken(): string | null {
   const fileToken = config[account];
   if (fileToken) {
     if (keyringSet(account, fileToken)) {
-      // Successfully migrated — remove from config file
+      // Successfully migrated — best-effort cleanup of the config-file copy.
+      // Failures here (read-only FS, permission denied, full disk) must not
+      // crash callers. Token stays in the file; next invocation will retry.
       delete config[account];
-      writeConfig(config);
+      try {
+        writeConfig(config);
+      } catch {
+        // Ignore — migration is best-effort.
+      }
     }
     return fileToken;
   }
