@@ -1,7 +1,7 @@
-import { intro, outro, note, log, text, isCancel, cancel, spinner } from '@clack/prompts';
+import { intro, outro, note, log, text, isCancel, cancel } from '@clack/prompts';
 import { getToken } from './auth';
 import { PlatformClient } from './client';
-import { cliTitle } from './output';
+import { cliTitle, createSpinner } from './output';
 import { readProjectConfig, removeProjectConfig } from './project';
 import { resolveProjectBySlug } from './resolve-project';
 
@@ -70,7 +70,7 @@ export async function runDeleteCommand(
     }
   }
 
-  const s = spinner();
+  const s = createSpinner();
   s.start('Deleting project...');
 
   const result = await client.deleteProject(projectId);

@@ -32,6 +32,7 @@ vi.mock('@clack/prompts', () => ({
   select: (...args: unknown[]) => mockSelect(...args),
   text: (...args: unknown[]) => mockText(...args),
   spinner: () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }),
+  isCI: () => false,
   isCancel: (value: unknown) => value === Symbol.for('cancel'),
   cancel: vi.fn(),
 }));

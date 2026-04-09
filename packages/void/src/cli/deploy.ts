@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
-import { intro, outro, log, note, spinner, confirm, isCancel } from '@clack/prompts';
+import { intro, outro, log, note, confirm, isCancel, type SpinnerResult } from '@clack/prompts';
 import { findVoidAuthConfig } from '../auth/config';
 import {
   readConfig,
@@ -45,7 +45,7 @@ import { getToken, getTokenSource } from './auth';
 import { isExpiredTokenError, PlatformClient } from './client';
 import { parseHeadersFile, parseRedirectsFile } from './headers';
 import { promptForLoginToken } from './login';
-import { cliTitle } from './output';
+import { cliTitle, createSpinner } from './output';
 import {
   packageBuild,
   packageStaticBuild,
@@ -282,7 +282,7 @@ async function streamDeploy(
   client: PlatformClient,
   projectId: string,
   formData: FormData,
-  s: ReturnType<typeof spinner>,
+  s: SpinnerResult,
 ): Promise<Extract<DeployEvent, { event: 'done' }>> {
   for await (const event of client.deploy(projectId, formData)) {
     switch (event.event) {
@@ -349,7 +349,7 @@ async function runStaticDeploy(
     process.exit(1);
   }
 
-  const s = spinner();
+  const s = createSpinner();
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
@@ -556,7 +556,7 @@ async function runFrameworkDeploy(
   const envVars = loadDeployEnv(root);
 
   // 11. Package & deploy
-  const s = spinner();
+  const s = createSpinner();
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
@@ -867,7 +867,7 @@ async function runFullDeploy(
   const envVars = loadDeployEnv(root);
 
   // 10. Package & Upload
-  const s = spinner();
+  const s = createSpinner();
 
   // Derive asset config: SSR and pages-mode workers handle their own 404s, non-SSR uses SPA fallback
   const assetConfig: AssetConfig =

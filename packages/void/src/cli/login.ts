@@ -1,7 +1,7 @@
-import { intro, outro, log, spinner, select, isCancel, cancel } from '@clack/prompts';
+import { intro, outro, log, select, isCancel, cancel } from '@clack/prompts';
 import { getToken, getTokenSource, removeToken, runLogin, saveToken, isStagingMode } from './auth';
 import { isExpiredTokenError, PlatformClient } from './client';
-import { cliTitle } from './output';
+import { cliTitle, createSpinner } from './output';
 
 export async function promptForLoginToken(): Promise<string> {
   const provider = await select({
@@ -18,7 +18,7 @@ export async function promptForLoginToken(): Promise<string> {
   }
 
   const providerName = provider === 'github' ? 'GitHub' : 'Google';
-  const s = spinner();
+  const s = createSpinner();
   s.start(`Opening browser for ${providerName} login...`);
 
   try {

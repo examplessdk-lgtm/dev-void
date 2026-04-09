@@ -1,7 +1,7 @@
-import { intro, outro, log, spinner } from '@clack/prompts';
+import { intro, outro, log } from '@clack/prompts';
 import { getToken } from './auth';
 import { PlatformClient } from './client';
-import { cliTitle, dim } from './output';
+import { cliTitle, createSpinner, dim } from './output';
 import { readProjectConfig } from './project';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project';
 
@@ -35,7 +35,7 @@ export async function runPurgeCacheCommand(root: string, projectSlug?: string): 
     projectId = linked.projectId;
   }
 
-  const s = spinner();
+  const s = createSpinner();
   s.start('Purging cache...');
 
   try {

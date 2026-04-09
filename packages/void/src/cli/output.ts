@@ -1,6 +1,54 @@
+import { isCI, log, spinner, type SpinnerResult } from '@clack/prompts';
 import pc from 'picocolors';
 
 export { pc };
+
+/**
+ * CI-safe spinner wrapper. In CI environments (GitHub Actions, etc.),
+ * `@clack/prompts` spinner emits DEC Private Mode cursor hide/show codes
+ * (`\x1b[?25l` / `\x1b[?25h`) that render as text artifacts. This wrapper
+ * replaces the spinner with plain log output in CI.
+ */
+export function createSpinner(): SpinnerResult {
+  if (!isCI()) {
+    return spinner();
+  }
+
+  let currentMessage = '';
+  return {
+    start(msg = '') {
+      currentMessage = msg;
+      if (msg) {
+        log.step(msg);
+      }
+    },
+    stop(msg = '') {
+      if (msg) {
+        log.info(msg);
+      }
+    },
+    message(msg = '') {
+      if (msg && msg !== currentMessage) {
+        currentMessage = msg;
+        log.step(msg);
+      }
+    },
+    cancel(msg = '') {
+      if (msg) {
+        log.warn(msg);
+      }
+    },
+    error(msg = '') {
+      if (msg) {
+        log.error(msg);
+      }
+    },
+    clear() {},
+    get isCancelled() {
+      return false;
+    },
+  };
+}
 
 export function cliTitle(command: string): string {
   return pc.blue(`void ${command}`);

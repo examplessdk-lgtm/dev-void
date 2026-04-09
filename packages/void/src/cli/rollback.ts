@@ -1,7 +1,7 @@
-import { intro, outro, log, select, confirm, isCancel, cancel, spinner } from '@clack/prompts';
+import { intro, outro, log, select, confirm, isCancel, cancel } from '@clack/prompts';
 import { getToken } from './auth';
 import { PlatformClient } from './client';
-import { cliTitle, dim, ensureUtc, pc } from './output';
+import { cliTitle, createSpinner, dim, ensureUtc, pc } from './output';
 import { readProjectConfig } from './project';
 
 export async function runRollbackCommand(root: string, deployId?: string): Promise<void> {
@@ -93,7 +93,7 @@ export async function runRollbackCommand(root: string, deployId?: string): Promi
     }
   }
 
-  const s = spinner();
+  const s = createSpinner();
   s.start('Rolling back...');
 
   try {

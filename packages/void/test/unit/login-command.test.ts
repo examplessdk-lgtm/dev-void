@@ -35,6 +35,7 @@ vi.mock('@clack/prompts', () => ({
     stop: (...args: unknown[]) => mockSpinnerStop(...args),
     message: (...args: unknown[]) => mockSpinnerMessage(...args),
   }),
+  isCI: () => false,
   select: (...args: unknown[]) => mockSelect(...args),
   isCancel: () => false,
   cancel: vi.fn(),

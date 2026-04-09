@@ -21,6 +21,7 @@ vi.mock('@clack/prompts', () => ({
   cancel: vi.fn(),
   confirm: vi.fn(),
   isCancel: vi.fn(),
+  isCI: () => false,
   select: vi.fn(),
   text: vi.fn(),
   spinner: () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }),
