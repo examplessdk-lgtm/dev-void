@@ -11,7 +11,7 @@ catalog:
   '@typescript/native-preview': 7.0.0-dev.20260325.1
   tsdown: ^0.21.5
   vite: ^8.0.2
-  wrangler: ^4.80.0
+  wrangler: ^4.81.0
 
 onlyBuiltDependencies:
   - better-sqlite3

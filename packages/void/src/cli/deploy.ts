@@ -777,6 +777,8 @@ async function runFullDeploy(
     ...(q.maxBatchTimeout != null && { maxBatchTimeout: q.maxBatchTimeout }),
   }));
   const hasPages = existsSync(join(root, 'pages'));
+  const hasRoutes = existsSync(join(root, 'routes'));
+  const hasMiddleware = existsSync(join(root, 'middleware'));
   const isSsr = isFrameworkMode
     ? true
     : Boolean(validateSsrEntry(root)) || (hasPages && deployConfig.output !== 'static');
@@ -820,8 +822,7 @@ async function runFullDeploy(
     const allPrerenderable = pageScan.pages.every(
       (p) => p.prerender && ((p.params.length === 0 && !p.catchAll) || p.hasGetPrerenderPaths),
     );
-    const hasNonPageBackend =
-      existsSync(join(root, 'routes')) || existsSync(join(root, 'middleware'));
+    const hasNonPageBackend = hasRoutes || hasMiddleware;
     if (allPrerenderable && !hasNonPageBackend && schedules.length === 0 && queues.length === 0) {
       log.info('All pages prerendered — deploying as static site');
       return runStaticDeploy(
@@ -892,7 +893,7 @@ async function runFullDeploy(
     effectiveBindings,
     validatedMigrations,
     schedules,
-    isSsr,
+    isSsr || hasRoutes || hasMiddleware,
     isFrameworkMode ? detected!.name : undefined,
     revalidate,
     envVars,

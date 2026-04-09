@@ -445,6 +445,32 @@ describe('isScaffoldableEmptyProject', () => {
     }
   });
 
+  it('parses tsconfig.json with JSONC comments', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'tsconfig.json'),
+        `{
+  // This is a comment
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true
+  }
+}\n`,
+      );
+
+      await runInitCommand(root, { tsconfig: true, github: false, agents: false });
+
+      const tsconfig = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf-8'));
+      expect(tsconfig.extends).toBeDefined();
+      expect(tsconfig.compilerOptions.types).toContain('void/env');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('uses the preinstalled adapter to scaffold an empty project', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {

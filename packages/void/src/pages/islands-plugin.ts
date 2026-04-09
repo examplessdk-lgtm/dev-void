@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { normalizePath, type ViteDevServer } from 'vite';
-import { resolveEffectiveLayoutChain } from './scan';
+import { resolveEffectiveLayoutChain, scanPages } from './scan';
 import type { PageScanResult } from './types';
 
 export const ISLANDS_RENDERER_ID = 'virtual:void-islands-renderer';
@@ -262,4 +262,56 @@ export function configureIslandCssServer(
     }
     next();
   });
+}
+
+/**
+ * Watch the pages directory for structural changes (add/remove) and .md content
+ * changes (frontmatter layout field) so that new layouts and named layouts are
+ * picked up without a dev server restart.
+ *
+ * Returns a `flush()` function that resolves when any pending rescan completes
+ * (useful for tests).
+ */
+export function watchPagesForRescan(
+  server: ViteDevServer,
+  pagesDir: string,
+  root: string,
+  onRescan: (pageScan: PageScanResult) => void,
+): { flush: () => Promise<void> } {
+  let pending: Promise<void> | null = null;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const scheduleRescan = (path: string) => {
+    if (!path.startsWith(pagesDir)) {
+      return;
+    }
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+    }
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      pending = scanPages(root).then((pageScan) => {
+        onRescan(pageScan);
+        for (const env of Object.values(server.environments)) {
+          const mod = env.moduleGraph.getModuleById('\0' + ISLANDS_RENDERER_ID);
+          if (mod) {
+            env.moduleGraph.invalidateModule(mod);
+          }
+        }
+        pending = null;
+      });
+    }, 50);
+  };
+
+  server.watcher.on('add', scheduleRescan);
+  server.watcher.on('unlink', scheduleRescan);
+  server.watcher.on('change', (path) => {
+    if (path.endsWith('.md')) {
+      scheduleRescan(path);
+    }
+  });
+
+  return {
+    flush: () => pending ?? Promise.resolve(),
+  };
 }

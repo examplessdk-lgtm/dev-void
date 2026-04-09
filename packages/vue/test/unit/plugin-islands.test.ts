@@ -1,6 +1,7 @@
+import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { islandsPlugin } from '../../src/plugin-islands';
 
 const TMP = join(import.meta.dirname, '__tmp_islands_plugin__');
@@ -13,21 +14,40 @@ function writeFile(relativePath: string, content: string): void {
 }
 
 /** Extract the plugin's buildStart and load hooks, simulating a minimal Vite lifecycle. */
-function setupPlugin() {
+function setupPlugin(options?: { dev?: boolean }) {
   const plugins = islandsPlugin(PAGES_DIR);
   const plugin = plugins[0];
 
-  // Call configResolved with minimal config
-  const config = { root: TMP, command: 'build' as const, plugins: [] };
+  const command = options?.dev ? 'serve' : 'build';
+  const config = { root: TMP, command: command as 'serve' | 'build', plugins: [] };
   (plugin as any).configResolved(config);
+
+  // Mock watcher and server for dev mode
+  const watcher = new EventEmitter();
+  const mockModuleGraph = {
+    getModuleById: () => null,
+    invalidateModule: () => {},
+  };
+  const mockServer = {
+    watcher,
+    environments: { client: { moduleGraph: mockModuleGraph } },
+    middlewares: { use: () => {} },
+  };
 
   return {
     async buildStart() {
       await (plugin as any).buildStart.call({});
     },
+    configureServer() {
+      (plugin as any).configureServer(mockServer);
+    },
     loadClientEntry(): string | undefined {
       return (plugin as any).load.handler('\0virtual:void-islands-client');
     },
+    loadRenderer(): string | undefined {
+      return (plugin as any).load.handler('\0virtual:void-islands-renderer');
+    },
+    watcher,
   };
 }
 
@@ -156,6 +176,52 @@ export const layout = "sidebar"
 
     expect(clientEntry).toBeDefined();
     expect(clientEntry).toContain('pages/_components/Clock');
+  });
+
+  it('picks up named layouts added after buildStart in dev mode', async () => {
+    // Start with a markdown page WITHOUT a layout reference
+    writeFile('layout.island.vue', `<template><slot /></template>`);
+    writeFile('blog/layout.island.vue', `<template><slot /></template>`);
+    writeFile(
+      'blog/hello.md',
+      `---
+title: Hello
+---
+
+# Hello`,
+    );
+
+    const { buildStart, configureServer, loadRenderer, watcher } = setupPlugin({ dev: true });
+    await buildStart();
+    configureServer();
+
+    // Before adding the named layout, the renderer should NOT contain it
+    const rendererBefore = loadRenderer();
+    expect(rendererBefore).not.toContain('_layouts/article');
+
+    // Now create the named layout file AND update the markdown to reference it
+    writeFile('_layouts/article.island.vue', `<template><article><slot /></article></template>`);
+    writeFile(
+      'blog/hello.md',
+      `---
+layout: article
+title: Hello
+---
+
+# Hello`,
+    );
+
+    // Simulate a file add event for the new layout
+    watcher.emit('add', join(PAGES_DIR, '_layouts/article.island.vue'));
+
+    // Wait for the 50ms debounce + async scanPages to complete
+    await vi.waitFor(
+      () => {
+        const rendererAfter = loadRenderer();
+        expect(rendererAfter).toContain('_layouts/article');
+      },
+      { timeout: 500 },
+    );
   });
 
   it('skips non-island layouts during pre-scan', async () => {

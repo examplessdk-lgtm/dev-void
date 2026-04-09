@@ -49,6 +49,7 @@ Then ask what to do next.
 | Static site generation                    | `docs/guide/ssg.md`                                                                       |
 | Deployment and CI                         | `docs/guide/deployment.md`, `docs/reference/cli.md`                                       |
 | Project status, deployment history        | `docs/reference/cli.md`                                                                   |
+| Cache purging                             | `docs/reference/cli.md`                                                                   |
 | Project logs, runtime errors              | `docs/reference/cli.md`                                                                   |
 | Secrets management (put/sync/delete)      | `docs/reference/cli.md`, `docs/guide/env-vars.md`                                         |
 | Custom domain setup                       | `docs/reference/cli.md`                                                                   |

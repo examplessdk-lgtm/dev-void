@@ -10,6 +10,7 @@ import {
   rebuildIslandCssMap as rebuildIslandCssMapShared,
   computePagesNeedingClientJS as computePagesNeedingClientJSShared,
   configureIslandCssServer,
+  watchPagesForRescan,
   ISLANDS_RENDERER_ID,
   ISLANDS_CLIENT_ENTRY_ID,
 } from 'void/pages-islands-plugin';
@@ -106,6 +107,10 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
       // the CSS string and serve it directly for render-blocking <link> tags.
       configureServer(server) {
         configureIslandCssServer(server, islandCssFiles, viteRoot, rebuildIslandCssMap);
+        watchPagesForRescan(server, pagesDir, root, (scan: PageScanResult) => {
+          pageScan = scan;
+          rebuildIslandCssMap();
+        });
       },
 
       async buildStart() {

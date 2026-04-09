@@ -365,7 +365,12 @@ function setupTsconfig(
     // Case C: existing tsconfig — check and offer fixes
     let tsconfig: any;
     try {
-      tsconfig = JSON.parse(readFileSync(tsconfigPath, 'utf-8'));
+      const raw = readFileSync(tsconfigPath, 'utf-8');
+      const errors: ParseError[] = [];
+      tsconfig = parse(raw, errors);
+      if (errors.length > 0) {
+        throw new SyntaxError('Failed to parse tsconfig.json');
+      }
     } catch {
       log.warn('Could not parse tsconfig.json, skipping');
       return;
@@ -730,9 +735,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v6
         with:
           ${nodeVersion}
           cache: pnpm
@@ -751,8 +756,8 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           ${nodeVersion}
           cache: yarn
@@ -771,7 +776,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
       - run: bun install
       - run: bunx void deploy
@@ -788,8 +793,8 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           ${nodeVersion}
           cache: npm

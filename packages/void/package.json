@@ -1,6 +1,6 @@
 {
   "name": "@void-sdk/void",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "bin": {
     "void": "dist/cli/cli.mjs"
   },
@@ -223,7 +223,7 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "@cloudflare/vite-plugin": "^1.31.0",
+    "@cloudflare/vite-plugin": "^1.31.1",
     "@cloudflare/workers-types": "catalog:",
     "@hono/oauth-providers": "^0.8.5",
     "@napi-rs/keyring": "1.2.0",
