@@ -72,6 +72,7 @@ function printHelp() {
       helpLine('  --no-data', 'Schema only (no INSERT statements)'),
       helpLine('  --no-schema', 'Data only (no CREATE TABLE)'),
       helpLine('  --table <name>', 'Export a single table'),
+      helpLine('void db rename-migrations', 'Rename to timestamp-based format'),
       '',
       categoryTitle('codegen'),
       helpLine('void gen model <name> [cols...]', 'Generate migration + CRUD routes + db types'),
@@ -263,7 +264,7 @@ if (command === 'staging') {
     },
     {
       name: 'db',
-      hint: 'status | reset | seed | execute | migrate | studio | export',
+      hint: 'status | reset | seed | execute | migrate | studio | export | rename-migrations',
       description: 'Database migrations and management',
     },
     {

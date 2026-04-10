@@ -1113,8 +1113,18 @@ function scaffoldDemo(root: string): void {
 
   // Migration
   mkdirSync(join(root, 'db', 'migrations'), { recursive: true });
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const migrationTs =
+    String(now.getUTCFullYear()) +
+    pad(now.getUTCMonth() + 1) +
+    pad(now.getUTCDate()) +
+    pad(now.getUTCHours()) +
+    pad(now.getUTCMinutes()) +
+    pad(now.getUTCSeconds());
+  const migrationFile = `${migrationTs}_create_posts.sql`;
   writeFileSync(
-    join(root, 'db', 'migrations', '0000_create_posts.sql'),
+    join(root, 'db', 'migrations', migrationFile),
     `CREATE TABLE IF NOT EXISTS posts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL,
@@ -1123,7 +1133,7 @@ function scaffoldDemo(root: string): void {
 );
 `,
   );
-  log.success('Created db/migrations/0000_create_posts.sql');
+  log.success(`Created db/migrations/${migrationFile}`);
 
   mkdirSync(join(root, 'db'), { recursive: true });
   writeFileSync(
