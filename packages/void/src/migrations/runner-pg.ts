@@ -11,6 +11,23 @@ export interface PgClient {
  * Apply unapplied SQL migrations via a connected PostgreSQL client.
  * Each migration runs in its own transaction (BEGIN/COMMIT).
  */
+export async function getPgAppliedMigrations(url: string): Promise<string[]> {
+  const { Client } = await import('pg');
+  const client = new Client({ connectionString: url });
+  await client.connect();
+  try {
+    await client.query(
+      `CREATE TABLE IF NOT EXISTS _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
+    );
+    const result = await client.query('SELECT name FROM _void_migrations');
+    return result.rows.map((r: any) => r.name);
+  } catch {
+    return [];
+  } finally {
+    await client.end();
+  }
+}
+
 export async function applyPgMigrations(
   client: PgClient,
   migrations: { name: string; sql: string }[],

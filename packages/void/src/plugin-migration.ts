@@ -74,15 +74,21 @@ export function migrationPlugin(
             }
             return;
           }
-          const { runPgMigrations } = await import('./migrations/runner-pg');
+          const { runPgMigrations, getPgAppliedMigrations } =
+            await import('./migrations/runner-pg');
           const { collectMigrations } = await import('./migrations/collect');
           const { validateMigrations } = await import('./migrations/validate');
 
           const allMigrations = collectMigrations(migrationsDir);
-          try {
-            validateMigrations(allMigrations);
-          } catch (err) {
-            voidWarn(err instanceof Error ? err.message : String(err));
+          const pgApplied = await getPgAppliedMigrations(url);
+          const pgAppliedSet = new Set(pgApplied);
+          const pgPending = allMigrations.filter((m) => !pgAppliedSet.has(m.name));
+          if (pgPending.length > 0) {
+            try {
+              validateMigrations(pgPending);
+            } catch (err) {
+              voidWarn(err instanceof Error ? err.message : String(err));
+            }
           }
 
           const applied = await runPgMigrations(migrationsDir, url);
