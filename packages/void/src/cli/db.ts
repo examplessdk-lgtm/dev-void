@@ -445,15 +445,32 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
       return;
     }
 
+    const client = new PlatformClient(token);
+
+    // Fetch remote applied set so we only validate and send pending migrations
+    let remoteApplied: Set<string>;
     try {
-      validateMigrations(rawMigrations);
+      const status = await client.getMigrationStatus(config.projectId);
+      remoteApplied = new Set(status.applied.map((m) => m.name));
+    } catch {
+      remoteApplied = new Set();
+    }
+
+    const pendingMigrations = rawMigrations.filter((m) => !remoteApplied.has(m.name));
+    if (pendingMigrations.length === 0) {
+      log.info('Remote database is up to date.');
+      outro('Done.');
+      return;
+    }
+
+    try {
+      validateMigrations(pendingMigrations);
     } catch (err: any) {
       log.error(err.message);
       process.exit(1);
     }
 
-    const client = new PlatformClient(token);
-    const result = await client.applyRemoteMigrations(config.projectId, rawMigrations);
+    const result = await client.applyRemoteMigrations(config.projectId, pendingMigrations);
 
     if (!result.ok) {
       log.error(result.error ?? 'Remote migration failed.');
