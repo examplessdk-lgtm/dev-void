@@ -59,6 +59,31 @@ export function createMigrationHandler(
   };
 }
 
+/**
+ * One-time migration: rename legacy `_migrations` table to `_void_migrations`.
+ * Copies all rows from the old table to the new one, then drops the old table.
+ */
+async function upgradeTrackingTable(db: D1Database): Promise<void> {
+  const { results } = await db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")
+    .all();
+  if (!results || results.length === 0) {
+    return;
+  }
+  await db.batch([
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS _void_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      )`,
+    ),
+    db.prepare(
+      `INSERT OR IGNORE INTO _void_migrations (name, applied_at) SELECT name, applied_at FROM _migrations`,
+    ),
+    db.prepare(`DROP TABLE _migrations`),
+  ]);
+}
+
 async function runD1Migrations(
   db: D1Database,
   migrations: MigrationEntry[],
@@ -71,6 +96,9 @@ async function runD1Migrations(
     )`,
     )
     .run();
+
+  // Upgrade legacy `_migrations` table if it exists
+  await upgradeTrackingTable(db);
 
   const { results } = await db.prepare('SELECT name FROM _void_migrations').all();
   const applied = new Set((results ?? []).map((r) => r.name as string));
