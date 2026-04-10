@@ -156,13 +156,13 @@ describe('parseDbArgs', () => {
 
   it('errors on unknown subcommand', () => {
     expect(() => parseDbArgs(['unknown'])).toThrow(
-      'Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url>',
+      'Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>',
     );
   });
 
   it('errors on no subcommand', () => {
     expect(() => parseDbArgs([])).toThrow(
-      'Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url>',
+      'Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>',
     );
   });
 

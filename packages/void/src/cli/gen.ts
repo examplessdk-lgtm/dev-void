@@ -42,19 +42,27 @@ function writeIfNotExists(filePath: string, content: string): boolean {
   return true;
 }
 
-function getNextMigrationNumber(migrationsDir: string): string {
-  if (!existsSync(migrationsDir)) {
-    return '0000';
+function formatTimestamp(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    String(date.getUTCFullYear()) +
+    pad(date.getUTCMonth() + 1) +
+    pad(date.getUTCDate()) +
+    pad(date.getUTCHours()) +
+    pad(date.getUTCMinutes()) +
+    pad(date.getUTCSeconds())
+  );
+}
+
+function getMigrationTimestamp(migrationsDir: string): string {
+  const now = new Date();
+  let ts = formatTimestamp(now);
+  // If a file with this timestamp already exists, increment seconds until unique
+  while (readdirSync(migrationsDir).some((f) => f.startsWith(ts + '_'))) {
+    now.setSeconds(now.getSeconds() + 1);
+    ts = formatTimestamp(now);
   }
-  const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql') && f !== 'seed.sql');
-  let max = -1;
-  for (const file of files) {
-    const match = file.match(/^(\d+)/);
-    if (match) {
-      max = Math.max(max, Number(match[1]));
-    }
-  }
-  return String(max + 1).padStart(4, '0');
+  return ts;
 }
 
 function getNextMiddlewareNumber(middlewareDir: string): string {
@@ -534,8 +542,8 @@ function runMigration(root: string, name: string): void {
   const migrationsDir = join(root, 'db', 'migrations');
   mkdirSync(migrationsDir, { recursive: true });
 
-  const num = getNextMigrationNumber(migrationsDir);
-  const filePath = join(migrationsDir, `${num}_${name}.sql`);
+  const timestamp = getMigrationTimestamp(migrationsDir);
+  const filePath = join(migrationsDir, `${timestamp}_${name}.sql`);
   writeIfNotExists(filePath, `-- ${name}\n`);
 
   outro('Migration created.');

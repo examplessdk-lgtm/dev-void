@@ -32,6 +32,16 @@ describe('isDestructive', () => {
   it('returns false for ADD COLUMN', () => {
     expect(isDestructive('ALTER TABLE users ADD COLUMN age INTEGER;')).toBe(false);
   });
+
+  it('detects TRUNCATE TABLE', () => {
+    expect(isDestructive('TRUNCATE TABLE users;')).toBe(true);
+    expect(isDestructive('truncate table users;')).toBe(true);
+  });
+
+  it('detects TRUNCATE without TABLE keyword (PostgreSQL)', () => {
+    expect(isDestructive('TRUNCATE users;')).toBe(true);
+    expect(isDestructive('truncate users, posts;')).toBe(true);
+  });
 });
 
 describe('validateMigrations', () => {

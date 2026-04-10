@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { runGenCommand } from '../../src/cli/gen';
@@ -350,31 +350,69 @@ describe('gen model', () => {
 // ---------------------------------------------------------------------------
 
 describe('gen migration', () => {
-  it('generates numbered migration file', async () => {
+  it('generates timestamp-prefixed migration file', async () => {
     await runGenCommand(TMP, { subcommand: 'migration', name: 'add_avatar_to_users' });
 
-    const sql = read('db/migrations/0000_add_avatar_to_users.sql');
+    const files = readdirSync(join(TMP, 'db', 'migrations')).filter((f) => f.endsWith('.sql'));
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^\d{14}_add_avatar_to_users\.sql$/);
+
+    const sql = readFileSync(join(TMP, 'db', 'migrations', files[0]), 'utf-8');
     expect(sql).toBe('-- add_avatar_to_users\n');
   });
 
-  it('auto-numbers with zero-padded prefix after existing migrations', async () => {
+  it('generates unique timestamps for subsequent migrations', async () => {
     mkdirSync(join(TMP, 'db', 'migrations'), { recursive: true });
-    writeFileSync(join(TMP, 'db/migrations/0005_something.sql'), '');
+    // Use a timestamp far in the past so the generated one always sorts after it
+    writeFileSync(join(TMP, 'db/migrations/20200101000000_something.sql'), '');
 
     await runGenCommand(TMP, { subcommand: 'migration', name: 'another' });
 
-    expect(existsSync(join(TMP, 'db/migrations/0006_another.sql'))).toBe(true);
-    // Verify padding — "6_another.sql" should not exist
-    expect(existsSync(join(TMP, 'db/migrations/6_another.sql'))).toBe(false);
+    const files = readdirSync(join(TMP, 'db', 'migrations'))
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+    expect(files).toHaveLength(2);
+    expect(files[0]).toBe('20200101000000_something.sql');
+    expect(files[1]).toMatch(/^\d{14}_another\.sql$/);
   });
 
-  it('ignores seed.sql for numbering', async () => {
+  it('avoids same-second timestamp collisions', async () => {
+    mkdirSync(join(TMP, 'db', 'migrations'), { recursive: true });
+    // Pre-create a file with the current UTC timestamp to force a collision
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const currentTs =
+      String(now.getUTCFullYear()) +
+      pad(now.getUTCMonth() + 1) +
+      pad(now.getUTCDate()) +
+      pad(now.getUTCHours()) +
+      pad(now.getUTCMinutes()) +
+      pad(now.getUTCSeconds());
+    writeFileSync(join(TMP, `db/migrations/${currentTs}_existing.sql`), '');
+
+    await runGenCommand(TMP, { subcommand: 'migration', name: 'new_one' });
+
+    const files = readdirSync(join(TMP, 'db', 'migrations'))
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+    expect(files).toHaveLength(2);
+    // The new file must have a different (later) timestamp than the existing one
+    const newFile = files.find((f) => f.includes('new_one'));
+    expect(newFile).toBeDefined();
+    expect(newFile).not.toContain(currentTs);
+  });
+
+  it('ignores seed.sql', async () => {
     mkdirSync(join(TMP, 'db', 'migrations'), { recursive: true });
     writeFileSync(join(TMP, 'db/migrations/seed.sql'), '');
 
     await runGenCommand(TMP, { subcommand: 'migration', name: 'first' });
 
-    expect(existsSync(join(TMP, 'db/migrations/0000_first.sql'))).toBe(true);
+    const files = readdirSync(join(TMP, 'db', 'migrations')).filter(
+      (f) => f.endsWith('.sql') && f !== 'seed.sql',
+    );
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^\d{14}_first\.sql$/);
   });
 });
 

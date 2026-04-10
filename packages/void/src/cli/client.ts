@@ -359,6 +359,26 @@ export class PlatformClient {
     return res.json();
   }
 
+  async renameMigrations(
+    projectId: string,
+    renames: { from: string; to: string }[],
+  ): Promise<{ ok: boolean }> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/migrations/rename`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({ renames }),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to rename remote migrations', res);
+    }
+
+    return res.json();
+  }
+
   async addDomain(projectId: string, hostname: string): Promise<DomainResponse> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/domains`, {
       method: 'POST',

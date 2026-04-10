@@ -12,6 +12,7 @@ const DESTRUCTIVE_PATTERNS = [
   /\bDROP\s+TABLE\b/i,
   /\bDROP\s+COLUMN\b/i,
   /\bALTER\s+TABLE\s+\S+\s+RENAME\b/i,
+  /\bTRUNCATE\b/i,
 ];
 
 const PRAGMA_COMMENT = '-- void:allow-destructive';

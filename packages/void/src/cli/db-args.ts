@@ -19,6 +19,7 @@ export const dbSubcommands: SubcommandDef[] = [
   },
   { name: 'studio', description: 'Open Drizzle Studio for the local database' },
   { name: 'set-url', description: 'Update the PostgreSQL connection string for deployment' },
+  { name: 'rename-migrations', description: 'Rename migrations to timestamp-based format' },
   {
     name: 'export',
     description: 'Export local database as SQL',
@@ -41,7 +42,8 @@ export type DbArgs =
   | { action: 'migrate'; remote?: boolean }
   | { action: 'studio' }
   | { action: 'export'; output?: string; noData?: boolean; noSchema?: boolean; table?: string }
-  | { action: 'set-url' };
+  | { action: 'set-url' }
+  | { action: 'rename-migrations' };
 
 export function parseDbArgs(args: string[]): DbArgs {
   const parsed = parseArgs({
@@ -133,6 +135,13 @@ export function parseDbArgs(args: string[]): DbArgs {
     return { action };
   }
 
+  if (action === 'rename-migrations') {
+    if (rest.length > 0) {
+      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+    }
+    return { action };
+  }
+
   if (action === 'export') {
     if (rest.length > 0) {
       throw new Error(`Error: Unexpected argument: ${rest[0]}`);
@@ -145,6 +154,6 @@ export function parseDbArgs(args: string[]): DbArgs {
   }
 
   throw new Error(
-    'Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url>',
+    'Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>',
   );
 }

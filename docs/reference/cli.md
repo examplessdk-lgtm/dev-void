@@ -231,6 +231,10 @@ Pass `--remote` to apply pending migrations to the remote database instead. Requ
 
 Open [Drizzle Studio](https://orm.drizzle.team/docs/drizzle-kit-studio) for the local database. Launches a web-based GUI for browsing and editing your data.
 
+### `void db rename-migrations`
+
+Rename existing migrations from the old numeric prefix format (`0001_name.sql`) to timestamp-based format (`20260410161500_name.sql`). Updates local tracking table and remote records if logged in with a linked project.
+
 ### `void db set-url`
 
 Update the PostgreSQL connection string for deployment. Only available for projects with `database.dialect: "postgresql"`.
@@ -285,12 +289,14 @@ Model names must be lowercase alphanumeric with underscores (e.g. `posts`, `user
 void gen migration <name>
 ```
 
-Create an empty migration file with auto-numbered prefix. The number is one greater than the highest existing migration.
+Create an empty migration file with a timestamp prefix (`YYYYMMDDHHMMSS`).
 
 ```sh
 void gen migration add_avatar_to_users
-# → db/migrations/002_add_avatar_to_users.sql
+# → db/migrations/20260410161500_add_avatar_to_users.sql
 ```
+
+Existing projects using the old numeric prefix (`0001_`, `0002_`, ...) can rename with `void db rename-migrations`.
 
 ### `void gen route`
 

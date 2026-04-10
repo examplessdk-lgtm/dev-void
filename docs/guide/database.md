@@ -20,8 +20,8 @@ const dbFileItems = [
         name: "migrations/",
         description: "Generated SQL migration files",
         children: [
-          { name: "0000_*.sql" },
-          { name: "0001_add_posts.sql" },
+          { name: "20260410161500_create_users.sql" },
+          { name: "20260410161501_add_posts.sql" },
         ],
       },
       { name: "seed.ts", description: "Programmatic seed script (optional)" },

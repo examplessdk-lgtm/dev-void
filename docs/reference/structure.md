@@ -39,8 +39,8 @@ const dbItems = [
       {
         name: "migrations/",
         children: [
-          { name: "0000_*.sql" },
-          { name: "0001_*.sql" },
+          { name: "20260410161500_*.sql" },
+          { name: "20260410161501_*.sql" },
         ],
       },
     ],

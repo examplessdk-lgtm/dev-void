@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Plugin } from 'vite';
 import type { DatabaseDialect } from './config';
-import { voidLog, voidError } from './log';
+import { voidLog, voidWarn, voidError } from './log';
 
 function readDatabaseUrl(root: string): string | undefined {
   const envPath = join(root, '.env.local');
@@ -75,13 +75,39 @@ export function migrationPlugin(
             return;
           }
           const { runPgMigrations } = await import('./migrations/runner-pg');
+          const { collectMigrations } = await import('./migrations/collect');
+          const { validateMigrations } = await import('./migrations/validate');
+
+          const allMigrations = collectMigrations(migrationsDir);
+          try {
+            validateMigrations(allMigrations);
+          } catch (err) {
+            voidWarn(err instanceof Error ? err.message : String(err));
+          }
+
           const applied = await runPgMigrations(migrationsDir, url);
           if (applied.length > 0) {
             voidLog(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
           }
         } else if (hasSqlMigrations) {
-          const { runMigrations, getMiniflareDatabasePath } = await import('./migrations/runner');
+          const { runMigrations, getMiniflareDatabasePath, getAppliedMigrations } =
+            await import('./migrations/runner');
+          const { collectMigrations } = await import('./migrations/collect');
+          const { validateMigrations } = await import('./migrations/validate');
           const dbPath = getMiniflareDatabasePath(persistRoot, databaseId);
+
+          const allMigrations = collectMigrations(migrationsDir);
+          const appliedRows = await getAppliedMigrations(dbPath);
+          const appliedSet = new Set(appliedRows.map((r) => r.name));
+          const pending = allMigrations.filter((m) => !appliedSet.has(m.name));
+          if (pending.length > 0) {
+            try {
+              validateMigrations(pending);
+            } catch (err) {
+              voidWarn(err instanceof Error ? err.message : String(err));
+            }
+          }
+
           const applied = await runMigrations(migrationsDir, dbPath);
           if (applied.length > 0) {
             voidLog(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
