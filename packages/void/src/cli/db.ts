@@ -447,13 +447,18 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
 
     const client = new PlatformClient(token);
 
-    // Fetch remote applied set so we only validate and send pending migrations
+    // Fetch remote applied set so we only validate and send pending migrations.
+    // This is required — if we can't determine what's already applied, we must
+    // abort rather than risk validating (and rejecting) already-applied migrations.
     let remoteApplied: Set<string>;
     try {
       const status = await client.getMigrationStatus(config.projectId);
       remoteApplied = new Set(status.applied.map((m) => m.name));
-    } catch {
-      remoteApplied = new Set();
+    } catch (err) {
+      log.error(
+        `Failed to fetch remote migration status: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
     }
 
     const pendingMigrations = rawMigrations.filter((m) => !remoteApplied.has(m.name));
