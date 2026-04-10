@@ -339,6 +339,26 @@ export class PlatformClient {
     return res.json();
   }
 
+  async applyRemoteMigrations(
+    projectId: string,
+    migrations: { name: string; sql: string }[],
+  ): Promise<{ ok: boolean; applied: string[]; skipped: string[]; error?: string }> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/migrations/apply`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({ migrations }),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to apply remote migrations', res);
+    }
+
+    return res.json();
+  }
+
   async addDomain(projectId: string, hostname: string): Promise<DomainResponse> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/domains`, {
       method: 'POST',

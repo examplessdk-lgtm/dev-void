@@ -220,10 +220,12 @@ Run ad-hoc SQL against the local D1 database. Provide SQL inline or from a file.
 ### `void db migrate`
 
 ```
-void db migrate
+void db migrate [--remote]
 ```
 
 Apply pending migrations to the local database without resetting. Unlike `void db reset`, this preserves existing data and only runs migrations that haven't been applied yet.
+
+Pass `--remote` to apply pending migrations to the remote database instead. Requires being logged in (`void auth login`) and having a linked project.
 
 ### `void db studio`
 

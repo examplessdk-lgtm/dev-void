@@ -110,7 +110,7 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
   } else if (args.action === 'execute') {
     await runExecute(root, args.command, args.file, dialect);
   } else if (args.action === 'migrate') {
-    await runMigrate(root, dialect);
+    await runMigrate(root, dialect, args.remote);
   } else if (args.action === 'studio') {
     await runStudio(root, dialect);
   } else if (args.action === 'set-url') {
@@ -422,9 +422,55 @@ function printTable(rows: Record<string, unknown>[]): void {
   console.log(lines.join('\n'));
 }
 
-async function runMigrate(root: string, dialect: DatabaseDialect): Promise<void> {
+async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boolean): Promise<void> {
   const migrationsDir = join(root, 'db', 'migrations');
   const rawMigrations = collectMigrations(migrationsDir);
+
+  if (remote) {
+    const token = getToken();
+    if (!token) {
+      log.error('Not logged in. Run `void auth login` first.');
+      process.exit(1);
+    }
+
+    const config = readProjectConfig(root);
+    if (!config) {
+      log.error('No project linked. Run `void deploy` first or link a project.');
+      process.exit(1);
+    }
+
+    if (rawMigrations.length === 0) {
+      log.info('No migration files found in db/migrations/');
+      outro('Done.');
+      return;
+    }
+
+    try {
+      validateMigrations(rawMigrations);
+    } catch (err: any) {
+      log.error(err.message);
+      process.exit(1);
+    }
+
+    const client = new PlatformClient(token);
+    const result = await client.applyRemoteMigrations(config.projectId, rawMigrations);
+
+    if (!result.ok) {
+      log.error(result.error ?? 'Remote migration failed.');
+      process.exit(1);
+    }
+
+    if (result.applied.length === 0) {
+      log.info('Remote database is up to date.');
+    } else {
+      for (const name of result.applied) {
+        log.step(name);
+      }
+      log.success(`Applied ${result.applied.length} migration(s) to remote database.`);
+    }
+    outro('Done.');
+    return;
+  }
 
   if (dialect === 'postgresql') {
     const { applyPgMigrations } = await import('../migrations/runner-pg');

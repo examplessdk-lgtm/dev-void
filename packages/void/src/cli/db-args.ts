@@ -12,7 +12,11 @@ export const dbSubcommands: SubcommandDef[] = [
     flags: [{ name: '--file', arg: '<path>', description: 'Seed from a specific file' }],
   },
   { name: 'execute', arg: '<sql>', description: 'Run SQL against the local database' },
-  { name: 'migrate', description: 'Apply pending migrations locally' },
+  {
+    name: 'migrate',
+    description: 'Apply pending migrations',
+    flags: [{ name: '--remote', description: 'Apply to the remote database' }],
+  },
   { name: 'studio', description: 'Open Drizzle Studio for the local database' },
   { name: 'set-url', description: 'Update the PostgreSQL connection string for deployment' },
   {
@@ -34,7 +38,7 @@ export type DbArgs =
   | { action: 'reset' }
   | { action: 'seed'; file?: string }
   | { action: 'execute'; command?: string; file?: string }
-  | { action: 'migrate' }
+  | { action: 'migrate'; remote?: boolean }
   | { action: 'studio' }
   | { action: 'export'; output?: string; noData?: boolean; noSchema?: boolean; table?: string }
   | { action: 'set-url' };
@@ -48,6 +52,7 @@ export function parseDbArgs(args: string[]): DbArgs {
       'no-data': { type: 'boolean' },
       'no-schema': { type: 'boolean' },
       table: { type: 'string' },
+      remote: { type: 'boolean' },
     },
     allowPositionals: true,
     strict: true,
@@ -110,7 +115,8 @@ export function parseDbArgs(args: string[]): DbArgs {
     if (rest.length > 0) {
       throw new Error(`Error: Unexpected argument: ${rest[0]}`);
     }
-    return { action };
+    const remote = parsed.values.remote === true ? true : undefined;
+    return { action, remote };
   }
 
   if (action === 'studio') {

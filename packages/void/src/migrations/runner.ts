@@ -44,16 +44,25 @@ export async function getAppliedMigrations(dbPath: string): Promise<AppliedMigra
   const db = await openSqliteDatabase(dbPath, { readonly: true });
 
   try {
-    const table = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")
-      .get();
+    // Check for current table name, fall back to legacy `_migrations` for
+    // projects that haven't run `void db migrate` yet (which auto-upgrades).
+    let tableName: string | null = null;
+    for (const candidate of ['_void_migrations', '_migrations']) {
+      const exists = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${candidate}'`)
+        .get();
+      if (exists) {
+        tableName = candidate;
+        break;
+      }
+    }
 
-    if (!table) {
+    if (!tableName) {
       return [];
     }
 
     return db
-      .prepare('SELECT name, applied_at FROM _migrations ORDER BY name')
+      .prepare(`SELECT name, applied_at FROM ${tableName} ORDER BY name`)
       .all() as AppliedMigration[];
   } finally {
     db.close();
@@ -84,8 +93,31 @@ export function getMiniflareDatabasePath(persistRoot: string, databaseId: string
 }
 
 /**
+ * One-time migration: rename legacy `_migrations` table to `_void_migrations`.
+ * Copies all rows from the old table to the new one, then drops the old table.
+ */
+function upgradeTrackingTable(db: any): void {
+  const legacy = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")
+    .get();
+  if (!legacy) {
+    return;
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS _void_migrations (
+      name TEXT PRIMARY KEY,
+      applied_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec(
+    `INSERT OR IGNORE INTO _void_migrations (name, applied_at) SELECT name, applied_at FROM _migrations`,
+  );
+  db.exec(`DROP TABLE _migrations`);
+}
+
+/**
  * Apply unapplied SQL migrations from the migrations directory.
- * Tracks applied migrations in the `_migrations` table.
+ * Tracks applied migrations in the `_void_migrations` table.
  * Each .sql file is split into statements and executed individually
  * because D1's `exec()` with multi-statement SQL can fail.
  */
@@ -100,16 +132,20 @@ export async function runMigrations(migrationsDir: string, dbPath: string): Prom
   const db = await openSqliteDatabase(dbPath);
 
   try {
+    upgradeTrackingTable(db);
+
     // Create tracking table if it doesn't exist
     db.exec(`
-      CREATE TABLE IF NOT EXISTS _migrations (
+      CREATE TABLE IF NOT EXISTS _void_migrations (
         name TEXT PRIMARY KEY,
         applied_at TEXT DEFAULT (datetime('now'))
       )
     `);
 
     const applied = new Set(
-      (db.prepare('SELECT name FROM _migrations').all() as { name: string }[]).map((r) => r.name),
+      (db.prepare('SELECT name FROM _void_migrations').all() as { name: string }[]).map(
+        (r) => r.name,
+      ),
     );
 
     const pending = allMigrations.filter((m) => !applied.has(m.name));
@@ -117,7 +153,7 @@ export async function runMigrations(migrationsDir: string, dbPath: string): Prom
       return [];
     }
 
-    const insertStmt = db.prepare('INSERT INTO _migrations (name) VALUES (?)');
+    const insertStmt = db.prepare('INSERT INTO _void_migrations (name) VALUES (?)');
 
     for (const migration of pending) {
       // Split into individual statements — D1/better-sqlite3 can choke on multi-statement exec

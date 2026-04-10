@@ -15,7 +15,7 @@ describe('getAppliedMigrations', () => {
     expect(result).toEqual([]);
   });
 
-  it('returns [] when _migrations table does not exist', async () => {
+  it('returns [] when _void_migrations table does not exist', async () => {
     mkdirSync(TMP_DIR, { recursive: true });
     const dbPath = join(TMP_DIR, 'empty.sqlite');
 
@@ -35,9 +35,9 @@ describe('getAppliedMigrations', () => {
     const Database = (await import('better-sqlite3')).default;
     const db = new Database(dbPath);
     db.exec(`
-      CREATE TABLE _migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
-      INSERT INTO _migrations (name, applied_at) VALUES ('002_second.sql', '2025-01-02T00:00:00Z');
-      INSERT INTO _migrations (name, applied_at) VALUES ('001_first.sql', '2025-01-01T00:00:00Z');
+      CREATE TABLE _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+      INSERT INTO _void_migrations (name, applied_at) VALUES ('002_second.sql', '2025-01-02T00:00:00Z');
+      INSERT INTO _void_migrations (name, applied_at) VALUES ('001_first.sql', '2025-01-01T00:00:00Z');
     `);
     db.close();
 
