@@ -49,4 +49,16 @@ describe('writeDrizzleConfig', () => {
     expect(config.dialect).toBe('sqlite');
     expect(config.dbCredentials.url).toBe('/tmp/test.sqlite');
   });
+
+  it('uses timestamp migration prefix for SQLite', () => {
+    const configPath = writeDrizzleConfig(root, '/tmp/test.sqlite');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.migrations).toEqual({ prefix: 'timestamp' });
+  });
+
+  it('uses timestamp migration prefix for PostgreSQL', () => {
+    const configPath = writeDrizzleConfig(root, 'postgresql://localhost/test', 'postgresql');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.migrations).toEqual({ prefix: 'timestamp' });
+  });
 });

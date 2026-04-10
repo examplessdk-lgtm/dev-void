@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { runGenCommand } from '../../src/cli/gen';
+import { runGenCommand, formatTimestamp } from '../../src/cli/gen';
 
 const mockSelect = vi.fn();
 
@@ -342,6 +342,27 @@ describe('gen model', () => {
     } finally {
       exitSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatTimestamp
+// ---------------------------------------------------------------------------
+
+describe('formatTimestamp', () => {
+  it('produces YYYYMMDDHHMMSS from a UTC date', () => {
+    const date = new Date(Date.UTC(2026, 3, 10, 16, 15, 0)); // April 10, 2026 16:15:00 UTC
+    expect(formatTimestamp(date)).toBe('20260410161500');
+  });
+
+  it('pads single-digit months and days', () => {
+    const date = new Date(Date.UTC(2025, 0, 5, 3, 7, 9)); // Jan 5, 2025 03:07:09 UTC
+    expect(formatTimestamp(date)).toBe('20250105030709');
+  });
+
+  it('uses UTC regardless of local timezone', () => {
+    const date = new Date(Date.UTC(2026, 11, 31, 23, 59, 59)); // Dec 31, 2026 23:59:59 UTC
+    expect(formatTimestamp(date)).toBe('20261231235959');
   });
 });
 

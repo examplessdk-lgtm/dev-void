@@ -24,6 +24,7 @@ import {
   type McpConfigTarget,
 } from './agents';
 import { maybeSetupDeployProject } from './deploy-setup';
+import { formatTimestamp } from './gen';
 import { cliTitle } from './output';
 import { formatProjectCommand } from './preset';
 import {
@@ -1113,15 +1114,7 @@ function scaffoldDemo(root: string): void {
 
   // Migration
   mkdirSync(join(root, 'db', 'migrations'), { recursive: true });
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const migrationTs =
-    String(now.getUTCFullYear()) +
-    pad(now.getUTCMonth() + 1) +
-    pad(now.getUTCDate()) +
-    pad(now.getUTCHours()) +
-    pad(now.getUTCMinutes()) +
-    pad(now.getUTCSeconds());
+  const migrationTs = formatTimestamp(new Date());
   const migrationFile = `${migrationTs}_create_posts.sql`;
   writeFileSync(
     join(root, 'db', 'migrations', migrationFile),

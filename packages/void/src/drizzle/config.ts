@@ -28,12 +28,14 @@ export function writeDrizzleConfig(
           dialect: 'postgresql',
           schema: schemaSpecifier(schema),
           out: './db/migrations',
+          migrations: { prefix: 'timestamp' },
           dbCredentials: { url: dbPath },
         }
       : {
           dialect: 'sqlite',
           schema: schemaSpecifier(schema),
           out: './db/migrations',
+          migrations: { prefix: 'timestamp' },
           dbCredentials: { url: dbPath },
         };
 

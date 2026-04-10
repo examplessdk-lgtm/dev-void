@@ -42,7 +42,7 @@ function writeIfNotExists(filePath: string, content: string): boolean {
   return true;
 }
 
-function formatTimestamp(date: Date): string {
+export function formatTimestamp(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return (
     String(date.getUTCFullYear()) +

@@ -9,6 +9,7 @@ import type { SeedFn } from '../runtime/seed';
 import { getToken } from './auth';
 import { PlatformClient } from './client';
 import type { DbArgs } from './db-args';
+import { formatTimestamp } from './gen';
 import { cliTitle, dim, pc } from './output';
 import { readProjectConfig } from './project';
 
@@ -621,14 +622,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
 
   // Find the earliest existing timestamp-prefixed migration so renamed files sort before them
   const timestampFiles = files.filter((f) => /^\d{14}_/.test(f));
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const formatTs = (d: Date) =>
-    String(d.getUTCFullYear()) +
-    pad(d.getUTCMonth() + 1) +
-    pad(d.getUTCDate()) +
-    pad(d.getUTCHours()) +
-    pad(d.getUTCMinutes()) +
-    pad(d.getUTCSeconds());
+  const formatTs = formatTimestamp;
 
   let baseTime: Date;
   if (timestampFiles.length > 0) {
@@ -654,22 +648,102 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     renames.push({ from: oldName, to: newName });
   }
 
-  for (const { from, to } of renames) {
-    renameSync(join(migrationsDir, from), join(migrationsDir, to));
-    log.step(`${from} → ${to}`);
+  // Update remote tracking first — if this fails, nothing local has changed yet
+  const token = getToken();
+  const config = readProjectConfig(root);
+  let remoteRenamed = false;
+  if (config && !token) {
+    log.error(
+      'Project is linked but you are not logged in.\n' +
+        'Run `void auth login` first so remote migration records can be updated.',
+    );
+    process.exit(1);
+  }
+  if (token && config) {
+    try {
+      const client = new PlatformClient(token);
+      await client.renameMigrations(config.projectId, renames);
+      remoteRenamed = true;
+      log.info('Remote migration records updated.');
+    } catch (err) {
+      log.error(
+        'Failed to update remote migration records. No local changes were made.\n' +
+          'Fix the connection and run `void db rename-migrations` again.',
+      );
+      log.error(String(err));
+      process.exit(1);
+    }
+  }
+
+  // Best-effort reversal of remote renames when a later step fails
+  const reverseRemote = async () => {
+    if (!remoteRenamed || !token || !config) {
+      return;
+    }
+    try {
+      const client = new PlatformClient(token);
+      const reversed = renames.map(({ from, to }) => ({ from: to, to: from }));
+      await client.renameMigrations(config.projectId, reversed);
+    } catch {
+      log.warn('Could not reverse remote rename. Run `void deploy` to sync remote records.');
+    }
+  };
+
+  // Rename files — roll back completed renames (and remote) on any failure
+  const renamed: { from: string; to: string }[] = [];
+  try {
+    for (const { from, to } of renames) {
+      renameSync(join(migrationsDir, from), join(migrationsDir, to));
+      renamed.push({ from, to });
+      log.step(`${from} → ${to}`);
+    }
+  } catch (err) {
+    for (const { from, to } of renamed) {
+      try {
+        renameSync(join(migrationsDir, to), join(migrationsDir, from));
+      } catch {
+        // best-effort rollback
+      }
+    }
+    await reverseRemote();
+    log.error('Failed to rename migration files. All changes have been reverted.');
+    log.error(String(err));
+    process.exit(1);
   }
 
   if (dialect === 'postgresql') {
     try {
       await withPgClient(root, async (client) => {
-        for (const { from, to } of renames) {
-          await client.query('UPDATE _void_migrations SET name = $1 WHERE name = $2', [to, from]);
+        const tableCheck = await client.query(
+          `SELECT 1 FROM information_schema.tables WHERE table_name = '_void_migrations' LIMIT 1`,
+        );
+        if (tableCheck.rows.length === 0) {
+          return;
+        }
+        await client.query('BEGIN');
+        try {
+          for (const { from, to } of renames) {
+            await client.query('UPDATE _void_migrations SET name = $1 WHERE name = $2', [to, from]);
+          }
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
         }
       });
     } catch (err) {
+      // Roll back file renames so tracking and filenames stay in sync
+      for (const { from, to } of renames) {
+        try {
+          renameSync(join(migrationsDir, to), join(migrationsDir, from));
+        } catch {
+          // best-effort rollback — ignore individual rename failures
+        }
+      }
+      await reverseRemote();
       log.error(
-        'Failed to update PostgreSQL tracking table. Files were renamed but the database still has old names.\n' +
-          'Run `void db migrate` to re-sync, or manually update the _void_migrations table.',
+        'Failed to update PostgreSQL tracking table. File renames have been reverted.\n' +
+          'Fix the database connection and run `void db rename-migrations` again.',
       );
       log.error(String(err));
       process.exit(1);
@@ -679,36 +753,47 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     const persistRoot = join(root, '.void');
     const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
     if (existsSync(dbPath)) {
-      const db = await openSqliteDatabase(dbPath);
       try {
-        const hasNew = db
-          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_void_migrations'")
-          .get();
-        const hasLegacy = db
-          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")
-          .get();
-        const tableName = hasNew ? '_void_migrations' : hasLegacy ? '_migrations' : null;
-        if (tableName) {
-          const updateStmt = db.prepare(`UPDATE ${tableName} SET name = ? WHERE name = ?`);
-          for (const { from, to } of renames) {
-            updateStmt.run(to, from);
+        const db = await openSqliteDatabase(dbPath);
+        try {
+          const hasNew = db
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type='table' AND name='_void_migrations'",
+            )
+            .get();
+          const hasLegacy = db
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")
+            .get();
+          const tableName = hasNew ? '_void_migrations' : hasLegacy ? '_migrations' : null;
+          if (tableName) {
+            const updateStmt = db.prepare(`UPDATE ${tableName} SET name = ? WHERE name = ?`);
+            const applyRenames = db.transaction(() => {
+              for (const { from, to } of renames) {
+                updateStmt.run(to, from);
+              }
+            });
+            applyRenames();
+          }
+        } finally {
+          db.close();
+        }
+      } catch (err) {
+        // Roll back file renames so tracking and filenames stay in sync
+        for (const { from, to } of renames) {
+          try {
+            renameSync(join(migrationsDir, to), join(migrationsDir, from));
+          } catch {
+            // best-effort rollback — ignore individual rename failures
           }
         }
-      } finally {
-        db.close();
+        await reverseRemote();
+        log.error(
+          'Failed to update SQLite tracking table. File renames have been reverted.\n' +
+            'Fix the database issue and run `void db rename-migrations` again.',
+        );
+        log.error(String(err));
+        process.exit(1);
       }
-    }
-  }
-
-  const token = getToken();
-  const config = readProjectConfig(root);
-  if (token && config) {
-    try {
-      const client = new PlatformClient(token);
-      await client.renameMigrations(config.projectId, renames);
-      log.info('Remote migration records updated.');
-    } catch {
-      log.warn('Could not update remote migration records. Run `void deploy` to sync.');
     }
   }
 
