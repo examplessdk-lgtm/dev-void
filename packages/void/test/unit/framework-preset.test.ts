@@ -20,6 +20,15 @@ describe('FRAMEWORK_PRESETS', () => {
     expect(preset.assetsDir).toBe('.output/public');
   });
 
+  it('has preset for analog', () => {
+    const preset = FRAMEWORK_PRESETS.analog;
+    expect(preset).toBeDefined();
+    expect(preset.buildCommand).toBe('vite build');
+    expect(preset.workerDir).toBe('dist/analog/server');
+    expect(preset.workerMain).toBe('index.mjs');
+    expect(preset.assetsDir).toBe('dist/client');
+  });
+
   it('has preset for astro', () => {
     const preset = FRAMEWORK_PRESETS.astro;
     expect(preset).toBeDefined();

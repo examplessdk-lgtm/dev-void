@@ -67,7 +67,7 @@ export interface FrameworkPreset {
  * Vite-compatible build command (`vite build` or `vp build`) and have their
  * output structure determined by the framework's Vite plugin.
  *
- * Class B/C frameworks (sveltekit, nuxt, astro) use their own build CLI
+ * Class B/C frameworks (sveltekit, nuxt, analog, astro) use their own build CLI
  * and have framework-specific output conventions.
  */
 export const FRAMEWORK_PRESETS: Record<string, FrameworkPreset> = {
@@ -111,6 +111,13 @@ export const FRAMEWORK_PRESETS: Record<string, FrameworkPreset> = {
     workerMain: 'index.mjs',
     assetsDir: '.output/public',
     hashedAssetsPrefix: '_nuxt',
+  },
+  analog: {
+    buildCommand: 'vite build',
+    workerDir: 'dist/analog/server',
+    workerMain: 'index.mjs',
+    assetsDir: 'dist/client',
+    hashedAssetsPrefix: 'assets',
   },
   astro: {
     buildCommand: 'astro build',

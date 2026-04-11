@@ -225,8 +225,8 @@ const usersWithPosts = await db.query.users.findMany({
 
 The user schema is automatically loaded into the `db` instance via a Vite plugin, so relational queries work out of the box.
 
-::: warning ⚠️ Nuxt limitation
-Nuxt uses Nitro, which bundles server routes outside of Vite's plugin pipeline. The schema cannot be injected into the `db` instance, so `db.query.*` relational queries are not available in Nuxt. Use the standard query builder API (`db.select().from(table)`) instead.
+::: warning ⚠️ Nuxt and Analog limitations
+Nuxt and Analog use Nitro, which bundles server routes outside of Vite's plugin pipeline. The schema cannot be injected into the `db` instance, so `db.query.*` relational queries are not available in Nuxt and Analog. Use the standard query builder API (`db.select().from(table)`) instead.
 :::
 
 ## Seeding

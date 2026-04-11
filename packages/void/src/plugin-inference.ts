@@ -32,6 +32,7 @@ const FRAMEWORK_PACKAGES: Record<string, DetectedFramework> = {
   vinext: { name: 'vinext-pages', class: 'a' },
   '@sveltejs/kit': { name: 'sveltekit', class: 'b' },
   nuxt: { name: 'nuxt', class: 'c' },
+  '@analogjs/platform': { name: 'analog', class: 'c' },
   astro: { name: 'astro', class: 'c' },
 };
 

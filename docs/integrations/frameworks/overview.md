@@ -8,7 +8,7 @@ Use this section when your app already has a framework that owns routing and ren
 
 Void supports deploying meta-framework apps with `void deploy`. Add `voidPlugin()` to your framework's Vite config to get binding inference, typed DB generation, migration management, cron jobs, queues, and caching.
 
-Some frameworks, such as TanStack Start and React Router, compose directly with `@cloudflare/vite-plugin`, which Void already covers. Others, such as SvelteKit, Nuxt, and Astro, bring their own Cloudflare integrations. In both cases, the framework stays in charge of routing and rendering. Void handles the platform-facing pieces around it.
+Some frameworks, such as TanStack Start and React Router, compose directly with `@cloudflare/vite-plugin`, which Void already covers. Others, such as SvelteKit, Nuxt, Analog, and Astro, bring their own Cloudflare integrations. In both cases, the framework stays in charge of routing and rendering. Void handles the platform-facing pieces around it.
 
 ![void relationships with meta frameworks and deployment targets](./void-relationships.svg)
 
@@ -20,6 +20,7 @@ Some frameworks, such as TanStack Start and React Router, compose directly with 
 | [React Router v7](https://reactrouter.com/)         | `@react-router/dev`     | Vite plugin composition. Setup matches TanStack Start.                       |
 | [SvelteKit](https://svelte.dev/docs/kit)            | `@sveltejs/kit`         | Vite-based, uses its own Cloudflare adapter                                  |
 | [Nuxt](https://nuxt.com/)                           | `nuxt`                  | Own CLI and build toolchain                                                  |
+| [Analog](https://analogjs.org/)                     | `@analogjs/platform`    | Vite-based, uses Nitro with Cloudflare preset                                |
 | [Astro **v6+**](https://astro.build/)               | `astro`                 | Own CLI and Cloudflare adapter (v6 required)                                 |
 
 Detection is automatic. The CLI reads your `package.json` dependencies.
@@ -30,6 +31,7 @@ See the individual framework guides for setup instructions:
 - [React Router](./react-router.md)
 - [SvelteKit](./sveltekit.md)
 - [Nuxt](./nuxt.md)
+- [Analog](./analog.md)
 - [Astro](./astro.md)
 
 ## Feature Support
@@ -45,7 +47,7 @@ With `voidPlugin()` added to the framework's Vite config, frameworks get most of
 - **Queue consumers:** typed producers and consumers via the `queues/` directory.
 - **Revalidation and prerendering:** configure them with [`routing.revalidate`](../../guide/edge/revalidation.md) and [`routing.prerender`](../../guide/edge/prerendering.md) in `void.json`. Void apps can also set these per page in component files.
 
-Frameworks can also access bindings directly via the framework's own mechanisms (e.g. `platform.env` in SvelteKit, `event.context.cloudflare.env` in Nuxt, `Astro.locals.runtime.env` in Astro).
+Frameworks can also access bindings directly via the framework's own mechanisms (e.g. `platform.env` in SvelteKit, `event.context.cloudflare.env` in Nuxt, `env` from `cloudflare:workers` in Analog, `Astro.locals.runtime.env` in Astro).
 
 ## Configuration
 
@@ -97,7 +99,7 @@ For `void deploy`, compatibility settings are read from `wrangler.jsonc` automat
 
 ## Deploy Pipeline
 
-SvelteKit, Nuxt, and Astro apps follow this pipeline:
+SvelteKit, Nuxt, Analog, and Astro apps follow this pipeline:
 
 ```
 void deploy
@@ -109,6 +111,7 @@ void deploy
   │    Runs framework's build command (or void.json `build` override)
   │    SvelteKit: vite build → .svelte-kit/cloudflare/
   │    Nuxt:      nuxt build → .output/
+  │    Analog:    vite build → dist/analog/
   │    Astro:     astro build → dist/
   │
   ├─ 3. Analyze
