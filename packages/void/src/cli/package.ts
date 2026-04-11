@@ -31,12 +31,15 @@ async function tickProgress(
   i: number,
   total: number,
   onProgress: ProgressCallback | undefined,
-  label: (i: number, total: number) => string,
+  label: string,
 ): Promise<void> {
+  if (!onProgress) {
+    return;
+  }
   if (i % PROGRESS_CHUNK !== 0 && i !== total) {
     return;
   }
-  onProgress?.(label(i, total));
+  onProgress(`${label} (${i}/${total})`);
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
@@ -124,9 +127,10 @@ export async function collectAndHashAssets(
     const files = collectFiles(dir);
     let processed = 0;
     for (const filePath of files) {
+      processed++;
+      await tickProgress(processed, files.length, onProgress, 'Hashing assets');
       const relativePath = '/' + toSlash(relative(dir, filePath));
       if (isIgnored(relativePath)) {
-        processed++;
         continue;
       }
       checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
@@ -136,13 +140,6 @@ export async function collectAndHashAssets(
         size: content.length,
       };
       assetFiles.set(relativePath, content);
-      processed++;
-      await tickProgress(
-        processed,
-        files.length,
-        onProgress,
-        (i, total) => `Hashing assets (${i}/${total})`,
-      );
     }
   } catch (err) {
     // Only swallow directory-not-found errors; re-throw everything else
@@ -355,28 +352,20 @@ export async function packageBuild(
   try {
     const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(clientDir);
     const clientFiles = collectFiles(clientDir);
-    onProgress?.(`Packaging assets (0/${clientFiles.length})`);
     let processed = 0;
     for (const filePath of clientFiles) {
+      processed++;
+      await tickProgress(processed, clientFiles.length, onProgress, 'Packaging assets');
       const relativePath = toSlash(relative(clientDir, filePath));
       if (isIgnored('/' + relativePath)) {
-        processed++;
         continue;
       }
       checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
       if (neededAssets && !neededAssets.has('/' + relativePath)) {
-        processed++;
         continue;
       }
       const content = readFileSync(filePath);
       formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
-      processed++;
-      await tickProgress(
-        processed,
-        clientFiles.length,
-        onProgress,
-        (i, total) => `Packaging assets (${i}/${total})`,
-      );
     }
   } catch (err) {
     if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -432,28 +421,20 @@ export async function packageStaticBuild(
 
   const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(outputDir);
   const files = collectFiles(outputDir);
-  onProgress?.(`Packaging assets (0/${files.length})`);
   let processed = 0;
   for (const filePath of files) {
+    processed++;
+    await tickProgress(processed, files.length, onProgress, 'Packaging assets');
     const relativePath = toSlash(relative(outputDir, filePath));
     if (isIgnored('/' + relativePath)) {
-      processed++;
       continue;
     }
     checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
     if (neededAssets && !neededAssets.has('/' + relativePath)) {
-      processed++;
       continue;
     }
     const content = readFileSync(filePath);
     formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
-    processed++;
-    await tickProgress(
-      processed,
-      files.length,
-      onProgress,
-      (i, total) => `Packaging assets (${i}/${total})`,
-    );
   }
 
   if (neededAssets) {
@@ -600,33 +581,24 @@ export async function packageFrameworkBuild(opts: {
   try {
     const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(opts.assetsDir);
     const assetFiles = collectFiles(opts.assetsDir);
-    opts.onProgress?.(`Packaging assets (0/${assetFiles.length})`);
     let processed = 0;
     for (const filePath of assetFiles) {
+      processed++;
+      await tickProgress(processed, assetFiles.length, opts.onProgress, 'Packaging assets');
       // Skip worker files when workerDir overlaps with assetsDir
       if (isOverlap && filePath.replace(/\\/g, '/').startsWith(workerDirNorm)) {
-        processed++;
         continue;
       }
       const relativePath = toSlash(relative(opts.assetsDir, filePath));
       if (isIgnored('/' + relativePath)) {
-        processed++;
         continue;
       }
       checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
       if (opts.neededAssets && !opts.neededAssets.has('/' + relativePath)) {
-        processed++;
         continue;
       }
       const content = readFileSync(filePath);
       formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
-      processed++;
-      await tickProgress(
-        processed,
-        assetFiles.length,
-        opts.onProgress,
-        (i, total) => `Packaging assets (${i}/${total})`,
-      );
     }
   } catch (err) {
     if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {

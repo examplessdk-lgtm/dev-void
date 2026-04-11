@@ -352,10 +352,11 @@ async function runStaticDeploy(
   }
 
   const s = createSpinner();
+  const onProgress = (msg: string) => s.message(msg);
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
-  const { assetManifest } = await collectAndHashAssets(preset.outputDir, (msg) => s.message(msg));
+  const { assetManifest } = await collectAndHashAssets(preset.outputDir, onProgress);
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest);
   s.stop('Checked for changes');
 
@@ -372,7 +373,7 @@ async function runStaticDeploy(
     hashedAssetsPrefix ?? 'assets',
     headerRules,
     redirectRules,
-    (msg) => s.message(msg),
+    onProgress,
   );
   if (neededSet) {
     formData.append('assetManifest', JSON.stringify(assetManifest));
@@ -560,10 +561,11 @@ async function runFrameworkDeploy(
 
   // 11. Package & deploy
   const s = createSpinner();
+  const onProgress = (msg: string) => s.message(msg);
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
-  const { assetManifest } = await collectAndHashAssets(assetsDir, (msg) => s.message(msg));
+  const { assetManifest } = await collectAndHashAssets(assetsDir, onProgress);
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
   s.stop('Checked for changes');
 
@@ -597,7 +599,7 @@ async function runFrameworkDeploy(
     headerRules,
     redirectRules,
     dialect,
-    onProgress: (msg) => s.message(msg),
+    onProgress,
   });
   if (neededSet) {
     formData.append('assetManifest', JSON.stringify(assetManifest));
@@ -885,6 +887,7 @@ async function runFullDeploy(
 
   // 10. Package & Upload
   const s = createSpinner();
+  const onProgress = (msg: string) => s.message(msg);
 
   // Derive asset config: SSR and pages-mode workers handle their own 404s, non-SSR uses SPA fallback
   const assetConfig: AssetConfig =
@@ -894,7 +897,7 @@ async function runFullDeploy(
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
-  const { assetManifest } = await collectAndHashAssets(clientDir, (msg) => s.message(msg));
+  const { assetManifest } = await collectAndHashAssets(clientDir, onProgress);
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
   s.stop('Checked for changes');
 
@@ -927,7 +930,7 @@ async function runFullDeploy(
     redirectRules,
     dialect,
     webSockets,
-    (msg) => s.message(msg),
+    onProgress,
   );
   if (neededSet) {
     formData.append('assetManifest', JSON.stringify(assetManifest));
