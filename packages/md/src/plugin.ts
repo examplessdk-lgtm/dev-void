@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { glob } from 'tinyglobby';
 import { normalizePath, type Plugin, type ResolvedConfig, type ViteDevServer } from 'vite';
+import { generateMdTypes } from './codegen/md-types';
 import type { CompileOptions } from './compile';
 import { emitReactComponent, emitReactComponentWithIslands } from './emit-react';
 import { emitSolidComponent, emitSolidComponentWithIslands } from './emit-solid';
@@ -125,6 +126,12 @@ export function voidMarkdown(options?: MarkdownOptions): Plugin[] {
     return pages.sort((a, b) => a.path.localeCompare(b.path));
   }
 
+  function writeMdTypes() {
+    const outDir = join(root, '.void');
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, 'md.d.ts'), generateMdTypes());
+  }
+
   return [
     {
       name: 'void-md',
@@ -185,6 +192,7 @@ export function voidMarkdown(options?: MarkdownOptions): Plugin[] {
         solidModules.clear();
         clientScripts.clear();
         mdPages = await scanMdPages();
+        writeMdTypes();
       },
 
       configureServer(server: ViteDevServer) {
