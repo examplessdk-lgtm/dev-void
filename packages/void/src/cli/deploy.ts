@@ -45,6 +45,7 @@ import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env';
 import { validateSsrEntry } from '../ssr/entry';
 import { getToken, getTokenSource } from './auth';
 import { isExpiredTokenError, PlatformClient } from './client';
+import { promptAndCreateProject } from './create-project';
 import { parseHeadersFile, parseRedirectsFile } from './headers';
 import { promptForLoginToken } from './login';
 import { cliTitle, createSpinner } from './output';
@@ -63,7 +64,7 @@ import {
   type FrameworkPreset,
 } from './preset';
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project';
-import { promptProjectSelection, promptProjectSlug } from './prompt';
+import { promptProjectSelection } from './prompt';
 import { getRequestedProjectSlug, resolveProjectBySlug, inferDefaultSlug } from './resolve-project';
 import type { AssetConfig, DeployEvent, HeaderRule, RedirectRule } from './types';
 import { readWranglerCompat } from './wrangler';
@@ -149,12 +150,10 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
             writeProjectConfig(root, config);
             log.step(`Linked to ${config.slug}`);
           } else {
-            const slug = await promptProjectSlug(inferDefaultSlug(root));
-            config = await createNewProject(root, client, slug);
+            config = await promptAndCreateProject(root, client);
           }
         } else {
-          const slug = await promptProjectSlug(inferDefaultSlug(root));
-          config = await createNewProject(root, client, slug);
+          config = await promptAndCreateProject(root, client);
         }
       }
 
