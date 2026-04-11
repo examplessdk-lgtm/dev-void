@@ -1,4 +1,13 @@
-import { mkdirSync, writeFileSync, rmSync, renameSync, copyFileSync, readdirSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  renameSync,
+  copyFileSync,
+  readdirSync,
+  readFileSync,
+} from 'node:fs';
 import { join, extname } from 'node:path';
 import { build } from 'vite';
 
@@ -9,6 +18,10 @@ export interface WrapperFeatures {
   crons: { name: string; filePath: string; crons: string[] }[];
   /** Queue consumer definitions (from scanQueuesSync). */
   queues: { name: string; filePath: string; bindingName: string }[];
+  /** Whether migrations are present (framework deploys need a /__void/migrate endpoint). */
+  hasMigrations?: boolean;
+  /** Database dialect for migration handler. */
+  migrationDialect?: 'sqlite' | 'postgresql';
 }
 
 export interface WrapperResult {
@@ -22,7 +35,7 @@ export interface WrapperResult {
  * Determine whether a wrapper is needed based on the features.
  */
 export function needsWrapper(features: WrapperFeatures): boolean {
-  return features.crons.length > 0 || features.queues.length > 0;
+  return features.crons.length > 0 || features.queues.length > 0 || !!features.hasMigrations;
 }
 
 /**
@@ -47,40 +60,66 @@ export async function generateWrapper(
   // Rename original entry
   renameSync(join(workerDir, workerMain), join(workerDir, renamedName));
 
-  // Compile cron/queue handlers (small focused build — user source is TypeScript)
-  const tmpDir = join(root, '.void', 'handlers');
-  mkdirSync(tmpDir, { recursive: true });
-  const handlersSource = generateHandlersSource(root, features);
-  const handlersEntry = join(tmpDir, 'handlers.ts');
-  writeFileSync(handlersEntry, handlersSource);
+  // Compile cron/queue handlers if needed (small focused build — user source is TypeScript)
+  let handlerFilename = '__void_handlers.mjs';
+  if (features.crons.length > 0 || features.queues.length > 0) {
+    const tmpDir = join(root, '.void', 'handlers');
+    mkdirSync(tmpDir, { recursive: true });
+    const handlersSource = generateHandlersSource(root, features);
+    const handlersEntry = join(tmpDir, 'handlers.ts');
+    writeFileSync(handlersEntry, handlersSource);
 
-  const outDir = join(tmpDir, 'out');
-  await build({
-    root: tmpDir,
-    logLevel: 'silent',
-    build: {
-      outDir,
-      emptyOutDir: true,
-      lib: {
-        entry: handlersEntry,
-        formats: ['es'],
-        fileName: '__void_handlers',
+    const outDir = join(tmpDir, 'out');
+    await build({
+      root: tmpDir,
+      logLevel: 'silent',
+      build: {
+        outDir,
+        emptyOutDir: true,
+        lib: {
+          entry: handlersEntry,
+          formats: ['es'],
+          fileName: '__void_handlers',
+        },
+        rollupOptions: {
+          external: [/^cloudflare:/, /^node:/],
+        },
+        minify: false,
+        target: 'esnext',
       },
-      rollupOptions: {
-        external: [/^cloudflare:/, /^node:/],
-      },
-      minify: false,
-      target: 'esnext',
-    },
-  });
+    });
 
-  // Find the actual output filename and copy to worker dir
-  const handlerFiles = readdirSync(outDir).filter((f) => f.startsWith('__void_handlers'));
-  const handlerFilename = handlerFiles[0] ?? '__void_handlers.mjs';
-  copyFileSync(join(outDir, handlerFilename), join(workerDir, handlerFilename));
+    // Find the actual output filename and copy to worker dir
+    const handlerFiles = readdirSync(outDir).filter((f) => f.startsWith('__void_handlers'));
+    handlerFilename = handlerFiles[0] ?? '__void_handlers.mjs';
+    copyFileSync(join(outDir, handlerFilename), join(workerDir, handlerFilename));
+  }
+
+  // Collect migrations and copy handler if needed
+  let migrations: { name: string; sql: string }[] | undefined;
+  if (features.hasMigrations) {
+    const { collectMigrations } = await import('../migrations/collect');
+    const migrationsDir = join(root, 'db', 'migrations');
+    migrations = collectMigrations(migrationsDir);
+    // Copy the migration handler runtime into the worker directory.
+    // Try dist/runtime/ relative to import.meta.dirname (works when bundled into dist/),
+    // then fall back to ../../dist/runtime/ (works from source src/cli/ in tests).
+    let handlerPath = join(import.meta.dirname, 'runtime', 'migration-handler.mjs');
+    if (!existsSync(handlerPath)) {
+      handlerPath = join(
+        import.meta.dirname,
+        '..',
+        '..',
+        'dist',
+        'runtime',
+        'migration-handler.mjs',
+      );
+    }
+    copyFileSync(handlerPath, join(workerDir, '__void_migration_handler.mjs'));
+  }
 
   // Write wrapper in place of original entry
-  const wrapperSource = generateWrapperSource(renamedName, handlerFilename, features);
+  const wrapperSource = generateWrapperSource(renamedName, handlerFilename, features, migrations);
   writeFileSync(join(workerDir, workerMain), wrapperSource);
 }
 
@@ -145,6 +184,7 @@ function generateWrapperSource(
   renamedEntry: string,
   handlersModule: string,
   features: WrapperFeatures,
+  migrations?: { name: string; sql: string }[],
 ): string {
   const lines: string[] = [];
 
@@ -156,35 +196,60 @@ function generateWrapperSource(
   if (features.queues.length > 0) {
     lines.push(`import { handleQueue } from "./${handlersModule}";`);
   }
+  if (migrations && migrations.length > 0) {
+    lines.push(`import { createMigrationHandler } from "./__void_migration_handler.mjs";`);
+    lines.push(`const __migrations = ${JSON.stringify(migrations)};`);
+    lines.push(
+      `const __migrationDialect = ${JSON.stringify(features.migrationDialect ?? 'sqlite')};`,
+    );
+  }
 
   lines.push('');
 
-  if (features.crons.length > 0) {
+  // Wrap fetch if any intercepted routes are needed
+  const needsFetchWrap = features.crons.length > 0 || (migrations && migrations.length > 0);
+
+  if (needsFetchWrap) {
     lines.push('async function wrappedFetch(request, env, ctx) {');
     lines.push('  const url = new URL(request.url);');
-    lines.push('  if (request.method === "POST" && url.pathname === "/__scheduled") {');
-    lines.push('    const __token = request.headers.get("x-void-internal");');
-    lines.push('    const __expected = env?.__VOID_PROXY_TOKEN || env?.CRON_SECRET;');
-    lines.push('    if (__expected && __token !== __expected) {');
-    lines.push("      return new Response(JSON.stringify({ error: 'unauthorized' }), {");
-    lines.push('        status: 401,');
-    lines.push('        headers: { "Content-Type": "application/json" },');
-    lines.push('      });');
-    lines.push('    }');
-    lines.push('    try {');
-    lines.push('      const { cron, scheduledTime } = await request.json();');
-    lines.push('      const controller = { cron, scheduledTime, noRetry() {} };');
-    lines.push('      await handleScheduled(controller, env, ctx);');
-    lines.push('      return new Response(JSON.stringify({ ok: true }), {');
-    lines.push('        headers: { "Content-Type": "application/json" },');
-    lines.push('      });');
-    lines.push('    } catch (err) {');
-    lines.push('      return new Response(JSON.stringify({ error: String(err) }), {');
-    lines.push('        status: 500,');
-    lines.push('        headers: { "Content-Type": "application/json" },');
-    lines.push('      });');
-    lines.push('    }');
-    lines.push('  }');
+
+    // Migration handler
+    if (migrations && migrations.length > 0) {
+      lines.push('  if (request.method === "POST" && url.pathname === "/__void/migrate") {');
+      lines.push(
+        '    const handler = createMigrationHandler(env, __migrations, __migrationDialect);',
+      );
+      lines.push('    return handler(request);');
+      lines.push('  }');
+    }
+
+    // Cron handler
+    if (features.crons.length > 0) {
+      lines.push('  if (request.method === "POST" && url.pathname === "/__scheduled") {');
+      lines.push('    const __token = request.headers.get("x-void-internal");');
+      lines.push('    const __expected = env?.__VOID_PROXY_TOKEN || env?.CRON_SECRET;');
+      lines.push('    if (__expected && __token !== __expected) {');
+      lines.push("      return new Response(JSON.stringify({ error: 'unauthorized' }), {");
+      lines.push('        status: 401,');
+      lines.push('        headers: { "Content-Type": "application/json" },');
+      lines.push('      });');
+      lines.push('    }');
+      lines.push('    try {');
+      lines.push('      const { cron, scheduledTime } = await request.json();');
+      lines.push('      const controller = { cron, scheduledTime, noRetry() {} };');
+      lines.push('      await handleScheduled(controller, env, ctx);');
+      lines.push('      return new Response(JSON.stringify({ ok: true }), {');
+      lines.push('        headers: { "Content-Type": "application/json" },');
+      lines.push('      });');
+      lines.push('    } catch (err) {');
+      lines.push('      return new Response(JSON.stringify({ error: String(err) }), {');
+      lines.push('        status: 500,');
+      lines.push('        headers: { "Content-Type": "application/json" },');
+      lines.push('      });');
+      lines.push('    }');
+      lines.push('  }');
+    }
+
     lines.push('  return original.fetch(request, env, ctx);');
     lines.push('}');
     lines.push('');
@@ -192,7 +257,7 @@ function generateWrapperSource(
 
   lines.push('export default {');
 
-  if (features.crons.length > 0) {
+  if (needsFetchWrap) {
     lines.push('  fetch: wrappedFetch,');
   } else {
     lines.push('  fetch: original.fetch,');

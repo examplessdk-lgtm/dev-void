@@ -509,6 +509,8 @@ async function runFrameworkDeploy(
     auth: null,
     crons: rawJobs,
     queues: rawQueues,
+    hasMigrations: validatedMigrations != null && validatedMigrations.length > 0,
+    migrationDialect: dialect,
   };
 
   let actualWorkerDir = workerDir;
