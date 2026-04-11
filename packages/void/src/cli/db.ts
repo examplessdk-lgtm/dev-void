@@ -3,7 +3,7 @@ import { extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { intro, outro, log } from '@clack/prompts';
 import { readConfig, getDatabaseDialect, type DatabaseDialect } from '../config';
-import { collectMigrations } from '../migrations/collect';
+import { collectMigrations, validateJournalCoherence } from '../migrations/collect';
 import { validateMigrations } from '../migrations/validate';
 import type { SeedFn } from '../runtime/seed';
 import { getToken } from './auth';
@@ -427,6 +427,13 @@ function printTable(rows: Record<string, unknown>[]): void {
 
 async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boolean): Promise<void> {
   const migrationsDir = join(root, 'db', 'migrations');
+  try {
+    validateJournalCoherence(migrationsDir);
+  } catch (err: any) {
+    log.error(err.message);
+    log.info('Fix the orphan files, then rerun `void db migrate`.');
+    process.exit(1);
+  }
   const rawMigrations = collectMigrations(migrationsDir);
 
   if (remote) {

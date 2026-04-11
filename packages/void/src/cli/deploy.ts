@@ -29,7 +29,7 @@ import { scanJobsSync } from '../crons/scan';
 import { writeDrizzleConfig } from '../drizzle/config';
 import { discoverSchema } from '../drizzle/discover';
 import { voidWarn } from '../log';
-import { collectMigrations } from '../migrations/collect';
+import { collectMigrations, validateJournalCoherence } from '../migrations/collect';
 import { validateMigrations } from '../migrations/validate';
 import { scanPages } from '../pages/scan';
 import {
@@ -460,6 +460,13 @@ async function runFrameworkDeploy(
 
   // 4. Collect migrations (before Hyperdrive check so migrations can gate provisioning)
   const migrationsDir = join(root, 'db', 'migrations');
+  try {
+    validateJournalCoherence(migrationsDir);
+  } catch (err: any) {
+    log.error(err.message);
+    log.info('Fix the orphan files, then rerun `void deploy`.');
+    process.exit(1);
+  }
   const rawMigrations = collectMigrations(migrationsDir);
   let validatedMigrations;
   if (rawMigrations.length > 0) {
@@ -729,6 +736,13 @@ async function runFullDeploy(
 
   // 7. Collect and validate migrations (before Hyperdrive check so migrations can gate provisioning)
   const migrationsDir = join(root, 'db', 'migrations');
+  try {
+    validateJournalCoherence(migrationsDir);
+  } catch (err: any) {
+    log.error(err.message);
+    log.info('Fix the orphan files, then rerun `void deploy`.');
+    process.exit(1);
+  }
   const rawMigrations = collectMigrations(migrationsDir);
   let validatedMigrations;
   if (rawMigrations.length > 0) {
