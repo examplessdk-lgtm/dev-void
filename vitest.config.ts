@@ -4,6 +4,7 @@ import { defineConfig } from 'vitest/config';
 const maxWorkers = process.env.CI ? 2 : Math.max(2, Math.floor(availableParallelism() * 0.75));
 
 const metaframeworks = [
+  'packages/void/test/integration/analog.test.ts',
   'packages/void/test/integration/astro.test.ts',
   'packages/void/test/integration/nuxt.test.ts',
   'packages/void/test/integration/sveltekit.test.ts',
