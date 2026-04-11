@@ -65,7 +65,7 @@ import {
 } from './preset';
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project';
 import { promptProjectSelection } from './prompt';
-import { getRequestedProjectSlug, resolveProjectBySlug, inferDefaultSlug } from './resolve-project';
+import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project';
 import type { AssetConfig, DeployEvent, HeaderRule, RedirectRule } from './types';
 import { readWranglerCompat } from './wrangler';
 import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper';
@@ -114,7 +114,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
         if (!config) {
           if (!process.stdin.isTTY) {
             // CI: auto-create when --project is explicitly specified
-            config = await createNewProject(root, client, requestedProjectSlug);
+            config = await createProjectFromSlug(root, client, requestedProjectSlug);
           } else {
             const shouldCreate = await confirm({
               message: `Project "${requestedProjectSlug}" does not exist. Create it?`,
@@ -124,7 +124,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
               process.exit(0);
             }
 
-            config = await createNewProject(root, client, requestedProjectSlug);
+            config = await createProjectFromSlug(root, client, requestedProjectSlug);
           }
         }
       } else {
@@ -971,15 +971,13 @@ async function runFullDeploy(
   outro('Done!');
 }
 
-async function createNewProject(
+async function createProjectFromSlug(
   root: string,
   client: PlatformClient,
-  slug?: string,
+  slug: string,
 ): Promise<ProjectConfig> {
-  const projectSlug = slug ?? inferDefaultSlug(root);
-
-  log.step(`Creating project "${projectSlug}"...`);
-  const project = await client.createProject(projectSlug);
+  log.step(`Creating project "${slug}"...`);
+  const project = await client.createProject(slug);
   const config = { projectId: project.id, slug: project.slug };
   writeProjectConfig(root, config);
   log.success(`Project created: ${config.slug}`);
