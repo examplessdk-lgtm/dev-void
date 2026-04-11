@@ -90,9 +90,15 @@ describe('playground/static-pages build (output: static)', () => {
         '/posts/world',
         '/tags/vue',
         '/tags/vite',
+        '/docs/getting-started',
+        '/docs/guides/sidebar-nesting',
       ]),
     );
     expect(paths).not.toContain('/items/:id');
+    // Catch-all paths must not contain the raw pattern suffix
+    for (const p of paths) {
+      expect(p).not.toContain('{.+}');
+    }
   });
 
   it('prerenders dynamic pages with getPrerenderPaths using virtual modules', () => {
@@ -104,6 +110,22 @@ describe('playground/static-pages build (output: static)', () => {
     const html = readFileSync(vuePath, 'utf-8');
     expect(html).toContain('data-testid="tag-title"');
     expect(html).toContain('Tag vue');
+  });
+
+  it('prerenders catch-all pages with getPrerenderPaths', () => {
+    // docs/[...slug] exports getPrerenderPaths returning single and multi-segment slugs
+    const gettingStartedPath = join(DIST, 'client/docs/getting-started.html');
+    const sidebarNestingPath = join(DIST, 'client/docs/guides/sidebar-nesting.html');
+    expect(existsSync(gettingStartedPath)).toBe(true);
+    expect(existsSync(sidebarNestingPath)).toBe(true);
+
+    const html = readFileSync(gettingStartedPath, 'utf-8');
+    expect(html).toContain('data-testid="doc-title"');
+    expect(html).toContain('Doc getting-started');
+
+    // Filenames must not contain the raw catch-all pattern suffix
+    expect(existsSync(join(DIST, 'client/docs/getting-started{.+}.html'))).toBe(false);
+    expect(existsSync(join(DIST, 'client/docs/guides/sidebar-nesting{.+}.html'))).toBe(false);
   });
 
   it('does not prerender dynamic pages without getPrerenderPaths', () => {
