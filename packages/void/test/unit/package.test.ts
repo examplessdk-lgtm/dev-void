@@ -21,11 +21,11 @@ afterEach(() => {
 });
 
 describe('packageStaticBuild', () => {
-  it('includes all assets in form data', () => {
+  it('includes all assets in form data', async () => {
     writeFileSync(join(TMP, 'a.html'), 'a');
     writeFileSync(join(TMP, 'b.js'), 'b');
 
-    const form = packageStaticBuild(TMP, 'spa');
+    const form = await packageStaticBuild(TMP, 'spa');
 
     const assetKeys: string[] = [];
     for (const [key] of form.entries()) {
@@ -37,20 +37,20 @@ describe('packageStaticBuild', () => {
     expect(assetKeys.sort()).toEqual(['a.html', 'b.js']);
   });
 
-  it('sets version 2 in manifest', () => {
+  it('sets version 2 in manifest', async () => {
     writeFileSync(join(TMP, 'index.html'), 'x');
 
-    const form = packageStaticBuild(TMP, 'spa');
+    const form = await packageStaticBuild(TMP, 'spa');
 
     const manifestRaw = form.get('manifest') as string;
     const manifest = JSON.parse(manifestRaw);
     expect(manifest.version).toBe(3);
   });
 
-  it('sets assetConfig for SPA mode', () => {
+  it('sets assetConfig for SPA mode', async () => {
     writeFileSync(join(TMP, 'index.html'), 'x');
 
-    const form = packageStaticBuild(TMP, 'spa');
+    const form = await packageStaticBuild(TMP, 'spa');
 
     const manifestRaw = form.get('manifest') as string;
     const manifest = JSON.parse(manifestRaw);
@@ -59,10 +59,10 @@ describe('packageStaticBuild', () => {
     });
   });
 
-  it('sets assetConfig for static mode', () => {
+  it('sets assetConfig for static mode', async () => {
     writeFileSync(join(TMP, 'index.html'), 'x');
 
-    const form = packageStaticBuild(TMP, 'static');
+    const form = await packageStaticBuild(TMP, 'static');
 
     const manifestRaw = form.get('manifest') as string;
     const manifest = JSON.parse(manifestRaw);
@@ -73,7 +73,7 @@ describe('packageStaticBuild', () => {
 });
 
 describe('packageBuild', () => {
-  it('excludes .vite/ directory from worker files', () => {
+  it('excludes .vite/ directory from worker files', async () => {
     // Set up dist/worker/ with worker files and .vite/manifest.json
     const workerDir = join(TMP, 'worker');
     mkdirSync(join(workerDir, '.vite'), { recursive: true });
@@ -82,7 +82,7 @@ describe('packageBuild', () => {
     writeFileSync(join(workerDir, 'assets', 'chunk.js'), 'var x = 1');
     writeFileSync(join(workerDir, '.vite', 'manifest.json'), '{"key":"value"}');
 
-    const form = packageBuild(TMP, 'worker', {
+    const form = await packageBuild(TMP, 'worker', {
       needsD1: false,
       needsKV: false,
       needsR2: false,
@@ -102,12 +102,12 @@ describe('packageBuild', () => {
     expect(workerKeys).not.toContain('.vite/manifest.json');
   });
 
-  it('sets version 2 in manifest', () => {
+  it('sets version 2 in manifest', async () => {
     const workerDir = join(TMP, 'worker');
     mkdirSync(workerDir, { recursive: true });
     writeFileSync(join(workerDir, 'index.js'), 'export default {}');
 
-    const form = packageBuild(TMP, 'worker', {
+    const form = await packageBuild(TMP, 'worker', {
       needsD1: false,
       needsKV: false,
       needsR2: false,
@@ -121,12 +121,12 @@ describe('packageBuild', () => {
     expect(manifest.version).toBe(3);
   });
 
-  it('marks auth-enabled deploys in the manifest', () => {
+  it('marks auth-enabled deploys in the manifest', async () => {
     const workerDir = join(TMP, 'worker');
     mkdirSync(workerDir, { recursive: true });
     writeFileSync(join(workerDir, 'index.js'), 'export default {}');
 
-    const form = packageBuild(TMP, 'worker', {
+    const form = await packageBuild(TMP, 'worker', {
       needsD1: false,
       needsKV: false,
       needsR2: false,
@@ -212,12 +212,12 @@ describe('computeAssetHash', () => {
 });
 
 describe('collectAndHashAssets', () => {
-  it('collects files with hashes and sizes', () => {
+  it('collects files with hashes and sizes', async () => {
     mkdirSync(join(TMP, 'assets'), { recursive: true });
     writeFileSync(join(TMP, 'index.html'), '<html>hello</html>');
     writeFileSync(join(TMP, 'assets', 'app.js'), "console.log('hi')");
 
-    const { assetManifest, assetFiles } = collectAndHashAssets(TMP);
+    const { assetManifest, assetFiles } = await collectAndHashAssets(TMP);
 
     expect(Object.keys(assetManifest).sort()).toEqual(['/assets/app.js', '/index.html']);
     expect(assetManifest['/index.html'].hash).toHaveLength(32);
@@ -225,46 +225,46 @@ describe('collectAndHashAssets', () => {
     expect(assetFiles.size).toBe(2);
   });
 
-  it('returns empty manifest for missing directory', () => {
-    const { assetManifest, assetFiles } = collectAndHashAssets(join(TMP, 'nonexistent'));
+  it('returns empty manifest for missing directory', async () => {
+    const { assetManifest, assetFiles } = await collectAndHashAssets(join(TMP, 'nonexistent'));
 
     expect(Object.keys(assetManifest)).toHaveLength(0);
     expect(assetFiles.size).toBe(0);
   });
 
-  it('excludes _headers, _redirects, and .assetsignore from manifest', () => {
+  it('excludes _headers, _redirects, and .assetsignore from manifest', async () => {
     writeFileSync(join(TMP, 'index.html'), '<html></html>');
     writeFileSync(join(TMP, '_headers'), '/* X-Frame-Options: DENY');
     writeFileSync(join(TMP, '_redirects'), '/old /new 301');
     writeFileSync(join(TMP, '.assetsignore'), '');
 
-    const { assetManifest, assetFiles } = collectAndHashAssets(TMP);
+    const { assetManifest, assetFiles } = await collectAndHashAssets(TMP);
 
     expect(Object.keys(assetManifest)).toEqual(['/index.html']);
     expect(assetFiles.size).toBe(1);
   });
 
-  it('honors custom .assetsignore patterns', () => {
+  it('honors custom .assetsignore patterns', async () => {
     mkdirSync(join(TMP, 'secret'), { recursive: true });
     writeFileSync(join(TMP, 'index.html'), '<html></html>');
     writeFileSync(join(TMP, 'draft.txt'), 'draft');
     writeFileSync(join(TMP, 'secret', 'key.pem'), 'secret');
     writeFileSync(join(TMP, '.assetsignore'), '*.txt\nsecret/');
 
-    const { assetManifest } = collectAndHashAssets(TMP);
+    const { assetManifest } = await collectAndHashAssets(TMP);
 
     expect(Object.keys(assetManifest)).toEqual(['/index.html']);
   });
 });
 
 describe('packageStaticBuild with neededAssets', () => {
-  it('only includes needed assets when set is provided', () => {
+  it('only includes needed assets when set is provided', async () => {
     writeFileSync(join(TMP, 'a.html'), 'a');
     writeFileSync(join(TMP, 'b.js'), 'b');
     writeFileSync(join(TMP, 'c.css'), 'c');
 
     const needed = new Set(['/a.html', '/c.css']);
-    const form = packageStaticBuild(TMP, 'spa', needed);
+    const form = await packageStaticBuild(TMP, 'spa', needed);
 
     const assetKeys: string[] = [];
     for (const [key] of form.entries()) {
@@ -277,11 +277,11 @@ describe('packageStaticBuild with neededAssets', () => {
     expect(form.get('preflight')).toBe('true');
   });
 
-  it('includes all assets when neededAssets is null', () => {
+  it('includes all assets when neededAssets is null', async () => {
     writeFileSync(join(TMP, 'a.html'), 'a');
     writeFileSync(join(TMP, 'b.js'), 'b');
 
-    const form = packageStaticBuild(TMP, 'spa', null);
+    const form = await packageStaticBuild(TMP, 'spa', null);
 
     const assetKeys: string[] = [];
     for (const [key] of form.entries()) {
@@ -296,13 +296,13 @@ describe('packageStaticBuild with neededAssets', () => {
 });
 
 describe('packageStaticBuild asset exclusion', () => {
-  it('excludes _headers and _redirects from packaged assets', () => {
+  it('excludes _headers and _redirects from packaged assets', async () => {
     writeFileSync(join(TMP, 'index.html'), '<html></html>');
     writeFileSync(join(TMP, 'app.js'), 'console.log()');
     writeFileSync(join(TMP, '_headers'), '/* X-Test: 1');
     writeFileSync(join(TMP, '_redirects'), '/old /new 301');
 
-    const form = packageStaticBuild(TMP, 'static');
+    const form = await packageStaticBuild(TMP, 'static');
 
     const assetKeys: string[] = [];
     for (const [key] of form.entries()) {
@@ -316,32 +316,32 @@ describe('packageStaticBuild asset exclusion', () => {
 });
 
 describe('_worker.js safety guard', () => {
-  it('throws when _worker.js file exists without .assetsignore', () => {
+  it('throws when _worker.js file exists without .assetsignore', async () => {
     writeFileSync(join(TMP, 'index.html'), '<html></html>');
     writeFileSync(join(TMP, '_worker.js'), 'export default {}');
 
-    expect(() => packageStaticBuild(TMP, 'static')).toThrow(
+    await expect(packageStaticBuild(TMP, 'static')).rejects.toThrow(
       'Uploading _worker.js file as an asset',
     );
   });
 
-  it('throws when _worker.js directory exists without .assetsignore', () => {
+  it('throws when _worker.js directory exists without .assetsignore', async () => {
     mkdirSync(join(TMP, '_worker.js'), { recursive: true });
     writeFileSync(join(TMP, 'index.html'), '<html></html>');
     writeFileSync(join(TMP, '_worker.js', 'index.js'), 'export default {}');
 
-    expect(() => packageStaticBuild(TMP, 'static')).toThrow(
+    await expect(packageStaticBuild(TMP, 'static')).rejects.toThrow(
       'Uploading _worker.js directory as an asset',
     );
   });
 
-  it('allows _worker.js when .assetsignore exists (even if empty)', () => {
+  it('allows _worker.js when .assetsignore exists (even if empty)', async () => {
     writeFileSync(join(TMP, 'index.html'), '<html></html>');
     writeFileSync(join(TMP, '_worker.js'), 'export default {}');
     writeFileSync(join(TMP, '.assetsignore'), '');
 
     // Does not throw — .assetsignore presence means the user is aware
-    const form = packageStaticBuild(TMP, 'static');
+    const form = await packageStaticBuild(TMP, 'static');
     const assetKeys: string[] = [];
     for (const [key] of form.entries()) {
       if (key.startsWith('asset:')) {
@@ -352,12 +352,12 @@ describe('_worker.js safety guard', () => {
     expect(assetKeys).toContain('_worker.js');
   });
 
-  it('excludes _worker.js when .assetsignore lists it', () => {
+  it('excludes _worker.js when .assetsignore lists it', async () => {
     writeFileSync(join(TMP, 'index.html'), '<html></html>');
     writeFileSync(join(TMP, '_worker.js'), 'export default {}');
     writeFileSync(join(TMP, '.assetsignore'), '_worker.js');
 
-    const form = packageStaticBuild(TMP, 'static');
+    const form = await packageStaticBuild(TMP, 'static');
     const assetKeys: string[] = [];
     for (const [key] of form.entries()) {
       if (key.startsWith('asset:')) {
@@ -368,14 +368,16 @@ describe('_worker.js safety guard', () => {
     expect(assetKeys).toContain('index.html');
   });
 
-  it('guards collectAndHashAssets against _worker.js too', () => {
+  it('guards collectAndHashAssets against _worker.js too', async () => {
     writeFileSync(join(TMP, 'index.html'), '<html></html>');
     writeFileSync(join(TMP, '_worker.js'), 'export default {}');
 
-    expect(() => collectAndHashAssets(TMP)).toThrow('Uploading _worker.js file as an asset');
+    await expect(collectAndHashAssets(TMP)).rejects.toThrow(
+      'Uploading _worker.js file as an asset',
+    );
   });
 
-  it('guards packageBuild client assets against _worker.js', () => {
+  it('guards packageBuild client assets against _worker.js', async () => {
     // Set up worker dir so packageBuild doesn't fail
     const workerDir = join(TMP, 'worker');
     mkdirSync(workerDir, { recursive: true });
@@ -386,7 +388,7 @@ describe('_worker.js safety guard', () => {
     writeFileSync(join(clientDir, 'index.html'), '<html></html>');
     writeFileSync(join(clientDir, '_worker.js'), 'export default {}');
 
-    expect(() =>
+    await expect(
       packageBuild(TMP, 'worker', {
         needsD1: false,
         needsKV: false,
@@ -395,10 +397,10 @@ describe('_worker.js safety guard', () => {
         needsQueues: false,
         needsAI: false,
       }),
-    ).toThrow('Uploading _worker.js file as an asset');
+    ).rejects.toThrow('Uploading _worker.js file as an asset');
   });
 
-  it('guards packageFrameworkBuild assets against _worker.js', () => {
+  it('guards packageFrameworkBuild assets against _worker.js', async () => {
     const workerDir = join(TMP, 'server');
     const assetsDir = join(TMP, 'public');
     mkdirSync(workerDir, { recursive: true });
@@ -407,7 +409,7 @@ describe('_worker.js safety guard', () => {
     writeFileSync(join(assetsDir, 'index.html'), '<html></html>');
     writeFileSync(join(assetsDir, '_worker.js'), 'export default {}');
 
-    expect(() =>
+    await expect(
       packageFrameworkBuild({
         frameworkName: 'test',
         workerDir,
@@ -422,6 +424,6 @@ describe('_worker.js safety guard', () => {
           needsAI: false,
         },
       }),
-    ).toThrow('Uploading _worker.js file as an asset');
+    ).rejects.toThrow('Uploading _worker.js file as an asset');
   });
 });

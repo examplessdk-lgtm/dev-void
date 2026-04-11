@@ -355,7 +355,7 @@ async function runStaticDeploy(
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
-  const { assetManifest } = collectAndHashAssets(preset.outputDir);
+  const { assetManifest } = await collectAndHashAssets(preset.outputDir, (msg) => s.message(msg));
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest);
   s.stop('Checked for changes');
 
@@ -365,13 +365,14 @@ async function runStaticDeploy(
 
   s.start('Packaging...');
   const neededSet = skipped > 0 ? new Set(needed) : null;
-  const formData = packageStaticBuild(
+  const formData = await packageStaticBuild(
     preset.outputDir,
     preset.appType,
     neededSet,
     hashedAssetsPrefix ?? 'assets',
     headerRules,
     redirectRules,
+    (msg) => s.message(msg),
   );
   if (neededSet) {
     formData.append('assetManifest', JSON.stringify(assetManifest));
@@ -562,7 +563,7 @@ async function runFrameworkDeploy(
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
-  const { assetManifest } = collectAndHashAssets(assetsDir);
+  const { assetManifest } = await collectAndHashAssets(assetsDir, (msg) => s.message(msg));
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
   s.stop('Checked for changes');
 
@@ -572,7 +573,7 @@ async function runFrameworkDeploy(
 
   s.start('Packaging...');
   const neededSet = skipped > 0 ? new Set(needed) : null;
-  const formData = packageFrameworkBuild({
+  const formData = await packageFrameworkBuild({
     frameworkName: detected.name,
     workerDir: actualWorkerDir,
     workerMain: actualWorkerMain,
@@ -596,6 +597,7 @@ async function runFrameworkDeploy(
     headerRules,
     redirectRules,
     dialect,
+    onProgress: (msg) => s.message(msg),
   });
   if (neededSet) {
     formData.append('assetManifest', JSON.stringify(assetManifest));
@@ -892,7 +894,7 @@ async function runFullDeploy(
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
-  const { assetManifest } = collectAndHashAssets(clientDir);
+  const { assetManifest } = await collectAndHashAssets(clientDir, (msg) => s.message(msg));
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
   s.stop('Checked for changes');
 
@@ -902,7 +904,7 @@ async function runFullDeploy(
 
   s.start('Packaging...');
   const neededSet = skipped > 0 ? new Set(needed) : null;
-  const formData = packageBuild(
+  const formData = await packageBuild(
     distDir,
     workerDirName,
     effectiveBindings,
@@ -925,6 +927,7 @@ async function runFullDeploy(
     redirectRules,
     dialect,
     webSockets,
+    (msg) => s.message(msg),
   );
   if (neededSet) {
     formData.append('assetManifest', JSON.stringify(assetManifest));
