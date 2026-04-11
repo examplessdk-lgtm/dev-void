@@ -26,7 +26,7 @@ describe('FRAMEWORK_PRESETS', () => {
     expect(preset.buildCommand).toBe('vite build');
     expect(preset.workerDir).toBe('dist/analog/server');
     expect(preset.workerMain).toBe('index.mjs');
-    expect(preset.assetsDir).toBe('dist/client');
+    expect(preset.assetsDir).toBe('dist/analog/public');
   });
 
   it('has preset for astro', () => {

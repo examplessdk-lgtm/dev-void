@@ -116,7 +116,7 @@ export const FRAMEWORK_PRESETS: Record<string, FrameworkPreset> = {
     buildCommand: 'vite build',
     workerDir: 'dist/analog/server',
     workerMain: 'index.mjs',
-    assetsDir: 'dist/client',
+    assetsDir: 'dist/analog/public',
     hashedAssetsPrefix: 'assets',
   },
   astro: {

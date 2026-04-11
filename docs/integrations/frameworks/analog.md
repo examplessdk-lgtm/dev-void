@@ -65,7 +65,7 @@ export default defineConfig({
 }
 ```
 
-`nodejs_als` is required for `void/*` runtime helpers (e.g. `void/db`, `void/kv`) in Analog.
+`nodejs_compat` is required for Nitro's Cloudflare runtime. `nodejs_als` is required for `void/*` runtime helpers (e.g. `void/db`, `void/kv`).
 
 ### 5. Deploy
 
