@@ -106,6 +106,10 @@ describe('playground/ssr build + preview', () => {
       {
         cwd: ROOT,
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          VOID_INSPECTOR_PORT: 'false',
+        },
       },
     );
 
