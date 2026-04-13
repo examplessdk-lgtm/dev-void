@@ -66,7 +66,7 @@ import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './pro
 import { promptProjectSelection, promptProjectSlug } from './prompt';
 import { getRequestedProjectSlug, resolveProjectBySlug, inferDefaultSlug } from './resolve-project';
 import type { AssetConfig, DeployEvent, HeaderRule, RedirectRule } from './types';
-import { readWranglerCompat } from './wrangler';
+import { readWranglerCompat, type WranglerCompat } from './wrangler';
 import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper';
 import type { WrapperFeatures } from './wrapper';
 
@@ -75,6 +75,14 @@ export interface RunDeployOptions {
   dir?: string;
   spa?: boolean;
   skipBuild?: boolean;
+}
+
+export function resolveDeployWranglerCompat(
+  root: string,
+  config: VoidConfig,
+  buildOutputDir: string,
+): WranglerCompat | undefined {
+  return isNodeTarget(config.target) ? undefined : readWranglerCompat(root, config, buildOutputDir);
 }
 
 /**
@@ -530,7 +538,7 @@ async function runFrameworkDeploy(
     log.info('Wrapper generated');
   }
 
-  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > build output > default)
+  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > build output)
   // Use the original workerDir (not actualWorkerDir) because bundleEntry() may
   // reassign actualWorkerDir to a temporary output — the plugin-generated
   // wrangler.json with correct compat settings lives in the original build output.
@@ -875,8 +883,12 @@ async function runFullDeploy(
             projectId: config.projectId,
           });
 
-  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > build output > default)
-  const wranglerCompat = readWranglerCompat(root, deployConfig, join(distDir, workerDirName));
+  // 8. Read wrangler compat settings for Cloudflare targets
+  const wranglerCompat = resolveDeployWranglerCompat(
+    root,
+    deployConfig,
+    join(distDir, workerDirName),
+  );
 
   // 9. Load .env vars for production (excludes .local files)
   const envVars = loadDeployEnv(root);
@@ -916,8 +928,8 @@ async function runFullDeploy(
     uniquePrerenderPaths,
     assetConfig,
     {
-      compatibilityDate: wranglerCompat.compatibilityDate,
-      compatibilityFlags: wranglerCompat.compatibilityFlags,
+      compatibilityDate: wranglerCompat?.compatibilityDate,
+      compatibilityFlags: wranglerCompat?.compatibilityFlags,
     },
     neededSet,
     assetsPrefix,

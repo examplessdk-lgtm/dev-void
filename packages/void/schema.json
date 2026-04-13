@@ -253,7 +253,7 @@
     },
     "worker": {
       "type": "object",
-      "description": "Curated wrangler config passthrough. Binding arrays (d1_databases, kv_namespaces, r2_buckets) are not allowed here — bindings are fully managed by void.",
+      "description": "Curated wrangler config passthrough. Cloudflare-targeted apps require compatibility_date here unless provided by wrangler.jsonc/wrangler.json; Void pins the latest known-good date here if none is configured. Binding arrays (d1_databases, kv_namespaces, r2_buckets) are not allowed here — bindings are fully managed by void.",
       "properties": {
         "compatibility_date": {
           "type": "string",
