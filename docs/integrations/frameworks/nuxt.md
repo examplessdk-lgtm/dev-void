@@ -52,7 +52,7 @@ By default, Nuxt Cloudflare dev runtime and `voidPlugin()` migrations share Wran
 {
   "name": "my-app",
   "compatibility_date": "2026-02-24",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "nodejs_als"],
 }
 ```
 

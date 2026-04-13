@@ -8,29 +8,46 @@ outline: deep
 
 Void is currently in private preview. Keep imports in your app on `void` and `@void/*`. In the preview, only the installed package identities change.
 
-1. Add this project `.npmrc` file:
+1. Add the GitHub Packages registry mapping to your project's `.npmrc`:
 
-```ini
-@void-sdk:registry=https://npm.pkg.github.com
+```sh
+echo "@void-sdk:registry=https://npm.pkg.github.com" >> .npmrc
 ```
 
 2. Create a GitHub classic PAT with `read:packages`:
 
-- Create token: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic
-- Packages permissions: https://docs.github.com/en/packages/learn-github-packages/about-permissions-for-github-packages
+- Visit https://github.com/settings/tokens/new
+- Enable `read:packages`
+- Click "Generate Token"
+
+See also [token creation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic) and [packages permissions](https://docs.github.com/en/packages/learn-github-packages/about-permissions-for-github-packages) for details.
 
 3. Add the token to your user `~/.npmrc` so it stays out of source control:
 
-```ini
-//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
+```sh
+echo "//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT" >> ~/.npmrc
 ```
 
-4. Install the Void CLI from GitHub Packages using a package alias:
+4. For CI, configure `NODE_AUTH_TOKEN` with your PAT under GitHub repo settings "Secrets and variables" > "Actions":
+
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version: lts/*
+    cache: pnpm
+    registry-url: https://npm.pkg.github.com
+    scope: '@void-sdk'
+- run: pnpm install
+  env:
+    NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+```
+
+5. Install the Void CLI from GitHub Packages using a package alias:
 
 `npm`
 
 ```sh
-npm install -D void@npm:@void-sdk/void
+npm install -D void@npm:@void-sdk/void --legacy-peer-deps
 ```
 
 `pnpm`
@@ -50,6 +67,10 @@ yarn add -D void@npm:@void-sdk/void
 ```sh
 bun add -D void@npm:@void-sdk/void
 ```
+
+::: warning npm package aliases
+npm has a known issue resolving peer dependencies with package aliases. Use `--legacy-peer-deps` for npm installs during the private preview.
+:::
 
 Your `package.json` will then contain an alias like:
 
@@ -125,7 +146,7 @@ Void is currently in private preview, so use the alias install shown above inste
 ::: code-group
 
 ```sh [npm]
-npm install -D void@npm:@void-sdk/void
+npm install -D void@npm:@void-sdk/void --legacy-peer-deps
 ```
 
 ```sh [pnpm]

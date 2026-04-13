@@ -40,7 +40,7 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "svelte": "^5.55.0",
+    "svelte": "^5.55.3",
     "tsdown": "catalog:",
     "vite": "catalog:",
     "void": "workspace:@void-sdk/void@*"

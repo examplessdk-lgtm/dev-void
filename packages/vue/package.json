@@ -43,7 +43,7 @@
     "tsdown": "catalog:",
     "vite": "catalog:",
     "void": "workspace:@void-sdk/void@*",
-    "vue": "^3.5.31"
+    "vue": "^3.5.32"
   },
   "peerDependencies": {
     "vite": "catalog:",

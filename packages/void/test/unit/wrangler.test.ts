@@ -3,10 +3,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  ensureWranglerCompatibilityDate,
   ensureWranglerNodejsAlsFlag,
+  LATEST_KNOWN_COMPAT_DATE,
   readWranglerCompat,
   syncWranglerBindings,
-  DEFAULT_COMPAT_DATE,
 } from '../../src/cli/wrangler';
 import type { VoidConfig } from '../../src/config';
 import type { InferredBindings } from '../../src/inference/walk';
@@ -24,11 +25,14 @@ afterEach(() => {
 });
 
 describe('readWranglerCompat', () => {
-  it('returns default date when no wrangler config exists', () => {
+  it('pins the latest known-good compatibility date in void.json when none exists', () => {
     rmSync(tmpDir, { recursive: true, force: true });
     mkdirSync(tmpDir, { recursive: true });
     expect(readWranglerCompat(tmpDir)).toEqual({
-      compatibilityDate: DEFAULT_COMPAT_DATE,
+      compatibilityDate: LATEST_KNOWN_COMPAT_DATE,
+    });
+    expect(JSON.parse(readFileSync(join(tmpDir, 'void.json'), 'utf-8'))).toEqual({
+      worker: { compatibility_date: LATEST_KNOWN_COMPAT_DATE },
     });
   });
 
@@ -76,10 +80,13 @@ describe('readWranglerCompat', () => {
     });
   });
 
-  it('falls back to default date when fields are missing from wrangler config', () => {
+  it('pins void.json when fields are missing from wrangler config', () => {
     setup('wrangler.json', '{ "name": "test" }');
     expect(readWranglerCompat(tmpDir)).toEqual({
-      compatibilityDate: DEFAULT_COMPAT_DATE,
+      compatibilityDate: LATEST_KNOWN_COMPAT_DATE,
+    });
+    expect(JSON.parse(readFileSync(join(tmpDir, 'void.json'), 'utf-8'))).toEqual({
+      worker: { compatibility_date: LATEST_KNOWN_COMPAT_DATE },
     });
   });
 
@@ -223,12 +230,57 @@ describe('readWranglerCompat', () => {
     });
   });
 
-  it('ignores missing build output directory gracefully', () => {
+  it('pins void.json when the build output fallback is missing too', () => {
     rmSync(tmpDir, { recursive: true, force: true });
     mkdirSync(tmpDir, { recursive: true });
     expect(readWranglerCompat(tmpDir, undefined, join(tmpDir, 'nonexistent'))).toEqual({
-      compatibilityDate: DEFAULT_COMPAT_DATE,
+      compatibilityDate: LATEST_KNOWN_COMPAT_DATE,
     });
+  });
+
+  it('preserves existing void.json fields when pinning compatibility_date', () => {
+    setup(
+      'void.json',
+      JSON.stringify({
+        $schema: './node_modules/void/schema.json',
+        database: 'pg',
+        worker: { compatibility_flags: ['nodejs_compat'] },
+      }),
+    );
+    expect(readWranglerCompat(tmpDir)).toEqual({
+      compatibilityDate: LATEST_KNOWN_COMPAT_DATE,
+      compatibilityFlags: ['nodejs_compat'],
+    });
+    expect(JSON.parse(readFileSync(join(tmpDir, 'void.json'), 'utf-8'))).toEqual({
+      $schema: './node_modules/void/schema.json',
+      database: 'pg',
+      worker: {
+        compatibility_flags: ['nodejs_compat'],
+        compatibility_date: LATEST_KNOWN_COMPAT_DATE,
+      },
+    });
+  });
+});
+
+describe('ensureWranglerCompatibilityDate', () => {
+  it('creates wrangler.jsonc with compatibility_date when no wrangler config exists', () => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    mkdirSync(tmpDir, { recursive: true });
+    expect(ensureWranglerCompatibilityDate(tmpDir, '2026-02-24')).toBe(true);
+    const created = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(created.compatibility_date).toBe('2026-02-24');
+  });
+
+  it('updates existing wrangler config compatibility_date', () => {
+    setup('wrangler.jsonc', '{ "name": "test" }');
+    expect(ensureWranglerCompatibilityDate(tmpDir, '2026-02-24')).toBe(true);
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.compatibility_date).toBe('2026-02-24');
+  });
+
+  it('returns false when compatibility_date already matches', () => {
+    setup('wrangler.jsonc', '{ "compatibility_date": "2026-02-24" }');
+    expect(ensureWranglerCompatibilityDate(tmpDir, '2026-02-24')).toBe(false);
   });
 });
 

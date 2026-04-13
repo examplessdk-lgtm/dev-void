@@ -18,6 +18,31 @@ import type {
 
 const textEncoder = new TextEncoder();
 
+type ProgressCallback = (message: string) => void;
+
+const PROGRESS_CHUNK = 50;
+
+/**
+ * Yield to the event loop every PROGRESS_CHUNK iterations so spinner ticks
+ * can repaint, and emit a progress message via onProgress. Otherwise the
+ * tight sync loop blocks the spinner interval and the user sees no updates.
+ */
+async function tickProgress(
+  i: number,
+  total: number,
+  onProgress: ProgressCallback | undefined,
+  label: string,
+): Promise<void> {
+  if (!onProgress) {
+    return;
+  }
+  if (i % PROGRESS_CHUNK !== 0 && i !== total) {
+    return;
+  }
+  onProgress(`${label} (${i}/${total})`);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 /**
  * Compute a CF-compatible asset hash: BLAKE3 of base64(content) + extension,
  * first 32 hex chars. Matches Wrangler's hashFile algorithm exactly.
@@ -87,17 +112,23 @@ export interface AssetManifestEntry {
  * Collect all files in a directory, compute hashes, and return both the
  * manifest (for preflight) and the raw file map (for selective packaging).
  */
-export function collectAndHashAssets(dir: string): {
+export async function collectAndHashAssets(
+  dir: string,
+  onProgress?: ProgressCallback,
+): Promise<{
   assetManifest: Record<string, AssetManifestEntry>;
   assetFiles: Map<string, Buffer>;
-} {
+}> {
   const assetManifest: Record<string, AssetManifestEntry> = {};
   const assetFiles = new Map<string, Buffer>();
 
   try {
     const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(dir);
     const files = collectFiles(dir);
+    let processed = 0;
     for (const filePath of files) {
+      processed++;
+      await tickProgress(processed, files.length, onProgress, 'Hashing assets');
       const relativePath = '/' + toSlash(relative(dir, filePath));
       if (isIgnored(relativePath)) {
         continue;
@@ -179,7 +210,7 @@ function toWebSocketManifest(
   };
 }
 
-export function packageBuild(
+export async function packageBuild(
   distDir: string,
   workerDirName: string,
   bindings: InferredBindings,
@@ -199,7 +230,8 @@ export function packageBuild(
   redirectRules?: RedirectRule[],
   dialect?: 'sqlite' | 'postgresql',
   webSockets?: WebSocketRouteDefinition[],
-): FormData {
+  onProgress?: ProgressCallback,
+): Promise<FormData> {
   const formData = new FormData();
 
   // Build manifest from inferred bindings
@@ -231,6 +263,9 @@ export function packageBuild(
       dialect: dialect ?? 'sqlite',
       pending: migrations.length,
     };
+    onProgress?.(
+      `Packaging ${migrations.length} migration${migrations.length === 1 ? '' : 's'}...`,
+    );
     for (const m of migrations) {
       formData.append(`migration:${m.name}`, new Blob([m.sql]), m.name);
     }
@@ -300,6 +335,7 @@ export function packageBuild(
   formData.append('manifest', JSON.stringify(manifest));
 
   // Add worker files
+  onProgress?.('Packaging worker files...');
   const workerDir = join(distDir, workerDirName);
   const workerFiles = collectFiles(workerDir);
   for (const filePath of workerFiles) {
@@ -316,7 +352,10 @@ export function packageBuild(
   try {
     const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(clientDir);
     const clientFiles = collectFiles(clientDir);
+    let processed = 0;
     for (const filePath of clientFiles) {
+      processed++;
+      await tickProgress(processed, clientFiles.length, onProgress, 'Packaging assets');
       const relativePath = toSlash(relative(clientDir, filePath));
       if (isIgnored('/' + relativePath)) {
         continue;
@@ -346,14 +385,15 @@ export function packageBuild(
 /**
  * Package a static build (no worker) into a FormData ready for upload.
  */
-export function packageStaticBuild(
+export async function packageStaticBuild(
   outputDir: string,
   appType: 'spa' | 'static',
   neededAssets?: Set<string> | null,
   hashedAssetsPrefix?: string,
   headerRules?: HeaderRule[],
   redirectRules?: RedirectRule[],
-): FormData {
+  onProgress?: ProgressCallback,
+): Promise<FormData> {
   const formData = new FormData();
 
   const manifest: DeployManifest = {
@@ -381,7 +421,10 @@ export function packageStaticBuild(
 
   const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(outputDir);
   const files = collectFiles(outputDir);
+  let processed = 0;
   for (const filePath of files) {
+    processed++;
+    await tickProgress(processed, files.length, onProgress, 'Packaging assets');
     const relativePath = toSlash(relative(outputDir, filePath));
     if (isIgnored('/' + relativePath)) {
       continue;
@@ -409,7 +452,7 @@ export function packageStaticBuild(
  * inside the assets directory (SvelteKit, Astro). Worker files are excluded
  * from asset collection when directories overlap.
  */
-export function packageFrameworkBuild(opts: {
+export async function packageFrameworkBuild(opts: {
   frameworkName: string;
   workerDir: string;
   workerMain: string;
@@ -429,7 +472,8 @@ export function packageFrameworkBuild(opts: {
   redirectRules?: RedirectRule[];
   dialect?: 'sqlite' | 'postgresql';
   webSockets?: WebSocketRouteDefinition[];
-}): FormData {
+  onProgress?: ProgressCallback;
+}): Promise<FormData> {
   const formData = new FormData();
   const po = opts.packageOptions;
 
@@ -458,6 +502,9 @@ export function packageFrameworkBuild(opts: {
       dialect: opts.dialect ?? 'sqlite',
       pending: opts.migrations.length,
     };
+    opts.onProgress?.(
+      `Packaging ${opts.migrations.length} migration${opts.migrations.length === 1 ? '' : 's'}...`,
+    );
     for (const m of opts.migrations) {
       formData.append(`migration:${m.name}`, new Blob([m.sql]), m.name);
     }
@@ -519,6 +566,7 @@ export function packageFrameworkBuild(opts: {
     workerDirNorm.startsWith(assetsDirNorm + '/') || workerDirNorm === assetsDirNorm;
 
   // Worker files
+  opts.onProgress?.('Packaging worker files...');
   const workerFiles = collectFiles(opts.workerDir);
   for (const filePath of workerFiles) {
     const relativePath = toSlash(relative(opts.workerDir, filePath));
@@ -533,7 +581,10 @@ export function packageFrameworkBuild(opts: {
   try {
     const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(opts.assetsDir);
     const assetFiles = collectFiles(opts.assetsDir);
+    let processed = 0;
     for (const filePath of assetFiles) {
+      processed++;
+      await tickProgress(processed, assetFiles.length, opts.onProgress, 'Packaging assets');
       // Skip worker files when workerDir overlaps with assetsDir
       if (isOverlap && filePath.replace(/\\/g, '/').startsWith(workerDirNorm)) {
         continue;

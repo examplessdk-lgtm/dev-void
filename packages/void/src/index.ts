@@ -4,7 +4,12 @@ import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vi
 import { loadEnv, type Plugin } from 'vite';
 import { findVoidAuthConfig } from './auth/config';
 import { getToken, isStagingMode } from './cli/auth';
-import { ensureWranglerNodejsAlsFlag, syncWranglerBindings } from './cli/wrangler';
+import {
+  ensureWranglerCompatibilityDate,
+  ensureWranglerNodejsAlsFlag,
+  readWranglerCompat,
+  syncWranglerBindings,
+} from './cli/wrangler';
 import {
   readConfig,
   resolveBindingNames,
@@ -266,7 +271,7 @@ async function runAiSetupPrompt(
  * Binding inference runs synchronously here so results are available
  * before the Cloudflare plugin initializes.
  *
- * If the user has a `wrangler.json` / `wrangler.toml` in their project root,
+ * If the user has a `wrangler.jsonc` / `wrangler.json` in their project root,
  * the Cloudflare plugin reads it and provides the resolved config to our
  * config function. Bindings already defined there (with real IDs for
  * production deployment) are preserved — we only add inferred bindings
@@ -348,6 +353,13 @@ export function voidPlugin(options?: {
   if (detected && (detected.class === 'b' || detected.class === 'c')) {
     const bindingNames = resolveBindingNames(config.inference?.bindings);
     const frameworkPersistRoot = join(root, '.wrangler', 'state');
+    const syncFrameworkCompat = () => {
+      const compat = readWranglerCompat(root, config);
+      const syncedDate = ensureWranglerCompatibilityDate(root, compat.compatibilityDate);
+      if (syncedDate) {
+        voidLog('Synced compatibility_date to wrangler config');
+      }
+    };
 
     // Ensure required compat flags are written before framework adapters
     // initialize Cloudflare dev runtime / Miniflare.
@@ -355,6 +367,7 @@ export function voidPlugin(options?: {
       name: 'void:wrangler-compat',
       enforce: 'pre',
       config(_, env) {
+        syncFrameworkCompat();
         if (env.command !== 'serve') {
           return;
         }
@@ -369,6 +382,7 @@ export function voidPlugin(options?: {
     const wranglerSyncPlugin: Plugin = {
       name: 'void:wrangler-sync',
       configResolved(resolvedConfig) {
+        syncFrameworkCompat();
         if (resolvedConfig.command !== 'serve') {
           return;
         }
@@ -439,11 +453,12 @@ export function voidPlugin(options?: {
   let viteCommand: 'serve' | 'build' = 'build';
 
   // Merge curated wrangler fields from void.json
-  if (config.worker?.compatibility_date) {
-    workerConfig.compatibility_date = config.worker.compatibility_date;
-  }
-  if (config.worker?.compatibility_flags) {
-    workerConfig.compatibility_flags = config.worker.compatibility_flags;
+  const wranglerCompat = isNodeTarget(config.target) ? undefined : readWranglerCompat(root, config);
+  if (wranglerCompat) {
+    workerConfig.compatibility_date = wranglerCompat.compatibilityDate;
+    if (wranglerCompat.compatibilityFlags) {
+      workerConfig.compatibility_flags = wranglerCompat.compatibilityFlags;
+    }
   }
   const inspectorPortEnv = process.env.VOID_INSPECTOR_PORT;
   const inspectorPort =

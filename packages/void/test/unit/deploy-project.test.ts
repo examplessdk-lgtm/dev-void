@@ -1,10 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ProjectResponse } from '../../src/cli/client';
 import {
   resolveDistDir,
+  resolveDeployWranglerCompat,
   resolveStaticBuildCommand,
   resolveWorkerDirName,
 } from '../../src/cli/deploy';
@@ -145,6 +146,25 @@ describe('resolveDistDir', () => {
     expect(() => resolveDistDir(root, FRAMEWORK_PRESETS.sveltekit, 'vp build')).toThrow(
       'Run "vp build" first.',
     );
+  });
+});
+
+describe('resolveDeployWranglerCompat', () => {
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop()!;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not pin compatibility_date for non-Cloudflare targets', () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-test-'));
+    tempDirs.push(root);
+
+    expect(resolveDeployWranglerCompat(root, { target: 'node' }, join(root, 'dist', 'ssr'))).toBe(
+      undefined,
+    );
+    expect(existsSync(join(root, 'void.json'))).toBe(false);
   });
 });
 

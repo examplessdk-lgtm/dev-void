@@ -14,6 +14,13 @@ function createTempRoot(): string {
   return root;
 }
 
+function writeCompatConfig(root: string): void {
+  writeFileSync(
+    join(root, 'void.json'),
+    JSON.stringify({ worker: { compatibility_date: '2026-02-24' } }),
+  );
+}
+
 function getHookHandler<T>(hook: T | { handler: T } | undefined): T {
   if (typeof hook === 'function') {
     return hook;
@@ -213,6 +220,7 @@ describe('detectFramework', () => {
 
   it('lets framework-mode configResolved run without touching websocket TDZ state', () => {
     const root = createTempRoot();
+    writeCompatConfig(root);
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ dependencies: { astro: '^5.0.0' } }),
@@ -239,6 +247,7 @@ describe('detectFramework', () => {
 
   it('externalizes Cloudflare builtins for default worker builds', () => {
     const root = createTempRoot();
+    writeCompatConfig(root);
     const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
 
     try {
@@ -275,6 +284,7 @@ describe('detectFramework', () => {
 
   it('includes Cloudflare builtin externalization for class A frameworks', () => {
     const root = createTempRoot();
+    writeCompatConfig(root);
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ dependencies: { '@tanstack/react-start': '^1.0.0' } }),

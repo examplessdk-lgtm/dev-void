@@ -22,10 +22,12 @@ export function ensureProjectTsconfig(
   mkdirSync(outDir, { recursive: true });
   const includeRoutes = hasRouteTypes ?? existsSync(join(root, 'routes'));
   const includeQueues = existsSync(join(root, 'queues'));
+  const includeMd = existsSync(join(outDir, 'md.d.ts'));
   const files = [
     ...(includeRoutes ? ['routes.d.ts'] : []),
     ...(hasDb ? ['db.d.ts'] : []),
     ...(includeQueues ? ['queues.d.ts'] : []),
+    ...(includeMd ? ['md.d.ts'] : []),
   ];
 
   const tsconfig: Record<string, unknown> = { files };
@@ -75,6 +77,17 @@ export function ensureProjectTsconfig(
     // prefers the package export file unless we point it at the generated
     // project-local declaration module.
     paths['void/queues'] = ['./queues.d.ts'];
+  }
+
+  if (includeMd) {
+    const compilerOptions = (tsconfig.compilerOptions ??= {}) as {
+      paths?: Record<string, string[]>;
+    };
+    const paths = (compilerOptions.paths ??= {});
+
+    // Override the package export stub with the generated project-local
+    // declaration so TypeScript uses project-specific page types.
+    paths['@void/md/pages'] = ['./md.d.ts'];
   }
 
   writeFileSync(join(outDir, 'tsconfig.json'), JSON.stringify(tsconfig, null, 2) + '\n');

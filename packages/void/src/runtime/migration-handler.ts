@@ -117,11 +117,12 @@ async function runD1Migrations(
         .split(';')
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
-      await db.batch(statements.map((s) => db.prepare(s)));
-      await db
-        .prepare('INSERT INTO _void_migrations (name, applied_at) VALUES (?, ?)')
-        .bind(m.name, new Date().toISOString())
-        .run();
+      await db.batch([
+        ...statements.map((s) => db.prepare(s)),
+        db
+          .prepare('INSERT INTO _void_migrations (name, applied_at) VALUES (?, ?)')
+          .bind(m.name, new Date().toISOString()),
+      ]);
       migrationResults.push({ name: m.name, applied: true, durationMs: Date.now() - start });
     } catch (err) {
       migrationResults.push({
