@@ -85,6 +85,7 @@ export interface DeployManifest {
 
 export type DeployEvent =
   | { event: 'start'; deploymentId: string }
+  | { event: 'heartbeat'; deploymentId: string; step: string }
   | { event: 'asset_upload'; total: number; new: number; cached: number }
   | { event: 'asset_upload_done' }
   | { event: 'provisioning'; bindings: string[] }

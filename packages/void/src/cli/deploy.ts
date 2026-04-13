@@ -14,6 +14,8 @@ import { fileURLToPath } from 'node:url';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
+const DEPLOY_RECOVERY_POLL_INTERVAL_MS = 3_000;
+const DEPLOY_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000;
 import { intro, outro, log, note, confirm, isCancel, type SpinnerResult } from '@clack/prompts';
 import { findVoidAuthConfig } from '../auth/config';
 import {
@@ -29,8 +31,8 @@ import { scanJobsSync } from '../crons/scan';
 import { writeDrizzleConfig } from '../drizzle/config';
 import { discoverSchema } from '../drizzle/discover';
 import { voidWarn } from '../log';
-import { collectMigrations, validateJournalCoherence } from '../migrations/collect';
-import { validateMigrations } from '../migrations/validate';
+import { collectMigrations } from '../migrations/collect';
+import { assertJournalCoherence, validateMigrations } from '../migrations/validate';
 import { scanPages } from '../pages/scan';
 import {
   inferProjectBindings,
@@ -44,7 +46,12 @@ import { scanWebSocketRoutesSync } from '../router/websocket';
 import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env';
 import { validateSsrEntry } from '../ssr/entry';
 import { getToken, getTokenSource } from './auth';
-import { isExpiredTokenError, PlatformClient } from './client';
+import {
+  isExpiredTokenError,
+  PlatformApiError,
+  PlatformClient,
+  type DeploymentResponse,
+} from './client';
 import { promptAndCreateProject } from './create-project';
 import { parseHeadersFile, parseRedirectsFile } from './headers';
 import { promptForLoginToken } from './login';
@@ -69,6 +76,8 @@ import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project
 import type { AssetConfig, DeployEvent, HeaderRule, RedirectRule } from './types';
 import { readWranglerCompat, type WranglerCompat } from './wrangler';
 import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper';
+
+class DeployEventError extends Error {}
 import type { WrapperFeatures } from './wrapper';
 
 export interface RunDeployOptions {
@@ -77,6 +86,12 @@ export interface RunDeployOptions {
   spa?: boolean;
   skipBuild?: boolean;
 }
+
+type DeployDoneEvent = Extract<DeployEvent, { event: 'done' }>;
+type RecoveredDeployDoneEvent = Omit<DeployDoneEvent, 'assets' | 'workers' | 'migrations'> & {
+  recovered: true;
+};
+type StreamDeployResult = DeployDoneEvent | RecoveredDeployDoneEvent;
 
 export function resolveDeployWranglerCompat(
   root: string,
@@ -292,45 +307,153 @@ async function streamDeploy(
   projectId: string,
   formData: FormData,
   s: SpinnerResult,
-): Promise<Extract<DeployEvent, { event: 'done' }>> {
-  for await (const event of client.deploy(projectId, formData)) {
-    switch (event.event) {
-      case 'start':
-        s.message('Deploying...');
-        break;
-      case 'asset_upload':
-        if (event.new > 0) {
-          s.message(`Uploading assets (${event.new} new, ${event.cached} cached)`);
-        } else {
-          s.message(`Uploading assets (${event.total} cached)`);
-        }
-        break;
-      case 'provisioning':
-        s.message(`Provisioning ${event.bindings.join(', ')}`);
-        break;
-      case 'migration_start':
-        s.message(`Running ${event.pending} migration${event.pending > 1 ? 's' : ''}...`);
-        break;
-      case 'migration':
-        s.message(`Applied migration: ${event.name} (${event.durationMs}ms)`);
-        break;
-      case 'worker_upload':
-        s.message('Uploading worker...');
-        break;
-      case 'prerender':
-        s.message(`Prerendering ${event.pages} pages...`);
-        break;
-      case 'done':
-        s.stop('Deployed!');
-        return event;
-      case 'error':
-        s.stop('Deploy failed');
-        throw new Error(event.message);
+  fallbackUrl: string,
+): Promise<StreamDeployResult> {
+  let deploymentId: string | null = null;
+
+  try {
+    for await (const event of client.deploy(projectId, formData)) {
+      switch (event.event) {
+        case 'start':
+          deploymentId = event.deploymentId;
+          s.message('Deploying...');
+          break;
+        case 'heartbeat':
+          break;
+        case 'asset_upload':
+          if (event.new > 0) {
+            s.message(`Uploading assets (${event.new} new, ${event.cached} cached)`);
+          } else {
+            s.message(`Uploading assets (${event.total} cached)`);
+          }
+          break;
+        case 'provisioning':
+          s.message(`Provisioning ${event.bindings.join(', ')}`);
+          break;
+        case 'migration_start':
+          s.message(`Running ${event.pending} migration${event.pending > 1 ? 's' : ''}...`);
+          break;
+        case 'migration':
+          s.message(`Applied migration: ${event.name} (${event.durationMs}ms)`);
+          break;
+        case 'worker_upload':
+          s.message('Uploading worker...');
+          break;
+        case 'prerender':
+          s.message(`Prerendering ${event.pages} pages...`);
+          break;
+        case 'done':
+          s.stop('Deployed!');
+          return event;
+        case 'error':
+          s.stop('Deploy failed');
+          throw new DeployEventError(formatDeployFailureMessage(event.message, deploymentId));
+      }
     }
+  } catch (err) {
+    if (err instanceof DeployEventError) {
+      throw err;
+    }
+    if (!deploymentId) {
+      throw err;
+    }
+    return recoverDroppedDeployStream(client, projectId, deploymentId, s, {
+      fallbackUrl,
+    });
   }
-  // Stream ended without done/error — connection dropped
-  s.stop('Deploy failed');
-  throw new Error('Connection lost during deploy');
+
+  if (!deploymentId) {
+    s.stop('Deploy failed');
+    throw new Error('Connection lost during deploy');
+  }
+
+  return recoverDroppedDeployStream(client, projectId, deploymentId, s, {
+    fallbackUrl,
+  });
+}
+
+async function recoverDroppedDeployStream(
+  client: PlatformClient,
+  projectId: string,
+  deploymentId: string,
+  s: SpinnerResult,
+  progress: {
+    fallbackUrl: string;
+  },
+): Promise<StreamDeployResult> {
+  const deadline = Date.now() + DEPLOY_RECOVERY_TIMEOUT_MS;
+  let lastStatus = 'unknown';
+  s.message('Connection lost; checking deploy status...');
+
+  while (Date.now() < deadline) {
+    await sleep(DEPLOY_RECOVERY_POLL_INTERVAL_MS);
+    let deployments: DeploymentResponse[];
+    try {
+      ({ deployments } = await client.listDeployments(projectId));
+    } catch (err) {
+      if (err instanceof PlatformApiError) {
+        s.stop('Deploy status check failed');
+        throw err;
+      }
+      s.message('Connection lost; retrying deploy status check...');
+      continue;
+    }
+    const deployment = deployments.find((d) => d.id === deploymentId);
+    if (!deployment) {
+      continue;
+    }
+
+    lastStatus = deployment.status;
+    if (deployment.status === 'live') {
+      s.stop('Deployed!');
+      return {
+        event: 'done',
+        deployment: deployment.id,
+        url: progress.fallbackUrl,
+        urls: [progress.fallbackUrl],
+        recovered: true,
+      };
+    }
+    if (deployment.status === 'failed' || deployment.status === 'canceled') {
+      s.stop('Deploy failed');
+      throw new Error(
+        formatDeployFailureMessage(
+          deployment.error_message ?? `deploy ${deployment.status}`,
+          deploymentId,
+        ),
+      );
+    }
+
+    s.message(`Connection lost; deploy is still ${deployment.status}...`);
+  }
+
+  s.stop('Deploy status unknown');
+  throw new Error(
+    `Connection lost during deploy. Deployment ${deploymentId} is still ${lastStatus}; run \`void project status\` before retrying.`,
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatDeployFailureMessage(message: string, deploymentId: string | null): string {
+  return deploymentId ? `${message}\nDeployment: ${deploymentId}` : message;
+}
+
+function formatKnownAssetSummary(result: DeployDoneEvent, skipped: number): string {
+  const uploaded = result.assets - skipped;
+  return skipped > 0
+    ? `${result.assets} static asset(s) (${skipped} unchanged, ${uploaded} uploaded)`
+    : `${result.assets} static asset(s)`;
+}
+
+function addRecoveredMetricsNote(summary: string[], result: StreamDeployResult): void {
+  if ('recovered' in result) {
+    summary.push(
+      'Deploy completed after reconnect; asset, worker, and migration totals unavailable',
+    );
+  }
 }
 
 async function runStaticDeploy(
@@ -390,14 +513,19 @@ async function runStaticDeploy(
     formData.append('commit', commit);
   }
 
-  const result = await streamDeploy(client, config.projectId, formData, s);
+  const result = await streamDeploy(
+    client,
+    config.projectId,
+    formData,
+    s,
+    `https://${config.slug}.void.app`,
+  );
 
-  const uploaded = result.assets - skipped;
-  const assetSummary =
-    skipped > 0
-      ? `${result.assets} static asset(s) (${skipped} unchanged, ${uploaded} uploaded)`
-      : `${result.assets} static asset(s)`;
-  const summary = [`${typeLabel} — ${assetSummary}`];
+  const summary =
+    'recovered' in result
+      ? [typeLabel]
+      : [`${typeLabel} — ${formatKnownAssetSummary(result, skipped)}`];
+  addRecoveredMetricsNote(summary, result);
   note(summary.join('\n'), result.url);
 
   outro('Done!');
@@ -465,19 +593,19 @@ async function runFrameworkDeploy(
     process.exit(1);
   }
 
+  const migrationsDir = join(root, 'db', 'migrations');
+
   assertDeploySchemaDriftFree(root, dialect);
 
   // 4. Collect migrations (before Hyperdrive check so migrations can gate provisioning)
-  const migrationsDir = join(root, 'db', 'migrations');
-  try {
-    validateJournalCoherence(migrationsDir);
-  } catch (err: any) {
-    log.error(err.message);
-    log.info('Fix the orphan files, then rerun `void deploy`.');
-    process.exit(1);
-  }
   const rawMigrations = collectMigrations(migrationsDir);
   let validatedMigrations;
+  try {
+    assertJournalCoherence(migrationsDir, rawMigrations);
+  } catch (err: any) {
+    log.error(err.message);
+    process.exit(1);
+  }
   if (rawMigrations.length > 0) {
     try {
       validatedMigrations = validateMigrations(rawMigrations);
@@ -625,15 +753,20 @@ async function runFrameworkDeploy(
     formData.append('commit', commit);
   }
 
-  const result = await streamDeploy(client, config.projectId, formData, s);
+  const result = await streamDeploy(
+    client,
+    config.projectId,
+    formData,
+    s,
+    `https://${config.slug}.void.app`,
+  );
 
-  const uploaded = result.assets - skipped;
-  const assetSummary =
-    skipped > 0
-      ? `${result.assets} static asset(s) (${skipped} unchanged, ${uploaded} uploaded)`
-      : `${result.assets} static asset(s)`;
-  const summary = [`${result.workers} worker module(s), ${assetSummary}`];
-  if (result.migrations) {
+  const summary =
+    'recovered' in result
+      ? ['Framework deploy']
+      : [`${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`];
+  addRecoveredMetricsNote(summary, result);
+  if (!('recovered' in result) && result.migrations) {
     summary.push(`${result.migrations} migration(s) applied`);
   }
   if (schedules.length > 0) {
@@ -745,19 +878,19 @@ async function runFullDeploy(
   const cfgRedirectRules = convertRedirectsConfig(deployConfig.routing?.redirects);
   const redirectRules: RedirectRule[] = [...(userRedirectRules ?? []), ...(cfgRedirectRules ?? [])];
 
+  const migrationsDir = join(root, 'db', 'migrations');
+
   assertDeploySchemaDriftFree(root, dialect);
 
   // 7. Collect and validate migrations (before Hyperdrive check so migrations can gate provisioning)
-  const migrationsDir = join(root, 'db', 'migrations');
-  try {
-    validateJournalCoherence(migrationsDir);
-  } catch (err: any) {
-    log.error(err.message);
-    log.info('Fix the orphan files, then rerun `void deploy`.');
-    process.exit(1);
-  }
   const rawMigrations = collectMigrations(migrationsDir);
   let validatedMigrations;
+  try {
+    assertJournalCoherence(migrationsDir, rawMigrations);
+  } catch (err: any) {
+    log.error(err.message);
+    process.exit(1);
+  }
   if (rawMigrations.length > 0) {
     try {
       validatedMigrations = validateMigrations(rawMigrations);
@@ -967,15 +1100,20 @@ async function runFullDeploy(
     formData.append('commit', commit);
   }
 
-  const result = await streamDeploy(client, config.projectId, formData, s);
+  const result = await streamDeploy(
+    client,
+    config.projectId,
+    formData,
+    s,
+    `https://${config.slug}.void.app`,
+  );
 
-  const uploaded = result.assets - skipped;
-  const assetSummary =
-    skipped > 0
-      ? `${result.assets} static asset(s) (${skipped} unchanged, ${uploaded} uploaded)`
-      : `${result.assets} static asset(s)`;
-  const summary = [`${result.workers} worker module(s), ${assetSummary}`];
-  if (result.migrations) {
+  const summary =
+    'recovered' in result
+      ? ['Deploy completed']
+      : [`${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`];
+  addRecoveredMetricsNote(summary, result);
+  if (!('recovered' in result) && result.migrations) {
     summary.push(`${result.migrations} migration(s) applied`);
   }
   if (schedules.length > 0) {

@@ -341,7 +341,7 @@ export function ensureWranglerNodejsAlsFlag(root: string): boolean {
 
 function parseJsonc(text: string): Record<string, unknown> {
   const errors: ParseError[] = [];
-  const result = parse(text, errors);
+  const result = parse(text, errors, { allowTrailingComma: true });
   if (errors.length > 0) {
     throw new SyntaxError('Failed to parse JSONC');
   }

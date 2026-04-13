@@ -3,8 +3,12 @@ import { extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { intro, outro, log } from '@clack/prompts';
 import { readConfig, getDatabaseDialect, type DatabaseDialect } from '../config';
-import { collectMigrations, validateJournalCoherence } from '../migrations/collect';
-import { validateMigrations } from '../migrations/validate';
+import { collectMigrations, readJournal, stripSqlExt, writeJournal } from '../migrations/collect';
+import {
+  assertJournalCoherence,
+  listDrizzleArtifacts,
+  validateMigrations,
+} from '../migrations/validate';
 import type { SeedFn } from '../runtime/seed';
 import { getToken } from './auth';
 import { PlatformClient } from './client';
@@ -174,8 +178,14 @@ async function runGenerate(root: string, dialect: DatabaseDialect): Promise<void
 
 async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> {
   const migrationsDir = join(root, 'db', 'migrations');
-  const { collectMigrations } = await import('../migrations/collect');
   const allMigrations = collectMigrations(migrationsDir);
+
+  try {
+    assertJournalCoherence(migrationsDir, allMigrations);
+  } catch (err: any) {
+    log.error(err.message);
+    process.exit(1);
+  }
 
   if (allMigrations.length === 0) {
     log.info('No migration files found in db/migrations/');
@@ -253,6 +263,20 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
 }
 
 async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<number> {
+  // Coherence check must happen before any destructive work. Route
+  // failures through `log.error` + `process.exit(1)` instead of letting
+  // malformed `_journal.json` bubble as a raw stack trace — this matches
+  // `runStatus`, `runMigrate`, and the deploy path, and this is the exact
+  // drift case the preflight is here to surface.
+  const migrationsDir = join(root, 'db', 'migrations');
+  const migrations = collectMigrations(migrationsDir);
+  try {
+    assertJournalCoherence(migrationsDir, migrations);
+  } catch (err: any) {
+    log.error(err.message);
+    process.exit(1);
+  }
+
   if (dialect === 'postgresql') {
     await withPgClient(root, async (client) => {
       const tables = await client.query(
@@ -262,9 +286,6 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
         await client.query(`DROP TABLE IF EXISTS "${row.tablename}" CASCADE`);
       }
     });
-    const migrationsDir = join(root, 'db', 'migrations');
-    const { collectMigrations } = await import('../migrations/collect');
-    const migrations = collectMigrations(migrationsDir);
     if (migrations.length > 0) {
       await withPgClient(root, async (client) => {
         await client.query(
@@ -297,7 +318,6 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
   rmSync(dbPath + '-wal', { force: true });
   rmSync(dbPath + '-shm', { force: true });
 
-  const migrationsDir = join(root, 'db', 'migrations');
   const applied = await runMigrations(migrationsDir, dbPath);
   return applied.length;
 }
@@ -427,14 +447,14 @@ function printTable(rows: Record<string, unknown>[]): void {
 
 async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boolean): Promise<void> {
   const migrationsDir = join(root, 'db', 'migrations');
+  const rawMigrations = collectMigrations(migrationsDir);
+
   try {
-    validateJournalCoherence(migrationsDir);
+    assertJournalCoherence(migrationsDir, rawMigrations);
   } catch (err: any) {
     log.error(err.message);
-    log.info('Fix the orphan files, then rerun `void db migrate`.');
     process.exit(1);
   }
-  const rawMigrations = collectMigrations(migrationsDir);
 
   if (remote) {
     const token = getToken();
@@ -616,6 +636,44 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     return;
   }
 
+  // Drift / partial-state gate. Mirrors the preflight used by `runStatus`,
+  // `runMigrate`, and `runReset` — one shared helper, one source of truth.
+  // Run BEFORE the bundled-mode guard and BEFORE computing files or
+  // touching anything remote, so a project in a partial drizzle-kit state
+  // (missing journal + leftover snapshots/`migrations.js`) or a project
+  // whose journal tags don't line up with its `.sql` files gets refused
+  // with the same message the rest of the CLI emits. Bare-legacy (no
+  // journal, no artifacts) silently passes through — those projects are
+  // the entire reason `rename-migrations` exists, and the journal/snapshot
+  // mutation steps below are already no-ops on that shape.
+  const currentMigrations = collectMigrations(migrationsDir);
+  try {
+    assertJournalCoherence(migrationsDir, currentMigrations);
+  } catch (err: any) {
+    log.error(err.message);
+    process.exit(1);
+  }
+
+  // Refuse bundled-mode projects up front. A bundled project has a valid
+  // `_journal.json` AND a sibling `db/migrations/migrations.js` that
+  // statically imports every `.sql` file by filename. Renaming the files
+  // here would leave `migrations.js` pointing at nonexistent imports, so
+  // the next bundled migration run blows up at module resolution.
+  // Drizzle-kit owns the bundle format (import paths, padding, trailing
+  // comma) — replicating its emit here would silently break whenever
+  // drizzle-kit bumps that format. Fail fast with a concrete recovery path
+  // instead.
+  if (existsSync(join(migrationsDir, 'migrations.js'))) {
+    log.error(
+      "This project uses Drizzle's bundled migration format (db/migrations/migrations.js).\n" +
+        '`void db rename-migrations` cannot rename migrations in bundled mode because\n' +
+        '`migrations.js` contains static imports of the SQL files by filename.\n\n' +
+        'Delete db/migrations/migrations.js and re-run `void db generate` to migrate away\n' +
+        'from bundled mode, then retry `void db rename-migrations`.',
+    );
+    process.exit(1);
+  }
+
   const files = readdirSync(migrationsDir)
     .filter((f) => f.endsWith('.sql') && f !== 'seed.sql')
     .sort();
@@ -655,7 +713,104 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     renames.push({ from: oldName, to: newName });
   }
 
-  // Update remote tracking first — if this fails, nothing local has changed yet
+  // Snapshot the raw journal bytes BEFORE the remote rename and BEFORE
+  // the snapshot preflight gate. Two reasons:
+  //   1. The preflight below uses `originalJournalBytes !== null` as
+  //      the "journal-backed project" signal, so it must be captured
+  //      first.
+  //   2. `restoreJournal` (defined further down) needs the pre-run
+  //      bytes to byte-restore after a rollback — capturing them here
+  //      guarantees we have the state from before ANY mutation.
+  // Legacy projects have no journal at all — `originalJournalBytes` stays
+  // `null` and `restoreJournal` becomes a no-op in that mode.
+  const journalPath = join(migrationsDir, 'meta', '_journal.json');
+  const originalJournalBytes: Buffer | null = existsSync(journalPath)
+    ? readFileSync(journalPath)
+    : null;
+
+  // Drizzle-kit locates snapshot files by splitting the journal tag on the
+  // first underscore and appending `_snapshot.json`. When we rewrite tags,
+  // we must rename the matching snapshot alongside the .sql file so
+  // rollback/drop tooling keeps working. The old tag prefix is the numeric
+  // `NNNN` chunk before the first underscore; the new prefix is the
+  // 14-digit timestamp. Legacy projects without snapshots are skipped.
+  // These helpers are hoisted above the remote rename because the
+  // snapshot preflight below needs `snapshotPathFor` / `snapshotPrefix`.
+  const metaDir = join(migrationsDir, 'meta');
+  const snapshotPrefix = (tag: string): string => tag.split('_')[0];
+  const snapshotPathFor = (tag: string): string =>
+    join(metaDir, `${snapshotPrefix(tag)}_snapshot.json`);
+
+  // Round 29 gate: if this is a journal-backed project, every tag we're
+  // about to rename MUST have its matching snapshot on disk. The rename
+  // loop below silently skips missing snapshots so bare-legacy projects
+  // (no journal, no snapshots at all) keep working — but a journal-backed
+  // project with a missing snapshot is a partial state. Proceeding would
+  // rename the .sql + journal entry to the new tag, then the next
+  // `void gen migration` (custom-migration path) or `void db generate`
+  // would be unable to locate the expected snapshot under the new
+  // filename. Refuse up front with a concrete recovery path.
+  //
+  // Round 30 refinement: the "journal file exists on disk" signal
+  // (`originalJournalBytes !== null`) is not enough on its own. The
+  // kitchen-sink playground ships a placeholder journal of the form
+  // `{ "version": "7", "dialect": "sqlite", "entries": [] }` with no
+  // `meta/*_snapshot.json` files and no bundled `migrations.js`.
+  // `assertJournalCoherence` treats that exact shape as identical to
+  // "bare-legacy, no journal at all" and lets `void db status`, `migrate`,
+  // `reset`, and `deploy` fall through to the filename-based runner. The
+  // gate below must honor the same equivalence — otherwise
+  // `rename-migrations` rejects the playground outright, even though
+  // there is no snapshot chain to worry about. The
+  // `entries: [] + drizzle artifacts on disk` partial state is a real
+  // shape but `assertJournalCoherence` already rejected it long before
+  // this gate runs, so we don't need to re-handle it here.
+  //
+  // Order of operations note: this gate MUST run BEFORE
+  // `client.renameMigrations` below. Running it after the remote call
+  // means a failed gate leaves the remote mutated while the local
+  // filesystem is untouched; the best-effort `reverseRemote()` rollback
+  // can then fail on a transient network error and leave the project in
+  // divergent state that's hard to recover from. Running it up front
+  // guarantees "remote is mutated only after the local preflight
+  // passes," so there is nothing to reverse when the gate bails.
+  const preRenameJournal = readJournal(migrationsDir);
+  const drizzleArtifacts = listDrizzleArtifacts(migrationsDir);
+  const isBareLegacyPlaceholder =
+    preRenameJournal !== undefined &&
+    preRenameJournal !== null &&
+    typeof preRenameJournal === 'object' &&
+    Array.isArray((preRenameJournal as { entries?: unknown }).entries) &&
+    (preRenameJournal as { entries: unknown[] }).entries.length === 0 &&
+    drizzleArtifacts.length === 0;
+
+  if (originalJournalBytes !== null && !isBareLegacyPlaceholder) {
+    const missingSnapshots: string[] = [];
+    for (const { from } of renames) {
+      const fromTag = stripSqlExt(from);
+      const snapshotFrom = snapshotPathFor(fromTag);
+      if (!existsSync(snapshotFrom)) {
+        missingSnapshots.push(`meta/${snapshotPrefix(fromTag)}_snapshot.json`);
+      }
+    }
+    if (missingSnapshots.length > 0) {
+      log.error(
+        'Cannot rename migrations: this is a drizzle-managed project but one or more snapshot files are missing:',
+      );
+      for (const p of missingSnapshots) {
+        log.error(`  - db/migrations/${p}`);
+      }
+      log.error(
+        '\nRestore the missing snapshot(s) from version control, or reset the migration directory with `void db generate`, then retry `void db rename-migrations`.',
+      );
+      // No reverseRemote() here — the remote has not been touched yet.
+      process.exit(1);
+    }
+  }
+
+  // Update remote tracking — the snapshot preflight above has already
+  // verified that the local filesystem is in a state we can safely
+  // mutate. If this fails, nothing local has changed yet.
   const token = getToken();
   const config = readProjectConfig(root);
   let remoteRenamed = false;
@@ -696,15 +851,68 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     }
   };
 
+  // Tracks whether `_journal.json` was actually rewritten below, so
+  // `restoreJournal` knows when a byte-restore is needed on rollback.
+  // `originalJournalBytes` was captured above (before the remote call).
+  let journalRewritten = false;
+
+  const restoreJournal = () => {
+    // Byte-restore the pre-run snapshot. No-op when nothing was rewritten
+    // or when no journal existed before the run (legacy path).
+    if (!journalRewritten || originalJournalBytes === null) {
+      return;
+    }
+    try {
+      writeFileSync(journalPath, originalJournalBytes);
+    } catch (err) {
+      log.warn(
+        'Could not restore db/migrations/meta/_journal.json after rollback. ' +
+          'The journal may be in a partial state.\n' +
+          'Regenerate it with `void db generate`, or restore it from version control.',
+      );
+      log.warn(String(err));
+    }
+  };
+
   // Rename files — roll back completed renames (and remote) on any failure
   const renamed: { from: string; to: string }[] = [];
+  // Parallel list tracking snapshot renames so rollback can reverse them
+  // with the same best-effort semantics as the .sql file renames.
+  const renamedSnapshots: { from: string; to: string }[] = [];
+
+  const reverseSnapshotRenames = () => {
+    for (const { from, to } of renamedSnapshots) {
+      try {
+        renameSync(to, from);
+      } catch (err) {
+        // best-effort rollback — warn but don't fail
+        log.warn(
+          `Could not reverse snapshot rename for ${from}. ` +
+            'The meta/ directory may be in a partial state.',
+        );
+        log.warn(String(err));
+      }
+    }
+  };
+
   try {
     for (const { from, to } of renames) {
       renameSync(join(migrationsDir, from), join(migrationsDir, to));
       renamed.push({ from, to });
       log.step(`${from} → ${to}`);
+
+      // Mirror the SQL rename onto the Drizzle snapshot when one exists.
+      const fromTag = stripSqlExt(from);
+      const toTag = stripSqlExt(to);
+      const snapshotFrom = snapshotPathFor(fromTag);
+      const snapshotTo = snapshotPathFor(toTag);
+      if (existsSync(snapshotFrom)) {
+        renameSync(snapshotFrom, snapshotTo);
+        renamedSnapshots.push({ from: snapshotFrom, to: snapshotTo });
+      }
     }
   } catch (err) {
+    reverseSnapshotRenames();
     for (const { from, to } of renamed) {
       try {
         renameSync(join(migrationsDir, to), join(migrationsDir, from));
@@ -712,10 +920,66 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
         // best-effort rollback
       }
     }
+    restoreJournal();
     await reverseRemote();
     log.error('Failed to rename migration files. All changes have been reverted.');
     log.error(String(err));
     process.exit(1);
+  }
+
+  // Rewrite `_journal.json` tags to match the new filenames BEFORE touching
+  // the tracking tables, so any tracking-table failure can roll the journal
+  // back alongside the file renames. Legacy projects with no journal skip
+  // this step entirely — there's nothing to rewrite, and the snapshot/
+  // tracking rollback sites already no-op via `journalRewritten === false`.
+  if (originalJournalBytes !== null) {
+    try {
+      const journal = readJournal(migrationsDir);
+      if (!journal) {
+        // The journal existed when we snapshotted its bytes above but has
+        // since disappeared or become unreadable. Treat this as a hard
+        // failure so the rename flow rolls back rather than silently
+        // losing journal coherence.
+        throw new Error(
+          'db/migrations/meta/_journal.json disappeared mid-run. File renames will be reverted.',
+        );
+      }
+      const renameMap = new Map<string, string>();
+      for (const { from, to } of renames) {
+        renameMap.set(stripSqlExt(from), stripSqlExt(to));
+      }
+      const updatedEntries = journal.entries.map((entry) => {
+        const next = renameMap.get(entry.tag);
+        return next ? { ...entry, tag: next } : entry;
+      });
+      // Mark the journal as mutated BEFORE the write, so rollback will
+      // byte-restore the snapshot even if `writeJournal` fails mid-write
+      // (disk full, EIO, process killed). The flag's semantic is "a
+      // mutation was attempted," which is what rollback correctness needs.
+      journalRewritten = true;
+      writeJournal(migrationsDir, {
+        version: journal.version,
+        dialect: journal.dialect,
+        entries: updatedEntries,
+      });
+    } catch (err) {
+      // Revert file renames so journal and filenames stay in sync
+      reverseSnapshotRenames();
+      for (const { from, to } of renames) {
+        try {
+          renameSync(join(migrationsDir, to), join(migrationsDir, from));
+        } catch {
+          // best-effort rollback
+        }
+      }
+      restoreJournal();
+      await reverseRemote();
+      log.error(
+        'Failed to update db/migrations/meta/_journal.json. File renames have been reverted.',
+      );
+      log.error(String(err));
+      process.exit(1);
+    }
   }
 
   if (dialect === 'postgresql') {
@@ -740,6 +1004,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       });
     } catch (err) {
       // Roll back file renames so tracking and filenames stay in sync
+      reverseSnapshotRenames();
       for (const { from, to } of renames) {
         try {
           renameSync(join(migrationsDir, to), join(migrationsDir, from));
@@ -747,6 +1012,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
           // best-effort rollback — ignore individual rename failures
         }
       }
+      restoreJournal();
       await reverseRemote();
       log.error(
         'Failed to update PostgreSQL tracking table. File renames have been reverted.\n' +
@@ -786,6 +1052,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
         }
       } catch (err) {
         // Roll back file renames so tracking and filenames stay in sync
+        reverseSnapshotRenames();
         for (const { from, to } of renames) {
           try {
             renameSync(join(migrationsDir, to), join(migrationsDir, from));
@@ -793,6 +1060,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
             // best-effort rollback — ignore individual rename failures
           }
         }
+        restoreJournal();
         await reverseRemote();
         log.error(
           'Failed to update SQLite tracking table. File renames have been reverted.\n' +

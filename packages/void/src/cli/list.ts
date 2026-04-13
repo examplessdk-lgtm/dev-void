@@ -120,6 +120,7 @@ function colorStatus(status: string): string {
     case 'evicted':
       return dim(status);
     case 'failed':
+    case 'canceled':
       return pc.red(status);
     default:
       return status;

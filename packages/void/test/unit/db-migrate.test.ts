@@ -37,11 +37,30 @@ const roots: string[] = [];
 function createProjectRoot(migrations: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), 'void-db-migrate-'));
   const migrationsDir = join(root, 'db', 'migrations');
-  mkdirSync(migrationsDir, { recursive: true });
+  mkdirSync(join(migrationsDir, 'meta'), { recursive: true });
 
+  const entries: Array<{
+    idx: number;
+    version: string;
+    when: number;
+    tag: string;
+    breakpoints: boolean;
+  }> = [];
+  let idx = 0;
   for (const [name, sql] of Object.entries(migrations)) {
     writeFileSync(join(migrationsDir, name), sql);
+    entries.push({
+      idx: idx++,
+      version: '7',
+      when: Date.now(),
+      tag: name.replace(/\.sql$/, ''),
+      breakpoints: true,
+    });
   }
+  writeFileSync(
+    join(migrationsDir, 'meta', '_journal.json'),
+    JSON.stringify({ version: '7', dialect: 'sqlite', entries }),
+  );
 
   roots.push(root);
   return root;
