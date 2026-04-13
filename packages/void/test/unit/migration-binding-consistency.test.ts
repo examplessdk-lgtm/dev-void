@@ -66,9 +66,14 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('packageBuild migration-binding consistency', () => {
-  it('includes both d1 binding and migrations when needsD1 is true', () => {
+  it('includes both d1 binding and migrations when needsD1 is true', async () => {
     setupWorkerDir();
-    const form = packageBuild(TMP, 'worker', { ...noBindings, needsD1: true }, sampleMigrations);
+    const form = await packageBuild(
+      TMP,
+      'worker',
+      { ...noBindings, needsD1: true },
+      sampleMigrations,
+    );
     const manifest = getManifest(form);
 
     expect(manifest.bindings.d1).toEqual(['DB']);
@@ -76,9 +81,9 @@ describe('packageBuild migration-binding consistency', () => {
     expect(getMigrationEntries(form)).toEqual(['0001_create_users.sql']);
   });
 
-  it('forces d1 binding when migrations exist even if needsD1 is false', () => {
+  it('forces d1 binding when migrations exist even if needsD1 is false', async () => {
     setupWorkerDir();
-    const form = packageBuild(TMP, 'worker', noBindings, sampleMigrations);
+    const form = await packageBuild(TMP, 'worker', noBindings, sampleMigrations);
     const manifest = getManifest(form);
 
     // Migrations imply a database is needed — d1 binding must be present
@@ -87,9 +92,9 @@ describe('packageBuild migration-binding consistency', () => {
     expect(getMigrationEntries(form)).toEqual(['0001_create_users.sql']);
   });
 
-  it('has no migrations and no d1 binding when both are absent', () => {
+  it('has no migrations and no d1 binding when both are absent', async () => {
     setupWorkerDir();
-    const form = packageBuild(TMP, 'worker', noBindings);
+    const form = await packageBuild(TMP, 'worker', noBindings);
     const manifest = getManifest(form);
 
     expect(manifest.bindings.d1).toBeUndefined();
@@ -97,9 +102,9 @@ describe('packageBuild migration-binding consistency', () => {
     expect(getMigrationEntries(form)).toEqual([]);
   });
 
-  it('has no migrations when migrations array is empty', () => {
+  it('has no migrations when migrations array is empty', async () => {
     setupWorkerDir();
-    const form = packageBuild(TMP, 'worker', noBindings, []);
+    const form = await packageBuild(TMP, 'worker', noBindings, []);
     const manifest = getManifest(form);
 
     expect(manifest.bindings.d1).toBeUndefined();
@@ -107,25 +112,30 @@ describe('packageBuild migration-binding consistency', () => {
     expect(getMigrationEntries(form)).toEqual([]);
   });
 
-  it('has d1 binding but no migrations when needsD1 is true with no migration files', () => {
+  it('has d1 binding but no migrations when needsD1 is true with no migration files', async () => {
     setupWorkerDir();
-    const form = packageBuild(TMP, 'worker', { ...noBindings, needsD1: true });
+    const form = await packageBuild(TMP, 'worker', { ...noBindings, needsD1: true });
     const manifest = getManifest(form);
 
     expect(manifest.bindings.d1).toEqual(['DB']);
     expect(manifest.migrations).toBeUndefined();
   });
 
-  it('includes d1 binding when auth forces needsD1 even without explicit D1 usage', () => {
+  it('includes d1 binding when auth forces needsD1 even without explicit D1 usage', async () => {
     setupWorkerDir();
-    const form = packageBuild(TMP, 'worker', { ...noBindings, needsAuth: true }, sampleMigrations);
+    const form = await packageBuild(
+      TMP,
+      'worker',
+      { ...noBindings, needsAuth: true },
+      sampleMigrations,
+    );
     const manifest = getManifest(form);
 
     expect(manifest.bindings.d1).toEqual(['DB']);
     expect(manifest.migrations).toEqual({ dialect: 'sqlite', pending: 1 });
   });
 
-  it('forces d1 binding when multiple migrations exist without D1 usage', () => {
+  it('forces d1 binding when multiple migrations exist without D1 usage', async () => {
     setupWorkerDir();
     const migrations: MigrationFile[] = [
       {
@@ -145,7 +155,7 @@ describe('packageBuild migration-binding consistency', () => {
       },
     ];
 
-    const form = packageBuild(TMP, 'worker', noBindings, migrations);
+    const form = await packageBuild(TMP, 'worker', noBindings, migrations);
     const manifest = getManifest(form);
 
     expect(manifest.bindings.d1).toEqual(['DB']);
@@ -157,9 +167,9 @@ describe('packageBuild migration-binding consistency', () => {
     ]);
   });
 
-  it('uses custom d1 binding name when provided', () => {
+  it('uses custom d1 binding name when provided', async () => {
     setupWorkerDir();
-    const form = packageBuild(
+    const form = await packageBuild(
       TMP,
       'worker',
       { ...noBindings, needsD1: true },
@@ -185,9 +195,9 @@ describe('packageBuild migration-binding consistency', () => {
 // ---------------------------------------------------------------------------
 
 describe('packageBuild postgresql migration-binding consistency', () => {
-  it('forces hyperdrive binding when migrations exist with postgresql dialect and needsD1 is false', () => {
+  it('forces hyperdrive binding when migrations exist with postgresql dialect and needsD1 is false', async () => {
     setupWorkerDir();
-    const form = packageBuild(
+    const form = await packageBuild(
       TMP,
       'worker',
       noBindings,
@@ -215,9 +225,9 @@ describe('packageBuild postgresql migration-binding consistency', () => {
     expect(manifest.migrations).toEqual({ dialect: 'postgresql', pending: 1 });
   });
 
-  it('includes both hyperdrive binding and migrations when needsD1 is true with postgresql dialect', () => {
+  it('includes both hyperdrive binding and migrations when needsD1 is true with postgresql dialect', async () => {
     setupWorkerDir();
-    const form = packageBuild(
+    const form = await packageBuild(
       TMP,
       'worker',
       { ...noBindings, needsD1: true },
@@ -260,9 +270,9 @@ describe('packageFrameworkBuild migration-binding consistency', () => {
     return { workerDir, assetsDir };
   }
 
-  it('forces d1 binding when migrations exist even if needsD1 is false', () => {
+  it('forces d1 binding when migrations exist even if needsD1 is false', async () => {
     const { workerDir, assetsDir } = setupFrameworkDirs();
-    const form = packageFrameworkBuild({
+    const form = await packageFrameworkBuild({
       frameworkName: 'nuxt',
       workerDir,
       workerMain: 'index.js',
@@ -277,9 +287,9 @@ describe('packageFrameworkBuild migration-binding consistency', () => {
     expect(getMigrationEntries(form)).toEqual(['0001_create_users.sql']);
   });
 
-  it('includes both d1 binding and migrations when needsD1 is true', () => {
+  it('includes both d1 binding and migrations when needsD1 is true', async () => {
     const { workerDir, assetsDir } = setupFrameworkDirs();
-    const form = packageFrameworkBuild({
+    const form = await packageFrameworkBuild({
       frameworkName: 'nuxt',
       workerDir,
       workerMain: 'index.js',
@@ -293,9 +303,9 @@ describe('packageFrameworkBuild migration-binding consistency', () => {
     expect(manifest.migrations).toEqual({ dialect: 'sqlite', pending: 1 });
   });
 
-  it('includes d1 binding via auth even without explicit D1 usage', () => {
+  it('includes d1 binding via auth even without explicit D1 usage', async () => {
     const { workerDir, assetsDir } = setupFrameworkDirs();
-    const form = packageFrameworkBuild({
+    const form = await packageFrameworkBuild({
       frameworkName: 'nuxt',
       workerDir,
       workerMain: 'index.js',
@@ -309,9 +319,9 @@ describe('packageFrameworkBuild migration-binding consistency', () => {
     expect(manifest.migrations).toEqual({ dialect: 'sqlite', pending: 1 });
   });
 
-  it('forces hyperdrive binding when postgresql migrations exist with needsD1 false', () => {
+  it('forces hyperdrive binding when postgresql migrations exist with needsD1 false', async () => {
     const { workerDir, assetsDir } = setupFrameworkDirs();
-    const form = packageFrameworkBuild({
+    const form = await packageFrameworkBuild({
       frameworkName: 'nuxt',
       workerDir,
       workerMain: 'index.js',
@@ -412,7 +422,7 @@ describe('createMigrationHandler with missing D1 binding', () => {
 // ---------------------------------------------------------------------------
 
 describe('end-to-end: D1 removed but migrations remain on disk', () => {
-  it('forces d1 binding when user removes D1 usage but keeps migration files', () => {
+  it('forces d1 binding when user removes D1 usage but keeps migration files', async () => {
     // Source code has no void/db imports or env.DB usage
     const sourceCode = `export const GET = defineHandler(() => ({ message: "hello" }));`;
     const bindings = inferBindingsFromSource(sourceCode, 'hello.ts');
@@ -435,14 +445,14 @@ describe('end-to-end: D1 removed but migrations remain on disk', () => {
     writeFileSync(join(workerDir, 'index.js'), 'export default {}');
     const distDir = join(TMP, 'dist');
 
-    const form = packageBuild(distDir, 'worker', bindings, validatedMigrations);
+    const form = await packageBuild(distDir, 'worker', bindings, validatedMigrations);
     const manifest = getManifest(form);
 
     expect(manifest.bindings.d1).toEqual(['DB']);
     expect(manifest.migrations).toEqual({ dialect: 'sqlite', pending: 1 });
   });
 
-  it('works correctly when D1 usage is still present', () => {
+  it('works correctly when D1 usage is still present', async () => {
     const sourceCode = `
       import { db } from "void/db";
       export const GET = defineHandler(async () => {
@@ -465,14 +475,14 @@ describe('end-to-end: D1 removed but migrations remain on disk', () => {
     writeFileSync(join(workerDir, 'index.js'), 'export default {}');
     const distDir = join(TMP, 'dist');
 
-    const form = packageBuild(distDir, 'worker', bindings, validatedMigrations);
+    const form = await packageBuild(distDir, 'worker', bindings, validatedMigrations);
     const manifest = getManifest(form);
 
     expect(manifest.bindings.d1).toEqual(['DB']);
     expect(manifest.migrations).toEqual({ dialect: 'sqlite', pending: 1 });
   });
 
-  it('produces clean manifest when both D1 and migrations are removed', () => {
+  it('produces clean manifest when both D1 and migrations are removed', async () => {
     const sourceCode = `export const GET = defineHandler(() => ({ ok: true }));`;
     const bindings = inferBindingsFromSource(sourceCode, 'health.ts');
 
@@ -485,14 +495,14 @@ describe('end-to-end: D1 removed but migrations remain on disk', () => {
     writeFileSync(join(workerDir, 'index.js'), 'export default {}');
     const distDir = join(TMP, 'dist');
 
-    const form = packageBuild(distDir, 'worker', bindings);
+    const form = await packageBuild(distDir, 'worker', bindings);
     const manifest = getManifest(form);
 
     expect(manifest.migrations).toBeUndefined();
     expect(manifest.bindings.d1).toBeUndefined();
   });
 
-  it('forces d1 binding when multiple old migrations remain after removing env.DB', () => {
+  it('forces d1 binding when multiple old migrations remain after removing env.DB', async () => {
     const sourceCode = `
       export const GET = defineHandler(async (c) => {
         const data = await fetch("https://api.example.com/users");
@@ -519,14 +529,14 @@ describe('end-to-end: D1 removed but migrations remain on disk', () => {
     writeFileSync(join(workerDir, 'index.js'), 'export default {}');
     const distDir = join(TMP, 'dist');
 
-    const form = packageBuild(distDir, 'worker', bindings, validatedMigrations);
+    const form = await packageBuild(distDir, 'worker', bindings, validatedMigrations);
     const manifest = getManifest(form);
 
     expect(manifest.bindings.d1).toEqual(['DB']);
     expect(manifest.migrations).toEqual({ dialect: 'sqlite', pending: 2 });
   });
 
-  it('auth-enabled project with leftover migrations stays consistent', () => {
+  it('auth-enabled project with leftover migrations stays consistent', async () => {
     const authSource = `import { auth } from "void/client"; await auth.signOut();`;
     const routeSource = `export const GET = defineHandler(() => ({ ok: true }));`;
     const merged = mergeBindings([
@@ -553,14 +563,14 @@ describe('end-to-end: D1 removed but migrations remain on disk', () => {
     writeFileSync(join(workerDir, 'index.js'), 'export default {}');
     const distDir = join(TMP, 'dist');
 
-    const form = packageBuild(distDir, 'worker', effectiveBindings, validatedMigrations);
+    const form = await packageBuild(distDir, 'worker', effectiveBindings, validatedMigrations);
     const manifest = getManifest(form);
 
     expect(manifest.bindings.d1).toEqual(['DB']);
     expect(manifest.migrations!.pending).toBe(1);
   });
 
-  it('forces d1 binding for non-auth project with leftover migrations', () => {
+  it('forces d1 binding for non-auth project with leftover migrations', async () => {
     const routeSource = `export const GET = defineHandler(() => ({ ok: true }));`;
     const bindings = inferBindingsFromSource(routeSource, 'health.ts');
     expect(bindings.needsD1).toBe(false);
@@ -579,7 +589,7 @@ describe('end-to-end: D1 removed but migrations remain on disk', () => {
     writeFileSync(join(workerDir, 'index.js'), 'export default {}');
     const distDir = join(TMP, 'dist');
 
-    const form = packageBuild(distDir, 'worker', bindings, validatedMigrations);
+    const form = await packageBuild(distDir, 'worker', bindings, validatedMigrations);
     const manifest = getManifest(form);
 
     // Migrations should force the d1 binding even without auth or D1 imports

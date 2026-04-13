@@ -1,10 +1,10 @@
 import { intro, outro, log, cancel } from '@clack/prompts';
 import { getToken, getSiteDomain } from './auth';
 import { PlatformClient } from './client';
+import { promptAndCreateProject } from './create-project';
 import { cliTitle } from './output';
 import { readProjectConfig, writeProjectConfig } from './project';
-import { promptProjectSelection, promptProjectSlug } from './prompt';
-import { inferDefaultSlug } from './resolve-project';
+import { promptProjectSelection } from './prompt';
 
 export async function runLink(root: string, slug?: string): Promise<void> {
   console.log();
@@ -44,11 +44,8 @@ export async function runLink(root: string, slug?: string): Promise<void> {
   const result = await promptProjectSelection(projects);
 
   if (result.action === 'create') {
-    const slug = await promptProjectSlug(inferDefaultSlug(root));
-    log.step(`Creating project "${slug}"...`);
-    const created = await client.createProject(slug);
-    writeProjectConfig(root, { projectId: created.id, slug: created.slug });
-    outro(`Created and linked to ${created.slug} (${created.slug}.${getSiteDomain()})`);
+    const config = await promptAndCreateProject(root, client);
+    outro(`Created and linked to ${config.slug} (${config.slug}.${getSiteDomain()})`);
     return;
   }
 

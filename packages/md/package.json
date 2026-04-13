@@ -2,7 +2,8 @@
   "name": "@void-sdk/md",
   "version": "0.2.8",
   "files": [
-    "dist"
+    "dist",
+    "pages.d.ts"
   ],
   "type": "module",
   "exports": {
@@ -17,6 +18,9 @@
     "./runtime": {
       "types": "./dist/runtime/index.d.mts",
       "import": "./dist/runtime/index.mjs"
+    },
+    "./pages": {
+      "types": "./pages.d.ts"
     },
     "./theme.css": "./dist/theme/index.css",
     "./theme-content.css": "./dist/theme/content.css"

@@ -76,12 +76,46 @@ export async function killChild(child: ReturnType<typeof spawn>): Promise<void> 
       } catch {
         // Process may have already exited
       }
+    } else if (child.pid) {
+      // On Unix, SIGTERM only reaches the direct child (e.g. pnpm).
+      // Grandchildren like vite → miniflare → workerd are NOT signalled
+      // and become orphans that hold resource locks (D1 SQLite, ports).
+      // Walk the process tree bottom-up so every descendant is killed.
+      killTree(child.pid, 'SIGTERM');
     } else {
       child.kill('SIGTERM');
     }
     await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 5_000))]);
     if (child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGKILL');
+      if (process.platform !== 'win32' && child.pid) {
+        killTree(child.pid, 'SIGKILL');
+      } else {
+        child.kill('SIGKILL');
+      }
     }
+  }
+}
+
+function killTree(pid: number, signal: NodeJS.Signals): void {
+  // Find direct children before killing the parent, because once the
+  // parent dies its children are reparented to init and pgrep -P won't
+  // find them anymore.
+  let childPids: number[] = [];
+  try {
+    childPids = execSync(`pgrep -P ${pid}`, { encoding: 'utf8' })
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map(Number);
+  } catch {
+    // pgrep exits 1 when no children are found
+  }
+  for (const childPid of childPids) {
+    killTree(childPid, signal);
+  }
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Process may have already exited
   }
 }

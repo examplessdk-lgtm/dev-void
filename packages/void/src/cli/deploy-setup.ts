@@ -1,10 +1,10 @@
 import { cancel, confirm, isCancel, log } from '@clack/prompts';
 import { getToken, isStagingMode } from './auth';
 import { PlatformClient } from './client';
+import { promptAndCreateProject } from './create-project';
 import { promptForLoginToken } from './login';
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project';
-import { promptProjectSelection, promptProjectSlug } from './prompt';
-import { inferDefaultSlug } from './resolve-project';
+import { promptProjectSelection } from './prompt';
 
 async function ensureToken(): Promise<string> {
   const existing = getToken();
@@ -15,19 +15,6 @@ async function ensureToken(): Promise<string> {
   const token = await promptForLoginToken();
   log.success(isStagingMode() ? 'Staging token saved.' : 'Token saved.');
   return token;
-}
-
-async function createProject(
-  root: string,
-  client: PlatformClient,
-  slug: string,
-): Promise<ProjectConfig> {
-  log.step(`Creating project "${slug}"...`);
-  const project = await client.createProject(slug);
-  const config = { projectId: project.id, slug: project.slug };
-  writeProjectConfig(root, config);
-  log.success(`Project created and linked: ${config.slug}`);
-  return config;
 }
 
 export async function maybeSetupDeployProject(root: string): Promise<ProjectConfig | null> {
@@ -56,8 +43,7 @@ export async function maybeSetupDeployProject(root: string): Promise<ProjectConf
   const projects = await client.listProjects();
 
   if (projects.length === 0) {
-    const slug = await promptProjectSlug(inferDefaultSlug(root));
-    return createProject(root, client, slug);
+    return promptAndCreateProject(root, client);
   }
 
   const result = await promptProjectSelection(projects, 'Select a project to link:');
@@ -68,6 +54,5 @@ export async function maybeSetupDeployProject(root: string): Promise<ProjectConf
     return config;
   }
 
-  const slug = await promptProjectSlug(inferDefaultSlug(root));
-  return createProject(root, client, slug);
+  return promptAndCreateProject(root, client);
 }

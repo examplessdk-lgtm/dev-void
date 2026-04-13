@@ -1228,6 +1228,7 @@ function compilePrerenderCollector(
   lines.push(`function __voidBuildPrerenderPath(pattern, params) {`);
   lines.push(`  let path = pattern;`);
   lines.push(`  for (const [key, value] of Object.entries(params)) {`);
+  lines.push(`    path = path.replace(":" + key + "{.+}", value);`);
   lines.push(`    path = path.replace(":" + key, value);`);
   lines.push(`  }`);
   lines.push(`  return path;`);

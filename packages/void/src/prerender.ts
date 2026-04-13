@@ -12,6 +12,8 @@ import { dirname, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadEnv } from 'vite';
 import { getToken, isStagingMode } from './cli/auth';
+import { readWranglerCompat } from './cli/wrangler';
+import { readConfig } from './config';
 import { voidLog, voidWarn } from './log';
 import { filterLoadedEnv, stripInternalEnvKeys } from './shared/env';
 import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy';
@@ -225,6 +227,7 @@ async function createCloudflarePrerenderRunner(options: {
     throw new Error(`[void] wrangler.json not found in ${workerDir}`);
   }
   const wranglerConfig = JSON.parse(readFileSync(wranglerPath, 'utf-8'));
+  const wranglerCompat = readWranglerCompat(root, readConfig(root), workerDir);
   const workerMain = wranglerConfig.main ?? 'index.js';
 
   const env = filterLoadedEnv(loadEnv('production', root, ''));
@@ -274,8 +277,8 @@ async function createCloudflarePrerenderRunner(options: {
   const mfOptions: Record<string, unknown> = {
     modules: collectPrerenderWorkerModules(workerDir, workerMain),
     modulesRoot: workerDir,
-    compatibilityDate: wranglerConfig.compatibility_date ?? '2024-01-01',
-    compatibilityFlags: wranglerConfig.compatibility_flags ?? [],
+    compatibilityDate: wranglerCompat.compatibilityDate,
+    compatibilityFlags: wranglerCompat.compatibilityFlags ?? [],
     bindings,
   };
 
