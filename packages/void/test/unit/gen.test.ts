@@ -1755,6 +1755,230 @@ describe('gen migration', () => {
       .sort();
     expect(snapshotFiles).toEqual(['20200101000000_snapshot.json']);
   });
+
+  // Round 38: Yarn Berry PnP guard — under PnP, `node_modules` does not
+  // exist and dependencies resolve through `.pnp.cjs`. `runMigration`
+  // must inject the PnP loaders into the spawned child's NODE_OPTIONS
+  // so `drizzle-kit generate --custom` can resolve user imports like
+  // `void/schema-d1` from `db/schema.ts`. These tests pin that shape.
+  describe('Yarn PnP NODE_OPTIONS injection', () => {
+    // Seed a minimal journal-backed project so `runMigration` reaches
+    // the spawn call instead of bailing early.
+    function seedJournalBackedProject(): void {
+      seedSchema();
+      const migrationsDir = join(TMP, 'db', 'migrations');
+      mkdirSync(join(migrationsDir, 'meta'), { recursive: true });
+      const journalPath = join(migrationsDir, 'meta', '_journal.json');
+      const initialJournal = {
+        version: '7',
+        dialect: 'sqlite',
+        entries: [
+          {
+            idx: 0,
+            version: '6',
+            when: 1_700_000_000_000,
+            tag: '20200101000000_initial',
+            breakpoints: true,
+          },
+        ],
+      };
+      writeFileSync(journalPath, JSON.stringify(initialJournal, null, 2) + '\n');
+      writeFileSync(join(migrationsDir, '20200101000000_initial.sql'), '-- initial\n');
+      writeFileSync(
+        join(migrationsDir, 'meta', '20200101000000_snapshot.json'),
+        JSON.stringify(
+          {
+            version: '6',
+            dialect: 'sqlite',
+            id: '11111111-1111-1111-1111-111111111111',
+            prevId: '00000000-0000-0000-0000-000000000000',
+            tables: {},
+          },
+          null,
+          2,
+        ),
+      );
+    }
+
+    // Normalize NODE_OPTIONS across each test so pre-existing values
+    // from the ambient vitest environment don't leak into assertions.
+    // Saved once per test and restored in afterEach.
+    let savedNodeOptions: string | undefined;
+    beforeEach(() => {
+      savedNodeOptions = process.env.NODE_OPTIONS;
+      delete process.env.NODE_OPTIONS;
+    });
+    afterEach(() => {
+      if (savedNodeOptions === undefined) {
+        delete process.env.NODE_OPTIONS;
+      } else {
+        process.env.NODE_OPTIONS = savedNodeOptions;
+      }
+    });
+
+    it('injects --require .pnp.cjs into NODE_OPTIONS when .pnp.cjs exists', async () => {
+      seedJournalBackedProject();
+      const pnpCjsPath = join(TMP, '.pnp.cjs');
+      writeFileSync(pnpCjsPath, '// fake pnp shim\n');
+
+      await runGenCommand(TMP, { subcommand: 'migration', name: 'backfill' });
+
+      const generateCall = spawnMockState.calls.find(
+        (c) => Array.isArray(c.args) && c.args[1] === 'generate',
+      );
+      expect(generateCall).toBeDefined();
+      const env = (generateCall!.options as { env?: NodeJS.ProcessEnv }).env;
+      expect(env).toBeDefined();
+      expect(typeof env!.NODE_OPTIONS).toBe('string');
+      expect(env!.NODE_OPTIONS).toContain('--require');
+      // Path is JSON.stringify-quoted so spaces in the project path are
+      // handled by Node's NODE_OPTIONS parser.
+      expect(env!.NODE_OPTIONS).toContain(JSON.stringify(pnpCjsPath));
+      // Without a `.pnp.loader.mjs` on disk, no loader flag is injected.
+      expect(env!.NODE_OPTIONS).not.toContain('--experimental-loader');
+    });
+
+    it('also injects --experimental-loader file URL when .pnp.loader.mjs exists', async () => {
+      seedJournalBackedProject();
+      const pnpCjsPath = join(TMP, '.pnp.cjs');
+      const pnpLoaderPath = join(TMP, '.pnp.loader.mjs');
+      writeFileSync(pnpCjsPath, '// fake pnp shim\n');
+      writeFileSync(pnpLoaderPath, '// fake pnp loader\n');
+
+      await runGenCommand(TMP, { subcommand: 'migration', name: 'backfill' });
+
+      const generateCall = spawnMockState.calls.find(
+        (c) => Array.isArray(c.args) && c.args[1] === 'generate',
+      );
+      expect(generateCall).toBeDefined();
+      const env = (generateCall!.options as { env?: NodeJS.ProcessEnv }).env;
+      expect(env).toBeDefined();
+      expect(typeof env!.NODE_OPTIONS).toBe('string');
+      expect(env!.NODE_OPTIONS).toContain('--require');
+      expect(env!.NODE_OPTIONS).toContain(JSON.stringify(pnpCjsPath));
+      expect(env!.NODE_OPTIONS).toContain('--experimental-loader');
+      // The loader flag must be a file:// URL (Node requires a URL here,
+      // not a plain path). `pathToFileURL` produces the documented form.
+      expect(env!.NODE_OPTIONS).toContain(pathToFileURL(pnpLoaderPath).href);
+    });
+
+    it('leaves NODE_OPTIONS untouched when no PnP markers exist', async () => {
+      seedJournalBackedProject();
+      // No `.pnp.cjs` or `.pnp.loader.mjs` on disk — non-PnP project.
+
+      await runGenCommand(TMP, { subcommand: 'migration', name: 'backfill' });
+
+      const generateCall = spawnMockState.calls.find(
+        (c) => Array.isArray(c.args) && c.args[1] === 'generate',
+      );
+      expect(generateCall).toBeDefined();
+      const env = (generateCall!.options as { env?: NodeJS.ProcessEnv }).env;
+      // The child env is a clone of process.env (from the spread), so
+      // NODE_OPTIONS should match whatever the parent had — which the
+      // beforeEach normalized to `undefined`.
+      expect(env?.NODE_OPTIONS).toBeUndefined();
+    });
+
+    it('preserves pre-existing NODE_OPTIONS when injecting the PnP --require flag', async () => {
+      seedJournalBackedProject();
+      const pnpCjsPath = join(TMP, '.pnp.cjs');
+      writeFileSync(pnpCjsPath, '// fake pnp shim\n');
+      // Simulate a user-set NODE_OPTIONS (e.g. extra heap for heavy
+      // projects). The PnP flag must come first so `--require .pnp.cjs`
+      // runs before anything the user registered.
+      process.env.NODE_OPTIONS = '--max-old-space-size=4096';
+
+      await runGenCommand(TMP, { subcommand: 'migration', name: 'backfill' });
+
+      const generateCall = spawnMockState.calls.find(
+        (c) => Array.isArray(c.args) && c.args[1] === 'generate',
+      );
+      expect(generateCall).toBeDefined();
+      const env = (generateCall!.options as { env?: NodeJS.ProcessEnv }).env;
+      expect(env).toBeDefined();
+      expect(typeof env!.NODE_OPTIONS).toBe('string');
+      // Injected PnP flag comes first so `--require` runs before any
+      // user-registered requires/loaders.
+      expect(env!.NODE_OPTIONS!.startsWith('--require ')).toBe(true);
+      expect(env!.NODE_OPTIONS).toContain(JSON.stringify(pnpCjsPath));
+      // And the pre-existing user value is still there.
+      expect(env!.NODE_OPTIONS).toContain('--max-old-space-size=4096');
+    });
+
+    it('walks ancestors to find `.pnp.cjs` (workspace-root PnP, project is a subpackage)', async () => {
+      // Round 39: Yarn PnP monorepos keep `.pnp.cjs` at the workspace
+      // root, not in each subpackage. The helper walks ancestors so
+      // this common shape works. Set up a nested "subpackage" under
+      // TMP and place `.pnp.cjs` one directory up from the project
+      // root to simulate the workspace layout.
+      const subProject = join(TMP, 'packages', 'app');
+      const workspaceRoot = join(TMP, 'packages');
+      mkdirSync(subProject, { recursive: true });
+      // Schema + journal must live inside the project that we hand to
+      // runGenCommand, not the workspace root.
+      const schemaPath = join(subProject, 'db', 'schema.ts');
+      mkdirSync(dirname(schemaPath), { recursive: true });
+      writeFileSync(
+        schemaPath,
+        'import { sqliteTable, text } from "drizzle-orm/sqlite-core";\nexport const t = sqliteTable("t", { a: text("a") });\n',
+      );
+      const migrationsDir = join(subProject, 'db', 'migrations');
+      mkdirSync(join(migrationsDir, 'meta'), { recursive: true });
+      writeFileSync(
+        join(migrationsDir, 'meta', '_journal.json'),
+        JSON.stringify(
+          {
+            version: '7',
+            dialect: 'sqlite',
+            entries: [
+              {
+                idx: 0,
+                version: '6',
+                when: 1_700_000_000_000,
+                tag: '20200101000000_initial',
+                breakpoints: true,
+              },
+            ],
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(join(migrationsDir, '20200101000000_initial.sql'), '-- initial\n');
+      writeFileSync(
+        join(migrationsDir, 'meta', '20200101000000_snapshot.json'),
+        JSON.stringify(
+          {
+            version: '6',
+            dialect: 'sqlite',
+            id: '11111111-1111-1111-1111-111111111111',
+            prevId: '00000000-0000-0000-0000-000000000000',
+            tables: {},
+          },
+          null,
+          2,
+        ),
+      );
+      // `.pnp.cjs` is at the workspace root (the PARENT of the
+      // project) — NOT inside the project itself.
+      const pnpCjsPath = join(workspaceRoot, '.pnp.cjs');
+      writeFileSync(pnpCjsPath, '// fake pnp shim at workspace root\n');
+
+      await runGenCommand(subProject, { subcommand: 'migration', name: 'backfill' });
+
+      const generateCall = spawnMockState.calls.find(
+        (c) => Array.isArray(c.args) && c.args[1] === 'generate',
+      );
+      expect(generateCall).toBeDefined();
+      const env = (generateCall!.options as { env?: NodeJS.ProcessEnv }).env;
+      expect(env).toBeDefined();
+      expect(typeof env!.NODE_OPTIONS).toBe('string');
+      expect(env!.NODE_OPTIONS).toContain('--require');
+      // The helper must have found the ancestor `.pnp.cjs`, not
+      // anything inside the project directory.
+      expect(env!.NODE_OPTIONS).toContain(JSON.stringify(pnpCjsPath));
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
