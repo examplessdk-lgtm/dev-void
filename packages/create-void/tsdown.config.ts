@@ -6,5 +6,15 @@ export default defineConfig({
   dts: false,
   clean: true,
   minify: true,
-  inlineOnly: ['@clack/prompts', '@clack/core', 'sisteransi', 'picocolors'],
+  deps: {
+    onlyBundle: [
+      '@clack/prompts',
+      '@clack/core',
+      'fast-string-truncated-width',
+      'fast-string-width',
+      'fast-wrap-ansi',
+      'sisteransi',
+      'picocolors',
+    ],
+  },
 });

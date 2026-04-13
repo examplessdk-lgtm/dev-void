@@ -14,31 +14,59 @@ export default defineConfig({
 });
 ```
 
-## Quickstart
+## Authentication
 
-Void is currently in private preview. To install it for the first time:
+Void is currently in private preview. You need to set up a GitHub Personal Access Token (PAT) for the GitHub Packages registry.
 
-1. Create a project `.npmrc` with the GitHub Packages registry mapping:
+1. Add the GitHub Packages registry mapping to your project's `.npmrc`:
 
-```ini
-@void-sdk:registry=https://npm.pkg.github.com
+```sh
+echo "@void-sdk:registry=https://npm.pkg.github.com" >> .npmrc
 ```
 
-2. Create a GitHub classic PAT with `read:packages` so your machine can install private packages:
+2. Create a GitHub classic PAT with `read:packages` to install private packages:
 
-- Token creation: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic
-- Packages permissions: https://docs.github.com/en/packages/learn-github-packages/about-permissions-for-github-packages
+- Visit https://github.com/settings/tokens/new
+- Enable `read:packages`
+- Click "Generate Token"
+
+See also [token creation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic) and [packages permissions](https://docs.github.com/en/packages/learn-github-packages/about-permissions-for-github-packages) for details.
 
 3. Add the token to your user `~/.npmrc` so you do not commit credentials into the project:
 
-```ini
-//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
+```sh
+echo "//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT" >> ~/.npmrc
 ```
 
-4. Install the preview CLI using a package alias:
+4. For CI, configure `NODE_AUTH_TOKEN` with your PAT under GitHub repo settings "Secrets and variables" > "Actions":
+
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version: lts/*
+    cache: pnpm
+    registry-url: https://npm.pkg.github.com
+    scope: '@void-sdk'
+- run: pnpm install
+  env:
+    NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+```
+
+## Starting a New Project
+
+1. Install the preview CLI using a package alias:
 
 ```sh
-npm install -D void@npm:@void-sdk/void
+mkdir your-project
+cd your-project
+pnpm add -D void@npm:@void-sdk/void
+```
+
+> [!WARNING]
+> **Using npm?** npm has a known issue resolving peer dependencies with package aliases. Add the `--legacy-peer-deps` flag.
+
+```sh
+npm install -D void@npm:@void-sdk/void --legacy-peer-deps
 ```
 
 For example, the resulting `package.json` entry looks like this:
@@ -51,14 +79,52 @@ For example, the resulting `package.json` entry looks like this:
 }
 ```
 
-When you run `void init` in an empty directory, it scaffolds the starter and adds the matching framework adapter plus Vite dependencies for you. Framework and support packages still follow the same alias pattern when you add them manually later: `@void/react@npm:@void-sdk/react`, `@void/vue@npm:@void-sdk/vue`, `@void/svelte@npm:@void-sdk/svelte`, `@void/solid@npm:@void-sdk/solid`, and `@void/md@npm:@void-sdk/md`.
+When you run `void init` in a scaffoldable empty directory, it scaffolds the starter and adds the matching framework adapter plus Vite dependencies for you. Framework and support packages still follow the same alias pattern when you add them manually later: `@void/react@npm:@void-sdk/react`, `@void/vue@npm:@void-sdk/vue`, `@void/svelte@npm:@void-sdk/svelte`, `@void/solid@npm:@void-sdk/solid`, and `@void/md@npm:@void-sdk/md`.
 
 Then run:
 
 ```sh
-npx void init
-npm run dev          # local dev with workerd runtime
-npx void deploy      # deploy to void.app
+pnpm void init
+pnpm dev             # local dev with workerd runtime
+pnpm void deploy     # deploy to void.app
+```
+
+## Adding Void to an Existing Project
+
+1. Install the preview package using a package alias:
+
+```sh
+pnpm add -D void@npm:@void-sdk/void
+```
+
+> [!WARNING]
+> **Using npm?** npm has a known issue resolving peer dependencies with package aliases. Add the `--legacy-peer-deps` flag.
+
+```sh
+npm install -D void@npm:@void-sdk/void --legacy-peer-deps
+```
+
+2. Enable the plugin in `vite.config.ts`:
+
+```ts
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+
+export default defineConfig({
+  plugins: [voidPlugin()],
+});
+```
+
+3. Run the setup flow:
+
+```sh
+pnpm void init
+```
+
+4. Deploy to void.app:
+
+```sh
+pnpm void deploy
 ```
 
 ## Features
@@ -72,7 +138,7 @@ npx void deploy      # deploy to void.app
 
 ## Documentation
 
-Full docs at [void.cloud](https://void.cloud)
+Full docs at [void.cloud](https://void.cloud). Run `pnpm dev:docs` in this repo to view the documentation locally.
 
 ## Contributing
 
@@ -92,7 +158,7 @@ pnpm test              # run tests
 pnpm lint              # oxlint
 pnpm fmt               # oxfmt
 pnpm check             # typecheck all packages
-pnpm docs              # local docs dev server
+pnpm dev:docs          # local docs dev server
 ```
 
 ### Project Structure
