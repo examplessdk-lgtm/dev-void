@@ -18,7 +18,7 @@ import type {
 
 const textEncoder = new TextEncoder();
 
-export type ProgressCallback = (message: string) => void;
+type ProgressCallback = (message: string) => void;
 
 const PROGRESS_CHUNK = 50;
 
