@@ -9,7 +9,7 @@
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "vue": "^3.5.31"
+    "vue": "^3.5.32"
   },
   "devDependencies": {
     "@void/md": "workspace:@void-sdk/md@*",

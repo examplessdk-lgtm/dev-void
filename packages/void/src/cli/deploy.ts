@@ -45,6 +45,7 @@ import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env';
 import { validateSsrEntry } from '../ssr/entry';
 import { getToken, getTokenSource } from './auth';
 import { isExpiredTokenError, PlatformClient } from './client';
+import { promptAndCreateProject } from './create-project';
 import { parseHeadersFile, parseRedirectsFile } from './headers';
 import { promptForLoginToken } from './login';
 import { cliTitle, createSpinner } from './output';
@@ -63,10 +64,10 @@ import {
   type FrameworkPreset,
 } from './preset';
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project';
-import { promptProjectSelection, promptProjectSlug } from './prompt';
-import { getRequestedProjectSlug, resolveProjectBySlug, inferDefaultSlug } from './resolve-project';
+import { promptProjectSelection } from './prompt';
+import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project';
 import type { AssetConfig, DeployEvent, HeaderRule, RedirectRule } from './types';
-import { readWranglerCompat } from './wrangler';
+import { readWranglerCompat, type WranglerCompat } from './wrangler';
 import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper';
 import type { WrapperFeatures } from './wrapper';
 
@@ -75,6 +76,14 @@ export interface RunDeployOptions {
   dir?: string;
   spa?: boolean;
   skipBuild?: boolean;
+}
+
+export function resolveDeployWranglerCompat(
+  root: string,
+  config: VoidConfig,
+  buildOutputDir: string,
+): WranglerCompat | undefined {
+  return isNodeTarget(config.target) ? undefined : readWranglerCompat(root, config, buildOutputDir);
 }
 
 /**
@@ -113,7 +122,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
         if (!config) {
           if (!process.stdin.isTTY) {
             // CI: auto-create when --project is explicitly specified
-            config = await createNewProject(root, client, requestedProjectSlug);
+            config = await createProjectFromSlug(root, client, requestedProjectSlug);
           } else {
             const shouldCreate = await confirm({
               message: `Project "${requestedProjectSlug}" does not exist. Create it?`,
@@ -123,7 +132,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
               process.exit(0);
             }
 
-            config = await createNewProject(root, client, requestedProjectSlug);
+            config = await createProjectFromSlug(root, client, requestedProjectSlug);
           }
         }
       } else {
@@ -149,12 +158,10 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
             writeProjectConfig(root, config);
             log.step(`Linked to ${config.slug}`);
           } else {
-            const slug = await promptProjectSlug(inferDefaultSlug(root));
-            config = await createNewProject(root, client, slug);
+            config = await promptAndCreateProject(root, client);
           }
         } else {
-          const slug = await promptProjectSlug(inferDefaultSlug(root));
-          config = await createNewProject(root, client, slug);
+          config = await promptAndCreateProject(root, client);
         }
       }
 
@@ -532,7 +539,7 @@ async function runFrameworkDeploy(
     log.info('Wrapper generated');
   }
 
-  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > build output > default)
+  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > build output)
   // Use the original workerDir (not actualWorkerDir) because bundleEntry() may
   // reassign actualWorkerDir to a temporary output — the plugin-generated
   // wrangler.json with correct compat settings lives in the original build output.
@@ -879,8 +886,12 @@ async function runFullDeploy(
             projectId: config.projectId,
           });
 
-  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > build output > default)
-  const wranglerCompat = readWranglerCompat(root, deployConfig, join(distDir, workerDirName));
+  // 8. Read wrangler compat settings for Cloudflare targets
+  const wranglerCompat = resolveDeployWranglerCompat(
+    root,
+    deployConfig,
+    join(distDir, workerDirName),
+  );
 
   // 9. Load .env vars for production (excludes .local files)
   const envVars = loadDeployEnv(root);
@@ -921,8 +932,8 @@ async function runFullDeploy(
     uniquePrerenderPaths,
     assetConfig,
     {
-      compatibilityDate: wranglerCompat.compatibilityDate,
-      compatibilityFlags: wranglerCompat.compatibilityFlags,
+      compatibilityDate: wranglerCompat?.compatibilityDate,
+      compatibilityFlags: wranglerCompat?.compatibilityFlags,
     },
     neededSet,
     assetsPrefix,
@@ -978,15 +989,13 @@ async function runFullDeploy(
   outro('Done!');
 }
 
-async function createNewProject(
+async function createProjectFromSlug(
   root: string,
   client: PlatformClient,
-  slug?: string,
+  slug: string,
 ): Promise<ProjectConfig> {
-  const projectSlug = slug ?? inferDefaultSlug(root);
-
-  log.step(`Creating project "${projectSlug}"...`);
-  const project = await client.createProject(projectSlug);
+  log.step(`Creating project "${slug}"...`);
+  const project = await client.createProject(slug);
   const config = { projectId: project.id, slug: project.slug };
   writeProjectConfig(root, config);
   log.success(`Project created: ${config.slug}`);

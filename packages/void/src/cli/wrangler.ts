@@ -5,11 +5,12 @@ import type { VoidConfig } from '../config';
 import type { InferredBindings } from '../inference/walk';
 import type { WebSocketRouteDefinition } from '../router/websocket';
 
-/** Known-good default compatibility date — bumped when we test against newer runtime versions. */
-export const DEFAULT_COMPAT_DATE = '2026-02-12';
-
 const COMPAT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const NODEJS_ALS_FLAG = 'nodejs_als';
+const VOID_CONFIG_FILE = 'void.json';
+
+/** Latest compatibility date the Void test suite is pinned against. */
+export const LATEST_KNOWN_COMPAT_DATE = '2026-02-24';
 
 /** Subset of wrangler config fields we extract. */
 export interface WranglerCompat {
@@ -19,9 +20,10 @@ export interface WranglerCompat {
 
 /**
  * Read compatibility settings from `wrangler.jsonc`/`wrangler.json` and
- * `void.json`, with priority: void.json > wrangler.jsonc > build output > built-in default.
+ * `void.json`, with priority: void.json > wrangler.jsonc > build output.
  *
- * Always returns a `compatibilityDate` (falls back to `DEFAULT_COMPAT_DATE`).
+ * If no explicit `compatibility_date` is configured, pins the latest known-good
+ * date in `void.json` so subsequent runs are explicit and stable.
  *
  * @param buildOutputDir - Optional path to the build output directory (e.g.
  *   `dist/ssr`) which may contain a plugin-generated `wrangler.json` with the
@@ -32,6 +34,8 @@ export function readWranglerCompat(
   config?: VoidConfig,
   buildOutputDir?: string,
 ): WranglerCompat {
+  const voidConfig = config ?? readVoidConfigIfExists(root);
+
   // 1. Read wrangler.jsonc / wrangler.json from project root
   let raw: string | undefined;
   for (const name of ['wrangler.jsonc', 'wrangler.json']) {
@@ -48,11 +52,7 @@ export function readWranglerCompat(
   if (raw) {
     const parsed = parseJsonc(raw);
     if (typeof parsed.compatibility_date === 'string') {
-      if (!COMPAT_DATE_RE.test(parsed.compatibility_date)) {
-        throw new Error(
-          `"compatibility_date" in wrangler config must be YYYY-MM-DD format, got "${parsed.compatibility_date}"`,
-        );
-      }
+      validateCompatDate(parsed.compatibility_date, 'wrangler config');
       wranglerDate = parsed.compatibility_date;
     }
     if (
@@ -71,6 +71,7 @@ export function readWranglerCompat(
       const buildRaw = readFileSync(join(buildOutputDir, 'wrangler.json'), 'utf-8');
       const buildParsed = JSON.parse(buildRaw);
       if (typeof buildParsed.compatibility_date === 'string') {
+        validateCompatDate(buildParsed.compatibility_date, 'build output wrangler.json');
         buildDate = buildParsed.compatibility_date;
       }
       if (
@@ -85,12 +86,18 @@ export function readWranglerCompat(
   }
 
   // 2. Override with void.json worker fields (higher priority)
-  const voidDate = config?.worker?.compatibility_date;
-  const voidFlags = config?.worker?.compatibility_flags;
+  const voidDate = voidConfig?.worker?.compatibility_date;
+  const voidFlags = voidConfig?.worker?.compatibility_flags;
+  if (voidDate !== undefined) {
+    validateCompatDate(voidDate, 'void.json worker config');
+  }
 
-  // 3. Merge: void.json > project wrangler.jsonc > build output > default
+  // 3. Merge: void.json > project wrangler.jsonc > build output
+  const compatibilityDate =
+    voidDate ?? wranglerDate ?? buildDate ?? ensureVoidCompatibilityDate(root, voidConfig);
+
   const result: WranglerCompat = {
-    compatibilityDate: voidDate ?? wranglerDate ?? buildDate ?? DEFAULT_COMPAT_DATE,
+    compatibilityDate,
   };
 
   const flags = voidFlags ?? wranglerFlags ?? buildFlags;
@@ -99,6 +106,61 @@ export function readWranglerCompat(
   }
 
   return result;
+}
+
+function validateCompatDate(value: string, source: string): void {
+  if (!COMPAT_DATE_RE.test(value)) {
+    throw new Error(`"compatibility_date" in ${source} must be YYYY-MM-DD format, got "${value}"`);
+  }
+}
+
+function readVoidConfigIfExists(root: string): VoidConfig | undefined {
+  const filePath = join(root, VOID_CONFIG_FILE);
+  if (!existsSync(filePath)) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error(`${VOID_CONFIG_FILE} must be a JSON object`);
+    }
+    return parsed as VoidConfig;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(`Invalid JSON in ${VOID_CONFIG_FILE}`);
+    }
+    throw error;
+  }
+}
+
+function ensureVoidCompatibilityDate(root: string, config?: VoidConfig): string {
+  const filePath = join(root, VOID_CONFIG_FILE);
+  let nextConfig: VoidConfig = {};
+
+  if (existsSync(filePath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error(`${VOID_CONFIG_FILE} must be a JSON object`);
+      }
+      nextConfig = parsed as VoidConfig;
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error(`Invalid JSON in ${VOID_CONFIG_FILE}`);
+      }
+      throw error;
+    }
+  } else if (config) {
+    nextConfig = { ...config };
+  }
+
+  nextConfig.worker = {
+    ...(nextConfig.worker ?? {}),
+    compatibility_date: LATEST_KNOWN_COMPAT_DATE,
+  };
+  writeFileSync(filePath, `${JSON.stringify(nextConfig, null, 2)}\n`);
+  return LATEST_KNOWN_COMPAT_DATE;
 }
 
 /**
@@ -200,6 +262,43 @@ export function syncWranglerBindings(
   }
 
   return created || modified;
+}
+
+/**
+ * Ensure a wrangler config has an explicit compatibility date.
+ * Used when `worker.compatibility_date` is configured in void.json but the
+ * active framework reads Cloudflare settings from wrangler.jsonc/json.
+ */
+export function ensureWranglerCompatibilityDate(root: string, compatibilityDate: string): boolean {
+  validateCompatDate(compatibilityDate, 'void.json worker config');
+
+  let configPath: string | undefined;
+  let parsed: Record<string, unknown> | undefined;
+  for (const name of ['wrangler.jsonc', 'wrangler.json']) {
+    const p = join(root, name);
+    if (existsSync(p)) {
+      configPath = p;
+      try {
+        parsed = parseJsonc(readFileSync(p, 'utf-8'));
+      } catch {
+        // Can't read, skip
+      }
+      break;
+    }
+  }
+
+  if (!configPath || !parsed) {
+    configPath = join(root, 'wrangler.jsonc');
+    parsed = {};
+  }
+
+  if (parsed.compatibility_date === compatibilityDate) {
+    return false;
+  }
+
+  parsed.compatibility_date = compatibilityDate;
+  writeFileSync(configPath, JSON.stringify(parsed, null, 2) + '\n');
+  return true;
 }
 
 /**

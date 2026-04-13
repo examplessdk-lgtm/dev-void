@@ -10,7 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isScaffoldableEmptyProject, runInitCommand } from '../../src/cli/init';
+import { getTodayCompatDate, isScaffoldableEmptyProject, runInitCommand } from '../../src/cli/init';
 
 const mockSpawnSync = vi.fn();
 const mockSelect = vi.fn();
@@ -119,14 +119,6 @@ function listMigrationSqlFiles(root: string): string[] {
   return readdirSync(migrationsDir)
     .filter((entry) => entry.endsWith('.sql'))
     .sort();
-}
-
-function getTodayCompatDate(): string {
-  const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
 }
 
 afterEach(() => {
@@ -300,6 +292,15 @@ describe('isScaffoldableEmptyProject', () => {
       expect(() =>
         readFileSync(join(root, 'db', 'migrations', '0000_initial.sql'), 'utf-8'),
       ).toThrow(/ENOENT/);
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'pnpm',
+        ['install'],
+        expect.objectContaining({
+          cwd: root,
+          stdio: 'inherit',
+          shell: process.platform === 'win32',
+        }),
+      );
 
       const tsconfig = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf-8'));
       expect(tsconfig.compilerOptions.jsx).toBe('react-jsx');
@@ -429,6 +430,46 @@ describe('isScaffoldableEmptyProject', () => {
           compatibility_date: getTodayCompatDate(),
         },
       });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to npm for starter dependency installation when pnpm is unavailable', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      mockSpawnSync.mockImplementation((command, args) => {
+        if (command === 'pnpm' && Array.isArray(args) && args[0] === '--version') {
+          return { status: 1, stdout: '', stderr: '' };
+        }
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      mockSelect
+        .mockResolvedValueOnce('react')
+        .mockResolvedValueOnce('static')
+        .mockResolvedValueOnce('generic');
+      mockConfirm.mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'pnpm',
+        ['--version'],
+        expect.objectContaining({
+          stdio: 'ignore',
+          shell: process.platform === 'win32',
+        }),
+      );
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'npm',
+        ['install'],
+        expect.objectContaining({
+          cwd: root,
+          stdio: 'inherit',
+          shell: process.platform === 'win32',
+        }),
+      );
+      expect(mockSpawnSync).not.toHaveBeenCalledWith('pnpm', ['install'], expect.anything());
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
