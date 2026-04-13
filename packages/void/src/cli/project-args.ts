@@ -6,6 +6,7 @@ export const projectSubcommands: SubcommandDef[] = [
   { name: 'list', description: 'List your projects' },
   { name: 'logs', description: 'Show runtime logs from the deployed project' },
   { name: 'rollback', arg: '[deployId]', description: 'Roll back to a previous deployment' },
+  { name: 'cancel', arg: '[deployId]', description: 'Cancel an active deployment' },
   {
     name: 'delete',
     arg: '[name]',
@@ -20,6 +21,7 @@ export type ProjectArgs =
   | { subcommand: 'list' }
   | { subcommand: 'logs'; filter: string; range: string; deployment: string }
   | { subcommand: 'rollback'; deployId: string }
+  | { subcommand: 'cancel'; deployId: string }
   | { subcommand: 'delete'; name: string; force: boolean }
   | { subcommand: 'purge-cache'; projectSlug: string };
 
@@ -75,6 +77,14 @@ export function parseProjectArgs(args: string[]): ProjectArgs {
     return { subcommand, deployId: deployId ?? '' };
   }
 
+  if (subcommand === 'cancel') {
+    const [deployId, extra] = rest;
+    if (extra) {
+      throw new Error(`Error: Unexpected argument: ${extra}`);
+    }
+    return { subcommand, deployId: deployId ?? '' };
+  }
+
   if (subcommand === 'delete') {
     let name = '';
     let force = false;
@@ -104,5 +114,7 @@ export function parseProjectArgs(args: string[]): ProjectArgs {
     return { subcommand, projectSlug };
   }
 
-  throw new Error('Error: Usage: void project <status|link|list|logs|rollback|delete|purge-cache>');
+  throw new Error(
+    'Error: Usage: void project <status|link|list|logs|rollback|cancel|delete|purge-cache>',
+  );
 }

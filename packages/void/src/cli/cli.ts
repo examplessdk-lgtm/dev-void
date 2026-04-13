@@ -45,6 +45,7 @@ function printHelp() {
       helpLine('void project list', 'List your projects'),
       helpLine('void project logs [--filter] [--range]', 'Show runtime logs from deployed project'),
       helpLine('void project rollback [deployId]', 'Roll back to a previous deployment'),
+      helpLine('void project cancel [deployId]', 'Cancel an active deployment'),
       helpLine('void project delete [name]', 'Delete a project and all its resources'),
       helpLine('void project purge-cache [--project]', 'Purge all cached pages'),
       '',

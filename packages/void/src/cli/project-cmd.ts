@@ -21,6 +21,10 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
     const { runRollbackCommand } = await import('./rollback');
     return runRollbackCommand(root, args.deployId || undefined);
   }
+  if (args.subcommand === 'cancel') {
+    const { runCancelDeployCommand } = await import('./cancel-deploy');
+    return runCancelDeployCommand(root, args.deployId || undefined);
+  }
   if (args.subcommand === 'delete') {
     const { runDeleteCommand } = await import('./delete');
     return runDeleteCommand(root, args.name || undefined, { force: args.force });

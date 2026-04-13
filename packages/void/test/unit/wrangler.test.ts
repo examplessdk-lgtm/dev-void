@@ -72,6 +72,26 @@ describe('readWranglerCompat', () => {
     });
   });
 
+  it('reads from wrangler.jsonc with trailing commas', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "name": "test",
+  "compatibility_date": "2026-02-24",
+  "compatibility_flags": [
+    "nodejs_compat",
+  ],
+  "assets": {
+    "directory": "dist/client",
+  },
+}`,
+    );
+    expect(readWranglerCompat(tmpDir)).toEqual({
+      compatibilityDate: '2026-02-24',
+      compatibilityFlags: ['nodejs_compat'],
+    });
+  });
+
   it('prefers wrangler.jsonc over wrangler.json', () => {
     setup('wrangler.jsonc', '{ "compatibility_date": "2026-01-01" }');
     writeFileSync(join(tmpDir, 'wrangler.json'), '{ "compatibility_date": "2025-01-01" }');

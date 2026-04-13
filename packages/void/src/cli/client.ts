@@ -187,6 +187,27 @@ export class PlatformClient {
     return res.json();
   }
 
+  async cancelDeployment(
+    projectId: string,
+    deploymentId: string,
+  ): Promise<{ ok: boolean; deploymentId: string; status: string }> {
+    const res = await fetch(
+      `${this.baseUrl}/projects/${projectId}/deployments/${deploymentId}/cancel`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+        },
+      },
+    );
+
+    if (!res.ok) {
+      await throwPlatformApiError('Cancel deployment failed', res);
+    }
+
+    return res.json();
+  }
+
   async createProject(slug: string): Promise<CreateProjectResponse> {
     const res = await fetch(`${this.baseUrl}/projects`, {
       method: 'POST',
