@@ -1,6 +1,9 @@
 {
   "$schema": "./node_modules/void/schema.json",
   "output": "static",
+  "worker": {
+    "compatibility_date": "2026-02-12"
+  },
   "head": {
     "titleTemplate": "%s | Zero JS",
     "htmlAttrs": { "lang": "en" },

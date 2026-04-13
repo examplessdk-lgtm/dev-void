@@ -3,7 +3,7 @@ import { defineConfig } from 'astro/config';
 import { voidPlugin } from 'void';
 
 export default defineConfig({
-  adapter: cloudflare(),
+  adapter: cloudflare({ configPath: './wrangler.build.jsonc' }),
   vite: {
     plugins: [voidPlugin()],
   },

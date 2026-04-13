@@ -65,6 +65,10 @@ describe('playground/kitchen-sink', () => {
       {
         cwd: ROOT,
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          VOID_INSPECTOR_PORT: 'false',
+        },
       },
     );
 

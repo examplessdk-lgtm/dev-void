@@ -114,7 +114,7 @@ You can set non-binding wrangler fields like `compatibility_date` and `compatibi
 ```json
 {
   "worker": {
-    "compatibility_date": "2026-02-12",
+    "compatibility_date": "2026-02-24",
     "compatibility_flags": ["nodejs_compat"]
   }
 }
@@ -131,7 +131,7 @@ Binding arrays such as `d1_databases`, `kv_namespaces`, and `r2_buckets` are not
 
 ## Wrangler config merging
 
-By default, Void configures the Cloudflare plugin entirely programmatically -- you don't need a `wrangler.jsonc`. Bindings are inferred from your source code and provisioned with local placeholder IDs for development.
+By default, Void configures the Cloudflare plugin programmatically, so you don't need a `wrangler.jsonc` for bindings. Void pins a Workers compatibility date in `void.json` `worker.compatibility_date`; if no date is already configured in `void.json` or `wrangler.jsonc`/`wrangler.json`, Void writes the latest known-good date to `void.json`. Bindings are inferred from your source code and provisioned with local placeholder IDs for development.
 
 If you add a `wrangler.jsonc` (or `wrangler.json`) to your project root, Void respects it -- but **how** depends on whether Void owns the Cloudflare integration or a meta-framework does.
 
@@ -157,6 +157,7 @@ When using SvelteKit, Nuxt, or Astro, the framework's own Cloudflare adapter own
 Because Void doesn't control the CF plugin in this mode, it can't merge bindings via a config callback. Instead, on dev startup Void syncs inferred bindings directly to your `wrangler.jsonc` file on disk:
 
 - Only adds bindings that are **missing** by name -- existing bindings are never modified or removed.
+- If `worker.compatibility_date` is set in `void.json`, syncs that date into wrangler config so the framework adapter reads the same value.
 - Also ensures the `nodejs_als` compatibility flag is present.
 - The framework adapter then reads this `wrangler.jsonc` normally.
 
@@ -169,7 +170,8 @@ This means your `wrangler.jsonc` is the single source of truth for bindings in t
 | Your `wrangler.jsonc`      | Highest for bindings | Real resource IDs, service bindings, routes, vars, environments     |
 | `void.json` `worker` field | Highest for compat   | `compatibility_date`, `compatibility_flags`, `vars`                 |
 | Void inference             | Fills gaps only      | Adds placeholder bindings for inferred resources not in your config |
-| Built-in defaults          | Lowest               | `compatibility_date: "2026-02-12"` when nothing else is set         |
+
+If no date is found in `void.json`, project wrangler config, or the supported generated build wrangler fallback during deploy, Void pins the latest known-good date to `void.json` and uses it for that run.
 
 ### Example
 
@@ -234,7 +236,7 @@ Create `wrangler.jsonc` in your project root with the resource IDs from step 1:
 ```jsonc
 {
   "name": "my-app",
-  "compatibility_date": "2026-02-12",
+  "compatibility_date": "2026-02-24",
   "d1_databases": [
     {
       "binding": "DB",

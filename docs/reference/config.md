@@ -8,7 +8,7 @@ outline: deep
 
 Use this page as the exact reference for `void.json`. If you are still learning how the pieces fit together, start in the guide first and come back here when you need field-by-field details.
 
-All project-level configuration lives in a `void.json` file at the project root. Every field is optional. If the file is missing, Void uses the defaults.
+Project-level configuration lives in a `void.json` file at the project root. Most fields are optional. Cloudflare-targeted apps must pin a Workers `compatibility_date` in `worker.compatibility_date` or in a supported wrangler fallback file (`wrangler.jsonc` or `wrangler.json`). If no date is configured, Void writes the latest known-good date to `void.json` so future runs stay explicit and stable.
 
 ```json
 {
@@ -202,7 +202,7 @@ Non-CF targets disable CF bindings (`void/db`, `void/kv`, `void/auth`, `void/sto
 
 ### `worker`
 
-Curated Cloudflare Workers configuration. Binding arrays such as `d1_databases`, `kv_namespaces`, and `r2_buckets` are not allowed here because Void manages bindings through inference and `inference.bindings`. If you need custom bindings with real IDs, use a `wrangler.json` and `wrangler deploy`.
+Curated Cloudflare Workers configuration. Cloudflare-targeted apps require an explicit `compatibility_date` here unless it is provided by a supported wrangler fallback file. If no date is configured, Void writes the latest known-good date here. Binding arrays such as `d1_databases`, `kv_namespaces`, and `r2_buckets` are not allowed here because Void manages bindings through inference and `inference.bindings`. If you need custom bindings with real IDs, use a `wrangler.json` and `wrangler deploy`.
 
 | Field                 | Type       | Description                            |
 | --------------------- | ---------- | -------------------------------------- |

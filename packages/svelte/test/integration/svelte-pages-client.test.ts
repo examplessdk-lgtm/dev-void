@@ -756,6 +756,10 @@ describe('svelte-pages client (preview)', { retry: 2, timeout: 60_000 }, () => {
       {
         cwd: ROOT,
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          VOID_INSPECTOR_PORT: 'false',
+        },
       },
     );
 
