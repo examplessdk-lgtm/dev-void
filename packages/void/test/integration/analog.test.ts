@@ -44,7 +44,7 @@ describe('playground/analog build', () => {
     const serverEntry = join(ROOT, `${PLAYGROUND}/dist/analog/server/index.mjs`);
     expect(existsSync(serverEntry)).toBe(true);
 
-    const clientDir = join(ROOT, `${PLAYGROUND}/dist/client`);
+    const clientDir = join(ROOT, `${PLAYGROUND}/dist/analog/public`);
     expect(existsSync(clientDir)).toBe(true);
   });
 });
