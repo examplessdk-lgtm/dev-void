@@ -10,7 +10,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getTodayCompatDate, isScaffoldableEmptyProject, runInitCommand } from '../../src/cli/init';
+import {
+  generateStarterMigration,
+  getTodayCompatDate,
+  isScaffoldableEmptyProject,
+  runInitCommand,
+} from '../../src/cli/init';
 
 const mockSpawnSync = vi.fn();
 const mockSelect = vi.fn();
@@ -777,5 +782,188 @@ describe('isScaffoldableEmptyProject', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('generateStarterMigration', () => {
+  // Regression for void-sdk/void#6 round 43: when `drizzle-kit generate`
+  // crashes mid-write — truncated journal, partial snapshot, or an
+  // interrupted write during `void init` — `generateStarterMigration`
+  // previously threw without cleaning up the partial artifacts it had
+  // planted in `db/migrations/`. The next `void db status` /
+  // `void db generate` / `void gen migration` then hit
+  // `assertJournalCoherence` and refused to proceed, wedging the repo
+  // until the user manually deleted `db/migrations/`. The fix snapshots
+  // everything drizzle-kit might touch before spawning, then
+  // restores/unlinks on failure. Mirrors the rollback pattern in
+  // `gen.ts`'s `generateCustomMigration`, extended to handle the
+  // "migrations dir didn't exist yet" case that's unique to the
+  // starter path.
+
+  function seedStarterSchema(root: string, dialect: 'sqlite' | 'postgresql'): void {
+    mkdirSync(join(root, 'db'), { recursive: true });
+    writeFileSync(
+      join(root, 'db', 'schema.ts'),
+      dialect === 'postgresql'
+        ? 'import { sqliteTable } from "void/schema-pg";\nexport const messages = sqliteTable("messages", {});\n'
+        : 'import { sqliteTable } from "void/schema-d1";\nexport const messages = sqliteTable("messages", {});\n',
+    );
+  }
+
+  it('rolls back partial artifacts when drizzle-kit fails and migrations/ did not exist before', () => {
+    // Empty-dir case: `db/migrations/` does not exist at all before
+    // the spawn. Drizzle-kit plants a partial journal + one partial
+    // snapshot, then exits non-zero. Rollback must nuke both the
+    // snapshot/journal files AND the `meta/` directory so the next
+    // retry is not wedged on a coherence check.
+    withTempDir((root) => {
+      seedStarterSchema(root, 'sqlite');
+      mockSpawnSync.mockImplementationOnce((command, args, options) => {
+        if (
+          command === process.execPath &&
+          Array.isArray(args) &&
+          args[1] === 'generate' &&
+          options &&
+          typeof options === 'object' &&
+          'cwd' in options &&
+          typeof options.cwd === 'string'
+        ) {
+          // Plant a partial journal + snapshot mid-write before
+          // "crashing" with a non-zero exit.
+          const migrationsDir = join(options.cwd, 'db', 'migrations');
+          const metaDir = join(migrationsDir, 'meta');
+          mkdirSync(metaDir, { recursive: true });
+          writeFileSync(
+            join(metaDir, '_journal.json'),
+            '{"version":"7","dialect":"sqlite","entries":[',
+          );
+          writeFileSync(join(metaDir, '0000_snapshot.json'), '{"partial":true');
+          writeFileSync(join(migrationsDir, '0000_generated.sql'), '-- partially written sql\n');
+        }
+        return {
+          status: 1,
+          stdout: '',
+          stderr: 'drizzle-kit: simulated crash',
+        };
+      });
+
+      expect(() => generateStarterMigration(root, 'sqlite')).toThrow(
+        /Failed to generate the starter database migration/,
+      );
+
+      // Rollback must have removed everything the failed spawn
+      // planted. The meta/ dir and the journal must be gone because
+      // they didn't exist before the spawn.
+      expect(existsSync(join(root, 'db', 'migrations', 'meta', '_journal.json'))).toBe(false);
+      expect(existsSync(join(root, 'db', 'migrations', 'meta', '0000_snapshot.json'))).toBe(false);
+      // Best-effort — the meta/ dir itself may or may not be removed,
+      // but it must at least be empty so subsequent retries are not
+      // blocked by partial artifacts.
+      if (existsSync(join(root, 'db', 'migrations', 'meta'))) {
+        expect(readdirSync(join(root, 'db', 'migrations', 'meta'))).toEqual([]);
+      }
+      // No fresh .sql files in migrations/.
+      const sqlFiles = existsSync(join(root, 'db', 'migrations'))
+        ? readdirSync(join(root, 'db', 'migrations')).filter((f) => f.endsWith('.sql'))
+        : [];
+      expect(sqlFiles).toEqual([]);
+    });
+  });
+
+  it('restores the journal and keeps prior entries when drizzle-kit fails and a journal existed before', () => {
+    // Existing-journal case: `db/migrations/meta/_journal.json` is
+    // already on disk with some known content, plus a prior
+    // `0000_prev.sql` and `0000_snapshot.json`. The spawn overwrites
+    // the journal, plants a new `0001_new.sql` / `0001_snapshot.json`,
+    // then exits non-zero. Rollback must:
+    //   - byte-restore the original journal
+    //   - preserve `0000_prev.sql` and `0000_snapshot.json`
+    //   - unlink the new `0001_new.sql` and `0001_snapshot.json`
+    withTempDir((root) => {
+      seedStarterSchema(root, 'sqlite');
+      const migrationsDir = join(root, 'db', 'migrations');
+      const metaDir = join(migrationsDir, 'meta');
+      mkdirSync(metaDir, { recursive: true });
+
+      const originalJournal =
+        JSON.stringify(
+          {
+            version: '7',
+            dialect: 'sqlite',
+            entries: [{ idx: 0, version: '6', when: 0, tag: '0000_prev', breakpoints: true }],
+          },
+          null,
+          2,
+        ) + '\n';
+      writeFileSync(join(metaDir, '_journal.json'), originalJournal);
+      writeFileSync(
+        join(metaDir, '0000_snapshot.json'),
+        JSON.stringify({ version: '6', dialect: 'sqlite' }, null, 2) + '\n',
+      );
+      writeFileSync(
+        join(migrationsDir, '0000_prev.sql'),
+        'CREATE TABLE existing (id INTEGER PRIMARY KEY);\n',
+      );
+
+      mockSpawnSync.mockImplementationOnce((command, args, options) => {
+        if (
+          command === process.execPath &&
+          Array.isArray(args) &&
+          args[1] === 'generate' &&
+          options &&
+          typeof options === 'object' &&
+          'cwd' in options &&
+          typeof options.cwd === 'string'
+        ) {
+          const cwdMigrationsDir = join(options.cwd, 'db', 'migrations');
+          const cwdMetaDir = join(cwdMigrationsDir, 'meta');
+          // Overwrite the journal with a corrupted / partial write.
+          writeFileSync(join(cwdMetaDir, '_journal.json'), '{"truncated":true');
+          // Plant a new snapshot + sql file for a migration that
+          // never finishes.
+          writeFileSync(join(cwdMetaDir, '0001_snapshot.json'), '{"new":"partial"');
+          writeFileSync(join(cwdMigrationsDir, '0001_new.sql'), '-- half-written new migration\n');
+        }
+        return {
+          status: 1,
+          stdout: '',
+          stderr: 'drizzle-kit: simulated crash',
+        };
+      });
+
+      expect(() => generateStarterMigration(root, 'sqlite')).toThrow(
+        /Failed to generate the starter database migration/,
+      );
+
+      // Journal must be byte-restored.
+      expect(readFileSync(join(metaDir, '_journal.json'), 'utf-8')).toBe(originalJournal);
+      // Prior migration artifacts must still exist.
+      expect(existsSync(join(metaDir, '0000_snapshot.json'))).toBe(true);
+      expect(existsSync(join(migrationsDir, '0000_prev.sql'))).toBe(true);
+      // Fresh partial artifacts must be gone.
+      expect(existsSync(join(metaDir, '0001_snapshot.json'))).toBe(false);
+      expect(existsSync(join(migrationsDir, '0001_new.sql'))).toBe(false);
+    });
+  });
+
+  it('leaves all new artifacts in place on the success path', () => {
+    // Regression guard: the rollback path must only fire when the
+    // spawn fails. On a successful spawn, every file drizzle-kit
+    // wrote (journal, snapshot, sql migration) must survive untouched.
+    withTempDir((root) => {
+      seedStarterSchema(root, 'sqlite');
+
+      // The default beforeEach mock already writes a full mock
+      // migration on success — let it run.
+      generateStarterMigration(root, 'sqlite');
+
+      expect(existsSync(join(root, 'db', 'migrations', '0000_generated.sql'))).toBe(true);
+      expect(existsSync(join(root, 'db', 'migrations', 'meta', '_journal.json'))).toBe(true);
+      expect(existsSync(join(root, 'db', 'migrations', 'meta', '0000_snapshot.json'))).toBe(true);
+      // Sanity: journal is non-empty and mentions the generated entry.
+      expect(
+        readFileSync(join(root, 'db', 'migrations', 'meta', '_journal.json'), 'utf-8'),
+      ).toContain('0000_generated');
+    });
   });
 });

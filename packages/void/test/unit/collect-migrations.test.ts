@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { collectMigrations, validateJournalCoherence } from '../../src/migrations/collect';
+import { collectMigrations } from '../../src/migrations/collect';
 
 const TMP_DIR = join(import.meta.dirname, '.tmp-collect-test');
 
@@ -71,85 +71,6 @@ describe('collectMigrations', () => {
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe('001_create.sql');
 
-    cleanup();
-  });
-});
-
-describe('validateJournalCoherence', () => {
-  it('does nothing when no _journal.json exists', () => {
-    setup({ '001_create.sql': 'CREATE TABLE a;' });
-    expect(() => validateJournalCoherence(TMP_DIR)).not.toThrow();
-    cleanup();
-  });
-
-  it('does nothing when directory does not exist', () => {
-    expect(() => validateJournalCoherence('/nonexistent/path')).not.toThrow();
-  });
-
-  it('passes when all sql files are tracked in the journal', () => {
-    setup({ '0000_initial.sql': 'CREATE TABLE a;' });
-    const metaDir = join(TMP_DIR, 'meta');
-    mkdirSync(metaDir, { recursive: true });
-    writeFileSync(
-      join(metaDir, '_journal.json'),
-      JSON.stringify({
-        version: '7',
-        dialect: 'sqlite',
-        entries: [{ idx: 0, version: '6', when: 0, tag: '0000_initial', breakpoints: true }],
-      }),
-    );
-
-    expect(() => validateJournalCoherence(TMP_DIR)).not.toThrow();
-    cleanup();
-  });
-
-  it('throws when orphan sql files exist alongside a journal', () => {
-    setup({
-      '0000_initial.sql': 'CREATE TABLE a;',
-      '0001_orphan.sql': 'CREATE TABLE b;',
-    });
-    const metaDir = join(TMP_DIR, 'meta');
-    mkdirSync(metaDir, { recursive: true });
-    writeFileSync(
-      join(metaDir, '_journal.json'),
-      JSON.stringify({
-        version: '7',
-        dialect: 'sqlite',
-        entries: [{ idx: 0, version: '6', when: 0, tag: '0000_initial', breakpoints: true }],
-      }),
-    );
-
-    expect(() => validateJournalCoherence(TMP_DIR)).toThrow('0001_orphan.sql');
-    cleanup();
-  });
-
-  it('ignores seed.sql when checking coherence', () => {
-    setup({
-      '0000_initial.sql': 'CREATE TABLE a;',
-      'seed.sql': 'INSERT INTO a VALUES (1);',
-    });
-    const metaDir = join(TMP_DIR, 'meta');
-    mkdirSync(metaDir, { recursive: true });
-    writeFileSync(
-      join(metaDir, '_journal.json'),
-      JSON.stringify({
-        version: '7',
-        dialect: 'sqlite',
-        entries: [{ idx: 0, version: '6', when: 0, tag: '0000_initial', breakpoints: true }],
-      }),
-    );
-
-    expect(() => validateJournalCoherence(TMP_DIR)).not.toThrow();
-    cleanup();
-  });
-
-  it('handles malformed journal gracefully', () => {
-    setup({ '001_create.sql': 'CREATE TABLE a;' });
-    const metaDir = join(TMP_DIR, 'meta');
-    mkdirSync(metaDir, { recursive: true });
-    writeFileSync(join(metaDir, '_journal.json'), 'not json');
-
-    expect(() => validateJournalCoherence(TMP_DIR)).not.toThrow();
     cleanup();
   });
 });

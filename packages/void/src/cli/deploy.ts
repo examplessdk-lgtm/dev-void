@@ -29,8 +29,8 @@ import { scanJobsSync } from '../crons/scan';
 import { writeDrizzleConfig } from '../drizzle/config';
 import { discoverSchema } from '../drizzle/discover';
 import { voidWarn } from '../log';
-import { collectMigrations, validateJournalCoherence } from '../migrations/collect';
-import { validateMigrations } from '../migrations/validate';
+import { collectMigrations } from '../migrations/collect';
+import { assertJournalCoherence, validateMigrations } from '../migrations/validate';
 import { scanPages } from '../pages/scan';
 import {
   inferProjectBindings,
@@ -465,19 +465,19 @@ async function runFrameworkDeploy(
     process.exit(1);
   }
 
+  const migrationsDir = join(root, 'db', 'migrations');
+
   assertDeploySchemaDriftFree(root, dialect);
 
   // 4. Collect migrations (before Hyperdrive check so migrations can gate provisioning)
-  const migrationsDir = join(root, 'db', 'migrations');
-  try {
-    validateJournalCoherence(migrationsDir);
-  } catch (err: any) {
-    log.error(err.message);
-    log.info('Fix the orphan files, then rerun `void deploy`.');
-    process.exit(1);
-  }
   const rawMigrations = collectMigrations(migrationsDir);
   let validatedMigrations;
+  try {
+    assertJournalCoherence(migrationsDir, rawMigrations);
+  } catch (err: any) {
+    log.error(err.message);
+    process.exit(1);
+  }
   if (rawMigrations.length > 0) {
     try {
       validatedMigrations = validateMigrations(rawMigrations);
@@ -743,19 +743,19 @@ async function runFullDeploy(
   const cfgRedirectRules = convertRedirectsConfig(deployConfig.routing?.redirects);
   const redirectRules: RedirectRule[] = [...(userRedirectRules ?? []), ...(cfgRedirectRules ?? [])];
 
+  const migrationsDir = join(root, 'db', 'migrations');
+
   assertDeploySchemaDriftFree(root, dialect);
 
   // 7. Collect and validate migrations (before Hyperdrive check so migrations can gate provisioning)
-  const migrationsDir = join(root, 'db', 'migrations');
-  try {
-    validateJournalCoherence(migrationsDir);
-  } catch (err: any) {
-    log.error(err.message);
-    log.info('Fix the orphan files, then rerun `void deploy`.');
-    process.exit(1);
-  }
   const rawMigrations = collectMigrations(migrationsDir);
   let validatedMigrations;
+  try {
+    assertJournalCoherence(migrationsDir, rawMigrations);
+  } catch (err: any) {
+    log.error(err.message);
+    process.exit(1);
+  }
   if (rawMigrations.length > 0) {
     try {
       validatedMigrations = validateMigrations(rawMigrations);

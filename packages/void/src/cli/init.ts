@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  rmdirSync,
   unlinkSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -24,7 +25,6 @@ import {
   type McpConfigTarget,
 } from './agents';
 import { maybeSetupDeployProject } from './deploy-setup';
-import { formatTimestamp } from './gen';
 import { cliTitle } from './output';
 import { formatProjectCommand } from './preset';
 import {
@@ -975,6 +975,27 @@ export function generateStarterMigration(
     dialect,
   );
 
+  // Round 43: snapshot everything drizzle-kit might touch so a
+  // mid-write crash can't leave partial artifacts that wedge
+  // subsequent `void db` commands on the journal coherence check.
+  // Mirrors the rollback pattern in `gen.ts`'s
+  // `generateCustomMigration`, but extended for the "migrations dir
+  // doesn't exist yet" case that only the starter path hits.
+  const migrationsDir = join(root, 'db', 'migrations');
+  const metaDir = join(migrationsDir, 'meta');
+  const journalPath = join(metaDir, '_journal.json');
+  const migrationsDirExistedBefore = existsSync(migrationsDir);
+  const metaDirExistedBefore = existsSync(metaDir);
+  const originalJournalBytes: Buffer | null = existsSync(journalPath)
+    ? readFileSync(journalPath)
+    : null;
+  const snapshotsBefore = metaDirExistedBefore
+    ? new Set(readdirSync(metaDir).filter((f) => f.endsWith('_snapshot.json')))
+    : new Set<string>();
+  const sqlFilesBefore = migrationsDirExistedBefore
+    ? new Set(readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')))
+    : new Set<string>();
+
   log.step('Generating initial Drizzle migration');
   const result = spawnSync(process.execPath, [drizzleKitBin, 'generate', '--config', configPath], {
     cwd: root,
@@ -982,6 +1003,80 @@ export function generateStarterMigration(
     encoding: 'utf-8',
     shell: process.platform === 'win32',
   });
+
+  const failed = Boolean(result.error) || result.status !== 0;
+  if (failed) {
+    // Best-effort byte-restore of the journal + unlink of any fresh
+    // files drizzle-kit may have planted before it crashed. Swallow
+    // cleanup errors — the original spawn failure is the actionable
+    // signal; a cleanup bug should not shadow it.
+    if (originalJournalBytes !== null) {
+      try {
+        writeFileSync(journalPath, originalJournalBytes);
+      } catch {
+        // Swallow: surfacing the original failure is more useful.
+      }
+    } else if (!metaDirExistedBefore && existsSync(metaDir)) {
+      // meta/ didn't exist before — nuke anything drizzle-kit planted
+      // inside it and remove the dir itself.
+      try {
+        for (const f of readdirSync(metaDir)) {
+          try {
+            unlinkSync(join(metaDir, f));
+          } catch {
+            // Swallow.
+          }
+        }
+        try {
+          rmdirSync(metaDir);
+        } catch {
+          // Swallow.
+        }
+      } catch {
+        // Swallow: a failed readdir is not a useful signal here.
+      }
+    }
+    if (metaDirExistedBefore && existsSync(metaDir)) {
+      for (const f of readdirSync(metaDir)) {
+        if (f.endsWith('_snapshot.json') && !snapshotsBefore.has(f)) {
+          try {
+            unlinkSync(join(metaDir, f));
+          } catch {
+            // Swallow.
+          }
+        }
+      }
+    }
+    if (!migrationsDirExistedBefore && existsSync(migrationsDir)) {
+      // migrations/ didn't exist before — nuke any fresh sql files.
+      // Intentionally do NOT rmdir the directory itself: a subsequent
+      // retry wants it to exist, and leaving an empty dir behind is
+      // harmless.
+      try {
+        for (const f of readdirSync(migrationsDir)) {
+          if (f.endsWith('.sql')) {
+            try {
+              unlinkSync(join(migrationsDir, f));
+            } catch {
+              // Swallow.
+            }
+          }
+        }
+      } catch {
+        // Swallow.
+      }
+    } else if (migrationsDirExistedBefore && existsSync(migrationsDir)) {
+      for (const f of readdirSync(migrationsDir)) {
+        if (f.endsWith('.sql') && !sqlFilesBefore.has(f)) {
+          try {
+            unlinkSync(join(migrationsDir, f));
+          } catch {
+            // Swallow.
+          }
+        }
+      }
+    }
+  }
 
   if (result.error) {
     throw result.error;

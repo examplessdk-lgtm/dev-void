@@ -32,14 +32,30 @@ function createProjectRoot(options: {
   schema?: string;
 }): string {
   const root = mkdtempSync(join(import.meta.dirname, '.tmp-db-seed-'));
-  mkdirSync(join(root, 'db', 'migrations'), { recursive: true });
+  const migrationsDir = join(root, 'db', 'migrations');
+  mkdirSync(join(migrationsDir, 'meta'), { recursive: true });
   writeFileSync(
-    join(root, 'db', 'migrations', '0000_messages.sql'),
+    join(migrationsDir, '0000_messages.sql'),
     `CREATE TABLE messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   text TEXT NOT NULL
 );
 `,
+  );
+  // Keep the journal coherent with the migration file above.
+  writeFileSync(
+    join(migrationsDir, 'meta', '_journal.json'),
+    JSON.stringify(
+      {
+        version: '7',
+        dialect: 'sqlite',
+        entries: [
+          { idx: 0, version: '7', when: 1730000000000, tag: '0000_messages', breakpoints: true },
+        ],
+      },
+      null,
+      2,
+    ) + '\n',
   );
   writeFileSync(join(root, 'db', options.seedFile.name), options.seedFile.content);
   if (options.extraSeedFile) {
