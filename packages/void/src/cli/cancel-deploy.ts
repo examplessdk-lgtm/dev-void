@@ -57,7 +57,7 @@ export async function runCancelDeployCommand(root: string, deployId?: string): P
   }
 
   await client.cancelDeployment(linked.projectId, target.id);
-  outro(`Deployment ${target.id} was canceled.`);
+  outro(`Cancellation requested for deployment ${target.id}.`);
 }
 
 function formatDeployment(deployment: DeploymentResponse): string {
