@@ -186,6 +186,7 @@ export default extendConfig(
                   { text: 'Edge Prerendering', link: '/guide/edge/prerendering' },
                   { text: 'Custom Headers', link: '/guide/edge/headers' },
                   { text: 'Redirects', link: '/guide/edge/redirects' },
+                  { text: 'Rewrites', link: '/guide/edge/rewrites' },
                 ],
               },
               { text: 'Custom SSR', link: '/guide/ssr' },

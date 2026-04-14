@@ -220,7 +220,7 @@ Curated Cloudflare Workers configuration. Cloudflare-targeted apps require an ex
 
 ### `routing`
 
-Routing and edge configuration for headers, redirects, and caching.
+Routing and edge configuration for headers, redirects, rewrites, and caching.
 
 #### `routing.headers`
 
@@ -247,6 +247,21 @@ URL redirects. Keys are source URL patterns, values are destination strings (302
     "redirects": {
       "/old": "/new",
       "/blog/*": { "to": "/posts/:splat", "status": 301 }
+    }
+  }
+}
+```
+
+#### `routing.rewrites`
+
+URL rewrites. Keys are source URL patterns, values are destination paths. Serves content from the destination without changing the browser URL. See [Rewrites](../guide/edge/rewrites) for details.
+
+```json
+{
+  "routing": {
+    "rewrites": {
+      "/": "/en",
+      "/docs/*": "/en/docs/:splat"
     }
   }
 }

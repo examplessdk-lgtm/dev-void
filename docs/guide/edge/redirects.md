@@ -56,7 +56,7 @@ A request to `/blog/hello-world` redirects to `/posts/hello-world` with a `301` 
 Meta-frameworks may generate a `_redirects` file during build. Void parses this file at deploy time and merges the rules into the deploy manifest.
 
 - Framework-generated rules are applied **before** `void.json` rules. Since the last match wins, `routing.redirects` in `void.json` takes precedence.
-- Only 3xx redirect rules are included. Rewrite rules (status `200`) in `_redirects` files are ignored.
+- Both 3xx redirect rules and status `200` [rewrite rules](./rewrites) are supported in `_redirects` files.
 - The `_redirects` file is not uploaded as a static asset. Its contents are parsed and included in the manifest only.
 
 ## How redirects work
