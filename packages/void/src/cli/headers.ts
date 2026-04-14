@@ -80,7 +80,7 @@ export function parseHeadersFile(dir: string): Array<HeaderRule> | undefined {
 /**
  * Parse a `_redirects` file into RedirectRule[].
  * Format: `source destination [status]` per line (status defaults to 302).
- * Lines starting with # are comments. Only 3xx redirects are included (200 rewrites skipped).
+ * Lines starting with # are comments. Includes 3xx redirects and 200 rewrites.
  */
 export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined {
   const filePath = join(dir, '_redirects');
@@ -105,8 +105,8 @@ export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined
     const [source, destination, statusStr] = parts;
     const status = statusStr ? parseInt(statusStr, 10) : 302;
 
-    // Only include actual redirects (3xx), skip rewrites (200)
-    if (status >= 300 && status < 400) {
+    // Include redirects (3xx) and rewrites (200)
+    if (status === 200 || (status >= 300 && status < 400)) {
       rules.push({ source, destination, status });
     }
   }

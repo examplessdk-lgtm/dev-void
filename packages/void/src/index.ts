@@ -1013,6 +1013,7 @@ export {
   defineRender,
   defineHead,
   defineQueue,
+  rewrite,
 } from './runtime/handler';
 export type {
   CloudContext,

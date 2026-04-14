@@ -17,12 +17,13 @@ export interface WranglerConfig {
   compatibility_flags?: Array<string>;
 }
 
-/** Routing configuration — headers, redirects, revalidation, prerendering. */
+/** Routing configuration — headers, redirects, rewrites, revalidation, prerendering. */
 export interface RoutingConfig {
   revalidate?: number | Record<string, number>;
   prerender?: Array<string>;
   headers?: Record<string, Array<string>>;
   redirects?: Record<string, RedirectDestination>;
+  rewrites?: Record<string, string>;
 }
 
 /** Inference configuration — bindings, scanDirs, build, outputDir, appType. */
@@ -320,6 +321,31 @@ export function readConfig(root: string): VoidConfig {
         }
       }
     }
+
+    // Validate routing.rewrites
+    if (routing.rewrites !== undefined) {
+      if (
+        typeof routing.rewrites !== 'object' ||
+        routing.rewrites === null ||
+        Array.isArray(routing.rewrites)
+      ) {
+        throw new Error(`"routing.rewrites" in ${CONFIG_FILE} must be an object`);
+      }
+      const rw = routing.rewrites as Record<string, unknown>;
+      for (const [source, dest] of Object.entries(rw)) {
+        if (!source.startsWith('/')) {
+          throw new Error(`Rewrite source "${source}" in ${CONFIG_FILE} must start with "/"`);
+        }
+        if (typeof dest !== 'string') {
+          throw new Error(`Rewrite destination for "${source}" in ${CONFIG_FILE} must be a string`);
+        }
+        if (!dest.startsWith('/')) {
+          throw new Error(
+            `Rewrite destination for "${source}" in ${CONFIG_FILE} must start with "/" (only internal paths are supported)`,
+          );
+        }
+      }
+    }
   }
 
   // Validate inference
@@ -538,6 +564,28 @@ export function convertRedirectsConfig(
     } else {
       rules.push({ source, destination: dest.to, status: dest.status ?? 302 });
     }
+  }
+
+  return rules.length > 0 ? rules : undefined;
+}
+
+/**
+ * Convert the `rewrites` config field into `RedirectRule[]` with status 200.
+ *
+ * Each key is a URL pattern (e.g. "/docs") and each value is a destination path.
+ * Rewrites serve content from the destination without changing the browser URL.
+ * Returns undefined if the input is empty or undefined.
+ */
+export function convertRewritesConfig(
+  rewrites: Record<string, string> | undefined,
+): RedirectRule[] | undefined {
+  if (!rewrites) {
+    return undefined;
+  }
+
+  const rules: RedirectRule[] = [];
+  for (const [source, destination] of Object.entries(rewrites)) {
+    rules.push({ source, destination, status: 200 });
   }
 
   return rules.length > 0 ? rules : undefined;

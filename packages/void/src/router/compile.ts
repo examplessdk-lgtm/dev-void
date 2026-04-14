@@ -754,6 +754,19 @@ export function compileRouteTable(
   lines.push(`export const requestContext = new AsyncLocalStorage();`);
   lines.push('');
 
+  // Inject rewrite utility into context — closure over `app` for re-dispatch
+  lines.push('app.use(async (c, next) => {');
+  lines.push('  c.set("__rewrite", (path) => {');
+  lines.push('    const rewriteUrl = new URL(c.req.url);');
+  lines.push('    rewriteUrl.pathname = path;');
+  lines.push('    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
+  lines.push('    rewriteReq.headers.set("X-Void-Rewritten", "1");');
+  lines.push('    return app.fetch(rewriteReq, c.env);');
+  lines.push('  });');
+  lines.push('  await next();');
+  lines.push('});');
+  lines.push('');
+
   // Request context middleware — threads outer request into ALS for isomorphic fetch
   lines.push('app.use(async (c, next) => {');
   if (options.nodeTarget) {
@@ -768,7 +781,7 @@ export function compileRouteTable(
 
   // Edge routing middleware (node targets only — on CF these are handled by the dispatch worker)
   if (options.nodeTarget && options.redirectRules?.length) {
-    compileRedirectMiddleware(lines, options.redirectRules);
+    compileRoutingRulesMiddleware(lines, options.redirectRules);
   }
   if (options.nodeTarget && options.headerRules?.length) {
     compileHeaderMiddleware(lines, options.headerRules);
@@ -2135,17 +2148,19 @@ function emitMatchPattern(lines: Array<string>): void {
 }
 
 /**
- * Emit redirect middleware — short-circuits matching requests before route handlers.
+ * Emit routing rules middleware — handles both redirects (3xx) and rewrites (200).
  * Last match wins, consistent with dispatch worker behavior.
+ * Rewrites re-dispatch through the Hono app with a guard header to prevent loops.
  */
-function compileRedirectMiddleware(lines: Array<string>, rules: Array<RedirectRule>): void {
+function compileRoutingRulesMiddleware(lines: Array<string>, rules: Array<RedirectRule>): void {
   emitMatchPattern(lines);
-  lines.push('// Redirect rules (applied before route handlers)');
-  lines.push(`const __redirectRules = ${JSON.stringify(rules)};`);
+  lines.push('// Routing rules: redirects + rewrites (applied before route handlers)');
+  lines.push(`const __routingRules = ${JSON.stringify(rules)};`);
   lines.push('app.use("*", async (c, next) => {');
+  lines.push('  if (c.req.header("X-Void-Rewritten")) return next();');
   lines.push('  const pathname = new URL(c.req.url).pathname;');
   lines.push('  let matched;');
-  lines.push('  for (const rule of __redirectRules) {');
+  lines.push('  for (const rule of __routingRules) {');
   lines.push('    if (__matchPattern(rule.source, pathname)) matched = rule;');
   lines.push('  }');
   lines.push('  if (matched) {');
@@ -2154,6 +2169,13 @@ function compileRedirectMiddleware(lines: Array<string>, rules: Array<RedirectRu
   lines.push('      const prefix = matched.source.split("*")[0];');
   lines.push('      const splat = pathname.slice(prefix.length);');
   lines.push('      dest = dest.replace(":splat", splat);');
+  lines.push('    }');
+  lines.push('    if (matched.status === 200) {');
+  lines.push('      const rewriteUrl = new URL(c.req.url);');
+  lines.push('      rewriteUrl.pathname = dest;');
+  lines.push('      const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
+  lines.push('      rewriteReq.headers.set("X-Void-Rewritten", "1");');
+  lines.push('      return app.fetch(rewriteReq, c.env);');
   lines.push('    }');
   lines.push('    return c.redirect(dest, matched.status);');
   lines.push('  }');

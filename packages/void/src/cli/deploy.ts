@@ -25,7 +25,7 @@ import {
   getDatabaseDialect,
   isNodeTarget,
 } from '../config';
-import { convertHeadersConfig, convertRedirectsConfig } from '../config';
+import { convertHeadersConfig, convertRedirectsConfig, convertRewritesConfig } from '../config';
 import { scanJobsSync } from '../crons/scan';
 import { writeDrizzleConfig } from '../drizzle/config';
 import { discoverSchema } from '../drizzle/discover';
@@ -290,7 +290,10 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
           gitCommit,
           undefined,
           convertHeadersConfig(voidConfig.routing?.headers) ?? [],
-          convertRedirectsConfig(voidConfig.routing?.redirects) ?? [],
+          [
+            ...(convertRedirectsConfig(voidConfig.routing?.redirects) ?? []),
+            ...(convertRewritesConfig(voidConfig.routing?.rewrites) ?? []),
+          ],
         );
       } else {
         await runFullDeploy(root, config, client, undefined, options?.skipBuild, gitCommit);
@@ -550,9 +553,11 @@ async function runFrameworkDeploy(
   // Collect redirect rules: parse framework-generated _redirects file + void.json config
   const fwRedirectRules = existsSync(assetsDir) ? parseRedirectsFile(assetsDir) : undefined;
   const cfgRedirectRules = convertRedirectsConfig(voidConfig.routing?.redirects);
+  const cfgRewriteRules = convertRewritesConfig(voidConfig.routing?.rewrites);
   const redirectRules: Array<RedirectRule> = [
     ...(fwRedirectRules ?? []),
     ...(cfgRedirectRules ?? []),
+    ...(cfgRewriteRules ?? []),
   ];
 
   if (!existsSync(workerDir)) {
@@ -859,9 +864,11 @@ async function runFullDeploy(
   // Collect redirect rules: parse user/framework _redirects file + void.json config
   const userRedirectRules = existsSync(clientDir) ? parseRedirectsFile(clientDir) : undefined;
   const cfgRedirectRules = convertRedirectsConfig(deployConfig.routing?.redirects);
+  const cfgRewriteRules = convertRewritesConfig(deployConfig.routing?.rewrites);
   const redirectRules: Array<RedirectRule> = [
     ...(userRedirectRules ?? []),
     ...(cfgRedirectRules ?? []),
+    ...(cfgRewriteRules ?? []),
   ];
 
   const migrationsDir = join(root, 'db', 'migrations');

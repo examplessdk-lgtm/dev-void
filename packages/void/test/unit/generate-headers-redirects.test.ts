@@ -44,10 +44,13 @@ describe('parseRedirectsFile', () => {
     expect(rules).toEqual([{ source: '/old', destination: '/new', status: 302 }]);
   });
 
-  it('skips 200 rewrites (only includes 3xx)', () => {
+  it('includes 200 rewrites alongside 3xx redirects', () => {
     setup('/app/* /index.html 200\n/old /new 301\n');
     const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([{ source: '/old', destination: '/new', status: 301 }]);
+    expect(rules).toEqual([
+      { source: '/app/*', destination: '/index.html', status: 200 },
+      { source: '/old', destination: '/new', status: 301 },
+    ]);
   });
 
   it('handles :splat destinations (preserved as-is)', () => {
@@ -61,8 +64,15 @@ describe('parseRedirectsFile', () => {
     expect(parseRedirectsFile(tmpDir)).toBeUndefined();
   });
 
-  it('returns undefined for file with only 200 rewrites', () => {
+  it('parses file with only 200 rewrites', () => {
     setup('/app/* /index.html 200\n');
-    expect(parseRedirectsFile(tmpDir)).toBeUndefined();
+    const rules = parseRedirectsFile(tmpDir);
+    expect(rules).toEqual([{ source: '/app/*', destination: '/index.html', status: 200 }]);
+  });
+
+  it('skips non-200 non-3xx status codes', () => {
+    setup('/old /new 404\n/ok /new 301\n');
+    const rules = parseRedirectsFile(tmpDir);
+    expect(rules).toEqual([{ source: '/ok', destination: '/new', status: 301 }]);
   });
 });

@@ -5,6 +5,7 @@ import {
   readConfig,
   convertHeadersConfig,
   convertRedirectsConfig,
+  convertRewritesConfig,
   resolveBindingNames,
   isNodeTarget,
   getDatabaseDialect,
@@ -524,6 +525,39 @@ describe('readConfig redirects', () => {
   });
 });
 
+describe('routing.rewrites validation', () => {
+  it('accepts valid rewrites', () => {
+    setup(JSON.stringify({ routing: { rewrites: { '/docs': '/en/docs' } } }));
+    const config = readConfig(tmpDir);
+    expect(config.routing?.rewrites).toEqual({ '/docs': '/en/docs' });
+    cleanup();
+  });
+
+  it('throws when rewrites is not an object', () => {
+    setup(JSON.stringify({ routing: { rewrites: ['/old', '/new'] } }));
+    expect(() => readConfig(tmpDir)).toThrow('"routing.rewrites" in void.json must be an object');
+    cleanup();
+  });
+
+  it('throws when source does not start with /', () => {
+    setup(JSON.stringify({ routing: { rewrites: { docs: '/en/docs' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
+    cleanup();
+  });
+
+  it('throws when destination is not a string', () => {
+    setup(JSON.stringify({ routing: { rewrites: { '/docs': 42 } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be a string');
+    cleanup();
+  });
+
+  it('throws when destination does not start with /', () => {
+    setup(JSON.stringify({ routing: { rewrites: { '/docs': 'en/docs' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
+    cleanup();
+  });
+});
+
 describe('convertHeadersConfig', () => {
   it('returns undefined for undefined input', () => {
     expect(convertHeadersConfig(undefined)).toBeUndefined();
@@ -630,6 +664,32 @@ describe('convertRedirectsConfig', () => {
     expect(result).toEqual([
       { source: '/a', destination: '/b', status: 302 },
       { source: '/c/*', destination: '/d/:splat', status: 308 },
+    ]);
+  });
+});
+
+describe('convertRewritesConfig', () => {
+  it('returns undefined for undefined input', () => {
+    expect(convertRewritesConfig(undefined)).toBeUndefined();
+  });
+
+  it('returns undefined for empty object', () => {
+    expect(convertRewritesConfig({})).toBeUndefined();
+  });
+
+  it('converts entries with status 200', () => {
+    const result = convertRewritesConfig({ '/docs': '/en/docs' });
+    expect(result).toEqual([{ source: '/docs', destination: '/en/docs', status: 200 }]);
+  });
+
+  it('converts multiple entries preserving order', () => {
+    const result = convertRewritesConfig({
+      '/': '/en',
+      '/docs/*': '/en/docs/:splat',
+    });
+    expect(result).toEqual([
+      { source: '/', destination: '/en', status: 200 },
+      { source: '/docs/*', destination: '/en/docs/:splat', status: 200 },
     ]);
   });
 });
