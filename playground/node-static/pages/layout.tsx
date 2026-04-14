@@ -1,10 +1,20 @@
 import { Link } from '@void/react';
+import { useState, type ReactNode } from 'react';
 
-export default function Layout({ children }: { children: React.ReactNode }) {
+export default function Layout({ children }: { children: ReactNode }) {
+  const [count, setCount] = useState(0);
+
   return (
     <div>
       <nav>
-        <Link href="/">Home</Link> | <Link href="/about">About</Link>
+        <Link href="/" prefetch>
+          Home
+        </Link>{' '}
+        |{' '}
+        <Link href="/about" prefetch>
+          About
+        </Link>{' '}
+        | <button onClick={() => setCount((value) => value + 1)}>Layout count: {count}</button>
       </nav>
       <hr />
       {children}

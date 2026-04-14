@@ -56,6 +56,7 @@ export interface PageRouterConfig {
 }
 
 const PAGE_DATA_SCRIPT_ID = '__VOID_PAGE_DATA__';
+const STATIC_PAGE_DATA_PREFIX = '/_void/pages';
 
 // --- Form utilities ---
 
@@ -175,6 +176,102 @@ export async function createPageRouter(config: PageRouterConfig): Promise<{
   async function resolveLayouts(componentId: string) {
     const ids = layoutTree[componentId] || [];
     return Promise.all(ids.map(async (id: string) => (await components[id]()).default));
+  }
+
+  function getStaticPageDataUrl(url: string): string {
+    const { pathname } = new URL(url || '/', window.location.origin);
+    const filePath = pathname === '/' ? 'index' : pathname.replace(/^\/+/, '');
+    return `${STATIC_PAGE_DATA_PREFIX}/${filePath}.json`;
+  }
+
+  function parsePageDataFromHtml(html: string): any | null {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const scriptEl = doc.getElementById(PAGE_DATA_SCRIPT_ID);
+    if (!scriptEl?.textContent) {
+      return null;
+    }
+    try {
+      return JSON.parse(scriptEl.textContent);
+    } catch {
+      return null;
+    }
+  }
+
+  function isUsablePageData(pageData: any, matchedId: string): boolean {
+    return (
+      pageData &&
+      typeof pageData.component === 'string' &&
+      pageData.component === matchedId &&
+      !routeMeta[pageData.component]?.island &&
+      Boolean(components[pageData.component])
+    );
+  }
+
+  function wrapResolvedDeferredProps(pageData: any): void {
+    if (!pageData.deferredKeys) {
+      return;
+    }
+    for (const key of Object.keys(pageData.deferredKeys)) {
+      const value = pageData.props[key];
+      const ref = adapter.createDeferred();
+      pageData.props[key] = adapter.resolveDeferred(ref, value);
+    }
+  }
+
+  function isAbortError(error: unknown): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'name' in error &&
+      (error as { name?: unknown }).name === 'AbortError'
+    );
+  }
+
+  async function loadStaticPageData(
+    fetchUrl: string,
+    response: Response,
+    signal?: AbortSignal,
+  ): Promise<{
+    pageData: any;
+    resolvedDeferred: boolean;
+  } | null> {
+    if (!response.ok) {
+      return null;
+    }
+
+    const matchedId = matchRoute(fetchUrl || window.location.pathname + window.location.search);
+    if (!matchedId || routeMeta[matchedId]?.island || !components[matchedId]) {
+      return null;
+    }
+
+    try {
+      const pageDataResponse = await fetch(getStaticPageDataUrl(fetchUrl), {
+        headers: { Accept: 'application/json' },
+        signal,
+      });
+      if (pageDataResponse.ok) {
+        const pageData = await pageDataResponse.json();
+        if (isUsablePageData(pageData, matchedId)) {
+          return { pageData, resolvedDeferred: true };
+        }
+      }
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) {
+        throw error;
+      }
+      // Fall back to parsing the HTML response below.
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType && !contentType.includes('text/html')) {
+      return null;
+    }
+
+    const pageData = parsePageDataFromHtml(await response.text());
+    if (!isUsablePageData(pageData, matchedId) || pageData.deferredKeys) {
+      return null;
+    }
+    return { pageData, resolvedDeferred: false };
   }
 
   // --- Deferred props ---
@@ -299,7 +396,8 @@ export async function createPageRouter(config: PageRouterConfig): Promise<{
           'X-VoidPages': 'true',
           Accept: 'application/json',
         };
-        const fetchOptions: any = { method, headers, signal: _abortController.signal };
+        const visitSignal = _abortController.signal;
+        const fetchOptions: any = { method, headers, signal: visitSignal };
 
         if (options.data && method !== 'GET') {
           if (hasFiles(options.data)) {
@@ -321,13 +419,7 @@ export async function createPageRouter(config: PageRouterConfig): Promise<{
             return;
           }
           // Prefetch responses have deferred props pre-resolved — wrap them
-          if (pageData.deferredKeys) {
-            for (const key of Object.keys(pageData.deferredKeys)) {
-              const value = pageData.props[key];
-              const ref = adapter.createDeferred();
-              pageData.props[key] = adapter.resolveDeferred(ref, value);
-            }
-          }
+          wrapResolvedDeferredProps(pageData);
           // If stale, fire background refetch to refresh cache
           if (!_prefetchCache.isFresh(cacheEntry)) {
             const bgHeaders = {
@@ -335,9 +427,9 @@ export async function createPageRouter(config: PageRouterConfig): Promise<{
               Accept: 'application/json',
               Purpose: 'prefetch',
             };
-            const bgFetch = fetch(fetchUrl, { method, headers: bgHeaders }).then((r) => {
+            const bgFetch = fetch(fetchUrl, { method, headers: bgHeaders }).then(async (r) => {
               if (!r.headers.get('X-VoidPages')) {
-                return null;
+                return (await loadStaticPageData(fetchUrl, r))?.pageData ?? null;
               }
               return r.json();
             });
@@ -351,18 +443,33 @@ export async function createPageRouter(config: PageRouterConfig): Promise<{
           }
 
           if (!response.headers.get('X-VoidPages')) {
-            window.location.href = url;
-            return;
+            if (method === 'GET') {
+              const staticPageData = await loadStaticPageData(fetchUrl, response, visitSignal);
+              if (staticPageData) {
+                pageData = staticPageData.pageData;
+                if (staticPageData.resolvedDeferred) {
+                  wrapResolvedDeferredProps(pageData);
+                }
+              } else {
+                window.location.href = url;
+                return;
+              }
+            } else {
+              window.location.href = url;
+              return;
+            }
           }
 
           const contentType = response.headers.get('content-type') || '';
 
-          if (contentType.includes('application/x-ndjson')) {
+          if (pageData !== undefined) {
+            // Static page-data fallback already loaded the page object.
+          } else if (contentType.includes('application/x-ndjson')) {
             const reader = response.body!.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
             let firstLine = true;
-            const signal = _abortController.signal;
+            const signal = visitSignal;
 
             const processLines = () => {
               let newlineIdx;
@@ -536,7 +643,10 @@ export async function createPageRouter(config: PageRouterConfig): Promise<{
       };
       const fetchPromise = fetch(prefetchUrl, { method, headers }).then((r) => {
         if (!r.headers.get('X-VoidPages')) {
-          return null;
+          if (method !== 'GET') {
+            return null;
+          }
+          return loadStaticPageData(prefetchUrl, r).then((result) => result?.pageData ?? null);
         }
         return r.json();
       });

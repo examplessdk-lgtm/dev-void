@@ -17,6 +17,7 @@ import { collectMigrations, readJournal } from '../migrations/collect';
 import { assertJournalCoherence, listDrizzleArtifacts } from '../migrations/validate';
 import type { GenArgs } from './gen-args';
 import { cliTitle } from './output';
+import { buildDrizzleKitSpawnEnv } from './yarn-pnp';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 
@@ -758,6 +759,18 @@ function runMigration(root: string, name: string): void {
         ? writeDrizzleConfig(root, 'postgresql://dummy', 'postgresql')
         : writeDrizzleConfig(root, ':memory:');
 
+    // Round 38: under Yarn Berry PnP, there is no `node_modules` tree —
+    // dependencies live inside ZIP archives (`.yarn/cache/*.zip`) and are
+    // resolved through `.pnp.cjs`, which patches `fs` +
+    // `Module._resolveFilename` to handle the virtual paths. Plain `node
+    // drizzle-kit` cannot load that resolver, so drizzle-kit fails to
+    // resolve `void/schema-d1` from the user's `db/schema.ts`. The
+    // shared helper walks ancestors for the PnP markers and returns a
+    // child env with `NODE_OPTIONS` pre-populated with the right
+    // `--require` / `--experimental-loader` flags. Non-PnP projects get
+    // a plain clone of `process.env`.
+    const childEnv = buildDrizzleKitSpawnEnv(root);
+
     const result = spawnSync(
       process.execPath,
       [drizzleKitBin, 'generate', '--config', configPath, '--custom', '--name', name],
@@ -766,6 +779,7 @@ function runMigration(root: string, name: string): void {
         stdio: 'pipe',
         encoding: 'utf-8',
         shell: process.platform === 'win32',
+        env: childEnv,
       },
     );
 

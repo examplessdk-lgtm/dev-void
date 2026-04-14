@@ -53,7 +53,7 @@ export function getRawRuntimeEnv(): RuntimeEnv {
     cloudflareEnv ??
     (() => {
       throw new Error(
-        'Cloudflare env is unavailable. Use void runtime bindings inside Nuxt/SvelteKit server request handlers or Worker handlers.',
+        'Cloudflare env is unavailable. Use void runtime bindings inside Nuxt/SvelteKit/Analog server request handlers or Worker handlers.',
       );
     })()
   );

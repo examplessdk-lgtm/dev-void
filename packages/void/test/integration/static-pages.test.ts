@@ -62,6 +62,22 @@ describe('playground/static-pages build (output: static)', () => {
     expect(html).not.toContain('/@id/');
   });
 
+  it('emits static page data for prerendered routes', () => {
+    const indexData = JSON.parse(
+      readFileSync(join(DIST, 'client/_void/pages/index.json'), 'utf-8'),
+    ) as { component: string; props: Record<string, unknown>; url: string };
+    const aboutData = JSON.parse(
+      readFileSync(join(DIST, 'client/_void/pages/about.json'), 'utf-8'),
+    ) as { component: string; props: Record<string, unknown>; url: string };
+
+    expect(indexData.component).toBe('index');
+    expect(indexData.url).toBe('/');
+    expect(indexData.props.title).toBe('Home');
+    expect(aboutData.component).toBe('about');
+    expect(aboutData.url).toBe('/about');
+    expect(aboutData.props.content).toBe('About page content');
+  });
+
   it('prerenders dynamic pages with getPrerenderPaths', () => {
     // posts/[slug] exports getPrerenderPaths returning [{slug:"hello"},{slug:"world"}]
     const helloPath = join(DIST, 'client/posts/hello.html');

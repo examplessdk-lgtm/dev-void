@@ -19,6 +19,7 @@ import { filterLoadedEnv, stripInternalEnvKeys } from './shared/env';
 import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy';
 
 const PRERENDER_PATHS_ENDPOINT = '/__void/prerender-paths';
+const STATIC_PAGE_DATA_DIR = '_void/pages';
 
 type PrerenderWorkerModuleType = 'ESModule' | 'CommonJS' | 'CompiledWasm' | 'Text' | 'Data';
 
@@ -41,6 +42,12 @@ function outputFileForPath(path: string): string {
   return path === '/' ? 'index.html' : `${path.slice(1)}.html`;
 }
 
+function pageDataFileForPath(path: string): string {
+  return path === '/'
+    ? `${STATIC_PAGE_DATA_DIR}/index.json`
+    : `${STATIC_PAGE_DATA_DIR}/${path.slice(1)}.json`;
+}
+
 async function readPrerenderPathsResponse(response: Response): Promise<string[]> {
   if (!response.ok) {
     throw new Error(`Failed to collect prerender paths: HTTP ${response.status}`);
@@ -58,6 +65,7 @@ async function renderPrerenderPaths(
   paths: string[],
   clientDir: string,
   fetchPath: (path: string) => Promise<Response>,
+  fetchPageData?: (path: string) => Promise<Response>,
 ): Promise<PrerenderResult> {
   const result: PrerenderResult = { rendered: [], failed: [] };
 
@@ -76,6 +84,18 @@ async function renderPrerenderPaths(
       const outputPath = join(clientDir, outputFile);
       mkdirSync(dirname(outputPath), { recursive: true });
       writeFileSync(outputPath, html);
+
+      if (fetchPageData) {
+        const pageDataResponse = await fetchPageData(path);
+        if (pageDataResponse.headers.get('X-VoidPages')) {
+          const pageData = await pageDataResponse.json();
+          const pageDataFile = pageDataFileForPath(path);
+          const pageDataPath = join(clientDir, pageDataFile);
+          mkdirSync(dirname(pageDataPath), { recursive: true });
+          writeFileSync(pageDataPath, JSON.stringify(pageData));
+        }
+      }
+
       result.rendered.push(path);
       voidLog(`prerender \x1b[36m${outputFile}\x1b[39m`);
     } catch (err) {
@@ -347,6 +367,11 @@ async function createCloudflarePrerenderRunner(options: {
     async fetchPath(path: string): Promise<Response> {
       return mf.dispatchFetch(`http://localhost${path}`);
     },
+    async fetchPageData(path: string): Promise<Response> {
+      return mf.dispatchFetch(`http://localhost${path}`, {
+        headers: { Accept: 'application/json', Purpose: 'prefetch', 'X-VoidPages': 'true' },
+      });
+    },
     async close() {
       await mf.dispose();
     },
@@ -389,8 +414,11 @@ export async function prerenderPages(options: {
       return { paths, rendered: [], failed: [] };
     }
 
-    const result = await renderPrerenderPaths(paths, options.clientDir, (path) =>
-      runner.fetchPath(path),
+    const result = await renderPrerenderPaths(
+      paths,
+      options.clientDir,
+      (path) => runner.fetchPath(path),
+      (path) => runner.fetchPageData(path),
     );
     return { paths, ...result };
   } finally {
@@ -477,6 +505,16 @@ async function renderPaths(paths) {
       const outputPath = join(clientDir, outputFile);
       mkdirSync(dirname(outputPath), { recursive: true });
       writeFileSync(outputPath, html);
+      const pageDataResponse = await fetch(new Request("http://localhost" + path, {
+        headers: { "Accept": "application/json", "Purpose": "prefetch", "X-VoidPages": "true" },
+      }));
+      if (pageDataResponse.headers.get("X-VoidPages")) {
+        const pageData = await pageDataResponse.json();
+        const pageDataFile = path === "/" ? "_void/pages/index.json" : "_void/pages/" + path.slice(1) + ".json";
+        const pageDataPath = join(clientDir, pageDataFile);
+        mkdirSync(dirname(pageDataPath), { recursive: true });
+        writeFileSync(pageDataPath, JSON.stringify(pageData));
+      }
       result.rendered.push(path);
     } catch (err) {
       result.failed.push({ path, error: err instanceof Error ? err.message : String(err) });

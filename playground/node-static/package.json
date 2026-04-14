@@ -5,7 +5,8 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "serve:static": "node scripts/serve-static.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.13",

@@ -76,6 +76,7 @@ const integrationItems = [
       { text: 'Astro', link: '/integrations/frameworks/astro' },
       { text: 'SvelteKit', link: '/integrations/frameworks/sveltekit' },
       { text: 'Nuxt', link: '/integrations/frameworks/nuxt' },
+      { text: 'Analog', link: '/integrations/frameworks/analog' },
     ],
   },
   { text: 'Coding Agents', link: '/integrations/agents' },
@@ -237,6 +238,7 @@ export default extendConfig(
             Astro: { light: 'logos:astro-icon', dark: 'simple-icons:astro' },
             SvelteKit: 'logos:svelte-icon',
             Nuxt: 'logos:nuxt-icon',
+            Analog: 'logos:analog',
           };
           const itemIcons: Record<string, IconOption> = {
             'Coding Agents': 'lucide:bot',

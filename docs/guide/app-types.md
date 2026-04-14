@@ -47,6 +47,7 @@ Void supports deploying Vite-based meta-framework apps with `void deploy`. The f
 | [React Router v7](https://reactrouter.com/)         | `@react-router/dev`     | [Guide](../integrations/frameworks/react-router.md)   |
 | [SvelteKit](https://svelte.dev/docs/kit)            | `@sveltejs/kit`         | [Guide](../integrations/frameworks/sveltekit.md)      |
 | [Nuxt](https://nuxt.com/)                           | `nuxt`                  | [Guide](../integrations/frameworks/nuxt.md)           |
+| [Analog](https://analogjs.org/)                     | `@analogjs/platform`    | [Guide](../integrations/frameworks/analog.md)         |
 | [Astro](https://astro.build/)                       | `astro`                 | [Guide](../integrations/frameworks/astro.md)          |
 
 Add `voidPlugin()` to the framework's Vite config to get binding inference, typed DB generation, migration management, auth, cron jobs, queues, and caching. See the [Meta Frameworks Integration](../integrations/frameworks/overview.md) for the full feature matrix, deploy pipeline, and per-framework setup guides.
@@ -76,14 +77,14 @@ At the edge, the resolution order is:
 
 When running `void deploy` and no `inference.appType` is set in `void.json`, the detection logic runs in this order:
 
-| Priority | Condition                                                                                 | Type                                        |
-| -------- | ----------------------------------------------------------------------------------------- | ------------------------------------------- |
-| 1        | `--dir` flag                                                                              | Static (or SPA with `--spa`)                |
-| 2        | Known SSG in dependencies (`vitepress`, `@docusaurus/core`)                               | Static, builds with SSG CLI                 |
-| 3        | `@tanstack/react-start`, `@react-router/dev`, `@sveltejs/kit`, `nuxt`, or `astro` in deps | Framework                                   |
-| 4        | Backend files exist (`routes/`, `pages/`, `middleware/`, `crons/`, `queues/`, SSR entry)  | Void app                                    |
-| 5        | `vite` or `vite-plus` in dependencies, no backend files                                   | SPA, builds with `vite build` or `vp build` |
-| 6        | `dist/index.html` or `./index.html` exists                                                | Static (no build step)                      |
+| Priority | Condition                                                                                                       | Type                                        |
+| -------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| 1        | `--dir` flag                                                                                                    | Static (or SPA with `--spa`)                |
+| 2        | Known SSG in dependencies (`vitepress`, `@docusaurus/core`)                                                     | Static, builds with SSG CLI                 |
+| 3        | `@tanstack/react-start`, `@react-router/dev`, `@sveltejs/kit`, `nuxt`, `@analogjs/platform`, or `astro` in deps | Framework                                   |
+| 4        | Backend files exist (`routes/`, `pages/`, `middleware/`, `crons/`, `queues/`, SSR entry)                        | Void app                                    |
+| 5        | `vite` or `vite-plus` in dependencies, no backend files                                                         | SPA, builds with `vite build` or `vp build` |
+| 6        | `dist/index.html` or `./index.html` exists                                                                      | Static (no build step)                      |
 
 ## Explicit Configuration
 

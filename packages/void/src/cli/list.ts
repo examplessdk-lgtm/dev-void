@@ -122,6 +122,8 @@ function colorStatus(status: string): string {
     case 'failed':
     case 'canceled':
       return pc.red(status);
+    case 'canceling':
+      return pc.yellow(status);
     default:
       return status;
   }
