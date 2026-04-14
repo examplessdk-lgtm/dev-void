@@ -109,6 +109,34 @@ describe('generateWrapper with migrations', () => {
     expect(wrapper).toContain('CREATE TABLE users');
   });
 
+  it('uses PG migration handler when dialect is postgresql', async () => {
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, 'index.mjs'),
+      'export default { fetch() { return new Response("ok"); } };',
+    );
+
+    mkdirSync(join(projectRoot, 'db', 'migrations'), { recursive: true });
+    writeFileSync(
+      join(projectRoot, 'db', 'migrations', '001_test.sql'),
+      'CREATE TABLE test (id SERIAL PRIMARY KEY);',
+    );
+
+    await generateWrapper(workerDir, 'index.mjs', projectRoot, {
+      ...base,
+      hasMigrations: true,
+      migrationDialect: 'postgresql',
+    });
+
+    const wrapper = readFileSync(join(workerDir, 'index.mjs'), 'utf-8');
+    expect(wrapper).toContain('/__void/migrate');
+    expect(wrapper).toContain('createMigrationHandler');
+    expect(wrapper).toContain('"postgresql"');
+
+    // Migration handler should be copied
+    expect(existsSync(join(workerDir, '__void_migration_handler.mjs'))).toBe(true);
+  });
+
   it('does not generate migration handler when hasMigrations is false', async () => {
     mkdirSync(workerDir, { recursive: true });
     writeFileSync(
