@@ -34,101 +34,109 @@ describe('playground/nuxt build', () => {
   });
 });
 
-describe('playground/nuxt dev', () => {
-  let child: ReturnType<typeof spawn>;
-  let stderr = '';
+describe(
+  'playground/nuxt dev',
+  () => {
+    let child: ReturnType<typeof spawn>;
+    let stderr = '';
 
-  beforeAll(async () => {
-    const pg = join(ROOT, PLAYGROUND);
-    rmSync(join(pg, '.void'), { recursive: true, force: true });
-    rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
-    removeWranglerConfig(pg);
+    beforeAll(
+      async () => {
+        const pg = join(ROOT, PLAYGROUND);
+        rmSync(join(pg, '.void'), { recursive: true, force: true });
+        rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
+        removeWranglerConfig(pg);
 
-    DEV_PORT = await getPort();
-    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
+        DEV_PORT = await getPort();
+        DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
-    child = spawn(
-      'pnpm',
-      [
-        '--dir',
-        PLAYGROUND,
-        'exec',
-        'nuxt',
-        'dev',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(DEV_PORT),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: 'false',
-        },
+        child = spawn(
+          'pnpm',
+          [
+            '--dir',
+            PLAYGROUND,
+            'exec',
+            'nuxt',
+            'dev',
+            '--host',
+            '127.0.0.1',
+            '--port',
+            String(DEV_PORT),
+          ],
+          {
+            cwd: ROOT,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+              ...process.env,
+              VOID_INSPECTOR_PORT: 'false',
+            },
+          },
+        );
+
+        child.stderr!.on('data', (chunk: Buffer) => {
+          stderr += String(chunk);
+        });
+
+        const serverTimeout = process.platform === 'win32' ? 60_000 : 30_000;
+        await waitForServer(DEV_BASE, serverTimeout);
       },
+      process.platform === 'win32' ? 75_000 : 45_000,
     );
 
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
+    afterAll(async () => {
+      if (child) {
+        await killChild(child);
+      }
     });
 
-    await waitForServer(DEV_BASE, 30_000);
-  }, 45_000);
+    it('syncs wrangler.jsonc with bindings from void.json', () => {
+      const wranglerConfig = JSON.parse(
+        readFileSync(join(ROOT, `${PLAYGROUND}/wrangler.jsonc`), 'utf-8'),
+      ) as {
+        d1_databases?: Array<{ binding: string }>;
+        kv_namespaces?: Array<{ binding: string }>;
+      };
 
-  afterAll(async () => {
-    if (child) {
-      await killChild(child);
-    }
-  });
+      expect(wranglerConfig.d1_databases?.some((b) => b.binding === 'DB')).toBe(true);
+      expect(wranglerConfig.kv_namespaces?.some((b) => b.binding === 'KV')).toBe(true);
+    });
 
-  it('syncs wrangler.jsonc with bindings from void.json', () => {
-    const wranglerConfig = JSON.parse(
-      readFileSync(join(ROOT, `${PLAYGROUND}/wrangler.jsonc`), 'utf-8'),
-    ) as {
-      d1_databases?: Array<{ binding: string }>;
-      kv_namespaces?: Array<{ binding: string }>;
-    };
+    it('renders home page with SSR', async () => {
+      const response = await fetch(`${DEV_BASE}/`);
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain('Nuxt + Void');
+    });
 
-    expect(wranglerConfig.d1_databases?.some((b) => b.binding === 'DB')).toBe(true);
-    expect(wranglerConfig.kv_namespaces?.some((b) => b.binding === 'KV')).toBe(true);
-  });
+    it('navigates to smoke route via SPA from home page', async () => {
+      const { chromium } = await import('playwright');
+      const browser = await chromium.launch();
+      try {
+        const page = await browser.newPage();
+        await page.goto(DEV_BASE);
+        await page.waitForLoadState('networkidle');
 
-  it('renders home page with SSR', async () => {
-    const response = await fetch(`${DEV_BASE}/`);
-    expect(response.status).toBe(200);
-    const html = await response.text();
-    expect(html).toContain('Nuxt + Void');
-  });
+        // Mark the document to detect full page reloads
+        await page.evaluate(() => {
+          (window as any).__spa_marker = true;
+        });
 
-  it('navigates to smoke route via SPA from home page', async () => {
-    const { chromium } = await import('playwright');
-    const browser = await chromium.launch();
-    try {
-      const page = await browser.newPage();
-      await page.goto(DEV_BASE);
-      await page.waitForLoadState('networkidle');
+        await page.click('a[href="/smoke"]');
+        await page.waitForURL('**/smoke');
+        await page.waitForSelector('[data-testid="d1-user"]');
 
-      // Mark the document to detect full page reloads
-      await page.evaluate(() => {
-        (window as any).__spa_marker = true;
-      });
+        // Assert SPA navigation (no full reload)
+        const spaMarker = await page.evaluate(() => (window as any).__spa_marker);
+        expect(spaMarker).toBe(true);
 
-      await page.click('a[href="/smoke"]');
-      await page.waitForURL('**/smoke');
-      await page.waitForSelector('[data-testid="d1-user"]');
-
-      // Assert SPA navigation (no full reload)
-      const spaMarker = await page.evaluate(() => (window as any).__spa_marker);
-      expect(spaMarker).toBe(true);
-
-      const d1User = await page.textContent('[data-testid="d1-user"]');
-      const kvValue = await page.textContent('[data-testid="kv-value"]');
-      expect(d1User).toBe('Alice');
-      expect(kvValue).toBe('ok');
-    } finally {
-      await browser.close();
-    }
-  });
-}, 60_000);
+        const d1User = await page.textContent('[data-testid="d1-user"]');
+        const kvValue = await page.textContent('[data-testid="kv-value"]');
+        expect(d1User).toBe('Alice');
+        expect(kvValue).toBe('ok');
+      } finally {
+        await browser.close();
+      }
+    });
+  },
+  process.platform === 'win32' ? 120_000 : 60_000,
+);

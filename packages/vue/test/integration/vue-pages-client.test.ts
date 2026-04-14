@@ -569,38 +569,42 @@ describe('vue-pages client (dev)', () => {
   let child: ReturnType<typeof spawn>;
   let stderr = '';
 
-  beforeAll(async () => {
-    DEV_PORT = await getPort();
-    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
+  beforeAll(
+    async () => {
+      DEV_PORT = await getPort();
+      DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
-    child = spawn(
-      'pnpm',
-      [
-        '--dir',
-        'playground/vue-pages',
-        'exec',
-        'vite',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(DEV_PORT),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: 'false',
+      child = spawn(
+        'pnpm',
+        [
+          '--dir',
+          'playground/vue-pages',
+          'exec',
+          'vite',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(DEV_PORT),
+        ],
+        {
+          cwd: ROOT,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            VOID_INSPECTOR_PORT: 'false',
+          },
         },
-      },
-    );
+      );
 
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
-    });
+      child.stderr!.on('data', (chunk: Buffer) => {
+        stderr += String(chunk);
+      });
 
-    await waitForServer(DEV_BASE, 20_000);
-  }, 30_000);
+      const serverTimeout = process.platform === 'win32' ? 45_000 : 20_000;
+      await waitForServer(DEV_BASE, serverTimeout);
+    },
+    process.platform === 'win32' ? 60_000 : 30_000,
+  );
 
   afterAll(async () => {
     if (child) {
