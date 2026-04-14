@@ -228,7 +228,7 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "@cloudflare/vite-plugin": "^1.31.2",
+    "@cloudflare/vite-plugin": "^1.32.2",
     "@cloudflare/workers-types": "catalog:",
     "@hono/oauth-providers": "^0.8.5",
     "@napi-rs/keyring": "1.2.0",

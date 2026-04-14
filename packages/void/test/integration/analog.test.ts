@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -7,15 +7,36 @@ import { getPort, waitForServer, killChild } from '../../../../test/integration-
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/analog';
+const PLAYGROUND_ROOT = join(ROOT, PLAYGROUND);
+const CONFIG_FILES = ['void.json', 'wrangler.jsonc', 'wrangler.json'];
+const configSnapshot = new Map<string, string | undefined>();
 
 function removeWranglerConfig(root: string) {
   rmSync(join(root, 'wrangler.jsonc'), { force: true });
   rmSync(join(root, 'wrangler.json'), { force: true });
 }
 
+beforeAll(() => {
+  for (const file of CONFIG_FILES) {
+    const filePath = join(PLAYGROUND_ROOT, file);
+    configSnapshot.set(file, existsSync(filePath) ? readFileSync(filePath, 'utf-8') : undefined);
+  }
+});
+
+afterAll(() => {
+  for (const [file, contents] of configSnapshot) {
+    const filePath = join(PLAYGROUND_ROOT, file);
+    if (contents === undefined) {
+      rmSync(filePath, { force: true });
+    } else {
+      writeFileSync(filePath, contents);
+    }
+  }
+});
+
 describe('playground/analog build', () => {
   beforeAll(() => {
-    const pg = join(ROOT, PLAYGROUND);
+    const pg = PLAYGROUND_ROOT;
     rmSync(join(pg, 'dist'), { recursive: true, force: true });
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
@@ -55,7 +76,7 @@ describe('playground/analog dev', () => {
   let DEV_BASE: string;
 
   beforeAll(async () => {
-    const pg = join(ROOT, PLAYGROUND);
+    const pg = PLAYGROUND_ROOT;
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
     removeWranglerConfig(pg);

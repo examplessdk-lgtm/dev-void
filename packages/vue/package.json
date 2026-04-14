@@ -36,7 +36,7 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "@vitejs/plugin-vue": "^6.0.5"
+    "@vitejs/plugin-vue": "^6.0.6"
   },
   "devDependencies": {
     "@types/node": "catalog:",

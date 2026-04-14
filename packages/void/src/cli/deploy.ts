@@ -14,8 +14,6 @@ import { fileURLToPath } from 'node:url';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
-const DEPLOY_RECOVERY_POLL_INTERVAL_MS = 3_000;
-const DEPLOY_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000;
 import { intro, outro, log, note, confirm, isCancel, type SpinnerResult } from '@clack/prompts';
 import { findVoidAuthConfig } from '../auth/config';
 import {
@@ -46,12 +44,7 @@ import { scanWebSocketRoutesSync } from '../router/websocket';
 import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env';
 import { validateSsrEntry } from '../ssr/entry';
 import { getToken, getTokenSource } from './auth';
-import {
-  isExpiredTokenError,
-  PlatformApiError,
-  PlatformClient,
-  type DeploymentResponse,
-} from './client';
+import { isExpiredTokenError, PlatformClient } from './client';
 import { promptAndCreateProject } from './create-project';
 import { parseHeadersFile, parseRedirectsFile } from './headers';
 import { promptForLoginToken } from './login';
@@ -88,10 +81,7 @@ export interface RunDeployOptions {
 }
 
 type DeployDoneEvent = Extract<DeployEvent, { event: 'done' }>;
-type RecoveredDeployDoneEvent = Omit<DeployDoneEvent, 'assets' | 'workers' | 'migrations'> & {
-  recovered: true;
-};
-type StreamDeployResult = DeployDoneEvent | RecoveredDeployDoneEvent;
+type StreamDeployResult = DeployDoneEvent;
 
 export function resolveDeployWranglerCompat(
   root: string,
@@ -307,9 +297,21 @@ async function streamDeploy(
   projectId: string,
   formData: FormData,
   s: SpinnerResult,
-  fallbackUrl: string,
 ): Promise<StreamDeployResult> {
   let deploymentId: string | null = null;
+  let interrupted = false;
+  const onSigint = () => {
+    interrupted = true;
+    s.stop('Deploy interrupted');
+    if (deploymentId) {
+      log.info(`Deployment: ${deploymentId}`);
+    } else {
+      log.info('Deployment id was not received before the interrupt.');
+    }
+    process.exit(130);
+  };
+
+  process.once('SIGINT', onSigint);
 
   try {
     for await (const event of client.deploy(projectId, formData)) {
@@ -354,91 +356,25 @@ async function streamDeploy(
     if (err instanceof DeployEventError) {
       throw err;
     }
-    if (!deploymentId) {
+    if (interrupted) {
       throw err;
     }
-    return recoverDroppedDeployStream(client, projectId, deploymentId, s, {
-      fallbackUrl,
-    });
-  }
-
-  if (!deploymentId) {
     s.stop('Deploy failed');
-    throw new Error('Connection lost during deploy');
+    throw new Error(formatConnectionLostMessage(deploymentId));
+  } finally {
+    process.removeListener('SIGINT', onSigint);
   }
 
-  return recoverDroppedDeployStream(client, projectId, deploymentId, s, {
-    fallbackUrl,
-  });
-}
-
-async function recoverDroppedDeployStream(
-  client: PlatformClient,
-  projectId: string,
-  deploymentId: string,
-  s: SpinnerResult,
-  progress: {
-    fallbackUrl: string;
-  },
-): Promise<StreamDeployResult> {
-  const deadline = Date.now() + DEPLOY_RECOVERY_TIMEOUT_MS;
-  let lastStatus = 'unknown';
-  s.message('Connection lost; checking deploy status...');
-
-  while (Date.now() < deadline) {
-    await sleep(DEPLOY_RECOVERY_POLL_INTERVAL_MS);
-    let deployments: DeploymentResponse[];
-    try {
-      ({ deployments } = await client.listDeployments(projectId));
-    } catch (err) {
-      if (err instanceof PlatformApiError) {
-        s.stop('Deploy status check failed');
-        throw err;
-      }
-      s.message('Connection lost; retrying deploy status check...');
-      continue;
-    }
-    const deployment = deployments.find((d) => d.id === deploymentId);
-    if (!deployment) {
-      continue;
-    }
-
-    lastStatus = deployment.status;
-    if (deployment.status === 'live') {
-      s.stop('Deployed!');
-      return {
-        event: 'done',
-        deployment: deployment.id,
-        url: progress.fallbackUrl,
-        urls: [progress.fallbackUrl],
-        recovered: true,
-      };
-    }
-    if (deployment.status === 'failed' || deployment.status === 'canceled') {
-      s.stop('Deploy failed');
-      throw new Error(
-        formatDeployFailureMessage(
-          deployment.error_message ?? `deploy ${deployment.status}`,
-          deploymentId,
-        ),
-      );
-    }
-
-    s.message(`Connection lost; deploy is still ${deployment.status}...`);
-  }
-
-  s.stop('Deploy status unknown');
-  throw new Error(
-    `Connection lost during deploy. Deployment ${deploymentId} is still ${lastStatus}; run \`void project status\` before retrying.`,
-  );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  s.stop('Deploy failed');
+  throw new Error(formatConnectionLostMessage(deploymentId));
 }
 
 function formatDeployFailureMessage(message: string, deploymentId: string | null): string {
   return deploymentId ? `${message}\nDeployment: ${deploymentId}` : message;
+}
+
+function formatConnectionLostMessage(deploymentId: string | null): string {
+  return formatDeployFailureMessage('Connection lost during deploy', deploymentId);
 }
 
 function formatKnownAssetSummary(result: DeployDoneEvent, skipped: number): string {
@@ -446,14 +382,6 @@ function formatKnownAssetSummary(result: DeployDoneEvent, skipped: number): stri
   return skipped > 0
     ? `${result.assets} static asset(s) (${skipped} unchanged, ${uploaded} uploaded)`
     : `${result.assets} static asset(s)`;
-}
-
-function addRecoveredMetricsNote(summary: string[], result: StreamDeployResult): void {
-  if ('recovered' in result) {
-    summary.push(
-      'Deploy completed after reconnect; asset, worker, and migration totals unavailable',
-    );
-  }
 }
 
 async function runStaticDeploy(
@@ -505,27 +433,15 @@ async function runStaticDeploy(
     redirectRules,
     onProgress,
   );
-  if (neededSet) {
-    formData.append('assetManifest', JSON.stringify(assetManifest));
-  }
+  formData.append('assetManifest', JSON.stringify(assetManifest));
   formData.append('source', getTokenSource());
   if (commit) {
     formData.append('commit', commit);
   }
 
-  const result = await streamDeploy(
-    client,
-    config.projectId,
-    formData,
-    s,
-    `https://${config.slug}.void.app`,
-  );
+  const result = await streamDeploy(client, config.projectId, formData, s);
 
-  const summary =
-    'recovered' in result
-      ? [typeLabel]
-      : [`${typeLabel} — ${formatKnownAssetSummary(result, skipped)}`];
-  addRecoveredMetricsNote(summary, result);
+  const summary = [`${typeLabel} — ${formatKnownAssetSummary(result, skipped)}`];
   note(summary.join('\n'), result.url);
 
   outro('Done!');
@@ -745,28 +661,18 @@ async function runFrameworkDeploy(
     dialect,
     onProgress,
   });
-  if (neededSet) {
-    formData.append('assetManifest', JSON.stringify(assetManifest));
-  }
+  formData.append('assetManifest', JSON.stringify(assetManifest));
   formData.append('source', getTokenSource());
   if (commit) {
     formData.append('commit', commit);
   }
 
-  const result = await streamDeploy(
-    client,
-    config.projectId,
-    formData,
-    s,
-    `https://${config.slug}.void.app`,
-  );
+  const result = await streamDeploy(client, config.projectId, formData, s);
 
-  const summary =
-    'recovered' in result
-      ? ['Framework deploy']
-      : [`${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`];
-  addRecoveredMetricsNote(summary, result);
-  if (!('recovered' in result) && result.migrations) {
+  const summary = [
+    `${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`,
+  ];
+  if (result.migrations) {
     summary.push(`${result.migrations} migration(s) applied`);
   }
   if (schedules.length > 0) {
@@ -1092,28 +998,18 @@ async function runFullDeploy(
     webSockets,
     onProgress,
   );
-  if (neededSet) {
-    formData.append('assetManifest', JSON.stringify(assetManifest));
-  }
+  formData.append('assetManifest', JSON.stringify(assetManifest));
   formData.append('source', getTokenSource());
   if (commit) {
     formData.append('commit', commit);
   }
 
-  const result = await streamDeploy(
-    client,
-    config.projectId,
-    formData,
-    s,
-    `https://${config.slug}.void.app`,
-  );
+  const result = await streamDeploy(client, config.projectId, formData, s);
 
-  const summary =
-    'recovered' in result
-      ? ['Deploy completed']
-      : [`${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`];
-  addRecoveredMetricsNote(summary, result);
-  if (!('recovered' in result) && result.migrations) {
+  const summary = [
+    `${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`,
+  ];
+  if (result.migrations) {
     summary.push(`${result.migrations} migration(s) applied`);
   }
   if (schedules.length > 0) {
