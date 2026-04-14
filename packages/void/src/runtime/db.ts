@@ -5,8 +5,8 @@
  * virtual module that auto-wires the D1 binding with the user's schema.
  * This stub exists for the published npm package and type declarations.
  */
-import { drizzle as _drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
-import { requireRuntimeBinding } from "./env";
+import { drizzle as _drizzle, type DrizzleD1Database } from 'drizzle-orm/d1';
+import { requireRuntimeBinding } from './env';
 
 // Re-export commonly used Drizzle utilities so consumers never need
 // to depend on drizzle-orm directly.
@@ -39,8 +39,8 @@ export {
   avg,
   min,
   max,
-} from "drizzle-orm";
-export type { DrizzleD1Database } from "drizzle-orm/d1";
+} from 'drizzle-orm';
+export type { DrizzleD1Database } from 'drizzle-orm/d1';
 
 /**
  * Create a Drizzle D1 instance from a custom D1 binding.
@@ -59,7 +59,7 @@ let _instance: DrizzleD1Database | undefined;
  */
 export const db: DrizzleD1Database = new Proxy({} as any, {
   get(_, prop) {
-    _instance ??= _drizzle(requireRuntimeBinding<D1Database>("DB"));
+    _instance ??= _drizzle(requireRuntimeBinding<D1Database>('DB'));
     return Reflect.get(_instance, prop);
   },
 });

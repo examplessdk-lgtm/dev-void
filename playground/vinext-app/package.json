@@ -3,14 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite dev",
-    "build": "vite build"
+    "build": "vite build",
+    "dev": "vite dev"
   },
   "dependencies": {
-    "@vitejs/plugin-rsc": "^0.5.21",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
-    "react-server-dom-webpack": "^19.2.4",
+    "@vitejs/plugin-rsc": "^0.5.23",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "react-server-dom-webpack": "^19.2.5",
     "vinext": "^0.0.35"
   },
   "devDependencies": {
@@ -18,6 +18,6 @@
     "@types/react-dom": "^19.2.3",
     "@typescript/native-preview": "catalog:",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   }
 }

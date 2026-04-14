@@ -1,4 +1,4 @@
-import type { Props } from "./index.server";
+import type { Props } from './index.server';
 
 export default function HomePage({ title, runtime }: Props) {
   return (

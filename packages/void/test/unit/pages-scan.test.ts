@@ -1,434 +1,434 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { resolveLayoutIds } from '../../src/pages/layout-resolution';
 import {
   scanPages,
   resolveLayoutChain,
   resolveNamedLayout,
   resolveEffectiveLayoutChain,
   MAX_REVALIDATE,
-} from "../../src/pages/scan";
-import { resolveLayoutIds } from "../../src/pages/layout-resolution";
+} from '../../src/pages/scan';
 
-const TMP = join(import.meta.dirname, "__tmp_pages_scan__");
+const TMP = join(import.meta.dirname, '__tmp_pages_scan__');
 
 function writeFile(relativePath: string, content: string): void {
-  const full = join(TMP, "pages", relativePath);
-  mkdirSync(join(full, ".."), { recursive: true });
+  const full = join(TMP, 'pages', relativePath);
+  mkdirSync(join(full, '..'), { recursive: true });
   writeFileSync(full, content);
 }
 
-describe("scanPages", () => {
+describe('scanPages', () => {
   beforeEach(() => {
-    mkdirSync(join(TMP, "pages"), { recursive: true });
+    mkdirSync(join(TMP, 'pages'), { recursive: true });
   });
 
   afterEach(() => {
     rmSync(TMP, { recursive: true, force: true });
   });
 
-  it("returns empty result when no pages/ directory exists", async () => {
-    rmSync(join(TMP, "pages"), { recursive: true, force: true });
+  it('returns empty result when no pages/ directory exists', async () => {
+    rmSync(join(TMP, 'pages'), { recursive: true, force: true });
     const result = await scanPages(TMP);
     expect(result).toEqual({ pages: [], layouts: [], namedLayouts: [] });
   });
 
-  it("scans .vue files and produces correct patterns", async () => {
-    writeFile("index.vue", "<template><div>Home</div></template>");
-    writeFile("about.vue", "<template><div>About</div></template>");
-    writeFile("users/index.vue", "<template><div>Users</div></template>");
-    writeFile("users/[id].vue", "<template><div>User</div></template>");
+  it('scans .vue files and produces correct patterns', async () => {
+    writeFile('index.vue', '<template><div>Home</div></template>');
+    writeFile('about.vue', '<template><div>About</div></template>');
+    writeFile('users/index.vue', '<template><div>Users</div></template>');
+    writeFile('users/[id].vue', '<template><div>User</div></template>');
 
     const result = await scanPages(TMP);
 
     expect(result.pages).toHaveLength(4);
 
-    const home = result.pages.find((p) => p.componentId === "index");
+    const home = result.pages.find((p) => p.componentId === 'index');
     expect(home).toBeDefined();
-    expect(home!.pattern).toBe("/");
+    expect(home!.pattern).toBe('/');
 
-    const about = result.pages.find((p) => p.componentId === "about");
+    const about = result.pages.find((p) => p.componentId === 'about');
     expect(about).toBeDefined();
-    expect(about!.pattern).toBe("/about");
+    expect(about!.pattern).toBe('/about');
 
-    const users = result.pages.find((p) => p.componentId === "users");
+    const users = result.pages.find((p) => p.componentId === 'users');
     expect(users).toBeDefined();
-    expect(users!.pattern).toBe("/users");
+    expect(users!.pattern).toBe('/users');
 
-    const userId = result.pages.find((p) => p.componentId === "users/[id]");
+    const userId = result.pages.find((p) => p.componentId === 'users/[id]');
     expect(userId).toBeDefined();
-    expect(userId!.pattern).toBe("/users/:id");
-    expect(userId!.params).toEqual(["id"]);
+    expect(userId!.pattern).toBe('/users/:id');
+    expect(userId!.params).toEqual(['id']);
   });
 
-  it("detects companion .server.ts files and extracts methods", async () => {
-    writeFile("users/index.vue", "<template><div>Users</div></template>");
+  it('detects companion .server.ts files and extracts methods', async () => {
+    writeFile('users/index.vue', '<template><div>Users</div></template>');
     writeFile(
-      "users/index.server.ts",
-      "export const loader = () => [];\nexport const action = () => ({});",
+      'users/index.server.ts',
+      'export const loader = () => [];\nexport const action = () => ({});',
     );
 
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "users");
+    const page = result.pages.find((p) => p.componentId === 'users');
     expect(page).toBeDefined();
-    expect(page!.serverPath).toBe("users/index.server.ts");
-    expect(page!.methods).toEqual(["loader", "action"]);
+    expect(page!.serverPath).toBe('users/index.server.ts');
+    expect(page!.methods).toEqual(['loader', 'action']);
   });
 
-  it("detects actions (plural) export from .server.ts", async () => {
-    writeFile("settings.vue", "<template><div>Settings</div></template>");
+  it('detects actions (plural) export from .server.ts', async () => {
+    writeFile('settings.vue', '<template><div>Settings</div></template>');
     writeFile(
-      "settings.server.ts",
-      "export const actions = {\n  updateName: async () => ({}),\n  updateEmail: async () => ({}),\n};",
+      'settings.server.ts',
+      'export const actions = {\n  updateName: async () => ({}),\n  updateEmail: async () => ({}),\n};',
     );
 
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "settings");
+    const page = result.pages.find((p) => p.componentId === 'settings');
     expect(page).toBeDefined();
-    expect(page!.serverPath).toBe("settings.server.ts");
-    expect(page!.methods).toEqual(["actions"]);
+    expect(page!.serverPath).toBe('settings.server.ts');
+    expect(page!.methods).toEqual(['actions']);
   });
 
-  it("detects both loader and actions exports from .server.ts", async () => {
-    writeFile("profile.vue", "<template><div>Profile</div></template>");
+  it('detects both loader and actions exports from .server.ts', async () => {
+    writeFile('profile.vue', '<template><div>Profile</div></template>');
     writeFile(
-      "profile.server.ts",
-      "export const loader = () => ({});\nexport const actions = {\n  update: async () => ({}),\n};",
+      'profile.server.ts',
+      'export const loader = () => ({});\nexport const actions = {\n  update: async () => ({}),\n};',
     );
 
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "profile");
+    const page = result.pages.find((p) => p.componentId === 'profile');
     expect(page).toBeDefined();
-    expect(page!.methods).toEqual(["loader", "actions"]);
+    expect(page!.methods).toEqual(['loader', 'actions']);
   });
 
-  it("identifies layout.vue files separately", async () => {
-    writeFile("layout.vue", "<template><slot /></template>");
-    writeFile("users/layout.vue", "<template><slot /></template>");
-    writeFile("index.vue", "<template><div>Home</div></template>");
+  it('identifies layout.vue files separately', async () => {
+    writeFile('layout.vue', '<template><slot /></template>');
+    writeFile('users/layout.vue', '<template><slot /></template>');
+    writeFile('index.vue', '<template><div>Home</div></template>');
 
     const result = await scanPages(TMP);
     expect(result.layouts).toHaveLength(2);
 
-    const root = result.layouts.find((l) => l.directory === "");
+    const root = result.layouts.find((l) => l.directory === '');
     expect(root).toBeDefined();
-    expect(root!.filePath).toBe("layout.vue");
+    expect(root!.filePath).toBe('layout.vue');
 
-    const users = result.layouts.find((l) => l.directory === "users");
+    const users = result.layouts.find((l) => l.directory === 'users');
     expect(users).toBeDefined();
-    expect(users!.filePath).toBe("users/layout.vue");
+    expect(users!.filePath).toBe('users/layout.vue');
 
     // Layouts should not appear as pages
-    expect(result.pages.every((p) => !p.componentPath.includes("layout"))).toBe(true);
+    expect(result.pages.every((p) => !p.componentPath.includes('layout'))).toBe(true);
   });
 
-  it("skips _-prefixed files but allows _layouts/", async () => {
-    writeFile("index.vue", "<template><div>Home</div></template>");
-    writeFile("_components/shared.vue", "<template><div>Shared</div></template>");
-    writeFile("_hidden.vue", "<template><div>Hidden</div></template>");
-    writeFile("_layouts/home.vue", "<template><slot /></template>");
+  it('skips _-prefixed files but allows _layouts/', async () => {
+    writeFile('index.vue', '<template><div>Home</div></template>');
+    writeFile('_components/shared.vue', '<template><div>Shared</div></template>');
+    writeFile('_hidden.vue', '<template><div>Hidden</div></template>');
+    writeFile('_layouts/home.vue', '<template><slot /></template>');
 
     const result = await scanPages(TMP);
     expect(result.pages).toHaveLength(1);
-    expect(result.pages[0].componentId).toBe("index");
+    expect(result.pages[0].componentId).toBe('index');
     expect(result.namedLayouts).toHaveLength(1);
-    expect(result.namedLayouts[0].name).toBe("home");
+    expect(result.namedLayouts[0].name).toBe('home');
   });
 
-  it("sorts static before dynamic, catch-all last", async () => {
-    writeFile("about.vue", "<template><div /></template>");
-    writeFile("[...slug].vue", "<template><div /></template>");
-    writeFile("[id].vue", "<template><div /></template>");
-    writeFile("index.vue", "<template><div /></template>");
+  it('sorts static before dynamic, catch-all last', async () => {
+    writeFile('about.vue', '<template><div /></template>');
+    writeFile('[...slug].vue', '<template><div /></template>');
+    writeFile('[id].vue', '<template><div /></template>');
+    writeFile('index.vue', '<template><div /></template>');
 
     const result = await scanPages(TMP);
     const patterns = result.pages.map((p) => p.pattern);
     // Static routes first (/about, /), then dynamic (/:id), then catch-all
-    expect(patterns.indexOf("/about")).toBeLessThan(patterns.indexOf("/:id"));
-    expect(patterns.indexOf("/:id")).toBeLessThan(patterns.indexOf("/**:slug"));
+    expect(patterns.indexOf('/about')).toBeLessThan(patterns.indexOf('/:id'));
+    expect(patterns.indexOf('/:id')).toBeLessThan(patterns.indexOf('/:slug{.+}'));
   });
 
-  it("handles .tsx components", async () => {
-    writeFile("dashboard.tsx", "export default function Dashboard() { return <div />; }");
+  it('handles .tsx components', async () => {
+    writeFile('dashboard.tsx', 'export default function Dashboard() { return <div />; }');
     const result = await scanPages(TMP);
     expect(result.pages).toHaveLength(1);
-    expect(result.pages[0].componentId).toBe("dashboard");
-    expect(result.pages[0].pattern).toBe("/dashboard");
+    expect(result.pages[0].componentId).toBe('dashboard');
+    expect(result.pages[0].pattern).toBe('/dashboard');
   });
 
-  it("extracts revalidate from .server.ts", async () => {
-    writeFile("products/index.vue", "<template><div>Products</div></template>");
+  it('extracts revalidate from .server.ts', async () => {
+    writeFile('products/index.vue', '<template><div>Products</div></template>');
     writeFile(
-      "products/index.server.ts",
-      "export const revalidate = 120;\nexport const loader = () => [];",
+      'products/index.server.ts',
+      'export const revalidate = 120;\nexport const loader = () => [];',
     );
 
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "products");
+    const page = result.pages.find((p) => p.componentId === 'products');
     expect(page).toBeDefined();
     expect(page!.revalidate).toBe(120);
   });
 
-  it("extracts revalidate zero from .server.ts", async () => {
-    writeFile("private.vue", "<template><div>Private</div></template>");
-    writeFile("private.server.ts", "export const revalidate = 0;\nexport const loader = () => [];");
+  it('extracts revalidate zero from .server.ts', async () => {
+    writeFile('private.vue', '<template><div>Private</div></template>');
+    writeFile('private.server.ts', 'export const revalidate = 0;\nexport const loader = () => [];');
 
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "private");
+    const page = result.pages.find((p) => p.componentId === 'private');
     expect(page).toBeDefined();
     expect(page!.revalidate).toBe(0);
   });
 
-  it("returns undefined revalidate when not exported", async () => {
-    writeFile("about.vue", "<template><div>About</div></template>");
-    writeFile("about.server.ts", "export const loader = () => [];");
+  it('returns undefined revalidate when not exported', async () => {
+    writeFile('about.vue', '<template><div>About</div></template>');
+    writeFile('about.server.ts', 'export const loader = () => [];');
 
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "about");
+    const page = result.pages.find((p) => p.componentId === 'about');
     expect(page).toBeDefined();
     expect(page!.revalidate).toBeUndefined();
   });
 
-  it("detects prerender = true from .server.ts", async () => {
-    writeFile("products/index.vue", "<template><div>Products</div></template>");
+  it('detects prerender = true from .server.ts', async () => {
+    writeFile('products/index.vue', '<template><div>Products</div></template>');
     writeFile(
-      "products/index.server.ts",
-      "export const prerender = true;\nexport const loader = () => [];",
+      'products/index.server.ts',
+      'export const prerender = true;\nexport const loader = () => [];',
     );
 
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "products");
+    const page = result.pages.find((p) => p.componentId === 'products');
     expect(page).toBeDefined();
     expect(page!.prerender).toBe(true);
   });
 
-  it("detects getPrerenderPaths from .server.ts", async () => {
-    writeFile("blog/[slug].vue", "<template><div>Blog</div></template>");
+  it('detects getPrerenderPaths from .server.ts', async () => {
+    writeFile('blog/[slug].vue', '<template><div>Blog</div></template>');
     writeFile(
-      "blog/[slug].server.ts",
+      'blog/[slug].server.ts',
       "export const prerender = true;\nexport async function getPrerenderPaths() { return [{ slug: 'hello' }]; }\nexport const loader = () => [];",
     );
 
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "blog/[slug]");
+    const page = result.pages.find((p) => p.componentId === 'blog/[slug]');
     expect(page).toBeDefined();
     expect(page!.prerender).toBe(true);
     expect(page!.hasGetPrerenderPaths).toBe(true);
   });
 
-  it("scans .island.tsx files with island flag", async () => {
-    writeFile("index.island.tsx", "export default function Home() { return <div />; }");
+  it('scans .island.tsx files with island flag', async () => {
+    writeFile('index.island.tsx', 'export default function Home() { return <div />; }');
     const result = await scanPages(TMP);
     expect(result.pages).toHaveLength(1);
     expect(result.pages[0].island).toBe(true);
-    expect(result.pages[0].componentId).toBe("index");
-    expect(result.pages[0].pattern).toBe("/");
+    expect(result.pages[0].componentId).toBe('index');
+    expect(result.pages[0].pattern).toBe('/');
   });
 
-  it("scans .island.vue files with island flag", async () => {
-    writeFile("pricing.island.vue", "<template><div>Pricing</div></template>");
+  it('scans .island.vue files with island flag', async () => {
+    writeFile('pricing.island.vue', '<template><div>Pricing</div></template>');
     const result = await scanPages(TMP);
     expect(result.pages).toHaveLength(1);
     expect(result.pages[0].island).toBe(true);
-    expect(result.pages[0].componentId).toBe("pricing");
-    expect(result.pages[0].pattern).toBe("/pricing");
+    expect(result.pages[0].componentId).toBe('pricing');
+    expect(result.pages[0].pattern).toBe('/pricing');
   });
 
-  it("detects layout.island.tsx as island layout", async () => {
+  it('detects layout.island.tsx as island layout', async () => {
     writeFile(
-      "blog/layout.island.tsx",
-      "export default function Layout({ children }) { return <div>{children}</div>; }",
+      'blog/layout.island.tsx',
+      'export default function Layout({ children }) { return <div>{children}</div>; }',
     );
-    writeFile("blog/index.island.tsx", "export default function Blog() { return <div />; }");
+    writeFile('blog/index.island.tsx', 'export default function Blog() { return <div />; }');
     const result = await scanPages(TMP);
     expect(result.layouts).toHaveLength(1);
     expect(result.layouts[0].island).toBe(true);
-    expect(result.layouts[0].directory).toBe("blog");
+    expect(result.layouts[0].directory).toBe('blog');
   });
 
-  it("finds companion .server.ts for island pages", async () => {
-    writeFile("index.island.tsx", "export default function Home() { return <div />; }");
-    writeFile("index.server.ts", "export const loader = () => ({});");
+  it('finds companion .server.ts for island pages', async () => {
+    writeFile('index.island.tsx', 'export default function Home() { return <div />; }');
+    writeFile('index.server.ts', 'export const loader = () => ({});');
     const result = await scanPages(TMP);
     expect(result.pages[0].island).toBe(true);
-    expect(result.pages[0].serverPath).toBe("index.server.ts");
+    expect(result.pages[0].serverPath).toBe('index.server.ts');
   });
 
-  it("throws when regular page is under island layout", async () => {
+  it('throws when regular page is under island layout', async () => {
     writeFile(
-      "blog/layout.island.tsx",
-      "export default function L({ children }) { return children; }",
+      'blog/layout.island.tsx',
+      'export default function L({ children }) { return children; }',
     );
-    writeFile("blog/post.tsx", "export default function Post() { return <div />; }");
+    writeFile('blog/post.tsx', 'export default function Post() { return <div />; }');
 
-    await expect(scanPages(TMP)).rejects.toThrow("Regular page");
+    await expect(scanPages(TMP)).rejects.toThrow('Regular page');
   });
 
-  it("throws when regular index page is under island layout", async () => {
+  it('throws when regular index page is under island layout', async () => {
     writeFile(
-      "blog/layout.island.tsx",
-      "export default function L({ children }) { return children; }",
+      'blog/layout.island.tsx',
+      'export default function L({ children }) { return children; }',
     );
-    writeFile("blog/index.tsx", "export default function Blog() { return <div />; }");
+    writeFile('blog/index.tsx', 'export default function Blog() { return <div />; }');
 
-    await expect(scanPages(TMP)).rejects.toThrow("Regular page");
+    await expect(scanPages(TMP)).rejects.toThrow('Regular page');
   });
 
-  it("non-island pages have island as undefined", async () => {
-    writeFile("dashboard.tsx", "export default function Dashboard() { return <div />; }");
+  it('non-island pages have island as undefined', async () => {
+    writeFile('dashboard.tsx', 'export default function Dashboard() { return <div />; }');
     const result = await scanPages(TMP);
     expect(result.pages[0].island).toBeUndefined();
   });
 
-  it("returns undefined prerender when not exported", async () => {
-    writeFile("about.vue", "<template><div>About</div></template>");
-    writeFile("about.server.ts", "export const loader = () => [];");
+  it('returns undefined prerender when not exported', async () => {
+    writeFile('about.vue', '<template><div>About</div></template>');
+    writeFile('about.server.ts', 'export const loader = () => [];');
 
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "about");
+    const page = result.pages.find((p) => p.componentId === 'about');
     expect(page).toBeDefined();
     expect(page!.prerender).toBeUndefined();
     expect(page!.hasGetPrerenderPaths).toBeUndefined();
   });
 
-  it("auto-prerenders static island page with no loader, no params", async () => {
-    writeFile("pricing.island.vue", "<template><div>Pricing</div></template>");
+  it('auto-prerenders static island page with no loader, no params', async () => {
+    writeFile('pricing.island.vue', '<template><div>Pricing</div></template>');
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "pricing");
+    const page = result.pages.find((p) => p.componentId === 'pricing');
     expect(page!.prerender).toBe(true);
     expect(page!.revalidate).toBe(MAX_REVALIDATE);
   });
 
-  it("auto-prerenders island page even with island imports", async () => {
+  it('auto-prerenders island page even with island imports', async () => {
     writeFile(
-      "pricing.island.vue",
+      'pricing.island.vue',
       `<script setup>\nimport Counter from "./Counter.vue" with { island: "load" };\n</script>\n<template><Counter /></template>`,
     );
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "pricing");
+    const page = result.pages.find((p) => p.componentId === 'pricing');
     expect(page!.prerender).toBe(true);
     expect(page!.revalidate).toBe(MAX_REVALIDATE);
   });
 
-  it("does not auto-prerender island page with loader", async () => {
-    writeFile("products.island.vue", "<template><div>Products</div></template>");
-    writeFile("products.server.ts", "export const loader = () => [];");
+  it('does not auto-prerender island page with loader', async () => {
+    writeFile('products.island.vue', '<template><div>Products</div></template>');
+    writeFile('products.server.ts', 'export const loader = () => [];');
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "products");
+    const page = result.pages.find((p) => p.componentId === 'products');
     expect(page!.prerender).toBeUndefined();
   });
 
-  it("does not auto-prerender dynamic island page", async () => {
-    writeFile("blog/[slug].island.vue", "<template><div>Post</div></template>");
+  it('does not auto-prerender dynamic island page', async () => {
+    writeFile('blog/[slug].island.vue', '<template><div>Post</div></template>');
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "blog/[slug]");
+    const page = result.pages.find((p) => p.componentId === 'blog/[slug]');
     expect(page!.prerender).toBeUndefined();
   });
 
-  it("auto-sets max revalidate for explicit prerender on any page", async () => {
-    writeFile("about.vue", "<template><div>About</div></template>");
-    writeFile("about.server.ts", "export const prerender = true;");
+  it('auto-sets max revalidate for explicit prerender on any page', async () => {
+    writeFile('about.vue', '<template><div>About</div></template>');
+    writeFile('about.server.ts', 'export const prerender = true;');
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "about");
+    const page = result.pages.find((p) => p.componentId === 'about');
     expect(page!.prerender).toBe(true);
     expect(page!.revalidate).toBe(MAX_REVALIDATE);
   });
 
-  it("preserves explicit revalidate when prerender is true", async () => {
-    writeFile("about.vue", "<template><div>About</div></template>");
-    writeFile("about.server.ts", "export const prerender = true;\nexport const revalidate = 3600;");
+  it('preserves explicit revalidate when prerender is true', async () => {
+    writeFile('about.vue', '<template><div>About</div></template>');
+    writeFile('about.server.ts', 'export const prerender = true;\nexport const revalidate = 3600;');
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "about");
+    const page = result.pages.find((p) => p.componentId === 'about');
     expect(page!.prerender).toBe(true);
     expect(page!.revalidate).toBe(3600);
   });
 
-  it("scans .md files as island pages", async () => {
-    writeFile("docs/getting-started.md", "# Getting Started\n\nHello world.");
+  it('scans .md files as island pages', async () => {
+    writeFile('docs/getting-started.md', '# Getting Started\n\nHello world.');
     const result = await scanPages(TMP);
     expect(result.pages).toHaveLength(1);
     const page = result.pages[0];
     expect(page.island).toBe(true);
-    expect(page.componentId).toBe("docs/getting-started");
-    expect(page.pattern).toBe("/docs/getting-started");
-    expect(page.componentPath).toBe("docs/getting-started.md");
+    expect(page.componentId).toBe('docs/getting-started');
+    expect(page.pattern).toBe('/docs/getting-started');
+    expect(page.componentPath).toBe('docs/getting-started.md');
   });
 
-  it("auto-prerenders static .md page (no loader, no params)", async () => {
-    writeFile("docs/guide.md", "# Guide");
+  it('auto-prerenders static .md page (no loader, no params)', async () => {
+    writeFile('docs/guide.md', '# Guide');
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "docs/guide");
+    const page = result.pages.find((p) => p.componentId === 'docs/guide');
     expect(page!.prerender).toBe(true);
     expect(page!.revalidate).toBe(MAX_REVALIDATE);
   });
 
-  it("does not auto-prerender dynamic .md page", async () => {
-    writeFile("blog/[slug].md", "# Post");
+  it('does not auto-prerender dynamic .md page', async () => {
+    writeFile('blog/[slug].md', '# Post');
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "blog/[slug]");
+    const page = result.pages.find((p) => p.componentId === 'blog/[slug]');
     expect(page!.island).toBe(true);
     expect(page!.prerender).toBeUndefined();
   });
 
-  it("picks up companion .server.ts for .md page", async () => {
-    writeFile("docs/guide.md", "# Guide");
-    writeFile("docs/guide.server.ts", "export const loader = () => ({});");
+  it('picks up companion .server.ts for .md page', async () => {
+    writeFile('docs/guide.md', '# Guide');
+    writeFile('docs/guide.server.ts', 'export const loader = () => ({});');
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "docs/guide");
-    expect(page!.serverPath).toBe("docs/guide.server.ts");
-    expect(page!.methods).toEqual(["loader"]);
+    const page = result.pages.find((p) => p.componentId === 'docs/guide');
+    expect(page!.serverPath).toBe('docs/guide.server.ts');
+    expect(page!.methods).toEqual(['loader']);
     // Has loader → no auto-prerender
     expect(page!.prerender).toBeUndefined();
   });
 
-  it("scans .md index file correctly", async () => {
-    writeFile("docs/index.md", "# Docs Home");
+  it('scans .md index file correctly', async () => {
+    writeFile('docs/index.md', '# Docs Home');
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "docs");
+    const page = result.pages.find((p) => p.componentId === 'docs');
     expect(page).toBeDefined();
-    expect(page!.pattern).toBe("/docs");
+    expect(page!.pattern).toBe('/docs');
     expect(page!.island).toBe(true);
   });
 
-  it("auto-prerenders island page but preserves user revalidate from server file", async () => {
-    writeFile("pricing.island.vue", "<template><div>Pricing</div></template>");
-    writeFile("pricing.server.ts", "export const revalidate = 60;");
+  it('auto-prerenders island page but preserves user revalidate from server file', async () => {
+    writeFile('pricing.island.vue', '<template><div>Pricing</div></template>');
+    writeFile('pricing.server.ts', 'export const revalidate = 60;');
     const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === "pricing");
+    const page = result.pages.find((p) => p.componentId === 'pricing');
     expect(page!.prerender).toBe(true);
     expect(page!.revalidate).toBe(60);
   });
 
-  describe("named layouts", () => {
-    it("scans root _layouts/ directory", async () => {
-      writeFile("_layouts/home.vue", "<template><slot /></template>");
-      writeFile("_layouts/post.vue", "<template><slot /></template>");
+  describe('named layouts', () => {
+    it('scans root _layouts/ directory', async () => {
+      writeFile('_layouts/home.vue', '<template><slot /></template>');
+      writeFile('_layouts/post.vue', '<template><slot /></template>');
       writeFile(
-        "index.vue",
+        'index.vue',
         '<script>export const layout = "home";</script>\n<template><div /></template>',
       );
       const result = await scanPages(TMP);
       expect(result.namedLayouts).toHaveLength(2);
-      expect(result.namedLayouts.map((nl) => nl.name).sort()).toEqual(["home", "post"]);
-      expect(result.namedLayouts[0].directory).toBe("");
+      expect(result.namedLayouts.map((nl) => nl.name).sort()).toEqual(['home', 'post']);
+      expect(result.namedLayouts[0].directory).toBe('');
     });
 
-    it("scans nested _layouts/ directories", async () => {
-      writeFile("guide/_layouts/api.vue", "<template><slot /></template>");
+    it('scans nested _layouts/ directories', async () => {
+      writeFile('guide/_layouts/api.vue', '<template><slot /></template>');
       writeFile(
-        "guide/intro.vue",
+        'guide/intro.vue',
         '<script>export const layout = "api";</script>\n<template><div /></template>',
       );
       const result = await scanPages(TMP);
       expect(result.namedLayouts).toHaveLength(1);
-      expect(result.namedLayouts[0].name).toBe("api");
-      expect(result.namedLayouts[0].directory).toBe("guide");
+      expect(result.namedLayouts[0].name).toBe('api');
+      expect(result.namedLayouts[0].directory).toBe('guide');
     });
 
-    it("detects island named layouts", async () => {
-      writeFile("_layouts/post.island.vue", "<template><slot /></template>");
+    it('detects island named layouts', async () => {
+      writeFile('_layouts/post.island.vue', '<template><slot /></template>');
       writeFile(
-        "index.island.vue",
+        'index.island.vue',
         '<script>export const layout = "post";</script>\n<template><div /></template>',
       );
       const result = await scanPages(TMP);
@@ -436,287 +436,287 @@ describe("scanPages", () => {
       expect(result.namedLayouts[0].island).toBe(true);
     });
 
-    it("named layout files are not treated as pages", async () => {
-      writeFile("_layouts/home.vue", "<template><slot /></template>");
-      writeFile("index.vue", "<template><div /></template>");
+    it('named layout files are not treated as pages', async () => {
+      writeFile('_layouts/home.vue', '<template><slot /></template>');
+      writeFile('index.vue', '<template><div /></template>');
       const result = await scanPages(TMP);
       expect(result.pages).toHaveLength(1);
-      expect(result.pages[0].componentId).toBe("index");
+      expect(result.pages[0].componentId).toBe('index');
     });
 
-    it("extracts layout from Vue SFC export const", async () => {
-      writeFile("_layouts/home.vue", "<template><slot /></template>");
+    it('extracts layout from Vue SFC export const', async () => {
+      writeFile('_layouts/home.vue', '<template><slot /></template>');
       writeFile(
-        "index.vue",
+        'index.vue',
         '<script>export const layout = "home";</script>\n<template><div /></template>',
       );
       const result = await scanPages(TMP);
-      const page = result.pages.find((p) => p.componentId === "index");
-      expect(page!.layout).toBe("home");
+      const page = result.pages.find((p) => p.componentId === 'index');
+      expect(page!.layout).toBe('home');
     });
 
-    it("extracts layout = false from Vue SFC", async () => {
-      writeFile("layout.vue", "<template><slot /></template>");
+    it('extracts layout = false from Vue SFC', async () => {
+      writeFile('layout.vue', '<template><slot /></template>');
       writeFile(
-        "index.vue",
-        "<script>export const layout = false;</script>\n<template><div /></template>",
+        'index.vue',
+        '<script>export const layout = false;</script>\n<template><div /></template>',
       );
       const result = await scanPages(TMP);
-      const page = result.pages.find((p) => p.componentId === "index");
+      const page = result.pages.find((p) => p.componentId === 'index');
       expect(page!.layout).toBe(false);
     });
 
-    it("extracts exclusive layout from Vue SFC", async () => {
-      writeFile("_layouts/home.vue", "<template><slot /></template>");
+    it('extracts exclusive layout from Vue SFC', async () => {
+      writeFile('_layouts/home.vue', '<template><slot /></template>');
       writeFile(
-        "index.vue",
+        'index.vue',
         '<script>export const layout = "!home";</script>\n<template><div /></template>',
       );
       const result = await scanPages(TMP);
-      const page = result.pages.find((p) => p.componentId === "index");
-      expect(page!.layout).toBe("!home");
+      const page = result.pages.find((p) => p.componentId === 'index');
+      expect(page!.layout).toBe('!home');
     });
 
-    it("extracts layout from TSX export", async () => {
-      writeFile("_layouts/dash.vue", "<template><slot /></template>");
+    it('extracts layout from TSX export', async () => {
+      writeFile('_layouts/dash.vue', '<template><slot /></template>');
       writeFile(
-        "admin.tsx",
+        'admin.tsx',
         'export const layout = "dash";\nexport default function Admin() { return <div />; }',
       );
       const result = await scanPages(TMP);
-      const page = result.pages.find((p) => p.componentId === "admin");
-      expect(page!.layout).toBe("dash");
+      const page = result.pages.find((p) => p.componentId === 'admin');
+      expect(page!.layout).toBe('dash');
     });
 
-    it("extracts layout from markdown frontmatter", async () => {
-      writeFile("_layouts/post.vue", "<template><slot /></template>");
-      writeFile("blog/hello.md", "---\nlayout: post\n---\n# Hello");
+    it('extracts layout from markdown frontmatter', async () => {
+      writeFile('_layouts/post.vue', '<template><slot /></template>');
+      writeFile('blog/hello.md', '---\nlayout: post\n---\n# Hello');
       const result = await scanPages(TMP);
-      const page = result.pages.find((p) => p.componentId === "blog/hello");
-      expect(page!.layout).toBe("post");
+      const page = result.pages.find((p) => p.componentId === 'blog/hello');
+      expect(page!.layout).toBe('post');
     });
 
-    it("extracts layout: false from markdown frontmatter", async () => {
-      writeFile("layout.vue", "<template><slot /></template>");
-      writeFile("bare.md", "---\nlayout: false\n---\n# Bare");
+    it('extracts layout: false from markdown frontmatter', async () => {
+      writeFile('layout.vue', '<template><slot /></template>');
+      writeFile('bare.md', '---\nlayout: false\n---\n# Bare');
       const result = await scanPages(TMP);
-      const page = result.pages.find((p) => p.componentId === "bare");
+      const page = result.pages.find((p) => p.componentId === 'bare');
       expect(page!.layout).toBe(false);
     });
 
-    it("throws when named layout reference is not found", async () => {
+    it('throws when named layout reference is not found', async () => {
       writeFile(
-        "index.vue",
+        'index.vue',
         '<script>export const layout = "missing";</script>\n<template><div /></template>',
       );
-      await expect(scanPages(TMP)).rejects.toThrow("_layouts/missing.vue");
+      await expect(scanPages(TMP)).rejects.toThrow('_layouts/missing.vue');
     });
 
-    it("does not throw for layout: false", async () => {
-      writeFile("layout.vue", "<template><slot /></template>");
+    it('does not throw for layout: false', async () => {
+      writeFile('layout.vue', '<template><slot /></template>');
       writeFile(
-        "index.vue",
-        "<script>export const layout = false;</script>\n<template><div /></template>",
+        'index.vue',
+        '<script>export const layout = false;</script>\n<template><div /></template>',
       );
       await expect(scanPages(TMP)).resolves.toBeDefined();
     });
   });
 });
 
-describe("resolveLayoutChain", () => {
-  it("returns correct layout hierarchy", () => {
+describe('resolveLayoutChain', () => {
+  it('returns correct layout hierarchy', () => {
     const layouts = [
-      { directory: "", filePath: "layout.vue" },
-      { directory: "users", filePath: "users/layout.vue" },
-      { directory: "users/settings", filePath: "users/settings/layout.vue" },
+      { directory: '', filePath: 'layout.vue' },
+      { directory: 'users', filePath: 'users/layout.vue' },
+      { directory: 'users/settings', filePath: 'users/settings/layout.vue' },
     ];
 
-    const chain = resolveLayoutChain("users/settings/profile", layouts);
+    const chain = resolveLayoutChain('users/settings/profile', layouts);
     expect(chain).toHaveLength(3);
-    expect(chain[0].directory).toBe("");
-    expect(chain[1].directory).toBe("users");
-    expect(chain[2].directory).toBe("users/settings");
+    expect(chain[0].directory).toBe('');
+    expect(chain[1].directory).toBe('users');
+    expect(chain[2].directory).toBe('users/settings');
   });
 
-  it("returns only root layout for top-level pages", () => {
+  it('returns only root layout for top-level pages', () => {
     const layouts = [
-      { directory: "", filePath: "layout.vue" },
-      { directory: "users", filePath: "users/layout.vue" },
+      { directory: '', filePath: 'layout.vue' },
+      { directory: 'users', filePath: 'users/layout.vue' },
     ];
 
-    const chain = resolveLayoutChain("about", layouts);
+    const chain = resolveLayoutChain('about', layouts);
     expect(chain).toHaveLength(1);
-    expect(chain[0].directory).toBe("");
+    expect(chain[0].directory).toBe('');
   });
 
-  it("returns empty array when no layouts match", () => {
-    const layouts = [{ directory: "admin", filePath: "admin/layout.vue" }];
+  it('returns empty array when no layouts match', () => {
+    const layouts = [{ directory: 'admin', filePath: 'admin/layout.vue' }];
 
-    const chain = resolveLayoutChain("about", layouts);
+    const chain = resolveLayoutChain('about', layouts);
     expect(chain).toHaveLength(0);
   });
 
-  it("skips missing intermediate layouts", () => {
+  it('skips missing intermediate layouts', () => {
     const layouts = [
-      { directory: "", filePath: "layout.vue" },
-      { directory: "users/settings", filePath: "users/settings/layout.vue" },
+      { directory: '', filePath: 'layout.vue' },
+      { directory: 'users/settings', filePath: 'users/settings/layout.vue' },
     ];
 
-    const chain = resolveLayoutChain("users/settings/profile", layouts);
+    const chain = resolveLayoutChain('users/settings/profile', layouts);
     expect(chain).toHaveLength(2);
-    expect(chain[0].directory).toBe("");
-    expect(chain[1].directory).toBe("users/settings");
+    expect(chain[0].directory).toBe('');
+    expect(chain[1].directory).toBe('users/settings');
   });
 });
 
-describe("resolveNamedLayout", () => {
+describe('resolveNamedLayout', () => {
   const namedLayouts = [
-    { name: "home", directory: "", filePath: "_layouts/home.vue" },
-    { name: "post", directory: "", filePath: "_layouts/post.vue" },
-    { name: "api", directory: "guide", filePath: "guide/_layouts/api.vue" },
-    { name: "post", directory: "blog", filePath: "blog/_layouts/post.vue" },
+    { name: 'home', directory: '', filePath: '_layouts/home.vue' },
+    { name: 'post', directory: '', filePath: '_layouts/post.vue' },
+    { name: 'api', directory: 'guide', filePath: 'guide/_layouts/api.vue' },
+    { name: 'post', directory: 'blog', filePath: 'blog/_layouts/post.vue' },
   ];
 
-  it("resolves from same directory level", () => {
-    const result = resolveNamedLayout("api", "guide/intro", namedLayouts);
+  it('resolves from same directory level', () => {
+    const result = resolveNamedLayout('api', 'guide/intro', namedLayouts);
     expect(result).not.toBeNull();
-    expect(result!.directory).toBe("guide");
+    expect(result!.directory).toBe('guide');
   });
 
-  it("resolves from parent directory (walks up)", () => {
-    const result = resolveNamedLayout("home", "guide/intro", namedLayouts);
+  it('resolves from parent directory (walks up)', () => {
+    const result = resolveNamedLayout('home', 'guide/intro', namedLayouts);
     expect(result).not.toBeNull();
-    expect(result!.directory).toBe("");
+    expect(result!.directory).toBe('');
   });
 
-  it("prefers closest ancestor", () => {
-    const result = resolveNamedLayout("post", "blog/article", namedLayouts);
+  it('prefers closest ancestor', () => {
+    const result = resolveNamedLayout('post', 'blog/article', namedLayouts);
     expect(result).not.toBeNull();
-    expect(result!.directory).toBe("blog");
+    expect(result!.directory).toBe('blog');
   });
 
-  it("falls back to root when not in closer directory", () => {
-    const result = resolveNamedLayout("post", "about", namedLayouts);
+  it('falls back to root when not in closer directory', () => {
+    const result = resolveNamedLayout('post', 'about', namedLayouts);
     expect(result).not.toBeNull();
-    expect(result!.directory).toBe("");
+    expect(result!.directory).toBe('');
   });
 
-  it("returns null when not found", () => {
-    const result = resolveNamedLayout("missing", "about", namedLayouts);
+  it('returns null when not found', () => {
+    const result = resolveNamedLayout('missing', 'about', namedLayouts);
     expect(result).toBeNull();
   });
 });
 
-describe("resolveEffectiveLayoutChain", () => {
+describe('resolveEffectiveLayoutChain', () => {
   const layouts = [
-    { directory: "", filePath: "layout.vue" },
-    { directory: "guide", filePath: "guide/layout.vue" },
+    { directory: '', filePath: 'layout.vue' },
+    { directory: 'guide', filePath: 'guide/layout.vue' },
   ];
   const namedLayouts = [
-    { name: "home", directory: "", filePath: "_layouts/home.vue" },
-    { name: "api", directory: "guide", filePath: "guide/_layouts/api.vue" },
+    { name: 'home', directory: '', filePath: '_layouts/home.vue' },
+    { name: 'api', directory: 'guide', filePath: 'guide/_layouts/api.vue' },
   ];
 
-  it("returns default chain when no layout field", () => {
+  it('returns default chain when no layout field', () => {
     const chain = resolveEffectiveLayoutChain(
-      { componentId: "guide/intro" },
+      { componentId: 'guide/intro' },
       layouts,
       namedLayouts,
     );
     expect(chain).toHaveLength(2);
-    expect(chain[0].directory).toBe("");
-    expect(chain[1].directory).toBe("guide");
+    expect(chain[0].directory).toBe('');
+    expect(chain[1].directory).toBe('guide');
   });
 
-  it("returns empty chain for layout: false", () => {
+  it('returns empty chain for layout: false', () => {
     const chain = resolveEffectiveLayoutChain(
-      { componentId: "guide/intro", layout: false },
+      { componentId: 'guide/intro', layout: false },
       layouts,
       namedLayouts,
     );
     expect(chain).toHaveLength(0);
   });
 
-  it("replaces innermost layout for named layout", () => {
+  it('replaces innermost layout for named layout', () => {
     const chain = resolveEffectiveLayoutChain(
-      { componentId: "guide/intro", layout: "api" },
+      { componentId: 'guide/intro', layout: 'api' },
       layouts,
       namedLayouts,
     );
     expect(chain).toHaveLength(2);
-    expect(chain[0].directory).toBe("");
-    expect((chain[1] as any).name).toBe("api");
+    expect(chain[0].directory).toBe('');
+    expect((chain[1] as any).name).toBe('api');
   });
 
-  it("replaces entire chain for exclusive layout", () => {
+  it('replaces entire chain for exclusive layout', () => {
     const chain = resolveEffectiveLayoutChain(
-      { componentId: "guide/intro", layout: "!home" },
+      { componentId: 'guide/intro', layout: '!home' },
       layouts,
       namedLayouts,
     );
     expect(chain).toHaveLength(1);
-    expect((chain[0] as any).name).toBe("home");
+    expect((chain[0] as any).name).toBe('home');
   });
 
-  it("returns named layout as sole entry when no default chain", () => {
+  it('returns named layout as sole entry when no default chain', () => {
     const chain = resolveEffectiveLayoutChain(
-      { componentId: "about", layout: "home" },
-      [{ directory: "guide", filePath: "guide/layout.vue" }], // no root layout
+      { componentId: 'about', layout: 'home' },
+      [{ directory: 'guide', filePath: 'guide/layout.vue' }], // no root layout
       namedLayouts,
     );
     expect(chain).toHaveLength(1);
-    expect((chain[0] as any).name).toBe("home");
+    expect((chain[0] as any).name).toBe('home');
   });
 
-  it("falls back to default chain for unresolvable named layout", () => {
+  it('falls back to default chain for unresolvable named layout', () => {
     const chain = resolveEffectiveLayoutChain(
-      { componentId: "guide/intro", layout: "missing" },
+      { componentId: 'guide/intro', layout: 'missing' },
       layouts,
       namedLayouts,
     );
     expect(chain).toHaveLength(2);
-    expect(chain[0].directory).toBe("");
-    expect(chain[1].directory).toBe("guide");
+    expect(chain[0].directory).toBe('');
+    expect(chain[1].directory).toBe('guide');
   });
 
-  it("passes through default chain for relative path layouts", () => {
+  it('passes through default chain for relative path layouts', () => {
     const chain = resolveEffectiveLayoutChain(
-      { componentId: "guide/intro", layout: "./custom" },
+      { componentId: 'guide/intro', layout: './custom' },
       layouts,
       namedLayouts,
     );
     expect(chain).toHaveLength(2);
-    expect(chain[0].directory).toBe("");
-    expect(chain[1].directory).toBe("guide");
+    expect(chain[0].directory).toBe('');
+    expect(chain[1].directory).toBe('guide');
   });
 });
 
-describe("resolveLayoutIds", () => {
+describe('resolveLayoutIds', () => {
   const layouts = [
-    { directory: "", filePath: "layout.vue" },
-    { directory: "guide", filePath: "guide/layout.vue" },
+    { directory: '', filePath: 'layout.vue' },
+    { directory: 'guide', filePath: 'guide/layout.vue' },
   ];
   const namedLayouts = [
-    { name: "home", directory: "", filePath: "_layouts/home.vue" },
-    { name: "api", directory: "guide", filePath: "guide/_layouts/api.vue" },
+    { name: 'home', directory: '', filePath: '_layouts/home.vue' },
+    { name: 'api', directory: 'guide', filePath: 'guide/_layouts/api.vue' },
   ];
 
-  it("returns default layout ids", () => {
-    expect(resolveLayoutIds({ componentId: "guide/intro" }, layouts, namedLayouts)).toEqual([
-      "layout",
-      "guide/layout",
+  it('returns default layout ids', () => {
+    expect(resolveLayoutIds({ componentId: 'guide/intro' }, layouts, namedLayouts)).toEqual([
+      'layout',
+      'guide/layout',
     ]);
   });
 
-  it("replaces the innermost layout id for named layouts", () => {
+  it('replaces the innermost layout id for named layouts', () => {
     expect(
-      resolveLayoutIds({ componentId: "guide/intro", layout: "api" }, layouts, namedLayouts),
-    ).toEqual(["layout", "guide/_layouts/api"]);
+      resolveLayoutIds({ componentId: 'guide/intro', layout: 'api' }, layouts, namedLayouts),
+    ).toEqual(['layout', 'guide/_layouts/api']);
   });
 
-  it("returns only the exclusive named layout id", () => {
+  it('returns only the exclusive named layout id', () => {
     expect(
-      resolveLayoutIds({ componentId: "guide/intro", layout: "!home" }, layouts, namedLayouts),
-    ).toEqual(["_layouts/home"]);
+      resolveLayoutIds({ componentId: 'guide/intro', layout: '!home' }, layouts, namedLayouts),
+    ).toEqual(['_layouts/home']);
   });
 });

@@ -1,4 +1,4 @@
-import { FetchError as OFetchError } from "ofetch";
+import { FetchError as OFetchError } from 'ofetch';
 
 export interface FetchResponse<T = unknown> extends Response {
   _data?: T;

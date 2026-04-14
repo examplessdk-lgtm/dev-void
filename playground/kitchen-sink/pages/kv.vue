@@ -1,18 +1,18 @@
 <script setup lang="ts">
-import { useForm } from "@void/vue";
-import type { Props } from "./kv.server";
+import { useForm } from '@void/vue';
+import type { Props } from './kv.server';
 
 defineProps<Props>();
 
-const setForm = useForm("/kv", {
-  intent: "set",
-  key: "",
-  value: "",
+const setForm = useForm('/kv', {
+  intent: 'set',
+  key: '',
+  value: '',
 });
 
-const deleteForm = useForm("/kv", {
-  intent: "delete",
-  key: "",
+const deleteForm = useForm('/kv', {
+  intent: 'delete',
+  key: '',
 });
 
 function deleteKey(name: string) {
@@ -36,7 +36,7 @@ function deleteKey(name: string) {
         <input v-model="setForm.data.value" placeholder="my-value" required />
       </div>
       <button type="submit" :disabled="setForm.processing" style="margin-top: 5px">
-        {{ setForm.processing ? "Saving..." : "Set" }}
+        {{ setForm.processing ? 'Saving...' : 'Set' }}
       </button>
     </form>
 
@@ -67,7 +67,7 @@ function deleteKey(name: string) {
           <td>
             <code>{{ k.name }}</code>
           </td>
-          <td>{{ k.expiration ? new Date(k.expiration * 1000).toISOString() : "\u2014" }}</td>
+          <td>{{ k.expiration ? new Date(k.expiration * 1000).toISOString() : '\u2014' }}</td>
           <td>
             <button @click="deleteKey(k.name)" :disabled="deleteForm.processing">Delete</button>
           </td>

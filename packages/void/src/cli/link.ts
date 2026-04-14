@@ -1,27 +1,27 @@
-import { intro, outro, log, cancel } from "@clack/prompts";
-import { getToken, getSiteDomain } from "./auth";
-import { PlatformClient } from "./client";
-import { readProjectConfig, writeProjectConfig } from "./project";
-import { promptProjectSelection, promptProjectSlug } from "./prompt";
-import { inferDefaultSlug } from "./resolve-project";
-import { cliTitle } from "./output";
+import { intro, outro, log, cancel } from '@clack/prompts';
+import { getToken, getSiteDomain } from './auth';
+import { PlatformClient } from './client';
+import { promptAndCreateProject } from './create-project';
+import { cliTitle } from './output';
+import { readProjectConfig, writeProjectConfig } from './project';
+import { promptProjectSelection } from './prompt';
 
 export async function runLink(root: string, slug?: string): Promise<void> {
   console.log();
-  intro(cliTitle("project link"));
+  intro(cliTitle('project link'));
 
   // Check if already linked
   const existing = readProjectConfig(root);
   if (existing) {
     log.warn(`Already linked to ${existing.slug} (${existing.slug}.${getSiteDomain()})`);
-    outro("To re-link, delete .void/project.json and run again.");
+    outro('To re-link, delete .void/project.json and run again.');
     return;
   }
 
   // Auth
   const token = getToken();
   if (!token) {
-    cancel("No auth token found. Run `void auth login` first.");
+    cancel('No auth token found. Run `void auth login` first.');
     process.exit(1);
   }
 
@@ -43,12 +43,9 @@ export async function runLink(root: string, slug?: string): Promise<void> {
   // Interactive: prompt user to select or create
   const result = await promptProjectSelection(projects);
 
-  if (result.action === "create") {
-    const slug = await promptProjectSlug(inferDefaultSlug(root));
-    log.step(`Creating project "${slug}"...`);
-    const created = await client.createProject(slug);
-    writeProjectConfig(root, { projectId: created.id, slug: created.slug });
-    outro(`Created and linked to ${created.slug} (${created.slug}.${getSiteDomain()})`);
+  if (result.action === 'create') {
+    const config = await promptAndCreateProject(root, client);
+    outro(`Created and linked to ${config.slug} (${config.slug}.${getSiteDomain()})`);
     return;
   }
 

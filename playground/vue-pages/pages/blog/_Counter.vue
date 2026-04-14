@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref } from 'vue';
 
 const props = withDefaults(defineProps<{ initial?: number }>(), { initial: 0 });
 const count = ref(props.initial);

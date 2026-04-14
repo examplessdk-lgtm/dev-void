@@ -1,7 +1,7 @@
 <script setup>
-import pages from "@void/md/pages";
+import pages from '@void/md/pages';
 
-const posts = pages.filter((p) => p.path.startsWith("/posts"));
+const posts = pages.filter((p) => p.path.startsWith('/posts'));
 </script>
 
 <template>

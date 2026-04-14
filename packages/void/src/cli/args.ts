@@ -1,4 +1,4 @@
-import { parseArgs } from "node:util";
+import { parseArgs } from 'node:util';
 
 export interface DeployArgs {
   projectSlug?: string;
@@ -13,10 +13,10 @@ export function parseDeployArgs(args: string[]): DeployArgs {
     parsed = parseArgs({
       args,
       options: {
-        project: { type: "string" },
-        dir: { type: "string" },
-        spa: { type: "boolean" },
-        "skip-build": { type: "boolean" },
+        project: { type: 'string' },
+        dir: { type: 'string' },
+        spa: { type: 'boolean' },
+        'skip-build': { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true,
@@ -25,8 +25,8 @@ export function parseDeployArgs(args: string[]): DeployArgs {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
-    if (message.includes("argument missing") || message.includes("argument is ambiguous")) {
-      throw new Error("Error: --project requires a slug");
+    if (message.includes('argument missing') || message.includes('argument is ambiguous')) {
+      throw new Error('Error: --project requires a slug');
     }
 
     const unknownOptionMatch = message.match(/Unknown option '([^']+)'/);
@@ -39,10 +39,10 @@ export function parseDeployArgs(args: string[]): DeployArgs {
 
   const tokens = parsed.tokens ?? [];
   const projectTokens = tokens.filter(
-    (token) => token.kind === "option" && token.name === "project",
+    (token) => token.kind === 'option' && token.name === 'project',
   );
   if (projectTokens.length > 1) {
-    throw new Error("Error: --project can only be specified once");
+    throw new Error('Error: --project can only be specified once');
   }
 
   if (parsed.positionals.length > 0) {
@@ -50,14 +50,14 @@ export function parseDeployArgs(args: string[]): DeployArgs {
   }
 
   const projectValue = parsed.values.project;
-  const projectSlug = typeof projectValue === "string" ? projectValue : undefined;
-  if (typeof projectSlug === "string" && projectSlug.startsWith("-")) {
-    throw new Error("Error: --project requires a slug");
+  const projectSlug = typeof projectValue === 'string' ? projectValue : undefined;
+  if (typeof projectSlug === 'string' && projectSlug.startsWith('-')) {
+    throw new Error('Error: --project requires a slug');
   }
 
-  const dir = typeof parsed.values.dir === "string" ? parsed.values.dir : undefined;
+  const dir = typeof parsed.values.dir === 'string' ? parsed.values.dir : undefined;
   const spa = parsed.values.spa === true ? true : undefined;
-  const skipBuild = parsed.values["skip-build"] === true ? true : undefined;
+  const skipBuild = parsed.values['skip-build'] === true ? true : undefined;
 
   return { projectSlug, dir, spa, skipBuild };
 }

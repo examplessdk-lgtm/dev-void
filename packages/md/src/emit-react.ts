@@ -1,6 +1,6 @@
-import type { CompileResult } from "./compile";
-import type { IslandImport } from "./extract-script";
-import { buildRenderChunks, toIslandId } from "./emit-shared";
+import type { CompileResult } from './compile';
+import { buildRenderChunks, toIslandId } from './emit-shared';
+import type { IslandImport } from './extract-script';
 
 export function emitReactComponent(result: CompileResult): string {
   return `
@@ -56,18 +56,18 @@ export function emitReactComponentWithIslands(
   const children: string[] = [];
 
   for (const chunk of chunks) {
-    if (chunk.type === "html") {
+    if (chunk.type === 'html') {
       children.push(
         `React.createElement("div", { dangerouslySetInnerHTML: { __html: ${JSON.stringify(chunk.html)} } })`,
       );
     } else {
-      const propsCode = Object.keys(chunk.props).length > 0 ? JSON.stringify(chunk.props) : "null";
+      const propsCode = Object.keys(chunk.props).length > 0 ? JSON.stringify(chunk.props) : 'null';
       children.push(`React.createElement(${chunk.islandImport.name}, ${propsCode})`);
     }
   }
 
   if (children.length === 0) {
-    children.push("null");
+    children.push('null');
   }
 
   code += `
@@ -84,7 +84,7 @@ export default function MarkdownPage() {
     React.createElement(
       React.Fragment,
       null,
-      ${children.join(",\n      ")}
+      ${children.join(',\n      ')}
     )
   );
 }

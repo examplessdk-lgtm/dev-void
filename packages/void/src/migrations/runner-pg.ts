@@ -1,4 +1,4 @@
-import { collectMigrations } from "./collect";
+import { collectMigrations } from './collect';
 
 /**
  * Minimal client interface satisfied by both pg.Client and PGlite.
@@ -11,33 +11,54 @@ export interface PgClient {
  * Apply unapplied SQL migrations via a connected PostgreSQL client.
  * Each migration runs in its own transaction (BEGIN/COMMIT).
  */
+export async function getPgAppliedMigrations(url: string): Promise<string[]> {
+  const { Client } = await import('pg');
+  const client = new Client({ connectionString: url });
+  await client.connect();
+  try {
+    await client.query(
+      `CREATE TABLE IF NOT EXISTS _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
+    );
+    const result = await client.query('SELECT name FROM _void_migrations');
+    return result.rows.map((r: any) => r.name);
+  } catch {
+    return [];
+  } finally {
+    await client.end();
+  }
+}
+
 export async function applyPgMigrations(
   client: PgClient,
   migrations: { name: string; sql: string }[],
 ): Promise<string[]> {
-  if (migrations.length === 0) return [];
+  if (migrations.length === 0) {
+    return [];
+  }
 
   await client.query(
     `CREATE TABLE IF NOT EXISTS _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
   );
 
-  const existing = await client.query("SELECT name FROM _void_migrations");
+  const existing = await client.query('SELECT name FROM _void_migrations');
   const appliedSet = new Set(existing.rows.map((r: any) => r.name));
 
   const pending = migrations.filter((m) => !appliedSet.has(m.name));
-  if (pending.length === 0) return [];
+  if (pending.length === 0) {
+    return [];
+  }
 
   for (const m of pending) {
-    await client.query("BEGIN");
+    await client.query('BEGIN');
     try {
       await client.query(m.sql);
-      await client.query("INSERT INTO _void_migrations (name, applied_at) VALUES ($1, $2)", [
+      await client.query('INSERT INTO _void_migrations (name, applied_at) VALUES ($1, $2)', [
         m.name,
         new Date().toISOString(),
       ]);
-      await client.query("COMMIT");
+      await client.query('COMMIT');
     } catch (err) {
-      await client.query("ROLLBACK");
+      await client.query('ROLLBACK');
       throw err;
     }
   }
@@ -51,9 +72,11 @@ export async function applyPgMigrations(
  */
 export async function runPgMigrations(migrationsDir: string, url: string): Promise<string[]> {
   const allMigrations = collectMigrations(migrationsDir);
-  if (allMigrations.length === 0) return [];
+  if (allMigrations.length === 0) {
+    return [];
+  }
 
-  const { Client } = await import("pg");
+  const { Client } = await import('pg');
   const client = new Client({ connectionString: url });
   await client.connect();
 

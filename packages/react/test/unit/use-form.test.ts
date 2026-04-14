@@ -1,10 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from 'vitest';
 
 // Test the core logic of useForm directly (without React rendering context).
 // We re-implement the non-hook logic inline since useForm uses useContext/useState
 // which require a React component tree. Actual integration is tested in the playground.
 
-describe("useForm core logic", () => {
+describe('useForm core logic', () => {
   function createForm(
     url: string,
     defaults: Record<string, unknown>,
@@ -21,11 +21,11 @@ describe("useForm core logic", () => {
 
     let data = { ...formDefaults };
     let errors: Record<string, string> = {};
-    let processing = false;
-    let wasSuccessful = false;
-    let recentlySuccessful = false;
+    const processing = false;
+    const wasSuccessful = false;
+    const recentlySuccessful = false;
 
-    let defaults_ = { ...formDefaults };
+    const defaults_ = { ...formDefaults };
 
     function isDirty() {
       return Object.keys(defaults_).some(
@@ -86,113 +86,113 @@ describe("useForm core logic", () => {
     };
   }
 
-  it("initial data matches defaults", () => {
-    const form = createForm("/test", { name: "", email: "" });
-    expect(form.data.name).toBe("");
-    expect(form.data.email).toBe("");
+  it('initial data matches defaults', () => {
+    const form = createForm('/test', { name: '', email: '' });
+    expect(form.data.name).toBe('');
+    expect(form.data.email).toBe('');
   });
 
-  it("setData updates a single field", () => {
-    const form = createForm("/test", { name: "", email: "" });
-    form.setData("name", "John");
-    expect(form.data.name).toBe("John");
-    expect(form.data.email).toBe("");
+  it('setData updates a single field', () => {
+    const form = createForm('/test', { name: '', email: '' });
+    form.setData('name', 'John');
+    expect(form.data.name).toBe('John');
+    expect(form.data.email).toBe('');
   });
 
-  it("isDirty returns true when data changes", () => {
-    const form = createForm("/test", { name: "default" });
+  it('isDirty returns true when data changes', () => {
+    const form = createForm('/test', { name: 'default' });
     expect(form.isDirty()).toBe(false);
 
-    form.setData("name", "changed");
+    form.setData('name', 'changed');
     expect(form.isDirty()).toBe(true);
   });
 
-  it("isDirty returns false when data reverts to defaults", () => {
-    const form = createForm("/test", { name: "default" });
-    form.setData("name", "changed");
+  it('isDirty returns false when data reverts to defaults', () => {
+    const form = createForm('/test', { name: 'default' });
+    form.setData('name', 'changed');
     expect(form.isDirty()).toBe(true);
 
-    form.setData("name", "default");
+    form.setData('name', 'default');
     expect(form.isDirty()).toBe(false);
   });
 
-  it("reset() reverts all fields to defaults", () => {
-    const form = createForm("/test", { name: "default", email: "default@test.com" });
-    form.setData("name", "changed");
-    form.setData("email", "changed@test.com");
+  it('reset() reverts all fields to defaults', () => {
+    const form = createForm('/test', { name: 'default', email: 'default@test.com' });
+    form.setData('name', 'changed');
+    form.setData('email', 'changed@test.com');
 
     form.reset();
 
-    expect(form.data.name).toBe("default");
-    expect(form.data.email).toBe("default@test.com");
+    expect(form.data.name).toBe('default');
+    expect(form.data.email).toBe('default@test.com');
     expect(form.isDirty()).toBe(false);
   });
 
-  it("reset(field) reverts specific fields only", () => {
-    const form = createForm("/test", { name: "default", email: "default@test.com" });
-    form.setData("name", "changed");
-    form.setData("email", "changed@test.com");
+  it('reset(field) reverts specific fields only', () => {
+    const form = createForm('/test', { name: 'default', email: 'default@test.com' });
+    form.setData('name', 'changed');
+    form.setData('email', 'changed@test.com');
 
-    form.reset("name");
+    form.reset('name');
 
-    expect(form.data.name).toBe("default");
-    expect(form.data.email).toBe("changed@test.com");
+    expect(form.data.name).toBe('default');
+    expect(form.data.email).toBe('changed@test.com');
   });
 
-  it("clearErrors() removes all errors", () => {
-    const form = createForm("/test", { name: "" });
-    form.errors = { name: "required", email: "invalid" };
+  it('clearErrors() removes all errors', () => {
+    const form = createForm('/test', { name: '' });
+    form.errors = { name: 'required', email: 'invalid' };
 
     form.clearErrors();
 
     expect(Object.keys(form.errors)).toHaveLength(0);
   });
 
-  it("clearErrors(field) removes specific errors", () => {
-    const form = createForm("/test", { name: "" });
-    form.errors = { name: "required", email: "invalid" };
+  it('clearErrors(field) removes specific errors', () => {
+    const form = createForm('/test', { name: '' });
+    form.errors = { name: 'required', email: 'invalid' };
 
-    form.clearErrors("name");
+    form.clearErrors('name');
 
     expect(form.errors.name).toBeUndefined();
-    expect(form.errors.email).toBe("invalid");
+    expect(form.errors.email).toBe('invalid');
   });
 
-  it("processing is initialized to false", () => {
-    const form = createForm("/test", { name: "" });
+  it('processing is initialized to false', () => {
+    const form = createForm('/test', { name: '' });
     expect(form.processing).toBe(false);
   });
 
-  it("wasSuccessful and recentlySuccessful are initialized to false", () => {
-    const form = createForm("/test", { name: "" });
+  it('wasSuccessful and recentlySuccessful are initialized to false', () => {
+    const form = createForm('/test', { name: '' });
     expect(form.wasSuccessful).toBe(false);
     expect(form.recentlySuccessful).toBe(false);
   });
 
-  it("stores URL", () => {
-    const form = createForm("/users", { name: "", email: "" });
-    expect(form.data.name).toBe("");
-    expect(form.data.email).toBe("");
-    expect(form._url).toBe("/users");
+  it('stores URL', () => {
+    const form = createForm('/users', { name: '', email: '' });
+    expect(form.data.name).toBe('');
+    expect(form.data.email).toBe('');
+    expect(form._url).toBe('/users');
   });
 
-  it("resolves :param segments in URL", () => {
-    const form = createForm("/users/:id", { name: "Alice" }, { params: { id: "42" } });
-    expect(form.data.name).toBe("Alice");
-    expect(form._url).toBe("/users/42");
+  it('resolves :param segments in URL', () => {
+    const form = createForm('/users/:id', { name: 'Alice' }, { params: { id: '42' } });
+    expect(form.data.name).toBe('Alice');
+    expect(form._url).toBe('/users/42');
   });
 
-  it("encodes param values in URL", () => {
-    const form = createForm("/users/:id", { name: "" }, { params: { id: "hello world" } });
-    expect(form._url).toBe("/users/hello%20world");
+  it('encodes param values in URL', () => {
+    const form = createForm('/users/:id', { name: '' }, { params: { id: 'hello world' } });
+    expect(form._url).toBe('/users/hello%20world');
   });
 
-  it("resolves multiple params", () => {
+  it('resolves multiple params', () => {
     const form = createForm(
-      "/org/:orgId/users/:userId",
-      { name: "" },
-      { params: { orgId: "a", userId: "b" } },
+      '/org/:orgId/users/:userId',
+      { name: '' },
+      { params: { orgId: 'a', userId: 'b' } },
     );
-    expect(form._url).toBe("/org/a/users/b");
+    expect(form._url).toBe('/org/a/users/b');
   });
 });

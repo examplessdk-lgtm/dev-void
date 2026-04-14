@@ -1,6 +1,6 @@
-import { useState, useRef, useCallback, useContext, useMemo } from "react";
-import type { ActionUrl, ResolveActionBody, ActionFormOptions } from "void/routes";
-import { RouterContext } from "./context";
+import { useState, useRef, useCallback, useContext, useMemo } from 'react';
+import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
+import { RouterContext } from './context';
 
 // Typed overload — full inference from PageActionMap (requires codegen)
 export function useForm<U extends ActionUrl & string>(
@@ -34,8 +34,8 @@ export function useForm(
   let resolvedUrl = url;
 
   // Strip ?action query before param resolution, then re-append
-  let actionQuery = "";
-  const qIdx = resolvedUrl.indexOf("?");
+  let actionQuery = '';
+  const qIdx = resolvedUrl.indexOf('?');
   if (qIdx !== -1) {
     actionQuery = resolvedUrl.slice(qIdx);
     resolvedUrl = resolvedUrl.slice(0, qIdx);
@@ -103,7 +103,9 @@ export function useForm(
       setProcessing(true);
       setWasSuccessful(false);
       setRecentlySuccessful(false);
-      if (successTimeoutRef.current) clearTimeout(successTimeoutRef.current);
+      if (successTimeoutRef.current) {
+        clearTimeout(successTimeoutRef.current);
+      }
       setErrors({});
 
       try {
@@ -143,9 +145,9 @@ export function useForm(
     recentlySuccessful,
     reset,
     clearErrors,
-    post: (opts?: any) => submit("POST", opts),
-    put: (opts?: any) => submit("PUT", opts),
-    patch: (opts?: any) => submit("PATCH", opts),
-    delete: (opts?: any) => submit("DELETE", opts),
+    post: (opts?: any) => submit('POST', opts),
+    put: (opts?: any) => submit('PUT', opts),
+    patch: (opts?: any) => submit('PATCH', opts),
+    delete: (opts?: any) => submit('DELETE', opts),
   };
 }

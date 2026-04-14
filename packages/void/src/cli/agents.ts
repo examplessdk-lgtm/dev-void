@@ -1,17 +1,19 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export function getPackageDir(): string {
-  let dir = join(fileURLToPath(import.meta.url), "..");
+  let dir = join(fileURLToPath(import.meta.url), '..');
   for (let i = 0; i < 5; i++) {
-    if (existsSync(join(dir, "package.json"))) {
-      const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
-      if (pkg.name === "void") return dir;
+    if (existsSync(join(dir, 'package.json'))) {
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf-8'));
+      if (pkg.name === 'void' || pkg.name === '@void-sdk/void') {
+        return dir;
+      }
     }
-    dir = join(dir, "..");
+    dir = join(dir, '..');
   }
-  throw new Error("Could not find void package root");
+  throw new Error('Could not find void package root');
 }
 
 export interface McpConfigTarget {
@@ -37,129 +39,129 @@ export interface AgentConfig {
 }
 
 const agents: Record<string, AgentConfig> = {
-  "claude-code": {
-    displayName: "Claude Code",
-    skillsDir: ".claude/skills",
-    detect: (root) => existsSync(join(root, ".claude")) || existsSync(join(root, "CLAUDE.md")),
+  'claude-code': {
+    displayName: 'Claude Code',
+    skillsDir: '.claude/skills',
+    detect: (root) => existsSync(join(root, '.claude')) || existsSync(join(root, 'CLAUDE.md')),
     mcpConfig: [
-      { filePath: ".claude/settings.json", rootKey: "mcpServers" },
-      { filePath: ".claude/settings.local.json", rootKey: "mcpServers" },
+      { filePath: '.claude/settings.json', rootKey: 'mcpServers' },
+      { filePath: '.claude/settings.local.json', rootKey: 'mcpServers' },
     ],
   },
   amp: {
-    displayName: "Amp",
-    skillsDir: ".agents/skills",
-    detect: (root) => existsSync(join(root, ".agents")),
+    displayName: 'Amp',
+    skillsDir: '.agents/skills',
+    detect: (root) => existsSync(join(root, '.agents')),
     mcpHint:
       "Run `npx void mcp` — this starts a stdio MCP server. See your agent's docs for how to add a local MCP server.",
   },
   codex: {
-    displayName: "Codex",
-    skillsDir: ".agents/skills",
-    detect: (root) => existsSync(join(root, ".codex")),
-    mcpHint: "codex mcp add void -- npx void mcp",
+    displayName: 'Codex',
+    skillsDir: '.agents/skills',
+    detect: (root) => existsSync(join(root, '.codex')),
+    mcpHint: 'codex mcp add void -- npx void mcp',
   },
   cursor: {
-    displayName: "Cursor",
-    skillsDir: ".agents/skills",
-    detect: (root) => existsSync(join(root, ".cursor")),
-    mcpConfig: [{ filePath: ".cursor/mcp.json", rootKey: "mcpServers" }],
+    displayName: 'Cursor',
+    skillsDir: '.agents/skills',
+    detect: (root) => existsSync(join(root, '.cursor')),
+    mcpConfig: [{ filePath: '.cursor/mcp.json', rootKey: 'mcpServers' }],
   },
   windsurf: {
-    displayName: "Windsurf",
-    skillsDir: ".windsurf/skills",
-    detect: (root) => existsSync(join(root, ".windsurf")),
-    mcpConfig: [{ filePath: ".windsurf/mcp.json", rootKey: "mcpServers" }],
+    displayName: 'Windsurf',
+    skillsDir: '.windsurf/skills',
+    detect: (root) => existsSync(join(root, '.windsurf')),
+    mcpConfig: [{ filePath: '.windsurf/mcp.json', rootKey: 'mcpServers' }],
   },
-  "gemini-cli": {
-    displayName: "Gemini CLI",
-    skillsDir: ".agents/skills",
-    detect: (root) => existsSync(join(root, ".gemini")),
-    mcpHint: "gemini mcp add void -- npx void mcp",
+  'gemini-cli': {
+    displayName: 'Gemini CLI',
+    skillsDir: '.agents/skills',
+    detect: (root) => existsSync(join(root, '.gemini')),
+    mcpHint: 'gemini mcp add void -- npx void mcp',
   },
-  "github-copilot": {
-    displayName: "GitHub Copilot",
-    skillsDir: ".agents/skills",
+  'github-copilot': {
+    displayName: 'GitHub Copilot',
+    skillsDir: '.agents/skills',
     detect: (root) =>
-      existsSync(join(root, ".github", "copilot-instructions.md")) ||
-      existsSync(join(root, ".vscode", "mcp.json")),
+      existsSync(join(root, '.github', 'copilot-instructions.md')) ||
+      existsSync(join(root, '.vscode', 'mcp.json')),
     mcpConfig: [
-      { filePath: ".vscode/mcp.json", rootKey: "servers", extraFields: { type: "stdio" } },
+      { filePath: '.vscode/mcp.json', rootKey: 'servers', extraFields: { type: 'stdio' } },
     ],
   },
   cline: {
-    displayName: "Cline",
-    skillsDir: ".cline/skills",
-    detect: (root) => existsSync(join(root, ".cline")),
+    displayName: 'Cline',
+    skillsDir: '.cline/skills',
+    detect: (root) => existsSync(join(root, '.cline')),
     mcpHint:
       "Run `npx void mcp` — this starts a stdio MCP server. See your agent's docs for how to add a local MCP server.",
   },
   roo: {
-    displayName: "Roo Code",
-    skillsDir: ".roo/skills",
-    detect: (root) => existsSync(join(root, ".roo")),
-    mcpConfig: [{ filePath: ".roo/mcp.json", rootKey: "mcpServers" }],
+    displayName: 'Roo Code',
+    skillsDir: '.roo/skills',
+    detect: (root) => existsSync(join(root, '.roo')),
+    mcpConfig: [{ filePath: '.roo/mcp.json', rootKey: 'mcpServers' }],
   },
   kilo: {
-    displayName: "Kilo Code",
-    skillsDir: ".kilocode/skills",
-    detect: (root) => existsSync(join(root, ".kilocode")),
+    displayName: 'Kilo Code',
+    skillsDir: '.kilocode/skills',
+    detect: (root) => existsSync(join(root, '.kilocode')),
     mcpHint:
       "Run `npx void mcp` — this starts a stdio MCP server. See your agent's docs for how to add a local MCP server.",
   },
   continue: {
-    displayName: "Continue",
-    skillsDir: ".continue/skills",
-    detect: (root) => existsSync(join(root, ".continue")),
+    displayName: 'Continue',
+    skillsDir: '.continue/skills',
+    detect: (root) => existsSync(join(root, '.continue')),
     mcpHint:
       "Run `npx void mcp` — this starts a stdio MCP server. See your agent's docs for how to add a local MCP server.",
   },
   goose: {
-    displayName: "Goose",
-    skillsDir: ".goose/skills",
-    detect: (root) => existsSync(join(root, ".goose")),
+    displayName: 'Goose',
+    skillsDir: '.goose/skills',
+    detect: (root) => existsSync(join(root, '.goose')),
     mcpHint:
       "Run `npx void mcp` — this starts a stdio MCP server. See your agent's docs for how to add a local MCP server.",
   },
   opencode: {
-    displayName: "OpenCode",
-    skillsDir: ".agents/skills",
-    detect: (root) => existsSync(join(root, ".opencode")),
+    displayName: 'OpenCode',
+    skillsDir: '.agents/skills',
+    detect: (root) => existsSync(join(root, '.opencode')),
     mcpHint:
       "Run `npx void mcp` — this starts a stdio MCP server. See your agent's docs for how to add a local MCP server.",
   },
   trae: {
-    displayName: "Trae",
-    skillsDir: ".trae/skills",
-    detect: (root) => existsSync(join(root, ".trae")),
+    displayName: 'Trae',
+    skillsDir: '.trae/skills',
+    detect: (root) => existsSync(join(root, '.trae')),
     mcpHint:
       "Run `npx void mcp` — this starts a stdio MCP server. See your agent's docs for how to add a local MCP server.",
   },
   junie: {
-    displayName: "Junie",
-    skillsDir: ".junie/skills",
-    detect: (root) => existsSync(join(root, ".junie")),
+    displayName: 'Junie',
+    skillsDir: '.junie/skills',
+    detect: (root) => existsSync(join(root, '.junie')),
     mcpHint:
       "Run `npx void mcp` — this starts a stdio MCP server. See your agent's docs for how to add a local MCP server.",
   },
-  "kiro-cli": {
-    displayName: "Kiro CLI",
-    skillsDir: ".kiro/skills",
-    detect: (root) => existsSync(join(root, ".kiro")),
+  'kiro-cli': {
+    displayName: 'Kiro CLI',
+    skillsDir: '.kiro/skills',
+    detect: (root) => existsSync(join(root, '.kiro')),
     mcpHint:
       "Run `npx void mcp` — this starts a stdio MCP server. See your agent's docs for how to add a local MCP server.",
   },
   zencoder: {
-    displayName: "Zencoder",
-    skillsDir: ".zencoder/skills",
-    detect: (root) => existsSync(join(root, ".zencoder")),
+    displayName: 'Zencoder',
+    skillsDir: '.zencoder/skills',
+    detect: (root) => existsSync(join(root, '.zencoder')),
     mcpHint:
       "Run `npx void mcp` — this starts a stdio MCP server. See your agent's docs for how to add a local MCP server.",
   },
-  "qwen-code": {
-    displayName: "Qwen Code",
-    skillsDir: ".qwen/skills",
-    detect: (root) => existsSync(join(root, ".qwen")),
+  'qwen-code': {
+    displayName: 'Qwen Code',
+    skillsDir: '.qwen/skills',
+    detect: (root) => existsSync(join(root, '.qwen')),
     mcpHint:
       "Run `npx void mcp` — this starts a stdio MCP server. See your agent's docs for how to add a local MCP server.",
   },

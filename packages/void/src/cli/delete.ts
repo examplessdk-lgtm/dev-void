@@ -1,9 +1,9 @@
-import { intro, outro, note, log, text, isCancel, cancel, spinner } from "@clack/prompts";
-import { getToken } from "./auth";
-import { PlatformClient } from "./client";
-import { readProjectConfig, removeProjectConfig } from "./project";
-import { resolveProjectBySlug } from "./resolve-project";
-import { cliTitle } from "./output";
+import { intro, outro, note, log, text, isCancel, cancel } from '@clack/prompts';
+import { getToken } from './auth';
+import { PlatformClient } from './client';
+import { cliTitle, createSpinner } from './output';
+import { readProjectConfig, removeProjectConfig } from './project';
+import { resolveProjectBySlug } from './resolve-project';
 
 export async function runDeleteCommand(
   root: string,
@@ -11,11 +11,11 @@ export async function runDeleteCommand(
   options?: { force?: boolean },
 ): Promise<void> {
   console.log();
-  intro(cliTitle("delete"));
+  intro(cliTitle('delete'));
 
   const token = getToken();
   if (!token) {
-    log.error("Not logged in. Run `void auth login` first.");
+    log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
   }
 
@@ -37,7 +37,7 @@ export async function runDeleteCommand(
   } else {
     const config = readProjectConfig(root);
     if (!config) {
-      log.error("No linked project found. Pass a project name: void project delete <name>");
+      log.error('No linked project found. Pass a project name: void project delete <name>');
       process.exit(1);
     }
     projectId = config.projectId;
@@ -47,11 +47,11 @@ export async function runDeleteCommand(
   if (!options?.force) {
     note(
       [
-        "Worker deployments",
-        "D1 databases, KV namespaces, R2 buckets",
-        "Static assets",
-        "Deployment history",
-      ].join("\n"),
+        'Worker deployments',
+        'D1 databases, KV namespaces, R2 buckets',
+        'Static assets',
+        'Deployment history',
+      ].join('\n'),
       `Deleting ${projectSlug} will permanently remove`,
     );
 
@@ -65,17 +65,17 @@ export async function runDeleteCommand(
     });
 
     if (isCancel(confirmation)) {
-      cancel("Delete cancelled.");
+      cancel('Delete cancelled.');
       process.exit(0);
     }
   }
 
-  const s = spinner();
-  s.start("Deleting project...");
+  const s = createSpinner();
+  s.start('Deleting project...');
 
   const result = await client.deleteProject(projectId);
 
-  s.stop("Project deleted.");
+  s.stop('Project deleted.');
 
   if (result.warnings && result.warnings.length > 0) {
     for (const warning of result.warnings) {
@@ -87,7 +87,7 @@ export async function runDeleteCommand(
   const localConfig = readProjectConfig(root);
   if (localConfig?.projectId === projectId) {
     removeProjectConfig(root);
-    log.step("Removed local .void/project.json");
+    log.step('Removed local .void/project.json');
   }
 
   outro(`Deleted ${projectSlug}`);

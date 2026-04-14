@@ -13,14 +13,14 @@ export interface RouteDefinition {
   filePath: string;
 }
 
-const EXTENSIONS = [".ts", ".mts", ".js", ".mjs"];
-const ENV_SUFFIXES = ["dev", "prod"];
+const EXTENSIONS = ['.ts', '.mts', '.js', '.mjs'];
+const ENV_SUFFIXES = ['dev', 'prod'];
 
 function parsePath(relativePath: string, isWebSocketRoute: boolean): RouteDefinition {
   const filePath = relativePath;
 
   // Normalize path separators
-  let path = relativePath.replace(/\\/g, "/");
+  let path = relativePath.replace(/\\/g, '/');
 
   // 1. Strip extension
   for (const ext of EXTENSIONS) {
@@ -31,12 +31,12 @@ function parsePath(relativePath: string, isWebSocketRoute: boolean): RouteDefini
   }
 
   // 1b. Strip .ws segment for WebSocket routes
-  if (isWebSocketRoute && path.endsWith(".ws")) {
+  if (isWebSocketRoute && path.endsWith('.ws')) {
     path = path.slice(0, -3);
   }
 
   // Split into segments for processing
-  const segments = path.split("/");
+  const segments = path.split('/');
   let filename = segments.pop()!;
 
   // 2. Check for env suffix
@@ -53,12 +53,12 @@ function parsePath(relativePath: string, isWebSocketRoute: boolean): RouteDefini
   segments.push(filename);
 
   // 3. Strip trailing "index"
-  if (segments[segments.length - 1] === "index") {
+  if (segments[segments.length - 1] === 'index') {
     segments.pop();
   }
 
   // 4. Remove route groups: (groupname)
-  const filtered = segments.filter((s) => !s.startsWith("(") || !s.endsWith(")"));
+  const filtered = segments.filter((s) => !s.startsWith('(') || !s.endsWith(')'));
 
   // 5. Convert dynamic segments
   const params: string[] = [];
@@ -66,17 +66,17 @@ function parsePath(relativePath: string, isWebSocketRoute: boolean): RouteDefini
 
   const converted = filtered.map((segment) => {
     // [...param] - catch-all with named param
-    if (segment.startsWith("[...") && segment.endsWith("]")) {
+    if (segment.startsWith('[...') && segment.endsWith(']')) {
       const paramName = segment.slice(4, -1);
       catchAll = true;
       if (paramName) {
         params.push(paramName);
-        return `**:${paramName}`;
+        return `:${paramName}{.+}`;
       }
-      return "**";
+      return '*';
     }
     // [param] - single dynamic param
-    if (segment.startsWith("[") && segment.endsWith("]")) {
+    if (segment.startsWith('[') && segment.endsWith(']')) {
       const paramName = segment.slice(1, -1);
       params.push(paramName);
       return `:${paramName}`;
@@ -85,7 +85,7 @@ function parsePath(relativePath: string, isWebSocketRoute: boolean): RouteDefini
   });
 
   // 6. Build pattern with leading /
-  const pattern = "/" + converted.join("/");
+  const pattern = '/' + converted.join('/');
 
   return {
     pattern,
@@ -105,7 +105,7 @@ function parsePath(relativePath: string, isWebSocketRoute: boolean): RouteDefini
  * 2. Check for env suffix (.dev, .prod) → strip and record
  * 3. Strip trailing "index" segment
  * 4. Remove route group directories: (groupname)
- * 5. Convert [param] → :param, [...param] → **:param, [...] → **
+ * 5. Convert [param] → :param, [...param] → :param{.+}, [...] → *
  * 6. Prefix with /
  */
 export function parseRouteFilename(relativePath: string): RouteDefinition {

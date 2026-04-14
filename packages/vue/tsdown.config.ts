@@ -1,15 +1,15 @@
-import { defineConfig } from "tsdown";
+import { defineConfig } from 'tsdown';
 
 export default defineConfig({
   entry: [
-    "src/index.ts",
-    "src/plugin.ts",
-    "src/runtime/index.ts",
-    "src/runtime/use-deferred.ts",
-    "src/runtime/prefetch.ts",
+    'src/index.ts',
+    'src/plugin.ts',
+    'src/runtime/index.ts',
+    'src/runtime/use-deferred.ts',
+    'src/runtime/prefetch.ts',
   ],
-  format: "esm",
+  format: 'esm',
   dts: true,
   clean: true,
-  external: ["vue", "vue/server-renderer", "vite", "void", "@vitejs/plugin-vue"],
+  external: ['vue', 'vue/server-renderer', 'vite', 'void', 'void/*', '@vitejs/plugin-vue'],
 });

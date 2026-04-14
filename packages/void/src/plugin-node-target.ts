@@ -1,24 +1,24 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import type { Plugin } from "vite";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { existsSync } from 'node:fs';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import type { Plugin } from 'vite';
 
 /** Imports that require CF bindings and are not available in Node.js mode. */
 export const CF_ONLY_IMPORTS: string[] = [
-  "void/db",
-  "void/kv",
-  "void/auth",
-  "void/storage",
-  "void/ai",
-  "void/env",
+  'void/db',
+  'void/kv',
+  'void/auth',
+  'void/storage',
+  'void/ai',
+  'void/env',
 ];
 
 const CF_ONLY_REGEX = new RegExp(
-  `^(${CF_ONLY_IMPORTS.map((s) => s.replace("/", "\\/")).join("|")})$`,
+  `^(${CF_ONLY_IMPORTS.map((s) => s.replace('/', '\\/')).join('|')})$`,
 );
 
-type NodeTarget = "node" | "bun" | "deno";
+type NodeTarget = 'node' | 'bun' | 'deno';
 
 /**
  * Bridge Node.js HTTP to Web API and serve via a Hono app.
@@ -32,9 +32,9 @@ function honoMiddleware(
       // Let Vite handle its own internal requests (HMR, modules, etc.)
       if (
         !req.url ||
-        req.url.startsWith("/@") ||
-        req.url.startsWith("/__") ||
-        req.url.startsWith("/node_modules/")
+        req.url.startsWith('/@') ||
+        req.url.startsWith('/__') ||
+        req.url.startsWith('/node_modules/')
       ) {
         next();
         return;
@@ -47,19 +47,21 @@ function honoMiddleware(
       }
 
       // Build a Request from the incoming Node.js http.IncomingMessage
-      const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+      const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const headers = new Headers();
       for (const [key, value] of Object.entries(req.headers)) {
-        if (value) headers.set(key, Array.isArray(value) ? value.join(", ") : value);
+        if (value) {
+          headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+        }
       }
 
-      const hasBody = req.method !== "GET" && req.method !== "HEAD";
+      const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
       const request = new Request(url.toString(), {
         method: req.method,
         headers,
         body: hasBody ? (req as unknown as BodyInit) : undefined,
         // @ts-ignore Node.js specific
-        duplex: hasBody ? "half" : undefined,
+        duplex: hasBody ? 'half' : undefined,
       });
 
       const response = await app.fetch(request);
@@ -81,7 +83,9 @@ function honoMiddleware(
         const reader = response.body.getReader();
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            break;
+          }
           res.write(value);
         }
         res.end();
@@ -106,8 +110,8 @@ function honoMiddleware(
  */
 export function nodeTargetPlugin(target: NodeTarget): Plugin[] {
   const guardPlugin: Plugin = {
-    name: "void:node-target",
-    enforce: "pre",
+    name: 'void:node-target',
+    enforce: 'pre',
 
     resolveId: {
       filter: { id: CF_ONLY_REGEX },
@@ -120,26 +124,28 @@ export function nodeTargetPlugin(target: NodeTarget): Plugin[] {
     },
 
     config(_, { command }) {
-      if (command !== "build") return;
+      if (command !== 'build') {
+        return;
+      }
 
       const root = process.cwd();
-      const voidDir = join(root, ".void");
+      const voidDir = join(root, '.void');
       const ssrBuildOptions = {
-        outDir: "dist/ssr",
+        outDir: 'dist/ssr',
         rollupOptions: {
           input: {
-            app: join(voidDir, "app.ts"),
-            index: join(voidDir, "index.ts"),
+            app: join(voidDir, 'app.ts'),
+            index: join(voidDir, 'index.ts'),
           },
-          external: [/^node:/, "@hono/node-server", "@hono/node-server/serve-static"],
+          external: [/^node:/, '@hono/node-server', '@hono/node-server/serve-static'],
         },
       };
 
       // Pages apps need dual builds: client (React hydration) + SSR (server entry).
       // API-only apps need a single SSR build.
-      if (existsSync(join(root, "pages"))) {
+      if (existsSync(join(root, 'pages'))) {
         return {
-          build: { outDir: "dist/client" },
+          build: { outDir: 'dist/client' },
           environments: {
             ssr: { build: ssrBuildOptions },
           },
@@ -174,7 +180,7 @@ export function nodeTargetPlugin(target: NodeTarget): Plugin[] {
       // so Vite's HMR and module serving still work normally.
       server.middlewares.use(
         honoMiddleware(async () => {
-          const mod = await server.ssrLoadModule("virtual:void-routes");
+          const mod = await server.ssrLoadModule('virtual:void-routes');
           return mod.default;
         }),
       );
@@ -182,7 +188,7 @@ export function nodeTargetPlugin(target: NodeTarget): Plugin[] {
 
     configurePreviewServer(server) {
       // Import the built app module (not index.js which starts a server).
-      const entryPath = join(process.cwd(), "dist", "ssr", "app.js");
+      const entryPath = join(process.cwd(), 'dist', 'ssr', 'app.js');
       let appPromise: Promise<{ fetch: (req: Request) => Promise<Response> } | null> | null = null;
 
       server.middlewares.use(

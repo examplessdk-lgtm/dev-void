@@ -50,9 +50,9 @@ If no render export is found, build/deploy fails with a clear error.
 Example:
 
 ```tsx
-import { renderToString } from "react-dom/server";
-import { defineRender } from "void";
-import App from "./App";
+import { renderToString } from 'react-dom/server';
+import { defineRender } from 'void';
+import App from './App';
 
 export default defineRender(async (c, assetTags) => {
   const url = new URL(c.req.raw.url);
@@ -66,7 +66,7 @@ export default defineRender(async (c, assetTags) => {
     ${assetTags.body}
   </body>
 </html>`,
-    { headers: { "content-type": "text/html; charset=utf-8" } },
+    { headers: { 'content-type': 'text/html; charset=utf-8' } },
   );
 });
 ```
@@ -74,10 +74,10 @@ export default defineRender(async (c, assetTags) => {
 `src/main.client.ts(x)` should hydrate/mount your app:
 
 ```tsx
-import { hydrateRoot } from "react-dom/client";
-import App from "./App";
+import { hydrateRoot } from 'react-dom/client';
+import App from './App';
 
-hydrateRoot(document.getElementById("root")!, <App url={window.location.pathname} />);
+hydrateRoot(document.getElementById('root')!, <App url={window.location.pathname} />);
 ```
 
 ## Client Asset Injection

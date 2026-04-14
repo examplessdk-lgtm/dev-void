@@ -1,5 +1,5 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { createServerFn } from "@tanstack/react-start";
+import { createFileRoute } from '@tanstack/react-router';
+import { createServerFn } from '@tanstack/react-start';
 
 const getInfo = createServerFn().handler(() => {
   return {
@@ -7,7 +7,7 @@ const getInfo = createServerFn().handler(() => {
   };
 });
 
-export const Route = createFileRoute("/")({
+export const Route = createFileRoute('/')({
   loader: () => getInfo(),
   component: HomePage,
 });
@@ -16,7 +16,7 @@ function HomePage() {
   const data = Route.useLoaderData();
 
   return (
-    <div style={{ padding: "16px" }}>
+    <div style={{ padding: '16px' }}>
       <h1>TanStack Start + Void</h1>
       <p>
         This playground demonstrates meta-framework integration. TanStack Start handles routing and

@@ -1,19 +1,19 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { migrationPlugin } from "../../src/plugin-migration";
-import { getMiniflareDatabasePath } from "../../src/migrations/runner";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { getMiniflareDatabasePath } from '../../src/migrations/runner';
+import { migrationPlugin } from '../../src/plugin-migration';
 
 const roots: string[] = [];
 
 function createProjectRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "void-migrations-"));
-  const migrationsDir = join(root, "db", "migrations");
+  const root = mkdtempSync(join(tmpdir(), 'void-migrations-'));
+  const migrationsDir = join(root, 'db', 'migrations');
   mkdirSync(migrationsDir, { recursive: true });
   writeFileSync(
-    join(migrationsDir, "001_create_users.sql"),
-    "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+    join(migrationsDir, '001_create_users.sql'),
+    'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);',
   );
   roots.push(root);
   return root;
@@ -27,33 +27,35 @@ afterEach(() => {
 
 async function runConfigureServer(plugin: ReturnType<typeof migrationPlugin>) {
   const hook = plugin.configureServer as any;
-  if (!hook) return;
-  if (typeof hook === "function") {
+  if (!hook) {
+    return;
+  }
+  if (typeof hook === 'function') {
     await hook.call({} as any, {} as any);
     return;
   }
   await hook.handler.call({} as any, {} as any);
 }
 
-describe("migrationPlugin persistence roots", () => {
-  it("uses .void by default", async () => {
+describe('migrationPlugin persistence roots', () => {
+  it('uses .void by default', async () => {
     const root = createProjectRoot();
-    const plugin = migrationPlugin(root, "sqlite");
+    const plugin = migrationPlugin(root, 'sqlite');
 
     await runConfigureServer(plugin);
 
-    const dbPath = getMiniflareDatabasePath(join(root, ".void"), "local");
+    const dbPath = getMiniflareDatabasePath(join(root, '.void'), 'local');
     expect(existsSync(dbPath)).toBe(true);
   });
 
-  it("supports custom persist root for framework mode", async () => {
+  it('supports custom persist root for framework mode', async () => {
     const root = createProjectRoot();
-    const persistRoot = join(root, ".wrangler", "state");
-    const plugin = migrationPlugin(root, "sqlite", "local", persistRoot);
+    const persistRoot = join(root, '.wrangler', 'state');
+    const plugin = migrationPlugin(root, 'sqlite', 'local', persistRoot);
 
     await runConfigureServer(plugin);
 
-    const dbPath = getMiniflareDatabasePath(persistRoot, "local");
+    const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
     expect(existsSync(dbPath)).toBe(true);
   });
 });

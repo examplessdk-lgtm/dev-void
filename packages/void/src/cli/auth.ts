@@ -1,13 +1,13 @@
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { Entry } from "@napi-rs/keyring";
-import { pc } from "./output";
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { Entry } from '@napi-rs/keyring';
+import { pc } from './output';
 
-const CONFIG_DIR = join(homedir(), ".void");
-const CONFIG_PATH = join(CONFIG_DIR, "config.json");
+const CONFIG_DIR = join(homedir(), '.void');
+const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
 
-const KEYRING_SERVICE = "dev.void.cli";
+const KEYRING_SERVICE = 'dev.void.cli';
 
 // ---------------------------------------------------------------------------
 // Keyring helpers — try/catch around `new Entry` for environments where the
@@ -54,7 +54,7 @@ interface Config {
 
 function readConfig(): Config {
   try {
-    return JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+    return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
   } catch {
     return {};
   }
@@ -62,32 +62,30 @@ function readConfig(): Config {
 
 function writeConfig(config: Config): void {
   mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
 }
 
 export function isStagingMode(): boolean {
-  const config = readConfig();
-  if (config.staging === false) return false;
-  return true;
+  return readConfig().staging === true || !!process.env.STAGING;
 }
 
 export function setStagingMode(on: boolean): void {
   const config = readConfig();
   if (on) {
-    delete config.staging;
+    config.staging = true;
   } else {
-    config.staging = false;
+    delete config.staging;
   }
   writeConfig(config);
 }
 
 export function getSiteDomain(): string {
-  return isStagingMode() ? "staging.void.app" : "void.app";
+  return isStagingMode() ? 'staging.void.app' : 'void.app';
 }
 
 export function printStagingBanner(): void {
   if (isStagingMode()) {
-    console.log(pc.black(pc.bgYellow(" ⚠ STAGING MODE ")) + "\n");
+    console.log(pc.black(pc.bgYellow(' ⚠ STAGING MODE ')) + '\n');
   }
 }
 
@@ -97,22 +95,32 @@ export function printStagingBanner(): void {
  */
 export function getToken(): string | null {
   const envToken = process.env.VOID_TOKEN;
-  if (envToken) return envToken;
+  if (envToken) {
+    return envToken;
+  }
 
-  const account = isStagingMode() ? "stagingToken" : "token";
+  const account = isStagingMode() ? 'stagingToken' : 'token';
 
   // Try keyring first
   const keyringToken = keyringGet(account);
-  if (keyringToken) return keyringToken;
+  if (keyringToken) {
+    return keyringToken;
+  }
 
   // File fallback — auto-migrate to keyring if available
   const config = readConfig();
   const fileToken = config[account];
   if (fileToken) {
     if (keyringSet(account, fileToken)) {
-      // Successfully migrated — remove from config file
+      // Successfully migrated — best-effort cleanup of the config-file copy.
+      // Failures here (read-only FS, permission denied, full disk) must not
+      // crash callers. Token stays in the file; next invocation will retry.
       delete config[account];
-      writeConfig(config);
+      try {
+        writeConfig(config);
+      } catch {
+        // Ignore — migration is best-effort.
+      }
     }
     return fileToken;
   }
@@ -120,27 +128,31 @@ export function getToken(): string | null {
   return null;
 }
 
-export function getTokenSource(): "ci" | "manual" {
-  return process.env.VOID_TOKEN ? "ci" : "manual";
+export function getTokenSource(): 'ci' | 'manual' {
+  return process.env.VOID_TOKEN ? 'ci' : 'manual';
 }
 
 export function saveToken(token: string): void {
-  const account = isStagingMode() ? "stagingToken" : "token";
-  if (keyringSet(account, token)) return;
+  const account = isStagingMode() ? 'stagingToken' : 'token';
+  if (keyringSet(account, token)) {
+    return;
+  }
 
   // Keyring unavailable — fall back to file
-  console.warn(pc.yellow("System keychain unavailable, storing token in ~/.void/config.json"));
+  console.warn(pc.yellow('System keychain unavailable, storing token in ~/.void/config.json'));
   const config = readConfig();
   config[account] = token;
   writeConfig(config);
 }
 
 export function removeToken(): boolean {
-  const account = isStagingMode() ? "stagingToken" : "token";
+  const account = isStagingMode() ? 'stagingToken' : 'token';
   let removed = false;
 
   // Remove from keyring
-  if (keyringDelete(account)) removed = true;
+  if (keyringDelete(account)) {
+    removed = true;
+  }
 
   // Also clean up config file if token exists there
   try {
@@ -157,8 +169,8 @@ export function removeToken(): boolean {
   return removed;
 }
 
-const DEFAULT_API_URL = "https://api.void.cloud";
-const STAGING_API_URL = "https://api.staging.void.cloud";
+const DEFAULT_API_URL = 'https://api.void.cloud';
+const STAGING_API_URL = 'https://api.staging.void.cloud';
 
 /**
  * Read the API URL from environment or config file.
@@ -184,55 +196,58 @@ function page(title: string, message: string): string {
  * Start a local HTTP server, open the browser to the platform login page,
  * and wait for the OAuth callback with a JWT token.
  */
-export async function runLogin(provider = "github"): Promise<string> {
-  const http = await import("node:http");
-  const { exec } = await import("node:child_process");
+export async function runLogin(provider = 'github'): Promise<string> {
+  const http = await import('node:http');
+  const { exec } = await import('node:child_process');
 
   const apiUrl = getApiUrl();
 
   return new Promise<string>((resolve, reject) => {
     const server = http.createServer((req, res) => {
       const url = new URL(req.url!, `http://localhost`);
-      if (url.pathname !== "/callback") {
+      if (url.pathname !== '/callback') {
         res.writeHead(404);
-        res.end("Not found");
+        res.end('Not found');
         return;
       }
 
-      const error = url.searchParams.get("error");
-      if (error === "signup_restricted") {
-        res.writeHead(403, { "Content-Type": "text/html" });
+      const error = url.searchParams.get('error');
+      if (error === 'signup_restricted') {
+        res.writeHead(403, { 'Content-Type': 'text/html' });
         res.end(
-          page("Signup restricted", "Your email is not on the approved list for this environment."),
+          page('Signup restricted', 'Your email is not on the approved list for this environment.'),
         );
         server.close();
         reject(
           new Error(
-            "Signup restricted: your email is not on the approved list for this environment.",
+            'Signup restricted: your email is not on the approved list for this environment.',
           ),
         );
         return;
       }
 
-      const token = url.searchParams.get("token");
+      const token = url.searchParams.get('token');
       if (!token) {
-        res.writeHead(400, { "Content-Type": "text/html" });
-        res.end(page("Login failed", "No token received. Please try again."));
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end(page('Login failed', 'No token received. Please try again.'));
         server.close();
-        reject(new Error("No token received from callback"));
+        reject(new Error('No token received from callback'));
         return;
       }
 
-      res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(page("Login successful!", "You can close this tab and return to the terminal."));
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(page('Login successful!', 'You can close this tab and return to the terminal.'));
       server.close();
       resolve(token);
     });
 
-    server.listen(0, "127.0.0.1", () => {
+    // Close immediately after callback — don't wait for keep-alive timeout
+    server.on('connection', (socket) => socket.unref());
+
+    server.listen(0, '127.0.0.1', () => {
       const addr = server.address();
-      if (!addr || typeof addr === "string") {
-        reject(new Error("Failed to start local server"));
+      if (!addr || typeof addr === 'string') {
+        reject(new Error('Failed to start local server'));
         return;
       }
 
@@ -241,11 +256,11 @@ export async function runLogin(provider = "github"): Promise<string> {
       const loginUrl = `${apiUrl}/auth/login?redirect=${encodeURIComponent(redirect)}&provider=${provider}`;
 
       // Open browser with platform detection
-      if (process.platform === "win32") {
+      if (process.platform === 'win32') {
         // `start` treats the first quoted arg as window title, pass empty title
         exec(`start "" "${loginUrl}"`);
       } else {
-        exec(`${process.platform === "darwin" ? "open" : "xdg-open"} "${loginUrl}"`);
+        exec(`${process.platform === 'darwin' ? 'open' : 'xdg-open'} "${loginUrl}"`);
       }
     });
 
@@ -253,7 +268,7 @@ export async function runLogin(provider = "github"): Promise<string> {
     const timeout = setTimeout(
       () => {
         server.close();
-        reject(new Error("Login timed out after 5 minutes"));
+        reject(new Error('Login timed out after 5 minutes'));
       },
       5 * 60 * 1000,
     );

@@ -1,5 +1,5 @@
-import { defineHandler } from "void";
-import { tags } from "virtual:tags";
+import { tags } from 'virtual:tags';
+import { defineHandler } from 'void';
 
 export interface Props {
   tag: string;
@@ -12,5 +12,5 @@ export function getPrerenderPaths() {
 }
 
 export const loader = defineHandler<Props>((c) => {
-  return { tag: c.req.param("tag") };
+  return { tag: c.req.param('tag') };
 });

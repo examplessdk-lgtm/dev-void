@@ -19,14 +19,14 @@ export interface MigrationResponse {
 export function createMigrationHandler(
   env: Record<string, unknown>,
   migrations: MigrationEntry[] | undefined,
-  _dialect: "sqlite" | "postgresql",
+  _dialect: 'sqlite' | 'postgresql',
   runAuthMigrations?: () => Promise<void>,
 ) {
   return async (request: Request): Promise<Response> => {
-    const token = request.headers.get("x-void-internal");
+    const token = request.headers.get('x-void-internal');
     if (!token || token !== (env as Record<string, string>).__VOID_PROXY_TOKEN) {
       return Response.json(
-        { ok: false, error: "unauthorized", migrations: [] } satisfies MigrationResponse,
+        { ok: false, error: 'unauthorized', migrations: [] } satisfies MigrationResponse,
         {
           status: 401,
         },
@@ -37,7 +37,7 @@ export function createMigrationHandler(
       const db = (env as Record<string, D1Database>).DB;
       if (!db) {
         return Response.json(
-          { ok: false, error: "no D1 binding found", migrations: [] } satisfies MigrationResponse,
+          { ok: false, error: 'no D1 binding found', migrations: [] } satisfies MigrationResponse,
           { status: 500 },
         );
       }
@@ -59,6 +59,31 @@ export function createMigrationHandler(
   };
 }
 
+/**
+ * One-time migration: rename legacy `_migrations` table to `_void_migrations`.
+ * Copies all rows from the old table to the new one, then drops the old table.
+ */
+async function upgradeTrackingTable(db: D1Database): Promise<void> {
+  const { results } = await db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")
+    .all();
+  if (!results || results.length === 0) {
+    return;
+  }
+  await db.batch([
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS _void_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      )`,
+    ),
+    db.prepare(
+      `INSERT OR IGNORE INTO _void_migrations (name, applied_at) SELECT name, applied_at FROM _migrations`,
+    ),
+    db.prepare(`DROP TABLE _migrations`),
+  ]);
+}
+
 async function runD1Migrations(
   db: D1Database,
   migrations: MigrationEntry[],
@@ -72,7 +97,10 @@ async function runD1Migrations(
     )
     .run();
 
-  const { results } = await db.prepare("SELECT name FROM _void_migrations").all();
+  // Upgrade legacy `_migrations` table if it exists
+  await upgradeTrackingTable(db);
+
+  const { results } = await db.prepare('SELECT name FROM _void_migrations').all();
   const applied = new Set((results ?? []).map((r) => r.name as string));
 
   const migrationResults: MigrationResult[] = [];
@@ -86,14 +114,15 @@ async function runD1Migrations(
     const start = Date.now();
     try {
       const statements = m.sql
-        .split(";")
+        .split(';')
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
-      await db.batch(statements.map((s) => db.prepare(s)));
-      await db
-        .prepare("INSERT INTO _void_migrations (name, applied_at) VALUES (?, ?)")
-        .bind(m.name, new Date().toISOString())
-        .run();
+      await db.batch([
+        ...statements.map((s) => db.prepare(s)),
+        db
+          .prepare('INSERT INTO _void_migrations (name, applied_at) VALUES (?, ?)')
+          .bind(m.name, new Date().toISOString()),
+      ]);
       migrationResults.push({ name: m.name, applied: true, durationMs: Date.now() - start });
     } catch (err) {
       migrationResults.push({

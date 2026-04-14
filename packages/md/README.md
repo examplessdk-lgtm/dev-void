@@ -6,10 +6,10 @@ Markdown pages plugin for Void — `.md` files as first-class routes with zero c
 
 ```ts
 // vite.config.ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidVue } from "@void/vue/plugin";
-import { voidMarkdown } from "@void/md/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidVue } from '@void/vue/plugin';
+import { voidMarkdown } from '@void/md/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidVue(), voidMarkdown()],
@@ -43,7 +43,7 @@ Import from `@void/md`:
 - **`@void/md/pages`** — flat array of all `MdPage` objects (HMR-aware), useful for building navs, sidebars, and search indexes
 
 ```ts
-import pages from "@void/md/pages";
+import pages from '@void/md/pages';
 // MdPage { path, title, frontmatter, headings }
 ```
 
@@ -130,7 +130,7 @@ Two CSS exports for styling markdown content:
 
 ```ts
 // In your layout or entry
-import "@void/md/theme.css"; // or theme-content.css
+import '@void/md/theme.css'; // or theme-content.css
 ```
 
 ## Architecture

@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "singleQuote": true,
+  "experimentalSortImports": {
+    "newlinesBetween": false
+  },
+  "experimentalSortPackageJson": {
+    "sortScripts": true
+  },
+  "ignorePatterns": [
+    "packages/void/docs/**",
+    "packages/void/skills/void/docs/**",
+    "playground/**/.astro/**",
+    "playground/**/.nuxt/**",
+    "playground/**/.output/**",
+    "playground/**/.react-router/**",
+    "playground/**/.svelte-kit/**",
+    "playground/**/build/**",
+    "playground/**/src/routeTree.gen.ts",
+    "playground/**/wrangler.json",
+    "playground/**/wrangler.jsonc"
+  ]
+}

@@ -89,7 +89,7 @@ Place a layout file in any `pages/` directory to wrap all pages in that subtree:
 
 ```tsx [React]
 // pages/layout.tsx
-import { useShared, Link } from "@void/react";
+import { useShared, Link } from '@void/react';
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const { auth } = useShared();
@@ -109,7 +109,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 ```vue [Vue]
 <!-- pages/layout.vue -->
 <script setup lang="ts">
-import { useShared, Link } from "@void/vue";
+import { useShared, Link } from '@void/vue';
 const { auth } = useShared();
 </script>
 
@@ -145,8 +145,8 @@ const { auth } = useShared();
 
 ```tsx [Solid]
 // pages/layout.tsx
-import { useShared, Link } from "@void/solid";
-import type { JSX } from "solid-js";
+import { useShared, Link } from '@void/solid';
+import type { JSX } from 'solid-js';
 
 export default function Layout(props: { children: JSX.Element }) {
   const shared = useShared<{ auth: { user: { name: string } | null } }>();
@@ -184,7 +184,7 @@ Export a `layout` constant from any page:
 ::: code-group
 
 ```tsx [React]
-export const layout = "landing";
+export const layout = 'landing';
 
 export default function Page() {
   return <div>This page uses the landing layout</div>;
@@ -193,7 +193,7 @@ export default function Page() {
 
 ```vue [Vue]
 <script setup>
-export const layout = "landing";
+export const layout = 'landing';
 </script>
 
 <template>
@@ -210,7 +210,7 @@ export const layout = "landing";
 ```
 
 ```tsx [Solid]
-export const layout = "landing";
+export const layout = 'landing';
 
 export default function Page() {
   return <div>This page uses the landing layout</div>;
@@ -292,7 +292,7 @@ export const layout = false;
 
 ```md
 ---
-layout: "!landing"
+layout: '!landing'
 ---
 
 # Standalone Landing Page
@@ -306,9 +306,9 @@ Middleware can inject data available on every page via `c.set("shared", {...})`.
 
 ```ts
 // middleware/01.auth.ts
-import { defineMiddleware } from "void";
+import { defineMiddleware } from 'void';
 
-declare module "void" {
+declare module 'void' {
   interface CloudContextVariables {
     shared: { auth: { user: { name: string } | null } };
   }
@@ -316,7 +316,7 @@ declare module "void" {
 
 export default defineMiddleware(async (c, next) => {
   const user = await getSessionUser(c);
-  c.set("shared", { auth: { user } });
+  c.set('shared', { auth: { user } });
   await next();
 });
 ```
@@ -326,7 +326,7 @@ Access it on the client with `useShared()`. The return type is inferred from you
 ::: code-group
 
 ```tsx [React]
-import { useShared } from "@void/react";
+import { useShared } from '@void/react';
 
 export default function Page() {
   const { auth } = useShared(); // { auth: { user: { name: string } | null } }
@@ -336,7 +336,7 @@ export default function Page() {
 
 ```vue [Vue]
 <script setup lang="ts">
-import { useShared } from "@void/vue";
+import { useShared } from '@void/vue';
 const { auth } = useShared(); // { auth: { user: { name: string } | null } }
 </script>
 ```
@@ -349,7 +349,7 @@ const { auth } = useShared(); // { auth: { user: { name: string } | null } }
 ```
 
 ```tsx [Solid]
-import { useShared } from "@void/solid";
+import { useShared } from '@void/solid';
 
 export default function Page() {
   const shared = useShared(); // { auth: { user: { name: string } | null } }

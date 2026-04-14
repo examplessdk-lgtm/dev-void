@@ -12,10 +12,10 @@ Every page can have a companion `.server.ts` file that exports a `loader`. Serve
 
 ```ts
 // pages/users/index.server.ts
-import { defineHandler } from "void";
-import type { InferProps } from "void";
-import { db } from "void/db";
-import { users } from "@schema";
+import { defineHandler } from 'void';
+import type { InferProps } from 'void';
+import { db } from 'void/db';
+import { users } from '@schema';
 
 export type Props = InferProps<typeof loader>; // [!code highlight]
 
@@ -44,7 +44,7 @@ The component receives loader data as props. Export the props type from your `.s
 
 ```tsx [React]
 // pages/users/index.tsx
-import type { Props } from "./index.server";
+import type { Props } from './index.server';
 
 export default function UsersPage({ users }: Props) {
   return (
@@ -60,7 +60,7 @@ export default function UsersPage({ users }: Props) {
 ```vue [Vue]
 <!-- pages/users/index.vue -->
 <script setup lang="ts">
-import type { Props } from "./index.server";
+import type { Props } from './index.server';
 defineProps<Props>();
 </script>
 
@@ -90,8 +90,8 @@ defineProps<Props>();
 
 ```tsx [Solid]
 // pages/users/index.tsx
-import type { Props } from "./index.server";
-import { For } from "solid-js";
+import type { Props } from './index.server';
+import { For } from 'solid-js';
 
 export default function UsersPage(props: Props) {
   return (
@@ -113,10 +113,10 @@ Loaders sometimes need to fetch slower data such as analytics, external API resp
 
 ```ts
 // pages/dashboard.server.ts
-import { defineHandler, defer } from "void";
-import type { InferProps } from "void";
-import { db } from "void/db";
-import { projects } from "@schema";
+import { defineHandler, defer } from 'void';
+import type { InferProps } from 'void';
+import { db } from 'void/db';
+import { projects } from '@schema';
 
 export type Props = InferProps<typeof loader>;
 
@@ -149,7 +149,7 @@ Check `loading` first, then `error`. TypeScript narrows `value` to `T` in the re
 ::: code-group
 
 ```tsx [React]
-import type { Props } from "./dashboard.server";
+import type { Props } from './dashboard.server';
 
 export default function Dashboard({ projects, usage }: Props) {
   return (
@@ -169,7 +169,7 @@ export default function Dashboard({ projects, usage }: Props) {
 
 ```vue [Vue]
 <script setup lang="ts">
-import type { Props } from "./dashboard.server";
+import type { Props } from './dashboard.server';
 defineProps<Props>();
 </script>
 
@@ -202,7 +202,7 @@ defineProps<Props>();
 ```
 
 ```tsx [Solid]
-import type { Props } from "./dashboard.server";
+import type { Props } from './dashboard.server';
 
 export default function Dashboard(props: Props) {
   return (
@@ -245,8 +245,8 @@ export const loader = defineHandler<Props>(async (c) => {
 
   return {
     projects: await db.select().from(projects),
-    metrics: defer("analytics", analyticsResolver),
-    chart: defer("analytics", analyticsResolver),
+    metrics: defer('analytics', analyticsResolver),
+    chart: defer('analytics', analyticsResolver),
   };
 });
 ```

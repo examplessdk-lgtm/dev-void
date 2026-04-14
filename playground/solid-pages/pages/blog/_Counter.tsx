@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { createSignal } from 'solid-js';
 
 export default function Counter(props: { initial?: number }) {
   const [count, setCount] = createSignal(props.initial ?? 0);

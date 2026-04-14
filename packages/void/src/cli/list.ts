@@ -1,17 +1,17 @@
-import { intro, outro, log } from "@clack/prompts";
-import { getToken } from "./auth";
-import { PlatformClient, type DeploymentResponse } from "./client";
-import { readProjectConfig } from "./project";
-import { resolveProjectBySlug } from "./resolve-project";
-import { cliTitle, dim, pc, tablePrefix } from "./output";
+import { intro, outro, log } from '@clack/prompts';
+import { getToken } from './auth';
+import { PlatformClient, type DeploymentResponse } from './client';
+import { cliTitle, dim, ensureUtc, pc, tablePrefix } from './output';
+import { readProjectConfig } from './project';
+import { resolveProjectBySlug } from './resolve-project';
 
 export async function runListCommand(root: string, slug?: string): Promise<void> {
   console.log();
-  intro(cliTitle("project status"));
+  intro(cliTitle('project status'));
 
   const token = getToken();
   if (!token) {
-    log.error("Not logged in. Run `void auth login` first.");
+    log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
   }
 
@@ -32,7 +32,7 @@ export async function runListCommand(root: string, slug?: string): Promise<void>
   } else {
     const linked = readProjectConfig(root);
     if (!linked) {
-      log.error("No linked project found. Pass a project name: void project status <name>");
+      log.error('No linked project found. Pass a project name: void project status <name>');
       process.exit(1);
     }
     projectId = linked.projectId;
@@ -55,30 +55,32 @@ async function showDeployments(
   }
 
   const latest = deployments[0];
-  if (latest.status === "failed" && latest.error_message) {
+  if (latest.status === 'failed' && latest.error_message) {
     log.error(`Latest deploy failed: ${latest.error_message}`);
   }
 
   const rows = deployments.map((d) => formatDeploymentRow(d, activeDeploymentId));
 
-  const idWidth = Math.max("id".length, ...rows.map((r) => r.id.length));
-  const typeWidth = Math.max("type".length, ...rows.map((r) => r.appType.length));
-  const statusWidth = Math.max("status".length, ...rows.map((r) => r.statusRaw.length));
-  const sourceWidth = Math.max("source".length, ...rows.map((r) => r.source.length));
-  const commitWidth = Math.max("commit".length, ...rows.map((r) => r.commit.length));
-  const isrWidth = Math.max("isr".length, ...rows.map((r) => r.isr.length));
+  const idWidth = Math.max('id'.length, ...rows.map((r) => r.id.length));
+  const typeWidth = Math.max('type'.length, ...rows.map((r) => r.appType.length));
+  const statusWidth = Math.max('status'.length, ...rows.map((r) => r.statusRaw.length));
+  const sourceWidth = Math.max('source'.length, ...rows.map((r) => r.source.length));
+  const commitWidth = Math.max('commit'.length, ...rows.map((r) => r.commit.length));
+  const isrWidth = Math.max('isr'.length, ...rows.map((r) => r.isr.length));
 
   const prefix = tablePrefix();
-  const header = `${prefix}${dim(`${"id".padEnd(idWidth)}  ${"type".padEnd(typeWidth)}  ${"status".padEnd(statusWidth)}  ${"source".padEnd(sourceWidth)}  ${"commit".padEnd(commitWidth)}  ${"isr".padEnd(isrWidth)}  deployed`)}`;
+  const header = `${prefix}${dim(`${'id'.padEnd(idWidth)}  ${'type'.padEnd(typeWidth)}  ${'status'.padEnd(statusWidth)}  ${'source'.padEnd(sourceWidth)}  ${'commit'.padEnd(commitWidth)}  ${'isr'.padEnd(isrWidth)}  deployed`)}`;
 
   const lines = rows.map(
     (row) =>
-      `${prefix}${row.id.padEnd(idWidth)}  ${row.appType.padEnd(typeWidth)}  ${row.statusColored}${"".padEnd(statusWidth - row.statusRaw.length)}  ${row.source.padEnd(sourceWidth)}  ${row.commit.padEnd(commitWidth)}  ${row.isr.padEnd(isrWidth)}  ${row.deployed}`,
+      `${prefix}${row.id.padEnd(idWidth)}  ${row.appType.padEnd(typeWidth)}  ${row.statusColored}${''.padEnd(statusWidth - row.statusRaw.length)}  ${row.source.padEnd(sourceWidth)}  ${row.commit.padEnd(commitWidth)}  ${row.isr.padEnd(isrWidth)}  ${row.deployed}`,
   );
 
   console.log(prefix);
   console.log(header);
-  for (const line of lines) console.log(line);
+  for (const line of lines) {
+    console.log(line);
+  }
   outro(`${slug} — ${deployments.length} deployment(s)`);
 }
 
@@ -94,23 +96,34 @@ interface DeploymentRow {
 }
 
 function computeDisplayStatus(d: DeploymentResponse, activeDeploymentId: string | null): string {
-  if (d.status === "failed") return "failed";
-  if (d.status !== "live") return d.status;
-  if (d.id === activeDeploymentId) return "live";
-  if (d.retained) return "retained";
-  return "evicted";
+  if (d.status === 'failed') {
+    return 'failed';
+  }
+  if (d.status !== 'live') {
+    return d.status;
+  }
+  if (d.id === activeDeploymentId) {
+    return 'live';
+  }
+  if (d.retained) {
+    return 'retained';
+  }
+  return 'evicted';
 }
 
 function colorStatus(status: string): string {
   switch (status) {
-    case "live":
+    case 'live':
       return pc.bold(pc.green(status));
-    case "retained":
+    case 'retained':
       return dim(pc.green(status));
-    case "evicted":
+    case 'evicted':
       return dim(status);
-    case "failed":
+    case 'failed':
+    case 'canceled':
       return pc.red(status);
+    case 'canceling':
+      return pc.yellow(status);
     default:
       return status;
   }
@@ -134,34 +147,42 @@ function formatDeploymentRow(
     }
   }
 
-  const appType = manifest?.type ?? (manifest?.framework ? "framework" : "void");
-  const isr = manifest?.revalidate && manifest.revalidate > 0 ? `${manifest.revalidate}s` : "-";
-  const source = d.source ?? "-";
-  const commit = d.commit ? d.commit.slice(0, 7) : "-";
+  const appType = manifest?.type ?? (manifest?.framework ? 'framework' : 'void');
+  const isr = manifest?.revalidate && manifest.revalidate > 0 ? `${manifest.revalidate}s` : '-';
+  const source = d.source ?? '-';
+  const commit = d.commit ? d.commit.slice(0, 7) : '-';
 
   const statusRaw = computeDisplayStatus(d, activeDeploymentId);
   const statusColored = colorStatus(statusRaw);
 
-  const deployed = d.deployed_at ? formatRelativeTime(d.deployed_at) : "-";
+  const deployed = d.deployed_at ? formatRelativeTime(d.deployed_at) : '-';
 
   return { id: d.id, appType, statusRaw, statusColored, source, commit, isr, deployed };
 }
 
 function formatRelativeTime(iso: string): string {
   const now = Date.now();
-  const then = new Date(iso).getTime();
+  const then = new Date(ensureUtc(iso)).getTime();
   const diffMs = now - then;
 
-  if (diffMs < 0) return "just now";
+  if (diffMs < 0) {
+    return 'just now';
+  }
 
   const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 60) return "just now";
+  if (seconds < 60) {
+    return 'just now';
+  }
 
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
 
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
 
   const days = Math.floor(hours / 24);
   return `${days}d ago`;

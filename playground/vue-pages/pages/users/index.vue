@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { Link, useForm } from "@void/vue";
-import type { Props } from "./index.server";
+import { Link, useForm } from '@void/vue';
+import type { Props } from './index.server';
 
 const props = defineProps<Props>();
 
-const form = useForm("/users", {
-  name: "",
-  email: "",
+const form = useForm('/users', {
+  name: '',
+  email: '',
 });
 </script>
 
@@ -34,7 +34,7 @@ const form = useForm("/users", {
         <span v-if="form.errors.email" style="color: red">{{ form.errors.email }}</span>
       </div>
       <button type="submit" :disabled="form.processing">
-        {{ form.processing ? "Saving..." : "Add User" }}
+        {{ form.processing ? 'Saving...' : 'Add User' }}
       </button>
     </form>
   </div>

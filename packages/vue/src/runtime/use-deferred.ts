@@ -1,4 +1,4 @@
-import { reactive } from "vue";
+import { reactive } from 'vue';
 
 export type DeferredRef<T = unknown> =
   | { value: null; loading: true; error: null }

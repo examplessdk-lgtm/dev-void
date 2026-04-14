@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { useForm } from "@void/vue";
-import type { Props } from "./revalidate.server";
+import { useForm } from '@void/vue';
+import type { Props } from './revalidate.server';
 
 defineProps<Props>();
 
-const form = useForm("/revalidate", {});
+const form = useForm('/revalidate', {});
 </script>
 <template>
   <div>
@@ -28,7 +28,7 @@ const form = useForm("/revalidate", {});
     </p>
     <form @submit.prevent="form.post()">
       <button type="submit" :disabled="form.processing">
-        {{ form.processing ? "Revalidating..." : "Revalidate /revalidate" }}
+        {{ form.processing ? 'Revalidating...' : 'Revalidate /revalidate' }}
       </button>
     </form>
   </div>

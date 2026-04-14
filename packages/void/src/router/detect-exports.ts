@@ -1,15 +1,15 @@
-import { readFileSync } from "node:fs";
-import { basename } from "node:path";
-import { parseSync } from "vite";
+import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
+import { parseSync } from 'vite';
 
-const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]);
+const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']);
 
 /**
  * Detect which HTTP method names are exported from a route file.
  * Scans top-level named exports for identifiers matching HTTP methods.
  */
 export function detectHttpExports(absPath: string): string[] {
-  const code = readFileSync(absPath, "utf-8");
+  const code = readFileSync(absPath, 'utf-8');
   const filename = basename(absPath);
   let parsed: ReturnType<typeof parseSync>;
   try {
@@ -20,17 +20,17 @@ export function detectHttpExports(absPath: string): string[] {
 
   const methods: string[] = [];
   for (const node of parsed.program.body as any[]) {
-    if (node.type === "ExportNamedDeclaration") {
+    if (node.type === 'ExportNamedDeclaration') {
       // export const GET = ...; export function POST() { ... }
       const decl = node.declaration;
       if (decl) {
-        if (decl.type === "VariableDeclaration") {
+        if (decl.type === 'VariableDeclaration') {
           for (const declarator of decl.declarations) {
-            if (declarator.id?.type === "Identifier" && HTTP_METHODS.has(declarator.id.name)) {
+            if (declarator.id?.type === 'Identifier' && HTTP_METHODS.has(declarator.id.name)) {
               methods.push(declarator.id.name);
             }
           }
-        } else if (decl.type === "FunctionDeclaration" && decl.id?.type === "Identifier") {
+        } else if (decl.type === 'FunctionDeclaration' && decl.id?.type === 'Identifier') {
           if (HTTP_METHODS.has(decl.id.name)) {
             methods.push(decl.id.name);
           }

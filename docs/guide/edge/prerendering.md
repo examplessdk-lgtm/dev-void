@@ -34,7 +34,7 @@ export const prerender = true;
 
 export async function getPrerenderPaths() {
   // Return param objects matching the URL pattern
-  return [{ slug: "hello-world" }, { slug: "getting-started" }];
+  return [{ slug: 'hello-world' }, { slug: 'getting-started' }];
 }
 
 export const loader = defineHandler(async (c) => {
@@ -51,7 +51,7 @@ In custom SSR mode (`src/main.ssr.ts`), export `getPrerenderPaths()` at the top 
 export const prerender = true;
 
 export async function getPrerenderPaths() {
-  return ["/", "/about", "/blog/hello-world"];
+  return ['/', '/about', '/blog/hello-world'];
 }
 
 export default defineRender(async (c, assetTags) => {

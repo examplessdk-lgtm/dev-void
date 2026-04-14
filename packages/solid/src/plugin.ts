@@ -1,8 +1,8 @@
-import solid from "vite-plugin-solid";
-import type { Plugin } from "vite";
-import { join } from "node:path";
-import { islandsPlugin } from "./plugin-islands";
-import { pagesPlugin } from "./plugin-pages";
+import { join } from 'node:path';
+import type { Plugin } from 'vite';
+import solid from 'vite-plugin-solid';
+import { islandsPlugin } from './plugin-islands';
+import { pagesPlugin } from './plugin-pages';
 
 interface PrefetchConfig {
   hoverDelay?: number;
@@ -16,7 +16,7 @@ export interface VoidSolidOptions {
 }
 
 export function voidSolid(options?: VoidSolidOptions): Plugin[] {
-  const pagesDir = join(process.cwd(), "pages");
+  const pagesDir = join(process.cwd(), 'pages');
   return [
     solid({ ssr: true, ...options?.solid }),
     pagesPlugin(pagesDir, {

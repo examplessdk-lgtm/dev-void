@@ -37,12 +37,12 @@ export const POST = defineHandler.withValidator({
 
 ```ts
 // Client: types inferred from handlers above
-const users = await fetch("/api/users");
+const users = await fetch('/api/users');
 //    ↑ { name: string; email: string }[]
 
-await fetch("/api/users", {
-  method: "POST",
-  body: { name: "Alice", email: "alice@example.com" }, // ← typed from validator
+await fetch('/api/users', {
+  method: 'POST',
+  body: { name: 'Alice', email: 'alice@example.com' }, // ← typed from validator
 });
 ```
 
@@ -64,7 +64,7 @@ export const loader = defineHandler(async (c) => {
 ```vue
 <!-- pages/users/index.vue -->
 <script setup lang="ts">
-import type { Props } from "./index.server";
+import type { Props } from './index.server';
 defineProps<Props>(); // ← { users: { id: number; name: string; ... }[] }
 </script>
 ```
@@ -85,7 +85,7 @@ export const action = defineHandler.withValidator({
 ```
 
 ```ts
-const form = useForm("/users/create", { name: "", email: "" });
+const form = useForm('/users/create', { name: '', email: '' });
 //                    ^ autocompletes     ^ must match body schema
 
 form.errors.email; // ✓ string | undefined
@@ -95,8 +95,8 @@ form.errors.foo; // ✗ TypeScript error
 [Named actions](./pages-routing/actions-and-forms#named-actions) work the same way. The `?actionName` suffix selects the right types for that action:
 
 ```ts
-const updateForm = useForm("/users/:id?update", { name: "" }, { params: { id } });
-const deleteForm = useForm("/users/:id?delete", { id: "" }, { params: { id } });
+const updateForm = useForm('/users/:id?update', { name: '' }, { params: { id } });
+const deleteForm = useForm('/users/:id?delete', { id: '' }, { params: { id } });
 // Each form's data and errors are typed from their respective validators
 ```
 
@@ -130,14 +130,14 @@ Middleware and handlers share typed data through Hono's context variables. Augme
 
 ```ts
 // middleware/01.auth.ts
-declare module "void" {
+declare module 'void' {
   interface CloudContextVariables {
     requestId: string;
   }
 }
 
 export default defineMiddleware(async (c, next) => {
-  c.set("requestId", crypto.randomUUID());
+  c.set('requestId', crypto.randomUUID());
   await next();
 });
 ```

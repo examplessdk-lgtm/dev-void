@@ -1,4 +1,4 @@
-@import "@voidzero-dev/vitepress-theme/src/styles/index.css";
+@import '@voidzero-dev/vitepress-theme/src/styles/index.css';
 
 @source "./**/*.vue";
 
@@ -7,11 +7,11 @@
 }
 
 :root.dark:not([data-theme]),
-:root[data-theme="dark"] {
+:root[data-theme='dark'] {
   --color-brand: #7d88ff;
 }
 
-:root[data-theme="light"] {
+:root[data-theme='light'] {
   --color-brand: #4f30e8;
 }
 

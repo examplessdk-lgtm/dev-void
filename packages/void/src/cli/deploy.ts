@@ -1,7 +1,4 @@
-import { execFileSync, execSync } from "node:child_process";
-import { join, relative, resolve } from "node:path";
-import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { execFileSync, execSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
@@ -10,43 +7,17 @@ import {
   readdirSync,
   rmSync,
   symlinkSync,
-} from "node:fs";
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const drizzleKitBin = join(fileURLToPath(import.meta.resolve("drizzle-kit")), "..", "bin.cjs");
-const deployDriftCheckDir = join(".void", "deploy-drift-check");
-import { intro, outro, log, note, spinner, confirm, isCancel } from "@clack/prompts";
-import { getToken, getTokenSource } from "./auth";
-import { readProjectConfig, writeProjectConfig, type ProjectConfig } from "./project";
-import {
-  packageBuild,
-  packageStaticBuild,
-  packageFrameworkBuild,
-  collectAndHashAssets,
-} from "./package";
-import { PlatformClient } from "./client";
-import {
-  inferProjectBindings,
-  FRAMEWORK_SCAN_DIRS,
-  detectFramework,
-  type DetectedFramework,
-} from "../plugin-inference";
-import { promptProjectSelection, promptProjectSlug } from "./prompt";
-import { collectMigrations } from "../migrations/collect";
-import { validateMigrations } from "../migrations/validate";
-import { scanJobsSync } from "../crons/scan";
-import { scanQueuesSync } from "../queues/scan";
-import { scanWebSocketRoutesSync } from "../router/websocket";
-import { validateSsrEntry } from "../ssr/entry";
-import { scanPages } from "../pages/scan";
-import { collectPrerenderPaths, collectPrerenderPathsNode } from "../prerender";
-import {
-  detectPreset,
-  FRAMEWORK_PRESETS,
-  formatProjectCommand,
-  resolveProjectCommand,
-  type StaticPreset,
-  type FrameworkPreset,
-} from "./preset";
+const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
+const deployDriftCheckDir = join('.void', 'deploy-drift-check');
+const DEPLOY_RECOVERY_POLL_INTERVAL_MS = 3_000;
+const DEPLOY_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000;
+import { intro, outro, log, note, confirm, isCancel, type SpinnerResult } from '@clack/prompts';
+import { findVoidAuthConfig } from '../auth/config';
 import {
   readConfig,
   resolveBindingNames,
@@ -54,24 +25,80 @@ import {
   type VoidConfig,
   getDatabaseDialect,
   isNodeTarget,
-} from "../config";
-import { readWranglerCompat } from "./wrangler";
-import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from "./wrapper";
-import type { WrapperFeatures } from "./wrapper";
-import { getRequestedProjectSlug, resolveProjectBySlug, inferDefaultSlug } from "./resolve-project";
-import { cliTitle } from "./output";
-import { parseHeadersFile, parseRedirectsFile } from "./headers";
-import { convertHeadersConfig, convertRedirectsConfig } from "../config";
-import type { AssetConfig, DeployEvent, HeaderRule, RedirectRule } from "./types";
-import { findVoidAuthConfig } from "../auth/config";
-import { discoverSchema } from "../drizzle/discover";
-import { writeDrizzleConfig } from "../drizzle/config";
+} from '../config';
+import { convertHeadersConfig, convertRedirectsConfig } from '../config';
+import { scanJobsSync } from '../crons/scan';
+import { writeDrizzleConfig } from '../drizzle/config';
+import { discoverSchema } from '../drizzle/discover';
+import { voidWarn } from '../log';
+import { collectMigrations } from '../migrations/collect';
+import { assertJournalCoherence, validateMigrations } from '../migrations/validate';
+import { scanPages } from '../pages/scan';
+import {
+  inferProjectBindings,
+  FRAMEWORK_SCAN_DIRS,
+  detectFramework,
+  type DetectedFramework,
+} from '../plugin-inference';
+import { collectPrerenderPaths, collectPrerenderPathsNode } from '../prerender';
+import { scanQueuesSync } from '../queues/scan';
+import { scanWebSocketRoutesSync } from '../router/websocket';
+import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env';
+import { validateSsrEntry } from '../ssr/entry';
+import { getToken, getTokenSource } from './auth';
+import {
+  isExpiredTokenError,
+  PlatformApiError,
+  PlatformClient,
+  type DeploymentResponse,
+} from './client';
+import { promptAndCreateProject } from './create-project';
+import { parseHeadersFile, parseRedirectsFile } from './headers';
+import { promptForLoginToken } from './login';
+import { cliTitle, createSpinner } from './output';
+import {
+  packageBuild,
+  packageStaticBuild,
+  packageFrameworkBuild,
+  collectAndHashAssets,
+} from './package';
+import {
+  detectPreset,
+  FRAMEWORK_PRESETS,
+  formatProjectCommand,
+  resolveProjectCommand,
+  type StaticPreset,
+  type FrameworkPreset,
+} from './preset';
+import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project';
+import { promptProjectSelection } from './prompt';
+import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project';
+import type { AssetConfig, DeployEvent, HeaderRule, RedirectRule } from './types';
+import { readWranglerCompat, type WranglerCompat } from './wrangler';
+import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper';
+
+class DeployEventError extends Error {}
+import type { WrapperFeatures } from './wrapper';
 
 export interface RunDeployOptions {
   projectSlug?: string;
   dir?: string;
   spa?: boolean;
   skipBuild?: boolean;
+}
+
+type DeployDoneEvent = Extract<DeployEvent, { event: 'done' }>;
+type RecoveredDeployDoneEvent = Omit<DeployDoneEvent, 'assets' | 'workers' | 'migrations'> & {
+  recovered: true;
+};
+type StreamDeployResult = DeployDoneEvent | RecoveredDeployDoneEvent;
+
+export function resolveDeployWranglerCompat(
+  root: string,
+  config: VoidConfig,
+  buildOutputDir: string,
+): WranglerCompat | undefined {
+  return isNodeTarget(config.target) ? undefined : readWranglerCompat(root, config, buildOutputDir);
 }
 
 /**
@@ -85,146 +112,182 @@ export interface RunDeployOptions {
  */
 export async function runDeploy(root: string, options?: RunDeployOptions): Promise<void> {
   console.log();
-  intro(cliTitle("deploy"));
+  intro(cliTitle('deploy'));
 
-  // 1. Auth
-  const token = getToken();
-  if (!token) {
-    log.error("No auth token found. Run `void auth login` first.");
-    process.exit(1);
-  }
-
-  const client = new PlatformClient(token);
-
-  // 2. Resolve target project (CLI flag > env var > linked project file)
-  const requestedProjectSlug = getRequestedProjectSlug(options);
-  let config: ProjectConfig | null = null;
-
-  if (requestedProjectSlug) {
-    const projects = await client.listProjects();
-    config = resolveProjectBySlug(projects, requestedProjectSlug);
-
-    if (!config) {
-      if (!process.stdin.isTTY) {
-        // CI: auto-create when --project is explicitly specified
-        config = await createNewProject(root, client, requestedProjectSlug);
-      } else {
-        const shouldCreate = await confirm({
-          message: `Project "${requestedProjectSlug}" does not exist. Create it?`,
-        });
-        if (isCancel(shouldCreate) || !shouldCreate) {
-          log.info("Deploy cancelled.");
-          process.exit(0);
-        }
-
-        config = await createNewProject(root, client, requestedProjectSlug);
-      }
-    }
-  } else {
-    config = readProjectConfig(root);
-  }
-
-  if (!config) {
-    const projects = await client.listProjects();
-
-    if (projects.length > 0) {
-      // User has existing projects — let them choose
-      const result = await promptProjectSelection(projects, "Select a project to deploy to:");
-
-      if (result.action === "select") {
-        config = { projectId: result.project.id, slug: result.project.slug };
-        writeProjectConfig(root, config);
-        log.step(`Linked to ${config.slug}`);
-      } else {
-        const slug = await promptProjectSlug(inferDefaultSlug(root));
-        config = await createNewProject(root, client, slug);
-      }
-    } else {
-      const slug = await promptProjectSlug(inferDefaultSlug(root));
-      config = await createNewProject(root, client, slug);
-    }
-  }
-
-  // 3. Resolve deploy app type: void.json > CLI flags > auto-detection
-  const voidConfig = readConfig(root);
-
-  // Check for known framework first
-  const detected = detectFramework(root);
-  if (detected) {
-    const gitCommit = options?.skipBuild ? null : getGitCommit(root);
-    const fwPreset = FRAMEWORK_PRESETS[detected.name];
-    if (detected.class === "b" || detected.class === "c") {
-      if (!fwPreset) {
-        log.error(`No deploy preset found for framework "${detected.name}".`);
+  let reauthenticated = false;
+  while (true) {
+    try {
+      // 1. Auth
+      const token = getToken();
+      if (!token) {
+        log.error('No auth token found. Run `void auth login` first.');
         process.exit(1);
       }
-      await runFrameworkDeploy(
-        root,
-        config,
-        client,
-        detected,
-        fwPreset,
-        voidConfig,
-        options?.skipBuild,
-        gitCommit,
-      );
-    } else {
-      // Class A: preset is optional (e.g. vinext probes at runtime)
-      await runFullDeploy(root, config, client, fwPreset, options?.skipBuild, gitCommit, detected);
-    }
-    return;
-  }
 
-  let preset: StaticPreset | null = null;
+      const client = new PlatformClient(token);
 
-  const appType = voidConfig.inference?.appType;
-  if (appType && appType !== "void" && appType !== "framework") {
-    // void.json has an explicit static app type
-    const outputDir = voidConfig.inference?.outputDir;
-    preset = {
-      buildCommand: null,
-      outputDir: outputDir ? resolve(root, outputDir) : join(root, "dist"),
-      appType,
-    };
-    // Re-detect build command (config stores app type, not command)
-    const detectedPreset = detectPreset(root, { dir: options?.dir, spa: options?.spa });
-    if (detectedPreset) {
-      preset.buildCommand = detectedPreset.buildCommand;
-      if (!outputDir) {
-        preset.outputDir = detectedPreset.outputDir;
+      // 2. Resolve target project (CLI flag > env var > linked project file)
+      const requestedProjectSlug = getRequestedProjectSlug(options);
+      let config: ProjectConfig | null = null;
+
+      if (requestedProjectSlug) {
+        const projects = await client.listProjects();
+        config = resolveProjectBySlug(projects, requestedProjectSlug);
+
+        if (!config) {
+          if (!process.stdin.isTTY) {
+            // CI: auto-create when --project is explicitly specified
+            config = await createProjectFromSlug(root, client, requestedProjectSlug);
+          } else {
+            const shouldCreate = await confirm({
+              message: `Project "${requestedProjectSlug}" does not exist. Create it?`,
+            });
+            if (isCancel(shouldCreate) || !shouldCreate) {
+              log.info('Deploy cancelled.');
+              process.exit(0);
+            }
+
+            config = await createProjectFromSlug(root, client, requestedProjectSlug);
+          }
+        }
+      } else {
+        config = readProjectConfig(root);
       }
+
+      if (!config && !process.stdin.isTTY) {
+        log.error(
+          'No project specified. Set `VOID_PROJECT`, pass `--project <slug>`, or commit `.void/project.json`.',
+        );
+        process.exit(1);
+      }
+
+      if (!config) {
+        const projects = await client.listProjects();
+
+        if (projects.length > 0) {
+          // User has existing projects — let them choose
+          const result = await promptProjectSelection(projects, 'Select a project to deploy to:');
+
+          if (result.action === 'select') {
+            config = { projectId: result.project.id, slug: result.project.slug };
+            writeProjectConfig(root, config);
+            log.step(`Linked to ${config.slug}`);
+          } else {
+            config = await promptAndCreateProject(root, client);
+          }
+        } else {
+          config = await promptAndCreateProject(root, client);
+        }
+      }
+
+      // 3. Resolve deploy app type: void.json > CLI flags > auto-detection
+      const voidConfig = readConfig(root);
+
+      // Check for known framework first
+      const detected = detectFramework(root);
+      if (detected) {
+        const gitCommit = options?.skipBuild ? null : getGitCommit(root);
+        const fwPreset = FRAMEWORK_PRESETS[detected.name];
+        if (detected.class === 'b' || detected.class === 'c') {
+          if (!fwPreset) {
+            log.error(`No deploy preset found for framework "${detected.name}".`);
+            process.exit(1);
+          }
+          await runFrameworkDeploy(
+            root,
+            config,
+            client,
+            detected,
+            fwPreset,
+            voidConfig,
+            options?.skipBuild,
+            gitCommit,
+          );
+        } else {
+          // Class A: preset is optional (e.g. vinext probes at runtime)
+          await runFullDeploy(
+            root,
+            config,
+            client,
+            fwPreset,
+            options?.skipBuild,
+            gitCommit,
+            detected,
+          );
+        }
+        return;
+      }
+
+      let preset: StaticPreset | null = null;
+
+      const appType = voidConfig.inference?.appType;
+      if (appType && appType !== 'void' && appType !== 'framework') {
+        // void.json has an explicit static app type
+        const outputDir = voidConfig.inference?.outputDir;
+        preset = {
+          buildCommand: null,
+          outputDir: outputDir ? resolve(root, outputDir) : join(root, 'dist'),
+          appType,
+        };
+        // Re-detect build command (config stores app type, not command)
+        const detectedPreset = detectPreset(root, { dir: options?.dir, spa: options?.spa });
+        if (detectedPreset) {
+          preset.buildCommand = detectedPreset.buildCommand;
+          if (!outputDir) {
+            preset.outputDir = detectedPreset.outputDir;
+          }
+        }
+      } else if (!appType) {
+        // No configured app type — detect from CLI flags + project structure
+        preset = detectPreset(root, { dir: options?.dir, spa: options?.spa });
+      }
+      // appType === "void" or "framework" → preset stays null → full deploy
+
+      // Detect git commit before build (only when not skipping build)
+      const gitCommit = options?.skipBuild ? null : getGitCommit(root);
+
+      if (preset) {
+        preset = {
+          ...preset,
+          buildCommand: resolveStaticBuildCommand(
+            preset,
+            voidConfig.inference?.build,
+            Boolean(options?.dir),
+          ),
+        };
+        await runStaticDeploy(
+          root,
+          config,
+          client,
+          preset,
+          options?.skipBuild,
+          gitCommit,
+          undefined,
+          convertHeadersConfig(voidConfig.routing?.headers) ?? [],
+          convertRedirectsConfig(voidConfig.routing?.redirects) ?? [],
+        );
+      } else {
+        await runFullDeploy(root, config, client, undefined, options?.skipBuild, gitCommit);
+      }
+      return;
+    } catch (error) {
+      if (isExpiredTokenError(error)) {
+        if (getTokenSource() === 'ci') {
+          throw new Error(
+            '`VOID_TOKEN` is invalid or expired. Generate a new token and try again.',
+          );
+        }
+        if (!process.stdin.isTTY || reauthenticated) {
+          throw new Error('Auth token expired. Run `void auth login` and try again.');
+        }
+        log.warn('Auth token expired. Re-authenticating...');
+        await promptForLoginToken();
+        log.success('Re-authenticated. Retrying deploy...');
+        reauthenticated = true;
+        continue;
+      }
+      throw error;
     }
-  } else if (!appType) {
-    // No configured app type — detect from CLI flags + project structure
-    preset = detectPreset(root, { dir: options?.dir, spa: options?.spa });
-  }
-  // appType === "void" or "framework" → preset stays null → full deploy
-
-  // Detect git commit before build (only when not skipping build)
-  const gitCommit = options?.skipBuild ? null : getGitCommit(root);
-
-  if (preset) {
-    preset = {
-      ...preset,
-      buildCommand: resolveStaticBuildCommand(
-        preset,
-        voidConfig.inference?.build,
-        Boolean(options?.dir),
-      ),
-    };
-    await runStaticDeploy(
-      root,
-      config,
-      client,
-      preset,
-      options?.skipBuild,
-      gitCommit,
-      undefined,
-      convertHeadersConfig(voidConfig.routing?.headers) ?? [],
-      convertRedirectsConfig(voidConfig.routing?.redirects) ?? [],
-    );
-  } else {
-    await runFullDeploy(root, config, client, undefined, options?.skipBuild, gitCommit);
   }
 }
 
@@ -233,7 +296,9 @@ export function resolveStaticBuildCommand(
   buildOverride?: string,
   hasExplicitDir = false,
 ): string | null {
-  if (hasExplicitDir) return null;
+  if (hasExplicitDir) {
+    return null;
+  }
   return buildOverride ?? preset.buildCommand;
 }
 
@@ -241,46 +306,154 @@ async function streamDeploy(
   client: PlatformClient,
   projectId: string,
   formData: FormData,
-  s: ReturnType<typeof spinner>,
-): Promise<Extract<DeployEvent, { event: "done" }>> {
-  for await (const event of client.deploy(projectId, formData)) {
-    switch (event.event) {
-      case "start":
-        s.message("Deploying...");
-        break;
-      case "asset_upload":
-        if (event.new > 0) {
-          s.message(`Uploading assets (${event.new} new, ${event.cached} cached)`);
-        } else {
-          s.message(`Uploading assets (${event.total} cached)`);
-        }
-        break;
-      case "provisioning":
-        s.message(`Provisioning ${event.bindings.join(", ")}`);
-        break;
-      case "migration_start":
-        s.message(`Running ${event.pending} migration${event.pending > 1 ? "s" : ""}...`);
-        break;
-      case "migration":
-        s.message(`Applied migration: ${event.name} (${event.durationMs}ms)`);
-        break;
-      case "worker_upload":
-        s.message("Uploading worker...");
-        break;
-      case "prerender":
-        s.message(`Prerendering ${event.pages} pages...`);
-        break;
-      case "done":
-        s.stop("Deployed!");
-        return event;
-      case "error":
-        s.stop("Deploy failed");
-        throw new Error(event.message);
+  s: SpinnerResult,
+  fallbackUrl: string,
+): Promise<StreamDeployResult> {
+  let deploymentId: string | null = null;
+
+  try {
+    for await (const event of client.deploy(projectId, formData)) {
+      switch (event.event) {
+        case 'start':
+          deploymentId = event.deploymentId;
+          s.message('Deploying...');
+          break;
+        case 'heartbeat':
+          break;
+        case 'asset_upload':
+          if (event.new > 0) {
+            s.message(`Uploading assets (${event.new} new, ${event.cached} cached)`);
+          } else {
+            s.message(`Uploading assets (${event.total} cached)`);
+          }
+          break;
+        case 'provisioning':
+          s.message(`Provisioning ${event.bindings.join(', ')}`);
+          break;
+        case 'migration_start':
+          s.message(`Running ${event.pending} migration${event.pending > 1 ? 's' : ''}...`);
+          break;
+        case 'migration':
+          s.message(`Applied migration: ${event.name} (${event.durationMs}ms)`);
+          break;
+        case 'worker_upload':
+          s.message('Uploading worker...');
+          break;
+        case 'prerender':
+          s.message(`Prerendering ${event.pages} pages...`);
+          break;
+        case 'done':
+          s.stop('Deployed!');
+          return event;
+        case 'error':
+          s.stop('Deploy failed');
+          throw new DeployEventError(formatDeployFailureMessage(event.message, deploymentId));
+      }
     }
+  } catch (err) {
+    if (err instanceof DeployEventError) {
+      throw err;
+    }
+    if (!deploymentId) {
+      throw err;
+    }
+    return recoverDroppedDeployStream(client, projectId, deploymentId, s, {
+      fallbackUrl,
+    });
   }
-  // Stream ended without done/error — connection dropped
-  s.stop("Deploy failed");
-  throw new Error("Connection lost during deploy");
+
+  if (!deploymentId) {
+    s.stop('Deploy failed');
+    throw new Error('Connection lost during deploy');
+  }
+
+  return recoverDroppedDeployStream(client, projectId, deploymentId, s, {
+    fallbackUrl,
+  });
+}
+
+async function recoverDroppedDeployStream(
+  client: PlatformClient,
+  projectId: string,
+  deploymentId: string,
+  s: SpinnerResult,
+  progress: {
+    fallbackUrl: string;
+  },
+): Promise<StreamDeployResult> {
+  const deadline = Date.now() + DEPLOY_RECOVERY_TIMEOUT_MS;
+  let lastStatus = 'unknown';
+  s.message('Connection lost; checking deploy status...');
+
+  while (Date.now() < deadline) {
+    await sleep(DEPLOY_RECOVERY_POLL_INTERVAL_MS);
+    let deployments: DeploymentResponse[];
+    try {
+      ({ deployments } = await client.listDeployments(projectId));
+    } catch (err) {
+      if (err instanceof PlatformApiError) {
+        s.stop('Deploy status check failed');
+        throw err;
+      }
+      s.message('Connection lost; retrying deploy status check...');
+      continue;
+    }
+    const deployment = deployments.find((d) => d.id === deploymentId);
+    if (!deployment) {
+      continue;
+    }
+
+    lastStatus = deployment.status;
+    if (deployment.status === 'live') {
+      s.stop('Deployed!');
+      return {
+        event: 'done',
+        deployment: deployment.id,
+        url: progress.fallbackUrl,
+        urls: [progress.fallbackUrl],
+        recovered: true,
+      };
+    }
+    if (deployment.status === 'failed' || deployment.status === 'canceled') {
+      s.stop('Deploy failed');
+      throw new Error(
+        formatDeployFailureMessage(
+          deployment.error_message ?? `deploy ${deployment.status}`,
+          deploymentId,
+        ),
+      );
+    }
+
+    s.message(`Connection lost; deploy is still ${deployment.status}...`);
+  }
+
+  s.stop('Deploy status unknown');
+  throw new Error(
+    `Connection lost during deploy. Deployment ${deploymentId} is still ${lastStatus}; run \`void project status\` before retrying.`,
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatDeployFailureMessage(message: string, deploymentId: string | null): string {
+  return deploymentId ? `${message}\nDeployment: ${deploymentId}` : message;
+}
+
+function formatKnownAssetSummary(result: DeployDoneEvent, skipped: number): string {
+  const uploaded = result.assets - skipped;
+  return skipped > 0
+    ? `${result.assets} static asset(s) (${skipped} unchanged, ${uploaded} uploaded)`
+    : `${result.assets} static asset(s)`;
+}
+
+function addRecoveredMetricsNote(summary: string[], result: StreamDeployResult): void {
+  if ('recovered' in result) {
+    summary.push(
+      'Deploy completed after reconnect; asset, worker, and migration totals unavailable',
+    );
+  }
 }
 
 async function runStaticDeploy(
@@ -294,13 +467,13 @@ async function runStaticDeploy(
   headerRules?: HeaderRule[],
   redirectRules?: RedirectRule[],
 ): Promise<void> {
-  const typeLabel = preset.appType === "spa" ? "Static SPA" : "Static Site";
+  const typeLabel = preset.appType === 'spa' ? 'Static SPA' : 'Static Site';
   log.info(`${typeLabel} deploy`);
 
   // Build (if needed)
   if (preset.buildCommand && !skipBuild) {
-    log.step("Building...");
-    execSync(preset.buildCommand, { cwd: root, stdio: "inherit" });
+    log.step('Building...');
+    execSync(preset.buildCommand, { cwd: root, stdio: 'inherit' });
   }
 
   if (!existsSync(preset.outputDir)) {
@@ -308,43 +481,54 @@ async function runStaticDeploy(
     process.exit(1);
   }
 
-  const s = spinner();
+  const s = createSpinner();
+  const onProgress = (msg: string) => s.message(msg);
 
   // Preflight: hash assets and check which ones changed
-  s.start("Checking for changes...");
-  const { assetManifest } = collectAndHashAssets(preset.outputDir);
+  s.start('Checking for changes...');
+  const { assetManifest } = await collectAndHashAssets(preset.outputDir, onProgress);
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest);
-  s.stop("Checked for changes");
+  s.stop('Checked for changes');
 
   if (skipped > 0) {
     log.info(`Skipping ${skipped} unchanged asset(s)`);
   }
 
-  s.start("Packaging...");
+  s.start('Packaging...');
   const neededSet = skipped > 0 ? new Set(needed) : null;
-  const formData = packageStaticBuild(
+  const formData = await packageStaticBuild(
     preset.outputDir,
     preset.appType,
     neededSet,
-    hashedAssetsPrefix ?? "assets",
+    hashedAssetsPrefix ?? 'assets',
     headerRules,
     redirectRules,
+    onProgress,
   );
-  if (neededSet) formData.append("assetManifest", JSON.stringify(assetManifest));
-  formData.append("source", getTokenSource());
-  if (commit) formData.append("commit", commit);
+  if (neededSet) {
+    formData.append('assetManifest', JSON.stringify(assetManifest));
+  }
+  formData.append('source', getTokenSource());
+  if (commit) {
+    formData.append('commit', commit);
+  }
 
-  const result = await streamDeploy(client, config.projectId, formData, s);
+  const result = await streamDeploy(
+    client,
+    config.projectId,
+    formData,
+    s,
+    `https://${config.slug}.void.app`,
+  );
 
-  const uploaded = result.assets - skipped;
-  const assetSummary =
-    skipped > 0
-      ? `${result.assets} static asset(s) (${skipped} unchanged, ${uploaded} uploaded)`
-      : `${result.assets} static asset(s)`;
-  const summary = [`${typeLabel} — ${assetSummary}`];
-  note(summary.join("\n"), result.url);
+  const summary =
+    'recovered' in result
+      ? [typeLabel]
+      : [`${typeLabel} — ${formatKnownAssetSummary(result, skipped)}`];
+  addRecoveredMetricsNote(summary, result);
+  note(summary.join('\n'), result.url);
 
-  outro("Done!");
+  outro('Done!');
 }
 
 /**
@@ -370,7 +554,7 @@ async function runFrameworkDeploy(
     log.step(`Building (${buildCmd})...`);
     execSync(voidConfig.inference?.build ?? resolveProjectCommand(root, fwPreset.buildCommand), {
       cwd: root,
-      stdio: "inherit",
+      stdio: 'inherit',
     });
   }
 
@@ -409,40 +593,19 @@ async function runFrameworkDeploy(
     process.exit(1);
   }
 
-  // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects
-  if (dialect === "postgresql" && bindings.needsD1) {
-    try {
-      const resources = await client.getResources(config.projectId);
-      const hasHyperdrive = resources.some((r: any) => r.type === "hyperdrive");
-      if (!hasHyperdrive) {
-        const { text: promptText, isCancel: isCancelPrompt } = await import("@clack/prompts");
-        const connectionString = await promptText({
-          message: "Your project uses PostgreSQL. Enter your connection string:",
-          placeholder: "postgresql://user:pass@host:5432/dbname",
-          validate(value) {
-            if (!value?.startsWith("postgres://") && !value?.startsWith("postgresql://")) {
-              return 'Must start with "postgres://" or "postgresql://"';
-            }
-          },
-        });
-        if (isCancelPrompt(connectionString)) {
-          log.info("Deploy cancelled.");
-          process.exit(0);
-        }
-        await client.provisionDatabase(config.projectId, connectionString as string);
-        log.success("Hyperdrive provisioned.");
-      }
-    } catch {
-      // Resources endpoint not available
-    }
-  }
+  const migrationsDir = join(root, 'db', 'migrations');
 
   assertDeploySchemaDriftFree(root, dialect);
 
-  // 4. Collect migrations
-  const migrationsDir = join(root, "db", "migrations");
+  // 4. Collect migrations (before Hyperdrive check so migrations can gate provisioning)
   const rawMigrations = collectMigrations(migrationsDir);
   let validatedMigrations;
+  try {
+    assertJournalCoherence(migrationsDir, rawMigrations);
+  } catch (err: any) {
+    log.error(err.message);
+    process.exit(1);
+  }
   if (rawMigrations.length > 0) {
     try {
       validatedMigrations = validateMigrations(rawMigrations);
@@ -450,6 +613,34 @@ async function runFrameworkDeploy(
     } catch (err: any) {
       log.error(err.message);
       process.exit(1);
+    }
+  }
+
+  // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects
+  if (dialect === 'postgresql' && (bindings.needsD1 || rawMigrations.length > 0)) {
+    try {
+      const resources = await client.getResources(config.projectId);
+      const hasHyperdrive = resources.some((r: any) => r.type === 'hyperdrive');
+      if (!hasHyperdrive) {
+        const { text: promptText, isCancel: isCancelPrompt } = await import('@clack/prompts');
+        const connectionString = await promptText({
+          message: 'Your project uses PostgreSQL. Enter your connection string:',
+          placeholder: 'postgresql://user:pass@host:5432/dbname',
+          validate(value) {
+            if (!value?.startsWith('postgres://') && !value?.startsWith('postgresql://')) {
+              return 'Must start with "postgres://" or "postgresql://"';
+            }
+          },
+        });
+        if (isCancelPrompt(connectionString)) {
+          log.info('Deploy cancelled.');
+          process.exit(0);
+        }
+        await client.provisionDatabase(config.projectId, connectionString as string);
+        log.success('Hyperdrive provisioned.');
+      }
+    } catch {
+      // Resources endpoint not available
     }
   }
 
@@ -469,22 +660,25 @@ async function runFrameworkDeploy(
 
   // Step 1: Bundle if framework has unbundled bare imports (e.g. SvelteKit)
   if (fwPreset.bundle) {
-    log.step("Bundling worker...");
+    log.step('Bundling worker...');
     const bundleResult = await bundleEntry(root, originalEntry);
     actualWorkerDir = bundleResult.outputDir;
     actualWorkerMain = bundleResult.entryFilename;
-    log.info("Worker bundled");
+    log.info('Worker bundled');
   }
 
   // Step 2: Wrap if crons/queues are present (in-place, no re-bundling)
   if (needsWrapper(wrapperFeatures)) {
-    log.step("Generating wrapper...");
+    log.step('Generating wrapper...');
     await generateWrapper(actualWorkerDir, actualWorkerMain, root, wrapperFeatures);
-    log.info("Wrapper generated");
+    log.info('Wrapper generated');
   }
 
-  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > default)
-  const wranglerCompat = readWranglerCompat(root, voidConfig);
+  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > build output)
+  // Use the original workerDir (not actualWorkerDir) because bundleEntry() may
+  // reassign actualWorkerDir to a temporary output — the plugin-generated
+  // wrangler.json with correct compat settings lives in the original build output.
+  const wranglerCompat = readWranglerCompat(root, voidConfig, workerDir);
 
   // 9. Resolve revalidate + prerender from void.json
   const revalidate = voidConfig.routing?.revalidate;
@@ -508,21 +702,22 @@ async function runFrameworkDeploy(
   const envVars = loadDeployEnv(root);
 
   // 11. Package & deploy
-  const s = spinner();
+  const s = createSpinner();
+  const onProgress = (msg: string) => s.message(msg);
 
   // Preflight: hash assets and check which ones changed
-  s.start("Checking for changes...");
-  const { assetManifest } = collectAndHashAssets(assetsDir);
-  const { needed, skipped } = await client.preflight(config.projectId, assetManifest);
-  s.stop("Checked for changes");
+  s.start('Checking for changes...');
+  const { assetManifest } = await collectAndHashAssets(assetsDir, onProgress);
+  const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
+  s.stop('Checked for changes');
 
   if (skipped > 0) {
     log.info(`Skipping ${skipped} unchanged asset(s)`);
   }
 
-  s.start("Packaging...");
+  s.start('Packaging...');
   const neededSet = skipped > 0 ? new Set(needed) : null;
-  const formData = packageFrameworkBuild({
+  const formData = await packageFrameworkBuild({
     frameworkName: detected.name,
     workerDir: actualWorkerDir,
     workerMain: actualWorkerMain,
@@ -533,7 +728,7 @@ async function runFrameworkDeploy(
     queues,
     revalidate,
     prerender,
-    assetConfig: { not_found_handling: "none" },
+    assetConfig: { not_found_handling: 'none' },
     vars: envVars,
     packageOptions: {
       bindingNames: resolveBindingNames(voidConfig.inference?.bindings),
@@ -542,24 +737,34 @@ async function runFrameworkDeploy(
       compatibilityFlags: wranglerCompat.compatibilityFlags,
     },
     neededAssets: neededSet,
-    hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? "assets",
+    hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? 'assets',
     headerRules,
     redirectRules,
     dialect,
+    onProgress,
   });
-  if (neededSet) formData.append("assetManifest", JSON.stringify(assetManifest));
-  formData.append("source", getTokenSource());
-  if (commit) formData.append("commit", commit);
+  if (neededSet) {
+    formData.append('assetManifest', JSON.stringify(assetManifest));
+  }
+  formData.append('source', getTokenSource());
+  if (commit) {
+    formData.append('commit', commit);
+  }
 
-  const result = await streamDeploy(client, config.projectId, formData, s);
+  const result = await streamDeploy(
+    client,
+    config.projectId,
+    formData,
+    s,
+    `https://${config.slug}.void.app`,
+  );
 
-  const uploaded = result.assets - skipped;
-  const assetSummary =
-    skipped > 0
-      ? `${result.assets} static asset(s) (${skipped} unchanged, ${uploaded} uploaded)`
-      : `${result.assets} static asset(s)`;
-  const summary = [`${result.workers} worker module(s), ${assetSummary}`];
-  if (result.migrations) {
+  const summary =
+    'recovered' in result
+      ? ['Framework deploy']
+      : [`${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`];
+  addRecoveredMetricsNote(summary, result);
+  if (!('recovered' in result) && result.migrations) {
     summary.push(`${result.migrations} migration(s) applied`);
   }
   if (schedules.length > 0) {
@@ -572,19 +777,19 @@ async function runFrameworkDeploy(
     summary.push(`${prerender.length} page(s) prerendered`);
   }
   if (revalidate) {
-    if (typeof revalidate === "number") {
+    if (typeof revalidate === 'number') {
       summary.push(`ISR revalidate: ${revalidate}s`);
     } else {
       summary.push(`ISR revalidate: ${Object.keys(revalidate).length} path rule(s)`);
     }
   }
   summary.push(`Framework: ${detected.name}`);
-  note(summary.join("\n"), result.url);
+  note(summary.join('\n'), result.url);
 
   // Clean up generated wrapper files
   cleanupWrapper(root);
 
-  outro("Done!");
+  outro('Done!');
 }
 
 async function runFullDeploy(
@@ -598,10 +803,17 @@ async function runFullDeploy(
 ): Promise<void> {
   // 3. Build (child process to avoid Vite API side effects on bundle output)
   if (!skipBuild) {
-    const buildCmd = formatProjectCommand(root, "vite build");
+    const buildCmd = formatProjectCommand(root, 'vite build');
     log.step(`Building (${buildCmd})...`);
     try {
-      execSync(resolveProjectCommand(root, "vite build"), { cwd: root, stdio: "inherit" });
+      // Pass VOID_DEPLOY_PROJECT_ID so plugin-prerender (running inside this
+      // child vite build) can resolve the Void projectId without relying on
+      // .void/project.json, which may be stale or absent under `--project <slug>`.
+      execSync(resolveProjectCommand(root, 'vite build'), {
+        cwd: root,
+        stdio: 'inherit',
+        env: { ...process.env, VOID_DEPLOY_PROJECT_ID: config.projectId },
+      });
     } catch (err: any) {
       process.exit(err.status ?? 1);
     }
@@ -615,16 +827,18 @@ async function runFullDeploy(
   const distDir = resolveDistDir(root, fwPreset, frameworkBuildCmd);
 
   // Detect non-default assetsDir from Vite client manifest for _headers generation
-  let assetsPrefix = "assets";
-  const clientManifestPath = join(distDir, "client", ".vite", "manifest.json");
+  let assetsPrefix = 'assets';
+  const clientManifestPath = join(distDir, 'client', '.vite', 'manifest.json');
   if (existsSync(clientManifestPath)) {
     const manifest: Record<string, { file?: string }> = JSON.parse(
-      readFileSync(clientManifestPath, "utf-8"),
+      readFileSync(clientManifestPath, 'utf-8'),
     );
     for (const entry of Object.values(manifest)) {
-      if (entry.file?.includes("/")) {
-        const dir = entry.file.slice(0, entry.file.indexOf("/"));
-        if (dir !== "assets") assetsPrefix = dir;
+      if (entry.file?.includes('/')) {
+        const dir = entry.file.slice(0, entry.file.indexOf('/'));
+        if (dir !== 'assets') {
+          assetsPrefix = dir;
+        }
         break;
       }
     }
@@ -651,36 +865,8 @@ async function runFullDeploy(
     process.exit(1);
   }
 
-  // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects
-  if (dialect === "postgresql" && effectiveBindings.needsD1) {
-    try {
-      const resources = await client.getResources(config.projectId);
-      const hasHyperdrive = resources.some((r: any) => r.type === "hyperdrive");
-      if (!hasHyperdrive) {
-        const { text: promptText, isCancel: isCancelPrompt } = await import("@clack/prompts");
-        const connectionString = await promptText({
-          message: "Your project uses PostgreSQL. Enter your connection string:",
-          placeholder: "postgresql://user:pass@host:5432/dbname",
-          validate(value) {
-            if (!value?.startsWith("postgres://") && !value?.startsWith("postgresql://")) {
-              return 'Must start with "postgres://" or "postgresql://"';
-            }
-          },
-        });
-        if (isCancelPrompt(connectionString)) {
-          log.info("Deploy cancelled.");
-          process.exit(0);
-        }
-        await client.provisionDatabase(config.projectId, connectionString as string);
-        log.success("Hyperdrive provisioned.");
-      }
-    } catch {
-      // Resources endpoint not available — Hyperdrive will be checked at deploy time
-    }
-  }
-
   // Collect header rules: parse user/framework _headers file + void.json config
-  const clientDir = join(distDir, "client");
+  const clientDir = join(distDir, 'client');
   const userHeaderRules = existsSync(clientDir) ? parseHeadersFile(clientDir) : undefined;
   const cfgHeaderRules = convertHeadersConfig(deployConfig.routing?.headers);
   const headerRules: HeaderRule[] = [...(userHeaderRules ?? []), ...(cfgHeaderRules ?? [])];
@@ -690,12 +876,19 @@ async function runFullDeploy(
   const cfgRedirectRules = convertRedirectsConfig(deployConfig.routing?.redirects);
   const redirectRules: RedirectRule[] = [...(userRedirectRules ?? []), ...(cfgRedirectRules ?? [])];
 
+  const migrationsDir = join(root, 'db', 'migrations');
+
   assertDeploySchemaDriftFree(root, dialect);
 
-  // 7. Collect and validate migrations
-  const migrationsDir = join(root, "db", "migrations");
+  // 7. Collect and validate migrations (before Hyperdrive check so migrations can gate provisioning)
   const rawMigrations = collectMigrations(migrationsDir);
   let validatedMigrations;
+  try {
+    assertJournalCoherence(migrationsDir, rawMigrations);
+  } catch (err: any) {
+    log.error(err.message);
+    process.exit(1);
+  }
   if (rawMigrations.length > 0) {
     try {
       validatedMigrations = validateMigrations(rawMigrations);
@@ -703,6 +896,36 @@ async function runFullDeploy(
     } catch (err: any) {
       log.error(err.message);
       process.exit(1);
+    }
+  }
+
+  // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects.
+  // Migrations on disk also gate this — even if inference says needsD1: false,
+  // packageBuild will add the hyperdrive binding when migrations are present.
+  if (dialect === 'postgresql' && (effectiveBindings.needsD1 || rawMigrations.length > 0)) {
+    try {
+      const resources = await client.getResources(config.projectId);
+      const hasHyperdrive = resources.some((r: any) => r.type === 'hyperdrive');
+      if (!hasHyperdrive) {
+        const { text: promptText, isCancel: isCancelPrompt } = await import('@clack/prompts');
+        const connectionString = await promptText({
+          message: 'Your project uses PostgreSQL. Enter your connection string:',
+          placeholder: 'postgresql://user:pass@host:5432/dbname',
+          validate(value) {
+            if (!value?.startsWith('postgres://') && !value?.startsWith('postgresql://')) {
+              return 'Must start with "postgres://" or "postgresql://"';
+            }
+          },
+        });
+        if (isCancelPrompt(connectionString)) {
+          log.info('Deploy cancelled.');
+          process.exit(0);
+        }
+        await client.provisionDatabase(config.projectId, connectionString as string);
+        log.success('Hyperdrive provisioned.');
+      }
+    } catch {
+      // Resources endpoint not available — Hyperdrive will be checked at deploy time
     }
   }
   const workerDirName = resolveWorkerDirName(distDir, fwPreset, frameworkBuildCmd);
@@ -720,10 +943,12 @@ async function runFullDeploy(
     ...(q.maxBatchSize != null && { maxBatchSize: q.maxBatchSize }),
     ...(q.maxBatchTimeout != null && { maxBatchTimeout: q.maxBatchTimeout }),
   }));
-  const hasPages = existsSync(join(root, "pages"));
+  const hasPages = existsSync(join(root, 'pages'));
+  const hasRoutes = existsSync(join(root, 'routes'));
+  const hasMiddleware = existsSync(join(root, 'middleware'));
   const isSsr = isFrameworkMode
     ? true
-    : Boolean(validateSsrEntry(root)) || (hasPages && deployConfig.output !== "static");
+    : Boolean(validateSsrEntry(root)) || (hasPages && deployConfig.output !== 'static');
 
   // Resolve revalidate config from void.json + per-page .server.ts exports
   const vcRevalidate = readConfig(root).routing?.revalidate;
@@ -732,7 +957,7 @@ async function runFullDeploy(
     revalidate = vcRevalidate;
   }
   // Merge per-page revalidate exports (pages mode)
-  const pageScan = existsSync(join(root, "pages"))
+  const pageScan = existsSync(join(root, 'pages'))
     ? await scanPages(root, { output: deployConfig.output })
     : null;
   if (pageScan) {
@@ -743,10 +968,10 @@ async function runFullDeploy(
       }
     }
     if (Object.keys(perPageRules).length > 0) {
-      if (typeof revalidate === "number") {
+      if (typeof revalidate === 'number') {
         // Global number → pathmap with "*" fallback, per-page entries first
-        revalidate = Object.fromEntries([...Object.entries(perPageRules), ["*", revalidate]]);
-      } else if (typeof revalidate === "object") {
+        revalidate = Object.fromEntries([...Object.entries(perPageRules), ['*', revalidate]]);
+      } else if (typeof revalidate === 'object') {
         // Per-page entries first (higher precedence in first-match)
         revalidate = Object.fromEntries([
           ...Object.entries(perPageRules),
@@ -760,14 +985,13 @@ async function runFullDeploy(
 
   // Fully-static optimization: if output: "static" and all pages are prerendered
   // with no backend features, deploy as a static site (no worker needed)
-  if (deployConfig.output === "static" && pageScan && !isSsr) {
+  if (deployConfig.output === 'static' && pageScan && !isSsr) {
     const allPrerenderable = pageScan.pages.every(
       (p) => p.prerender && ((p.params.length === 0 && !p.catchAll) || p.hasGetPrerenderPaths),
     );
-    const hasNonPageBackend =
-      existsSync(join(root, "routes")) || existsSync(join(root, "middleware"));
+    const hasNonPageBackend = hasRoutes || hasMiddleware;
     if (allPrerenderable && !hasNonPageBackend && schedules.length === 0 && queues.length === 0) {
-      log.info("All pages prerendered — deploying as static site");
+      log.info('All pages prerendered — deploying as static site');
       return runStaticDeploy(
         root,
         config,
@@ -775,7 +999,7 @@ async function runFullDeploy(
         {
           buildCommand: null,
           outputDir: clientDir,
-          appType: "static",
+          appType: 'static',
         },
         true,
         commit,
@@ -788,55 +1012,66 @@ async function runFullDeploy(
 
   // Resolve prerender paths (skip when output: "static" — pages are already built as static assets)
   const uniquePrerenderPaths =
-    deployConfig.output === "static"
+    deployConfig.output === 'static'
       ? []
       : isNodeTarget(deployConfig.target)
         ? await collectPrerenderPathsNode({
             root,
-            ssrDir: join(distDir, "ssr"),
+            ssrDir: join(distDir, 'ssr'),
             clientDir,
           })
         : await collectPrerenderPaths({
             root,
             workerDir: join(distDir, workerDirName),
             clientDir,
-            persistDir: join(root, ".void"),
+            persistDir: join(root, '.void'),
+            // Match the runtime remote-mode switch so getPrerenderPaths()
+            // reads real D1/KV/R2 during deploy-time path discovery when
+            // the project is in remote mode. Without this the manifest
+            // would be built from local bindings even for remote projects.
+            remoteMode: resolveRemoteMode(deployConfig.remote),
+            projectId: config.projectId,
           });
 
-  // 8. Read wrangler compat settings (void.json > wrangler.jsonc > default)
-  const wranglerCompat = readWranglerCompat(root, deployConfig);
+  // 8. Read wrangler compat settings for Cloudflare targets
+  const wranglerCompat = resolveDeployWranglerCompat(
+    root,
+    deployConfig,
+    join(distDir, workerDirName),
+  );
 
   // 9. Load .env vars for production (excludes .local files)
   const envVars = loadDeployEnv(root);
 
   // 10. Package & Upload
-  const s = spinner();
+  const s = createSpinner();
+  const onProgress = (msg: string) => s.message(msg);
 
   // Derive asset config: SSR and pages-mode workers handle their own 404s, non-SSR uses SPA fallback
   const assetConfig: AssetConfig =
     isSsr || hasPages
-      ? { not_found_handling: "none" }
-      : { not_found_handling: "single-page-application" };
+      ? { not_found_handling: 'none' }
+      : { not_found_handling: 'single-page-application' };
 
   // Preflight: hash assets and check which ones changed
-  s.start("Checking for changes...");
-  const { assetManifest } = collectAndHashAssets(clientDir);
-  const { needed, skipped } = await client.preflight(config.projectId, assetManifest);
-  s.stop("Checked for changes");
+  s.start('Checking for changes...');
+  const { assetManifest } = await collectAndHashAssets(clientDir, onProgress);
+  const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
+  s.stop('Checked for changes');
 
   if (skipped > 0) {
     log.info(`Skipping ${skipped} unchanged asset(s)`);
   }
 
-  s.start("Packaging...");
+  s.start('Packaging...');
   const neededSet = skipped > 0 ? new Set(needed) : null;
-  const formData = packageBuild(
+  const formData = await packageBuild(
     distDir,
     workerDirName,
     effectiveBindings,
     validatedMigrations,
     schedules,
-    isSsr,
+    isSsr || hasRoutes || hasMiddleware,
     isFrameworkMode ? detected!.name : undefined,
     revalidate,
     envVars,
@@ -844,8 +1079,8 @@ async function runFullDeploy(
     uniquePrerenderPaths,
     assetConfig,
     {
-      compatibilityDate: wranglerCompat.compatibilityDate,
-      compatibilityFlags: wranglerCompat.compatibilityFlags,
+      compatibilityDate: wranglerCompat?.compatibilityDate,
+      compatibilityFlags: wranglerCompat?.compatibilityFlags,
     },
     neededSet,
     assetsPrefix,
@@ -853,20 +1088,30 @@ async function runFullDeploy(
     redirectRules,
     dialect,
     webSockets,
+    onProgress,
   );
-  if (neededSet) formData.append("assetManifest", JSON.stringify(assetManifest));
-  formData.append("source", getTokenSource());
-  if (commit) formData.append("commit", commit);
+  if (neededSet) {
+    formData.append('assetManifest', JSON.stringify(assetManifest));
+  }
+  formData.append('source', getTokenSource());
+  if (commit) {
+    formData.append('commit', commit);
+  }
 
-  const result = await streamDeploy(client, config.projectId, formData, s);
+  const result = await streamDeploy(
+    client,
+    config.projectId,
+    formData,
+    s,
+    `https://${config.slug}.void.app`,
+  );
 
-  const uploaded = result.assets - skipped;
-  const assetSummary =
-    skipped > 0
-      ? `${result.assets} static asset(s) (${skipped} unchanged, ${uploaded} uploaded)`
-      : `${result.assets} static asset(s)`;
-  const summary = [`${result.workers} worker module(s), ${assetSummary}`];
-  if (result.migrations) {
+  const summary =
+    'recovered' in result
+      ? ['Deploy completed']
+      : [`${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`];
+  addRecoveredMetricsNote(summary, result);
+  if (!('recovered' in result) && result.migrations) {
     summary.push(`${result.migrations} migration(s) applied`);
   }
   if (schedules.length > 0) {
@@ -879,32 +1124,30 @@ async function runFullDeploy(
     summary.push(`${uniquePrerenderPaths.length} page(s) prerendered`);
   }
   if (isSsr) {
-    summary.push("SSR enabled");
+    summary.push('SSR enabled');
   }
   if (revalidate) {
-    if (typeof revalidate === "number") {
+    if (typeof revalidate === 'number') {
       summary.push(`ISR revalidate: ${revalidate}s`);
     } else {
       summary.push(`ISR revalidate: ${Object.keys(revalidate).length} path rule(s)`);
     }
   }
   if (isFrameworkMode) {
-    summary.push("Framework mode");
+    summary.push('Framework mode');
   }
-  note(summary.join("\n"), result.url);
+  note(summary.join('\n'), result.url);
 
-  outro("Done!");
+  outro('Done!');
 }
 
-async function createNewProject(
+async function createProjectFromSlug(
   root: string,
   client: PlatformClient,
-  slug?: string,
+  slug: string,
 ): Promise<ProjectConfig> {
-  const projectSlug = slug ?? inferDefaultSlug(root);
-
-  log.step(`Creating project "${projectSlug}"...`);
-  const project = await client.createProject(projectSlug);
+  log.step(`Creating project "${slug}"...`);
+  const project = await client.createProject(slug);
   const config = { projectId: project.id, slug: project.slug };
   writeProjectConfig(root, config);
   log.success(`Project created: ${config.slug}`);
@@ -914,12 +1157,14 @@ async function createNewProject(
 function getGitCommit(root: string): string | null {
   try {
     // Check if in a git repo
-    execSync("git rev-parse --is-inside-work-tree", { cwd: root, stdio: "ignore" });
+    execSync('git rev-parse --is-inside-work-tree', { cwd: root, stdio: 'ignore' });
     // Check if working tree is clean
-    const status = execSync("git status --porcelain", { cwd: root, encoding: "utf-8" }).trim();
-    if (status !== "") return null;
+    const status = execSync('git status --porcelain', { cwd: root, encoding: 'utf-8' }).trim();
+    if (status !== '') {
+      return null;
+    }
     // Get current commit hash
-    return execSync("git rev-parse HEAD", { cwd: root, encoding: "utf-8" }).trim();
+    return execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf-8' }).trim();
   } catch {
     return null;
   }
@@ -945,24 +1190,24 @@ export function hasDeploySchemaDrift(root: string, dialect: DatabaseDialect): bo
   }
 
   const driftRoot = mkDeployDriftCheckRoot();
-  const driftProjectRoot = join(driftRoot, "project");
+  const driftProjectRoot = join(driftRoot, 'project');
 
   rmSync(driftRoot, { recursive: true, force: true });
   mkdirSync(driftRoot, { recursive: true });
   createDeployDriftProject(root, driftProjectRoot);
 
   try {
-    const migrationsDir = join(driftProjectRoot, "db", "migrations");
+    const migrationsDir = join(driftProjectRoot, 'db', 'migrations');
     const before = snapshotDir(migrationsDir);
     const driftConfigPath = writeDrizzleConfig(
       driftProjectRoot,
-      dialect === "postgresql" ? "postgresql://dummy" : ":memory:",
+      dialect === 'postgresql' ? 'postgresql://dummy' : ':memory:',
       dialect,
     );
 
-    execFileSync(process.execPath, [drizzleKitBin, "generate", "--config", driftConfigPath], {
+    execFileSync(process.execPath, [drizzleKitBin, 'generate', '--config', driftConfigPath], {
       cwd: driftProjectRoot,
-      stdio: "pipe",
+      stdio: 'pipe',
     });
 
     return !migrationSnapshotsEqual(before, snapshotDir(migrationsDir));
@@ -975,28 +1220,28 @@ export function hasDeploySchemaDrift(root: string, dialect: DatabaseDialect): bo
 
 function getDeploySchemaDriftMessage(): string {
   return [
-    "Schema drift detected between your Drizzle schema and db/migrations/.",
-    "Run `void db generate`, review the generated migration, commit it yourself, then rerun `void deploy`.",
-  ].join("\n");
+    'Schema drift detected between your Drizzle schema and db/migrations/.',
+    'Run `void db generate`, review the generated migration, commit it yourself, then rerun `void deploy`.',
+  ].join('\n');
 }
 
 function formatDeploySchemaDriftCheckError(error: unknown): string {
   const detail = extractExecErrorOutput(error);
   return [
-    "Failed to check Drizzle schema drift during deploy.",
-    "Run `void db generate` locally, fix any reported issues, review the generated migration, commit it yourself, then rerun `void deploy`.",
+    'Failed to check Drizzle schema drift during deploy.',
+    'Run `void db generate` locally, fix any reported issues, review the generated migration, commit it yourself, then rerun `void deploy`.',
     ...(detail ? [detail] : []),
-  ].join("\n\n");
+  ].join('\n\n');
 }
 
 function extractExecErrorOutput(error: unknown): string {
-  if (!error || typeof error !== "object") {
-    return "";
+  if (!error || typeof error !== 'object') {
+    return '';
   }
 
   const details = [];
-  const stderr = "stderr" in error ? bufferToString(error.stderr) : "";
-  const stdout = "stdout" in error ? bufferToString(error.stdout) : "";
+  const stderr = 'stderr' in error ? bufferToString(error.stderr) : '';
+  const stdout = 'stdout' in error ? bufferToString(error.stdout) : '';
 
   if (stderr) {
     details.push(stderr);
@@ -1005,34 +1250,34 @@ function extractExecErrorOutput(error: unknown): string {
     details.push(stdout);
   }
 
-  return details.join("\n").trim();
+  return details.join('\n').trim();
 }
 
 function bufferToString(value: unknown): string {
-  if (typeof value === "string") {
+  if (typeof value === 'string') {
     return value.trim();
   }
   if (value instanceof Buffer) {
-    return value.toString("utf-8").trim();
+    return value.toString('utf-8').trim();
   }
-  return "";
+  return '';
 }
 
 function createDeployDriftProject(root: string, driftProjectRoot: string): void {
   mkdirSync(driftProjectRoot, { recursive: true });
 
   for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (entry.name === ".git" || entry.name === ".void" || entry.name === "node_modules") {
+    if (entry.name === '.git' || entry.name === '.void' || entry.name === 'node_modules') {
       continue;
     }
     if (
-      entry.name === "dist" ||
-      entry.name === "build" ||
-      entry.name === ".wrangler" ||
-      entry.name === ".turbo" ||
-      entry.name === ".next" ||
-      entry.name === ".svelte-kit" ||
-      entry.name === ".output"
+      entry.name === 'dist' ||
+      entry.name === 'build' ||
+      entry.name === '.wrangler' ||
+      entry.name === '.turbo' ||
+      entry.name === '.next' ||
+      entry.name === '.svelte-kit' ||
+      entry.name === '.output'
     ) {
       continue;
     }
@@ -1040,29 +1285,29 @@ function createDeployDriftProject(root: string, driftProjectRoot: string): void 
     const source = join(root, entry.name);
     const target = join(driftProjectRoot, entry.name);
 
-    if (entry.name === "db") {
+    if (entry.name === 'db') {
       cpSync(source, target, { recursive: true });
       continue;
     }
 
-    symlinkSync(source, target, entry.isDirectory() ? symlinkDirType() : "file");
+    symlinkSync(source, target, entry.isDirectory() ? symlinkDirType() : 'file');
   }
 
   const nodeModules = findNearestNodeModules(root);
   if (nodeModules) {
-    symlinkSync(nodeModules, join(driftProjectRoot, "node_modules"), symlinkDirType());
+    symlinkSync(nodeModules, join(driftProjectRoot, 'node_modules'), symlinkDirType());
   }
 }
 
 function findNearestNodeModules(root: string): string | null {
   let current = root;
   while (true) {
-    const candidate = join(current, "node_modules");
+    const candidate = join(current, 'node_modules');
     if (existsSync(candidate)) {
       return candidate;
     }
 
-    const parent = resolve(current, "..");
+    const parent = resolve(current, '..');
     if (parent === current) {
       return null;
     }
@@ -1073,12 +1318,12 @@ function findNearestNodeModules(root: string): string | null {
 function mkDeployDriftCheckRoot(): string {
   return join(
     tmpdir(),
-    `${deployDriftCheckDir.replaceAll("/", "-").replaceAll("\\", "-")}-${Date.now()}`,
+    `${deployDriftCheckDir.replaceAll('/', '-').replaceAll('\\', '-')}-${Date.now()}`,
   );
 }
 
-function symlinkDirType(): "dir" | "junction" {
-  return process.platform === "win32" ? "junction" : "dir";
+function symlinkDirType(): 'dir' | 'junction' {
+  return process.platform === 'win32' ? 'junction' : 'dir';
 }
 
 function snapshotDir(root: string): Record<string, string> {
@@ -1102,7 +1347,7 @@ function collectSnapshotFiles(
       collectSnapshotFiles(fullPath, root, snapshot);
       continue;
     }
-    snapshot[relative(root, fullPath)] = readFileSync(fullPath, "utf-8");
+    snapshot[relative(root, fullPath)] = readFileSync(fullPath, 'utf-8');
   }
 }
 
@@ -1128,17 +1373,23 @@ function migrationSnapshotsEqual(
  * Later files win on conflict.
  */
 function loadDeployEnv(root: string): Record<string, string> {
-  const files = [".env", ".env.production"];
+  const files = ['.env', '.env.production'];
   const env: Record<string, string> = {};
   for (const file of files) {
     const filePath = join(root, file);
-    if (!existsSync(filePath)) continue;
-    const content = readFileSync(filePath, "utf-8");
-    for (const line of content.split("\n")) {
+    if (!existsSync(filePath)) {
+      continue;
+    }
+    const content = readFileSync(filePath, 'utf-8');
+    for (const line of content.split('\n')) {
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eqIndex = trimmed.indexOf("=");
-      if (eqIndex === -1) continue;
+      if (!trimmed || trimmed.startsWith('#')) {
+        continue;
+      }
+      const eqIndex = trimmed.indexOf('=');
+      if (eqIndex === -1) {
+        continue;
+      }
       const key = trimmed.slice(0, eqIndex).trim();
       let value = trimmed.slice(eqIndex + 1).trim();
       // Strip surrounding quotes
@@ -1151,7 +1402,13 @@ function loadDeployEnv(root: string): Record<string, string> {
       env[key] = value;
     }
   }
-  return env;
+  const { sanitized, stripped } = stripInternalEnvKeys(env);
+  if (stripped.length > 0) {
+    voidWarn(
+      `Ignoring internal env keys from .env files: ${stripped.join(', ')}. These are reserved for Void runtime use and will not be shipped in the deploy manifest.`,
+    );
+  }
+  return sanitized;
 }
 
 /**
@@ -1171,7 +1428,7 @@ export function resolveDistDir(
   if (fwPreset) {
     // Derive the top-level build dir from the preset's workerDir
     // e.g. "build/server" → "build", "dist/ssr" → "dist"
-    const topDir = fwPreset.workerDir.split("/")[0];
+    const topDir = fwPreset.workerDir.split('/')[0];
     const distDir = join(root, topDir);
     if (!existsSync(distDir)) {
       throw new Error(
@@ -1180,7 +1437,7 @@ export function resolveDistDir(
     }
     return distDir;
   }
-  return join(root, "dist");
+  return join(root, 'dist');
 }
 
 /**
@@ -1199,8 +1456,8 @@ export function resolveWorkerDirName(
   if (fwPreset) {
     // Derive the subdirectory from the preset's workerDir
     // e.g. "build/server" → "server", "dist/ssr" → "ssr"
-    const parts = fwPreset.workerDir.split("/");
-    const subDir = parts.slice(1).join("/");
+    const parts = fwPreset.workerDir.split('/');
+    const subDir = parts.slice(1).join('/');
     if (!existsSync(join(distDir, subDir))) {
       throw new Error(
         `Worker output not found at "${fwPreset.workerDir}". Run "${buildCommand ?? fwPreset.buildCommand}" first.`,
@@ -1210,8 +1467,10 @@ export function resolveWorkerDirName(
   }
 
   // Non-framework: probe for known output subdirectories
-  for (const name of ["ssr", "rsc", "server"]) {
-    if (existsSync(join(distDir, name))) return name;
+  for (const name of ['ssr', 'rsc', 'server']) {
+    if (existsSync(join(distDir, name))) {
+      return name;
+    }
   }
-  throw new Error("Worker output not found: expected dist/ssr/ or dist/rsc/");
+  throw new Error('Worker output not found: expected dist/ssr/ or dist/rsc/');
 }

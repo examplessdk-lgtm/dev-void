@@ -1,17 +1,17 @@
-import { describe, expect, it } from "vitest";
-import type { VoidAuthMigrationSchema } from "../../src/auth/drizzle";
-import { resolveVoidAuthMigrationSchema } from "../../src/auth/drizzle";
+import { describe, expect, it } from 'vitest';
+import type { VoidAuthMigrationSchema } from '../../src/auth/drizzle';
+import { resolveVoidAuthMigrationSchema } from '../../src/auth/drizzle';
 import {
   applyPgAuthMigrations,
   applySqliteAuthMigrations,
-} from "../../src/runtime/auth-migrations";
+} from '../../src/runtime/auth-migrations';
 
-describe("auth migration runner", () => {
-  it("applies the sqlite auth schema idempotently", async () => {
-    const { DatabaseSync } = await import("node:sqlite");
-    const db = new DatabaseSync(":memory:");
+describe('auth migration runner', () => {
+  it('applies the sqlite auth schema idempotently', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(':memory:');
     const schema = resolveVoidAuthMigrationSchema({
-      dialect: "sqlite",
+      dialect: 'sqlite',
       providers: null,
     });
 
@@ -36,29 +36,29 @@ describe("auth migration runner", () => {
       }>;
 
       expect(tables.map((table) => table.name)).toEqual([
-        "account",
-        "session",
-        "user",
-        "verification",
+        'account',
+        'session',
+        'user',
+        'verification',
       ]);
-      expect(sessionIndexes.some((index) => index.name === "session_userId_idx")).toBe(true);
+      expect(sessionIndexes.some((index) => index.name === 'session_userId_idx')).toBe(true);
     } finally {
       db.close();
     }
   });
 
-  it("uses identity columns for postgres serial auth ids", async () => {
+  it('uses identity columns for postgres serial auth ids', async () => {
     const statements: string[] = [];
     const schema: VoidAuthMigrationSchema = {
-      dialect: "postgresql",
-      idStrategy: "serial",
+      dialect: 'postgresql',
+      idStrategy: 'serial',
       tables: [
         {
-          name: "user",
+          name: 'user',
           order: 0,
           fields: {
             email: {
-              type: "string",
+              type: 'string',
               required: true,
               unique: true,
               index: false,
@@ -72,12 +72,18 @@ describe("auth migration runner", () => {
     await applyPgAuthMigrations(
       {
         async all<T extends Record<string, unknown>>(sql: string) {
-          if (sql.includes("current_schema")) {
-            return [{ schema: "public" }] as unknown as T[];
+          if (sql.includes('current_schema')) {
+            return [{ schema: 'public' }] as unknown as T[];
           }
-          if (sql.includes("information_schema.tables")) return [] as T[];
-          if (sql.includes("information_schema.columns")) return [] as T[];
-          if (sql.includes("pg_indexes")) return [] as T[];
+          if (sql.includes('information_schema.tables')) {
+            return [] as T[];
+          }
+          if (sql.includes('information_schema.columns')) {
+            return [] as T[];
+          }
+          if (sql.includes('pg_indexes')) {
+            return [] as T[];
+          }
           return [] as T[];
         },
         async run(sql: string) {
@@ -95,7 +101,7 @@ describe("auth migration runner", () => {
     );
   });
 
-  it("uses string-literal table names for sqlite PRAGMA introspection", async () => {
+  it('uses string-literal table names for sqlite PRAGMA introspection', async () => {
     const reads: string[] = [];
 
     await applySqliteAuthMigrations(
@@ -103,10 +109,10 @@ describe("auth migration runner", () => {
         async all<T extends Record<string, unknown>>(sql: string) {
           reads.push(sql);
           if (sql === "SELECT name FROM sqlite_master WHERE type = 'table'") {
-            return [{ name: "user" }] as unknown as T[];
+            return [{ name: 'user' }] as unknown as T[];
           }
           if (sql === "PRAGMA table_info('user')") {
-            return [{ name: "id" }] as unknown as T[];
+            return [{ name: 'id' }] as unknown as T[];
           }
           if (sql === "PRAGMA index_list('user')") {
             return [] as T[];
@@ -116,11 +122,11 @@ describe("auth migration runner", () => {
         async run() {},
       },
       {
-        dialect: "sqlite",
-        idStrategy: "text",
+        dialect: 'sqlite',
+        idStrategy: 'text',
         tables: [
           {
-            name: "user",
+            name: 'user',
             order: 0,
             fields: {},
           },

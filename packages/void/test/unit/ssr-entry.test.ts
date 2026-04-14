@@ -1,19 +1,19 @@
-import { describe, expect, it, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { getSsrServerEntryPath, hasSsrEntry, validateSsrEntry } from "../../src/ssr/entry";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it, afterEach } from 'vitest';
+import { getSsrServerEntryPath, hasSsrEntry, validateSsrEntry } from '../../src/ssr/entry';
 
 const tempDirs: string[] = [];
 
 function createTempRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "void-ssr-entry-"));
+  const root = mkdtempSync(join(tmpdir(), 'void-ssr-entry-'));
   tempDirs.push(root);
-  mkdirSync(join(root, "src"), { recursive: true });
+  mkdirSync(join(root, 'src'), { recursive: true });
   return root;
 }
 
-describe("ssr entry helpers", () => {
+describe('ssr entry helpers', () => {
   afterEach(() => {
     while (tempDirs.length > 0) {
       const dir = tempDirs.pop()!;
@@ -21,18 +21,18 @@ describe("ssr entry helpers", () => {
     }
   });
 
-  it("returns null when ssr entry is missing", () => {
+  it('returns null when ssr entry is missing', () => {
     const root = createTempRoot();
     expect(hasSsrEntry(root)).toBe(false);
     expect(getSsrServerEntryPath(root)).toBeNull();
     expect(validateSsrEntry(root)).toBeNull();
   });
 
-  it("validates exported render function", () => {
+  it('validates exported render function', () => {
     const root = createTempRoot();
-    const file = join(root, "src", "main.ssr.ts");
+    const file = join(root, 'src', 'main.ssr.ts');
     writeFileSync(
-      join(root, "src", "main.client.tsx"),
+      join(root, 'src', 'main.client.tsx'),
       "import { hydrateRoot } from 'react-dom/client'; hydrateRoot(document, null);",
     );
     writeFileSync(
@@ -44,10 +44,10 @@ describe("ssr entry helpers", () => {
     expect(validateSsrEntry(root)).toBe(file);
   });
 
-  it("supports tsx ssr entry files", () => {
+  it('supports tsx ssr entry files', () => {
     const root = createTempRoot();
-    const file = join(root, "src", "main.ssr.tsx");
-    writeFileSync(join(root, "src", "main.client.ts"), "console.log('client entry');");
+    const file = join(root, 'src', 'main.ssr.tsx');
+    writeFileSync(join(root, 'src', 'main.client.ts'), "console.log('client entry');");
     writeFileSync(
       file,
       "export async function render(request, env) { return new Response('<div>ok</div>'); }",
@@ -57,10 +57,10 @@ describe("ssr entry helpers", () => {
     expect(validateSsrEntry(root)).toBe(file);
   });
 
-  it("supports default defineRender export", () => {
+  it('supports default defineRender export', () => {
     const root = createTempRoot();
-    const file = join(root, "src", "main.ssr.ts");
-    writeFileSync(join(root, "src", "main.client.ts"), "console.log('client entry');");
+    const file = join(root, 'src', 'main.ssr.ts');
+    writeFileSync(join(root, 'src', 'main.client.ts'), "console.log('client entry');");
     writeFileSync(
       file,
       "import { defineRender } from 'void'; export default defineRender(async () => new Response('ok'));",
@@ -70,48 +70,48 @@ describe("ssr entry helpers", () => {
     expect(validateSsrEntry(root)).toBe(file);
   });
 
-  it("throws when both ts and tsx ssr entries exist", () => {
+  it('throws when both ts and tsx ssr entries exist', () => {
     const root = createTempRoot();
-    writeFileSync(join(root, "src", "main.client.ts"), "console.log('client entry');");
+    writeFileSync(join(root, 'src', 'main.client.ts'), "console.log('client entry');");
     writeFileSync(
-      join(root, "src", "main.ssr.ts"),
+      join(root, 'src', 'main.ssr.ts'),
       "export async function render(request, env) { return new Response('ok'); }",
     );
     writeFileSync(
-      join(root, "src", "main.ssr.tsx"),
+      join(root, 'src', 'main.ssr.tsx'),
       "export async function render(request, env) { return new Response('ok'); }",
     );
 
-    expect(() => validateSsrEntry(root)).toThrow("Multiple SSR entry files found");
+    expect(() => validateSsrEntry(root)).toThrow('Multiple SSR entry files found');
   });
 
-  it("throws for missing render export", () => {
+  it('throws for missing render export', () => {
     const root = createTempRoot();
-    writeFileSync(join(root, "src", "main.client.ts"), "console.log('client entry');");
+    writeFileSync(join(root, 'src', 'main.client.ts'), "console.log('client entry');");
     writeFileSync(
-      join(root, "src", "main.ssr.ts"),
+      join(root, 'src', 'main.ssr.ts'),
       "export const notRender = () => new Response('ok');",
     );
 
     expect(() => validateSsrEntry(root)).toThrow(
-      "expected `export function render(c, assetTags)` or `export default defineRender(...)`",
+      'expected `export function render(c, assetTags)` or `export default defineRender(...)`',
     );
   });
 
-  it("throws when server entry exists without client entry", () => {
+  it('throws when server entry exists without client entry', () => {
     const root = createTempRoot();
     writeFileSync(
-      join(root, "src", "main.ssr.ts"),
+      join(root, 'src', 'main.ssr.ts'),
       "export async function render(request, env) { return new Response('ok'); }",
     );
 
-    expect(() => validateSsrEntry(root)).toThrow("SSR mode requires a client entry");
+    expect(() => validateSsrEntry(root)).toThrow('SSR mode requires a client entry');
   });
 
-  it("throws when client entry exists without server entry", () => {
+  it('throws when client entry exists without server entry', () => {
     const root = createTempRoot();
-    writeFileSync(join(root, "src", "main.client.ts"), "console.log('client entry');");
+    writeFileSync(join(root, 'src', 'main.client.ts'), "console.log('client entry');");
 
-    expect(() => validateSsrEntry(root)).toThrow("SSR mode requires a server entry");
+    expect(() => validateSsrEntry(root)).toThrow('SSR mode requires a server entry');
   });
 });

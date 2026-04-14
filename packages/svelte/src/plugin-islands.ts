@@ -1,30 +1,32 @@
-import type { Plugin } from "vite";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve, relative } from "node:path";
-import { scanPages, resolveEffectiveLayoutChain } from "void/pages";
-import type { PageScanResult } from "void/pages";
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve, relative } from 'node:path';
+import { normalizePath, type Plugin } from 'vite';
+import { scanPages, resolveEffectiveLayoutChain } from 'void/pages';
+import type { PageScanResult } from 'void/pages';
 import {
   resolveSpecifier,
   needsIslandClientBundle,
+  rewriteCssImportForVirtualModule,
   fileHasCssImports,
   extractCssImports,
   rebuildIslandCssMap as rebuildIslandCssMapShared,
   computePagesNeedingClientJS as computePagesNeedingClientJSShared,
   configureIslandCssServer,
+  watchPagesForRescan,
   ISLANDS_RENDERER_ID,
   ISLANDS_CLIENT_ENTRY_ID,
-} from "void/pages-islands-plugin";
-import type { IslandEntry } from "void/pages-islands-plugin";
-import { generateComponentManifest } from "./pages-manifest";
+} from 'void/pages-islands-plugin';
+import type { IslandEntry } from 'void/pages-islands-plugin';
+import { generateComponentManifest } from './pages-manifest';
 
-const COMPONENT_EXTENSIONS = [".svelte", ".ts", ".js"];
+const COMPONENT_EXTENSIONS = ['.svelte', '.ts', '.js'];
 
 /**
  * Prefix for virtual island wrapper modules. Must NOT use the `\0` prefix
  * because `@sveltejs/vite-plugin-svelte` skips `\0`-prefixed modules in
  * its transform filter.
  */
-const WRAPPER_PREFIX = "/@void-island-wrap/";
+const WRAPPER_PREFIX = '/@void-island-wrap/';
 
 export function islandsPlugin(pagesDir: string): Plugin[] {
   let pageScan: PageScanResult | null = null;
@@ -32,30 +34,34 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
   const islandManifest = new Map<string, IslandEntry>();
   const islandCssFiles = new Set<string>();
   let isDev = false;
-  let viteRoot = "";
+  let viteRoot = '';
   const islandCssMap = new Map<string, string[]>();
   let resolvedConfig: any;
 
   /** Rebuild islandCssMap from current file contents (re-runs fileHasCssImports). */
   function rebuildIslandCssMap(): void {
-    if (!pageScan) return;
+    if (!pageScan) {
+      return;
+    }
     rebuildIslandCssMapShared(pageScan, pagesDir, islandCssMap, fileHasCssImports);
   }
 
   function computePagesNeedingClientJS(): Set<string> {
-    if (!pageScan) return new Set();
+    if (!pageScan) {
+      return new Set();
+    }
     return computePagesNeedingClientJSShared(pageScan, pagesDir, resolvedConfig);
   }
 
   return [
     {
-      name: "void-svelte:islands",
-      enforce: "pre",
+      name: 'void-svelte:islands',
+      enforce: 'pre',
 
       configResolved(config) {
         resolvedConfig = config;
         viteRoot = config.root;
-        isDev = config.command === "serve";
+        isDev = config.command === 'serve';
       },
 
       // Serve virtual island CSS as raw text/css in dev. The client transform
@@ -63,6 +69,10 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
       // the CSS string and serve it directly for render-blocking <link> tags.
       configureServer(server) {
         configureIslandCssServer(server, islandCssFiles, viteRoot, rebuildIslandCssMap);
+        watchPagesForRescan(server, pagesDir, root, (scan: PageScanResult) => {
+          pageScan = scan;
+          rebuildIslandCssMap();
+        });
       },
 
       async buildStart() {
@@ -73,10 +83,21 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
           // islands-client entry before island page transforms run.
           const importAttrRe =
             /import\s+\w+\s+from\s+("[^"]+"|'[^']+')\s+with\s*\{\s*island\s*:\s*("[^"]+"|'[^']+')\s*\}/g;
-          for (const page of pageScan.pages) {
-            if (!page.island) continue;
-            const filePath = resolve(pagesDir, page.componentPath);
-            const code = readFileSync(filePath, "utf-8");
+          // Scan both pages AND layouts for island imports
+          const filesToScan: { filePath: string; island: boolean }[] = [
+            ...pageScan.pages.map((p: any) => ({ filePath: p.componentPath, island: p.island })),
+            ...pageScan.layouts.map((l: any) => ({ filePath: l.filePath, island: l.island })),
+            ...pageScan.namedLayouts.map((nl: any) => ({
+              filePath: nl.filePath,
+              island: nl.island,
+            })),
+          ];
+          for (const entry of filesToScan) {
+            if (!entry.island) {
+              continue;
+            }
+            const filePath = resolve(pagesDir, entry.filePath);
+            const code = readFileSync(filePath, 'utf-8');
             const importerDir = dirname(filePath);
             importAttrRe.lastIndex = 0;
             let m;
@@ -85,7 +106,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
               const strategy = m[2].slice(1, -1);
               const absPath = resolveSpecifier(spec, importerDir, COMPONENT_EXTENSIONS);
               if (absPath) {
-                const islandId = relative(root, absPath).replace(/\.[^.]+$/, "");
+                const islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '');
                 islandManifest.set(islandId, {
                   componentPath: absPath,
                   islandId,
@@ -97,9 +118,11 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
 
           // Collect page and layout files needing CSS for island pages
           for (const page of pageScan.pages) {
-            if (!page.island) continue;
-            if (page.componentPath.endsWith(".svelte")) {
-              islandCssFiles.add(resolve(pagesDir, page.componentPath));
+            if (!page.island) {
+              continue;
+            }
+            if (page.componentPath.endsWith('.svelte')) {
+              islandCssFiles.add(normalizePath(resolve(pagesDir, page.componentPath)));
             }
             const layoutChain = resolveEffectiveLayoutChain(
               page,
@@ -107,7 +130,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
               pageScan.namedLayouts,
             );
             for (const layout of layoutChain) {
-              islandCssFiles.add(resolve(pagesDir, layout.filePath));
+              islandCssFiles.add(normalizePath(resolve(pagesDir, layout.filePath)));
             }
           }
 
@@ -122,7 +145,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
         },
         handler(source) {
           if (source === ISLANDS_RENDERER_ID || source === ISLANDS_CLIENT_ENTRY_ID) {
-            return "\0" + source;
+            return '\0' + source;
           }
           // Virtual wrapper modules — resolve without \0 prefix so the
           // Svelte vite plugin processes them as .svelte files
@@ -131,12 +154,16 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
           }
           // Virtual island CSS modules — no \0 prefix so Vite CSS pipeline processes them.
           // Return absolute path so CSS @import resolution uses the correct directory.
-          if (source.endsWith(".css")) {
-            const srcPath = source.slice(0, -4);
-            if (islandCssFiles.has(srcPath)) return srcPath + ".css";
-            if (srcPath.startsWith("/")) {
-              const absPath = resolve(viteRoot, srcPath.slice(1));
-              if (islandCssFiles.has(absPath)) return absPath + ".css";
+          if (source.endsWith('.css')) {
+            const srcPath = normalizePath(source.slice(0, -4));
+            if (islandCssFiles.has(srcPath)) {
+              return srcPath + '.css';
+            }
+            if (srcPath.startsWith('/')) {
+              const absPath = normalizePath(resolve(viteRoot, srcPath.slice(1)));
+              if (islandCssFiles.has(absPath)) {
+                return absPath + '.css';
+              }
             }
           }
         },
@@ -148,11 +175,11 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
           id: /^(\0virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)|\.svelte\.css$/,
         },
         handler(id) {
-          if (id === "\0" + ISLANDS_RENDERER_ID) {
+          if (id === '\0' + ISLANDS_RENDERER_ID) {
             if (!pageScan) {
               return "export function renderIslandPage() { throw new Error('No pages found'); }";
             }
-            const mdPlugin = resolvedConfig?.plugins?.find((p: any) => p.name === "void-md");
+            const mdPlugin = resolvedConfig?.plugins?.find((p: any) => p.name === 'void-md');
             const mdScriptIds: Set<string> = new Set(
               mdPlugin?.api?.getClientScripts?.()?.keys() ?? [],
             );
@@ -167,8 +194,10 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
               needsJS,
             );
           }
-          if (id === "\0" + ISLANDS_CLIENT_ENTRY_ID) {
-            if (!pageScan) return "";
+          if (id === '\0' + ISLANDS_CLIENT_ENTRY_ID) {
+            if (!pageScan) {
+              return '';
+            }
             return generateIslandClientEntry(islandManifest, islandCssFiles, isDev);
           }
           // Virtual wrapper component — generates a .svelte wrapper
@@ -176,7 +205,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
             return generateWrapperComponent(id);
           }
           // Virtual island CSS module — resolveId returns absolute path
-          if (id.endsWith(".css") && !id.startsWith("\0")) {
+          if (id.endsWith('.css') && !id.startsWith('\0')) {
             const srcPath = id.slice(0, -4);
             if (islandCssFiles.has(srcPath)) {
               return extractCssImports(srcPath);
@@ -215,7 +244,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
             // Resolve to absolute path for the island manifest
             const absPath = resolveSpecifier(spec, importerDir, COMPONENT_EXTENSIONS);
             if (absPath) {
-              const islandId = relative(root, absPath).replace(/\.[^.]+$/, "");
+              const islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '');
               islandManifest.set(islandId, {
                 componentPath: absPath,
                 islandId,
@@ -223,17 +252,19 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
               });
             }
 
-            const islandId = absPath ? relative(root, absPath).replace(/\.[^.]+$/, "") : spec;
+            const islandId = absPath
+              ? normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '')
+              : spec;
 
             // Rewrite import to point to virtual wrapper component
             const wrapperUrl =
               WRAPPER_PREFIX +
               encodeURIComponent(islandId) +
-              ".svelte?src=" +
+              '.svelte?src=' +
               encodeURIComponent(absPath || spec) +
-              "&island=" +
+              '&island=' +
               encodeURIComponent(islandId) +
-              "&hydrate=" +
+              '&hydrate=' +
               encodeURIComponent(strategy);
             const replacement = `import ${name} from ${JSON.stringify(wrapperUrl)}`;
             transformed = transformed.replace(match[0], replacement);
@@ -246,9 +277,11 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
       },
 
       config(_, env) {
-        if (!existsSync(pagesDir)) return;
-        if (env.command === "serve") {
-          return { optimizeDeps: { include: ["svelte"] } };
+        if (!existsSync(pagesDir)) {
+          return;
+        }
+        if (env.command === 'serve') {
+          return { optimizeDeps: { include: ['svelte'] } };
         }
         // Only add the islands client entry when content needs it
         if (needsIslandClientBundle(pagesDir, /\.island\.svelte$/, true)) {
@@ -258,7 +291,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
                 build: {
                   manifest: true,
                   rollupOptions: {
-                    input: { "islands-client": ISLANDS_CLIENT_ENTRY_ID },
+                    input: { 'islands-client': ISLANDS_CLIENT_ENTRY_ID },
                   },
                 },
               },
@@ -268,7 +301,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
       },
     },
     {
-      name: "void-svelte:islands-style",
+      name: 'void-svelte:islands-style',
 
       resolveId: {
         filter: { id: /\?island-style&/ },
@@ -281,18 +314,20 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
         filter: { id: /\?island-style&/ },
         handler(id) {
           // ?island-style&index=N&lang.{ext} — return raw CSS of Nth <style> block
-          const filePath = id.replace(/\?island-style&.*$/, "");
-          const params = new URLSearchParams(id.slice(id.indexOf("?island-style&") + 1));
-          const index = parseInt(params.get("index") || "0", 10);
-          const content = readFileSync(filePath, "utf-8");
+          const filePath = id.replace(/\?island-style&.*$/, '');
+          const params = new URLSearchParams(id.slice(id.indexOf('?island-style&') + 1));
+          const index = parseInt(params.get('index') || '0', 10);
+          const content = readFileSync(filePath, 'utf-8');
           const styleBlockRe = /<style\b[^>]*>([\s\S]*?)<\/style>/g;
           let match;
           let i = 0;
           while ((match = styleBlockRe.exec(content)) !== null) {
-            if (i === index) return match[1];
+            if (i === index) {
+              return match[1];
+            }
             i++;
           }
-          return "/* style block not found */";
+          return '/* style block not found */';
         },
       },
     },
@@ -304,10 +339,10 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
  * The URL encodes: src (absolute component path), island (ID), hydrate (strategy).
  */
 function generateWrapperComponent(id: string): string {
-  const url = new URL(id, "file://");
-  const src = decodeURIComponent(url.searchParams.get("src") || "");
-  const islandId = decodeURIComponent(url.searchParams.get("island") || "");
-  const hydrate = decodeURIComponent(url.searchParams.get("hydrate") || "load");
+  const url = new URL(id, 'file://');
+  const src = decodeURIComponent(url.searchParams.get('src') || '');
+  const islandId = decodeURIComponent(url.searchParams.get('island') || '');
+  const hydrate = decodeURIComponent(url.searchParams.get('hydrate') || 'load');
 
   return `<script>
   import Cmp from ${JSON.stringify(src)};
@@ -329,11 +364,11 @@ function generateIslandRenderer(
   pagesNeedingClientJS: Set<string>,
 ): string {
   // Build CSS link map for dev FOUC prevention
-  let cssMapCode = "";
+  let cssMapCode = '';
   if (isDev && islandCssMap.size > 0) {
     const cssMapObj: Record<string, string[]> = {};
     for (const [compId, paths] of islandCssMap) {
-      cssMapObj[compId] = paths.map((p) => "/" + relative(viteRoot, p) + ".css");
+      cssMapObj[compId] = paths.map((p) => '/' + normalizePath(relative(viteRoot, p)) + '.css');
     }
     cssMapCode = `const __cssPaths = ${JSON.stringify(cssMapObj)};`;
   }
@@ -412,7 +447,7 @@ function generateIslandClientEntry(
   // the CSS is included in the bundled output.
   if (!isDev) {
     for (const file of cssFiles) {
-      const content = readFileSync(file, "utf-8");
+      const content = readFileSync(file, 'utf-8');
 
       // Extract <style> blocks → emit ?island-style imports
       const styleRe = /<style\b([^>]*)>/g;
@@ -422,9 +457,9 @@ function generateIslandClientEntry(
       while ((styleMatch = styleRe.exec(content)) !== null) {
         const attrs = styleMatch[1];
         const langMatch = attrs.match(/\blang\s*=\s*["'](\w+)["']/);
-        const lang = langMatch ? langMatch[1] : "css";
+        const lang = langMatch ? langMatch[1] : 'css';
         lines.push(
-          `import ${JSON.stringify(file + "?island-style&index=" + styleIndex + "&lang." + lang)};`,
+          `import ${JSON.stringify(file + '?island-style&index=' + styleIndex + '&lang.' + lang)};`,
         );
         styleIndex++;
       }
@@ -439,17 +474,17 @@ function generateIslandClientEntry(
         let cssMatch;
         cssImportRe.lastIndex = 0;
         while ((cssMatch = cssImportRe.exec(scriptContent)) !== null) {
-          lines.push(cssMatch[0].trim() + ";");
+          lines.push(rewriteCssImportForVirtualModule(cssMatch[0], cssMatch[1], file));
         }
       }
     }
   }
 
-  lines.push("const islands = {");
+  lines.push('const islands = {');
   for (const [id, path] of uniqueIslands) {
     lines.push(`  ${JSON.stringify(id)}: () => import(${JSON.stringify(path)}),`);
   }
-  lines.push("};");
+  lines.push('};');
 
   lines.push(`
 async function hydrateIsland(el, mod, props) {
@@ -462,5 +497,5 @@ async function hydrateIsland(el, mod, props) {
 initIslands(islands, hydrateIsland);
 `);
 
-  return lines.join("\n");
+  return lines.join('\n');
 }

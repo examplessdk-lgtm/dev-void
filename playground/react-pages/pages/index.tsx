@@ -1,5 +1,5 @@
-import { Link } from "@void/react";
-import type { Props } from "./index.server";
+import { Link } from '@void/react';
+import type { Props } from './index.server';
 
 export default function HomePage({ title }: Props) {
   return (

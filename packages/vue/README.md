@@ -5,9 +5,9 @@ Vue adapter for Void Pages mode.
 ## Setup
 
 ```ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidVue } from "@void/vue/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidVue } from '@void/vue/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidVue()],
@@ -56,9 +56,9 @@ defineProps<{ title: string }>();
 ```
 
 ```ts
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
-export const loader = defineHandler(() => ({ title: "Home" }));
+export const loader = defineHandler(() => ({ title: 'Home' }));
 ```
 
 ## Tests

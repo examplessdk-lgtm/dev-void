@@ -1,4 +1,4 @@
-import type MarkdownExit from "markdown-exit";
+import type MarkdownExit from 'markdown-exit';
 
 const EXTERNAL_URL_RE = /^[a-z]+:/i;
 
@@ -13,8 +13,8 @@ export interface LinkOptions {
  */
 export function linkPlugin(md: MarkdownExit, options?: LinkOptions): void {
   const externalAttrs = options?.externalAttrs ?? {
-    target: "_blank",
-    rel: "noreferrer",
+    target: '_blank',
+    rel: 'noreferrer',
   };
 
   md.renderer.rules.link_open = (
@@ -25,13 +25,15 @@ export function linkPlugin(md: MarkdownExit, options?: LinkOptions): void {
     self: any,
   ) => {
     const token = tokens[idx];
-    const hrefIndex = token.attrIndex("href");
-    if (hrefIndex < 0) return self.renderToken(tokens, idx, mdOptions);
+    const hrefIndex = token.attrIndex('href');
+    if (hrefIndex < 0) {
+      return self.renderToken(tokens, idx, mdOptions);
+    }
 
     const url = token.attrs[hrefIndex][1] as string;
 
     // Skip anchor-only links and header-anchor links
-    if (url.startsWith("#") || token.attrGet("class") === "header-anchor") {
+    if (url.startsWith('#') || token.attrGet('class') === 'header-anchor') {
       return self.renderToken(tokens, idx, mdOptions);
     }
 
@@ -43,10 +45,10 @@ export function linkPlugin(md: MarkdownExit, options?: LinkOptions): void {
     } else {
       // Internal link — normalize .md extension
       let normalized = url;
-      if (normalized.endsWith(".md")) {
+      if (normalized.endsWith('.md')) {
         normalized = normalized.slice(0, -3);
-      } else if (normalized.includes(".md#")) {
-        normalized = normalized.replace(".md#", "#");
+      } else if (normalized.includes('.md#')) {
+        normalized = normalized.replace('.md#', '#');
       }
       if (normalized !== url) {
         token.attrs[hrefIndex][1] = normalized;

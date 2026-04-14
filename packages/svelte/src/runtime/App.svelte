@@ -38,7 +38,7 @@
   // Client mode: subscribe to stores for live updates after hydration.
   // onMount only runs on the client, not during SSR.
   onMount(() => {
-    if (!init.stores) return;
+    if (!init.stores) {return;}
     const unsubs = [
       init.stores.page.subscribe((v) => { currentPage = v; }),
       init.stores.props.subscribe((v) => { currentPageProps = v; }),

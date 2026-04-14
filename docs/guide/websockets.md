@@ -35,21 +35,21 @@ Use `defineRoom()` when many clients should share one route-scoped room or docum
 
 ```ts
 // routes/chat/[room].ws.ts
-import * as v from "valibot";
-import { defineRoom } from "void/ws";
+import * as v from 'valibot';
+import { defineRoom } from 'void/ws';
 
-const ClientMessage = v.variant("type", [
-  v.object({ type: v.literal("chat.message"), text: v.string() }),
+const ClientMessage = v.variant('type', [
+  v.object({ type: v.literal('chat.message'), text: v.string() }),
 ]);
 
-const ServerMessage = v.variant("type", [
+const ServerMessage = v.variant('type', [
   v.object({
-    type: v.literal("chat.message"),
+    type: v.literal('chat.message'),
     id: v.string(),
     text: v.string(),
     userId: v.string(),
   }),
-  v.object({ type: v.literal("chat.joined"), userId: v.string() }),
+  v.object({ type: v.literal('chat.joined'), userId: v.string() }),
 ]);
 
 export default defineRoom({
@@ -59,15 +59,15 @@ export default defineRoom({
   },
   onBeforeConnect(ctx) {
     if (!ctx.user) {
-      return new Response("Unauthorized", { status: 401 });
+      return new Response('Unauthorized', { status: 401 });
     }
   },
   async onConnect(ctx) {
-    await ctx.room.broadcast({ type: "chat.joined", userId: ctx.user!.id }, [ctx.connection.id]);
+    await ctx.room.broadcast({ type: 'chat.joined', userId: ctx.user!.id }, [ctx.connection.id]);
   },
   async onMessage(ctx, event) {
     await ctx.room.broadcast({
-      type: "chat.message",
+      type: 'chat.message',
       id: crypto.randomUUID(),
       text: event.text,
       userId: ctx.user!.id,
@@ -91,21 +91,21 @@ Use `defineWebSocket()` when each connection is handled independently instead of
 
 ```ts
 // routes/notifications.ws.ts
-import * as v from "valibot";
-import { defineWebSocket } from "void/ws";
+import * as v from 'valibot';
+import { defineWebSocket } from 'void/ws';
 
 export default defineWebSocket({
   messages: {
-    client: v.object({ type: v.literal("notifications.ack"), id: v.string() }),
-    server: v.object({ type: v.literal("notifications.item"), title: v.string() }),
+    client: v.object({ type: v.literal('notifications.ack'), id: v.string() }),
+    server: v.object({ type: v.literal('notifications.item'), title: v.string() }),
   },
   onBeforeConnect(ctx) {
     if (!ctx.user) {
-      return new Response("Unauthorized", { status: 401 });
+      return new Response('Unauthorized', { status: 401 });
     }
   },
   async onConnect(ctx) {
-    await ctx.socket.send({ type: "notifications.item", title: "Connected" });
+    await ctx.socket.send({ type: 'notifications.item', title: 'Connected' });
   },
 });
 ```
@@ -160,19 +160,19 @@ If a route does not define `onRequest()`, non-WebSocket requests return `426 Upg
 Use `connect()` from `void/ws` on the client:
 
 ```ts
-import { connect } from "void/ws";
+import { connect } from 'void/ws';
 
-const socket = connect("/chat/:room", {
-  params: { room: "general" },
+const socket = connect('/chat/:room', {
+  params: { room: 'general' },
 });
 
-socket.on("message", (event) => {
-  if (event.type === "chat.message") {
+socket.on('message', (event) => {
+  if (event.type === 'chat.message') {
     console.log(event.text);
   }
 });
 
-socket.send({ type: "chat.message", text: "hello" });
+socket.send({ type: 'chat.message', text: 'hello' });
 ```
 
 `connect()` resolves relative URLs against the current origin and automatically uses `ws:` or `wss:`. It also buffers messages until the socket opens and reconnects by default.

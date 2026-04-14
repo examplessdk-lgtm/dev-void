@@ -1,6 +1,6 @@
-import type { CompileResult } from "./compile";
-import type { IslandImport } from "./extract-script";
-import { buildRenderChunks, toIslandId } from "./emit-shared";
+import type { CompileResult } from './compile';
+import { buildRenderChunks, toIslandId } from './emit-shared';
+import type { IslandImport } from './extract-script';
 
 export function emitSolidComponent(result: CompileResult): string {
   return `
@@ -51,7 +51,7 @@ export const headings = __headings;
   let index = 0;
 
   for (const chunk of chunks) {
-    if (chunk.type === "html") {
+    if (chunk.type === 'html') {
       const htmlName = `__html_chunk_${index++}`;
       code += `\nconst ${htmlName} = ${JSON.stringify(chunk.html)};`;
       bodyLines.push(`<div innerHTML={${htmlName}} />`);
@@ -60,7 +60,7 @@ export const headings = __headings;
 
     const propsName = `__island_props_${index++}`;
     const importAlias = importAliasByName.get(chunk.islandImport.name) ?? chunk.islandImport.name;
-    const propsLiteral = Object.keys(chunk.props).length > 0 ? JSON.stringify(chunk.props) : "{}";
+    const propsLiteral = Object.keys(chunk.props).length > 0 ? JSON.stringify(chunk.props) : '{}';
     code += `\nconst ${propsName} = ${propsLiteral};`;
     bodyLines.push(
       `<div data-island=${JSON.stringify(toIslandId(chunk.islandImport))} data-props={JSON.stringify(${propsName})} data-hydrate=${JSON.stringify(chunk.islandImport.strategy)}><${importAlias} {...${propsName}} /></div>`,
@@ -68,7 +68,7 @@ export const headings = __headings;
   }
 
   if (bodyLines.length === 0) {
-    bodyLines.push("<></>");
+    bodyLines.push('<></>');
   }
 
   code += `
@@ -77,7 +77,7 @@ export default function MarkdownPage() {
   return (
     <FrontmatterContext.Provider value={__frontmatter}>
       <>
-        ${bodyLines.join("\n        ")}
+        ${bodyLines.join('\n        ')}
       </>
     </FrontmatterContext.Provider>
   );

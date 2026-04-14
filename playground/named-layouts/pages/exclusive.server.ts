@@ -1,4 +1,4 @@
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
 export const loader = defineHandler(() => {
   return {};

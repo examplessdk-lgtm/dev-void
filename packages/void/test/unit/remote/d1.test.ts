@@ -1,21 +1,21 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { ProxyD1Database, ProxyD1PreparedStatement } from "../../../src/runtime/remote/d1";
-import { ProxyClient } from "../../../src/runtime/remote/client";
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { ProxyClient } from '../../../src/runtime/remote/client';
+import { ProxyD1Database, ProxyD1PreparedStatement } from '../../../src/runtime/remote/d1';
 
 function createClient() {
-  return new ProxyClient("https://proxy.void.cloud", "jwt-token", "proj_1");
+  return new ProxyClient('https://proxy.void.cloud', 'jwt-token', 'proj_1');
 }
 
-function mockFetch(response: unknown, contentType = "application/json") {
+function mockFetch(response: unknown, contentType = 'application/json') {
   globalThis.fetch = vi.fn(
     async () =>
       new Response(JSON.stringify(response), {
-        headers: { "content-type": contentType },
+        headers: { 'content-type': contentType },
       }),
   ) as any;
 }
 
-describe("ProxyD1Database", () => {
+describe('ProxyD1Database', () => {
   const originalFetch = globalThis.fetch;
 
   afterEach(() => {
@@ -23,120 +23,120 @@ describe("ProxyD1Database", () => {
     vi.restoreAllMocks();
   });
 
-  describe("prepare().all()", () => {
-    it("sends correct request and returns D1Result", async () => {
-      const rows = [{ id: 1, name: "Alice" }];
+  describe('prepare().all()', () => {
+    it('sends correct request and returns D1Result', async () => {
+      const rows = [{ id: 1, name: 'Alice' }];
       mockFetch({ results: rows, success: true, meta: { duration: 0.1 } });
 
-      const db = new ProxyD1Database(createClient(), "DB");
-      const result = await db.prepare("SELECT * FROM users").all();
+      const db = new ProxyD1Database(createClient(), 'DB');
+      const result = await db.prepare('SELECT * FROM users').all();
 
       expect(result.results).toEqual(rows);
       expect(result.success).toBe(true);
 
       const call = (globalThis.fetch as any).mock.calls[0];
       const body = JSON.parse(call[1].body);
-      expect(body.sql).toBe("SELECT * FROM users");
-      expect(body.method).toBe("all");
-      expect(body.binding).toBe("DB");
+      expect(body.sql).toBe('SELECT * FROM users');
+      expect(body.method).toBe('all');
+      expect(body.binding).toBe('DB');
     });
   });
 
-  describe("prepare().bind().first()", () => {
-    it("sends method=first and returns single row", async () => {
-      mockFetch({ id: 1, name: "Alice" });
+  describe('prepare().bind().first()', () => {
+    it('sends method=first and returns single row', async () => {
+      mockFetch({ id: 1, name: 'Alice' });
 
-      const db = new ProxyD1Database(createClient(), "DB");
-      const row = await db.prepare("SELECT * FROM users WHERE id = ?").bind(1).first();
+      const db = new ProxyD1Database(createClient(), 'DB');
+      const row = await db.prepare('SELECT * FROM users WHERE id = ?').bind(1).first();
 
-      expect(row).toEqual({ id: 1, name: "Alice" });
+      expect(row).toEqual({ id: 1, name: 'Alice' });
 
       const call = (globalThis.fetch as any).mock.calls[0];
       const body = JSON.parse(call[1].body);
-      expect(body.method).toBe("first");
+      expect(body.method).toBe('first');
       expect(body.params).toEqual([1]);
     });
 
-    it("returns null when no row found", async () => {
+    it('returns null when no row found', async () => {
       mockFetch(null);
 
-      const db = new ProxyD1Database(createClient(), "DB");
-      const row = await db.prepare("SELECT * FROM users WHERE id = ?").bind(999).first();
+      const db = new ProxyD1Database(createClient(), 'DB');
+      const row = await db.prepare('SELECT * FROM users WHERE id = ?').bind(999).first();
 
       expect(row).toBeNull();
     });
 
-    it("returns specific column value when col is specified", async () => {
-      mockFetch({ id: 1, name: "Alice" });
+    it('returns specific column value when col is specified', async () => {
+      mockFetch({ id: 1, name: 'Alice' });
 
-      const db = new ProxyD1Database(createClient(), "DB");
-      const name = await db.prepare("SELECT * FROM users WHERE id = ?").bind(1).first("name");
+      const db = new ProxyD1Database(createClient(), 'DB');
+      const name = await db.prepare('SELECT * FROM users WHERE id = ?').bind(1).first('name');
 
-      expect(name).toBe("Alice");
+      expect(name).toBe('Alice');
     });
   });
 
-  describe("prepare().run()", () => {
-    it("sends method=run and returns D1Result", async () => {
+  describe('prepare().run()', () => {
+    it('sends method=run and returns D1Result', async () => {
       mockFetch({ success: true, meta: { duration: 0.002, changes: 1 } });
 
-      const db = new ProxyD1Database(createClient(), "DB");
+      const db = new ProxyD1Database(createClient(), 'DB');
       const result = await db
-        .prepare("UPDATE users SET name = ? WHERE id = ?")
-        .bind("Bob", 1)
+        .prepare('UPDATE users SET name = ? WHERE id = ?')
+        .bind('Bob', 1)
         .run();
 
       expect(result.success).toBe(true);
       const call = (globalThis.fetch as any).mock.calls[0];
       const body = JSON.parse(call[1].body);
-      expect(body.method).toBe("run");
-      expect(body.params).toEqual(["Bob", 1]);
+      expect(body.method).toBe('run');
+      expect(body.params).toEqual(['Bob', 1]);
     });
   });
 
-  describe("prepare().raw()", () => {
-    it("sends method=raw and returns array of arrays", async () => {
+  describe('prepare().raw()', () => {
+    it('sends method=raw and returns array of arrays', async () => {
       mockFetch({
-        columns: ["id", "name"],
+        columns: ['id', 'name'],
         results: [
-          [1, "Alice"],
-          [2, "Bob"],
+          [1, 'Alice'],
+          [2, 'Bob'],
         ],
       });
 
-      const db = new ProxyD1Database(createClient(), "DB");
-      const rows = await db.prepare("SELECT * FROM users").raw();
+      const db = new ProxyD1Database(createClient(), 'DB');
+      const rows = await db.prepare('SELECT * FROM users').raw();
 
       expect(rows).toEqual([
-        [1, "Alice"],
-        [2, "Bob"],
+        [1, 'Alice'],
+        [2, 'Bob'],
       ]);
     });
 
-    it("includes column names when columnNames option is true", async () => {
+    it('includes column names when columnNames option is true', async () => {
       mockFetch({
-        columns: ["id", "name"],
-        results: [[1, "Alice"]],
+        columns: ['id', 'name'],
+        results: [[1, 'Alice']],
       });
 
-      const db = new ProxyD1Database(createClient(), "DB");
-      const rows = await db.prepare("SELECT * FROM users").raw({ columnNames: true });
+      const db = new ProxyD1Database(createClient(), 'DB');
+      const rows = await db.prepare('SELECT * FROM users').raw({ columnNames: true });
 
-      expect(rows[0]).toEqual(["id", "name"]);
-      expect(rows[1]).toEqual([1, "Alice"]);
+      expect(rows[0]).toEqual(['id', 'name']);
+      expect(rows[1]).toEqual([1, 'Alice']);
     });
   });
 
-  describe("batch()", () => {
-    it("sends all statements in a batch request", async () => {
+  describe('batch()', () => {
+    it('sends all statements in a batch request', async () => {
       mockFetch([
         { results: [], success: true, meta: {} },
         { results: [], success: true, meta: {} },
       ]);
 
-      const db = new ProxyD1Database(createClient(), "DB");
-      const stmt1 = db.prepare("INSERT INTO users (name) VALUES (?)").bind("Alice");
-      const stmt2 = db.prepare("INSERT INTO users (name) VALUES (?)").bind("Bob");
+      const db = new ProxyD1Database(createClient(), 'DB');
+      const stmt1 = db.prepare('INSERT INTO users (name) VALUES (?)').bind('Alice');
+      const stmt2 = db.prepare('INSERT INTO users (name) VALUES (?)').bind('Bob');
       const results = await db.batch([stmt1 as any, stmt2 as any]);
 
       expect(results).toHaveLength(2);
@@ -144,30 +144,30 @@ describe("ProxyD1Database", () => {
       const call = (globalThis.fetch as any).mock.calls[0];
       const body = JSON.parse(call[1].body);
       expect(body.statements).toEqual([
-        { sql: "INSERT INTO users (name) VALUES (?)", params: ["Alice"] },
-        { sql: "INSERT INTO users (name) VALUES (?)", params: ["Bob"] },
+        { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Alice'] },
+        { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Bob'] },
       ]);
     });
   });
 
-  describe("exec()", () => {
-    it("sends sql with method=run and returns D1ExecResult", async () => {
+  describe('exec()', () => {
+    it('sends sql with method=run and returns D1ExecResult', async () => {
       mockFetch({ success: true, meta: { changes: 3, duration: 0.005 } });
 
-      const db = new ProxyD1Database(createClient(), "DB");
-      const result = await db.exec("CREATE TABLE test (id INTEGER PRIMARY KEY)");
+      const db = new ProxyD1Database(createClient(), 'DB');
+      const result = await db.exec('CREATE TABLE test (id INTEGER PRIMARY KEY)');
 
       expect(result.count).toBe(3);
       expect(result.duration).toBe(0.005);
     });
   });
 
-  describe("bind() accumulation", () => {
-    it("replaces params on each bind() call", async () => {
+  describe('bind() accumulation', () => {
+    it('replaces params on each bind() call', async () => {
       mockFetch({ results: [], success: true });
 
-      const db = new ProxyD1Database(createClient(), "DB");
-      const stmt = db.prepare("SELECT * FROM users WHERE id = ?");
+      const db = new ProxyD1Database(createClient(), 'DB');
+      const stmt = db.prepare('SELECT * FROM users WHERE id = ?');
 
       // First bind
       stmt.bind(1);

@@ -3,14 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
     "build": "vite build",
+    "dev": "vite",
     "preview": "vite preview"
   },
   "dependencies": {
-    "hono": "^4.12.9",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "hono": "^4.12.12",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
@@ -18,6 +18,6 @@
     "@typescript/native-preview": "catalog:",
     "@vitejs/plugin-react": "^6.0.1",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   }
 }

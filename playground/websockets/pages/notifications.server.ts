@@ -1,4 +1,4 @@
-import { defineHandler, defineHead } from "void";
+import { defineHandler, defineHead } from 'void';
 
 export interface Props {
   defaultCount: number;
@@ -10,7 +10,7 @@ export const loader = defineHandler<Props>(() => {
 
 export const head = defineHead<Props>(() => {
   return {
-    title: "Notifications",
-    meta: [{ name: "description", content: "Single-socket streaming websocket demo" }],
+    title: 'Notifications',
+    meta: [{ name: 'description', content: 'Single-socket streaming websocket demo' }],
   };
 });

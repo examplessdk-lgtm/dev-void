@@ -1,9 +1,9 @@
-import { describe, expectTypeOf, it } from "vitest";
-import { z } from "zod";
-import * as v from "valibot";
-import { type as arktype } from "arktype";
-import { defineHandler } from "../../src/runtime/handler";
-import type { StandardSchemaV1 } from "../../src/standard-schema";
+import { type as arktype } from 'arktype';
+import * as v from 'valibot';
+import { describe, expectTypeOf, it } from 'vitest';
+import { z } from 'zod';
+import { defineHandler } from '../../src/runtime/handler';
+import type { StandardSchemaV1 } from '../../src/standard-schema';
 
 /**
  * These types mirror what generateRouteTypes() emits in .void/routes.d.ts.
@@ -40,12 +40,12 @@ type ExtractInput<V> = {
 
 // ─── Output extraction ──────────────────────────────────────────────────────
 
-describe("Serialize<Awaited<handler.__output>>", () => {
-  it("extracts plain object return type", () => {
+describe('Serialize<Awaited<handler.__output>>', () => {
+  it('extracts plain object return type', () => {
     const handler = defineHandler((_c) => {
-      return { name: "Alice" as string, age: 30 as number };
+      return { name: 'Alice' as string, age: 30 as number };
     });
-    type Output = Serialize<Awaited<(typeof handler)["__output"]>>;
+    type Output = Serialize<Awaited<(typeof handler)['__output']>>;
 
     expectTypeOf<Output>().toEqualTypeOf<{ name: string; age: number }>();
 
@@ -53,20 +53,20 @@ describe("Serialize<Awaited<handler.__output>>", () => {
     void ({} as Output).email;
   });
 
-  it("converts Date to string", () => {
+  it('converts Date to string', () => {
     const handler = defineHandler((_c) => {
-      return { createdAt: new Date(), label: "test" as string };
+      return { createdAt: new Date(), label: 'test' as string };
     });
-    type Output = Serialize<Awaited<(typeof handler)["__output"]>>;
+    type Output = Serialize<Awaited<(typeof handler)['__output']>>;
 
     expectTypeOf<Output>().toEqualTypeOf<{ createdAt: string; label: string }>();
   });
 
-  it("strips function-valued keys", () => {
+  it('strips function-valued keys', () => {
     const handler = defineHandler((_c) => {
-      return { id: 1 as number, toJSON: () => "{}", name: "x" as string };
+      return { id: 1 as number, toJSON: () => '{}', name: 'x' as string };
     });
-    type Output = Serialize<Awaited<(typeof handler)["__output"]>>;
+    type Output = Serialize<Awaited<(typeof handler)['__output']>>;
 
     expectTypeOf<Output>().toEqualTypeOf<{ id: number; name: string }>();
 
@@ -74,31 +74,31 @@ describe("Serialize<Awaited<handler.__output>>", () => {
     void ({} as Output).toJSON;
   });
 
-  it("serializes arrays of objects", () => {
+  it('serializes arrays of objects', () => {
     const handler = defineHandler((_c) => {
-      return [{ id: "1" as string, name: "Alice" as string }];
+      return [{ id: '1' as string, name: 'Alice' as string }];
     });
-    type Output = Serialize<Awaited<(typeof handler)["__output"]>>;
+    type Output = Serialize<Awaited<(typeof handler)['__output']>>;
 
     expectTypeOf<Output>().toEqualTypeOf<Array<{ id: string; name: string }>>();
   });
 
-  it("preserves primitives", () => {
+  it('preserves primitives', () => {
     const handler = defineHandler((_c) => {
-      return { count: 0 as number, active: true as boolean, label: "" as string };
+      return { count: 0 as number, active: true as boolean, label: '' as string };
     });
-    type Output = Serialize<Awaited<(typeof handler)["__output"]>>;
+    type Output = Serialize<Awaited<(typeof handler)['__output']>>;
 
     expectTypeOf<Output>().toEqualTypeOf<{ count: number; active: boolean; label: string }>();
   });
 
-  it("works with withValidator return types", () => {
+  it('works with withValidator return types', () => {
     const handler = defineHandler.withValidator({
       body: z.object({ name: z.string() }),
     })((_c, { body }) => {
       return { greeting: `Hello ${body.name}` as string };
     });
-    type Output = Serialize<Awaited<(typeof handler)["__output"]>>;
+    type Output = Serialize<Awaited<(typeof handler)['__output']>>;
 
     expectTypeOf<Output>().toEqualTypeOf<{ greeting: string }>();
   });
@@ -106,24 +106,24 @@ describe("Serialize<Awaited<handler.__output>>", () => {
 
 // ─── Input extraction ───────────────────────────────────────────────────────
 
-describe("ExtractInput<handler.__validators>", () => {
-  it("is empty for plain defineHandler", () => {
+describe('ExtractInput<handler.__validators>', () => {
+  it('is empty for plain defineHandler', () => {
     const handler = defineHandler((_c) => ({ ok: true }));
-    type Input = ExtractInput<(typeof handler)["__validators"]>;
+    type Input = ExtractInput<(typeof handler)['__validators']>;
 
     expectTypeOf<Input>().toEqualTypeOf<{}>();
   });
 
-  it("extracts body from zod schema", () => {
+  it('extracts body from zod schema', () => {
     const handler = defineHandler.withValidator({
       body: z.object({ name: z.string(), count: z.number() }),
     })((_c, { body }) => ({ received: body.name }));
 
-    type Input = ExtractInput<(typeof handler)["__validators"]>;
+    type Input = ExtractInput<(typeof handler)['__validators']>;
     expectTypeOf<Input>().toEqualTypeOf<{ body: { name: string; count: number } }>();
   });
 
-  it("extracts params + body from valibot schemas", () => {
+  it('extracts params + body from valibot schemas', () => {
     const handler = defineHandler.withValidator({
       params: v.object({ id: v.string() }),
       body: v.object({ title: v.string() }),
@@ -132,28 +132,28 @@ describe("ExtractInput<handler.__validators>", () => {
       title: body.title,
     }));
 
-    type Input = ExtractInput<(typeof handler)["__validators"]>;
+    type Input = ExtractInput<(typeof handler)['__validators']>;
     expectTypeOf<Input>().toEqualTypeOf<{
       params: { id: string };
       body: { title: string };
     }>();
   });
 
-  it("extracts query from arktype schema", () => {
+  it('extracts query from arktype schema', () => {
     const handler = defineHandler.withValidator({
-      query: arktype({ page: "string", limit: "string" }),
+      query: arktype({ page: 'string', limit: 'string' }),
     })((_c, { query }) => ({
       page: query.page,
       limit: query.limit,
     }));
 
-    type Input = ExtractInput<(typeof handler)["__validators"]>;
+    type Input = ExtractInput<(typeof handler)['__validators']>;
     expectTypeOf<Input>().toEqualTypeOf<{
       query: { page: string; limit: string };
     }>();
   });
 
-  it("extracts all three slots combined", () => {
+  it('extracts all three slots combined', () => {
     const handler = defineHandler.withValidator({
       params: z.object({ id: z.string() }),
       query: z.object({ format: z.string() }),
@@ -164,7 +164,7 @@ describe("ExtractInput<handler.__validators>", () => {
       count: body.data.length,
     }));
 
-    type Input = ExtractInput<(typeof handler)["__validators"]>;
+    type Input = ExtractInput<(typeof handler)['__validators']>;
     expectTypeOf<Input>().toEqualTypeOf<{
       params: { id: string };
       query: { format: string };
@@ -175,8 +175,8 @@ describe("ExtractInput<handler.__validators>", () => {
 
 // ─── Combined input + output (full pipeline) ────────────────────────────────
 
-describe("full extraction pipeline (input + output)", () => {
-  it("zod: body in, serialized object out", () => {
+describe('full extraction pipeline (input + output)', () => {
+  it('zod: body in, serialized object out', () => {
     const handler = defineHandler.withValidator({
       body: z.object({ email: z.string(), tags: z.array(z.string()) }),
     })((_c, { body }) => ({
@@ -184,8 +184,8 @@ describe("full extraction pipeline (input + output)", () => {
       tagCount: body.tags.length,
     }));
 
-    type Input = ExtractInput<(typeof handler)["__validators"]>;
-    type Output = Serialize<Awaited<(typeof handler)["__output"]>>;
+    type Input = ExtractInput<(typeof handler)['__validators']>;
+    type Output = Serialize<Awaited<(typeof handler)['__output']>>;
 
     expectTypeOf<Input>().toEqualTypeOf<{
       body: { email: string; tags: string[] };
@@ -193,14 +193,14 @@ describe("full extraction pipeline (input + output)", () => {
     expectTypeOf<Output>().toEqualTypeOf<{ email: string; tagCount: number }>();
   });
 
-  it("valibot: params + body in, array out", () => {
+  it('valibot: params + body in, array out', () => {
     const handler = defineHandler.withValidator({
       params: v.object({ userId: v.string() }),
       body: v.object({ role: v.string() }),
     })((_c, { params, body }) => [{ userId: params.userId, role: body.role }]);
 
-    type Input = ExtractInput<(typeof handler)["__validators"]>;
-    type Output = Serialize<Awaited<(typeof handler)["__output"]>>;
+    type Input = ExtractInput<(typeof handler)['__validators']>;
+    type Output = Serialize<Awaited<(typeof handler)['__output']>>;
 
     expectTypeOf<Input>().toEqualTypeOf<{
       params: { userId: string };
@@ -209,16 +209,16 @@ describe("full extraction pipeline (input + output)", () => {
     expectTypeOf<Output>().toEqualTypeOf<Array<{ userId: string; role: string }>>();
   });
 
-  it("arktype: query in, nested object out", () => {
+  it('arktype: query in, nested object out', () => {
     const handler = defineHandler.withValidator({
-      query: arktype({ q: "string" }),
+      query: arktype({ q: 'string' }),
     })((_c, { query }) => ({
       results: [{ match: query.q }],
       meta: { query: query.q },
     }));
 
-    type Input = ExtractInput<(typeof handler)["__validators"]>;
-    type Output = Serialize<Awaited<(typeof handler)["__output"]>>;
+    type Input = ExtractInput<(typeof handler)['__validators']>;
+    type Output = Serialize<Awaited<(typeof handler)['__output']>>;
 
     expectTypeOf<Input>().toEqualTypeOf<{ query: { q: string } }>();
     expectTypeOf<Output>().toEqualTypeOf<{

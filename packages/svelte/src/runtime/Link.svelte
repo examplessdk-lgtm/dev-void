@@ -16,26 +16,26 @@
   const router = getContext("__void_router");
 
   function getStrategies() {
-    if (prefetchProp === false) return [];
-    if (prefetchProp === true) return ["hover"];
-    if (typeof prefetchProp === "string") return [prefetchProp];
+    if (prefetchProp === false) {return [];}
+    if (prefetchProp === true) {return ["hover"];}
+    if (typeof prefetchProp === "string") {return [prefetchProp];}
     return prefetchProp;
   }
 
   function doPrefetch() {
-    if (!router?.prefetch) return;
+    if (!router?.prefetch) {return;}
     const current = window.location.pathname + window.location.search;
-    if (href === current) return;
+    if (href === current) {return;}
     const options = {};
-    if (cacheFor !== undefined) options.cacheFor = cacheFor;
-    if (method) options.method = method;
+    if (cacheFor !== undefined) {options.cacheFor = cacheFor;}
+    if (method) {options.method = method;}
     router.prefetch(href, options);
   }
 
   function onClick(e) {
-    if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0) {return;}
     const url = new URL(href, window.location.origin);
-    if (url.origin !== window.location.origin) return;
+    if (url.origin !== window.location.origin) {return;}
 
     e.preventDefault();
     router.visit(href, {
@@ -86,7 +86,7 @@
   });
 
   onDestroy(() => {
-    if (hoverTimer) clearTimeout(hoverTimer);
+    if (hoverTimer) {clearTimeout(hoverTimer);}
     if (observer) {
       observer.disconnect();
       observer = null;

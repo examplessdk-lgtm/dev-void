@@ -1,7 +1,7 @@
-import type { Plugin } from "vite";
+import type { Plugin } from 'vite';
 
-const BINDING_HINT_VIRTUAL = "virtual:void/binding-hint";
-const BINDING_HINT_RESOLVED = "\0" + BINDING_HINT_VIRTUAL;
+const BINDING_HINT_VIRTUAL = 'virtual:void/binding-hint';
+const BINDING_HINT_RESOLVED = '\0' + BINDING_HINT_VIRTUAL;
 
 const RESTARTING_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -61,8 +61,8 @@ const CLIENT_MODULE = `if (import.meta.hot) {
  */
 export function restartPlugin(): Plugin {
   return {
-    name: "void:restart",
-    apply: "serve",
+    name: 'void:restart',
+    apply: 'serve',
 
     resolveId: {
       filter: { id: /^virtual:void\/binding-hint$/ },
@@ -82,13 +82,13 @@ export function restartPlugin(): Plugin {
     configureServer(server) {
       let restartPending = false;
 
-      server.middlewares.use("/__void/ping", (_req, res) => {
+      server.middlewares.use('/__void/ping', (_req, res) => {
         res.writeHead(restartPending ? 503 : 200);
         res.end();
       });
 
-      server.middlewares.use("/__void/restart", (req, res) => {
-        if (req.method !== "POST") {
+      server.middlewares.use('/__void/restart', (req, res) => {
+        if (req.method !== 'POST') {
           res.writeHead(405);
           res.end();
           return;
@@ -99,8 +99,8 @@ export function restartPlugin(): Plugin {
         setTimeout(() => server.restart(), 50);
       });
 
-      server.middlewares.use("/__void/restarting", (_req, res) => {
-        res.writeHead(200, { "Content-Type": "text/html" });
+      server.middlewares.use('/__void/restarting', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(RESTARTING_HTML);
       });
     },

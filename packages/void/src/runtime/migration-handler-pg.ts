@@ -1,16 +1,16 @@
-import type { MigrationEntry, MigrationResponse, MigrationResult } from "./migration-handler";
+import type { MigrationEntry, MigrationResponse, MigrationResult } from './migration-handler';
 
 export function createMigrationHandler(
   env: Record<string, unknown>,
   migrations: MigrationEntry[],
-  _dialect: "sqlite" | "postgresql",
+  _dialect: 'sqlite' | 'postgresql',
   runAuthMigrations?: () => Promise<void>,
 ) {
   return async (request: Request): Promise<Response> => {
-    const token = request.headers.get("x-void-internal");
+    const token = request.headers.get('x-void-internal');
     if (!token || token !== (env as Record<string, string>).__VOID_PROXY_TOKEN) {
       return Response.json(
-        { ok: false, error: "unauthorized", migrations: [] } satisfies MigrationResponse,
+        { ok: false, error: 'unauthorized', migrations: [] } satisfies MigrationResponse,
         {
           status: 401,
         },
@@ -42,10 +42,10 @@ async function runPgMigrations(
 ): Promise<MigrationResponse> {
   const hyperdrive = (env as any).HYPERDRIVE;
   if (!hyperdrive?.connectionString) {
-    return { ok: false, error: "no HYPERDRIVE binding found", migrations: [] };
+    return { ok: false, error: 'no HYPERDRIVE binding found', migrations: [] };
   }
 
-  const { Client } = await import("pg");
+  const { Client } = await import('pg');
   const client = new Client({ connectionString: hyperdrive.connectionString });
   await client.connect();
 
@@ -57,7 +57,7 @@ async function runPgMigrations(
       )`,
     );
 
-    const { rows } = await client.query("SELECT name FROM _void_migrations");
+    const { rows } = await client.query('SELECT name FROM _void_migrations');
     const applied = new Set(rows.map((r: any) => r.name as string));
 
     const migrationResults: MigrationResult[] = [];
@@ -70,16 +70,16 @@ async function runPgMigrations(
 
       const start = Date.now();
       try {
-        await client.query("BEGIN");
+        await client.query('BEGIN');
         await client.query(m.sql);
-        await client.query("INSERT INTO _void_migrations (name, applied_at) VALUES ($1, $2)", [
+        await client.query('INSERT INTO _void_migrations (name, applied_at) VALUES ($1, $2)', [
           m.name,
           new Date().toISOString(),
         ]);
-        await client.query("COMMIT");
+        await client.query('COMMIT');
         migrationResults.push({ name: m.name, applied: true, durationMs: Date.now() - start });
       } catch (err) {
-        await client.query("ROLLBACK");
+        await client.query('ROLLBACK');
         migrationResults.push({
           name: m.name,
           applied: false,

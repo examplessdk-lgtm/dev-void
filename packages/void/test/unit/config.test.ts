@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, it, expect } from 'vitest';
 import {
   readConfig,
   convertHeadersConfig,
@@ -8,15 +8,15 @@ import {
   resolveBindingNames,
   isNodeTarget,
   getDatabaseDialect,
-} from "../../src/config";
+} from '../../src/config';
 
-const tmpDir = join(import.meta.dirname, ".tmp-config-test");
+const tmpDir = join(import.meta.dirname, '.tmp-config-test');
 
 function setup(content?: string) {
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
   if (content !== undefined) {
-    writeFileSync(join(tmpDir, "void.json"), content);
+    writeFileSync(join(tmpDir, 'void.json'), content);
   }
 }
 
@@ -24,412 +24,412 @@ function cleanup() {
   rmSync(tmpDir, { recursive: true, force: true });
 }
 
-describe("readConfig", () => {
-  it("returns empty config when no file exists", () => {
+describe('readConfig', () => {
+  it('returns empty config when no file exists', () => {
     setup();
     const config = readConfig(tmpDir);
     expect(config).toEqual({});
     cleanup();
   });
 
-  it("reads a valid config with all fields", () => {
+  it('reads a valid config with all fields', () => {
     setup(
       JSON.stringify({
         inference: {
           bindings: { db: true, kv: false },
-          appType: "spa",
-          outputDir: "dist",
+          appType: 'spa',
+          outputDir: 'dist',
         },
         routing: {
           headers: {
-            "/assets/*": ["Cache-Control: public, max-age=31536000, immutable"],
-            "/*": ["X-Frame-Options: DENY"],
+            '/assets/*': ['Cache-Control: public, max-age=31536000, immutable'],
+            '/*': ['X-Frame-Options: DENY'],
           },
         },
         worker: {
-          compatibility_date: "2025-12-01",
-          compatibility_flags: ["nodejs_compat"],
+          compatibility_date: '2025-12-01',
+          compatibility_flags: ['nodejs_compat'],
         },
       }),
     );
     const config = readConfig(tmpDir);
     expect(config.inference?.bindings).toEqual({ db: true, kv: false });
     expect(config.routing?.headers).toEqual({
-      "/assets/*": ["Cache-Control: public, max-age=31536000, immutable"],
-      "/*": ["X-Frame-Options: DENY"],
+      '/assets/*': ['Cache-Control: public, max-age=31536000, immutable'],
+      '/*': ['X-Frame-Options: DENY'],
     });
-    expect(config.inference?.appType).toBe("spa");
-    expect(config.inference?.outputDir).toBe("dist");
+    expect(config.inference?.appType).toBe('spa');
+    expect(config.inference?.outputDir).toBe('dist');
     expect(config.worker).toEqual({
-      compatibility_date: "2025-12-01",
-      compatibility_flags: ["nodejs_compat"],
+      compatibility_date: '2025-12-01',
+      compatibility_flags: ['nodejs_compat'],
     });
     cleanup();
   });
 
-  it("accepts empty object", () => {
-    setup("{}");
+  it('accepts empty object', () => {
+    setup('{}');
     const config = readConfig(tmpDir);
     expect(config).toEqual({});
     cleanup();
   });
 
-  it("accepts top-level auth providers", () => {
-    setup(JSON.stringify({ auth: { providers: ["email", "github", "discord"] } }));
+  it('accepts top-level auth providers', () => {
+    setup(JSON.stringify({ auth: { providers: ['email', 'github', 'discord'] } }));
     const config = readConfig(tmpDir);
-    expect(config.auth?.providers).toEqual(["email", "github", "discord"]);
+    expect(config.auth?.providers).toEqual(['email', 'github', 'discord']);
     cleanup();
   });
 
-  it("accepts an empty top-level auth object", () => {
+  it('accepts an empty top-level auth object', () => {
     setup(JSON.stringify({ auth: {} }));
     const config = readConfig(tmpDir);
     expect(config.auth).toEqual({});
     cleanup();
   });
 
-  it("ignores $schema field", () => {
-    setup(JSON.stringify({ $schema: "https://unpkg.com/void/schema.json" }));
+  it('ignores $schema field', () => {
+    setup(JSON.stringify({ $schema: 'https://unpkg.com/void/schema.json' }));
     const config = readConfig(tmpDir);
-    expect(config.$schema).toBe("https://unpkg.com/void/schema.json");
+    expect(config.$schema).toBe('https://unpkg.com/void/schema.json');
     cleanup();
   });
 
-  it("throws on invalid JSON", () => {
-    setup("{not json}");
-    expect(() => readConfig(tmpDir)).toThrow("Invalid JSON");
+  it('throws on invalid JSON', () => {
+    setup('{not json}');
+    expect(() => readConfig(tmpDir)).toThrow('Invalid JSON');
     cleanup();
   });
 
-  it("throws if root is not an object", () => {
+  it('throws if root is not an object', () => {
     setup('"hello"');
-    expect(() => readConfig(tmpDir)).toThrow("must be a JSON object");
+    expect(() => readConfig(tmpDir)).toThrow('must be a JSON object');
     cleanup();
   });
 
-  it("rejects inference.auth arrays", () => {
-    setup(JSON.stringify({ inference: { auth: ["github", "twitter"] } }));
+  it('rejects inference.auth arrays', () => {
+    setup(JSON.stringify({ inference: { auth: ['github', 'twitter'] } }));
     expect(() => readConfig(tmpDir)).toThrow(
       '"inference.auth" in void.json is no longer supported',
     );
     cleanup();
   });
 
-  it("rejects inference.auth regardless of type", () => {
-    setup(JSON.stringify({ inference: { auth: "github" } }));
+  it('rejects inference.auth regardless of type', () => {
+    setup(JSON.stringify({ inference: { auth: 'github' } }));
     expect(() => readConfig(tmpDir)).toThrow(
       '"inference.auth" in void.json is no longer supported',
     );
     cleanup();
   });
 
-  it("rejects unknown top-level auth providers", () => {
-    setup(JSON.stringify({ auth: { providers: ["email", "patreon"] } }));
+  it('rejects unknown top-level auth providers', () => {
+    setup(JSON.stringify({ auth: { providers: ['email', 'patreon'] } }));
     expect(() => readConfig(tmpDir)).toThrow('"auth.providers" value "patreon"');
     cleanup();
   });
 
-  it("rejects duplicate top-level auth providers", () => {
-    setup(JSON.stringify({ auth: { providers: ["github", "github"] } }));
+  it('rejects duplicate top-level auth providers', () => {
+    setup(JSON.stringify({ auth: { providers: ['github', 'github'] } }));
     expect(() => readConfig(tmpDir)).toThrow(
       '"auth.providers" in void.json must not contain duplicates',
     );
     cleanup();
   });
 
-  it("throws on invalid bindings type", () => {
-    setup(JSON.stringify({ inference: { bindings: "db" } }));
+  it('throws on invalid bindings type', () => {
+    setup(JSON.stringify({ inference: { bindings: 'db' } }));
     expect(() => readConfig(tmpDir)).toThrow('"inference.bindings"');
     cleanup();
   });
 
-  it("throws on unknown binding key", () => {
+  it('throws on unknown binding key', () => {
     setup(JSON.stringify({ inference: { bindings: { db: true, queue: true } } }));
     expect(() => readConfig(tmpDir)).toThrow('Unknown binding "queue"');
     cleanup();
   });
 
-  it("accepts string binding names for db/kv/storage", () => {
+  it('accepts string binding names for db/kv/storage', () => {
     setup(
       JSON.stringify({
-        inference: { bindings: { db: "MY_DB", kv: "MY_KV", storage: "MY_R2" } },
+        inference: { bindings: { db: 'MY_DB', kv: 'MY_KV', storage: 'MY_R2' } },
       }),
     );
     const config = readConfig(tmpDir);
-    expect(config.inference?.bindings?.db).toBe("MY_DB");
-    expect(config.inference?.bindings?.kv).toBe("MY_KV");
-    expect(config.inference?.bindings?.storage).toBe("MY_R2");
+    expect(config.inference?.bindings?.db).toBe('MY_DB');
+    expect(config.inference?.bindings?.kv).toBe('MY_KV');
+    expect(config.inference?.bindings?.storage).toBe('MY_R2');
     cleanup();
   });
 
-  it("throws on non-boolean ai binding value", () => {
-    setup(JSON.stringify({ inference: { bindings: { ai: "yes" } } }));
-    expect(() => readConfig(tmpDir)).toThrow("must be a boolean");
+  it('throws on non-boolean ai binding value', () => {
+    setup(JSON.stringify({ inference: { bindings: { ai: 'yes' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be a boolean');
     cleanup();
   });
 
-  it("throws on invalid binding value type", () => {
+  it('throws on invalid binding value type', () => {
     setup(JSON.stringify({ inference: { bindings: { db: 42 } } }));
-    expect(() => readConfig(tmpDir)).toThrow("must be a boolean or a string");
+    expect(() => readConfig(tmpDir)).toThrow('must be a boolean or a string');
     cleanup();
   });
 
-  it("throws on invalid appType", () => {
-    setup(JSON.stringify({ inference: { appType: "serverless" } }));
-    expect(() => readConfig(tmpDir)).toThrow("must be one of: spa, static, void");
+  it('throws on invalid appType', () => {
+    setup(JSON.stringify({ inference: { appType: 'serverless' } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be one of: spa, static, void');
     cleanup();
   });
 
-  it("throws on non-string outputDir", () => {
+  it('throws on non-string outputDir', () => {
     setup(JSON.stringify({ inference: { outputDir: 42 } }));
-    expect(() => readConfig(tmpDir)).toThrow("must be a string");
+    expect(() => readConfig(tmpDir)).toThrow('must be a string');
     cleanup();
   });
 
-  it("throws on header pattern not starting with /", () => {
+  it('throws on header pattern not starting with /', () => {
     setup(
       JSON.stringify({
-        routing: { headers: { "assets/*": ["Cache-Control: no-cache"] } },
+        routing: { headers: { 'assets/*': ['Cache-Control: no-cache'] } },
       }),
     );
     expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
     cleanup();
   });
 
-  it("throws on non-array header values", () => {
-    setup(JSON.stringify({ routing: { headers: { "/*": "X-Frame-Options: DENY" } } }));
-    expect(() => readConfig(tmpDir)).toThrow("must be an array of strings");
+  it('throws on non-array header values', () => {
+    setup(JSON.stringify({ routing: { headers: { '/*': 'X-Frame-Options: DENY' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be an array of strings');
     cleanup();
   });
 
-  it("throws on invalid worker type", () => {
-    setup(JSON.stringify({ worker: "yes" }));
+  it('throws on invalid worker type', () => {
+    setup(JSON.stringify({ worker: 'yes' }));
     expect(() => readConfig(tmpDir)).toThrow('"worker"');
     cleanup();
   });
 
-  it("throws on invalid compatibility_date format", () => {
-    setup(JSON.stringify({ worker: { compatibility_date: "not-a-date" } }));
-    expect(() => readConfig(tmpDir)).toThrow("YYYY-MM-DD format");
+  it('throws on invalid compatibility_date format', () => {
+    setup(JSON.stringify({ worker: { compatibility_date: 'not-a-date' } }));
+    expect(() => readConfig(tmpDir)).toThrow('YYYY-MM-DD format');
     cleanup();
   });
 
-  it("throws on partial compatibility_date format", () => {
-    setup(JSON.stringify({ worker: { compatibility_date: "2026-02" } }));
-    expect(() => readConfig(tmpDir)).toThrow("YYYY-MM-DD format");
+  it('throws on partial compatibility_date format', () => {
+    setup(JSON.stringify({ worker: { compatibility_date: '2026-02' } }));
+    expect(() => readConfig(tmpDir)).toThrow('YYYY-MM-DD format');
     cleanup();
   });
 
-  it("accepts valid compatibility_date format", () => {
-    setup(JSON.stringify({ worker: { compatibility_date: "2026-02-24" } }));
+  it('accepts valid compatibility_date format', () => {
+    setup(JSON.stringify({ worker: { compatibility_date: '2026-02-24' } }));
     const config = readConfig(tmpDir);
-    expect(config.worker?.compatibility_date).toBe("2026-02-24");
+    expect(config.worker?.compatibility_date).toBe('2026-02-24');
     cleanup();
   });
 
-  it("accepts routing.revalidate as a number", () => {
+  it('accepts routing.revalidate as a number', () => {
     setup(JSON.stringify({ routing: { revalidate: 60 } }));
     const config = readConfig(tmpDir);
     expect(config.routing?.revalidate).toBe(60);
     cleanup();
   });
 
-  it("accepts routing.revalidate as zero", () => {
+  it('accepts routing.revalidate as zero', () => {
     setup(JSON.stringify({ routing: { revalidate: 0 } }));
     const config = readConfig(tmpDir);
     expect(config.routing?.revalidate).toBe(0);
     cleanup();
   });
 
-  it("accepts routing.revalidate as a path map", () => {
+  it('accepts routing.revalidate as a path map', () => {
     setup(
       JSON.stringify({
-        routing: { revalidate: { "/": 60, "/docs/*": 31536000, "*": 30 } },
+        routing: { revalidate: { '/': 60, '/docs/*': 31536000, '*': 30 } },
       }),
     );
     const config = readConfig(tmpDir);
-    expect(config.routing?.revalidate).toEqual({ "/": 60, "/docs/*": 31536000, "*": 30 });
+    expect(config.routing?.revalidate).toEqual({ '/': 60, '/docs/*': 31536000, '*': 30 });
     cleanup();
   });
 
-  it("throws on negative routing.revalidate number", () => {
+  it('throws on negative routing.revalidate number', () => {
     setup(JSON.stringify({ routing: { revalidate: -1 } }));
     expect(() => readConfig(tmpDir)).toThrow('"routing.revalidate"');
     cleanup();
   });
 
-  it("throws on string routing.revalidate", () => {
-    setup(JSON.stringify({ routing: { revalidate: "60" } }));
+  it('throws on string routing.revalidate', () => {
+    setup(JSON.stringify({ routing: { revalidate: '60' } }));
     expect(() => readConfig(tmpDir)).toThrow('"routing.revalidate"');
     cleanup();
   });
 
-  it("throws on non-numeric routing.revalidate path map value", () => {
-    setup(JSON.stringify({ routing: { revalidate: { "/": "60" } } }));
+  it('throws on non-numeric routing.revalidate path map value', () => {
+    setup(JSON.stringify({ routing: { revalidate: { '/': '60' } } }));
     expect(() => readConfig(tmpDir)).toThrow('"routing.revalidate"');
     cleanup();
   });
 
-  it("throws on negative routing.revalidate path map value", () => {
-    setup(JSON.stringify({ routing: { revalidate: { "/": -10 } } }));
+  it('throws on negative routing.revalidate path map value', () => {
+    setup(JSON.stringify({ routing: { revalidate: { '/': -10 } } }));
     expect(() => readConfig(tmpDir)).toThrow('"routing.revalidate"');
     cleanup();
   });
 
-  it("throws on routing.revalidate path map key not starting with / or *", () => {
+  it('throws on routing.revalidate path map key not starting with / or *', () => {
     setup(JSON.stringify({ routing: { revalidate: { docs: 60 } } }));
     expect(() => readConfig(tmpDir)).toThrow('"routing.revalidate"');
     cleanup();
   });
 
-  it("throws on invalid routing type", () => {
-    setup(JSON.stringify({ routing: "invalid" }));
+  it('throws on invalid routing type', () => {
+    setup(JSON.stringify({ routing: 'invalid' }));
     expect(() => readConfig(tmpDir)).toThrow('"routing" in void.json must be an object');
     cleanup();
   });
 
-  it("accepts empty routing object", () => {
+  it('accepts empty routing object', () => {
     setup(JSON.stringify({ routing: {} }));
     const config = readConfig(tmpDir);
     expect(config.routing).toEqual({});
     cleanup();
   });
 
-  it("accepts build command string", () => {
-    setup(JSON.stringify({ inference: { build: "nuxt build" } }));
+  it('accepts build command string', () => {
+    setup(JSON.stringify({ inference: { build: 'nuxt build' } }));
     const config = readConfig(tmpDir);
-    expect(config.inference?.build).toBe("nuxt build");
+    expect(config.inference?.build).toBe('nuxt build');
     cleanup();
   });
 
-  it("throws on non-string build", () => {
+  it('throws on non-string build', () => {
     setup(JSON.stringify({ inference: { build: true } }));
     expect(() => readConfig(tmpDir)).toThrow('"inference.build" in void.json must be a string');
     cleanup();
   });
 
-  it("accepts routing.prerender paths", () => {
-    setup(JSON.stringify({ routing: { prerender: ["/", "/about", "/docs/intro"] } }));
+  it('accepts routing.prerender paths', () => {
+    setup(JSON.stringify({ routing: { prerender: ['/', '/about', '/docs/intro'] } }));
     const config = readConfig(tmpDir);
-    expect(config.routing?.prerender).toEqual(["/", "/about", "/docs/intro"]);
+    expect(config.routing?.prerender).toEqual(['/', '/about', '/docs/intro']);
     cleanup();
   });
 
-  it("throws on non-array routing.prerender", () => {
-    setup(JSON.stringify({ routing: { prerender: "/about" } }));
+  it('throws on non-array routing.prerender', () => {
+    setup(JSON.stringify({ routing: { prerender: '/about' } }));
     expect(() => readConfig(tmpDir)).toThrow('"routing.prerender" in void.json must be an array');
     cleanup();
   });
 
-  it("throws on routing.prerender path not starting with /", () => {
-    setup(JSON.stringify({ routing: { prerender: ["about"] } }));
+  it('throws on routing.prerender path not starting with /', () => {
+    setup(JSON.stringify({ routing: { prerender: ['about'] } }));
     expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
     cleanup();
   });
 
-  it("accepts scanDirs as array of strings", () => {
-    setup(JSON.stringify({ inference: { scanDirs: ["src", "lib", "server"] } }));
+  it('accepts scanDirs as array of strings', () => {
+    setup(JSON.stringify({ inference: { scanDirs: ['src', 'lib', 'server'] } }));
     const config = readConfig(tmpDir);
-    expect(config.inference?.scanDirs).toEqual(["src", "lib", "server"]);
+    expect(config.inference?.scanDirs).toEqual(['src', 'lib', 'server']);
     cleanup();
   });
 
-  it("throws on non-array scanDirs", () => {
-    setup(JSON.stringify({ inference: { scanDirs: "src" } }));
+  it('throws on non-array scanDirs', () => {
+    setup(JSON.stringify({ inference: { scanDirs: 'src' } }));
     expect(() => readConfig(tmpDir)).toThrow('"inference.scanDirs" in void.json must be an array');
     cleanup();
   });
 
-  it("throws on absolute path in scanDirs", () => {
-    setup(JSON.stringify({ inference: { scanDirs: ["/etc/passwd"] } }));
-    expect(() => readConfig(tmpDir)).toThrow("must be a relative directory");
+  it('throws on absolute path in scanDirs', () => {
+    setup(JSON.stringify({ inference: { scanDirs: ['/etc/passwd'] } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be a relative directory');
     cleanup();
   });
 
-  it("throws on parent traversal in scanDirs", () => {
-    setup(JSON.stringify({ inference: { scanDirs: ["../secrets"] } }));
-    expect(() => readConfig(tmpDir)).toThrow("must be a relative directory");
+  it('throws on parent traversal in scanDirs', () => {
+    setup(JSON.stringify({ inference: { scanDirs: ['../secrets'] } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be a relative directory');
     cleanup();
   });
 });
 
-describe("readConfig migration errors", () => {
-  it("throws when auth is not an object", () => {
-    setup(JSON.stringify({ auth: ["github"] }));
+describe('readConfig migration errors', () => {
+  it('throws when auth is not an object', () => {
+    setup(JSON.stringify({ auth: ['github'] }));
     expect(() => readConfig(tmpDir)).toThrow('"auth" in void.json must be an object');
     cleanup();
   });
 
-  it("throws migration error when old flat bindings key is used", () => {
+  it('throws migration error when old flat bindings key is used', () => {
     setup(JSON.stringify({ bindings: { db: true } }));
     expect(() => readConfig(tmpDir)).toThrow('"bindings" has moved to "inference.bindings"');
     cleanup();
   });
 
-  it("throws migration error when old flat headers key is used", () => {
-    setup(JSON.stringify({ headers: { "/*": ["X-Frame-Options: DENY"] } }));
+  it('throws migration error when old flat headers key is used', () => {
+    setup(JSON.stringify({ headers: { '/*': ['X-Frame-Options: DENY'] } }));
     expect(() => readConfig(tmpDir)).toThrow('"headers" has moved to "routing.headers"');
     cleanup();
   });
 
-  it("throws migration error when old flat redirects key is used", () => {
-    setup(JSON.stringify({ redirects: { "/old": "/new" } }));
+  it('throws migration error when old flat redirects key is used', () => {
+    setup(JSON.stringify({ redirects: { '/old': '/new' } }));
     expect(() => readConfig(tmpDir)).toThrow('"redirects" has moved to "routing.redirects"');
     cleanup();
   });
 
-  it("throws migration error when old cache key is used", () => {
+  it('throws migration error when old cache key is used', () => {
     setup(JSON.stringify({ cache: { revalidate: 60 } }));
     expect(() => readConfig(tmpDir)).toThrow('"cache" has been replaced by "routing"');
     cleanup();
   });
 
-  it("throws migration error when old wrangler key is used", () => {
-    setup(JSON.stringify({ wrangler: { compatibility_date: "2025-12-01" } }));
+  it('throws migration error when old wrangler key is used', () => {
+    setup(JSON.stringify({ wrangler: { compatibility_date: '2025-12-01' } }));
     expect(() => readConfig(tmpDir)).toThrow('"wrangler" has been renamed to "worker"');
     cleanup();
   });
 
-  it("throws migration error when old mode key is used", () => {
-    setup(JSON.stringify({ mode: "spa" }));
+  it('throws migration error when old mode key is used', () => {
+    setup(JSON.stringify({ mode: 'spa' }));
     expect(() => readConfig(tmpDir)).toThrow('"mode" has been renamed to "inference.appType"');
     cleanup();
   });
 
-  it("throws migration error when old flat build key is used", () => {
-    setup(JSON.stringify({ build: "nuxt build" }));
+  it('throws migration error when old flat build key is used', () => {
+    setup(JSON.stringify({ build: 'nuxt build' }));
     expect(() => readConfig(tmpDir)).toThrow('"build" has moved to "inference.build"');
     cleanup();
   });
 
-  it("throws migration error when old flat scanDirs key is used", () => {
-    setup(JSON.stringify({ scanDirs: ["src"] }));
+  it('throws migration error when old flat scanDirs key is used', () => {
+    setup(JSON.stringify({ scanDirs: ['src'] }));
     expect(() => readConfig(tmpDir)).toThrow('"scanDirs" has moved to "inference.scanDirs"');
     cleanup();
   });
 
-  it("throws migration error when old flat appType key is used", () => {
-    setup(JSON.stringify({ appType: "spa" }));
+  it('throws migration error when old flat appType key is used', () => {
+    setup(JSON.stringify({ appType: 'spa' }));
     expect(() => readConfig(tmpDir)).toThrow('"appType" has moved to "inference.appType"');
     cleanup();
   });
 
-  it("throws migration error when old flat outputDir key is used", () => {
-    setup(JSON.stringify({ outputDir: "dist" }));
+  it('throws migration error when old flat outputDir key is used', () => {
+    setup(JSON.stringify({ outputDir: 'dist' }));
     expect(() => readConfig(tmpDir)).toThrow('"outputDir" has moved to "inference.outputDir"');
     cleanup();
   });
 
-  it("throws migration error when old top-level revalidate is used", () => {
+  it('throws migration error when old top-level revalidate is used', () => {
     setup(JSON.stringify({ revalidate: 60 }));
     expect(() => readConfig(tmpDir)).toThrow('"revalidate" has moved to "routing.revalidate"');
     cleanup();
   });
 });
 
-describe("readConfig target", () => {
-  it("accepts valid target values", () => {
-    for (const target of ["cloudflare", "node", "bun", "deno"]) {
+describe('readConfig target', () => {
+  it('accepts valid target values', () => {
+    for (const target of ['cloudflare', 'node', 'bun', 'deno']) {
       setup(JSON.stringify({ target }));
       const config = readConfig(tmpDir);
       expect(config.target).toBe(target);
@@ -437,257 +437,257 @@ describe("readConfig target", () => {
     }
   });
 
-  it("defaults target to undefined (cloudflare is implicit default)", () => {
+  it('defaults target to undefined (cloudflare is implicit default)', () => {
     setup(JSON.stringify({}));
     const config = readConfig(tmpDir);
     expect(config.target).toBeUndefined();
     cleanup();
   });
 
-  it("rejects invalid target value", () => {
-    setup(JSON.stringify({ target: "lambda" }));
+  it('rejects invalid target value', () => {
+    setup(JSON.stringify({ target: 'lambda' }));
     expect(() => readConfig(tmpDir)).toThrow('"target" in void.json must be one of');
     cleanup();
   });
 
-  it("warns on CF-only fields with non-CF target via isNodeTarget", () => {
-    expect(isNodeTarget("node")).toBe(true);
-    expect(isNodeTarget("bun")).toBe(true);
-    expect(isNodeTarget("deno")).toBe(true);
+  it('warns on CF-only fields with non-CF target via isNodeTarget', () => {
+    expect(isNodeTarget('node')).toBe(true);
+    expect(isNodeTarget('bun')).toBe(true);
+    expect(isNodeTarget('deno')).toBe(true);
     expect(isNodeTarget(undefined)).toBe(false);
-    expect(isNodeTarget("cloudflare")).toBe(false);
+    expect(isNodeTarget('cloudflare')).toBe(false);
   });
 });
 
-describe("readConfig redirects", () => {
-  it("accepts redirects with string destinations", () => {
-    setup(JSON.stringify({ routing: { redirects: { "/old": "/new" } } }));
+describe('readConfig redirects', () => {
+  it('accepts redirects with string destinations', () => {
+    setup(JSON.stringify({ routing: { redirects: { '/old': '/new' } } }));
     const config = readConfig(tmpDir);
-    expect(config.routing?.redirects).toEqual({ "/old": "/new" });
+    expect(config.routing?.redirects).toEqual({ '/old': '/new' });
     cleanup();
   });
 
-  it("accepts redirects with object destinations", () => {
-    setup(JSON.stringify({ routing: { redirects: { "/old": { to: "/new", status: 301 } } } }));
+  it('accepts redirects with object destinations', () => {
+    setup(JSON.stringify({ routing: { redirects: { '/old': { to: '/new', status: 301 } } } }));
     const config = readConfig(tmpDir);
-    expect(config.routing?.redirects).toEqual({ "/old": { to: "/new", status: 301 } });
+    expect(config.routing?.redirects).toEqual({ '/old': { to: '/new', status: 301 } });
     cleanup();
   });
 
-  it("accepts mixed string and object destinations", () => {
+  it('accepts mixed string and object destinations', () => {
     setup(
       JSON.stringify({
         routing: {
           redirects: {
-            "/a": "/b",
-            "/c": { to: "/d", status: 308 },
+            '/a': '/b',
+            '/c': { to: '/d', status: 308 },
           },
         },
       }),
     );
     const config = readConfig(tmpDir);
     expect(config.routing?.redirects).toEqual({
-      "/a": "/b",
-      "/c": { to: "/d", status: 308 },
+      '/a': '/b',
+      '/c': { to: '/d', status: 308 },
     });
     cleanup();
   });
 
-  it("throws on redirect source not starting with /", () => {
-    setup(JSON.stringify({ routing: { redirects: { old: "/new" } } }));
+  it('throws on redirect source not starting with /', () => {
+    setup(JSON.stringify({ routing: { redirects: { old: '/new' } } }));
     expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
     cleanup();
   });
 
-  it("throws on invalid redirects type", () => {
-    setup(JSON.stringify({ routing: { redirects: ["/old", "/new"] } }));
+  it('throws on invalid redirects type', () => {
+    setup(JSON.stringify({ routing: { redirects: ['/old', '/new'] } }));
     expect(() => readConfig(tmpDir)).toThrow('"routing.redirects" in void.json must be an object');
     cleanup();
   });
 
-  it("throws on invalid destination type", () => {
-    setup(JSON.stringify({ routing: { redirects: { "/old": 42 } } }));
-    expect(() => readConfig(tmpDir)).toThrow("must be a string or an object");
+  it('throws on invalid destination type', () => {
+    setup(JSON.stringify({ routing: { redirects: { '/old': 42 } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be a string or an object');
     cleanup();
   });
 
   it("throws on missing 'to' in object destination", () => {
-    setup(JSON.stringify({ routing: { redirects: { "/old": { status: 301 } } } }));
+    setup(JSON.stringify({ routing: { redirects: { '/old': { status: 301 } } } }));
     expect(() => readConfig(tmpDir)).toThrow('must have a "to" string');
     cleanup();
   });
 
-  it("throws on invalid status code", () => {
-    setup(JSON.stringify({ routing: { redirects: { "/old": { to: "/new", status: 200 } } } }));
-    expect(() => readConfig(tmpDir)).toThrow("must be 301, 302, 307, or 308");
+  it('throws on invalid status code', () => {
+    setup(JSON.stringify({ routing: { redirects: { '/old': { to: '/new', status: 200 } } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be 301, 302, 307, or 308');
     cleanup();
   });
 });
 
-describe("convertHeadersConfig", () => {
-  it("returns undefined for undefined input", () => {
+describe('convertHeadersConfig', () => {
+  it('returns undefined for undefined input', () => {
     expect(convertHeadersConfig(undefined)).toBeUndefined();
   });
 
-  it("returns undefined for empty object", () => {
+  it('returns undefined for empty object', () => {
     expect(convertHeadersConfig({})).toBeUndefined();
   });
 
-  it("converts a single pattern with one header", () => {
+  it('converts a single pattern with one header', () => {
     const result = convertHeadersConfig({
-      "/assets/*": ["Cache-Control: public, max-age=31536000, immutable"],
+      '/assets/*': ['Cache-Control: public, max-age=31536000, immutable'],
     });
     expect(result).toEqual([
       {
-        pattern: "/assets/*",
-        headers: [["Cache-Control", "public, max-age=31536000, immutable"]],
+        pattern: '/assets/*',
+        headers: [['Cache-Control', 'public, max-age=31536000, immutable']],
       },
     ]);
   });
 
-  it("converts multiple patterns with multiple headers", () => {
+  it('converts multiple patterns with multiple headers', () => {
     const result = convertHeadersConfig({
-      "/assets/*": ["Cache-Control: public, max-age=31536000, immutable"],
-      "/*": ["X-Frame-Options: DENY", "X-Content-Type-Options: nosniff"],
+      '/assets/*': ['Cache-Control: public, max-age=31536000, immutable'],
+      '/*': ['X-Frame-Options: DENY', 'X-Content-Type-Options: nosniff'],
     });
     expect(result).toEqual([
       {
-        pattern: "/assets/*",
-        headers: [["Cache-Control", "public, max-age=31536000, immutable"]],
+        pattern: '/assets/*',
+        headers: [['Cache-Control', 'public, max-age=31536000, immutable']],
       },
       {
-        pattern: "/*",
+        pattern: '/*',
         headers: [
-          ["X-Frame-Options", "DENY"],
-          ["X-Content-Type-Options", "nosniff"],
+          ['X-Frame-Options', 'DENY'],
+          ['X-Content-Type-Options', 'nosniff'],
         ],
       },
     ]);
   });
 
-  it("handles header values with colons", () => {
+  it('handles header values with colons', () => {
     const result = convertHeadersConfig({
-      "/api/*": ['Link: <https://example.com>; rel="preconnect"'],
+      '/api/*': ['Link: <https://example.com>; rel="preconnect"'],
     });
     expect(result).toEqual([
       {
-        pattern: "/api/*",
-        headers: [["Link", '<https://example.com>; rel="preconnect"']],
+        pattern: '/api/*',
+        headers: [['Link', '<https://example.com>; rel="preconnect"']],
       },
     ]);
   });
 
-  it("skips entries without colons", () => {
+  it('skips entries without colons', () => {
     const result = convertHeadersConfig({
-      "/*": ["not-a-header", "X-Frame-Options: DENY"],
+      '/*': ['not-a-header', 'X-Frame-Options: DENY'],
     });
     expect(result).toEqual([
       {
-        pattern: "/*",
-        headers: [["X-Frame-Options", "DENY"]],
+        pattern: '/*',
+        headers: [['X-Frame-Options', 'DENY']],
       },
     ]);
   });
 
-  it("skips patterns with only invalid entries", () => {
+  it('skips patterns with only invalid entries', () => {
     const result = convertHeadersConfig({
-      "/assets/*": ["Cache-Control: ok"],
-      "/*": ["not-a-header"],
+      '/assets/*': ['Cache-Control: ok'],
+      '/*': ['not-a-header'],
     });
     expect(result).toEqual([
       {
-        pattern: "/assets/*",
-        headers: [["Cache-Control", "ok"]],
+        pattern: '/assets/*',
+        headers: [['Cache-Control', 'ok']],
       },
     ]);
   });
 });
 
-describe("convertRedirectsConfig", () => {
-  it("returns undefined for undefined input", () => {
+describe('convertRedirectsConfig', () => {
+  it('returns undefined for undefined input', () => {
     expect(convertRedirectsConfig(undefined)).toBeUndefined();
   });
 
-  it("returns undefined for empty object", () => {
+  it('returns undefined for empty object', () => {
     expect(convertRedirectsConfig({})).toBeUndefined();
   });
 
-  it("converts string destinations with default 302", () => {
-    const result = convertRedirectsConfig({ "/old": "/new" });
-    expect(result).toEqual([{ source: "/old", destination: "/new", status: 302 }]);
+  it('converts string destinations with default 302', () => {
+    const result = convertRedirectsConfig({ '/old': '/new' });
+    expect(result).toEqual([{ source: '/old', destination: '/new', status: 302 }]);
   });
 
-  it("converts object destinations with explicit status", () => {
-    const result = convertRedirectsConfig({ "/old": { to: "/new", status: 301 } });
-    expect(result).toEqual([{ source: "/old", destination: "/new", status: 301 }]);
+  it('converts object destinations with explicit status', () => {
+    const result = convertRedirectsConfig({ '/old': { to: '/new', status: 301 } });
+    expect(result).toEqual([{ source: '/old', destination: '/new', status: 301 }]);
   });
 
-  it("converts mixed entries preserving order", () => {
+  it('converts mixed entries preserving order', () => {
     const result = convertRedirectsConfig({
-      "/a": "/b",
-      "/c/*": { to: "/d/:splat", status: 308 },
+      '/a': '/b',
+      '/c/*': { to: '/d/:splat', status: 308 },
     });
     expect(result).toEqual([
-      { source: "/a", destination: "/b", status: 302 },
-      { source: "/c/*", destination: "/d/:splat", status: 308 },
+      { source: '/a', destination: '/b', status: 302 },
+      { source: '/c/*', destination: '/d/:splat', status: 308 },
     ]);
   });
 });
 
-describe("database config", () => {
-  it("defaults to sqlite when omitted", () => {
-    setup("{}");
+describe('database config', () => {
+  it('defaults to sqlite when omitted', () => {
+    setup('{}');
     const config = readConfig(tmpDir);
-    expect(getDatabaseDialect(config)).toBe("sqlite");
+    expect(getDatabaseDialect(config)).toBe('sqlite');
     cleanup();
   });
 
-  it("defaults to sqlite for empty config", () => {
+  it('defaults to sqlite for empty config', () => {
     setup();
-    expect(getDatabaseDialect({})).toBe("sqlite");
+    expect(getDatabaseDialect({})).toBe('sqlite');
   });
 
-  it("accepts pg", () => {
-    setup(JSON.stringify({ database: "pg" }));
+  it('accepts pg', () => {
+    setup(JSON.stringify({ database: 'pg' }));
     const config = readConfig(tmpDir);
-    expect(getDatabaseDialect(config)).toBe("postgresql");
+    expect(getDatabaseDialect(config)).toBe('postgresql');
     cleanup();
   });
 
-  it("rejects invalid value", () => {
-    setup(JSON.stringify({ database: "mysql" }));
+  it('rejects invalid value', () => {
+    setup(JSON.stringify({ database: 'mysql' }));
     expect(() => readConfig(tmpDir)).toThrow('"database" in void.json must be "pg"');
     cleanup();
   });
 
-  it("rejects object value", () => {
-    setup(JSON.stringify({ database: { dialect: "pg" } }));
+  it('rejects object value', () => {
+    setup(JSON.stringify({ database: { dialect: 'pg' } }));
     expect(() => readConfig(tmpDir)).toThrow('"database" in void.json must be "pg"');
     cleanup();
   });
 });
 
-describe("resolveBindingNames", () => {
-  it("returns undefined for no bindings", () => {
+describe('resolveBindingNames', () => {
+  it('returns undefined for no bindings', () => {
     expect(resolveBindingNames(undefined)).toBeUndefined();
   });
 
-  it("returns undefined for boolean-only bindings", () => {
+  it('returns undefined for boolean-only bindings', () => {
     expect(resolveBindingNames({ db: true, kv: true })).toBeUndefined();
   });
 
-  it("returns custom names for string bindings", () => {
-    expect(resolveBindingNames({ db: "MY_DB", kv: true, storage: "BUCKET" })).toEqual({
-      d1: "MY_DB",
-      r2: "BUCKET",
+  it('returns custom names for string bindings', () => {
+    expect(resolveBindingNames({ db: 'MY_DB', kv: true, storage: 'BUCKET' })).toEqual({
+      d1: 'MY_DB',
+      r2: 'BUCKET',
     });
   });
 
-  it("returns all custom names", () => {
-    expect(resolveBindingNames({ db: "D", kv: "K", storage: "S" })).toEqual({
-      d1: "D",
-      kv: "K",
-      r2: "S",
+  it('returns all custom names', () => {
+    expect(resolveBindingNames({ db: 'D', kv: 'K', storage: 'S' })).toEqual({
+      d1: 'D',
+      kv: 'K',
+      r2: 'S',
     });
   });
 });

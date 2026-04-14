@@ -5,10 +5,10 @@ import {
   readdirSync,
   readlinkSync,
   symlinkSync,
-} from "node:fs";
-import { join, relative } from "node:path";
-import { log } from "@clack/prompts";
-import { detectAgents, getPackageDir, type AgentConfig } from "./agents";
+} from 'node:fs';
+import { join, relative } from 'node:path';
+import { log } from '@clack/prompts';
+import { detectAgents, getPackageDir, type AgentConfig } from './agents';
 
 interface SkillInfo {
   dirName: string;
@@ -17,22 +17,30 @@ interface SkillInfo {
 }
 
 function parseSkills(skillsDir: string): SkillInfo[] {
-  if (!existsSync(skillsDir)) return [];
+  if (!existsSync(skillsDir)) {
+    return [];
+  }
   const entries = readdirSync(skillsDir, { withFileTypes: true });
   const skills: SkillInfo[] = [];
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const skillMd = join(skillsDir, entry.name, "SKILL.md");
-    if (!existsSync(skillMd)) continue;
-    const content = readFileSync(skillMd, "utf-8");
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const skillMd = join(skillsDir, entry.name, 'SKILL.md');
+    if (!existsSync(skillMd)) {
+      continue;
+    }
+    const content = readFileSync(skillMd, 'utf-8');
     const frontmatter = content.match(/^---\n([\s\S]*?)\n---/);
-    if (!frontmatter) continue;
+    if (!frontmatter) {
+      continue;
+    }
     const nameMatch = frontmatter[1].match(/^name:\s*(.+)$/m);
     const descMatch = frontmatter[1].match(/^description:\s*(.+)$/m);
     skills.push({
       dirName: entry.name,
       name: nameMatch ? nameMatch[1].trim() : entry.name,
-      description: descMatch ? descMatch[1].trim() : "",
+      description: descMatch ? descMatch[1].trim() : '',
     });
   }
   return skills;
@@ -80,12 +88,16 @@ function linkSkills(
  */
 export function linkSkillsForAgents(root: string): number {
   const packageDir = getPackageDir();
-  const skillsDir = join(packageDir, "skills");
+  const skillsDir = join(packageDir, 'skills');
   const skills = parseSkills(skillsDir);
-  if (skills.length === 0) return 0;
+  if (skills.length === 0) {
+    return 0;
+  }
 
   const detected = detectAgents(root);
-  if (detected.length === 0) return 0;
+  if (detected.length === 0) {
+    return 0;
+  }
 
   let totalLinked = 0;
   for (const agent of detected) {
@@ -97,11 +109,15 @@ export function linkSkillsForAgents(root: string): number {
 
 export function linkSkillsForSpecificAgents(root: string, agents: AgentConfig[]): number {
   const packageDir = getPackageDir();
-  const skillsDir = join(packageDir, "skills");
+  const skillsDir = join(packageDir, 'skills');
   const skills = parseSkills(skillsDir);
-  if (skills.length === 0) return 0;
+  if (skills.length === 0) {
+    return 0;
+  }
 
-  if (agents.length === 0) return 0;
+  if (agents.length === 0) {
+    return 0;
+  }
 
   let totalLinked = 0;
   for (const agent of agents) {

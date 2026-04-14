@@ -1,13 +1,13 @@
-import { existsSync, readFileSync } from "node:fs";
-import { globSync } from "tinyglobby";
-import { join } from "node:path";
-import { inferBindingsFromSource, mergeBindings, type InferredBindings } from "./inference/walk";
-import { getSsrServerEntryPath } from "./ssr/entry";
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { globSync } from 'tinyglobby';
+import { inferBindingsFromSource, mergeBindings, type InferredBindings } from './inference/walk';
+import { getSsrServerEntryPath } from './ssr/entry';
 
-const SOURCE_GLOB = "**/*.{ts,tsx,mts,js,jsx,mjs,astro}";
+const SOURCE_GLOB = '**/*.{ts,tsx,mts,js,jsx,mjs,astro}';
 
 /** Framework class determines integration depth. */
-export type FrameworkClass = "a" | "b" | "c";
+export type FrameworkClass = 'a' | 'b' | 'c';
 
 export interface DetectedFramework {
   name: string;
@@ -15,10 +15,10 @@ export interface DetectedFramework {
 }
 
 /** Class A framework names (used for entry point lookup). */
-export type Framework = "tanstack-start" | "react-router" | "vinext-app" | "vinext-pages";
+export type Framework = 'tanstack-start' | 'react-router' | 'vinext-app' | 'vinext-pages';
 
 /** Directories to scan for binding inference in framework mode. */
-export const FRAMEWORK_SCAN_DIRS = ["src", "app", "pages", "routes", "server"] as const;
+export const FRAMEWORK_SCAN_DIRS = ['src', 'app', 'pages', 'routes', 'server'] as const;
 
 /**
  * Map from npm package name to framework identifier.
@@ -27,12 +27,12 @@ export const FRAMEWORK_SCAN_DIRS = ["src", "app", "pages", "routes", "server"] a
  * `@react-router/dev` signals the framework (Vite plugin) mode.
  */
 const FRAMEWORK_PACKAGES: Record<string, DetectedFramework> = {
-  "@tanstack/react-start": { name: "tanstack-start", class: "a" },
-  "@react-router/dev": { name: "react-router", class: "a" },
-  vinext: { name: "vinext-pages", class: "a" },
-  "@sveltejs/kit": { name: "sveltekit", class: "b" },
-  nuxt: { name: "nuxt", class: "c" },
-  astro: { name: "astro", class: "c" },
+  '@tanstack/react-start': { name: 'tanstack-start', class: 'a' },
+  '@react-router/dev': { name: 'react-router', class: 'a' },
+  vinext: { name: 'vinext-pages', class: 'a' },
+  '@sveltejs/kit': { name: 'sveltekit', class: 'b' },
+  nuxt: { name: 'nuxt', class: 'c' },
+  astro: { name: 'astro', class: 'c' },
 };
 
 /**
@@ -42,7 +42,7 @@ const FRAMEWORK_PACKAGES: Record<string, DetectedFramework> = {
 export function detectFramework(root: string): DetectedFramework | undefined {
   let pkg: Record<string, unknown>;
   try {
-    pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
+    pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
   } catch {
     return undefined;
   }
@@ -53,8 +53,8 @@ export function detectFramework(root: string): DetectedFramework | undefined {
   for (const [pkgName, framework] of Object.entries(FRAMEWORK_PACKAGES)) {
     if (pkgName in deps) {
       // vinext has two modes: App Router (app/ exists) vs Pages Router
-      if (framework.name === "vinext-pages" && existsSync(join(root, "app"))) {
-        return { name: "vinext-app", class: "a" };
+      if (framework.name === 'vinext-pages' && existsSync(join(root, 'app'))) {
+        return { name: 'vinext-app', class: 'a' };
       }
       return framework;
     }
@@ -74,17 +74,17 @@ export interface InferenceOptions {
 
 function extractAstroFrontmatter(code: string): string {
   const match = code.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  return match?.[1] ?? "";
+  return match?.[1] ?? '';
 }
 
 function inferBindingsFromFile(file: string, code: string): InferredBindings {
-  const filename = file.split("/").pop() ?? "unknown.ts";
-  if (!filename.endsWith(".astro")) {
+  const filename = file.split('/').pop() ?? 'unknown.ts';
+  if (!filename.endsWith('.astro')) {
     return inferBindingsFromSource(code, filename);
   }
 
   const frontmatter = extractAstroFrontmatter(code);
-  const virtualFilename = filename.replace(/\.astro$/, ".ts");
+  const virtualFilename = filename.replace(/\.astro$/, '.ts');
   return inferBindingsFromSource(frontmatter, virtualFilename);
 }
 
@@ -114,7 +114,7 @@ export function inferProjectBindings(
     };
   }
 
-  const dirs = scanDirs ?? ["routes", "middleware", "queues", "pages", "crons"];
+  const dirs = scanDirs ?? ['routes', 'middleware', 'queues', 'pages', 'crons'];
   const allBindings: InferredBindings[] = [];
 
   for (const dir of dirs) {
@@ -127,22 +127,22 @@ export function inferProjectBindings(
     }
 
     for (const file of files) {
-      const code = readFileSync(file, "utf-8");
+      const code = readFileSync(file, 'utf-8');
       allBindings.push(inferBindingsFromFile(file, code));
     }
   }
 
   const ssrEntry = getSsrServerEntryPath(root);
   if (ssrEntry) {
-    const code = readFileSync(ssrEntry, "utf-8");
-    const filename = ssrEntry.split("/").pop() ?? "main.ssr.ts";
+    const code = readFileSync(ssrEntry, 'utf-8');
+    const filename = ssrEntry.split('/').pop() ?? 'main.ssr.ts';
     allBindings.push(inferBindingsFromSource(code, filename));
   }
 
   // Also scan src/ for auth imports (unless src/ is already in scanDirs)
   const dirsSet = new Set(dirs);
-  if (!dirsSet.has("src")) {
-    const srcPath = join(root, "src");
+  if (!dirsSet.has('src')) {
+    const srcPath = join(root, 'src');
     let srcFiles: string[];
     try {
       srcFiles = globSync(SOURCE_GLOB, { cwd: srcPath, absolute: true });
@@ -150,7 +150,7 @@ export function inferProjectBindings(
       srcFiles = [];
     }
     for (const file of srcFiles) {
-      const code = readFileSync(file, "utf-8");
+      const code = readFileSync(file, 'utf-8');
       allBindings.push(inferBindingsFromFile(file, code));
     }
   }

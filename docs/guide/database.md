@@ -20,11 +20,12 @@ const dbFileItems = [
         name: "migrations/",
         description: "Generated SQL migration files",
         children: [
-          { name: "0000_initial.sql" },
-          { name: "0001_add_posts.sql" },
+          { name: "20260410161500_create_users.sql" },
+          { name: "20260410161501_add_posts.sql" },
         ],
       },
-      { name: "seed.ts", description: "Seed script (optional)" },
+      { name: "seed.ts", description: "Programmatic seed script (optional)" },
+      { name: "seed.sql", description: "Raw SQL seed file (optional alternative)" },
     ],
   },
 ]
@@ -57,15 +58,15 @@ Define your tables in `db/schema.ts` using column helpers from `void/schema-d1` 
 
 ```ts [SQLite (D1)]
 // db/schema.ts
-import { sqliteTable, text, integer } from "void/schema-d1";
-import { sql } from "void/db";
+import { sqliteTable, text, integer } from 'void/schema-d1';
+import { sql } from 'void/db';
 
-export const users = sqliteTable("users", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(),
-  email: text("email").notNull().unique(),
-  role: text("role").notNull().default("user"),
-  createdAt: text("created_at")
+export const users = sqliteTable('users', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  email: text('email').notNull().unique(),
+  role: text('role').notNull().default('user'),
+  createdAt: text('created_at')
     .notNull()
     .default(sql`(datetime('now'))`),
 });
@@ -73,14 +74,14 @@ export const users = sqliteTable("users", {
 
 ```ts [PostgreSQL]
 // db/schema.ts
-import { pgTable, serial, text, timestamp } from "void/schema-pg";
+import { pgTable, serial, text, timestamp } from 'void/schema-pg';
 
-export const users = pgTable("users", {
-  id: serial("id").primaryKey(),
-  name: text("name").notNull(),
-  email: text("email").notNull().unique(),
-  role: text("role").notNull().default("user"),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull(),
+  email: text('email').notNull().unique(),
+  role: text('role').notNull().default('user'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
 });
 ```
 
@@ -107,8 +108,8 @@ export * from "./schema/posts";
 Void re-exports all common [Drizzle query operators](https://orm.drizzle.team/docs/select) from `void/db` so you don't need to install `drizzle-orm` separately. Import `db` from `void/db` and your tables from `@schema`:
 
 ```ts
-import { db } from "void/db";
-import { users } from "@schema";
+import { db } from 'void/db';
+import { users } from '@schema';
 ```
 
 ::: info What is `@schema`?
@@ -124,8 +125,8 @@ const allUsers = await db.select().from(users);
 ### Filter with `where`
 
 ```ts
-import { db, eq, and, or } from "void/db";
-import { users } from "@schema";
+import { db, eq, and, or } from 'void/db';
+import { users } from '@schema';
 
 // Single condition
 const user = await db.select().from(users).where(eq(users.id, 1));
@@ -134,13 +135,13 @@ const user = await db.select().from(users).where(eq(users.id, 1));
 const admins = await db
   .select()
   .from(users)
-  .where(and(eq(users.role, "admin"), eq(users.name, "Alice")));
+  .where(and(eq(users.role, 'admin'), eq(users.name, 'Alice')));
 
 // OR conditions
 const result = await db
   .select()
   .from(users)
-  .where(or(eq(users.role, "admin"), eq(users.role, "editor")));
+  .where(or(eq(users.role, 'admin'), eq(users.role, 'editor')));
 ```
 
 ### Insert
@@ -148,30 +149,30 @@ const result = await db
 ```ts
 // Single row
 await db.insert(users).values({
-  name: "Alice",
-  email: "alice@example.com",
+  name: 'Alice',
+  email: 'alice@example.com',
 });
 
 // Insert and return the created row
 const [created] = await db
   .insert(users)
-  .values({ name: "Bob", email: "bob@example.com" })
+  .values({ name: 'Bob', email: 'bob@example.com' })
   .returning();
 
 // Multiple rows
 await db.insert(users).values([
-  { name: "Alice", email: "alice@example.com" },
-  { name: "Bob", email: "bob@example.com" },
+  { name: 'Alice', email: 'alice@example.com' },
+  { name: 'Bob', email: 'bob@example.com' },
 ]);
 ```
 
 ### Update
 
 ```ts
-await db.update(users).set({ role: "admin" }).where(eq(users.id, 1));
+await db.update(users).set({ role: 'admin' }).where(eq(users.id, 1));
 
 // Update and return the modified row
-const [updated] = await db.update(users).set({ role: "admin" }).where(eq(users.id, 1)).returning();
+const [updated] = await db.update(users).set({ role: 'admin' }).where(eq(users.id, 1)).returning();
 ```
 
 ### Delete
@@ -190,8 +191,8 @@ const names = await db.select({ name: users.name, email: users.email }).from(use
 ### Ordering and pagination
 
 ```ts
-import { db, desc } from "void/db";
-import { users } from "@schema";
+import { db, desc } from 'void/db';
+import { users } from '@schema';
 
 const page = await db.select().from(users).orderBy(desc(users.createdAt)).limit(10).offset(20);
 ```
@@ -199,8 +200,8 @@ const page = await db.select().from(users).orderBy(desc(users.createdAt)).limit(
 ### Joins
 
 ```ts
-import { db, eq } from "void/db";
-import { users, posts } from "@schema";
+import { db, eq } from 'void/db';
+import { users, posts } from '@schema';
 
 const results = await db
   .select({
@@ -228,6 +229,51 @@ The user schema is automatically loaded into the `db` instance via a Vite plugin
 Nuxt uses Nitro, which bundles server routes outside of Vite's plugin pipeline. The schema cannot be injected into the `db` instance, so `db.query.*` relational queries are not available in Nuxt. Use the standard query builder API (`db.select().from(table)`) instead.
 :::
 
+## Seeding
+
+Use `void db seed` to reset your local database, re-apply migrations, and then run a seed file.
+
+Void resolves default seed files in this order:
+
+1. `db/seed.ts`
+2. `db/seed.mts`
+3. `db/seed.js`
+4. `db/seed.mjs`
+5. `db/seed.sql`
+
+If more than one default seed file exists, pass `--file <path>` explicitly.
+
+### Programmatic seeding
+
+`db/seed.ts` is the first-class path for generated or randomized data. Seed modules can export either a default function or a named `seed` function.
+
+```ts
+// db/seed.ts
+import { defineSeed } from 'void/seed';
+
+export default defineSeed<typeof import('./schema')>(async ({ db, schema }) => {
+  const rows = Array.from({ length: 100 }, (_, i) => ({
+    text: `Seed message ${i + 1}`,
+  }));
+
+  await db.insert(schema.messages).values(rows);
+});
+```
+
+The seed context includes:
+
+- `dialect`: `"sqlite"` or `"postgresql"`
+- `db`: a Drizzle instance for the local database
+- `schema`: the exports from your `db/schema.ts` or `db/schema/` modules
+
+### SQL seeding
+
+If you prefer raw SQL, keep using `db/seed.sql`:
+
+```sql
+INSERT INTO messages (text) VALUES ('Hello from SQL');
+```
+
 ## Schema-Derived Validators
 
 Instead of writing validator schemas by hand, you can derive them directly from your Drizzle tables using Void's bundled adapter entrypoints: [`void/drizzle-zod`](../reference/api.md#subpath-exports), [`void/drizzle-valibot`](../reference/api.md#subpath-exports), and [`void/drizzle-arktype`](../reference/api.md#subpath-exports). These resolve through the same package boundary as `void/schema-*`, so the generated validators stay type-compatible with your tables automatically.
@@ -236,15 +282,15 @@ Instead of writing validator schemas by hand, you can derive them directly from 
 
 ```ts [Zod]
 // db/schema.ts
-import { sqliteTable, text, integer } from "void/schema-d1";
-import { sql } from "void/db";
-import { createInsertSchema } from "void/drizzle-zod";
+import { sqliteTable, text, integer } from 'void/schema-d1';
+import { sql } from 'void/db';
+import { createInsertSchema } from 'void/drizzle-zod';
 
-export const users = sqliteTable("users", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(),
-  email: text("email").notNull(),
-  createdAt: text("created_at")
+export const users = sqliteTable('users', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  email: text('email').notNull(),
+  createdAt: text('created_at')
     .notNull()
     .default(sql`(datetime('now'))`),
 });
@@ -257,16 +303,16 @@ export const insertUserSchema = createInsertSchema(users, {
 
 ```ts [Valibot]
 // db/schema.ts
-import { sqliteTable, text, integer } from "void/schema-d1";
-import { sql } from "void/db";
-import { createInsertSchema } from "void/drizzle-valibot";
-import { pipe, minLength, email } from "valibot";
+import { sqliteTable, text, integer } from 'void/schema-d1';
+import { sql } from 'void/db';
+import { createInsertSchema } from 'void/drizzle-valibot';
+import { pipe, minLength, email } from 'valibot';
 
-export const users = sqliteTable("users", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(),
-  email: text("email").notNull(),
-  createdAt: text("created_at")
+export const users = sqliteTable('users', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  email: text('email').notNull(),
+  createdAt: text('created_at')
     .notNull()
     .default(sql`(datetime('now'))`),
 });
@@ -279,23 +325,23 @@ export const insertUserSchema = createInsertSchema(users, {
 
 ```ts [ArkType]
 // db/schema.ts
-import { sqliteTable, text, integer } from "void/schema-d1";
-import { sql } from "void/db";
-import { createInsertSchema } from "void/drizzle-arktype";
-import { type } from "arktype";
+import { sqliteTable, text, integer } from 'void/schema-d1';
+import { sql } from 'void/db';
+import { createInsertSchema } from 'void/drizzle-arktype';
+import { type } from 'arktype';
 
-export const users = sqliteTable("users", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(),
-  email: text("email").notNull(),
-  createdAt: text("created_at")
+export const users = sqliteTable('users', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  email: text('email').notNull(),
+  createdAt: text('created_at')
     .notNull()
     .default(sql`(datetime('now'))`),
 });
 
 export const insertUserSchema = createInsertSchema(users, {
-  name: type("string > 0"),
-  email: type("string.email"),
+  name: type('string > 0'),
+  email: type('string.email'),
 });
 ```
 
@@ -307,9 +353,9 @@ Use the derived schema in your route handlers with [`withValidator()`](./server-
 
 ```ts
 // routes/api/users/index.ts
-import { defineHandler } from "void";
-import { db } from "void/db";
-import { users, insertUserSchema } from "@schema";
+import { defineHandler } from 'void';
+import { db } from 'void/db';
+import { users, insertUserSchema } from '@schema';
 
 export const POST = defineHandler.withValidator({
   body: insertUserSchema,

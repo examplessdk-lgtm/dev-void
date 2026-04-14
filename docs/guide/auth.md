@@ -31,19 +31,19 @@ You can also skip this step entirely. Auth activates automatically when you impo
 Use the preconfigured auth client from `void/client`:
 
 ```tsx
-import { auth } from "void/client";
+import { auth } from 'void/client';
 
 // sign up
 await auth.signUp.email({
-  email: "alice@example.com",
-  password: "s3cret",
-  name: "Alice",
+  email: 'alice@example.com',
+  password: 's3cret',
+  name: 'Alice',
 });
 
 // sign in
 await auth.signIn.email({
-  email: "alice@example.com",
-  password: "s3cret",
+  email: 'alice@example.com',
+  password: 's3cret',
 });
 ```
 
@@ -53,8 +53,8 @@ Use `requireAuth` in an API route handler or a page loader to gate access. It re
 
 ```ts
 // routes/api/profile.ts
-import { defineHandler } from "void";
-import { requireAuth } from "void/auth";
+import { defineHandler } from 'void';
+import { requireAuth } from 'void/auth';
 
 export const GET = defineHandler((c) => {
   const user = requireAuth(c);
@@ -66,8 +66,8 @@ In a pages-mode loader, use `getUser` or `getSession` when you want to allow una
 
 ```ts
 // pages/dashboard.server.ts
-import { defineHandler, type InferProps } from "void";
-import { getUser } from "void/auth";
+import { defineHandler, type InferProps } from 'void';
+import { getUser } from 'void/auth';
 
 export type Props = InferProps<typeof loader>;
 
@@ -120,17 +120,17 @@ For example, `github` uses:
 `void/client` exports a preconfigured Better Auth client:
 
 ```ts
-import { auth } from "void/client";
+import { auth } from 'void/client';
 
 await auth.signUp.email({
-  email: "alice@example.com",
-  password: "s3cret",
-  name: "Alice",
+  email: 'alice@example.com',
+  password: 's3cret',
+  name: 'Alice',
 });
 
 await auth.signIn.email({
-  email: "alice@example.com",
-  password: "s3cret",
+  email: 'alice@example.com',
+  password: 's3cret',
 });
 
 await auth.signOut();
@@ -155,7 +155,7 @@ For advanced usage, `void/client` also exports `createAuthClient`.
 `void/auth` provides the server-side helpers:
 
 ```ts
-import { getSession, getUser, requireAuth } from "void/auth";
+import { getSession, getUser, requireAuth } from 'void/auth';
 ```
 
 - `getUser()` returns the current `AuthUser | null`
@@ -165,8 +165,8 @@ import { getSession, getUser, requireAuth } from "void/auth";
 Example:
 
 ```ts
-import { defineHandler } from "void";
-import { requireAuth } from "void/auth";
+import { defineHandler } from 'void';
+import { requireAuth } from 'void/auth';
 
 export const GET = defineHandler((c) => {
   const user = requireAuth(c);

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState } from 'react';
 
 export default function Counter({ initial = 0 }: { initial?: number }) {
   const [count, setCount] = useState(initial);

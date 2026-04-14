@@ -21,7 +21,9 @@ export interface ScriptExtraction {
 
 export function extractScript(source: string): ScriptExtraction {
   const match = source.match(SCRIPT_RE);
-  if (!match) return { script: null, body: source, islandImports: [], clientCode: null };
+  if (!match) {
+    return { script: null, body: source, islandImports: [], clientCode: null };
+  }
 
   const script = match[1].trim();
   const body = source.slice(match[0].length);
@@ -36,7 +38,7 @@ export function extractScript(source: string): ScriptExtraction {
     });
   }
 
-  const stripped = script.replace(ISLAND_IMPORT_LINE_RE, "").trim();
+  const stripped = script.replace(ISLAND_IMPORT_LINE_RE, '').trim();
   const clientCode = stripped || null;
 
   return { script, body, islandImports, clientCode };

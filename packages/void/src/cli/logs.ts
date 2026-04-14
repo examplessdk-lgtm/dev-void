@@ -1,8 +1,8 @@
-import { intro, outro, log } from "@clack/prompts";
-import { getToken } from "./auth";
-import { PlatformClient, type LogEntry } from "./client";
-import { readProjectConfig } from "./project";
-import { cliTitle, dim, pc } from "./output";
+import { intro, outro, log } from '@clack/prompts';
+import { getToken } from './auth';
+import { PlatformClient, type LogEntry } from './client';
+import { cliTitle, dim, pc } from './output';
+import { readProjectConfig } from './project';
 
 export async function runLogsCommand(
   root: string,
@@ -11,11 +11,11 @@ export async function runLogsCommand(
   deployment?: string,
 ): Promise<void> {
   console.log();
-  intro(cliTitle("project logs"));
+  intro(cliTitle('project logs'));
 
   const token = getToken();
   if (!token) {
-    log.error("Not logged in. Run `void auth login` first.");
+    log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
   }
 
@@ -26,7 +26,7 @@ export async function runLogsCommand(
 
   const linked = readProjectConfig(root);
   if (!linked) {
-    log.error("No linked project. Run `void project link` first.");
+    log.error('No linked project. Run `void project link` first.');
     process.exit(1);
   }
 
@@ -44,12 +44,18 @@ export async function runLogsCommand(
     const lower = filter.toLowerCase();
     entries = entries.filter((entry) => {
       for (const l of entry.logs) {
-        const text = l.message.map(String).join(" ");
-        if (text.toLowerCase().includes(lower)) return true;
+        const text = l.message.map(String).join(' ');
+        if (text.toLowerCase().includes(lower)) {
+          return true;
+        }
       }
       for (const ex of entry.exceptions) {
-        if (ex.name.toLowerCase().includes(lower)) return true;
-        if (ex.message.toLowerCase().includes(lower)) return true;
+        if (ex.name.toLowerCase().includes(lower)) {
+          return true;
+        }
+        if (ex.message.toLowerCase().includes(lower)) {
+          return true;
+        }
       }
       return false;
     });
@@ -69,13 +75,13 @@ export async function runLogsCommand(
 
 function printEntry(entry: LogEntry): void {
   const time = formatTime(entry.timestamp);
-  const method = entry.method || "-";
-  const url = entry.url || "-";
-  const status = entry.status || "-";
+  const method = entry.method || '-';
+  const url = entry.url || '-';
+  const status = entry.status || '-';
 
   const statusNum = parseInt(status, 10);
   const coloredStatus =
-    entry.outcome === "exception" || statusNum >= 500
+    entry.outcome === 'exception' || statusNum >= 500
       ? pc.red(status)
       : statusNum >= 400
         ? pc.yellow(status)
@@ -84,11 +90,11 @@ function printEntry(entry: LogEntry): void {
   console.log(`${dim(time)} ${method} ${url} ${coloredStatus}`);
 
   for (const l of entry.logs) {
-    const text = l.message.map(String).join(" ");
-    const level = l.level ?? "log";
-    if (level === "error") {
+    const text = l.message.map(String).join(' ');
+    const level = l.level ?? 'log';
+    if (level === 'error') {
       console.log(`  ${pc.red(`[${level}]`)} ${text}`);
-    } else if (level === "warn") {
+    } else if (level === 'warn') {
       console.log(`  ${pc.yellow(`[${level}]`)} ${text}`);
     } else {
       console.log(`  ${dim(`[${level}]`)} ${text}`);
@@ -96,11 +102,11 @@ function printEntry(entry: LogEntry): void {
   }
 
   for (const ex of entry.exceptions) {
-    console.log(`  ${pc.red("[exception]")} ${ex.name}: ${ex.message}`);
+    console.log(`  ${pc.red('[exception]')} ${ex.name}: ${ex.message}`);
   }
 }
 
 function formatTime(ts: number): string {
   const d = new Date(ts);
-  return d.toLocaleTimeString("en-GB", { hour12: false });
+  return d.toLocaleTimeString('en-GB', { hour12: false });
 }

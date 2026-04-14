@@ -1,6 +1,6 @@
 <script setup>
-import ThemeToggle from "./_ThemeToggle.vue" with { island: "load" };
-import "@void/md/theme.css";
+import ThemeToggle from './_ThemeToggle.vue' with { island: 'load' };
+import '@void/md/theme.css';
 </script>
 
 <template>
@@ -46,14 +46,14 @@ nav {
 
 /* Auto (system) dark mode */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) body {
+  :root:not([data-theme='light']) body {
     background: #161718;
     color: #e2e8f0;
   }
 }
 
 /* Explicit dark mode */
-:root[data-theme="dark"] body {
+:root[data-theme='dark'] body {
   background: #161718;
   color: #e2e8f0;
 }

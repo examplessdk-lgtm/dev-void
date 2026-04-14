@@ -24,7 +24,7 @@ npm install -D @sveltejs/adapter-cloudflare void
 ### 3. Configure `svelte.config.js`
 
 ```js
-import adapter from "@sveltejs/adapter-cloudflare";
+import adapter from '@sveltejs/adapter-cloudflare';
 
 export default {
   kit: { adapter: adapter() },
@@ -34,9 +34,9 @@ export default {
 ### 4. Add `voidPlugin()` to `vite.config.ts`
 
 ```ts
-import { sveltekit } from "@sveltejs/kit/vite";
-import { voidPlugin } from "void";
-import { defineConfig } from "vite";
+import { sveltekit } from '@sveltejs/kit/vite';
+import { voidPlugin } from 'void';
+import { defineConfig } from 'vite';
 
 export default defineConfig({
   plugins: [voidPlugin(), sveltekit()],
@@ -72,8 +72,8 @@ Void-managed auth is not supported in framework mode yet. Use Better Auth's offi
 
 ```ts
 // src/routes/users/+page.server.ts
-import { db } from "void/db";
-import { users } from "@schema";
+import { db } from 'void/db';
+import { users } from '@schema';
 
 export async function load() {
   return { users: await db.select().from(users) };
@@ -83,32 +83,32 @@ export async function load() {
 ### KV Storage
 
 ```ts
-import { kv } from "void/kv";
+import { kv } from 'void/kv';
 
 export async function load() {
-  return { settings: await kv.get("app:settings") };
+  return { settings: await kv.get('app:settings') };
 }
 ```
 
 ### Blob Storage
 
 ```ts
-import { storage } from "void/storage";
+import { storage } from 'void/storage';
 
 export async function load() {
-  return { avatar: await storage.get("avatars/user-1.png") };
+  return { avatar: await storage.get('avatars/user-1.png') };
 }
 ```
 
 ### AI
 
 ```ts
-import { ai } from "void/ai";
+import { ai } from 'void/ai';
 
 export const actions = {
   summarize: async () => {
-    return ai.run("@cf/meta/llama-3.1-8b-instruct", {
-      prompt: "Summarize the latest news",
+    return ai.run('@cf/meta/llama-3.1-8b-instruct', {
+      prompt: 'Summarize the latest news',
     });
   },
 };
@@ -118,9 +118,9 @@ export const actions = {
 
 ```ts
 // crons/daily-cleanup.ts
-import { defineScheduled } from "void";
+import { defineScheduled } from 'void';
 
-export const cron = "0 0 * * *";
+export const cron = '0 0 * * *';
 
 export default defineScheduled(async () => {
   // runs daily at midnight
@@ -131,7 +131,7 @@ export default defineScheduled(async () => {
 
 ```ts
 // queues/emails.ts
-import { defineQueue } from "void";
+import { defineQueue } from 'void';
 
 export default defineQueue<{ to: string; subject: string }>(async (batch) => {
   for (const msg of batch.messages) {
@@ -148,7 +148,7 @@ You can also use SvelteKit's `platform.env` in server hooks and load functions:
 ```ts
 // src/routes/users/+page.server.ts
 export async function load({ platform }) {
-  const { results } = await platform.env.DB.prepare("SELECT * FROM users").all();
+  const { results } = await platform.env.DB.prepare('SELECT * FROM users').all();
   return { users: results };
 }
 ```
@@ -156,7 +156,7 @@ export async function load({ platform }) {
 Or the `cloudflare:workers` module:
 
 ```ts
-import { env } from "cloudflare:workers";
+import { env } from 'cloudflare:workers';
 
-const { results } = await env.DB.prepare("SELECT * FROM users").all();
+const { results } = await env.DB.prepare('SELECT * FROM users').all();
 ```

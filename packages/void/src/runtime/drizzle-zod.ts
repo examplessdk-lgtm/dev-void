@@ -1,1 +1,1 @@
-export * from "drizzle-zod";
+export * from 'drizzle-zod';

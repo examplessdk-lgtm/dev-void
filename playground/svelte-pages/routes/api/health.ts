@@ -1,5 +1,5 @@
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
 export const GET = defineHandler((c) => {
-  return c.json({ status: "ok" });
+  return c.json({ status: 'ok' });
 });

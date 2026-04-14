@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { Link } from "@void/vue";
-import type { Props } from "./[id].server";
+import { Link } from '@void/vue';
+import type { Props } from './[id].server';
 
 const props = defineProps<Props>();
 </script>

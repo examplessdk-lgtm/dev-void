@@ -7,6 +7,7 @@ Full-stack framework for Cloudflare Workers, powered by Vite.
 - **Important**: The source of truth for agent instructions is `CLAUDE.md` (this file). `AGENTS.md` is a symlink to this file. `README.md` is a separate public-facing file. When asked to update agent instructions, always update `CLAUDE.md`.
 - Documentation source lives in `docs/`.
   - Docs is a Vitepress project using our custom theme. When asked to "link the theme", temporarily edit `docs/package.json` so that `@voidzero-dev/vitepress-theme` point to `link:../../../theme`. Rerun `pnpm install` to link it. Revert these when asked to "unlink the theme".
+- Private beta packages publish under the temporary `@void-sdk/*` scope for GitHub Packages. Consumer-facing code, docs examples, and playground source should keep using `void` and `@void/*`; use package-manager aliases in consumer `package.json` files to bridge the difference.
 
 ## Important Note for Release Workflows
 

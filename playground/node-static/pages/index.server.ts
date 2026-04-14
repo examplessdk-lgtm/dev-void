@@ -1,4 +1,4 @@
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
 export interface Props {
   title: string;
@@ -6,5 +6,5 @@ export interface Props {
 }
 
 export const loader = defineHandler<Props>(() => {
-  return { title: "Home", runtime: process.versions.node };
+  return { title: 'Home', runtime: process.versions.node };
 });

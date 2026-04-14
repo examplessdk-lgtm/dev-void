@@ -1,6 +1,6 @@
 {
-  "name": "@void/vue",
-  "version": "0.0.1",
+  "name": "@void-sdk/vue",
+  "version": "0.3.0",
   "files": [
     "dist"
   ],
@@ -27,6 +27,9 @@
       "import": "./dist/runtime/prefetch.mjs"
     }
   },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
@@ -39,12 +42,12 @@
     "@types/node": "catalog:",
     "tsdown": "catalog:",
     "vite": "catalog:",
-    "void": "workspace:*",
-    "vue": "^3.5.31"
+    "void": "workspace:@void-sdk/void@*",
+    "vue": "^3.5.32"
   },
   "peerDependencies": {
     "vite": "catalog:",
-    "void": "workspace:*",
+    "void": "workspace:@void-sdk/void@*",
     "vue": "^3.5.0"
   }
 }

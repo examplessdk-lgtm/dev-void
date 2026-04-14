@@ -4,7 +4,7 @@ export async function getServerSideProps() {
 
 export default function Home() {
   return (
-    <div style={{ padding: "16px" }}>
+    <div style={{ padding: '16px' }}>
       <h1>vinext Pages Router + Void</h1>
       <p>This playground demonstrates vinext Pages Router integration with Void.</p>
       <p>

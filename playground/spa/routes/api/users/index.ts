@@ -1,7 +1,7 @@
-import * as v from "valibot";
-import { defineHandler } from "void";
-import { db } from "void/db";
-import { users } from "@schema";
+import { users } from '@schema';
+import * as v from 'valibot';
+import { defineHandler } from 'void';
+import { db } from 'void/db';
 
 export const GET = defineHandler(async () => {
   return db.select().from(users);

@@ -1,8 +1,8 @@
-import react from "@vitejs/plugin-react";
-import type { Plugin } from "vite";
-import { join } from "node:path";
-import { islandsPlugin } from "./plugin-islands";
-import { pagesPlugin } from "./plugin-pages";
+import { join } from 'node:path';
+import react from '@vitejs/plugin-react';
+import type { Plugin } from 'vite';
+import { islandsPlugin } from './plugin-islands';
+import { pagesPlugin } from './plugin-pages';
 
 interface PrefetchConfig {
   hoverDelay?: number;
@@ -16,7 +16,7 @@ export interface VoidReactOptions {
 }
 
 export function voidReact(options?: VoidReactOptions): Plugin[] {
-  const pagesDir = join(process.cwd(), "pages");
+  const pagesDir = join(process.cwd(), 'pages');
   return [
     ...react(options?.react),
     pagesPlugin(pagesDir, {

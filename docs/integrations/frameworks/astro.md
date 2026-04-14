@@ -30,9 +30,9 @@ npm install -D @astrojs/cloudflare void
 ### 3. Configure `astro.config.mjs`
 
 ```js
-import { defineConfig } from "astro/config";
-import cloudflare from "@astrojs/cloudflare";
-import { voidPlugin } from "void";
+import { defineConfig } from 'astro/config';
+import cloudflare from '@astrojs/cloudflare';
+import { voidPlugin } from 'void';
 
 export default defineConfig({
   adapter: cloudflare(),
@@ -83,9 +83,9 @@ export const prerender = false;
 Use `void/db` in API routes and server-side code:
 
 ```ts
-import type { APIRoute } from "astro";
-import { db } from "void/db";
-import { users } from "@schema";
+import type { APIRoute } from 'astro';
+import { db } from 'void/db';
+import { users } from '@schema';
 
 export const GET: APIRoute = async () => {
   const rows = await db.select().from(users);
@@ -98,11 +98,11 @@ export const GET: APIRoute = async () => {
 Use `void/kv` in both dev and production:
 
 ```ts
-import type { APIRoute } from "astro";
-import { kv } from "void/kv";
+import type { APIRoute } from 'astro';
+import { kv } from 'void/kv';
 
 export const GET: APIRoute = async () => {
-  const settings = await kv.get("app:settings");
+  const settings = await kv.get('app:settings');
   return Response.json(settings);
 };
 ```
@@ -110,11 +110,11 @@ export const GET: APIRoute = async () => {
 ### Blob Storage
 
 ```ts
-import type { APIRoute } from "astro";
-import { storage } from "void/storage";
+import type { APIRoute } from 'astro';
+import { storage } from 'void/storage';
 
 export const GET: APIRoute = async () => {
-  const avatar = await storage.get("avatars/user-1.png");
+  const avatar = await storage.get('avatars/user-1.png');
   return new Response(avatar);
 };
 ```
@@ -122,12 +122,12 @@ export const GET: APIRoute = async () => {
 ### AI
 
 ```ts
-import type { APIRoute } from "astro";
-import { ai } from "void/ai";
+import type { APIRoute } from 'astro';
+import { ai } from 'void/ai';
 
 export const POST: APIRoute = async () => {
-  const result = await ai.run("@cf/meta/llama-3.1-8b-instruct", {
-    prompt: "Summarize the latest news",
+  const result = await ai.run('@cf/meta/llama-3.1-8b-instruct', {
+    prompt: 'Summarize the latest news',
   });
   return Response.json(result);
 };
@@ -137,9 +137,9 @@ export const POST: APIRoute = async () => {
 
 ```ts
 // crons/daily-cleanup.ts
-import { defineScheduled } from "void";
+import { defineScheduled } from 'void';
 
-export const cron = "0 0 * * *";
+export const cron = '0 0 * * *';
 
 export default defineScheduled(async () => {
   // runs daily at midnight
@@ -150,7 +150,7 @@ export default defineScheduled(async () => {
 
 ```ts
 // queues/emails.ts
-import { defineQueue } from "void";
+import { defineQueue } from 'void';
 
 export default defineQueue<{ to: string; subject: string }>(async (batch) => {
   for (const msg of batch.messages) {
@@ -165,11 +165,11 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 Access bindings via `Astro.locals.runtime.env` (works in both dev and production):
 
 ```ts
-import type { APIRoute } from "astro";
+import type { APIRoute } from 'astro';
 
 export const GET: APIRoute = async ({ locals }) => {
   const { DB } = locals.runtime.env;
-  const { results } = await DB.prepare("SELECT * FROM users").all();
+  const { results } = await DB.prepare('SELECT * FROM users').all();
   return Response.json(results);
 };
 ```

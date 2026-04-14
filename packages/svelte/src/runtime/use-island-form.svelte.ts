@@ -42,13 +42,15 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
     processing = true;
     wasSuccessful = false;
     recentlySuccessful = false;
-    if (successTimeout) clearTimeout(successTimeout);
+    if (successTimeout) {
+      clearTimeout(successTimeout);
+    }
     clearErrors();
 
     try {
       const response = await fetch(url, {
         method,
-        headers: { "Content-Type": "application/json" },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       });
 
@@ -67,7 +69,9 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
         window.location.reload();
       } else if (response.status === 422) {
         const body = (await response.json()) as { errors?: Record<string, string> };
-        if (body?.errors) Object.assign(errors, body.errors);
+        if (body?.errors) {
+          Object.assign(errors, body.errors);
+        }
       }
     } catch {
       // Request failed
@@ -97,9 +101,9 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
     },
     reset,
     clearErrors,
-    post: (url: string) => submit(url, "POST"),
-    put: (url: string) => submit(url, "PUT"),
-    patch: (url: string) => submit(url, "PATCH"),
-    delete: (url: string) => submit(url, "DELETE"),
+    post: (url: string) => submit(url, 'POST'),
+    put: (url: string) => submit(url, 'PUT'),
+    patch: (url: string) => submit(url, 'PATCH'),
+    delete: (url: string) => submit(url, 'DELETE'),
   };
 }

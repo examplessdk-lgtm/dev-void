@@ -3,18 +3,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vitepress dev",
     "build": "vitepress build",
-    "preview": "vitepress preview",
-    "deploy": "void deploy"
+    "deploy": "void deploy",
+    "dev": "vitepress dev",
+    "preview": "vitepress preview"
   },
   "devDependencies": {
     "@iconify/vue": "5.0.0",
     "@voidzero-dev/vitepress-theme": "^4.8.4",
-    "oxc-minify": "^0.121.0",
-    "reka-ui": "2.9.2",
+    "oxc-minify": "^0.124.0",
+    "reka-ui": "2.9.5",
     "vitepress": "2.0.0-alpha.16",
-    "vitepress-plugin-group-icons": "^1.7.1",
-    "void": "workspace:*"
+    "vitepress-plugin-group-icons": "^1.7.3",
+    "void": "workspace:@void-sdk/void@*"
   }
 }

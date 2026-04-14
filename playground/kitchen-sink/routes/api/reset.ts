@@ -1,14 +1,14 @@
-import { defineHandler } from "void";
-import { kv } from "void/kv";
-import { storage } from "void/storage";
+import { defineHandler } from 'void';
+import { kv } from 'void/kv';
+import { storage } from 'void/storage';
 
 const D1_TABLES_TO_CLEAR = [
-  "notes",
-  "queue_results",
-  "verification",
-  "session",
-  "account",
-  "user",
+  'notes',
+  'queue_results',
+  'verification',
+  'session',
+  'account',
+  'user',
 ] as const;
 
 export const POST = defineHandler(async (c) => {
@@ -19,7 +19,7 @@ export const POST = defineHandler(async (c) => {
       await c.env.DB.prepare(
         `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${D1_TABLES_TO_CLEAR.map(
           (name) => `'${name}'`,
-        ).join(", ")})`,
+        ).join(', ')})`,
       ).all()
     ).results ?? [];
   const existingTables = new Set(existingTableRows.map((row) => String(row.name)));
@@ -45,7 +45,9 @@ export const POST = defineHandler(async (c) => {
   for (;;) {
     const result = await storage.list({ limit: 1000, cursor: r2Cursor });
     await Promise.all(result.objects.map((obj) => storage.delete(obj.key)));
-    if (!result.truncated) break;
+    if (!result.truncated) {
+      break;
+    }
     r2Cursor = result.cursor;
   }
 

@@ -25,6 +25,7 @@ Use this page as a command reference. If you are setting up a project for the fi
 | `void project link`               | Link directory to a project                         |
 | `void project logs`               | Show runtime logs from deployed project             |
 | `void project rollback`           | Roll back to a previous deployment                  |
+| `void project purge-cache`        | Purge all cached pages                              |
 | `void init`                       | Setup wizard (Pages scaffold, tsconfig, agents, CI) |
 
 ## Binary Invocation
@@ -47,7 +48,7 @@ void init [--tsconfig] [--github] [--agents]
 
 Setup wizard for void projects (new or existing).
 
-If run in a scaffoldable empty directory, `void init` first asks which Pages framework to scaffold (React, Vue, Svelte, or Solid), then asks which starter you want: D1, PostgreSQL, or Static Pages. The D1 and PostgreSQL starters write a framework-specific `vite.config.ts`, a `pages/` home page plus `.server.ts` loader, `db/schema.ts`, `db/migrations/0000_initial.sql`, and `routes/api/hello.ts`. The Static Pages starter writes just the framework-specific `vite.config.ts` and a `pages/` home page so you can add server features later.
+If run in a scaffoldable empty directory, `void init` scaffolds a Pages starter. If a single Pages adapter is already installed, it reuses that framework; otherwise it asks which framework to scaffold (React, Vue, Svelte, or Solid). It then asks which starter you want: D1, PostgreSQL, or Static Pages. The D1 and PostgreSQL starters write a framework-specific `vite.config.ts`, a `pages/` home page plus `.server.ts` loader, `db/schema.ts`, `db/seed.ts`, a generated initial migration under `db/migrations/`, and `routes/api/hello.ts`. The Static Pages starter writes just the framework-specific `vite.config.ts` and a `pages/` home page so you can add server features later.
 
 After that, the full interactive flow walks through:
 
@@ -144,6 +145,16 @@ Permanently delete a project and all its resources (databases, KV namespaces, R2
 
 If `[name]` is omitted, uses the linked project.
 
+### `void project purge-cache`
+
+```
+void project purge-cache [--project <name>]
+```
+
+Purge all cached pages for the linked project. The edge cache will clear within seconds.
+
+If `--project` is provided, purges that project's cache instead of the linked project.
+
 ## Deploy
 
 ### `void deploy`
@@ -169,7 +180,7 @@ Project resolution precedence:
 2. `VOID_PROJECT`
 3. linked project in `.void/project.json`
 
-If no project is linked and no override is provided, CLI prompts to link or create one.
+If no project is linked and no override is provided, CLI prompts to link or create one. In CI (non-TTY), `void deploy` errors out instead — set `VOID_PROJECT` or pass `--project <slug>`.
 
 That fallback is mainly for projects that skipped Void project setup during `void init`.
 
@@ -189,7 +200,13 @@ Drop the local D1 database and re-apply all migrations. Does not affect the remo
 void db seed [--file <path>]
 ```
 
-Reset the local database, re-apply all migrations, then execute a seed file. Defaults to `db/seed.sql`.
+Reset the local database, re-apply all migrations, then execute a seed file.
+
+If `--file` is omitted, Void looks for default seed files in this order: `db/seed.ts`, `db/seed.mts`, `db/seed.js`, `db/seed.mjs`, `db/seed.sql`.
+
+If more than one default seed file exists, the CLI stops and asks you to pass `--file <path>`.
+
+Programmatic seed modules must export either a default function or a named `seed` function.
 
 ### `void db execute`
 
@@ -203,14 +220,20 @@ Run ad-hoc SQL against the local D1 database. Provide SQL inline or from a file.
 ### `void db migrate`
 
 ```
-void db migrate
+void db migrate [--remote]
 ```
 
 Apply pending migrations to the local database without resetting. Unlike `void db reset`, this preserves existing data and only runs migrations that haven't been applied yet.
 
+Pass `--remote` to apply pending migrations to the remote database instead. Requires being logged in (`void auth login`) and having a linked project.
+
 ### `void db studio`
 
 Open [Drizzle Studio](https://orm.drizzle.team/docs/drizzle-kit-studio) for the local database. Launches a web-based GUI for browsing and editing your data.
+
+### `void db rename-migrations`
+
+Rename existing migrations from the old numeric prefix format (`0001_name.sql`) to timestamp-based format (`20260410161500_name.sql`). Updates local tracking table and remote records if logged in with a linked project.
 
 ### `void db set-url`
 
@@ -266,12 +289,14 @@ Model names must be lowercase alphanumeric with underscores (e.g. `posts`, `user
 void gen migration <name>
 ```
 
-Create an empty migration file with auto-numbered prefix. The number is one greater than the highest existing migration.
+Create an empty migration file with a timestamp prefix (`YYYYMMDDHHMMSS`).
 
 ```sh
 void gen migration add_avatar_to_users
-# → db/migrations/002_add_avatar_to_users.sql
+# → db/migrations/20260410161500_add_avatar_to_users.sql
 ```
+
+Existing projects using the old numeric prefix (`0001_`, `0002_`, ...) can rename with `void db rename-migrations`.
 
 ### `void gen route`
 

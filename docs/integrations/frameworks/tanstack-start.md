@@ -24,10 +24,10 @@ npm install -D void
 ### 3. Configure `vite.config.ts`
 
 ```ts
-import { defineConfig } from "vite";
-import { tanstackStart } from "@tanstack/react-start/plugin";
-import react from "@vitejs/plugin-react";
-import { voidPlugin } from "void";
+import { defineConfig } from 'vite';
+import { tanstackStart } from '@tanstack/react-start/plugin';
+import react from '@vitejs/plugin-react';
+import { voidPlugin } from 'void';
 
 export default defineConfig({
   plugins: [
@@ -54,9 +54,9 @@ Void-managed auth is not supported in framework mode yet. Use Better Auth's offi
 ### Database
 
 ```tsx
-import { createServerFn } from "@tanstack/react-start";
-import { db } from "void/db";
-import { users } from "@schema";
+import { createServerFn } from '@tanstack/react-start';
+import { db } from 'void/db';
+import { users } from '@schema';
 
 const getUsers = createServerFn().handler(async () => {
   return db.select().from(users);
@@ -66,34 +66,34 @@ const getUsers = createServerFn().handler(async () => {
 ### KV Storage
 
 ```tsx
-import { createServerFn } from "@tanstack/react-start";
-import { kv } from "void/kv";
+import { createServerFn } from '@tanstack/react-start';
+import { kv } from 'void/kv';
 
 const getSettings = createServerFn().handler(async () => {
-  return kv.get("app:settings");
+  return kv.get('app:settings');
 });
 ```
 
 ### Blob Storage
 
 ```tsx
-import { createServerFn } from "@tanstack/react-start";
-import { storage } from "void/storage";
+import { createServerFn } from '@tanstack/react-start';
+import { storage } from 'void/storage';
 
 const getAvatar = createServerFn().handler(async () => {
-  return storage.get("avatars/user-1.png");
+  return storage.get('avatars/user-1.png');
 });
 ```
 
 ### AI
 
 ```tsx
-import { createServerFn } from "@tanstack/react-start";
-import { ai } from "void/ai";
+import { createServerFn } from '@tanstack/react-start';
+import { ai } from 'void/ai';
 
 const summarize = createServerFn().handler(async () => {
-  return ai.run("@cf/meta/llama-3.1-8b-instruct", {
-    prompt: "Summarize the latest news",
+  return ai.run('@cf/meta/llama-3.1-8b-instruct', {
+    prompt: 'Summarize the latest news',
   });
 });
 ```
@@ -102,9 +102,9 @@ const summarize = createServerFn().handler(async () => {
 
 ```ts
 // crons/daily-cleanup.ts
-import { defineScheduled } from "void";
+import { defineScheduled } from 'void';
 
-export const cron = "0 0 * * *";
+export const cron = '0 0 * * *';
 
 export default defineScheduled(async () => {
   // runs daily at midnight
@@ -115,7 +115,7 @@ export default defineScheduled(async () => {
 
 ```ts
 // queues/emails.ts
-import { defineQueue } from "void";
+import { defineQueue } from 'void';
 
 export default defineQueue<{ to: string; subject: string }>(async (batch) => {
   for (const msg of batch.messages) {
@@ -130,7 +130,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 You can also access Cloudflare bindings via the `cloudflare:workers` module:
 
 ```tsx
-import { env } from "cloudflare:workers";
+import { env } from 'cloudflare:workers';
 
-const { results } = await env.DB.prepare("SELECT * FROM users").all();
+const { results } = await env.DB.prepare('SELECT * FROM users').all();
 ```

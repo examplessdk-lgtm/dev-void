@@ -1,4 +1,4 @@
-import { getRuntimeBinding } from "./env";
+import { getRawRuntimeEnv } from './env-raw';
 
 export interface RevalidateOptions {
   paths?: string[];
@@ -24,22 +24,23 @@ export interface RevalidateOptions {
  * ```
  */
 export async function revalidate(options: RevalidateOptions): Promise<void> {
-  const proxy = getRuntimeBinding<Fetcher>("__VOID_PROXY");
+  const rawEnv = getRawRuntimeEnv();
+  const proxy = rawEnv.__VOID_PROXY as Fetcher | undefined;
   if (!proxy) {
     // Local dev — no ISR cache to purge, no-op
     return;
   }
 
-  const projectId = getRuntimeBinding<string>("__PROJECT_ID");
-  const token = getRuntimeBinding<string>("__VOID_PROXY_TOKEN");
+  const projectId = rawEnv.__PROJECT_ID as string | undefined;
+  const token = rawEnv.__VOID_PROXY_TOKEN as string | undefined;
 
   if (!projectId || !token) {
-    throw new Error("ISR revalidation requires __PROJECT_ID and __VOID_PROXY_TOKEN bindings.");
+    throw new Error('ISR revalidation requires __PROJECT_ID and __VOID_PROXY_TOKEN bindings.');
   }
 
-  const response = await proxy.fetch("https://proxy/revalidate", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
+  const response = await proxy.fetch('https://proxy/revalidate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ projectId, aiToken: token, ...options }),
   });
 

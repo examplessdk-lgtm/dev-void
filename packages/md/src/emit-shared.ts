@@ -1,4 +1,4 @@
-import type { IslandImport } from "./extract-script";
+import type { IslandImport } from './extract-script';
 
 // Match self-closing uppercase tags: <Counter />, <Counter attr="val" />
 // and paired uppercase tags: <Counter>...</Counter>
@@ -13,12 +13,12 @@ interface IslandMatch {
 }
 
 interface HtmlChunk {
-  type: "html";
+  type: 'html';
   html: string;
 }
 
 interface IslandChunk {
-  type: "island";
+  type: 'island';
   islandImport: IslandImport;
   props: Record<string, string>;
 }
@@ -36,7 +36,7 @@ function findIslandTags(html: string, names: Set<string>): IslandMatch[] {
         name,
         start: match.index,
         end: match.index + match[0].length,
-        attrs: (match[2] ?? match[4] ?? "").trim(),
+        attrs: (match[2] ?? match[4] ?? '').trim(),
       });
     }
   }
@@ -48,13 +48,13 @@ function parseAttrs(attrStr: string): Record<string, string> {
   const attrRe = /(\w[\w-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+)))?/g;
   let match: RegExpExecArray | null;
   while ((match = attrRe.exec(attrStr)) !== null) {
-    result[match[1]] = match[2] ?? match[3] ?? match[4] ?? "";
+    result[match[1]] = match[2] ?? match[3] ?? match[4] ?? '';
   }
   return result;
 }
 
 export function toIslandId(imp: IslandImport): string {
-  return imp.islandId ?? imp.specifier.replace(/\.[^.]+$/, "");
+  return imp.islandId ?? imp.specifier.replace(/\.[^.]+$/, '');
 }
 
 export function buildRenderChunks(html: string, islandImports: IslandImport[]): RenderChunk[] {
@@ -68,14 +68,14 @@ export function buildRenderChunks(html: string, islandImports: IslandImport[]): 
     if (tag.start > cursor) {
       const segment = html.slice(cursor, tag.start);
       if (segment.trim()) {
-        chunks.push({ type: "html", html: segment });
+        chunks.push({ type: 'html', html: segment });
       }
     }
 
     const islandImport = islandByName.get(tag.name);
     if (islandImport) {
       chunks.push({
-        type: "island",
+        type: 'island',
         islandImport,
         props: parseAttrs(tag.attrs),
       });
@@ -87,7 +87,7 @@ export function buildRenderChunks(html: string, islandImports: IslandImport[]): 
   if (cursor < html.length) {
     const segment = html.slice(cursor);
     if (segment.trim()) {
-      chunks.push({ type: "html", html: segment });
+      chunks.push({ type: 'html', html: segment });
     }
   }
 

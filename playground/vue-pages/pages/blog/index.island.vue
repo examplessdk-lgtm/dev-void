@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import Counter from "./_Counter.vue" with { island: "load" };
-import PostForm from "./_PostForm.vue" with { island: "load" };
+import Counter from './_Counter.vue' with { island: 'load' };
+import PostForm from './_PostForm.vue' with { island: 'load' };
 
 interface Props {
   posts: Array<{ slug: string; title: string }>;

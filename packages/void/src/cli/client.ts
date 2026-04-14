@@ -1,5 +1,48 @@
-import { getApiUrl } from "./auth";
-import type { DeployEvent } from "./types";
+import { getApiUrl } from './auth';
+import type { DeployEvent } from './types';
+
+type PlatformErrorPayload = {
+  error?: string;
+  message?: string;
+};
+
+function parsePlatformErrorBody(body: string): PlatformErrorPayload | null {
+  try {
+    const parsed = JSON.parse(body);
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+    return parsed as PlatformErrorPayload;
+  } catch {
+    return null;
+  }
+}
+
+export class PlatformApiError extends Error {
+  status: number;
+  body: string;
+  code?: string;
+
+  constructor(action: string, status: number, body: string) {
+    super(`${action}: ${status} ${body}`);
+    this.name = 'PlatformApiError';
+    this.status = status;
+    this.body = body;
+    const parsed = parsePlatformErrorBody(body);
+    this.code = parsed?.error ?? parsed?.message;
+  }
+}
+
+async function throwPlatformApiError(action: string, res: Response): Promise<never> {
+  throw new PlatformApiError(action, res.status, await res.text());
+}
+
+export function isExpiredTokenError(error: unknown): boolean {
+  if (error instanceof PlatformApiError) {
+    return error.status === 401 && error.code === 'invalid or expired token';
+  }
+  return false;
+}
 
 export interface ProjectResponse {
   id: string;
@@ -90,8 +133,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to fetch user info: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to fetch user info', res);
     }
 
     return res.json();
@@ -105,8 +147,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to list projects: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to list projects', res);
     }
 
     return res.json();
@@ -120,8 +161,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to list deployments: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to list deployments', res);
     }
 
     return res.json();
@@ -132,17 +172,37 @@ export class PlatformClient {
     deploymentId: string,
   ): Promise<{ ok: boolean; deploymentId?: string; migrationDiff?: string[]; error?: string }> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/rollback`, {
-      method: "POST",
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
         Authorization: `Bearer ${this.token}`,
       },
       body: JSON.stringify({ deploymentId }),
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Rollback failed: ${res.status} ${body}`);
+      await throwPlatformApiError('Rollback failed', res);
+    }
+
+    return res.json();
+  }
+
+  async cancelDeployment(
+    projectId: string,
+    deploymentId: string,
+  ): Promise<{ ok: boolean; deploymentId: string; status: string }> {
+    const res = await fetch(
+      `${this.baseUrl}/projects/${projectId}/deployments/${deploymentId}/cancel`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+        },
+      },
+    );
+
+    if (!res.ok) {
+      await throwPlatformApiError('Cancel deployment failed', res);
     }
 
     return res.json();
@@ -150,17 +210,16 @@ export class PlatformClient {
 
   async createProject(slug: string): Promise<CreateProjectResponse> {
     const res = await fetch(`${this.baseUrl}/projects`, {
-      method: "POST",
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
         Authorization: `Bearer ${this.token}`,
       },
       body: JSON.stringify({ slug }),
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to create project: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to create project', res);
     }
 
     return res.json();
@@ -169,25 +228,33 @@ export class PlatformClient {
   async preflight(
     projectId: string,
     assetManifest: Record<string, { hash: string; size: number }>,
+    hasWorker?: boolean,
   ): Promise<{ needed: string[]; total: number; skipped: number }> {
     const total = Object.keys(assetManifest).length;
     try {
       const res = await fetch(`${this.baseUrl}/projects/${projectId}/deploy/preflight`, {
-        method: "POST",
+        method: 'POST',
         headers: {
-          "Content-Type": "application/json",
+          'Content-Type': 'application/json',
           Authorization: `Bearer ${this.token}`,
         },
-        body: JSON.stringify({ assetManifest }),
+        body: JSON.stringify({ assetManifest, ...(hasWorker && { hasWorker }) }),
       });
 
       if (!res.ok) {
+        const error = new PlatformApiError('Preflight failed', res.status, await res.text());
+        if (isExpiredTokenError(error)) {
+          throw error;
+        }
         // Preflight not supported or error — fall back to uploading everything
         return { needed: Object.keys(assetManifest), total, skipped: 0 };
       }
 
       return res.json();
-    } catch {
+    } catch (error) {
+      if (isExpiredTokenError(error)) {
+        throw error;
+      }
       // Network error — fall back to uploading everything
       return { needed: Object.keys(assetManifest), total, skipped: 0 };
     }
@@ -195,7 +262,7 @@ export class PlatformClient {
 
   async *deploy(projectId: string, formData: FormData): AsyncGenerator<DeployEvent> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/deploy`, {
-      method: "POST",
+      method: 'POST',
       headers: {
         Authorization: `Bearer ${this.token}`,
       },
@@ -203,21 +270,22 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Deploy failed: ${res.status} ${body}`);
+      await throwPlatformApiError('Deploy failed', res);
     }
 
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
-    let buffer = "";
+    let buffer = '';
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        break;
+      }
       buffer += decoder.decode(value, { stream: true });
 
       let newlineIdx;
-      while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
+      while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, newlineIdx);
         buffer = buffer.slice(newlineIdx + 1);
         if (line.trim()) {
@@ -235,8 +303,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to list secrets: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to list secrets', res);
     }
 
     return res.json();
@@ -246,9 +313,9 @@ export class PlatformClient {
     const res = await fetch(
       `${this.baseUrl}/projects/${projectId}/secrets/${encodeURIComponent(name)}`,
       {
-        method: "PUT",
+        method: 'PUT',
         headers: {
-          "Content-Type": "application/json",
+          'Content-Type': 'application/json',
           Authorization: `Bearer ${this.token}`,
         },
         body: JSON.stringify({ value }),
@@ -256,8 +323,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to set secret: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to set secret', res);
     }
 
     return res.json();
@@ -265,15 +331,14 @@ export class PlatformClient {
 
   async deleteProject(projectId: string): Promise<DeleteProjectResponse> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}`, {
-      method: "DELETE",
+      method: 'DELETE',
       headers: {
         Authorization: `Bearer ${this.token}`,
       },
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to delete project: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to delete project', res);
     }
 
     return res.json();
@@ -289,8 +354,47 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to get migration status: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to get migration status', res);
+    }
+
+    return res.json();
+  }
+
+  async applyRemoteMigrations(
+    projectId: string,
+    migrations: { name: string; sql: string }[],
+  ): Promise<{ ok: boolean; applied: string[]; skipped: string[]; error?: string }> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/migrations/apply`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({ migrations }),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to apply remote migrations', res);
+    }
+
+    return res.json();
+  }
+
+  async renameMigrations(
+    projectId: string,
+    renames: { from: string; to: string }[],
+  ): Promise<{ ok: boolean }> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/migrations/rename`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({ renames }),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to rename remote migrations', res);
     }
 
     return res.json();
@@ -298,17 +402,16 @@ export class PlatformClient {
 
   async addDomain(projectId: string, hostname: string): Promise<DomainResponse> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/domains`, {
-      method: "POST",
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
         Authorization: `Bearer ${this.token}`,
       },
       body: JSON.stringify({ hostname }),
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to add domain: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to add domain', res);
     }
 
     return res.json();
@@ -322,8 +425,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to list domains: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to list domains', res);
     }
 
     return res.json();
@@ -337,8 +439,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to get domain status: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to get domain status', res);
     }
 
     return res.json();
@@ -346,15 +447,14 @@ export class PlatformClient {
 
   async removeDomain(projectId: string, domainId: string): Promise<{ ok: boolean }> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/domains/${domainId}`, {
-      method: "DELETE",
+      method: 'DELETE',
       headers: {
         Authorization: `Bearer ${this.token}`,
       },
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to remove domain: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to remove domain', res);
     }
 
     return res.json();
@@ -364,7 +464,7 @@ export class PlatformClient {
     const res = await fetch(
       `${this.baseUrl}/projects/${projectId}/secrets/${encodeURIComponent(name)}`,
       {
-        method: "DELETE",
+        method: 'DELETE',
         headers: {
           Authorization: `Bearer ${this.token}`,
         },
@@ -372,8 +472,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to delete secret: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to delete secret', res);
     }
 
     return res.json();
@@ -387,8 +486,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to get resources: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to get resources', res);
     }
 
     return res.json();
@@ -396,17 +494,16 @@ export class PlatformClient {
 
   async provisionDatabase(projectId: string, connectionString: string): Promise<{ ok: boolean }> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/database`, {
-      method: "POST",
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
         Authorization: `Bearer ${this.token}`,
       },
       body: JSON.stringify({ connectionString }),
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to provision database: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to provision database', res);
     }
 
     return res.json();
@@ -414,17 +511,33 @@ export class PlatformClient {
 
   async setDatabaseUrl(projectId: string, connectionString: string): Promise<{ ok: boolean }> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/database-url`, {
-      method: "PUT",
+      method: 'PUT',
       headers: {
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
         Authorization: `Bearer ${this.token}`,
       },
       body: JSON.stringify({ connectionString }),
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to update database URL: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to update database URL', res);
+    }
+
+    return res.json();
+  }
+
+  async purgeCache(projectId: string): Promise<{ purged: number }> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/revalidate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({ all: true }),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Cache purge failed', res);
     }
 
     return res.json();
@@ -440,7 +553,9 @@ export class PlatformClient {
       since,
       limit: String(limit),
     });
-    if (deploymentId) params.set("deploymentId", deploymentId);
+    if (deploymentId) {
+      params.set('deploymentId', deploymentId);
+    }
 
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/logs?${params}`, {
       headers: {
@@ -449,8 +564,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Failed to fetch logs: ${res.status} ${body}`);
+      await throwPlatformApiError('Failed to fetch logs', res);
     }
 
     const json = (await res.json()) as { data: LogEntry[] };

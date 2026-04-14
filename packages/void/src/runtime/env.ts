@@ -1,59 +1,76 @@
-import { AsyncLocalStorage } from "node:async_hooks";
+/**
+ * Public runtime env API — exposed via "void/_env".
+ *
+ * All exports from this module are accessible to user code.
+ * Internal platform bindings (__VOID_*, __PROJECT_*) are filtered
+ * from getRuntimeEnv() and blocked in getRuntimeBinding().
+ */
+import {
+  envContext,
+  asEnv,
+  getRawRuntimeEnv,
+  INTERNAL_BINDING_PREFIXES,
+  type RuntimeEnv,
+} from './env-raw';
 
-export type RuntimeEnv = Record<string, unknown>;
-
-const envContext: AsyncLocalStorage<RuntimeEnv> = new AsyncLocalStorage<RuntimeEnv>();
-
-let cloudflareEnv: RuntimeEnv | undefined;
-// Don't await this import during module evaluation. Cloudflare validates
-// worker startup and rejects bundles with unsettled top-level await.
-void import("cloudflare:workers")
-  .then((mod) => {
-    const maybeEnv = asEnv((mod as { env?: unknown }).env);
-    if (maybeEnv) {
-      cloudflareEnv = maybeEnv;
-    }
-  })
-  .catch(() => {
-    // Not running in workerd.
-  });
-
-function asEnv(value: unknown): RuntimeEnv | null {
-  if (typeof value !== "object" || value === null) return null;
-  // Nuxt dev sets globalThis.__env__ to a Promise before resolving to env.
-  if ("then" in value && typeof (value as { then?: unknown }).then === "function") return null;
-  return value as RuntimeEnv;
-}
-
-function getNuxtEnv(): RuntimeEnv | null {
-  return asEnv((globalThis as RuntimeEnv & { __env__?: unknown }).__env__);
-}
+export type { RuntimeEnv };
 
 export function withRuntimeEnv<T>(env: unknown, fn: () => T): T {
   const resolved = asEnv(env);
-  if (!resolved) return fn();
+  if (!resolved) {
+    return fn();
+  }
   return envContext.run(resolved, fn);
 }
 
-export function getRuntimeEnv(): RuntimeEnv {
-  return (
-    envContext.getStore() ??
-    getNuxtEnv() ??
-    cloudflareEnv ??
-    (() => {
-      throw new Error(
-        "Cloudflare env is unavailable. Use void runtime bindings inside Nuxt/SvelteKit server request handlers or Worker handlers.",
+function isInternalBinding(name: string): boolean {
+  return INTERNAL_BINDING_PREFIXES.some((p) => name.startsWith(p));
+}
+
+function filterEnvProxy(env: RuntimeEnv): RuntimeEnv {
+  return new Proxy(env, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string' && isInternalBinding(prop)) {
+        return undefined;
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+    has(target, prop) {
+      if (typeof prop === 'string' && isInternalBinding(prop)) {
+        return false;
+      }
+      return Reflect.has(target, prop);
+    },
+    ownKeys(target) {
+      return Reflect.ownKeys(target).filter(
+        (key) => typeof key !== 'string' || !isInternalBinding(key),
       );
-    })()
-  );
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      if (typeof prop === 'string' && isInternalBinding(prop)) {
+        return undefined;
+      }
+      return Reflect.getOwnPropertyDescriptor(target, prop);
+    },
+  });
+}
+
+/** Returns the runtime env with internal platform bindings hidden. */
+export function getRuntimeEnv(): RuntimeEnv {
+  return filterEnvProxy(getRawRuntimeEnv());
 }
 
 export function getRuntimeBinding<T = unknown>(name: string): T | undefined {
-  return getRuntimeEnv()[name] as T | undefined;
+  if (isInternalBinding(name)) {
+    return undefined;
+  }
+  return getRawRuntimeEnv()[name] as T | undefined;
 }
 
 export function requireRuntimeBinding<T = unknown>(name: string): T {
   const value = getRuntimeBinding<T>(name);
-  if (value !== undefined && value !== null) return value;
+  if (value !== undefined && value !== null) {
+    return value;
+  }
   throw new Error(`Missing Cloudflare binding "${name}".`);
 }

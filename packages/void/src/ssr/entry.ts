@@ -1,11 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { parseSync } from "vite";
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { parseSync } from 'vite';
 
-export const SSR_SERVER_ENTRY_RELATIVE_PATHS = ["src/main.ssr.ts", "src/main.ssr.tsx"] as const;
+export const SSR_SERVER_ENTRY_RELATIVE_PATHS = ['src/main.ssr.ts', 'src/main.ssr.tsx'] as const;
 export const SSR_CLIENT_ENTRY_RELATIVE_PATHS = [
-  "src/main.client.ts",
-  "src/main.client.tsx",
+  'src/main.client.ts',
+  'src/main.client.tsx',
 ] as const;
 
 interface ResolvedEntry {
@@ -30,16 +30,18 @@ function resolveSingleEntry(
     }))
     .filter((entry) => existsSync(entry.absolutePath));
 
-  if (matches.length === 0) return null;
+  if (matches.length === 0) {
+    return null;
+  }
   if (matches.length > 1) {
-    const names = matches.map((entry) => entry.relativePath).join(", ");
+    const names = matches.map((entry) => entry.relativePath).join(', ');
     throw new Error(`Multiple ${label} entry files found: ${names}. Keep only one.`);
   }
   return matches[0];
 }
 
 export function getSsrServerEntryPath(root: string): string | null {
-  const entry = resolveSingleEntry(root, SSR_SERVER_ENTRY_RELATIVE_PATHS, "SSR");
+  const entry = resolveSingleEntry(root, SSR_SERVER_ENTRY_RELATIVE_PATHS, 'SSR');
   return entry?.absolutePath ?? null;
 }
 
@@ -50,7 +52,7 @@ export function hasSsrEntry(root: string): boolean {
 function validateServerRenderExport(entry: ResolvedEntry): void {
   const { absolutePath, relativePath } = entry;
 
-  const source = readFileSync(absolutePath, "utf-8");
+  const source = readFileSync(absolutePath, 'utf-8');
   if (
     /\bexport\s+(?:async\s+)?function\s+render\b/.test(source) ||
     /\bexport\s+const\s+render\b/.test(source) ||
@@ -72,36 +74,36 @@ function validateServerRenderExport(entry: ResolvedEntry): void {
   const body = program.body ?? [];
 
   const hasRenderExport = body.some((node) => {
-    if (node.type === "ExportDefaultDeclaration") {
+    if (node.type === 'ExportDefaultDeclaration') {
       const declaration = node.declaration;
       if (
-        declaration?.type === "FunctionDeclaration" ||
-        declaration?.type === "FunctionExpression" ||
-        declaration?.type === "ArrowFunctionExpression"
+        declaration?.type === 'FunctionDeclaration' ||
+        declaration?.type === 'FunctionExpression' ||
+        declaration?.type === 'ArrowFunctionExpression'
       ) {
         return true;
       }
-      if (declaration?.type === "CallExpression") {
+      if (declaration?.type === 'CallExpression') {
         return (
-          declaration.callee?.type === "Identifier" && declaration.callee.name === "defineRender"
+          declaration.callee?.type === 'Identifier' && declaration.callee.name === 'defineRender'
         );
       }
       return false;
     }
-    if (node.type !== "ExportNamedDeclaration") {
+    if (node.type !== 'ExportNamedDeclaration') {
       return false;
     }
 
     const declaration = node.declaration;
-    if (declaration?.type === "FunctionDeclaration") {
-      return declaration.id?.name === "render";
+    if (declaration?.type === 'FunctionDeclaration') {
+      return declaration.id?.name === 'render';
     }
-    if (declaration?.type === "VariableDeclaration") {
-      return declaration.declarations.some((decl: any) => decl.id?.name === "render");
+    if (declaration?.type === 'VariableDeclaration') {
+      return declaration.declarations.some((decl: any) => decl.id?.name === 'render');
     }
 
     const specifiers = node.specifiers ?? [];
-    return specifiers.some((specifier: any) => specifier.exported?.name === "render");
+    return specifiers.some((specifier: any) => specifier.exported?.name === 'render');
   });
 
   if (!hasRenderExport) {
@@ -116,18 +118,20 @@ function validateServerRenderExport(entry: ResolvedEntry): void {
  * Returns null when SSR mode is not used.
  */
 export function validateSsrEntries(root: string): SsrEntries | null {
-  const server = resolveSingleEntry(root, SSR_SERVER_ENTRY_RELATIVE_PATHS, "SSR");
-  const client = resolveSingleEntry(root, SSR_CLIENT_ENTRY_RELATIVE_PATHS, "SSR client");
+  const server = resolveSingleEntry(root, SSR_SERVER_ENTRY_RELATIVE_PATHS, 'SSR');
+  const client = resolveSingleEntry(root, SSR_CLIENT_ENTRY_RELATIVE_PATHS, 'SSR client');
 
-  if (!server && !client) return null;
+  if (!server && !client) {
+    return null;
+  }
   if (server && !client) {
     throw new Error(
-      `SSR mode requires a client entry. Add one of: ${SSR_CLIENT_ENTRY_RELATIVE_PATHS.join(", ")}`,
+      `SSR mode requires a client entry. Add one of: ${SSR_CLIENT_ENTRY_RELATIVE_PATHS.join(', ')}`,
     );
   }
   if (!server && client) {
     throw new Error(
-      `SSR mode requires a server entry. Add one of: ${SSR_SERVER_ENTRY_RELATIVE_PATHS.join(", ")}`,
+      `SSR mode requires a server entry. Add one of: ${SSR_SERVER_ENTRY_RELATIVE_PATHS.join(', ')}`,
     );
   }
 
@@ -153,13 +157,17 @@ export function detectSsrPrerender(
   root: string,
 ): { prerender: boolean; hasGetPrerenderPaths: boolean } | null {
   const entryPath = getSsrServerEntryPath(root);
-  if (!entryPath) return null;
+  if (!entryPath) {
+    return null;
+  }
 
-  const content = readFileSync(entryPath, "utf-8");
+  const content = readFileSync(entryPath, 'utf-8');
   const prerender = PRERENDER_RE.test(content);
   const hasGetPrerenderPaths = GET_PRERENDER_PATHS_RE.test(content);
 
-  if (!prerender && !hasGetPrerenderPaths) return null;
+  if (!prerender && !hasGetPrerenderPaths) {
+    return null;
+  }
 
   return { prerender, hasGetPrerenderPaths };
 }

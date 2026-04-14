@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
-import { defer, separateDeferred, DEFERRED } from "../../src/pages/defer";
+import { describe, expect, it, vi } from 'vitest';
+import { defer, separateDeferred, DEFERRED } from '../../src/pages/defer';
 
-describe("defer", () => {
-  it("single prop — returns sentinel with null group", () => {
+describe('defer', () => {
+  it('single prop — returns sentinel with null group', () => {
     const resolver = vi.fn();
     const result = defer(resolver) as any;
     expect(result[DEFERRED]).toBe(true);
@@ -10,26 +10,26 @@ describe("defer", () => {
     expect(result.resolver).toBe(resolver);
   });
 
-  it("named group — returns sentinel with group name", () => {
+  it('named group — returns sentinel with group name', () => {
     const resolver = vi.fn();
-    const result = defer("analytics", resolver) as any;
+    const result = defer('analytics', resolver) as any;
     expect(result[DEFERRED]).toBe(true);
-    expect(result.group).toBe("analytics");
+    expect(result.group).toBe('analytics');
     expect(result.resolver).toBe(resolver);
   });
 });
 
-describe("separateDeferred", () => {
-  it("returns all immediate props when no deferred", () => {
-    const input = { projects: [1, 2], title: "Hello" };
+describe('separateDeferred', () => {
+  it('returns all immediate props when no deferred', () => {
+    const input = { projects: [1, 2], title: 'Hello' };
     const { immediateProps, deferredMap } = separateDeferred(input);
-    expect(immediateProps).toEqual({ projects: [1, 2], title: "Hello" });
+    expect(immediateProps).toEqual({ projects: [1, 2], title: 'Hello' });
     expect(deferredMap).toEqual({});
   });
 
   const LOADING = { value: null, loading: true, error: null };
 
-  it("separates single deferred prop — uses object key as group", () => {
+  it('separates single deferred prop — uses object key as group', () => {
     const resolver = vi.fn();
     const input = {
       projects: [1, 2],
@@ -37,17 +37,17 @@ describe("separateDeferred", () => {
     };
     const { immediateProps, deferredMap } = separateDeferred(input);
     expect(immediateProps).toEqual({ projects: [1, 2], usage: LOADING });
-    expect(Object.keys(deferredMap)).toEqual(["usage"]);
-    expect(deferredMap["usage"].resolver).toBe(resolver);
-    expect(deferredMap["usage"].keys).toEqual(["usage"]);
+    expect(Object.keys(deferredMap)).toEqual(['usage']);
+    expect(deferredMap['usage'].resolver).toBe(resolver);
+    expect(deferredMap['usage'].keys).toEqual(['usage']);
   });
 
-  it("separates named group — groups by group name", () => {
+  it('separates named group — groups by group name', () => {
     const resolver = vi.fn();
     const input = {
       projects: [1, 2],
-      metrics: { [DEFERRED]: true, group: "analytics", resolver },
-      chart: { [DEFERRED]: true, group: "analytics", resolver },
+      metrics: { [DEFERRED]: true, group: 'analytics', resolver },
+      chart: { [DEFERRED]: true, group: 'analytics', resolver },
     };
     const { immediateProps, deferredMap } = separateDeferred(input);
     expect(immediateProps).toEqual({
@@ -55,12 +55,12 @@ describe("separateDeferred", () => {
       metrics: LOADING,
       chart: LOADING,
     });
-    expect(Object.keys(deferredMap)).toEqual(["analytics"]);
-    expect(deferredMap["analytics"].keys).toEqual(["metrics", "chart"]);
-    expect(deferredMap["analytics"].resolver).toBe(resolver);
+    expect(Object.keys(deferredMap)).toEqual(['analytics']);
+    expect(deferredMap['analytics'].keys).toEqual(['metrics', 'chart']);
+    expect(deferredMap['analytics'].resolver).toBe(resolver);
   });
 
-  it("handles mix of immediate, single deferred, and grouped deferred", () => {
+  it('handles mix of immediate, single deferred, and grouped deferred', () => {
     const usageResolver = vi.fn();
     const analyticsResolver = vi.fn();
     const input = {
@@ -68,12 +68,12 @@ describe("separateDeferred", () => {
       usage: { [DEFERRED]: true, group: null, resolver: usageResolver },
       metrics: {
         [DEFERRED]: true,
-        group: "analytics",
+        group: 'analytics',
         resolver: analyticsResolver,
       },
       chart: {
         [DEFERRED]: true,
-        group: "analytics",
+        group: 'analytics',
         resolver: analyticsResolver,
       },
     };
@@ -84,8 +84,8 @@ describe("separateDeferred", () => {
       metrics: LOADING,
       chart: LOADING,
     });
-    expect(Object.keys(deferredMap).sort()).toEqual(["analytics", "usage"]);
-    expect(deferredMap["usage"].keys).toEqual(["usage"]);
-    expect(deferredMap["analytics"].keys).toEqual(["metrics", "chart"]);
+    expect(Object.keys(deferredMap).sort()).toEqual(['analytics', 'usage']);
+    expect(deferredMap['usage'].keys).toEqual(['usage']);
+    expect(deferredMap['analytics'].keys).toEqual(['metrics', 'chart']);
   });
 });

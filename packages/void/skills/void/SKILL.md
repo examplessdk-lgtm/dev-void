@@ -13,7 +13,9 @@ Docs in this skill are bundled from `docs/` during `void` package build and live
 
 ## Command Naming
 
-Use `void` in examples and commands in this skill. For first-time setup, prefer `void init` followed by `void deploy`; `void init` can handle auth and project linking interactively.
+Use `void` in examples and commands in this skill. For first-time setup, prefer `void init` followed by `void deploy`; in an empty directory, install `void` first and let `void init` add the matching Pages adapter and starter dependencies. `void init` can also handle auth and project linking interactively.
+
+Use `void` and `@void/*` in code examples. During the GitHub Packages private beta, installation may use npm aliases such as `void@npm:@void-sdk/void`. Put `@void-sdk:registry=https://npm.pkg.github.com` in the project `.npmrc`, and keep the classic GitHub PAT with `read:packages` in the user's `~/.npmrc`.
 
 ## No-Args Behavior
 
@@ -47,6 +49,7 @@ Then ask what to do next.
 | Static site generation                    | `docs/guide/ssg.md`                                                                       |
 | Deployment and CI                         | `docs/guide/deployment.md`, `docs/reference/cli.md`                                       |
 | Project status, deployment history        | `docs/reference/cli.md`                                                                   |
+| Cache purging                             | `docs/reference/cli.md`                                                                   |
 | Project logs, runtime errors              | `docs/reference/cli.md`                                                                   |
 | Secrets management (put/sync/delete)      | `docs/reference/cli.md`, `docs/guide/env-vars.md`                                         |
 | Custom domain setup                       | `docs/reference/cli.md`                                                                   |

@@ -26,9 +26,9 @@ export function convertReturnValue(value: unknown): Response {
   let response: Response;
   if (value === null || value === undefined) {
     response = new Response(null, { status: 204 });
-  } else if (typeof value === "string") {
+  } else if (typeof value === 'string') {
     response = new Response(value, {
-      headers: { "Content-Type": "text/html; charset=utf-8" },
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
     });
   } else {
     // object, array, number, boolean → JSON

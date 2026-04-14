@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import { useForm } from "@void/vue";
-import type { Props } from "./queues.server";
+import { useForm } from '@void/vue';
+import type { Props } from './queues.server';
 
 defineProps<Props>();
 
-const form = useForm("/queues", {
-  key: "",
-  value: "",
+const form = useForm('/queues', {
+  key: '',
+  value: '',
 });
 
-const deleteForm = useForm("/queues", {
-  intent: "delete",
+const deleteForm = useForm('/queues', {
+  intent: 'delete',
   id: 0,
 });
 
@@ -38,7 +38,7 @@ function deleteResult(id: number) {
         <input v-model="form.data.value" placeholder="my-value" required />
       </div>
       <button type="submit" :disabled="form.processing" style="margin-top: 5px">
-        {{ form.processing ? "Sending..." : "Send to Queue" }}
+        {{ form.processing ? 'Sending...' : 'Send to Queue' }}
       </button>
     </form>
 

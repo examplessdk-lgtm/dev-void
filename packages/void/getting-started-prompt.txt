@@ -1,7 +1,28 @@
-Void is a fullstack Vite framework and deployment platform for Cloudflare. In an empty directory, set up a new app with:
+Void is a fullstack Vite framework and deployment platform for Cloudflare.
+Void is currently in private preview. In an empty directory, set up a new app like this:
 
-npm install -D void
+In the project, create `.npmrc` with this content:
+
+@void-sdk:registry=https://npm.pkg.github.com
+
+Then create a GitHub classic PAT with read:packages:
+
+https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic
+https://docs.github.com/en/packages/learn-github-packages/about-permissions-for-github-packages
+
+Store the token in your user ~/.npmrc:
+
+//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
+
+Then install:
+
+npm install -D void@npm:@void-sdk/void
+
+Then run:
+
 npx void init
+
+In an empty directory, `void init` will add the matching Pages adapter and starter dependencies after you choose a framework.
 
 During `void init`, first choose a Pages framework (React, Vue, Svelte, or Solid), then choose D1 for a zero-config, fully managed default or PostgreSQL if you already have Postgres infrastructure or expect heavier writes and more complex queries.
 

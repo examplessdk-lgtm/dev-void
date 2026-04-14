@@ -1,26 +1,26 @@
-import * as v from "valibot";
-import { defineRoom } from "void/ws";
+import * as v from 'valibot';
+import { defineRoom } from 'void/ws';
 
-const ChatClientMessage = v.variant("type", [
+const ChatClientMessage = v.variant('type', [
   v.object({
-    type: v.literal("chat.join"),
+    type: v.literal('chat.join'),
     name: v.pipe(v.string(), v.trim(), v.minLength(1), v.maxLength(24)),
   }),
   v.object({
-    type: v.literal("chat.message"),
+    type: v.literal('chat.message'),
     text: v.pipe(v.string(), v.trim(), v.minLength(1), v.maxLength(280)),
   }),
 ]);
 
-const ChatServerMessage = v.variant("type", [
+const ChatServerMessage = v.variant('type', [
   v.object({
-    type: v.literal("chat.system"),
+    type: v.literal('chat.system'),
     id: v.string(),
     text: v.string(),
     activeConnections: v.number(),
   }),
   v.object({
-    type: v.literal("chat.message"),
+    type: v.literal('chat.message'),
     id: v.string(),
     name: v.string(),
     text: v.string(),
@@ -33,7 +33,7 @@ interface ChatConnectionState {
 }
 
 function activeConnectionCount(
-  room: Parameters<NonNullable<typeof definition.onConnect>>[0]["room"],
+  room: Parameters<NonNullable<typeof definition.onConnect>>[0]['room'],
 ): number {
   return Array.from(room.getConnections()).length;
 }
@@ -45,17 +45,17 @@ const definition = defineRoom({
   },
   async onConnect(ctx) {
     await ctx.connection.send({
-      type: "chat.system",
+      type: 'chat.system',
       id: crypto.randomUUID(),
       text: `Connected to room "${ctx.params.room}"`,
       activeConnections: activeConnectionCount(ctx.room),
     });
   },
   async onMessage(ctx, event) {
-    if (event.type === "chat.join") {
+    if (event.type === 'chat.join') {
       ctx.connection.setState({ name: event.name } satisfies ChatConnectionState);
       await ctx.room.broadcast({
-        type: "chat.system",
+        type: 'chat.system',
         id: crypto.randomUUID(),
         text: `${event.name} joined ${ctx.params.room}`,
         activeConnections: activeConnectionCount(ctx.room),
@@ -66,16 +66,16 @@ const definition = defineRoom({
     const state = (ctx.connection.state as ChatConnectionState | undefined) ?? {};
     if (!state.name) {
       await ctx.connection.send({
-        type: "chat.system",
+        type: 'chat.system',
         id: crypto.randomUUID(),
-        text: "Join the room before sending messages",
+        text: 'Join the room before sending messages',
         activeConnections: activeConnectionCount(ctx.room),
       });
       return;
     }
 
     await ctx.room.broadcast({
-      type: "chat.message",
+      type: 'chat.message',
       id: crypto.randomUUID(),
       name: state.name,
       text: event.text,
@@ -84,11 +84,13 @@ const definition = defineRoom({
   },
   async onClose(ctx) {
     const state = (ctx.connection.state as ChatConnectionState | undefined) ?? {};
-    if (!state.name) return;
+    if (!state.name) {
+      return;
+    }
 
     const remaining = Math.max(0, activeConnectionCount(ctx.room) - 1);
     await ctx.room.broadcast({
-      type: "chat.system",
+      type: 'chat.system',
       id: crypto.randomUUID(),
       text: `${state.name} left ${ctx.params.room}`,
       activeConnections: remaining,
@@ -98,7 +100,7 @@ const definition = defineRoom({
     return Response.json({
       ok: true,
       room: ctx.params.room,
-      kind: "room",
+      kind: 'room',
     });
   },
 });

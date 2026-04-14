@@ -1,16 +1,16 @@
-import { join } from "node:path";
-import { glob } from "tinyglobby";
-import { parseRouteFilename, type RouteDefinition } from "./parse-filename";
-import { detectHttpExports } from "./detect-exports";
-import { scanJobs, type JobDefinition } from "../crons/scan";
-import { scanQueues, type QueueDefinition } from "../queues/scan";
-import { scanPages } from "../pages/scan";
-import type { PageScanResult } from "../pages/types";
+import { join } from 'node:path';
+import { glob } from 'tinyglobby';
+import { scanJobs, type JobDefinition } from '../crons/scan';
+import { scanPages } from '../pages/scan';
+import type { PageScanResult } from '../pages/types';
+import { scanQueues, type QueueDefinition } from '../queues/scan';
+import { detectHttpExports } from './detect-exports';
+import { parseRouteFilename, type RouteDefinition } from './parse-filename';
 import {
   isWebSocketPatternFile,
   scanWebSocketRoutes,
   type WebSocketRouteDefinition,
-} from "./websocket";
+} from './websocket';
 
 export interface ScanResult {
   routes: RouteDefinition[];
@@ -28,7 +28,7 @@ export interface MiddlewareDefinition {
   filePath: string;
 }
 
-const HANDLER_EXTENSIONS = ["ts", "mts", "js", "mjs"];
+const HANDLER_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
 
 /**
  * Scan routes/ and middleware/ directories and return a structured manifest.
@@ -36,9 +36,9 @@ const HANDLER_EXTENSIONS = ["ts", "mts", "js", "mjs"];
  */
 export async function scanRoutes(
   root: string,
-  options?: { output?: "server" | "static" },
+  options?: { output?: 'server' | 'static' },
 ): Promise<ScanResult> {
-  const pattern = `**/*.{${HANDLER_EXTENSIONS.join(",")}}`;
+  const pattern = `**/*.{${HANDLER_EXTENSIONS.join(',')}}`;
 
   const [routeFiles, websockets, middlewareFiles, jobs, queues, pages] = await Promise.all([
     glob(pattern, { cwd: `${root}/routes`, absolute: false }),
@@ -54,7 +54,7 @@ export async function scanRoutes(
   // Parse routes, filtering out files starting with _
   const routes = routeFiles
     .filter((f) => !isWebSocketPatternFile(f))
-    .filter((f) => !f.split("/").some((s) => s.startsWith("_")))
+    .filter((f) => !f.split('/').some((s) => s.startsWith('_')))
     .map((f) => {
       const route = parseRouteFilename(f);
       route.methods = detectHttpExports(join(routesDir, f));
@@ -62,15 +62,17 @@ export async function scanRoutes(
     })
     // Sort: static routes before dynamic, catch-all last
     .sort((a, b) => {
-      if (a.catchAll !== b.catchAll) return a.catchAll ? 1 : -1;
+      if (a.catchAll !== b.catchAll) {
+        return a.catchAll ? 1 : -1;
+      }
       return a.pattern.localeCompare(b.pattern);
     });
 
   // Parse middleware, sorted by numeric prefix
   const middleware = middlewareFiles
-    .filter((f) => !f.startsWith("_"))
+    .filter((f) => !f.startsWith('_'))
     .map((f) => {
-      const basename = f.split("/").pop()!;
+      const basename = f.split('/').pop()!;
       const match = basename.match(/^(\d+)\./);
       return {
         order: match ? parseInt(match[1], 10) : Infinity,

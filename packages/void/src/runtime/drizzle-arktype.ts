@@ -1,1 +1,1 @@
-export * from "drizzle-arktype";
+export * from 'drizzle-arktype';

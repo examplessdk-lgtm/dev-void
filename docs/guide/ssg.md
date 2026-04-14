@@ -37,7 +37,7 @@ Dynamic pages with `getPrerenderPaths()` are prerendered for the returned param 
 ```ts
 // pages/blog/[slug].server.ts
 export async function getPrerenderPaths() {
-  return [{ slug: "hello-world" }, { slug: "getting-started" }];
+  return [{ slug: 'hello-world' }, { slug: 'getting-started' }];
 }
 ```
 

@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { hasSsrEntry } from "../ssr/entry";
+import { existsSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { hasSsrEntry } from '../ssr/entry';
 
 /** Build output conventions for a known SSG (static site generator). */
 export interface SsgPreset {
@@ -11,9 +11,9 @@ export interface SsgPreset {
   /** Default output directory, relative to project root. */
   outputDir: string;
   /** App type for the deploy manifest. */
-  appType: "static" | "spa";
+  appType: 'static' | 'spa';
   /** Optional project-aware overrides. */
-  resolve?: (root: string) => Partial<Pick<StaticPreset, "buildCommand" | "outputDir">> | undefined;
+  resolve?: (root: string) => Partial<Pick<StaticPreset, 'buildCommand' | 'outputDir'>> | undefined;
 }
 
 /**
@@ -22,24 +22,24 @@ export interface SsgPreset {
  */
 export const SSG_PRESETS: Record<string, SsgPreset> = {
   vitepress: {
-    dep: "vitepress",
-    buildCommand: "vitepress build",
-    outputDir: ".vitepress/dist",
-    appType: "static",
+    dep: 'vitepress',
+    buildCommand: 'vitepress build',
+    outputDir: '.vitepress/dist',
+    appType: 'static',
     resolve(root) {
-      if (existsSync(join(root, "docs/.vitepress"))) {
+      if (existsSync(join(root, 'docs/.vitepress'))) {
         return {
-          buildCommand: "vitepress build docs",
-          outputDir: "docs/.vitepress/dist",
+          buildCommand: 'vitepress build docs',
+          outputDir: 'docs/.vitepress/dist',
         };
       }
     },
   },
   docusaurus: {
-    dep: "@docusaurus/core",
-    buildCommand: "docusaurus build",
-    outputDir: "build",
-    appType: "static",
+    dep: '@docusaurus/core',
+    buildCommand: 'docusaurus build',
+    outputDir: 'build',
+    appType: 'static',
   },
 };
 
@@ -72,59 +72,59 @@ export interface FrameworkPreset {
  */
 export const FRAMEWORK_PRESETS: Record<string, FrameworkPreset> = {
   // Class A
-  "tanstack-start": {
-    buildCommand: "vite build",
-    workerDir: "dist/server",
-    workerMain: "index.js",
-    assetsDir: "dist/client",
+  'tanstack-start': {
+    buildCommand: 'vite build',
+    workerDir: 'dist/server',
+    workerMain: 'index.js',
+    assetsDir: 'dist/client',
   },
-  "react-router": {
-    buildCommand: "vite build",
-    workerDir: "build/server",
-    workerMain: "index.js",
-    assetsDir: "build/client",
+  'react-router': {
+    buildCommand: 'vite build',
+    workerDir: 'build/server',
+    workerMain: 'index.js',
+    assetsDir: 'build/client',
   },
-  "vinext-app": {
-    buildCommand: "vite build",
-    workerDir: "dist/rsc",
-    workerMain: "index.js",
-    assetsDir: "dist/client",
+  'vinext-app': {
+    buildCommand: 'vite build',
+    workerDir: 'dist/rsc',
+    workerMain: 'index.js',
+    assetsDir: 'dist/client',
   },
-  "vinext-pages": {
-    buildCommand: "vite build",
-    workerDir: "dist/ssr",
-    workerMain: "index.js",
-    assetsDir: "dist/client",
+  'vinext-pages': {
+    buildCommand: 'vite build',
+    workerDir: 'dist/ssr',
+    workerMain: 'index.js',
+    assetsDir: 'dist/client',
   },
   // Class B/C
   sveltekit: {
-    buildCommand: "vite build",
-    workerDir: ".svelte-kit/cloudflare",
-    workerMain: "_worker.js",
-    assetsDir: ".svelte-kit/cloudflare",
-    hashedAssetsPrefix: "_app/immutable",
+    buildCommand: 'vite build',
+    workerDir: '.svelte-kit/cloudflare',
+    workerMain: '_worker.js',
+    assetsDir: '.svelte-kit/cloudflare',
+    hashedAssetsPrefix: '_app/immutable',
     bundle: true,
   },
   nuxt: {
-    buildCommand: "nuxt build",
-    workerDir: ".output/server",
-    workerMain: "index.mjs",
-    assetsDir: ".output/public",
-    hashedAssetsPrefix: "_nuxt",
+    buildCommand: 'nuxt build',
+    workerDir: '.output/server',
+    workerMain: 'index.mjs',
+    assetsDir: '.output/public',
+    hashedAssetsPrefix: '_nuxt',
   },
   astro: {
-    buildCommand: "astro build",
-    workerDir: "dist/server",
-    workerMain: "entry.mjs",
-    assetsDir: "dist/client",
-    hashedAssetsPrefix: "_astro",
+    buildCommand: 'astro build',
+    workerDir: 'dist/server',
+    workerMain: 'entry.mjs',
+    assetsDir: 'dist/client',
+    hashedAssetsPrefix: '_astro',
   },
 };
 
 export interface StaticPreset {
   buildCommand: string | null;
   outputDir: string;
-  appType: "spa" | "static";
+  appType: 'spa' | 'static';
 }
 
 /**
@@ -134,7 +134,7 @@ export interface StaticPreset {
 export function resolveProjectCommand(root: string, command: string): string {
   const [bin, ...args] = command.trim().split(/\s+/);
   const resolvedBin = localBin(root, resolveCommandBin(root, bin));
-  return args.length > 0 ? `${resolvedBin} ${args.join(" ")}` : resolvedBin;
+  return args.length > 0 ? `${resolvedBin} ${args.join(' ')}` : resolvedBin;
 }
 
 /**
@@ -144,7 +144,7 @@ export function resolveProjectCommand(root: string, command: string): string {
 export function formatProjectCommand(root: string, command: string): string {
   const [bin, ...args] = command.trim().split(/\s+/);
   const formattedBin = resolveCommandBin(root, bin);
-  return args.length > 0 ? `${formattedBin} ${args.join(" ")}` : formattedBin;
+  return args.length > 0 ? `${formattedBin} ${args.join(' ')}` : formattedBin;
 }
 
 /**
@@ -160,7 +160,7 @@ export function detectPreset(
     return {
       buildCommand: null,
       outputDir: resolve(root, options.dir),
-      appType: options.spa ? "spa" : "static",
+      appType: options.spa ? 'spa' : 'static',
     };
   }
 
@@ -189,28 +189,28 @@ export function detectPreset(
 
   // 4. Vite/Vite+ in deps → static SPA
   if (pkg && hasViteLike(pkg)) {
-    const buildCommand = resolveProjectScriptCommand(root, "build");
+    const buildCommand = resolveProjectScriptCommand(root, 'build');
     return {
-      buildCommand: buildCommand ?? resolveProjectCommand(root, "vite build"),
-      outputDir: resolve(root, "dist"),
-      appType: "spa",
+      buildCommand: buildCommand ?? resolveProjectCommand(root, 'vite build'),
+      outputDir: resolve(root, 'dist'),
+      appType: 'spa',
     };
   }
 
   // 5. No build tool — look for pre-built output
-  if (existsSync(join(root, "dist/index.html"))) {
+  if (existsSync(join(root, 'dist/index.html'))) {
     return {
       buildCommand: null,
-      outputDir: resolve(root, "dist"),
-      appType: options?.spa ? "spa" : "static",
+      outputDir: resolve(root, 'dist'),
+      appType: options?.spa ? 'spa' : 'static',
     };
   }
 
-  if (existsSync(join(root, "index.html"))) {
+  if (existsSync(join(root, 'index.html'))) {
     return {
       buildCommand: null,
       outputDir: root,
-      appType: options?.spa ? "spa" : "static",
+      appType: options?.spa ? 'spa' : 'static',
     };
   }
 
@@ -222,12 +222,12 @@ export function detectPreset(
  * Falls back to bare command name if the bin doesn't exist locally.
  */
 function localBin(root: string, name: string): string {
-  const bin = join(root, "node_modules", ".bin", name);
+  const bin = join(root, 'node_modules', '.bin', name);
   return existsSync(bin) ? bin : name;
 }
 
 function resolveCommandBin(root: string, name: string): string {
-  if (name === "vite") {
+  if (name === 'vite') {
     return detectViteBinary(root);
   }
   return name;
@@ -235,7 +235,7 @@ function resolveCommandBin(root: string, name: string): string {
 
 function readPackageJson(root: string): Record<string, unknown> | null {
   try {
-    return JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
+    return JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
   } catch {
     return null;
   }
@@ -248,25 +248,35 @@ function getAllDeps(pkg: Record<string, unknown>): Record<string, string> {
   };
 }
 
-function detectPackageManager(root: string): "pnpm" | "yarn" | "bun" | "npm" {
-  if (existsSync(join(root, "pnpm-lock.yaml"))) return "pnpm";
-  if (existsSync(join(root, "yarn.lock"))) return "yarn";
-  if (existsSync(join(root, "bun.lock")) || existsSync(join(root, "bun.lockb"))) return "bun";
-  return "npm";
+function detectPackageManager(root: string): 'pnpm' | 'yarn' | 'bun' | 'npm' {
+  if (existsSync(join(root, 'pnpm-lock.yaml'))) {
+    return 'pnpm';
+  }
+  if (existsSync(join(root, 'yarn.lock'))) {
+    return 'yarn';
+  }
+  if (existsSync(join(root, 'bun.lock')) || existsSync(join(root, 'bun.lockb'))) {
+    return 'bun';
+  }
+  return 'npm';
 }
 
 function resolveProjectScriptCommand(root: string, scriptName: string): string | null {
   const pkg = readPackageJson(root);
   const script = pkg?.scripts;
-  if (!script || typeof script !== "object" || Array.isArray(script)) return null;
-  if (typeof (script as Record<string, unknown>)[scriptName] !== "string") return null;
+  if (!script || typeof script !== 'object' || Array.isArray(script)) {
+    return null;
+  }
+  if (typeof (script as Record<string, unknown>)[scriptName] !== 'string') {
+    return null;
+  }
 
   switch (detectPackageManager(root)) {
-    case "pnpm":
+    case 'pnpm':
       return `pnpm ${scriptName}`;
-    case "yarn":
+    case 'yarn':
       return `yarn ${scriptName}`;
-    case "bun":
+    case 'bun':
       return `bun run ${scriptName}`;
     default:
       return `npm run ${scriptName}`;
@@ -275,29 +285,41 @@ function resolveProjectScriptCommand(root: string, scriptName: string): string |
 
 function hasViteLike(pkg: Record<string, unknown>): boolean {
   const deps = getAllDeps(pkg);
-  return "vite" in deps || "vite-plus" in deps;
+  return 'vite' in deps || 'vite-plus' in deps;
 }
 
-function detectViteBinary(root: string): "vite" | "vp" {
+function detectViteBinary(root: string): 'vite' | 'vp' {
   const pkg = readPackageJson(root);
   if (pkg) {
     const deps = getAllDeps(pkg);
-    if ("vite-plus" in deps) {
-      return "vp";
+    if ('vite-plus' in deps) {
+      return 'vp';
     }
   }
-  return "vite";
+  return 'vite';
 }
 
 /**
  * Check whether the project has backend files that require a full worker deploy.
  */
 export function hasBackendFiles(root: string): boolean {
-  if (existsSync(join(root, "routes"))) return true;
-  if (existsSync(join(root, "pages"))) return true;
-  if (existsSync(join(root, "middleware"))) return true;
-  if (existsSync(join(root, "crons"))) return true;
-  if (existsSync(join(root, "queues"))) return true;
-  if (hasSsrEntry(root)) return true;
+  if (existsSync(join(root, 'routes'))) {
+    return true;
+  }
+  if (existsSync(join(root, 'pages'))) {
+    return true;
+  }
+  if (existsSync(join(root, 'middleware'))) {
+    return true;
+  }
+  if (existsSync(join(root, 'crons'))) {
+    return true;
+  }
+  if (existsSync(join(root, 'queues'))) {
+    return true;
+  }
+  if (hasSsrEntry(root)) {
+    return true;
+  }
   return false;
 }

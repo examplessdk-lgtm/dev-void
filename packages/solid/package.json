@@ -1,6 +1,6 @@
 {
-  "name": "@void/solid",
-  "version": "0.0.1",
+  "name": "@void-sdk/solid",
+  "version": "0.3.0",
   "files": [
     "dist",
     "src/runtime"
@@ -26,24 +26,27 @@
       "default": "./src/runtime/prefetch.ts"
     }
   },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "vite-plugin-solid": "^2.11.11"
+    "vite-plugin-solid": "^2.11.12"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "solid-js": "^1.9.12",
     "tsdown": "catalog:",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   },
   "peerDependencies": {
     "solid-js": "^1.9.0",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   }
 }

@@ -5,9 +5,9 @@ Solid adapter for Void Pages mode.
 ## Setup
 
 ```ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidSolid } from "@void/solid/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidSolid } from '@void/solid/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidSolid()],
@@ -51,9 +51,9 @@ export default function Home(props: { title: string }) {
 ```
 
 ```ts
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
-export const loader = defineHandler(() => ({ title: "Home" }));
+export const loader = defineHandler(() => ({ title: 'Home' }));
 ```
 
 ## Tests

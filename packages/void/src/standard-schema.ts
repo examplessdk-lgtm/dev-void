@@ -7,7 +7,7 @@
  */
 
 export interface StandardSchemaV1<Input = unknown, Output = Input> {
-  readonly "~standard": StandardSchemaV1.Props<Input, Output>;
+  readonly '~standard': StandardSchemaV1.Props<Input, Output>;
 }
 
 export declare namespace StandardSchemaV1 {
@@ -44,10 +44,10 @@ export declare namespace StandardSchemaV1 {
   }
 
   type InferInput<Schema extends StandardSchemaV1> = NonNullable<
-    Schema["~standard"]["types"]
-  >["input"];
+    Schema['~standard']['types']
+  >['input'];
 
   type InferOutput<Schema extends StandardSchemaV1> = NonNullable<
-    Schema["~standard"]["types"]
-  >["output"];
+    Schema['~standard']['types']
+  >['output'];
 }

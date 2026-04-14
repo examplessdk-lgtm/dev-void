@@ -1,4 +1,4 @@
-import type { Props } from "./deferred.server";
+import type { Props } from './deferred.server';
 
 export default function DeferredPage({ title, stats }: Props) {
   if (stats.loading) {

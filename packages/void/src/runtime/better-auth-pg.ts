@@ -1,23 +1,23 @@
+import { applyPgAuthMigrations } from './auth-migrations';
 import {
   createVoidAuthRuntime,
   type ResolvedDatabase,
   type VoidAuthEnv,
   type VoidAuthRuntimeApi,
-} from "./better-auth-shared";
-import { applyPgAuthMigrations } from "./auth-migrations";
+} from './better-auth-shared';
 
 function resolveConnectionString(env: VoidAuthEnv): string {
   const connectionString =
-    typeof env.DATABASE_URL === "string" && env.DATABASE_URL.length > 0
+    typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.length > 0
       ? env.DATABASE_URL
-      : typeof env.HYPERDRIVE?.connectionString === "string" &&
+      : typeof env.HYPERDRIVE?.connectionString === 'string' &&
           env.HYPERDRIVE.connectionString.length > 0
         ? env.HYPERDRIVE.connectionString
         : undefined;
 
   if (!connectionString) {
     throw new Error(
-      "Better Auth requires DATABASE_URL for local PostgreSQL dev or HYPERDRIVE in production.",
+      'Better Auth requires DATABASE_URL for local PostgreSQL dev or HYPERDRIVE in production.',
     );
   }
 
@@ -25,7 +25,7 @@ function resolveConnectionString(env: VoidAuthEnv): string {
 }
 
 async function resolveDatabase(env: VoidAuthEnv): Promise<ResolvedDatabase> {
-  const { default: pg } = await import("pg");
+  const { default: pg } = await import('pg');
   const connectionString = resolveConnectionString(env);
   const pool = new pg.Pool({ connectionString, max: 1 });
   return {
@@ -39,24 +39,24 @@ async function resolveDatabase(env: VoidAuthEnv): Promise<ResolvedDatabase> {
 async function runPostgresAuthMigrations(
   _request: Request,
   env: VoidAuthEnv,
-  runtime: Parameters<VoidAuthRuntimeApi["runVoidAuthMigrations"]>[2],
-  migrationSchema: Parameters<VoidAuthRuntimeApi["runVoidAuthMigrations"]>[3],
+  runtime: Parameters<VoidAuthRuntimeApi['runVoidAuthMigrations']>[2],
+  migrationSchema: Parameters<VoidAuthRuntimeApi['runVoidAuthMigrations']>[3],
 ): Promise<void> {
   if (!migrationSchema) {
-    throw new Error("Void auth migration schema is unavailable.");
+    throw new Error('Void auth migration schema is unavailable.');
   }
-  if (runtime.dialect !== "postgresql") {
+  if (runtime.dialect !== 'postgresql') {
     throw new Error(
       `Void auth runtime mismatch: expected postgresql, received ${runtime.dialect}.`,
     );
   }
-  if (migrationSchema.dialect !== "postgresql") {
+  if (migrationSchema.dialect !== 'postgresql') {
     throw new Error(
       `Void auth runtime mismatch: expected postgresql, received ${migrationSchema.dialect}.`,
     );
   }
 
-  const { Client } = await import("pg");
+  const { Client } = await import('pg');
   const client = new Client({ connectionString: resolveConnectionString(env) });
   await client.connect();
   try {
@@ -77,18 +77,18 @@ async function runPostgresAuthMigrations(
   }
 }
 
-const runtime = createVoidAuthRuntime("postgresql", resolveDatabase, runPostgresAuthMigrations);
+const runtime = createVoidAuthRuntime('postgresql', resolveDatabase, runPostgresAuthMigrations);
 
-export const resolveVoidAuthOptions: VoidAuthRuntimeApi["resolveVoidAuthOptions"] =
+export const resolveVoidAuthOptions: VoidAuthRuntimeApi['resolveVoidAuthOptions'] =
   runtime.resolveVoidAuthOptions;
-export const createVoidAuth: VoidAuthRuntimeApi["createVoidAuth"] = runtime.createVoidAuth;
-export const resolveVoidAuthState: VoidAuthRuntimeApi["resolveVoidAuthState"] =
+export const createVoidAuth: VoidAuthRuntimeApi['createVoidAuth'] = runtime.createVoidAuth;
+export const resolveVoidAuthState: VoidAuthRuntimeApi['resolveVoidAuthState'] =
   runtime.resolveVoidAuthState;
-export const runVoidAuthMiddleware: VoidAuthRuntimeApi["runVoidAuthMiddleware"] =
+export const runVoidAuthMiddleware: VoidAuthRuntimeApi['runVoidAuthMiddleware'] =
   runtime.runVoidAuthMiddleware;
-export const handleVoidAuthRequest: VoidAuthRuntimeApi["handleVoidAuthRequest"] =
+export const handleVoidAuthRequest: VoidAuthRuntimeApi['handleVoidAuthRequest'] =
   runtime.handleVoidAuthRequest;
-export const runVoidAuthMigrations: VoidAuthRuntimeApi["runVoidAuthMigrations"] =
+export const runVoidAuthMigrations: VoidAuthRuntimeApi['runVoidAuthMigrations'] =
   runtime.runVoidAuthMigrations;
 
-export type { VoidAuthDialect, VoidAuthEnv, VoidAuthRuntimeOptions } from "./better-auth-shared";
+export type { VoidAuthDialect, VoidAuthEnv, VoidAuthRuntimeOptions } from './better-auth-shared';

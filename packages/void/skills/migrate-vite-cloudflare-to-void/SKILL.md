@@ -1,5 +1,5 @@
 ---
-name: migrate-voidflare-to-void
+name: migrate-cloudflare-to-void
 description: Migrate an existing Vite app using @cloudflare/vite-plugin to Vite + void. Use when a project already runs on Cloudflare Workers but needs Void file-based routes, inferred bindings, and void deploy workflow.
 ---
 
@@ -44,8 +44,8 @@ Confirm:
 Target shape:
 
 ```ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
 
 export default defineConfig({
   plugins: [voidPlugin()],
@@ -94,7 +94,7 @@ export default defineConfig({
 - If the app no longer uses direct Wrangler workflows, remove `wrangler.jsonc`.
 - Remove direct `wrangler` dependency/devDependency from `package.json` when it is only used for old deploy/dev scripts.
 - Remove or rewrite npm scripts that call `wrangler` directly (for example old deploy/publish scripts).
-- Keep Wrangler only if the project still has explicit non-Vite-Cloud workflows that require it.
+- Keep Wrangler only if the project still has explicit non-Void workflows that require it.
 
 ## Routing behavior reference (use during file conversion)
 

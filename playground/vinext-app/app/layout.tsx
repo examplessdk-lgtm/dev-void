@@ -7,7 +7,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <title>vinext App Router + Void</title>
       </head>
       <body>
-        <nav style={{ padding: "8px", display: "flex", gap: "16px" }}>
+        <nav style={{ padding: '8px', display: 'flex', gap: '16px' }}>
           <a href="/">Home</a>
           <a href="/smoke">Smoke</a>
         </nav>

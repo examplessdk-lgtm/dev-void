@@ -1,7 +1,7 @@
-import { defineHandler, type InferProps } from "void";
-import { db, eq, desc } from "void/db";
-import { users, posts, insertUserSchema, insertPostSchema } from "@schema";
-import * as v from "valibot";
+import { users, posts, insertUserSchema, insertPostSchema } from '@schema';
+import * as v from 'valibot';
+import { defineHandler, type InferProps } from 'void';
+import { db, eq, desc } from 'void/db';
 
 export type Props = InferProps<typeof loader>;
 
@@ -22,26 +22,26 @@ export const loader = defineHandler(async () => {
 });
 
 export const actions = {
-  "create-user": defineHandler.withValidator({
+  'create-user': defineHandler.withValidator({
     body: insertUserSchema,
   })(async (_c, { body }) => {
     await db.insert(users).values(body);
   }),
 
-  "delete-user": defineHandler.withValidator({
+  'delete-user': defineHandler.withValidator({
     body: v.object({ id: v.number() }),
   })(async (_c, { body }) => {
     await db.delete(posts).where(eq(posts.authorId, body.id));
     await db.delete(users).where(eq(users.id, body.id));
   }),
 
-  "create-post": defineHandler.withValidator({
+  'create-post': defineHandler.withValidator({
     body: insertPostSchema,
   })(async (_c, { body }) => {
     await db.insert(posts).values(body);
   }),
 
-  "delete-post": defineHandler.withValidator({
+  'delete-post': defineHandler.withValidator({
     body: v.object({ id: v.number() }),
   })(async (_c, { body }) => {
     await db.delete(posts).where(eq(posts.id, body.id));

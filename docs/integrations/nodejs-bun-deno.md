@@ -168,9 +168,9 @@ my-app/
 
 ```ts
 // vite.config.ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidReact } from "@void/react/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidReact } from '@void/react/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidReact()],
@@ -179,10 +179,10 @@ export default defineConfig({
 
 ```ts
 // routes/api/hello.ts
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
 export const GET = defineHandler((c) => {
-  return c.json({ message: "Hello from Node.js!" });
+  return c.json({ message: 'Hello from Node.js!' });
 });
 ```
 
@@ -200,10 +200,10 @@ node dist/ssr/index.js
 Since `app.js` exports the Hono app, you can import it into a custom server:
 
 ```ts
-import app from "./dist/ssr/app.js";
+import app from './dist/ssr/app.js';
 
 // Use with any Node.js HTTP framework
-const response = await app.fetch(new Request("http://localhost/api/hello"));
+const response = await app.fetch(new Request('http://localhost/api/hello'));
 console.log(await response.json()); // { message: "Hello from Node.js!" }
 ```
 

@@ -7,7 +7,7 @@ outline: deep
 Void provides a typed AI client powered by Cloudflare's [AI Gateway](https://developers.cloudflare.com/ai-gateway/). It supports both [Workers AI](https://developers.cloudflare.com/workers-ai/) models and third-party providers such as OpenAI, Anthropic, and Google through bring-your-own-key credentials. Import `ai` from `void/ai` and run inference directly from your route handlers. Usage is metered through Void.
 
 ```ts
-import { ai } from "void/ai";
+import { ai } from 'void/ai';
 ```
 
 ## Basic Usage
@@ -15,14 +15,14 @@ import { ai } from "void/ai";
 Call `ai.run()` with a model name and inputs. Model names and input types are fully typed from `@cloudflare/workers-types`.
 
 ```ts
-import { defineHandler } from "void";
-import { ai } from "void/ai";
+import { defineHandler } from 'void';
+import { ai } from 'void/ai';
 
 export const POST = defineHandler(async (c) => {
   const { prompt } = await c.req.json();
 
-  const result = await ai.run("@cf/meta/llama-3.1-8b-instruct", {
-    messages: [{ role: "user", content: prompt }],
+  const result = await ai.run('@cf/meta/llama-3.1-8b-instruct', {
+    messages: [{ role: 'user', content: prompt }],
   });
 
   return c.json(result);
@@ -36,14 +36,14 @@ You can use any model available on [Workers AI](https://developers.cloudflare.co
 Use `ai.stream()` to get a streaming response with SSE headers that you can return directly from a route handler:
 
 ```ts
-import { defineHandler } from "void";
-import { ai } from "void/ai";
+import { defineHandler } from 'void';
+import { ai } from 'void/ai';
 
 export const POST = defineHandler(async (c) => {
   const { prompt } = await c.req.json();
 
-  return ai.stream("@cf/meta/llama-3.1-8b-instruct", {
-    messages: [{ role: "user", content: prompt }],
+  return ai.stream('@cf/meta/llama-3.1-8b-instruct', {
+    messages: [{ role: 'user', content: prompt }],
   });
 });
 ```
@@ -58,7 +58,7 @@ Use `ai.models()` to list available models:
 const models = await ai.models();
 
 // Filter by task
-const textModels = await ai.models({ task: "Text Generation" });
+const textModels = await ai.models({ task: 'Text Generation' });
 ```
 
 ## Markdown Conversion
@@ -66,7 +66,7 @@ const textModels = await ai.models({ task: "Text Generation" });
 Use `ai.toMarkdown()` to convert documents to markdown:
 
 ```ts
-const result = await ai.toMarkdown([{ name: "document.pdf", blob: pdfBytes }]);
+const result = await ai.toMarkdown([{ name: 'document.pdf', blob: pdfBytes }]);
 ```
 
 ## Local Development
@@ -94,14 +94,14 @@ You can use models from OpenAI, Anthropic, Google, and other providers by passin
 ### Usage
 
 ```ts
-import { defineHandler } from "void";
-import { ai } from "void/ai";
+import { defineHandler } from 'void';
+import { ai } from 'void/ai';
 
 export const POST = defineHandler(async (c) => {
   const { prompt } = await c.req.json();
 
-  const result = await ai.run("openai/gpt-4o", {
-    messages: [{ role: "user", content: prompt }],
+  const result = await ai.run('openai/gpt-4o', {
+    messages: [{ role: 'user', content: prompt }],
     max_tokens: 512,
   });
 
@@ -164,8 +164,8 @@ If the key is missing at runtime, `ai.run()` throws a descriptive error telling 
 export const POST = defineHandler(async (c) => {
   const { prompt } = await c.req.json();
 
-  return ai.stream("anthropic/claude-sonnet-4-20250514", {
-    messages: [{ role: "user", content: prompt }],
+  return ai.stream('anthropic/claude-sonnet-4-20250514', {
+    messages: [{ role: 'user', content: prompt }],
     max_tokens: 512,
   });
 });

@@ -7,8 +7,8 @@ import {
   S_RADIO_INACTIVE,
   S_CHECKBOX_ACTIVE,
   S_CHECKBOX_INACTIVE,
-} from "@clack/prompts";
-import { pc } from "./output";
+} from '@clack/prompts';
+import { pc } from './output';
 
 export interface FlagDef {
   name: string; // e.g. "--output" (include dashes)
@@ -18,12 +18,12 @@ export interface FlagDef {
 
 export type FollowUpDef =
   | {
-      type: "multi-select";
+      type: 'multi-select';
       flag: string;
       options: { value: string; label: string; selected?: boolean }[];
     }
   | {
-      type: "repeat-input";
+      type: 'repeat-input';
       placeholder: string;
     };
 
@@ -50,10 +50,10 @@ export function promptSubcommand(
   return new Promise((resolve) => {
     const { stdin, stdout } = process;
 
-    type Phase = "select" | "flags" | "multi-select" | "repeat-input";
-    let phase: Phase = "select";
+    type Phase = 'select' | 'flags' | 'multi-select' | 'repeat-input';
+    let phase: Phase = 'select';
     let cursor = 0;
-    let input = "";
+    let input = '';
     let prevLineCount = 0;
     let resolved = false;
 
@@ -70,12 +70,12 @@ export function promptSubcommand(
 
     // Repeat-input phase state
     let repeatEntries: string[] = [];
-    let repeatInput = "";
+    let repeatInput = '';
 
     const wasRaw = stdin.isRaw;
     stdin.setRawMode(true);
     stdin.resume();
-    stdout.write("\x1B[?25l"); // hide cursor
+    stdout.write('\x1B[?25l'); // hide cursor
 
     function clear() {
       if (prevLineCount > 0) {
@@ -85,18 +85,23 @@ export function promptSubcommand(
 
     function render() {
       clear();
-      if (phase === "select") renderSelect();
-      else if (phase === "flags") renderFlags();
-      else if (phase === "multi-select") renderMultiSelect();
-      else renderRepeatInput();
+      if (phase === 'select') {
+        renderSelect();
+      } else if (phase === 'flags') {
+        renderFlags();
+      } else if (phase === 'multi-select') {
+        renderMultiSelect();
+      } else {
+        renderRepeatInput();
+      }
     }
 
-    const title = command ? `void ${command}` : "void";
+    const title = command ? `void ${command}` : 'void';
 
     // Header for post-select phases
     function headerLine(): string {
-      const argPart = selectedArg ? ` ${selectedArg}` : "";
-      return `${pc.cyan(S_STEP_ACTIVE)}  ${pc.cyan(title)} ${pc.dim("·")} ${pc.cyan(`${selectedSub!.name}${argPart}`)}`;
+      const argPart = selectedArg ? ` ${selectedArg}` : '';
+      return `${pc.cyan(S_STEP_ACTIVE)}  ${pc.cyan(title)} ${pc.dim('·')} ${pc.cyan(`${selectedSub!.name}${argPart}`)}`;
     }
 
     // --- Renderers ---
@@ -116,7 +121,7 @@ export function promptSubcommand(
         const radio = isFocused ? pc.green(S_RADIO_ACTIVE) : pc.dim(S_RADIO_INACTIVE);
         const name = sub.name.padEnd(maxName);
 
-        let suffix = "";
+        let suffix = '';
         if (sub.arg) {
           if (isFocused && input.length > 0) {
             suffix = `  ${pc.cyan(input)}`;
@@ -138,7 +143,7 @@ export function promptSubcommand(
       lines.push(`${pc.gray(S_BAR)}  ${pc.dim(focused.description)}`);
       lines.push(pc.gray(S_BAR_END));
 
-      stdout.write(lines.join("\n") + "\n");
+      stdout.write(lines.join('\n') + '\n');
       prevLineCount = lines.length;
     }
 
@@ -164,7 +169,7 @@ export function promptSubcommand(
             : pc.dim(S_CHECKBOX_INACTIVE);
         const name = flag.name.padEnd(maxFlag);
 
-        let valueText = "";
+        let valueText = '';
         if (flag.arg) {
           if (state.enabled && state.value.length > 0) {
             valueText = `  ${isFocused ? pc.cyan(state.value) : pc.dim(state.value)}`;
@@ -184,12 +189,12 @@ export function promptSubcommand(
       lines.push(`${pc.gray(S_BAR)}  ${pc.dim(focused.description)}`);
       lines.push(pc.gray(S_BAR_END));
 
-      stdout.write(lines.join("\n") + "\n");
+      stdout.write(lines.join('\n') + '\n');
       prevLineCount = lines.length;
     }
 
     function renderMultiSelect() {
-      const followUp = selectedSub!.followUp as Extract<FollowUpDef, { type: "multi-select" }>;
+      const followUp = selectedSub!.followUp as Extract<FollowUpDef, { type: 'multi-select' }>;
       const options = followUp.options;
       const lines: string[] = [];
 
@@ -218,15 +223,15 @@ export function promptSubcommand(
       }
 
       lines.push(pc.gray(S_BAR));
-      lines.push(`${pc.gray(S_BAR)}  ${pc.dim("space to toggle, enter to confirm")}`);
+      lines.push(`${pc.gray(S_BAR)}  ${pc.dim('space to toggle, enter to confirm')}`);
       lines.push(pc.gray(S_BAR_END));
 
-      stdout.write(lines.join("\n") + "\n");
+      stdout.write(lines.join('\n') + '\n');
       prevLineCount = lines.length;
     }
 
     function renderRepeatInput() {
-      const followUp = selectedSub!.followUp as Extract<FollowUpDef, { type: "repeat-input" }>;
+      const followUp = selectedSub!.followUp as Extract<FollowUpDef, { type: 'repeat-input' }>;
       const lines: string[] = [];
 
       lines.push(headerLine());
@@ -243,22 +248,24 @@ export function promptSubcommand(
       }
 
       lines.push(pc.gray(S_BAR));
-      lines.push(`${pc.gray(S_BAR)}  ${pc.dim("enter to add, empty to finish")}`);
+      lines.push(`${pc.gray(S_BAR)}  ${pc.dim('enter to add, empty to finish')}`);
       lines.push(pc.gray(S_BAR_END));
 
-      stdout.write(lines.join("\n") + "\n");
+      stdout.write(lines.join('\n') + '\n');
       prevLineCount = lines.length;
     }
 
     // --- Lifecycle ---
 
     function cleanup() {
-      if (resolved) return;
+      if (resolved) {
+        return;
+      }
       resolved = true;
       stdin.setRawMode(wasRaw);
       stdin.pause();
-      stdin.removeListener("data", onData);
-      stdout.write("\x1B[?25h"); // show cursor
+      stdin.removeListener('data', onData);
+      stdout.write('\x1B[?25h'); // show cursor
     }
 
     function submit(result: SubcommandResult | null) {
@@ -267,18 +274,22 @@ export function promptSubcommand(
 
       if (result) {
         let summary = result.subcommand;
-        if (result.arg) summary += ` ${result.arg}`;
+        if (result.arg) {
+          summary += ` ${result.arg}`;
+        }
         if (result.flags) {
           for (const [flag, value] of Object.entries(result.flags)) {
             summary += ` ${flag}`;
-            if (typeof value === "string") summary += ` ${value}`;
+            if (typeof value === 'string') {
+              summary += ` ${value}`;
+            }
           }
         }
         if (result.extraArgs && result.extraArgs.length > 0) {
-          summary += ` ${result.extraArgs.join(" ")}`;
+          summary += ` ${result.extraArgs.join(' ')}`;
         }
         stdout.write(
-          `${pc.gray(S_STEP_SUBMIT)}  ${pc.dim(title)} ${pc.dim("·")} ${pc.dim(summary)}\n`,
+          `${pc.gray(S_STEP_SUBMIT)}  ${pc.dim(title)} ${pc.dim('·')} ${pc.dim(summary)}\n`,
         );
       }
 
@@ -304,28 +315,28 @@ export function promptSubcommand(
 
     function advancePhase() {
       // From select: try flags first
-      if (phase === "select" && selectedSub!.flags && selectedSub!.flags.length > 0) {
-        phase = "flags";
+      if (phase === 'select' && selectedSub!.flags && selectedSub!.flags.length > 0) {
+        phase = 'flags';
         cursor = 0;
-        flagStates = selectedSub!.flags!.map(() => ({ enabled: false, value: "" }));
+        flagStates = selectedSub!.flags!.map(() => ({ enabled: false, value: '' }));
         render();
         return;
       }
 
       // From select or flags: try followUp
-      if ((phase === "select" || phase === "flags") && selectedSub!.followUp) {
+      if ((phase === 'select' || phase === 'flags') && selectedSub!.followUp) {
         const followUp = selectedSub!.followUp;
-        if (followUp.type === "multi-select") {
-          phase = "multi-select";
+        if (followUp.type === 'multi-select') {
+          phase = 'multi-select';
           cursor = 0;
           multiSelectStates = followUp.options.map((o) => !!o.selected);
           render();
           return;
         }
-        if (followUp.type === "repeat-input") {
-          phase = "repeat-input";
+        if (followUp.type === 'repeat-input') {
+          phase = 'repeat-input';
           repeatEntries = [];
-          repeatInput = "";
+          repeatInput = '';
           render();
           return;
         }
@@ -340,24 +351,26 @@ export function promptSubcommand(
       const focused = subcommands[cursor];
 
       // Up
-      if (key === "\x1B[A" || key === "\x1BOA") {
+      if (key === '\x1B[A' || key === '\x1BOA') {
         cursor = cursor === 0 ? subcommands.length - 1 : cursor - 1;
-        input = "";
+        input = '';
         render();
         return;
       }
       // Down
-      if (key === "\x1B[B" || key === "\x1BOB") {
+      if (key === '\x1B[B' || key === '\x1BOB') {
         cursor = (cursor + 1) % subcommands.length;
-        input = "";
+        input = '';
         render();
         return;
       }
 
       // Enter
-      if (key === "\r" || key === "\n") {
-        const argRequired = focused.arg && focused.arg.startsWith("<");
-        if (argRequired && input.length === 0) return;
+      if (key === '\r' || key === '\n') {
+        const argRequired = focused.arg && focused.arg.startsWith('<');
+        if (argRequired && input.length === 0) {
+          return;
+        }
         selectedSub = focused;
         selectedArg = focused.arg ? input || undefined : undefined;
         clear();
@@ -366,7 +379,7 @@ export function promptSubcommand(
       }
 
       // Backspace
-      if (key === "\x7F" || key === "\b") {
+      if (key === '\x7F' || key === '\b') {
         if (focused.arg && input.length > 0) {
           input = input.slice(0, -1);
           render();
@@ -375,7 +388,7 @@ export function promptSubcommand(
       }
 
       // Printable characters — only if focused subcommand has arg
-      if (focused.arg && key.length === 1 && key >= " ") {
+      if (focused.arg && key.length === 1 && key >= ' ') {
         input += key;
         render();
       }
@@ -387,28 +400,30 @@ export function promptSubcommand(
       const state = flagStates[cursor];
 
       // Up
-      if (key === "\x1B[A" || key === "\x1BOA") {
+      if (key === '\x1B[A' || key === '\x1BOA') {
         cursor = cursor === 0 ? flags.length - 1 : cursor - 1;
         render();
         return;
       }
       // Down
-      if (key === "\x1B[B" || key === "\x1BOB") {
+      if (key === '\x1B[B' || key === '\x1BOB') {
         cursor = (cursor + 1) % flags.length;
         render();
         return;
       }
 
       // Space — toggle flag
-      if (key === " ") {
+      if (key === ' ') {
         state.enabled = !state.enabled;
-        if (!state.enabled) state.value = "";
+        if (!state.enabled) {
+          state.value = '';
+        }
         render();
         return;
       }
 
       // Enter — advance
-      if (key === "\r" || key === "\n") {
+      if (key === '\r' || key === '\n') {
         // Block if any enabled value flag has empty value
         for (let i = 0; i < flags.length; i++) {
           if (flagStates[i].enabled && flags[i].arg && flagStates[i].value.length === 0) {
@@ -429,7 +444,7 @@ export function promptSubcommand(
       }
 
       // Backspace — delete char from value
-      if (key === "\x7F" || key === "\b") {
+      if (key === '\x7F' || key === '\b') {
         if (focused.arg && state.enabled && state.value.length > 0) {
           state.value = state.value.slice(0, -1);
           render();
@@ -438,42 +453,46 @@ export function promptSubcommand(
       }
 
       // Printable characters — type value for enabled value flag (auto-enables)
-      if (focused.arg && key.length === 1 && key >= " ") {
-        if (!state.enabled) state.enabled = true;
+      if (focused.arg && key.length === 1 && key >= ' ') {
+        if (!state.enabled) {
+          state.enabled = true;
+        }
         state.value += key;
         render();
       }
     }
 
     function handleMultiSelectKey(key: string) {
-      const followUp = selectedSub!.followUp as Extract<FollowUpDef, { type: "multi-select" }>;
+      const followUp = selectedSub!.followUp as Extract<FollowUpDef, { type: 'multi-select' }>;
       const options = followUp.options;
 
       // Up
-      if (key === "\x1B[A" || key === "\x1BOA") {
+      if (key === '\x1B[A' || key === '\x1BOA') {
         cursor = cursor === 0 ? options.length - 1 : cursor - 1;
         render();
         return;
       }
       // Down
-      if (key === "\x1B[B" || key === "\x1BOB") {
+      if (key === '\x1B[B' || key === '\x1BOB') {
         cursor = (cursor + 1) % options.length;
         render();
         return;
       }
 
       // Space — toggle
-      if (key === " ") {
+      if (key === ' ') {
         multiSelectStates[cursor] = !multiSelectStates[cursor];
         render();
         return;
       }
 
       // Enter — submit
-      if (key === "\r" || key === "\n") {
+      if (key === '\r' || key === '\n') {
         const selected = options.filter((_, i) => multiSelectStates[i]);
-        if (selected.length === 0) return;
-        selectedFlags[followUp.flag] = selected.map((o) => o.value).join(",");
+        if (selected.length === 0) {
+          return;
+        }
+        selectedFlags[followUp.flag] = selected.map((o) => o.value).join(',');
         clear();
         finalize();
         return;
@@ -482,10 +501,10 @@ export function promptSubcommand(
 
     function handleRepeatInputKey(key: string) {
       // Enter — add entry or finish
-      if (key === "\r" || key === "\n") {
+      if (key === '\r' || key === '\n') {
         if (repeatInput.length > 0) {
           repeatEntries.push(repeatInput);
-          repeatInput = "";
+          repeatInput = '';
           render();
         } else {
           clear();
@@ -495,7 +514,7 @@ export function promptSubcommand(
       }
 
       // Backspace
-      if (key === "\x7F" || key === "\b") {
+      if (key === '\x7F' || key === '\b') {
         if (repeatInput.length > 0) {
           repeatInput = repeatInput.slice(0, -1);
           render();
@@ -504,7 +523,7 @@ export function promptSubcommand(
       }
 
       // Printable characters
-      if (key.length === 1 && key >= " ") {
+      if (key.length === 1 && key >= ' ') {
         repeatInput += key;
         render();
       }
@@ -513,32 +532,39 @@ export function promptSubcommand(
     // --- Main event handler ---
 
     function onData(data: Buffer) {
-      if (resolved) return;
+      if (resolved) {
+        return;
+      }
       const key = data.toString();
 
       // Ctrl+C
-      if (key === "\x03") {
+      if (key === '\x03') {
         submit(null);
         return;
       }
       // Escape
-      if (key === "\x1B" && data.length === 1) {
+      if (key === '\x1B' && data.length === 1) {
         submit(null);
         return;
       }
 
-      if (phase === "select") handleSelectKey(key);
-      else if (phase === "flags") handleFlagKey(key);
-      else if (phase === "multi-select") handleMultiSelectKey(key);
-      else handleRepeatInputKey(key);
+      if (phase === 'select') {
+        handleSelectKey(key);
+      } else if (phase === 'flags') {
+        handleFlagKey(key);
+      } else if (phase === 'multi-select') {
+        handleMultiSelectKey(key);
+      } else {
+        handleRepeatInputKey(key);
+      }
     }
 
-    stdin.on("data", onData);
+    stdin.on('data', onData);
 
     // Safety cleanup on exit
-    process.on("exit", () => {
+    process.on('exit', () => {
       if (!resolved) {
-        stdout.write("\x1B[?25h");
+        stdout.write('\x1B[?25h');
       }
     });
 

@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { useForm } from "@void/vue";
-import type { Props } from "./db.server";
+import { useForm } from '@void/vue';
+import type { Props } from './db.server';
 
 defineProps<Props>();
 
-const form = useForm("/db?create", {
-  title: "",
-  body: "",
+const form = useForm('/db?create', {
+  title: '',
+  body: '',
 });
 
-const deleteForm = useForm("/db?delete", {
+const deleteForm = useForm('/db?delete', {
   id: 0,
 });
 
@@ -34,7 +34,7 @@ function deleteNote(id: number) {
         <input v-model="form.data.body" placeholder="Note body" />
       </div>
       <button type="submit" :disabled="form.processing" style="margin-top: 5px">
-        {{ form.processing ? "Saving..." : "Add Note" }}
+        {{ form.processing ? 'Saving...' : 'Add Note' }}
       </button>
     </form>
 

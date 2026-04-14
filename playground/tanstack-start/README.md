@@ -15,7 +15,7 @@ src/
   types/
     bindings.d.ts         # Worker bindings type
 migrations/
-  001_create_users.sql    # Users table with sample data
+  0000_create_users.sql    # Users table with sample data
 ```
 
 ## Features

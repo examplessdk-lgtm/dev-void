@@ -1,6 +1,6 @@
 {
-  "name": "@void/svelte",
-  "version": "0.0.1",
+  "name": "@void-sdk/svelte",
+  "version": "0.3.0",
   "files": [
     "dist",
     "src/runtime"
@@ -27,6 +27,9 @@
       "default": "./src/runtime/prefetch.ts"
     }
   },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
@@ -37,14 +40,14 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "svelte": "^5.55.0",
+    "svelte": "^5.55.3",
     "tsdown": "catalog:",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   },
   "peerDependencies": {
     "svelte": "^5.0.0",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   }
 }

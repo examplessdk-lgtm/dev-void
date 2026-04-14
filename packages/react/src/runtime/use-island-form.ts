@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useMemo } from "react";
+import { useState, useRef, useCallback, useMemo } from 'react';
 
 export interface IslandFormReturn<T extends Record<string, unknown>> {
   data: T;
@@ -45,7 +45,9 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     } else {
       setDataState((prev) => {
         const next = { ...prev };
-        for (const field of fields) next[field] = defaultsRef.current[field] as T[typeof field];
+        for (const field of fields) {
+          next[field] = defaultsRef.current[field] as T[typeof field];
+        }
         return next;
       });
     }
@@ -57,7 +59,9 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     } else {
       setErrors((prev) => {
         const next = { ...prev };
-        for (const f of fields) delete next[f];
+        for (const f of fields) {
+          delete next[f];
+        }
         return next;
       });
     }
@@ -68,13 +72,15 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
       setProcessing(true);
       setWasSuccessful(false);
       setRecentlySuccessful(false);
-      if (successTimeoutRef.current) clearTimeout(successTimeoutRef.current);
+      if (successTimeoutRef.current) {
+        clearTimeout(successTimeoutRef.current);
+      }
       setErrors({});
 
       try {
         const response = await fetch(url, {
           method,
-          headers: { "Content-Type": "application/json" },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(data),
         });
 
@@ -91,7 +97,9 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
           window.location.reload();
         } else if (response.status === 422) {
           const body = (await response.json()) as { errors?: Record<string, string> };
-          if (body?.errors) setErrors(body.errors);
+          if (body?.errors) {
+            setErrors(body.errors);
+          }
         }
       } catch {
         // Request failed
@@ -112,9 +120,9 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     recentlySuccessful,
     reset,
     clearErrors,
-    post: (url: string) => submit(url, "POST"),
-    put: (url: string) => submit(url, "PUT"),
-    patch: (url: string) => submit(url, "PATCH"),
-    delete: (url: string) => submit(url, "DELETE"),
+    post: (url: string) => submit(url, 'POST'),
+    put: (url: string) => submit(url, 'PUT'),
+    patch: (url: string) => submit(url, 'PATCH'),
+    delete: (url: string) => submit(url, 'DELETE'),
   };
 }

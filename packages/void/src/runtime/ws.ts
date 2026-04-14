@@ -1,7 +1,7 @@
-import type { StandardSchemaV1 } from "../standard-schema";
-import type { WebSocketRouteMap } from "void/routes";
-import type { AuthUser } from "./auth";
-import type { CloudEnv } from "./handler";
+import type { WebSocketRouteMap } from 'void/routes';
+import type { StandardSchemaV1 } from '../standard-schema';
+import type { AuthUser } from './auth';
+import type { CloudEnv } from './handler';
 
 type MaybePromise<T> = T | Promise<T>;
 type ParamsRecord = Record<string, string>;
@@ -39,7 +39,7 @@ export interface WebSocketBaseContext {
   readonly params: ParamsRecord;
   readonly user: AuthUser | null;
   readonly request: Request;
-  readonly env: CloudEnv["Bindings"];
+  readonly env: CloudEnv['Bindings'];
   readonly storage: DurableObjectStorage;
 }
 
@@ -56,7 +56,7 @@ export interface RoomDefinition<
   ClientSchema extends StandardSchemaV1 = StandardSchemaV1,
   ServerSchema extends StandardSchemaV1 = StandardSchemaV1,
 > {
-  readonly __kind: "room";
+  readonly __kind: 'room';
   readonly messages: {
     client: ClientSchema;
     server: ServerSchema;
@@ -82,7 +82,7 @@ export interface SocketDefinition<
   ClientSchema extends StandardSchemaV1 = StandardSchemaV1,
   ServerSchema extends StandardSchemaV1 = StandardSchemaV1,
 > {
-  readonly __kind: "socket";
+  readonly __kind: 'socket';
   readonly messages: {
     client: ClientSchema;
     server: ServerSchema;
@@ -110,18 +110,18 @@ export function defineRoom<
   ClientSchema extends StandardSchemaV1,
   ServerSchema extends StandardSchemaV1,
 >(
-  definition: Omit<RoomDefinition<ClientSchema, ServerSchema>, "__kind">,
+  definition: Omit<RoomDefinition<ClientSchema, ServerSchema>, '__kind'>,
 ): RoomDefinition<ClientSchema, ServerSchema> {
-  return { ...definition, __kind: "room" };
+  return { ...definition, __kind: 'room' };
 }
 
 export function defineWebSocket<
   ClientSchema extends StandardSchemaV1,
   ServerSchema extends StandardSchemaV1,
 >(
-  definition: Omit<SocketDefinition<ClientSchema, ServerSchema>, "__kind">,
+  definition: Omit<SocketDefinition<ClientSchema, ServerSchema>, '__kind'>,
 ): SocketDefinition<ClientSchema, ServerSchema> {
-  return { ...definition, __kind: "socket" };
+  return { ...definition, __kind: 'socket' };
 }
 
 export interface VoidSocketCloseEvent {
@@ -181,41 +181,43 @@ export class VoidSocket<P extends keyof WebSocketRouteMap & string> {
   private connect(): void {
     const WebSocketCtor = (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
     if (!WebSocketCtor) {
-      throw new Error("WebSocket is not available in this runtime");
+      throw new Error('WebSocket is not available in this runtime');
     }
 
     this.socket = new WebSocketCtor(this.url, this.options.protocols);
-    this.socket.addEventListener("open", () => {
+    this.socket.addEventListener('open', () => {
       this.reconnectAttempts = 0;
       const queued = this.buffer.splice(0);
       for (const item of queued) {
         this.socket?.send(JSON.stringify(item));
       }
-      this.emit("open", undefined);
+      this.emit('open', undefined);
     });
 
-    this.socket.addEventListener("message", (event: { data: string }) => {
+    this.socket.addEventListener('message', (event: { data: string }) => {
       try {
-        this.emit("message", JSON.parse(event.data) as ServerEventOf<P>);
+        this.emit('message', JSON.parse(event.data) as ServerEventOf<P>);
       } catch (error) {
-        this.emit("error", error);
+        this.emit('error', error);
       }
     });
 
-    this.socket.addEventListener("error", (error) => {
-      this.emit("error", error);
+    this.socket.addEventListener('error', (error) => {
+      this.emit('error', error);
     });
 
     this.socket.addEventListener(
-      "close",
+      'close',
       (event: { code?: number; reason?: string; wasClean?: boolean }) => {
-        this.emit("close", {
+        this.emit('close', {
           code: event.code,
           reason: event.reason,
           wasClean: event.wasClean,
         });
 
-        if (this.closedByUser || this.options.reconnect === false) return;
+        if (this.closedByUser || this.options.reconnect === false) {
+          return;
+        }
         if (
           this.options.maxReconnectAttempts != null &&
           this.reconnectAttempts >= this.options.maxReconnectAttempts
@@ -255,7 +257,9 @@ export class VoidSocket<P extends keyof WebSocketRouteMap & string> {
 }
 
 function resolveBaseUrl(baseURL?: string): URL {
-  if (baseURL) return new URL(baseURL);
+  if (baseURL) {
+    return new URL(baseURL);
+  }
   const location = (globalThis as { location?: { href: string } }).location;
   if (!location) {
     throw new Error('connect() requires a browser-like runtime or an explicit "baseURL"');
@@ -287,6 +291,6 @@ export function connect(
   const base = resolveBaseUrl(options.baseURL);
   const resolvedPath = interpolateParams(path, options.params);
   const url = new URL(resolvedPath, base);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   return new VoidSocket(url.toString(), options);
 }

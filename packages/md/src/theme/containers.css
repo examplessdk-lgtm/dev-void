@@ -78,44 +78,44 @@
 
 /* Dark mode adjustments */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .void-md .tip {
+  :root:not([data-theme='light']) .void-md .tip {
     background: rgba(16, 185, 129, 0.12);
   }
-  :root:not([data-theme="light"]) .void-md .info,
-  :root:not([data-theme="light"]) .void-md .note {
+  :root:not([data-theme='light']) .void-md .info,
+  :root:not([data-theme='light']) .void-md .note {
     background: rgba(59, 130, 246, 0.12);
   }
-  :root:not([data-theme="light"]) .void-md .warning,
-  :root:not([data-theme="light"]) .void-md .important {
+  :root:not([data-theme='light']) .void-md .warning,
+  :root:not([data-theme='light']) .void-md .important {
     background: rgba(234, 179, 8, 0.12);
   }
-  :root:not([data-theme="light"]) .void-md .warning .custom-block-title,
-  :root:not([data-theme="light"]) .void-md .important .custom-block-title {
+  :root:not([data-theme='light']) .void-md .warning .custom-block-title,
+  :root:not([data-theme='light']) .void-md .important .custom-block-title {
     color: #eab308;
   }
-  :root:not([data-theme="light"]) .void-md .danger,
-  :root:not([data-theme="light"]) .void-md .caution {
+  :root:not([data-theme='light']) .void-md .danger,
+  :root:not([data-theme='light']) .void-md .caution {
     background: rgba(239, 68, 68, 0.12);
   }
 }
 
-:root[data-theme="dark"] .void-md .tip {
+:root[data-theme='dark'] .void-md .tip {
   background: rgba(16, 185, 129, 0.12);
 }
-:root[data-theme="dark"] .void-md .info,
-:root[data-theme="dark"] .void-md .note {
+:root[data-theme='dark'] .void-md .info,
+:root[data-theme='dark'] .void-md .note {
   background: rgba(59, 130, 246, 0.12);
 }
-:root[data-theme="dark"] .void-md .warning,
-:root[data-theme="dark"] .void-md .important {
+:root[data-theme='dark'] .void-md .warning,
+:root[data-theme='dark'] .void-md .important {
   background: rgba(234, 179, 8, 0.12);
 }
-:root[data-theme="dark"] .void-md .warning .custom-block-title,
-:root[data-theme="dark"] .void-md .important .custom-block-title {
+:root[data-theme='dark'] .void-md .warning .custom-block-title,
+:root[data-theme='dark'] .void-md .important .custom-block-title {
   color: #eab308;
 }
-:root[data-theme="dark"] .void-md .danger,
-:root[data-theme="dark"] .void-md .caution {
+:root[data-theme='dark'] .void-md .danger,
+:root[data-theme='dark'] .void-md .caution {
   background: rgba(239, 68, 68, 0.12);
 }
 

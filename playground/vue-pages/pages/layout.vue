@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Link, useShared } from "@void/vue";
+import { Link, useShared } from '@void/vue';
 
 const shared = useShared();
 </script>

@@ -1,5 +1,5 @@
-import type { PageScanResult } from "./types";
-import { resolveLayoutIds } from "./layout-resolution";
+import { resolveLayoutIds } from './layout-resolution';
+import type { PageScanResult } from './types';
 
 /**
  * Generates the component import map and layout tree as code strings.
@@ -9,7 +9,7 @@ export function generateComponentManifest(scan: PageScanResult, pagesDir: string
   const lines: string[] = [];
 
   // Component lazy imports
-  lines.push("const components = {");
+  lines.push('const components = {');
   for (const page of scan.pages) {
     const importPath = `${pagesDir}/${page.componentPath}`;
     lines.push(
@@ -18,7 +18,7 @@ export function generateComponentManifest(scan: PageScanResult, pagesDir: string
   }
   for (const layout of scan.layouts) {
     const importPath = `${pagesDir}/${layout.filePath}`;
-    const layoutId = layout.directory ? `${layout.directory}/layout` : "layout";
+    const layoutId = layout.directory ? `${layout.directory}/layout` : 'layout';
     lines.push(`  ${JSON.stringify(layoutId)}: () => import(${JSON.stringify(importPath)}),`);
   }
   for (const nl of scan.namedLayouts) {
@@ -26,34 +26,34 @@ export function generateComponentManifest(scan: PageScanResult, pagesDir: string
     const layoutId = nl.directory ? `${nl.directory}/_layouts/${nl.name}` : `_layouts/${nl.name}`;
     lines.push(`  ${JSON.stringify(layoutId)}: () => import(${JSON.stringify(importPath)}),`);
   }
-  lines.push("};");
+  lines.push('};');
 
   // Layout tree (component ID → ordered layout IDs)
-  lines.push("const layoutTree = {");
+  lines.push('const layoutTree = {');
   for (const page of scan.pages) {
     const chain = resolveLayoutIds(page, scan.layouts, scan.namedLayouts);
     if (chain.length > 0) {
       lines.push(`  ${JSON.stringify(page.componentId)}: ${JSON.stringify(chain)},`);
     }
   }
-  lines.push("};");
+  lines.push('};');
 
   // Route metadata (sparse — only island pages)
-  lines.push("const routeMeta = {");
+  lines.push('const routeMeta = {');
   for (const page of scan.pages) {
     if (page.island) {
       lines.push(`  ${JSON.stringify(page.componentId)}: { island: true },`);
     }
   }
-  lines.push("};");
+  lines.push('};');
 
   // Route pattern table for client-side URL matching
-  lines.push("const routes = [");
+  lines.push('const routes = [');
   for (const page of scan.pages) {
     const regex = patternToRegex(page.pattern);
     lines.push(`  { pattern: ${regex}, id: ${JSON.stringify(page.componentId)} },`);
   }
-  lines.push("];");
+  lines.push('];');
 
   lines.push(`function matchRoute(url) {
   const path = new URL(url, "http://x").pathname;
@@ -63,12 +63,15 @@ export function generateComponentManifest(scan: PageScanResult, pagesDir: string
   return null;
 }`);
 
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
 function patternToRegex(pattern: string): string {
   const re = pattern
-    .replace(/:[^/{}]+\{\.\+\}/g, "(.+)") // catch-all :path{.+}
-    .replace(/:[^/]+/g, "([^/]+)"); // dynamic :param
-  return `/^${re.replace(/\//g, "\\/")}$/`;
+    .replace(/:[^/{}]+\{\.\+\}/g, '(.+)') // catch-all :path{.+} (before escaping)
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&') // escape regex-special characters
+    .replace(/\*/, '(.*)') // wildcard *
+    .replace(/:[^/]+/g, '([^/]+)') // dynamic :param
+    .replace(/\//g, '\\/'); // escape forward slashes
+  return `/^${re}$/`;
 }

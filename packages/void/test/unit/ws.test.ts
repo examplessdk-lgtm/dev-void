@@ -1,17 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { connect } from "../../src/runtime/ws";
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { connect } from '../../src/runtime/ws';
 
-declare module "void/routes" {
+declare module 'void/routes' {
   interface WebSocketRouteMap {
-    "/chat/:room": {
+    '/chat/:room': {
       params: { room: string };
-      client: { type: "chat.message"; text: string };
-      server: { type: "chat.message"; text: string };
+      client: { type: 'chat.message'; text: string };
+      server: { type: 'chat.message'; text: string };
     };
-    "/notifications": {
+    '/notifications': {
       params: Record<string, never>;
-      client: { type: "notifications.ack"; id: string };
-      server: { type: "notifications.item"; title: string };
+      client: { type: 'notifications.ack'; id: string };
+      server: { type: 'notifications.item'; title: string };
     };
   }
 }
@@ -48,18 +48,18 @@ class MockWebSocket {
   }
 
   close(code?: number, reason?: string) {
-    this.emit("close", { code, reason, wasClean: true });
+    this.emit('close', { code, reason, wasClean: true });
   }
 }
 
 const originalWebSocket = (globalThis as { WebSocket?: unknown }).WebSocket;
 const originalLocation = (globalThis as { location?: unknown }).location;
 
-describe("typed websocket client", () => {
+describe('typed websocket client', () => {
   beforeEach(() => {
     MockWebSocket.instances = [];
-    vi.stubGlobal("WebSocket", MockWebSocket as unknown as typeof WebSocket);
-    vi.stubGlobal("location", { href: "https://void.test/app" });
+    vi.stubGlobal('WebSocket', MockWebSocket as unknown as typeof WebSocket);
+    vi.stubGlobal('location', { href: 'https://void.test/app' });
   });
 
   afterEach(() => {
@@ -68,34 +68,34 @@ describe("typed websocket client", () => {
     (globalThis as { location?: unknown }).location = originalLocation;
   });
 
-  it("resolves relative paths and interpolates params", () => {
-    connect("/chat/:room", { params: { room: "general" } });
+  it('resolves relative paths and interpolates params', () => {
+    connect('/chat/:room', { params: { room: 'general' } });
 
     expect(MockWebSocket.instances).toHaveLength(1);
-    expect(MockWebSocket.instances[0]!.url).toBe("wss://void.test/chat/general");
+    expect(MockWebSocket.instances[0]!.url).toBe('wss://void.test/chat/general');
   });
 
-  it("buffers messages until the socket opens", () => {
-    const socket = connect("/chat/:room", { params: { room: "general" } });
+  it('buffers messages until the socket opens', () => {
+    const socket = connect('/chat/:room', { params: { room: 'general' } });
     const ws = MockWebSocket.instances[0]!;
 
-    socket.send({ type: "chat.message", text: "hello" });
+    socket.send({ type: 'chat.message', text: 'hello' });
     expect(ws.sent).toEqual([]);
 
     ws.readyState = MockWebSocket.OPEN;
-    ws.emit("open");
+    ws.emit('open');
 
-    expect(ws.sent).toEqual([JSON.stringify({ type: "chat.message", text: "hello" })]);
+    expect(ws.sent).toEqual([JSON.stringify({ type: 'chat.message', text: 'hello' })]);
   });
 
-  it("parses incoming messages for subscribers", () => {
-    const socket = connect("/notifications");
+  it('parses incoming messages for subscribers', () => {
+    const socket = connect('/notifications');
     const ws = MockWebSocket.instances[0]!;
     const handler = vi.fn();
-    socket.on("message", handler);
+    socket.on('message', handler);
 
-    ws.emit("message", { data: JSON.stringify({ type: "notifications.item", title: "done" }) });
+    ws.emit('message', { data: JSON.stringify({ type: 'notifications.item', title: 'done' }) });
 
-    expect(handler).toHaveBeenCalledWith({ type: "notifications.item", title: "done" });
+    expect(handler).toHaveBeenCalledWith({ type: 'notifications.item', title: 'done' });
   });
 });

@@ -1,4 +1,4 @@
-import type { ProxyClient } from "./client";
+import type { ProxyClient } from './client';
 
 /**
  * KVNamespace implementation backed by the remote proxy.
@@ -11,8 +11,8 @@ export class ProxyKVNamespace {
   ) {}
 
   async get(key: string, options?: { type?: string } | string): Promise<any> {
-    const type = typeof options === "string" ? options : (options?.type ?? "text");
-    const res = await this.client.fetch("/kv/get", {
+    const type = typeof options === 'string' ? options : (options?.type ?? 'text');
+    const res = await this.client.fetch('/kv/get', {
       binding: this.binding,
       key,
       type,
@@ -20,16 +20,18 @@ export class ProxyKVNamespace {
 
     // The proxy returns JSON `null` (200, application/json) for missing keys
     // regardless of the requested type. Check for null before type conversion.
-    const ct = res.headers.get("content-type") ?? "";
-    if (type === "arrayBuffer" || type === "stream") {
+    const ct = res.headers.get('content-type') ?? '';
+    if (type === 'arrayBuffer' || type === 'stream') {
       // For binary types, the proxy returns application/octet-stream for real values
       // but application/json for null. Check content-type to detect null responses.
-      if (ct.includes("application/json")) {
+      if (ct.includes('application/json')) {
         const data = await res.json();
-        if (data === null) return null;
+        if (data === null) {
+          return null;
+        }
         // Non-null JSON response for binary type — shouldn't happen, but handle gracefully
         const encoded = new TextEncoder().encode(JSON.stringify(data));
-        return type === "arrayBuffer"
+        return type === 'arrayBuffer'
           ? encoded.buffer
           : new ReadableStream({
               start(controller) {
@@ -38,7 +40,9 @@ export class ProxyKVNamespace {
               },
             });
       }
-      if (type === "arrayBuffer") return res.arrayBuffer();
+      if (type === 'arrayBuffer') {
+        return res.arrayBuffer();
+      }
       return res.body;
     }
 
@@ -62,13 +66,15 @@ export class ProxyKVNamespace {
   ): Promise<void> {
     let serializedValue: unknown;
     let isBase64 = false;
-    if (typeof value === "string") {
+    if (typeof value === 'string') {
       serializedValue = value;
     } else if (value instanceof ArrayBuffer) {
       // Base64-encode binary data for JSON transport
       const bytes = new Uint8Array(value);
-      let binary = "";
-      for (const byte of bytes) binary += String.fromCharCode(byte);
+      let binary = '';
+      for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+      }
       serializedValue = btoa(binary);
       isBase64 = true;
     } else {
@@ -77,7 +83,9 @@ export class ProxyKVNamespace {
       const chunks: Uint8Array[] = [];
       while (true) {
         const { done, value: chunk } = await reader.read();
-        if (done) break;
+        if (done) {
+          break;
+        }
         chunks.push(chunk);
       }
       const total = chunks.reduce((sum, c) => sum + c.length, 0);
@@ -87,8 +95,10 @@ export class ProxyKVNamespace {
         merged.set(chunk, offset);
         offset += chunk.length;
       }
-      let binary = "";
-      for (const byte of merged) binary += String.fromCharCode(byte);
+      let binary = '';
+      for (const byte of merged) {
+        binary += String.fromCharCode(byte);
+      }
       serializedValue = btoa(binary);
       isBase64 = true;
     }
@@ -99,20 +109,26 @@ export class ProxyKVNamespace {
       value: serializedValue,
       ...(isBase64 && { base64: true }),
     };
-    if (options?.expiration) body.expiration = options.expiration;
-    if (options?.expirationTtl) body.expiration_ttl = options.expirationTtl;
-    if (options?.metadata) body.metadata = options.metadata;
-    await this.client.fetch("/kv/put", body);
+    if (options?.expiration) {
+      body.expiration = options.expiration;
+    }
+    if (options?.expirationTtl) {
+      body.expiration_ttl = options.expirationTtl;
+    }
+    if (options?.metadata) {
+      body.metadata = options.metadata;
+    }
+    await this.client.fetch('/kv/put', body);
   }
 
   async delete(key: string): Promise<void> {
-    await this.client.fetch("/kv/delete", { binding: this.binding, key });
+    await this.client.fetch('/kv/delete', { binding: this.binding, key });
   }
 
   async list<M = unknown>(
     options?: KVNamespaceListOptions,
   ): Promise<KVNamespaceListResult<M, string>> {
-    const res = await this.client.fetch("/kv/list", {
+    const res = await this.client.fetch('/kv/list', {
       binding: this.binding,
       prefix: options?.prefix,
       limit: options?.limit,

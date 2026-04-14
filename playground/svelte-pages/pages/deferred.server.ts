@@ -1,5 +1,5 @@
-import { defineHandler, defer } from "void";
-import type { Deferred } from "void";
+import { defineHandler, defer } from 'void';
+import type { Deferred } from 'void';
 
 export interface Props {
   title: string;
@@ -8,7 +8,7 @@ export interface Props {
 
 export const loader = defineHandler<Props>(() => {
   return {
-    title: "Deferred Page",
+    title: 'Deferred Page',
     stats: defer(async () => ({ count: 42 })),
   };
 });

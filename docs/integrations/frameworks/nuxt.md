@@ -26,16 +26,16 @@ The `wrangler` dependency is needed by Nuxt to create Cloudflare platform proxy 
 ### 3. Configure `nuxt.config.ts`
 
 ```ts
-import { resolve } from "node:path";
-import { voidPlugin } from "void";
+import { resolve } from 'node:path';
+import { voidPlugin } from 'void';
 
 export default defineNuxtConfig({
   nitro: {
-    preset: "cloudflare-module",
+    preset: 'cloudflare-module',
     alias: {
       // Nitro has its own bundler that doesn't use Vite aliases.
       // Duplicate @schema here so Nitro can resolve it.
-      "@schema": resolve(__dirname, "db/schema.ts"),
+      '@schema': resolve(__dirname, 'db/schema.ts'),
     },
   },
   vite: { plugins: [voidPlugin()] },
@@ -52,7 +52,7 @@ By default, Nuxt Cloudflare dev runtime and `voidPlugin()` migrations share Wran
 {
   "name": "my-app",
   "compatibility_date": "2026-02-24",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "nodejs_als"],
 }
 ```
 
@@ -73,8 +73,8 @@ Void-managed auth is not supported in framework mode yet. Use Better Auth's offi
 
 ```ts
 // server/api/users.get.ts
-import { db } from "void/db";
-import { users } from "@schema";
+import { db } from 'void/db';
+import { users } from '@schema';
 
 export default defineEventHandler(async () => {
   return db.select().from(users);
@@ -88,31 +88,31 @@ Nuxt uses Nitro, which bundles server routes outside of Vite's plugin pipeline. 
 ### KV Storage
 
 ```ts
-import { kv } from "void/kv";
+import { kv } from 'void/kv';
 
 export default defineEventHandler(async () => {
-  return kv.get("app:settings");
+  return kv.get('app:settings');
 });
 ```
 
 ### Blob Storage
 
 ```ts
-import { storage } from "void/storage";
+import { storage } from 'void/storage';
 
 export default defineEventHandler(async () => {
-  return storage.get("avatars/user-1.png");
+  return storage.get('avatars/user-1.png');
 });
 ```
 
 ### AI
 
 ```ts
-import { ai } from "void/ai";
+import { ai } from 'void/ai';
 
 export default defineEventHandler(async () => {
-  return ai.run("@cf/meta/llama-3.1-8b-instruct", {
-    prompt: "Summarize the latest news",
+  return ai.run('@cf/meta/llama-3.1-8b-instruct', {
+    prompt: 'Summarize the latest news',
   });
 });
 ```
@@ -121,9 +121,9 @@ export default defineEventHandler(async () => {
 
 ```ts
 // crons/daily-cleanup.ts
-import { defineScheduled } from "void";
+import { defineScheduled } from 'void';
 
-export const cron = "0 0 * * *";
+export const cron = '0 0 * * *';
 
 export default defineScheduled(async () => {
   // runs daily at midnight
@@ -134,7 +134,7 @@ export default defineScheduled(async () => {
 
 ```ts
 // queues/emails.ts
-import { defineQueue } from "void";
+import { defineQueue } from 'void';
 
 export default defineQueue<{ to: string; subject: string }>(async (batch) => {
   for (const msg of batch.messages) {
@@ -152,7 +152,7 @@ You can also access raw Cloudflare bindings via Nitro's event context:
 // server/api/users.get.ts
 export default defineEventHandler(async (event) => {
   const { DB } = event.context.cloudflare.env;
-  const { results } = await DB.prepare("SELECT * FROM users").all();
+  const { results } = await DB.prepare('SELECT * FROM users').all();
   return results;
 });
 ```

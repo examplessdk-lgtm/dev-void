@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Props } from "./cron.server";
+import type { Props } from './cron.server';
 
 defineProps<Props>();
 </script>

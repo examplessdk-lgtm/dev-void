@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock("cloudflare:workers", () => ({ env: {} }));
+vi.mock('cloudflare:workers', () => ({ env: {} }));
 
-import { createKV, type KVClient } from "../../src/runtime/kv";
+import { createKV, type KVClient } from '../../src/runtime/kv';
 
 function createMockKVNamespace() {
   const ns = {
@@ -15,7 +15,7 @@ function createMockKVNamespace() {
   return ns as unknown as KVNamespace & typeof ns;
 }
 
-describe("createKV", () => {
+describe('createKV', () => {
   let mockNS: ReturnType<typeof createMockKVNamespace>;
   let kv: KVClient;
 
@@ -24,158 +24,158 @@ describe("createKV", () => {
     kv = createKV(mockNS as unknown as KVNamespace);
   });
 
-  describe("get", () => {
-    it("returns parsed JSON value", async () => {
-      mockNS.get.mockResolvedValue(JSON.stringify({ name: "Alice" }));
-      const result = await kv.get<{ name: string }>("user:1");
-      expect(mockNS.get).toHaveBeenCalledWith("user:1");
-      expect(result).toEqual({ name: "Alice" });
+  describe('get', () => {
+    it('returns parsed JSON value', async () => {
+      mockNS.get.mockResolvedValue(JSON.stringify({ name: 'Alice' }));
+      const result = await kv.get<{ name: string }>('user:1');
+      expect(mockNS.get).toHaveBeenCalledWith('user:1');
+      expect(result).toEqual({ name: 'Alice' });
     });
 
-    it("returns null for missing key", async () => {
+    it('returns null for missing key', async () => {
       mockNS.get.mockResolvedValue(null);
-      const result = await kv.get("missing");
+      const result = await kv.get('missing');
       expect(result).toBeNull();
     });
 
-    it("returns raw string for non-JSON value", async () => {
-      mockNS.get.mockResolvedValue("plain text");
-      const result = await kv.get("key");
-      expect(result).toBe("plain text");
+    it('returns raw string for non-JSON value', async () => {
+      mockNS.get.mockResolvedValue('plain text');
+      const result = await kv.get('key');
+      expect(result).toBe('plain text');
     });
   });
 
-  describe("put", () => {
-    it("stores JSON-stringified objects", async () => {
-      await kv.put("user:1", { name: "Alice" });
-      expect(mockNS.put).toHaveBeenCalledWith("user:1", '{"name":"Alice"}', {});
+  describe('put', () => {
+    it('stores JSON-stringified objects', async () => {
+      await kv.put('user:1', { name: 'Alice' });
+      expect(mockNS.put).toHaveBeenCalledWith('user:1', '{"name":"Alice"}', {});
     });
 
-    it("stores strings as-is", async () => {
-      await kv.put("key", "hello");
-      expect(mockNS.put).toHaveBeenCalledWith("key", "hello", {});
+    it('stores strings as-is', async () => {
+      await kv.put('key', 'hello');
+      expect(mockNS.put).toHaveBeenCalledWith('key', 'hello', {});
     });
 
-    it("passes ttl option as expirationTtl", async () => {
-      await kv.put("key", "val", { ttl: 3600 });
-      expect(mockNS.put).toHaveBeenCalledWith("key", "val", { expirationTtl: 3600 });
+    it('passes ttl option as expirationTtl', async () => {
+      await kv.put('key', 'val', { ttl: 3600 });
+      expect(mockNS.put).toHaveBeenCalledWith('key', 'val', { expirationTtl: 3600 });
     });
 
-    it("passes expiration option", async () => {
-      await kv.put("key", "val", { expiration: 1700000000 });
-      expect(mockNS.put).toHaveBeenCalledWith("key", "val", { expiration: 1700000000 });
+    it('passes expiration option', async () => {
+      await kv.put('key', 'val', { expiration: 1700000000 });
+      expect(mockNS.put).toHaveBeenCalledWith('key', 'val', { expiration: 1700000000 });
     });
 
-    it("passes metadata option", async () => {
-      await kv.put("key", "val", { metadata: { role: "admin" } });
-      expect(mockNS.put).toHaveBeenCalledWith("key", "val", { metadata: { role: "admin" } });
-    });
-  });
-
-  describe("delete", () => {
-    it("deletes a key", async () => {
-      await kv.delete("user:1");
-      expect(mockNS.delete).toHaveBeenCalledWith("user:1");
+    it('passes metadata option', async () => {
+      await kv.put('key', 'val', { metadata: { role: 'admin' } });
+      expect(mockNS.put).toHaveBeenCalledWith('key', 'val', { metadata: { role: 'admin' } });
     });
   });
 
-  describe("list", () => {
-    it("returns keys list", async () => {
+  describe('delete', () => {
+    it('deletes a key', async () => {
+      await kv.delete('user:1');
+      expect(mockNS.delete).toHaveBeenCalledWith('user:1');
+    });
+  });
+
+  describe('list', () => {
+    it('returns keys list', async () => {
       mockNS.list.mockResolvedValue({
-        keys: [{ name: "user:1" }, { name: "user:2" }],
+        keys: [{ name: 'user:1' }, { name: 'user:2' }],
         list_complete: true,
       });
-      const result = await kv.list({ prefix: "user:" });
+      const result = await kv.list({ prefix: 'user:' });
       expect(mockNS.list).toHaveBeenCalledWith({
-        prefix: "user:",
+        prefix: 'user:',
         limit: undefined,
         cursor: undefined,
       });
-      expect(result.keys).toEqual([{ name: "user:1" }, { name: "user:2" }]);
+      expect(result.keys).toEqual([{ name: 'user:1' }, { name: 'user:2' }]);
       expect(result.list_complete).toBe(true);
     });
 
-    it("passes limit and cursor", async () => {
-      mockNS.list.mockResolvedValue({ keys: [], list_complete: false, cursor: "abc" });
-      const result = await kv.list({ limit: 10, cursor: "xyz" });
+    it('passes limit and cursor', async () => {
+      mockNS.list.mockResolvedValue({ keys: [], list_complete: false, cursor: 'abc' });
+      const result = await kv.list({ limit: 10, cursor: 'xyz' });
       expect(mockNS.list).toHaveBeenCalledWith({
         prefix: undefined,
         limit: 10,
-        cursor: "xyz",
+        cursor: 'xyz',
       });
       expect(result.list_complete).toBe(false);
-      expect(result.cursor).toBe("abc");
+      expect(result.cursor).toBe('abc');
     });
   });
 
-  describe("getWithMetadata", () => {
-    it("returns parsed value and metadata", async () => {
+  describe('getWithMetadata', () => {
+    it('returns parsed value and metadata', async () => {
       mockNS.getWithMetadata.mockResolvedValue({
-        value: JSON.stringify({ name: "Alice" }),
-        metadata: { role: "admin" },
+        value: JSON.stringify({ name: 'Alice' }),
+        metadata: { role: 'admin' },
       });
-      const result = await kv.getWithMetadata<{ name: string }, { role: string }>("user:1");
-      expect(result.value).toEqual({ name: "Alice" });
-      expect(result.metadata).toEqual({ role: "admin" });
+      const result = await kv.getWithMetadata<{ name: string }, { role: string }>('user:1');
+      expect(result.value).toEqual({ name: 'Alice' });
+      expect(result.metadata).toEqual({ role: 'admin' });
     });
 
-    it("returns null value and null metadata for missing key", async () => {
+    it('returns null value and null metadata for missing key', async () => {
       mockNS.getWithMetadata.mockResolvedValue({ value: null, metadata: null });
-      const result = await kv.getWithMetadata("missing");
+      const result = await kv.getWithMetadata('missing');
       expect(result.value).toBeNull();
       expect(result.metadata).toBeNull();
     });
   });
 
-  describe("map", () => {
-    it("prefixes keys on get", async () => {
-      mockNS.get.mockResolvedValue(JSON.stringify({ token: "abc" }));
-      const sessions = kv.map<{ token: string }>("sessions");
-      const result = await sessions.get("xyz");
-      expect(mockNS.get).toHaveBeenCalledWith("sessions:xyz");
-      expect(result).toEqual({ token: "abc" });
+  describe('map', () => {
+    it('prefixes keys on get', async () => {
+      mockNS.get.mockResolvedValue(JSON.stringify({ token: 'abc' }));
+      const sessions = kv.map<{ token: string }>('sessions');
+      const result = await sessions.get('xyz');
+      expect(mockNS.get).toHaveBeenCalledWith('sessions:xyz');
+      expect(result).toEqual({ token: 'abc' });
     });
 
-    it("prefixes keys on put", async () => {
-      const sessions = kv.map<{ token: string }>("sessions");
-      await sessions.put("xyz", { token: "abc" }, { ttl: 3600 });
-      expect(mockNS.put).toHaveBeenCalledWith("sessions:xyz", '{"token":"abc"}', {
+    it('prefixes keys on put', async () => {
+      const sessions = kv.map<{ token: string }>('sessions');
+      await sessions.put('xyz', { token: 'abc' }, { ttl: 3600 });
+      expect(mockNS.put).toHaveBeenCalledWith('sessions:xyz', '{"token":"abc"}', {
         expirationTtl: 3600,
       });
     });
 
-    it("prefixes keys on delete", async () => {
-      const sessions = kv.map("sessions");
-      await sessions.delete("xyz");
-      expect(mockNS.delete).toHaveBeenCalledWith("sessions:xyz");
+    it('prefixes keys on delete', async () => {
+      const sessions = kv.map('sessions');
+      await sessions.delete('xyz');
+      expect(mockNS.delete).toHaveBeenCalledWith('sessions:xyz');
     });
 
-    it("lists with prefix and strips prefix from key names", async () => {
+    it('lists with prefix and strips prefix from key names', async () => {
       mockNS.list.mockResolvedValue({
-        keys: [{ name: "sessions:abc" }, { name: "sessions:def" }],
+        keys: [{ name: 'sessions:abc' }, { name: 'sessions:def' }],
         list_complete: true,
       });
-      const sessions = kv.map("sessions");
+      const sessions = kv.map('sessions');
       const result = await sessions.list();
       expect(mockNS.list).toHaveBeenCalledWith({
-        prefix: "sessions:",
+        prefix: 'sessions:',
         limit: undefined,
         cursor: undefined,
       });
-      expect(result.keys).toEqual([{ name: "abc" }, { name: "def" }]);
+      expect(result.keys).toEqual([{ name: 'abc' }, { name: 'def' }]);
       expect(result.list_complete).toBe(true);
     });
 
-    it("getWithMetadata with prefix", async () => {
+    it('getWithMetadata with prefix', async () => {
       mockNS.getWithMetadata.mockResolvedValue({
-        value: JSON.stringify({ token: "abc" }),
-        metadata: { ip: "1.2.3.4" },
+        value: JSON.stringify({ token: 'abc' }),
+        metadata: { ip: '1.2.3.4' },
       });
-      const sessions = kv.map<{ token: string }>("sessions");
-      const result = await sessions.getWithMetadata<{ ip: string }>("xyz");
-      expect(mockNS.getWithMetadata).toHaveBeenCalledWith("sessions:xyz");
-      expect(result.value).toEqual({ token: "abc" });
-      expect(result.metadata).toEqual({ ip: "1.2.3.4" });
+      const sessions = kv.map<{ token: string }>('sessions');
+      const result = await sessions.getWithMetadata<{ ip: string }>('xyz');
+      expect(mockNS.getWithMetadata).toHaveBeenCalledWith('sessions:xyz');
+      expect(result.value).toEqual({ token: 'abc' });
+      expect(result.metadata).toEqual({ ip: '1.2.3.4' });
     });
   });
 });

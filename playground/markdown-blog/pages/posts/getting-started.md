@@ -23,10 +23,10 @@ npm install
 ## Code Example
 
 ```ts
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
 export const loader = defineHandler(() => {
-  return { message: "Hello from Void!" };
+  return { message: 'Hello from Void!' };
 });
 ```
 

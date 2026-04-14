@@ -110,7 +110,7 @@ A page companion file in `pages/` triggers D1 inference:
 
 ```ts
 // pages/users.server.ts
-import { db } from "void/db";
+import { db } from 'void/db';
 
 export function loader() {
   return db.select().from(users);
@@ -123,11 +123,11 @@ A scheduled handler in `crons/` triggers KV inference:
 
 ```ts
 // crons/cleanup.ts
-import { defineScheduled } from "void";
-import { kv } from "void/kv";
+import { defineScheduled } from 'void';
+import { kv } from 'void/kv';
 
 export default defineScheduled(async () => {
-  await kv.delete("temp-cache");
+  await kv.delete('temp-cache');
 });
 ```
 
@@ -137,12 +137,12 @@ A route handler in `routes/` triggers R2 inference:
 
 ```ts
 // routes/api/upload.ts
-import { defineHandler } from "void";
-import { storage } from "void/storage";
+import { defineHandler } from 'void';
+import { storage } from 'void/storage';
 
 export const POST = defineHandler(async (c) => {
   const file = await c.req.blob();
-  await storage.put("uploads/file.bin", file);
+  await storage.put('uploads/file.bin', file);
   return c.json({ ok: true });
 });
 ```

@@ -1,5 +1,5 @@
-import { defineHandler } from "void";
-import { ai } from "void/ai";
+import { defineHandler } from 'void';
+import { ai } from 'void/ai';
 
 export const POST = defineHandler(async (c) => {
   const { prompt, model } = await c.req.json<{
@@ -9,7 +9,7 @@ export const POST = defineHandler(async (c) => {
 
   try {
     return ai.stream(model as any, {
-      messages: [{ role: "user", content: prompt }],
+      messages: [{ role: 'user', content: prompt }],
       max_tokens: 512,
     });
   } catch (err) {

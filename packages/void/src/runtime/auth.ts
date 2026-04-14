@@ -1,7 +1,7 @@
-import { AsyncLocalStorage } from "node:async_hooks";
-import type { BetterAuthOptions, Session, User } from "better-auth";
-import type { Context, Env } from "hono";
-import { HTTPException } from "hono/http-exception";
+import { AsyncLocalStorage } from 'node:async_hooks';
+import type { BetterAuthOptions, Session, User } from 'better-auth';
+import type { Context, Env } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 
 export type AuthUser = User;
 export type AuthSession = Session;
@@ -14,7 +14,7 @@ export interface AuthState {
 export interface VoidAuthConfigContext {
   defaults: BetterAuthOptions;
   env: Record<string, unknown>;
-  dialect: "sqlite" | "postgresql";
+  dialect: 'sqlite' | 'postgresql';
   request: Request;
 }
 
@@ -47,7 +47,9 @@ export function getSession(): AuthState | null {
 export function requireAuth<E extends Env & { Variables: { user: AuthUser | null } }>(
   c: Context<E>,
 ): AuthUser {
-  const user = c.get("user");
-  if (!user) throw new HTTPException(401, { message: "Unauthorized" });
+  const user = c.get('user');
+  if (!user) {
+    throw new HTTPException(401, { message: 'Unauthorized' });
+  }
   return user;
 }

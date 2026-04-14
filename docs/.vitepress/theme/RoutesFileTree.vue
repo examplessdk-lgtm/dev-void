@@ -1,30 +1,30 @@
 <script setup lang="ts">
-import type { FileTreeItem } from "./FileTree.vue";
+import type { FileTreeItem } from './FileTree.vue';
 
 const items: FileTreeItem[] = [
   {
-    name: "routes/",
+    name: 'routes/',
     children: [
       {
-        name: "api/",
+        name: 'api/',
         children: [
-          { name: "hello.ts", description: "→ GET|POST /api/hello" },
+          { name: 'hello.ts', description: '→ GET|POST /api/hello' },
           {
-            name: "users/",
+            name: 'users/',
             children: [
-              { name: "index.ts", description: "→ GET|POST /api/users" },
+              { name: 'index.ts', description: '→ GET|POST /api/users' },
               {
-                name: "[id].ts",
-                description: "→ GET|PUT|DELETE /api/users/:id",
+                name: '[id].ts',
+                description: '→ GET|PUT|DELETE /api/users/:id',
               },
             ],
           },
           {
-            name: "search/",
+            name: 'search/',
             children: [
               {
-                name: "[...query].ts",
-                description: "→ GET /api/search/* (catch-all)",
+                name: '[...query].ts',
+                description: '→ GET /api/search/* (catch-all)',
               },
             ],
           },

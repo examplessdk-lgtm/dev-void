@@ -86,6 +86,7 @@ src/
 - **CF plugin API**: Worker config (`main`, `d1_databases`, `kv_namespaces`, `r2_buckets`) goes inside the `config` option of `cloudflare()`, NOT as top-level properties. `persistState` takes `{ path: string }`, not a raw string. The `config` option uses a **function form** `(resolved: WorkerConfig) => Partial<WorkerConfig>` so that bindings from the user's `wrangler.json` (if present) take precedence over inferred placeholder bindings.
 - **Migration DB path**: Miniflare stores D1 data at a deterministic path computed from the `database_id` using HMAC-SHA256. The `getMiniflareDatabasePath()` function in `migrations/runner.ts` replicates this algorithm so migrations target `<persist-root>/v3/d1/miniflare-D1DatabaseObject/<hash>.sqlite` (for example `.void/v3/...` in default/class-A mode and `.wrangler/state/v3/...` in class-B/C framework mode).
 - **Drizzle-first database**: Schema is defined in `db/schema.ts` (Drizzle table definitions). `void/db` exports a Drizzle D1 instance. `@schema` is an auto-configured alias for `db/schema.ts`. Migrations live in `db/migrations/`. CLI commands: `void db push` (prototype), `void db generate` (create migration files), `void db migrate` (apply locally). `drizzle-orm` and `drizzle-kit` ship with void.
+- **Journal coherence invariant**: `db/migrations/*.sql` and `db/migrations/meta/_journal.json` must stay in sync — every `.sql` file has a matching journal entry (by `tag`) and vice versa. `assertJournalCoherence` in `src/migrations/validate.ts` is the gate, called from `deploy`, `db status`, `db migrate`, and `db reset`. The two CLI commands that mutate migration state — `void gen migration` and `void db rename-migrations` — are responsible for keeping the journal coherent themselves: the first appends a new entry when writing a file (failing loud if the journal is missing — run `drizzle-kit generate` first), the second rewrites `tag` values alongside the file renames and also renames the matching `meta/<prefix>_snapshot.json` (with byte-level rollback on failure). `gen migration` additionally copies the previous `meta/<idx:04d>_snapshot.json` forward to the new idx so drizzle-kit's drop/rollback tooling keeps working on mixed hand-written + drizzle projects; projects without prior snapshots are skipped silently. Drift will fail loudly before touching any remote DB. Motivated by [void-sdk/void#6](https://github.com/void-sdk/void/issues/6), where an orphan scaffolded `.sql` file half-applied against D1 and wedged the deploy.
 
 ### Package Exports
 
@@ -112,7 +113,7 @@ Internal-only staging toggle (`void staging on|off`) that switches the CLI to us
 When staging mode is active:
 
 - **Token**: reads/writes `stagingToken` in `~/.void/config.json` instead of `token`
-- **API URL**: defaults to `https://api.staging.void.cloud` (unless overridden by `VOID_API_URL` or `api` config field)
+- **API URL**: defaults to `https://api.void.cloud` (prod); when staging is active, uses `https://api.staging.void.cloud` (unless overridden by `VOID_API_URL` or `api` config field)
 - **Banner**: prints a yellow `⚠ STAGING MODE` banner before every command
 
 Activation: `void staging on` sets `"staging": true` in config. `STAGING` env var also activates it. `void staging off` removes the field. `void staging` (no arg) prints current status.
@@ -127,7 +128,7 @@ Applied in order to a path relative to `routes/`:
 2. Strip env suffix (`.dev`, `.prod`)
 3. Strip trailing `index`
 4. Remove route group dirs `(groupname)`
-5. Convert `[param]` → `:param`, `[...param]` → `**:param`, `[...]` → `**`
+5. Convert `[param]` → `:param`, `[...param]` → `:param{.+}`, `[...]` → `*`
 6. Prefix with `/`
 
 HTTP methods are determined by **named exports** in each file (detected by `detect-exports.ts` via `parseSync`), not by filename suffixes. Files/dirs starting with `_` are ignored by the scanner.
@@ -159,7 +160,7 @@ Void ships with first-class support for coding agents (Claude Code, Cursor, Code
 - **`AGENT_PROMPT.md`** — compressed reference prompt shipped in the `void` npm package. Covers project structure, routing, DB, auth, typed fetch, KV/storage/queues/cron, CLI, and deployment.
 - **`skills/`** — Claude Code skills shipped in the npm package:
   - `void` — unified app + CLI skill covering project architecture, runtime APIs, deployment flows, and CLI operations (deploy, db, gen, secrets, domains, projects) with lazy-loaded reference files.
-  - `migrate-voidflare-to-void` — guides migration from `@cloudflare/vite-plugin` to `void`.
+  - `migrate-cloudflare-to-void` — guides migration from `@cloudflare/vite-plugin` to `void`.
 - **`docs/`** — all 23 docs markdown files are included in the npm package at `node_modules/void/docs/`.
 - **`void init --agents`** — runs all agent setup steps from a single detection/selection pass: injects Void instructions with versioned markers, symlinks skills from the `void` package, and writes MCP config (or prints manual commands/JSON for unsupported/generic agents).
 - **`void init` in an empty directory** — scaffolds a Pages-mode starter (React, Vue, Svelte, or Solid), then lets you pick D1, PostgreSQL, or Static Pages before running the same setup flow.

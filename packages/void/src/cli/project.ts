@@ -1,12 +1,12 @@
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 
 export interface ProjectConfig {
   projectId: string;
   slug: string;
 }
 
-const PROJECT_FILE = ".void/project.json";
+const PROJECT_FILE = '.void/project.json';
 
 /**
  * Read the project config from the project root.
@@ -15,7 +15,7 @@ const PROJECT_FILE = ".void/project.json";
 export function readProjectConfig(root: string): ProjectConfig | null {
   const filePath = join(root, PROJECT_FILE);
   try {
-    const raw = readFileSync(filePath, "utf-8");
+    const raw = readFileSync(filePath, 'utf-8');
     return JSON.parse(raw);
   } catch {
     return null;
@@ -28,7 +28,7 @@ export function readProjectConfig(root: string): ProjectConfig | null {
 export function writeProjectConfig(root: string, config: ProjectConfig): void {
   const filePath = join(root, PROJECT_FILE);
   mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, JSON.stringify(config, null, 2) + "\n");
+  writeFileSync(filePath, JSON.stringify(config, null, 2) + '\n');
 }
 
 /**

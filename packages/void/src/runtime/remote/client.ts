@@ -18,10 +18,10 @@ export class ProxyClient {
    */
   async fetch(path: string, body: Record<string, unknown>): Promise<Response> {
     const res = await globalThis.fetch(`${this.proxyUrl}${path}`, {
-      method: "POST",
+      method: 'POST',
       headers: {
         Authorization: `Bearer ${this.token}`,
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({ ...body, projectId: this.projectId }),
     });
@@ -40,7 +40,7 @@ export class ProxyClient {
   async stream(path: string, init: RequestInit): Promise<Response> {
     // Inject projectId into the body if it's JSON
     let body = init.body;
-    if (typeof body === "string") {
+    if (typeof body === 'string') {
       try {
         const parsed = JSON.parse(body);
         body = JSON.stringify({ ...parsed, projectId: this.projectId });

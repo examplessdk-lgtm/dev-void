@@ -1,4 +1,4 @@
-import type MarkdownExit from "markdown-exit";
+import type MarkdownExit from 'markdown-exit';
 
 export interface HeadingData {
   depth: number;
@@ -16,15 +16,15 @@ export function headingExtractPlugin(md: MarkdownExit): void {
     env.headings = [];
     for (let i = 0; i < tokens.length; i++) {
       const token = tokens[i];
-      if (token.type === "heading_open") {
+      if (token.type === 'heading_open') {
         const depth = Number(token.tag.slice(1));
-        const slug = token.attrGet?.("id") ?? "";
+        const slug = token.attrGet?.('id') ?? '';
         const inline = tokens[i + 1];
         const text = (
           inline?.children
-            ?.filter((t: any) => t.type === "text" || t.type === "code_inline")
+            ?.filter((t: any) => t.type === 'text' || t.type === 'code_inline')
             .map((t: any) => t.content)
-            .join("") ?? ""
+            .join('') ?? ''
         ).trim();
         env.headings.push({ depth, slug, text });
       }

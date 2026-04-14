@@ -53,16 +53,16 @@ With the `postgresql` dialect, import schema helpers from `void/schema-pg` (re-e
 
 ```ts
 // db/schema.ts
-import { pgTable, serial, text, timestamp, boolean, doublePrecision } from "void/schema-pg";
+import { pgTable, serial, text, timestamp, boolean, doublePrecision } from 'void/schema-pg';
 
-export const users = pgTable("users", {
-  id: serial("id").primaryKey(),
-  name: text("name").notNull(),
-  email: text("email").notNull().unique(),
-  role: text("role").notNull().default("user"),
-  active: boolean("active").notNull().default(true),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull(),
+  email: text('email').notNull().unique(),
+  role: text('role').notNull().default('user'),
+  active: boolean('active').notNull().default(true),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
 ```
 

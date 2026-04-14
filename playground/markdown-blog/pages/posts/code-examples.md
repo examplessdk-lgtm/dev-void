@@ -40,7 +40,7 @@ const app = createApp();
 app.use(router); // highlighted
 app.use(store);
 app.use(i18n); // highlighted
-app.mount("#app"); // highlighted
+app.mount('#app'); // highlighted
 ```
 
 ## With Line Numbers

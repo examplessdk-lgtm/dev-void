@@ -5,9 +5,9 @@ Svelte 5 adapter for Void Pages mode.
 ## Setup
 
 ```ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidSvelte } from "@void/svelte/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidSvelte } from '@void/svelte/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidSvelte()],
@@ -53,9 +53,9 @@ Pages are `.svelte` files in `pages/` with companion `.server.ts` files:
 ```
 
 ```ts
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
-export const loader = defineHandler(() => ({ title: "Home" }));
+export const loader = defineHandler(() => ({ title: 'Home' }));
 ```
 
 ## Tests

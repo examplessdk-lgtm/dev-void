@@ -3,7 +3,7 @@ import type {
   ResolveActionBody,
   ResolveActionParams,
   HasActionParams,
-} from "void/routes";
+} from 'void/routes';
 
 type ActionOptions<U extends string> =
   HasActionParams<U> extends true ? { params: ResolveActionParams<U> } : { params?: never };
@@ -22,15 +22,17 @@ export async function action<U extends ActionUrl & string>(
     ? [data?: ResolveActionBody<U>, options?: ActionOptions<U>]
     : [data?: ResolveActionBody<U>]
 ): Promise<void> {
-  if (!_router) throw new Error("action() called before router initialized");
+  if (!_router) {
+    throw new Error('action() called before router initialized');
+  }
 
   const data = args[0];
   const options = args[1] as ActionOptions<U> | undefined;
 
   let resolvedUrl: string = url;
-  let actionQuery = "";
+  let actionQuery = '';
 
-  const qIdx = resolvedUrl.indexOf("?");
+  const qIdx = resolvedUrl.indexOf('?');
   if (qIdx !== -1) {
     actionQuery = resolvedUrl.slice(qIdx);
     resolvedUrl = resolvedUrl.slice(0, qIdx);
@@ -43,5 +45,5 @@ export async function action<U extends ActionUrl & string>(
   }
 
   resolvedUrl = resolvedUrl + actionQuery;
-  await _router.visit(resolvedUrl, { method: "POST", data });
+  await _router.visit(resolvedUrl, { method: 'POST', data });
 }

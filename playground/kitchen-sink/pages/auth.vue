@@ -1,20 +1,20 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { useRouter } from "@void/vue";
-import { auth } from "void/client";
-import type { Props } from "./auth.server";
+import { useRouter } from '@void/vue';
+import { auth } from 'void/client';
+import { ref } from 'vue';
+import type { Props } from './auth.server';
 
 defineProps<Props>();
 
 const router = useRouter();
-const response = ref("");
-const tab = ref<"login" | "register">("login");
+const response = ref('');
+const tab = ref<'login' | 'register'>('login');
 
-const loginEmail = ref("");
-const loginPassword = ref("");
-const regEmail = ref("");
-const regPassword = ref("");
-const regName = ref("");
+const loginEmail = ref('');
+const loginPassword = ref('');
+const regEmail = ref('');
+const regPassword = ref('');
+const regName = ref('');
 
 function showResponse(label: string, data: unknown) {
   response.value = `${label}:\n${JSON.stringify(data, null, 2)}`;
@@ -27,13 +27,13 @@ async function handleRegister() {
       password: regPassword.value,
       name: regName.value,
     });
-    showResponse("signUp.email (200)", u);
-    regEmail.value = "";
-    regPassword.value = "";
-    regName.value = "";
+    showResponse('signUp.email (200)', u);
+    regEmail.value = '';
+    regPassword.value = '';
+    regName.value = '';
     router.reload();
   } catch (err) {
-    showResponse("signUp.email (error)", err);
+    showResponse('signUp.email (error)', err);
   }
 }
 
@@ -43,23 +43,23 @@ async function handleLogin() {
       email: loginEmail.value,
       password: loginPassword.value,
     });
-    showResponse("signIn.email (200)", u);
-    loginEmail.value = "";
-    loginPassword.value = "";
+    showResponse('signIn.email (200)', u);
+    loginEmail.value = '';
+    loginPassword.value = '';
     router.reload();
   } catch (err) {
-    showResponse("signIn.email (error)", err);
+    showResponse('signIn.email (error)', err);
   }
 }
 
 async function handleLogout() {
   await auth.signOut();
-  response.value = "Logged out";
+  response.value = 'Logged out';
   router.reload();
 }
 
 async function handleProfile() {
-  const res = await fetch("/api/profile");
+  const res = await fetch('/api/profile');
   const data = await res.json();
   showResponse(`GET /api/profile (${res.status})`, data);
 }
@@ -110,7 +110,7 @@ async function handleProfile() {
         <template v-if="user">
           <strong>{{ user.name || user.email || user.id }}</strong>
           <span style="opacity: 0.7">
-            ({{ user.emailVerified ? "email verified" : "email unverified" }})
+            ({{ user.emailVerified ? 'email verified' : 'email unverified' }})
           </span>
           <span v-if="session" style="opacity: 0.7"> session {{ session.id }}</span>
           &mdash;

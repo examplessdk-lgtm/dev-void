@@ -18,26 +18,26 @@ Use Hono's built-in middleware in your global middleware files or per-route:
 
 ```ts
 // middleware/01.cors.ts
-import { defineMiddleware } from "void";
-import { cors } from "hono/cors";
+import { defineMiddleware } from 'void';
+import { cors } from 'hono/cors';
 
-export default defineMiddleware(cors({ origin: "https://example.com" }));
+export default defineMiddleware(cors({ origin: 'https://example.com' }));
 ```
 
 ```ts
 // middleware/02.cache.ts
-import { defineMiddleware } from "void";
-import { cache } from "hono/cache";
+import { defineMiddleware } from 'void';
+import { cache } from 'hono/cache';
 
-export default defineMiddleware(cache({ cacheName: "my-app", cacheControl: "max-age=3600" }));
+export default defineMiddleware(cache({ cacheName: 'my-app', cacheControl: 'max-age=3600' }));
 ```
 
 ```ts
 // routes/api/webhooks/stripe.ts (per-route usage)
-import { defineHandler } from "void";
-import { bearerAuth } from "hono/bearer-auth";
+import { defineHandler } from 'void';
+import { bearerAuth } from 'hono/bearer-auth';
 
-export const POST = defineHandler(bearerAuth({ token: "webhook-secret" }), async (c) => {
+export const POST = defineHandler(bearerAuth({ token: 'webhook-secret' }), async (c) => {
   const body = await c.req.json();
   return { received: true };
 });
@@ -49,23 +49,23 @@ Hono's context helpers are available on `c` in every handler:
 
 ```ts
 // routes/api/download.ts
-import { defineHandler } from "void";
-import { stream } from "hono/streaming";
+import { defineHandler } from 'void';
+import { stream } from 'hono/streaming';
 
 export const GET = defineHandler((c) => {
   return stream(c, async (stream) => {
-    await stream.write("chunk 1");
-    await stream.write("chunk 2");
+    await stream.write('chunk 1');
+    await stream.write('chunk 2');
   });
 });
 ```
 
 ```ts
 // routes/api/data.ts
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
 export const GET = defineHandler((c) => {
-  c.header("X-Custom", "value");
+  c.header('X-Custom', 'value');
   c.status(201);
   return c.json({ created: true });
 });
@@ -77,8 +77,8 @@ Any `hono/*` or `@hono/*` package works. Install the package in your app, then u
 
 ```ts
 // middleware/01.rate-limit.ts
-import { defineMiddleware } from "void";
-import { rateLimiter } from "hono-rate-limiter";
+import { defineMiddleware } from 'void';
+import { rateLimiter } from 'hono-rate-limiter';
 
 export default defineMiddleware(rateLimiter({ windowMs: 60_000, limit: 100 }));
 ```
@@ -88,10 +88,10 @@ export default defineMiddleware(rateLimiter({ windowMs: 60_000, limit: 100 }));
 Hono's standalone helpers work anywhere:
 
 ```ts
-import { HTTPException } from "hono/http-exception";
+import { HTTPException } from 'hono/http-exception';
 
 // Throw typed HTTP errors
-throw new HTTPException(404, { message: "User not found" });
+throw new HTTPException(404, { message: 'User not found' });
 ```
 
 For the full list of built-in middleware, see the [Hono documentation](https://hono.dev/docs/middleware/builtin).

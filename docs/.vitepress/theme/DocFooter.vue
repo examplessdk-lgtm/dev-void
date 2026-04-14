@@ -1,6 +1,6 @@
 <script setup>
-import { FooterNav } from "@voidzero-dev/vitepress-theme";
-import { useData } from "vitepress";
+import { FooterNav } from '@voidzero-dev/vitepress-theme';
+import { useData } from 'vitepress';
 
 const { frontmatter } = useData();
 </script>

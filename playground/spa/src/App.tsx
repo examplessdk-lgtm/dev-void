@@ -1,28 +1,28 @@
-import { useState, useEffect } from "react";
-import { fetch } from "void/client";
+import { useState, useEffect } from 'react';
+import { fetch } from 'void/client';
 
 export default function App() {
   const [hello, setHello] = useState<{ message: string; timestamp: number } | null>(null);
   const [users, setUsers] = useState<
     { id: number; name: string; email: string; createdAt: string | null }[]
   >([]);
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
 
   useEffect(() => {
-    fetch("/api/hello").then(setHello);
-    fetch("/api/users").then(setUsers);
+    fetch('/api/hello').then(setHello);
+    fetch('/api/users').then(setUsers);
   }, []);
 
   async function createUser(e: React.FormEvent) {
     e.preventDefault();
-    await fetch("/api/users", {
-      method: "POST",
+    await fetch('/api/users', {
+      method: 'POST',
       body: { name, email },
     });
-    setName("");
-    setEmail("");
-    fetch("/api/users").then(setUsers);
+    setName('');
+    setEmail('');
+    fetch('/api/users').then(setUsers);
   }
 
   return (

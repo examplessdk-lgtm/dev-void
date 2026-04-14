@@ -1,8 +1,8 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { glob, globSync } from "tinyglobby";
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { glob, globSync } from 'tinyglobby';
 
-const JOB_EXTENSIONS = ["ts", "mts", "js", "mjs"];
+const JOB_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
 
 export interface JobDefinition {
   /** Relative file path from jobs/ */
@@ -14,7 +14,7 @@ export interface JobDefinition {
 }
 
 function extractJobName(filePath: string): string {
-  return filePath.replace(/\.[^.]+$/, "");
+  return filePath.replace(/\.[^.]+$/, '');
 }
 
 function extractCronExpressions(source: string, filePath: string): string[] {
@@ -48,11 +48,11 @@ function extractCronExpressions(source: string, filePath: string): string[] {
 
 function parseJobFiles(root: string, jobsDir: string, files: string[]): JobDefinition[] {
   return files
-    .filter((f) => !f.split("/").some((segment) => segment.startsWith("_")))
+    .filter((f) => !f.split('/').some((segment) => segment.startsWith('_')))
     .sort((a, b) => a.localeCompare(b))
     .map((filePath) => {
       const absPath = join(root, jobsDir, filePath);
-      const source = readFileSync(absPath, "utf-8");
+      const source = readFileSync(absPath, 'utf-8');
       return {
         filePath,
         name: extractJobName(filePath),
@@ -61,16 +61,16 @@ function parseJobFiles(root: string, jobsDir: string, files: string[]): JobDefin
     });
 }
 
-export async function scanJobs(root: string, jobsDir = "crons"): Promise<JobDefinition[]> {
-  const pattern = `**/*.{${JOB_EXTENSIONS.join(",")}}`;
+export async function scanJobs(root: string, jobsDir = 'crons'): Promise<JobDefinition[]> {
+  const pattern = `**/*.{${JOB_EXTENSIONS.join(',')}}`;
   const files = await glob(pattern, { cwd: `${root}/${jobsDir}`, absolute: false }).catch(
     () => [] as string[],
   );
   return parseJobFiles(root, jobsDir, files);
 }
 
-export function scanJobsSync(root: string, jobsDir = "crons"): JobDefinition[] {
-  const pattern = `**/*.{${JOB_EXTENSIONS.join(",")}}`;
+export function scanJobsSync(root: string, jobsDir = 'crons'): JobDefinition[] {
+  const pattern = `**/*.{${JOB_EXTENSIONS.join(',')}}`;
   let files: string[];
   try {
     files = globSync(pattern, { cwd: `${root}/${jobsDir}`, absolute: false });

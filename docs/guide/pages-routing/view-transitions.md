@@ -103,8 +103,8 @@ Override the global setting on individual links:
 Or programmatically:
 
 ```ts
-router.visit("/about", { viewTransition: true });
-router.visit("/settings", { viewTransition: false });
+router.visit('/about', { viewTransition: true });
+router.visit('/settings', { viewTransition: false });
 ```
 
 ## Customizing with CSS

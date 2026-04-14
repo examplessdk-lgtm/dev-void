@@ -1,10 +1,10 @@
-import { ofetch } from "ofetch";
-import { FetchError } from "./fetch-error";
+import { ofetch } from 'ofetch';
+import { FetchError } from './fetch-error';
 export { FetchError };
 
-import type { RouteMap } from "void/routes";
+import type { RouteMap } from 'void/routes';
 type MethodsOf<P extends keyof RouteMap> = keyof RouteMap[P] & string;
-type DefaultMethod<P extends keyof RouteMap> = "GET" extends MethodsOf<P> ? "GET" : never;
+type DefaultMethod<P extends keyof RouteMap> = 'GET' extends MethodsOf<P> ? 'GET' : never;
 
 type RouteEntry<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteMap[P][M] extends {
   input: infer I;
@@ -13,27 +13,27 @@ type RouteEntry<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteMap[P][
   ? { input: I; output: O }
   : { input: {}; output: unknown };
 
-type OutputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteEntry<P, M>["output"];
-type InputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteEntry<P, M>["input"];
+type OutputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteEntry<P, M>['output'];
+type InputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteEntry<P, M>['input'];
 
-type BodyOption<I> = "body" extends keyof I
-  ? { body: I["body" & keyof I] }
+type BodyOption<I> = 'body' extends keyof I
+  ? { body: I['body' & keyof I] }
   : { body?: Record<string, any> | BodyInit | null };
-type QueryOption<I> = "query" extends keyof I
-  ? { query: I["query" & keyof I] }
+type QueryOption<I> = 'query' extends keyof I
+  ? { query: I['query' & keyof I] }
   : { query?: Record<string, string> };
-type ParamsOption<I> = "params" extends keyof I
-  ? { params: I["params" & keyof I] }
+type ParamsOption<I> = 'params' extends keyof I
+  ? { params: I['params' & keyof I] }
   : { params?: Record<string, string> };
 
 type HasRequiredInput<
   P extends keyof RouteMap,
   M extends MethodsOf<P>,
-> = "body" extends keyof InputOf<P, M>
+> = 'body' extends keyof InputOf<P, M>
   ? true
-  : "query" extends keyof InputOf<P, M>
+  : 'query' extends keyof InputOf<P, M>
     ? true
-    : "params" extends keyof InputOf<P, M>
+    : 'params' extends keyof InputOf<P, M>
       ? true
       : false;
 
@@ -78,7 +78,7 @@ export async function fetch(path: string, options?: Record<string, any>): Promis
   }
 
   return ofetch(url, {
-    method: (options?.method ?? "GET") as string,
+    method: (options?.method ?? 'GET') as string,
     body: options?.body,
     query: options?.query,
     headers: options?.headers,

@@ -1,24 +1,24 @@
-import { useForm, action } from "@void/react";
-import type { Props } from "./index.server";
+import { useForm, action } from '@void/react';
+import type { Props } from './index.server';
 
 export default function DbPage({ users, posts }: Props) {
-  const userForm = useForm("/?create-user", {
-    name: "",
-    email: "",
+  const userForm = useForm('/?create-user', {
+    name: '',
+    email: '',
   });
 
-  const postForm = useForm("/?create-post", {
-    title: "",
-    body: "",
+  const postForm = useForm('/?create-post', {
+    title: '',
+    body: '',
     authorId: 0,
   });
 
   async function deleteUser(id: number) {
-    await action("/?delete-user", { id });
+    await action('/?delete-user', { id });
   }
 
   async function deletePost(id: number) {
-    await action("/?delete-post", { id });
+    await action('/?delete-post', { id });
   }
 
   return (
@@ -39,7 +39,7 @@ export default function DbPage({ users, posts }: Props) {
           <label>Name: </label>
           <input
             value={userForm.data.name}
-            onChange={(e) => userForm.setData("name", e.target.value)}
+            onChange={(e) => userForm.setData('name', e.target.value)}
             placeholder="Name"
             required
           />
@@ -48,13 +48,13 @@ export default function DbPage({ users, posts }: Props) {
           <label>Email: </label>
           <input
             value={userForm.data.email}
-            onChange={(e) => userForm.setData("email", e.target.value)}
+            onChange={(e) => userForm.setData('email', e.target.value)}
             placeholder="Email"
             required
           />
         </div>
         <button type="submit" disabled={userForm.processing} style={{ marginTop: 5 }}>
-          {userForm.processing ? "Saving..." : "Add User"}
+          {userForm.processing ? 'Saving...' : 'Add User'}
         </button>
       </form>
 
@@ -63,11 +63,11 @@ export default function DbPage({ users, posts }: Props) {
         <table>
           <thead>
             <tr>
-              <th style={{ textAlign: "left" }}>ID</th>
-              <th style={{ textAlign: "left" }}>Name</th>
-              <th style={{ textAlign: "left" }}>Email</th>
-              <th style={{ textAlign: "left" }}>Active</th>
-              <th style={{ textAlign: "left" }}>Created</th>
+              <th style={{ textAlign: 'left' }}>ID</th>
+              <th style={{ textAlign: 'left' }}>Name</th>
+              <th style={{ textAlign: 'left' }}>Email</th>
+              <th style={{ textAlign: 'left' }}>Active</th>
+              <th style={{ textAlign: 'left' }}>Created</th>
               <th></th>
             </tr>
           </thead>
@@ -77,7 +77,7 @@ export default function DbPage({ users, posts }: Props) {
                 <td>{user.id}</td>
                 <td>{user.name}</td>
                 <td>{user.email}</td>
-                <td>{user.active ? "Yes" : "No"}</td>
+                <td>{user.active ? 'Yes' : 'No'}</td>
                 <td>{String(user.createdAt)}</td>
                 <td>
                   <button onClick={() => deleteUser(user.id)}>Delete</button>
@@ -105,7 +105,7 @@ export default function DbPage({ users, posts }: Props) {
           <label>Title: </label>
           <input
             value={postForm.data.title}
-            onChange={(e) => postForm.setData("title", e.target.value)}
+            onChange={(e) => postForm.setData('title', e.target.value)}
             placeholder="Post title"
             required
           />
@@ -114,7 +114,7 @@ export default function DbPage({ users, posts }: Props) {
           <label>Body: </label>
           <input
             value={postForm.data.body}
-            onChange={(e) => postForm.setData("body", e.target.value)}
+            onChange={(e) => postForm.setData('body', e.target.value)}
             placeholder="Post body"
           />
         </div>
@@ -122,7 +122,7 @@ export default function DbPage({ users, posts }: Props) {
           <label>Author: </label>
           <select
             value={postForm.data.authorId}
-            onChange={(e) => postForm.setData("authorId", Number(e.target.value))}
+            onChange={(e) => postForm.setData('authorId', Number(e.target.value))}
             required
           >
             <option value={0} disabled>
@@ -136,7 +136,7 @@ export default function DbPage({ users, posts }: Props) {
           </select>
         </div>
         <button type="submit" disabled={postForm.processing} style={{ marginTop: 5 }}>
-          {postForm.processing ? "Saving..." : "Add Post"}
+          {postForm.processing ? 'Saving...' : 'Add Post'}
         </button>
       </form>
 
@@ -145,11 +145,11 @@ export default function DbPage({ users, posts }: Props) {
         <table>
           <thead>
             <tr>
-              <th style={{ textAlign: "left" }}>ID</th>
-              <th style={{ textAlign: "left" }}>Title</th>
-              <th style={{ textAlign: "left" }}>Body</th>
-              <th style={{ textAlign: "left" }}>Author</th>
-              <th style={{ textAlign: "left" }}>Created</th>
+              <th style={{ textAlign: 'left' }}>ID</th>
+              <th style={{ textAlign: 'left' }}>Title</th>
+              <th style={{ textAlign: 'left' }}>Body</th>
+              <th style={{ textAlign: 'left' }}>Author</th>
+              <th style={{ textAlign: 'left' }}>Created</th>
               <th></th>
             </tr>
           </thead>
@@ -180,45 +180,45 @@ export default function DbPage({ users, posts }: Props) {
 // --- Type tests (compile-time only, never executed) ---
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 function _typeTests() {
-  const userForm = useForm("/?create-user", { name: "", email: "" });
-  const postForm = useForm("/?create-post", { title: "", body: "", authorId: 0 });
+  const userForm = useForm('/?create-user', { name: '', email: '' });
+  const postForm = useForm('/?create-post', { title: '', body: '', authorId: 0 });
 
   // @ts-expect-error — invalid action name
-  useForm("/?nonexistent-action", {});
+  useForm('/?nonexistent-action', {});
 
   // @ts-expect-error — missing required field "email"
-  useForm("/?create-user", { name: "" });
+  useForm('/?create-user', { name: '' });
 
   // @ts-expect-error — extra field not in validator
-  useForm("/?create-user", { name: "", email: "", bogus: true });
+  useForm('/?create-user', { name: '', email: '', bogus: true });
 
   // @ts-expect-error — wrong field type (name should be string)
-  useForm("/?create-user", { name: 123, email: "" });
+  useForm('/?create-user', { name: 123, email: '' });
 
   // @ts-expect-error — wrong field type (authorId should be number)
-  useForm("/?create-post", { title: "", body: "", authorId: "not-a-number" });
+  useForm('/?create-post', { title: '', body: '', authorId: 'not-a-number' });
 
   // @ts-expect-error — "bogus" is not a field on create-user body
-  userForm.setData("bogus", "value");
+  userForm.setData('bogus', 'value');
 
   // @ts-expect-error — name should be string, not number
-  userForm.setData("name", 123);
+  userForm.setData('name', 123);
 
   // @ts-expect-error — "authorId" doesn't exist on create-user form
   void userForm.data.authorId;
 
   // @ts-expect-error — "bogus" is not a field on create-post body
-  postForm.setData("bogus", "value");
+  postForm.setData('bogus', 'value');
 
   // @ts-expect-error — authorId should be number, not string
-  postForm.setData("authorId", "not-a-number");
+  postForm.setData('authorId', 'not-a-number');
 
   // @ts-expect-error — invalid action name
-  action("/?nonexistent-action", {});
+  action('/?nonexistent-action', {});
 
   // @ts-expect-error — missing required field "id"
-  action("/?delete-user", {});
+  action('/?delete-user', {});
 
   // @ts-expect-error — wrong field type (id should be number)
-  action("/?delete-user", { id: "not-a-number" });
+  action('/?delete-user', { id: 'not-a-number' });
 }

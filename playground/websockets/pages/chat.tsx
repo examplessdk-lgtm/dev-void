@@ -1,25 +1,25 @@
-import { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
-import { connect, type VoidSocket } from "void/ws";
-import type { WebSocketRouteMap } from "void/routes";
-import type { Props } from "./chat.server";
+import { startTransition, useEffect, useEffectEvent, useRef, useState } from 'react';
+import type { WebSocketRouteMap } from 'void/routes';
+import { connect, type VoidSocket } from 'void/ws';
+import type { Props } from './chat.server';
 
-type ChatSocket = VoidSocket<"/ws/chat/:room">;
-type ChatClientEvent = WebSocketRouteMap["/ws/chat/:room"]["client"];
-type ChatServerEvent = WebSocketRouteMap["/ws/chat/:room"]["server"];
+type ChatSocket = VoidSocket<'/ws/chat/:room'>;
+type ChatClientEvent = WebSocketRouteMap['/ws/chat/:room']['client'];
+type ChatServerEvent = WebSocketRouteMap['/ws/chat/:room']['server'];
 
 interface TimelineEntry {
   id: string;
-  kind: "system" | "message";
+  kind: 'system' | 'message';
   title: string;
   body: string;
   meta: string;
 }
 
 function toTimelineEntry(event: ChatServerEvent): TimelineEntry {
-  if (event.type === "chat.message") {
+  if (event.type === 'chat.message') {
     return {
       id: event.id,
-      kind: "message",
+      kind: 'message',
       title: event.name,
       body: event.text,
       meta: new Date(event.sentAt).toLocaleTimeString(),
@@ -28,10 +28,10 @@ function toTimelineEntry(event: ChatServerEvent): TimelineEntry {
 
   return {
     id: event.id,
-    kind: "system",
-    title: "Room event",
+    kind: 'system',
+    title: 'Room event',
     body: event.text,
-    meta: `${event.activeConnections} active connection${event.activeConnections === 1 ? "" : "s"}`,
+    meta: `${event.activeConnections} active connection${event.activeConnections === 1 ? '' : 's'}`,
   };
 }
 
@@ -40,8 +40,8 @@ export default function ChatPage({ initialRoom, initialName }: Props) {
   const [nameInput, setNameInput] = useState(initialName);
   const [activeRoom, setActiveRoom] = useState(initialRoom);
   const [activeName, setActiveName] = useState(initialName);
-  const [draft, setDraft] = useState("");
-  const [status, setStatus] = useState("connecting");
+  const [draft, setDraft] = useState('');
+  const [status, setStatus] = useState('connecting');
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const socketRef = useRef<ChatSocket | null>(null);
 
@@ -52,24 +52,24 @@ export default function ChatPage({ initialRoom, initialName }: Props) {
   });
 
   useEffect(() => {
-    setStatus("connecting");
+    setStatus('connecting');
     setTimeline([]);
 
-    const socket: ChatSocket = connect("/ws/chat/:room", {
+    const socket: ChatSocket = connect('/ws/chat/:room', {
       params: { room: activeRoom },
     });
     socketRef.current = socket;
 
-    const disposeOpen = socket.on("open", () => {
-      setStatus("open");
-      socket.send({ type: "chat.join", name: activeName });
+    const disposeOpen = socket.on('open', () => {
+      setStatus('open');
+      socket.send({ type: 'chat.join', name: activeName });
     });
-    const disposeMessage = socket.on("message", appendEvent);
-    const disposeClose = socket.on("close", () => {
-      setStatus("closed");
+    const disposeMessage = socket.on('message', appendEvent);
+    const disposeClose = socket.on('close', () => {
+      setStatus('closed');
     });
-    const disposeError = socket.on("error", () => {
-      setStatus("error");
+    const disposeError = socket.on('error', () => {
+      setStatus('error');
     });
 
     return () => {
@@ -77,7 +77,7 @@ export default function ChatPage({ initialRoom, initialName }: Props) {
       disposeMessage();
       disposeClose();
       disposeError();
-      socket.close(1000, "Switching rooms");
+      socket.close(1000, 'Switching rooms');
       if (socketRef.current === socket) {
         socketRef.current = null;
       }
@@ -85,7 +85,7 @@ export default function ChatPage({ initialRoom, initialName }: Props) {
   }, [activeName, activeRoom]);
 
   const reconnect = () => {
-    const nextRoom = roomInput.trim() || "general";
+    const nextRoom = roomInput.trim() || 'general';
     const nextName = nameInput.trim() || initialName;
     setActiveRoom(nextRoom);
     setActiveName(nextName);
@@ -97,9 +97,11 @@ export default function ChatPage({ initialRoom, initialName }: Props) {
 
   const sendMessage = () => {
     const text = draft.trim();
-    if (!text) return;
-    send({ type: "chat.message", text });
-    setDraft("");
+    if (!text) {
+      return;
+    }
+    send({ type: 'chat.message', text });
+    setDraft('');
   };
 
   return (
@@ -112,40 +114,40 @@ export default function ChatPage({ initialRoom, initialName }: Props) {
 
       <p>
         <label>
-          Room:{" "}
+          Room:{' '}
           <input value={roomInput} onChange={(event) => setRoomInput(event.currentTarget.value)} />
-        </label>{" "}
+        </label>{' '}
         <label>
-          Display name:{" "}
+          Display name:{' '}
           <input value={nameInput} onChange={(event) => setNameInput(event.currentTarget.value)} />
-        </label>{" "}
+        </label>{' '}
         <button type="button" onClick={reconnect}>
           Reconnect
         </button>
       </p>
 
       <p>
-        status: <strong>{status}</strong> | room: <strong>{activeRoom}</strong> | name:{" "}
+        status: <strong>{status}</strong> | room: <strong>{activeRoom}</strong> | name:{' '}
         <strong>{activeName}</strong>
       </p>
 
       <p>
         <label>
-          Message:{" "}
+          Message:{' '}
           <input
             value={draft}
             onChange={(event) => setDraft(event.currentTarget.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") {
+              if (event.key === 'Enter') {
                 event.preventDefault();
                 sendMessage();
               }
             }}
           />
-        </label>{" "}
-        <button type="button" onClick={sendMessage} disabled={status !== "open"}>
+        </label>{' '}
+        <button type="button" onClick={sendMessage} disabled={status !== 'open'}>
           Send
-        </button>{" "}
+        </button>{' '}
         <button type="button" onClick={() => setTimeline([])}>
           Clear timeline
         </button>

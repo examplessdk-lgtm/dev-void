@@ -14,14 +14,14 @@ export type ParseActionUrl<U extends string> = U extends `${infer Base}?${infer 
 
 /** Resolve body type for a useForm URL (single action or named action) */
 export type ResolveActionBody<U extends string> =
-  ParseActionUrl<U>["base"] extends keyof PageActionMap
-    ? ParseActionUrl<U>["action"] extends never
-      ? PageActionMap[ParseActionUrl<U>["base"]] extends { body: infer B }
+  ParseActionUrl<U>['base'] extends keyof PageActionMap
+    ? ParseActionUrl<U>['action'] extends never
+      ? PageActionMap[ParseActionUrl<U>['base']] extends { body: infer B }
         ? B
         : Record<string, unknown>
-      : PageActionMap[ParseActionUrl<U>["base"]] extends { actions: infer A }
-        ? ParseActionUrl<U>["action"] extends keyof A
-          ? A[ParseActionUrl<U>["action"]] extends { body: infer B }
+      : PageActionMap[ParseActionUrl<U>['base']] extends { actions: infer A }
+        ? ParseActionUrl<U>['action'] extends keyof A
+          ? A[ParseActionUrl<U>['action']] extends { body: infer B }
             ? B
             : Record<string, unknown>
           : never
@@ -30,8 +30,8 @@ export type ResolveActionBody<U extends string> =
 
 /** Resolve params type */
 export type ResolveActionParams<U extends string> =
-  ParseActionUrl<U>["base"] extends keyof PageActionMap
-    ? PageActionMap[ParseActionUrl<U>["base"]] extends { params: infer P }
+  ParseActionUrl<U>['base'] extends keyof PageActionMap
+    ? PageActionMap[ParseActionUrl<U>['base']] extends { params: infer P }
       ? P
       : never
     : never;

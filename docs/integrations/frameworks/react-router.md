@@ -24,9 +24,9 @@ npm install -D void
 ### 3. Configure `vite.config.ts`
 
 ```ts
-import { defineConfig } from "vite";
-import { reactRouter } from "@react-router/dev/vite";
-import { voidPlugin } from "void";
+import { defineConfig } from 'vite';
+import { reactRouter } from '@react-router/dev/vite';
+import { voidPlugin } from 'void';
 
 export default defineConfig({
   plugins: [
@@ -52,9 +52,9 @@ Void-managed auth is not supported in framework mode yet. Use Better Auth's offi
 ### Database
 
 ```tsx
-import type { Route } from "./+types/users";
-import { db } from "void/db";
-import { users } from "@schema";
+import type { Route } from './+types/users';
+import { db } from 'void/db';
+import { users } from '@schema';
 
 export async function loader({}: Route.LoaderArgs) {
   return { users: await db.select().from(users) };
@@ -64,31 +64,31 @@ export async function loader({}: Route.LoaderArgs) {
 ### KV Storage
 
 ```tsx
-import { kv } from "void/kv";
+import { kv } from 'void/kv';
 
 export async function loader() {
-  return { settings: await kv.get("app:settings") };
+  return { settings: await kv.get('app:settings') };
 }
 ```
 
 ### Blob Storage
 
 ```tsx
-import { storage } from "void/storage";
+import { storage } from 'void/storage';
 
 export async function loader() {
-  return { avatar: await storage.get("avatars/user-1.png") };
+  return { avatar: await storage.get('avatars/user-1.png') };
 }
 ```
 
 ### AI
 
 ```tsx
-import { ai } from "void/ai";
+import { ai } from 'void/ai';
 
 export async function action() {
-  return ai.run("@cf/meta/llama-3.1-8b-instruct", {
-    prompt: "Summarize the latest news",
+  return ai.run('@cf/meta/llama-3.1-8b-instruct', {
+    prompt: 'Summarize the latest news',
   });
 }
 ```
@@ -97,9 +97,9 @@ export async function action() {
 
 ```ts
 // crons/daily-cleanup.ts
-import { defineScheduled } from "void";
+import { defineScheduled } from 'void';
 
-export const cron = "0 0 * * *";
+export const cron = '0 0 * * *';
 
 export default defineScheduled(async () => {
   // runs daily at midnight
@@ -110,7 +110,7 @@ export default defineScheduled(async () => {
 
 ```ts
 // queues/emails.ts
-import { defineQueue } from "void";
+import { defineQueue } from 'void';
 
 export default defineQueue<{ to: string; subject: string }>(async (batch) => {
   for (const msg of batch.messages) {
@@ -125,7 +125,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 You can also access Cloudflare bindings via the `cloudflare:workers` module:
 
 ```tsx
-import { env } from "cloudflare:workers";
+import { env } from 'cloudflare:workers';
 
-const { results } = await env.DB.prepare("SELECT * FROM users").all();
+const { results } = await env.DB.prepare('SELECT * FROM users').all();
 ```

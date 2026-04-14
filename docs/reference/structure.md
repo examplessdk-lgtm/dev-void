@@ -39,8 +39,8 @@ const dbItems = [
       {
         name: "migrations/",
         children: [
-          { name: "0000_*.sql" },
-          { name: "0001_*.sql" },
+          { name: "20260410161500_*.sql" },
+          { name: "20260410161501_*.sql" },
         ],
       },
     ],
@@ -121,9 +121,9 @@ Generate schema with `void gen model` or write it by hand. Generate migrations w
 
 ```ts
 // crons/heartbeat.ts
-import { defineScheduled } from "void";
+import { defineScheduled } from 'void';
 
-export const cron = "*/5 * * * *";
+export const cron = '*/5 * * * *';
 
 export default defineScheduled(async (controller, env) => {
   // runs every 5 minutes
@@ -136,7 +136,7 @@ export default defineScheduled(async (controller, env) => {
 
 ```ts
 // queues/email.ts
-import { defineQueue } from "void";
+import { defineQueue } from 'void';
 
 export default defineQueue(async (batch, env) => {
   for (const msg of batch.messages) {

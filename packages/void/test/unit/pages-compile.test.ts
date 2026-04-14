@@ -1,24 +1,27 @@
-import { describe, expect, it } from "vitest";
-import { compileRouteTable, type PagesCompileOptions } from "../../src/router/compile";
-import type { ScanResult } from "../../src/router/scan";
+import { describe, expect, it } from 'vitest';
+import { compileRouteTable, type PagesCompileOptions } from '../../src/router/compile';
+import type { ScanResult } from '../../src/router/scan';
 
 const testOptions = {
-  honoPath: "/resolved/hono/index.mjs",
-  responsePath: "/resolved/void/runtime/response.mjs",
-  runtimeEnvPath: "/resolved/void/runtime/env.mjs",
+  honoPath: '/resolved/hono/index.mjs',
+  responsePath: '/resolved/void/runtime/response.mjs',
+  runtimeEnvPath: '/resolved/void/runtime/env.mjs',
+  projectRoot: '/project',
+  homeDir: '/Users/test',
   reactRefresh: false,
+  dev: true,
   auth: null,
 };
 
 const pagesOptions: PagesCompileOptions = {
-  pagesDir: "/project/pages",
-  pagesDirRelative: "pages",
-  protocolPath: "/resolved/void/pages/protocol.mjs",
-  headPath: "/resolved/void/pages/head.mjs",
-  clientEntryId: "virtual:void-pages-client",
+  pagesDir: '/project/pages',
+  pagesDirRelative: 'pages',
+  protocolPath: '/resolved/void/pages/protocol.mjs',
+  headPath: '/resolved/void/pages/head.mjs',
+  clientEntryId: 'virtual:void-pages-client',
 };
 
-function makeScan(pages: ScanResult["pages"]): ScanResult {
+function makeScan(pages: ScanResult['pages']): ScanResult {
   return {
     routes: [],
     middleware: [],
@@ -28,18 +31,18 @@ function makeScan(pages: ScanResult["pages"]): ScanResult {
   };
 }
 
-describe("compileRouteTable with pages", () => {
-  it("imports handlePageGet and handlePageMutation from protocol", () => {
+describe('compileRouteTable with pages', () => {
+  it('imports handlePageGet and handlePageMutation from protocol', () => {
     const scan = makeScan({
       pages: [
         {
-          pattern: "/",
+          pattern: '/',
           params: [],
           catchAll: false,
-          componentPath: "index.vue",
+          componentPath: 'index.vue',
           serverPath: null,
           methods: [],
-          componentId: "index",
+          componentId: 'index',
         },
       ],
       layouts: [],
@@ -48,10 +51,10 @@ describe("compileRouteTable with pages", () => {
 
     const code = compileRouteTable(
       scan,
-      "/routes",
-      "/middleware",
-      "/crons",
-      "/queues",
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
       null,
       testOptions,
       pagesOptions,
@@ -62,17 +65,17 @@ describe("compileRouteTable with pages", () => {
     );
   });
 
-  it("imports renderPage from virtual module", () => {
+  it('imports renderPage from virtual module', () => {
     const scan = makeScan({
       pages: [
         {
-          pattern: "/",
+          pattern: '/',
           params: [],
           catchAll: false,
-          componentPath: "index.vue",
+          componentPath: 'index.vue',
           serverPath: null,
           methods: [],
-          componentId: "index",
+          componentId: 'index',
         },
       ],
       layouts: [],
@@ -81,10 +84,10 @@ describe("compileRouteTable with pages", () => {
 
     const code = compileRouteTable(
       scan,
-      "/routes",
-      "/middleware",
-      "/crons",
-      "/queues",
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
       null,
       testOptions,
       pagesOptions,
@@ -93,17 +96,17 @@ describe("compileRouteTable with pages", () => {
     expect(code).toContain(`import { renderPage } from "virtual:void-pages-renderer"`);
   });
 
-  it("registers GET handler for page without server module", () => {
+  it('registers GET handler for page without server module', () => {
     const scan = makeScan({
       pages: [
         {
-          pattern: "/about",
+          pattern: '/about',
           params: [],
           catchAll: false,
-          componentPath: "about.vue",
+          componentPath: 'about.vue',
           serverPath: null,
           methods: [],
-          componentId: "about",
+          componentId: 'about',
         },
       ],
       layouts: [],
@@ -112,10 +115,10 @@ describe("compileRouteTable with pages", () => {
 
     const code = compileRouteTable(
       scan,
-      "/routes",
-      "/middleware",
-      "/crons",
-      "/queues",
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
       null,
       testOptions,
       pagesOptions,
@@ -127,17 +130,17 @@ describe("compileRouteTable with pages", () => {
     );
   });
 
-  it("generates lazy loader for companion .server.ts", () => {
+  it('generates lazy loader for companion .server.ts', () => {
     const scan = makeScan({
       pages: [
         {
-          pattern: "/users",
+          pattern: '/users',
           params: [],
           catchAll: false,
-          componentPath: "users/index.vue",
-          serverPath: "users/index.server.ts",
-          methods: ["loader", "action"],
-          componentId: "users",
+          componentPath: 'users/index.vue',
+          serverPath: 'users/index.server.ts',
+          methods: ['loader', 'action'],
+          componentId: 'users',
         },
       ],
       layouts: [],
@@ -146,41 +149,41 @@ describe("compileRouteTable with pages", () => {
 
     const code = compileRouteTable(
       scan,
-      "/routes",
-      "/middleware",
-      "/crons",
-      "/queues",
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
       null,
       testOptions,
       pagesOptions,
     );
 
     // Lazy loader
-    expect(code).toContain("let _pmod_users;");
-    expect(code).toContain("async function _pload_users()");
+    expect(code).toContain('let _pmod_users;');
+    expect(code).toContain('async function _pload_users()');
     expect(code).toContain('import("/project/pages/users/index.server.ts")');
 
     // GET handler uses loader
     expect(code).toContain('app.get("/users"');
-    expect(code).toContain("mod.loader, mod.head, c");
+    expect(code).toContain('mod.loader, mod.head, c');
 
     // Action mutation handler (POST, PUT, PATCH, DELETE)
     expect(code).toContain('app.on(["POST", "PUT", "PATCH", "DELETE"], "/users"');
-    expect(code).toContain("const handler = mod.action;");
-    expect(code).toContain("handlePageMutation(handler, mod.loader, mod.head");
+    expect(code).toContain('const handler = mod.action;');
+    expect(code).toContain('handlePageMutation(handler, mod.loader, mod.head');
   });
 
-  it("generates catch-all for SPA navigation", () => {
+  it('generates catch-all for SPA navigation', () => {
     const scan = makeScan({
       pages: [
         {
-          pattern: "/",
+          pattern: '/',
           params: [],
           catchAll: false,
-          componentPath: "index.vue",
+          componentPath: 'index.vue',
           serverPath: null,
           methods: [],
-          componentId: "index",
+          componentId: 'index',
         },
       ],
       layouts: [],
@@ -189,67 +192,131 @@ describe("compileRouteTable with pages", () => {
 
     const code = compileRouteTable(
       scan,
-      "/routes",
-      "/middleware",
-      "/crons",
-      "/queues",
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
       null,
       testOptions,
       pagesOptions,
     );
 
-    expect(code).toContain("app.notFound(");
+    expect(code).toContain('app.notFound(');
     // Should skip API routes
     expect(code).toContain('path.startsWith("/api/")');
+    // Dot-prefixed segments (/.well-known, /.env, /.git) → 404
+    expect(code).toContain('path.includes("/.")');
+    // Last segment with dot (style.css, wp-login.php) → 404
+    expect(code).toContain('lastSeg.includes(".")');
+    // Trailing slash redirect
+    expect(code).toContain('path.endsWith("/")');
+    // notFound fallback: try render index as 404, catch errors
+    expect(code).toContain('try {');
+    expect(code).toContain('{ status: 404, headers: res.headers }');
+    expect(code).toContain('} catch {');
+    expect(code).toContain('serveCustomErrorPage(c, 404, "Not Found")');
   });
 
-  it("does not generate page code when pages is null", () => {
-    const scan = makeScan({ pages: [], layouts: [], namedLayouts: [] });
-
-    const code = compileRouteTable(
-      scan,
-      "/routes",
-      "/middleware",
-      "/crons",
-      "/queues",
-      null,
-      testOptions,
-      null,
-    );
-
-    expect(code).not.toContain("handlePageGet");
-    expect(code).not.toContain("renderPage");
-  });
-
-  it("does not generate page code when pages array is empty", () => {
-    const scan = makeScan({ pages: [], layouts: [], namedLayouts: [] });
-
-    const code = compileRouteTable(
-      scan,
-      "/routes",
-      "/middleware",
-      "/crons",
-      "/queues",
-      null,
-      testOptions,
-      pagesOptions,
-    );
-
-    expect(code).not.toContain("handlePageGet");
-    expect(code).not.toContain("renderPage");
-  });
-
-  it("island page uses renderIslandPage and getIslandsAssetTags", () => {
+  it('embeds the default self-contained error page helper and dev overlay support', () => {
     const scan = makeScan({
       pages: [
         {
-          pattern: "/",
+          pattern: '/',
           params: [],
           catchAll: false,
-          componentPath: "index.island.tsx",
+          componentPath: 'index.vue',
           serverPath: null,
           methods: [],
-          componentId: "index",
+          componentId: 'index',
+        },
+      ],
+      layouts: [],
+      namedLayouts: [],
+    });
+
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+      pagesOptions,
+    );
+
+    expect(code).toContain('place-items: center;');
+    expect(code).toContain('border-radius: 32px;');
+    expect(code).toContain('corner-shape: squircle;');
+    expect(code).toContain('function __voidRenderDevErrorOverlay(request, status, title, error) {');
+    expect(code).toContain('function __voidInjectDevErrorOverlay(html, overlay) {');
+    expect(code).toContain('function __voidGetStackFrames(error) {');
+    expect(code).toContain('function __voidEditorHref(value, line, column) {');
+    expect(code).toContain('const __VOID_DEV = true;');
+    expect(code).toContain('const __VOID_PROJECT_ROOT =');
+    expect(code).toContain('const __VOID_HOME_DIR =');
+    expect(code).toContain('__VOID_DEV && status === 500 && error');
+    expect(code).toContain('data-void-error-close');
+    expect(code).toContain('data-void-error-toggle');
+    expect(code).toContain('is-minimized');
+    expect(code).toContain('Minimize error overlay');
+    expect(code).toContain('vscode://file/');
+    expect(code).toContain(
+      'return __voidCreateErrorResponse(c.req.raw, status, fallbackText, error);',
+    );
+    expect(code).toContain(
+      'if (err && typeof err === "object" && "getResponse" in err) return err.getResponse();',
+    );
+    expect(code).toContain('return serveCustomErrorPage(c, 500, "Internal Server Error", err);');
+  });
+
+  it('does not generate page code when pages is null', () => {
+    const scan = makeScan({ pages: [], layouts: [], namedLayouts: [] });
+
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+      null,
+    );
+
+    expect(code).not.toContain('handlePageGet');
+    expect(code).not.toContain('renderPage');
+  });
+
+  it('does not generate page code when pages array is empty', () => {
+    const scan = makeScan({ pages: [], layouts: [], namedLayouts: [] });
+
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+      pagesOptions,
+    );
+
+    expect(code).not.toContain('handlePageGet');
+    expect(code).not.toContain('renderPage');
+  });
+
+  it('island page uses renderIslandPage and getIslandsAssetTags', () => {
+    const scan = makeScan({
+      pages: [
+        {
+          pattern: '/',
+          params: [],
+          catchAll: false,
+          componentPath: 'index.island.tsx',
+          serverPath: null,
+          methods: [],
+          componentId: 'index',
           island: true,
         },
       ],
@@ -259,37 +326,37 @@ describe("compileRouteTable with pages", () => {
 
     const islandPagesOptions: PagesCompileOptions = {
       ...pagesOptions,
-      islandClientEntryId: "virtual:void-islands-client",
+      islandClientEntryId: 'virtual:void-islands-client',
     };
 
     const code = compileRouteTable(
       scan,
-      "/routes",
-      "/middleware",
-      "/crons",
-      "/queues",
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
       null,
       testOptions,
       islandPagesOptions,
     );
 
     expect(code).toContain(`import { renderIslandPage } from "virtual:void-islands-renderer"`);
-    expect(code).toContain("renderIslandPage");
-    expect(code).toContain("getIslandsAssetTags");
-    expect(code).toContain(", true)");
+    expect(code).toContain('renderIslandPage');
+    expect(code).toContain('getIslandsAssetTags');
+    expect(code).toContain(', true)');
   });
 
-  it("non-island page does not use island renderer", () => {
+  it('non-island page does not use island renderer', () => {
     const scan = makeScan({
       pages: [
         {
-          pattern: "/dash",
+          pattern: '/dash',
           params: [],
           catchAll: false,
-          componentPath: "dash.tsx",
+          componentPath: 'dash.tsx',
           serverPath: null,
           methods: [],
-          componentId: "dash",
+          componentId: 'dash',
         },
       ],
       layouts: [],
@@ -298,41 +365,41 @@ describe("compileRouteTable with pages", () => {
 
     const code = compileRouteTable(
       scan,
-      "/routes",
-      "/middleware",
-      "/crons",
-      "/queues",
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
       null,
       testOptions,
       pagesOptions,
     );
 
-    expect(code).toContain("renderPage");
-    expect(code).not.toContain("renderIslandPage");
-    expect(code).not.toContain("getIslandsAssetTags");
+    expect(code).toContain('renderPage');
+    expect(code).not.toContain('renderIslandPage');
+    expect(code).not.toContain('getIslandsAssetTags');
   });
 
-  it("mixed island and non-island pages import both renderers", () => {
+  it('mixed island and non-island pages import both renderers', () => {
     const scan = makeScan({
       pages: [
         {
-          pattern: "/",
+          pattern: '/',
           params: [],
           catchAll: false,
-          componentPath: "index.island.tsx",
+          componentPath: 'index.island.tsx',
           serverPath: null,
           methods: [],
-          componentId: "index",
+          componentId: 'index',
           island: true,
         },
         {
-          pattern: "/dash",
+          pattern: '/dash',
           params: [],
           catchAll: false,
-          componentPath: "dash.tsx",
+          componentPath: 'dash.tsx',
           serverPath: null,
           methods: [],
-          componentId: "dash",
+          componentId: 'dash',
         },
       ],
       layouts: [],
@@ -341,15 +408,15 @@ describe("compileRouteTable with pages", () => {
 
     const islandPagesOptions: PagesCompileOptions = {
       ...pagesOptions,
-      islandClientEntryId: "virtual:void-islands-client",
+      islandClientEntryId: 'virtual:void-islands-client',
     };
 
     const code = compileRouteTable(
       scan,
-      "/routes",
-      "/middleware",
-      "/crons",
-      "/queues",
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
       null,
       testOptions,
       islandPagesOptions,
@@ -359,17 +426,17 @@ describe("compileRouteTable with pages", () => {
     expect(code).toContain(`import { renderIslandPage } from "virtual:void-islands-renderer"`);
   });
 
-  it("generates asset tags function for production manifest", () => {
+  it('generates asset tags function for production manifest', () => {
     const scan = makeScan({
       pages: [
         {
-          pattern: "/",
+          pattern: '/',
           params: [],
           catchAll: false,
-          componentPath: "index.vue",
+          componentPath: 'index.vue',
           serverPath: null,
           methods: [],
-          componentId: "index",
+          componentId: 'index',
         },
       ],
       layouts: [],
@@ -378,19 +445,19 @@ describe("compileRouteTable with pages", () => {
 
     const code = compileRouteTable(
       scan,
-      "/routes",
-      "/middleware",
-      "/crons",
-      "/queues",
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
       null,
       testOptions,
       pagesOptions,
     );
 
-    expect(code).toContain("getPagesAssetTags");
-    expect(code).toContain("loadPagesManifest");
-    expect(code).toContain("getPagesDevClientTags");
-    expect(code).toContain("collectRouteCss");
-    expect(code).toContain("PAGE_CSS_KEYS");
+    expect(code).toContain('getPagesAssetTags');
+    expect(code).toContain('loadPagesManifest');
+    expect(code).toContain('getPagesDevClientTags');
+    expect(code).toContain('collectRouteCss');
+    expect(code).toContain('PAGE_CSS_KEYS');
   });
 });

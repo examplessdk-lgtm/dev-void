@@ -26,7 +26,7 @@ export interface KVMap<T> {
   get(key: string): Promise<T | null>;
   put(key: string, value: T, options?: PutOptions): Promise<void>;
   delete(key: string): Promise<void>;
-  list<M = unknown>(options?: Omit<ListOptions, "prefix">): Promise<ListResult<M>>;
+  list<M = unknown>(options?: Omit<ListOptions, 'prefix'>): Promise<ListResult<M>>;
   getWithMetadata<M = unknown>(key: string): Promise<{ value: T | null; metadata: M | null }>;
 }
 
@@ -42,7 +42,9 @@ export interface KVClient {
 }
 
 function parseValue<T>(raw: string | null): T | null {
-  if (raw === null) return null;
+  if (raw === null) {
+    return null;
+  }
   try {
     return JSON.parse(raw) as T;
   } catch {
@@ -51,7 +53,9 @@ function parseValue<T>(raw: string | null): T | null {
 }
 
 function serializeValue(value: unknown): string {
-  if (typeof value === "string") return value;
+  if (typeof value === 'string') {
+    return value;
+  }
   return JSON.stringify(value);
 }
 
@@ -66,9 +70,15 @@ function createKVMap<T>(getNS: () => KVNamespace, prefix: string): KVMap<T> {
 
     async put(key, value, options) {
       const opts: KVNamespacePutOptions = {};
-      if (options?.ttl) opts.expirationTtl = options.ttl;
-      if (options?.expiration) opts.expiration = options.expiration;
-      if (options?.metadata) opts.metadata = options.metadata;
+      if (options?.ttl) {
+        opts.expirationTtl = options.ttl;
+      }
+      if (options?.expiration) {
+        opts.expiration = options.expiration;
+      }
+      if (options?.metadata) {
+        opts.metadata = options.metadata;
+      }
       await getNS().put(prefixed(key), serializeValue(value), opts);
     },
 
@@ -76,7 +86,7 @@ function createKVMap<T>(getNS: () => KVNamespace, prefix: string): KVMap<T> {
       await getNS().delete(prefixed(key));
     },
 
-    async list<M = unknown>(options?: Omit<ListOptions, "prefix">): Promise<ListResult<M>> {
+    async list<M = unknown>(options?: Omit<ListOptions, 'prefix'>): Promise<ListResult<M>> {
       const result = await getNS().list({
         prefix: `${prefix}:`,
         limit: options?.limit,
@@ -112,9 +122,15 @@ function createKVClient(getNS: () => KVNamespace): KVClient {
 
     async put(key, value, options) {
       const opts: KVNamespacePutOptions = {};
-      if (options?.ttl) opts.expirationTtl = options.ttl;
-      if (options?.expiration) opts.expiration = options.expiration;
-      if (options?.metadata) opts.metadata = options.metadata;
+      if (options?.ttl) {
+        opts.expirationTtl = options.ttl;
+      }
+      if (options?.expiration) {
+        opts.expiration = options.expiration;
+      }
+      if (options?.metadata) {
+        opts.metadata = options.metadata;
+      }
       await getNS().put(key, serializeValue(value), opts);
     },
 
@@ -154,7 +170,7 @@ export function createKV(namespace: KVNamespace): KVClient {
   return createKVClient(() => namespace);
 }
 
-import { requireRuntimeBinding } from "./env";
+import { requireRuntimeBinding } from './env';
 
 /** Default KV client — resolves `KV` from the active runtime environment. */
-export const kv: KVClient = createKVClient(() => requireRuntimeBinding<KVNamespace>("KV"));
+export const kv: KVClient = createKVClient(() => requireRuntimeBinding<KVNamespace>('KV'));

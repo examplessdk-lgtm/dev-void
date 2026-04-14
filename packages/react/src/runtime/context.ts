@@ -1,4 +1,4 @@
-import { createContext, type Context } from "react";
+import { createContext, type Context } from 'react';
 
 export const SharedContext: Context<any> = createContext<any>(null);
 export const ErrorsContext: Context<any> = createContext<any>(null);

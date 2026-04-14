@@ -27,7 +27,9 @@ export function resolveHead(
   middlewareHead: HeadDescriptor | undefined,
   pageHead: HeadDescriptor | undefined,
 ): HeadDescriptor | undefined {
-  if (!configHead && !middlewareHead && !pageHead) return undefined;
+  if (!configHead && !middlewareHead && !pageHead) {
+    return undefined;
+  }
 
   const result: HeadDescriptor = {};
 
@@ -35,7 +37,7 @@ export function resolveHead(
   const title = pageHead?.title ?? middlewareHead?.title ?? configHead?.title;
   if (title !== undefined) {
     const template = configHead?.titleTemplate;
-    result.title = template ? template.replace("%s", title) : title;
+    result.title = template ? template.replace('%s', title) : title;
   }
 
   // --- meta (dedup by name/property, page wins) ---
@@ -45,14 +47,18 @@ export function resolveHead(
   >();
   const metaOrder: string[] = [];
   for (const layer of [configHead, middlewareHead, pageHead]) {
-    if (!layer?.meta) continue;
+    if (!layer?.meta) {
+      continue;
+    }
     for (const entry of layer.meta) {
       const key = entry.charset
-        ? "charset"
+        ? 'charset'
         : entry.property
           ? `property:${entry.property}`
-          : `name:${entry.name ?? ""}`;
-      if (!metaMap.has(key)) metaOrder.push(key);
+          : `name:${entry.name ?? ''}`;
+      if (!metaMap.has(key)) {
+        metaOrder.push(key);
+      }
       metaMap.set(key, entry);
     }
   }
@@ -61,18 +67,26 @@ export function resolveHead(
   }
 
   // --- link (concatenated) ---
-  const links: HeadDescriptor["link"] = [];
+  const links: HeadDescriptor['link'] = [];
   for (const layer of [configHead, middlewareHead, pageHead]) {
-    if (layer?.link) links.push(...layer.link);
+    if (layer?.link) {
+      links.push(...layer.link);
+    }
   }
-  if (links.length > 0) result.link = links;
+  if (links.length > 0) {
+    result.link = links;
+  }
 
   // --- script (concatenated) ---
-  const scripts: HeadDescriptor["script"] = [];
+  const scripts: HeadDescriptor['script'] = [];
   for (const layer of [configHead, middlewareHead, pageHead]) {
-    if (layer?.script) scripts.push(...layer.script);
+    if (layer?.script) {
+      scripts.push(...layer.script);
+    }
   }
-  if (scripts.length > 0) result.script = scripts;
+  if (scripts.length > 0) {
+    result.script = scripts;
+  }
 
   // --- htmlAttrs (shallow merge, page wins) ---
   const htmlAttrs: Record<string, string> = {};
@@ -83,7 +97,9 @@ export function resolveHead(
       hasHtmlAttrs = true;
     }
   }
-  if (hasHtmlAttrs) result.htmlAttrs = htmlAttrs;
+  if (hasHtmlAttrs) {
+    result.htmlAttrs = htmlAttrs;
+  }
 
   // --- bodyAttrs (shallow merge, page wins) ---
   const bodyAttrs: Record<string, string> = {};
@@ -94,7 +110,9 @@ export function resolveHead(
       hasBodyAttrs = true;
     }
   }
-  if (hasBodyAttrs) result.bodyAttrs = bodyAttrs;
+  if (hasBodyAttrs) {
+    result.bodyAttrs = bodyAttrs;
+  }
 
   // Return undefined if nothing was set
   if (
@@ -113,10 +131,10 @@ export function resolveHead(
 
 function escapeHtml(s: string): string {
   return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 /** Serialize a HeadDescriptor to HTML tags for injection into `<head>`. */
@@ -130,11 +148,19 @@ export function renderHeadToString(head: HeadDescriptor): string {
   if (head.meta) {
     for (const entry of head.meta) {
       const attrs: string[] = [];
-      if (entry.charset) attrs.push(`charset="${escapeHtml(entry.charset)}"`);
-      if (entry.name) attrs.push(`name="${escapeHtml(entry.name)}"`);
-      if (entry.property) attrs.push(`property="${escapeHtml(entry.property)}"`);
-      if (entry.content !== undefined) attrs.push(`content="${escapeHtml(entry.content)}"`);
-      parts.push(`<meta ${attrs.join(" ")}>`);
+      if (entry.charset) {
+        attrs.push(`charset="${escapeHtml(entry.charset)}"`);
+      }
+      if (entry.name) {
+        attrs.push(`name="${escapeHtml(entry.name)}"`);
+      }
+      if (entry.property) {
+        attrs.push(`property="${escapeHtml(entry.property)}"`);
+      }
+      if (entry.content !== undefined) {
+        attrs.push(`content="${escapeHtml(entry.content)}"`);
+      }
+      parts.push(`<meta ${attrs.join(' ')}>`);
     }
   }
 
@@ -143,7 +169,7 @@ export function renderHeadToString(head: HeadDescriptor): string {
       const attrs = Object.entries(entry)
         .filter(([, v]) => v != null)
         .map(([k, v]) => `${k}="${escapeHtml(v!)}"`)
-        .join(" ");
+        .join(' ');
       parts.push(`<link ${attrs}>`);
     }
   }
@@ -154,32 +180,36 @@ export function renderHeadToString(head: HeadDescriptor): string {
       const attrs = Object.entries(rest)
         .filter(([, v]) => v != null)
         .map(([k, v]) => `${k}="${escapeHtml(v!)}"`)
-        .join(" ");
+        .join(' ');
       if (innerHTML) {
-        parts.push(`<script${attrs ? " " + attrs : ""}>${innerHTML}</script>`);
+        parts.push(`<script${attrs ? ' ' + attrs : ''}>${innerHTML}</script>`);
       } else if (attrs) {
         parts.push(`<script ${attrs}></script>`);
       }
     }
   }
 
-  return parts.join("\n");
+  return parts.join('\n');
 }
 
 /** Serialize htmlAttrs to an attribute string (includes leading space). */
 export function renderHtmlAttrs(head: HeadDescriptor): string {
-  if (!head.htmlAttrs) return "";
+  if (!head.htmlAttrs) {
+    return '';
+  }
   const attrs = Object.entries(head.htmlAttrs)
     .map(([k, v]) => `${k}="${escapeHtml(v)}"`)
-    .join(" ");
-  return attrs ? " " + attrs : "";
+    .join(' ');
+  return attrs ? ' ' + attrs : '';
 }
 
 /** Serialize bodyAttrs to an attribute string (includes leading space). */
 export function renderBodyAttrs(head: HeadDescriptor): string {
-  if (!head.bodyAttrs) return "";
+  if (!head.bodyAttrs) {
+    return '';
+  }
   const attrs = Object.entries(head.bodyAttrs)
     .map(([k, v]) => `${k}="${escapeHtml(v)}"`)
-    .join(" ");
-  return attrs ? " " + attrs : "";
+    .join(' ');
+  return attrs ? ' ' + attrs : '';
 }

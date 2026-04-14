@@ -1,9 +1,9 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { detectPreset, formatProjectCommand, resolveProjectCommand } from "../../src/cli/preset";
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { detectPreset, formatProjectCommand, resolveProjectCommand } from '../../src/cli/preset';
 
-const TMP = join(import.meta.dirname, ".tmp-preset");
+const TMP = join(import.meta.dirname, '.tmp-preset');
 
 function setupProject(opts: {
   pkg?: Record<string, unknown>;
@@ -12,13 +12,13 @@ function setupProject(opts: {
 }): string {
   mkdirSync(TMP, { recursive: true });
   if (opts.pkg) {
-    writeFileSync(join(TMP, "package.json"), JSON.stringify(opts.pkg));
+    writeFileSync(join(TMP, 'package.json'), JSON.stringify(opts.pkg));
   }
   for (const dir of opts.dirs ?? []) {
     mkdirSync(join(TMP, dir), { recursive: true });
   }
   for (const [name, content] of Object.entries(opts.files ?? {})) {
-    mkdirSync(join(TMP, name, ".."), { recursive: true });
+    mkdirSync(join(TMP, name, '..'), { recursive: true });
     writeFileSync(join(TMP, name), content);
   }
   return TMP;
@@ -32,211 +32,211 @@ afterEach(() => {
   rmSync(TMP, { recursive: true, force: true });
 });
 
-describe("detectPreset", () => {
-  it("returns explicit dir preset with --dir flag", () => {
+describe('detectPreset', () => {
+  it('returns explicit dir preset with --dir flag', () => {
     const root = setupProject({});
-    const result = detectPreset(root, { dir: "public" });
+    const result = detectPreset(root, { dir: 'public' });
     expect(result).toEqual({
       buildCommand: null,
-      outputDir: resolve(root, "public"),
-      appType: "static",
+      outputDir: resolve(root, 'public'),
+      appType: 'static',
     });
   });
 
-  it("returns SPA mode when --dir and --spa are combined", () => {
+  it('returns SPA mode when --dir and --spa are combined', () => {
     const root = setupProject({});
-    const result = detectPreset(root, { dir: "build", spa: true });
+    const result = detectPreset(root, { dir: 'build', spa: true });
     expect(result).toEqual({
       buildCommand: null,
-      outputDir: resolve(root, "build"),
-      appType: "spa",
+      outputDir: resolve(root, 'build'),
+      appType: 'spa',
     });
   });
 
-  it("detects VitePress (root .vitepress)", () => {
+  it('detects VitePress (root .vitepress)', () => {
     const root = setupProject({
-      pkg: { devDependencies: { vitepress: "^1.0.0" } },
-      dirs: [".vitepress"],
+      pkg: { devDependencies: { vitepress: '^1.0.0' } },
+      dirs: ['.vitepress'],
     });
     const result = detectPreset(root);
     expect(result).toEqual({
-      buildCommand: "vitepress build",
-      outputDir: resolve(root, ".vitepress/dist"),
-      appType: "static",
+      buildCommand: 'vitepress build',
+      outputDir: resolve(root, '.vitepress/dist'),
+      appType: 'static',
     });
   });
 
-  it("detects VitePress (docs/ subdir)", () => {
+  it('detects VitePress (docs/ subdir)', () => {
     const root = setupProject({
-      pkg: { devDependencies: { vitepress: "^1.0.0" } },
-      dirs: ["docs/.vitepress"],
+      pkg: { devDependencies: { vitepress: '^1.0.0' } },
+      dirs: ['docs/.vitepress'],
     });
     const result = detectPreset(root);
     expect(result).toEqual({
-      buildCommand: "vitepress build docs",
-      outputDir: resolve(root, "docs/.vitepress/dist"),
-      appType: "static",
+      buildCommand: 'vitepress build docs',
+      outputDir: resolve(root, 'docs/.vitepress/dist'),
+      appType: 'static',
     });
   });
 
-  it("detects Docusaurus", () => {
+  it('detects Docusaurus', () => {
     const root = setupProject({
-      pkg: { dependencies: { "@docusaurus/core": "^3.0.0" } },
+      pkg: { dependencies: { '@docusaurus/core': '^3.0.0' } },
     });
     const result = detectPreset(root);
     expect(result).toEqual({
-      buildCommand: "docusaurus build",
-      outputDir: resolve(root, "build"),
-      appType: "static",
+      buildCommand: 'docusaurus build',
+      outputDir: resolve(root, 'build'),
+      appType: 'static',
     });
   });
 
-  it("returns null when routes/ dir exists (backend files)", () => {
+  it('returns null when routes/ dir exists (backend files)', () => {
     const root = setupProject({
-      pkg: { dependencies: { vite: "^6.0.0" } },
-      dirs: ["routes"],
-    });
-    const result = detectPreset(root);
-    expect(result).toBeNull();
-  });
-
-  it("returns null when crons/ dir exists (backend files)", () => {
-    const root = setupProject({
-      pkg: { dependencies: { vite: "^6.0.0" } },
-      dirs: ["crons"],
+      pkg: { dependencies: { vite: '^6.0.0' } },
+      dirs: ['routes'],
     });
     const result = detectPreset(root);
     expect(result).toBeNull();
   });
 
-  it("returns null when middleware/ dir exists (backend files)", () => {
+  it('returns null when crons/ dir exists (backend files)', () => {
     const root = setupProject({
-      pkg: { dependencies: { vite: "^6.0.0" } },
-      dirs: ["middleware"],
+      pkg: { dependencies: { vite: '^6.0.0' } },
+      dirs: ['crons'],
     });
     const result = detectPreset(root);
     expect(result).toBeNull();
   });
 
-  it("returns null when pages/ dir exists (backend files)", () => {
+  it('returns null when middleware/ dir exists (backend files)', () => {
     const root = setupProject({
-      pkg: { dependencies: { vite: "^6.0.0" } },
-      dirs: ["pages"],
+      pkg: { dependencies: { vite: '^6.0.0' } },
+      dirs: ['middleware'],
     });
     const result = detectPreset(root);
     expect(result).toBeNull();
   });
 
-  it("returns null when queues/ dir exists (backend files)", () => {
+  it('returns null when pages/ dir exists (backend files)', () => {
     const root = setupProject({
-      pkg: { dependencies: { vite: "^6.0.0" } },
-      dirs: ["queues"],
+      pkg: { dependencies: { vite: '^6.0.0' } },
+      dirs: ['pages'],
     });
     const result = detectPreset(root);
     expect(result).toBeNull();
   });
 
-  it("detects plain Vite SPA (no backend files)", () => {
+  it('returns null when queues/ dir exists (backend files)', () => {
     const root = setupProject({
-      pkg: { dependencies: { vite: "^6.0.0" } },
+      pkg: { dependencies: { vite: '^6.0.0' } },
+      dirs: ['queues'],
+    });
+    const result = detectPreset(root);
+    expect(result).toBeNull();
+  });
+
+  it('detects plain Vite SPA (no backend files)', () => {
+    const root = setupProject({
+      pkg: { dependencies: { vite: '^6.0.0' } },
     });
     const result = detectPreset(root);
     expect(result).toEqual({
-      buildCommand: "vite build",
-      outputDir: resolve(root, "dist"),
-      appType: "spa",
+      buildCommand: 'vite build',
+      outputDir: resolve(root, 'dist'),
+      appType: 'spa',
     });
   });
 
-  it("prefers the project build script for plain Vite SPAs", () => {
+  it('prefers the project build script for plain Vite SPAs', () => {
     const root = setupProject({
       pkg: {
-        dependencies: { vite: "^6.0.0" },
-        scripts: { build: "vite build && node scripts/postbuild.js" },
+        dependencies: { vite: '^6.0.0' },
+        scripts: { build: 'vite build && node scripts/postbuild.js' },
       },
-      files: { "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" },
+      files: { 'pnpm-lock.yaml': "lockfileVersion: '9.0'\n" },
     });
     const result = detectPreset(root);
     expect(result).toEqual({
-      buildCommand: "pnpm build",
-      outputDir: resolve(root, "dist"),
-      appType: "spa",
+      buildCommand: 'pnpm build',
+      outputDir: resolve(root, 'dist'),
+      appType: 'spa',
     });
   });
 
-  it("detects Vite+ SPA (no backend files)", () => {
+  it('detects Vite+ SPA (no backend files)', () => {
     const root = setupProject({
-      pkg: { devDependencies: { "vite-plus": "^1.0.0" } },
+      pkg: { devDependencies: { 'vite-plus': '^1.0.0' } },
     });
     const result = detectPreset(root);
     expect(result).toEqual({
-      buildCommand: "vp build",
-      outputDir: resolve(root, "dist"),
-      appType: "spa",
+      buildCommand: 'vp build',
+      outputDir: resolve(root, 'dist'),
+      appType: 'spa',
     });
   });
 
-  it("detects pre-built dist/index.html as static", () => {
+  it('detects pre-built dist/index.html as static', () => {
     const root = setupProject({
-      files: { "dist/index.html": "<html></html>" },
+      files: { 'dist/index.html': '<html></html>' },
     });
     const result = detectPreset(root);
     expect(result).toEqual({
       buildCommand: null,
-      outputDir: resolve(root, "dist"),
-      appType: "static",
+      outputDir: resolve(root, 'dist'),
+      appType: 'static',
     });
   });
 
-  it("detects root index.html as static", () => {
+  it('detects root index.html as static', () => {
     const root = setupProject({
-      files: { "index.html": "<html></html>" },
+      files: { 'index.html': '<html></html>' },
     });
     const result = detectPreset(root);
     expect(result).toEqual({
       buildCommand: null,
       outputDir: root,
-      appType: "static",
+      appType: 'static',
     });
   });
 
-  it("returns null when no build tool and no output found", () => {
+  it('returns null when no build tool and no output found', () => {
     const root = setupProject({
-      pkg: { name: "empty" },
+      pkg: { name: 'empty' },
     });
     const result = detectPreset(root);
     expect(result).toBeNull();
   });
 });
 
-describe("project Vite commands", () => {
-  it("formats Vite commands with vp when Vite+ is installed", () => {
+describe('project Vite commands', () => {
+  it('formats Vite commands with vp when Vite+ is installed', () => {
     const root = setupProject({
-      pkg: { devDependencies: { "vite-plus": "^1.0.0" } },
+      pkg: { devDependencies: { 'vite-plus': '^1.0.0' } },
     });
 
-    expect(formatProjectCommand(root, "vite dev")).toBe("vp dev");
-    expect(formatProjectCommand(root, "vite build")).toBe("vp build");
-    expect(formatProjectCommand(root, "vite preview")).toBe("vp preview");
+    expect(formatProjectCommand(root, 'vite dev')).toBe('vp dev');
+    expect(formatProjectCommand(root, 'vite build')).toBe('vp build');
+    expect(formatProjectCommand(root, 'vite preview')).toBe('vp preview');
   });
 
-  it("resolves Vite+ commands to the local vp binary", () => {
+  it('resolves Vite+ commands to the local vp binary', () => {
     const root = setupProject({
-      pkg: { devDependencies: { "vite-plus": "^1.0.0" } },
-      files: { "node_modules/.bin/vp": "" },
+      pkg: { devDependencies: { 'vite-plus': '^1.0.0' } },
+      files: { 'node_modules/.bin/vp': '' },
     });
 
-    expect(resolveProjectCommand(root, "vite build")).toBe(
-      `${join(root, "node_modules", ".bin", "vp")} build`,
+    expect(resolveProjectCommand(root, 'vite build')).toBe(
+      `${join(root, 'node_modules', '.bin', 'vp')} build`,
     );
   });
 
-  it("keeps plain Vite commands unchanged", () => {
+  it('keeps plain Vite commands unchanged', () => {
     const root = setupProject({
-      pkg: { devDependencies: { vite: "^6.0.0" } },
+      pkg: { devDependencies: { vite: '^6.0.0' } },
     });
 
-    expect(formatProjectCommand(root, "vite dev")).toBe("vite dev");
-    expect(resolveProjectCommand(root, "vite build")).toBe("vite build");
+    expect(formatProjectCommand(root, 'vite dev')).toBe('vite dev');
+    expect(resolveProjectCommand(root, 'vite build')).toBe('vite build');
   });
 });

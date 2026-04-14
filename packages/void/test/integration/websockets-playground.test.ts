@@ -1,10 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { spawn } from "node:child_process";
-import { join } from "node:path";
-import { chromium, type Browser, type Page } from "playwright";
-import { getPort, killChild, waitForServer } from "../../../../test/integration-helpers";
+import { join } from 'node:path';
+import spawn from 'cross-spawn';
+import { chromium, type Browser, type Page } from 'playwright';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { getPort, killChild, waitForServer } from '../../../../test/integration-helpers';
 
-const ROOT = join(import.meta.dirname, "..", "..", "..", "..");
+const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 
 let browser: Browser;
 let port: number;
@@ -14,7 +14,7 @@ async function newPage(): Promise<Page> {
   const context = await browser.newContext();
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
-  await page.route("**/favicon.ico", (route) => route.fulfill({ status: 204, body: "" }));
+  await page.route('**/favicon.ico', (route) => route.fulfill({ status: 204, body: '' }));
   return page;
 }
 
@@ -29,29 +29,29 @@ async function waitForBodyText(page: Page, text: string) {
 function collectUnexpectedBrowserErrors(page: Page) {
   const errors: string[] = [];
 
-  page.on("console", (message) => {
-    if (message.type() !== "error" && message.type() !== "warning") {
+  page.on('console', (message) => {
+    if (message.type() !== 'error' && message.type() !== 'warning') {
       return;
     }
 
     const text = message.text();
-    if (text.includes("favicon.ico")) {
+    if (text.includes('favicon.ico')) {
       return;
     }
 
     errors.push(text);
   });
 
-  page.on("pageerror", (error) => {
+  page.on('pageerror', (error) => {
     errors.push(error.message);
   });
 
   return errors;
 }
 
-describe("playground/websockets", () => {
+describe('playground/websockets', () => {
   let child: ReturnType<typeof spawn>;
-  let stderr = "";
+  let stderr = '';
 
   beforeAll(async () => {
     browser = await chromium.launch();
@@ -60,28 +60,28 @@ describe("playground/websockets", () => {
     base = `http://127.0.0.1:${port}`;
 
     child = spawn(
-      "pnpm",
+      'pnpm',
       [
-        "--dir",
-        "playground/websockets",
-        "exec",
-        "vite",
-        "--host",
-        "127.0.0.1",
-        "--port",
+        '--dir',
+        'playground/websockets',
+        'exec',
+        'vite',
+        '--host',
+        '127.0.0.1',
+        '--port',
         String(port),
       ],
       {
         cwd: ROOT,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: {
           ...process.env,
-          VOID_INSPECTOR_PORT: "false",
+          VOID_INSPECTOR_PORT: 'false',
         },
       },
     );
 
-    child.stderr!.on("data", (chunk: Buffer) => {
+    child.stderr!.on('data', (chunk: Buffer) => {
       stderr += String(chunk);
     });
 
@@ -89,18 +89,20 @@ describe("playground/websockets", () => {
   }, 30_000);
 
   afterAll(async () => {
-    if (child) await killChild(child);
+    if (child) {
+      await killChild(child);
+    }
     await browser?.close();
-    if (stderr.includes("error when starting dev server")) {
+    if (stderr.includes('error when starting dev server')) {
       throw new Error(stderr);
     }
   });
 
-  it("chat reconnects to a fresh room and sends a typed message", async () => {
+  it('chat reconnects to a fresh room and sends a typed message', async () => {
     const page = await newPage();
     const errors = collectUnexpectedBrowserErrors(page);
     const room = `e2e-room-${Date.now().toString(36)}`;
-    const name = "e2e-user";
+    const name = 'e2e-user';
     const message = `hello-${room}`;
 
     try {
@@ -108,13 +110,13 @@ describe("playground/websockets", () => {
       await waitForHydration(page);
       await waitForBodyText(page, 'Connected to room "general"');
 
-      await page.getByLabel("Room:").fill(room);
-      await page.getByLabel("Display name:").fill(name);
-      await page.getByRole("button", { name: "Reconnect" }).click();
+      await page.getByLabel('Room:').fill(room);
+      await page.getByLabel('Display name:').fill(name);
+      await page.getByRole('button', { name: 'Reconnect' }).click();
 
       await page.waitForFunction(
         ([expectedRoom, expectedName]) => {
-          const text = document.body.textContent || "";
+          const text = document.body.textContent || '';
           return (
             text.includes(`room: ${expectedRoom}`) &&
             text.includes(`name: ${expectedName}`) &&
@@ -125,8 +127,8 @@ describe("playground/websockets", () => {
         [room, name],
       );
 
-      await page.getByLabel("Message:").fill(message);
-      await page.getByRole("button", { name: "Send" }).click();
+      await page.getByLabel('Message:').fill(message);
+      await page.getByRole('button', { name: 'Send' }).click();
       await waitForBodyText(page, message);
 
       expect(errors).toEqual([]);
@@ -135,7 +137,7 @@ describe("playground/websockets", () => {
     }
   });
 
-  it("notifications stream typed items and acknowledge one", async () => {
+  it('notifications stream typed items and acknowledge one', async () => {
     const page = await newPage();
     const errors = collectUnexpectedBrowserErrors(page);
 
@@ -143,41 +145,41 @@ describe("playground/websockets", () => {
       await page.goto(`${base}/notifications`);
       await waitForHydration(page);
       await page.waitForFunction(() => {
-        const text = document.body.textContent || "";
-        return text.includes("status: open") && text.includes("stream idle");
+        const text = document.body.textContent || '';
+        return text.includes('status: open') && text.includes('stream idle');
       });
 
-      await page.getByLabel("Items per stream:").selectOption("3");
-      await page.getByRole("button", { name: "Start stream" }).click();
+      await page.getByLabel('Items per stream:').selectOption('3');
+      await page.getByRole('button', { name: 'Start stream' }).click();
 
       await page.waitForFunction(() => {
-        const text = document.body.textContent || "";
+        const text = document.body.textContent || '';
         return (
-          text.includes("stream active, 3 notifications remaining") &&
-          text.includes("Notification 1")
+          text.includes('stream active, 3 notifications remaining') &&
+          text.includes('Notification 1')
         );
       });
 
       await page.waitForFunction(() => {
-        const text = document.body.textContent || "";
+        const text = document.body.textContent || '';
         return (
-          text.includes("stream finished after 3 items") &&
-          text.includes("Notification 1") &&
-          text.includes("Notification 2") &&
-          text.includes("Notification 3")
+          text.includes('stream finished after 3 items') &&
+          text.includes('Notification 1') &&
+          text.includes('Notification 2') &&
+          text.includes('Notification 3')
         );
       });
 
-      const latestItem = page.locator("li", { hasText: "Notification 3" }).first();
-      await latestItem.getByRole("button", { name: "Acknowledge" }).click();
+      const latestItem = page.locator('li', { hasText: 'Notification 3' }).first();
+      await latestItem.getByRole('button', { name: 'Acknowledge' }).click();
 
       await page.waitForFunction(() =>
-        Array.from(document.querySelectorAll("li")).some(
+        Array.from(document.querySelectorAll('li')).some(
           (item) =>
-            item.textContent?.includes("Notification 3") && item.textContent?.includes("Acked"),
+            item.textContent?.includes('Notification 3') && item.textContent?.includes('Acked'),
         ),
       );
-      await page.waitForFunction(() => document.body.textContent?.includes("acknowledged "));
+      await page.waitForFunction(() => document.body.textContent?.includes('acknowledged '));
 
       expect(errors).toEqual([]);
     } finally {

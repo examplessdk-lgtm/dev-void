@@ -5,9 +5,9 @@ React adapter for Void Pages mode.
 ## Setup
 
 ```ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidReact } from "@void/react/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidReact } from '@void/react/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidReact()],
@@ -51,9 +51,9 @@ export default function Home({ title }: { title: string }) {
 ```
 
 ```ts
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
-export const loader = defineHandler(() => ({ title: "Home" }));
+export const loader = defineHandler(() => ({ title: 'Home' }));
 ```
 
 ## Tests

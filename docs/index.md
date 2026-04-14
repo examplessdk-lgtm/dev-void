@@ -35,7 +35,7 @@ features:
     details: Built-in skills, MCP support, and reference prompts let coding agents scaffold and ship full-stack apps in a single prompt.
   - iconify: lucide:terminal
     title: One Command to Production
-    details: "`void deploy` builds your app, runs migrations, provisions resources, and deploys to Cloudflare Workers, without requiring a Cloudflare account or knowledge about the infra."
+    details: '`void deploy` builds your app, runs migrations, provisions resources, and deploys to Cloudflare Workers, without requiring a Cloudflare account or knowledge about the infra.'
 
 footer_heading: Build and Deploy at Warp Speed
 footer_subheading: npm install void

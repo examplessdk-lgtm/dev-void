@@ -1,13 +1,13 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { createServerFn } from "@tanstack/react-start";
-import { db } from "void/db";
-import { users } from "@schema";
+import { users } from '@schema';
+import { createFileRoute } from '@tanstack/react-router';
+import { createServerFn } from '@tanstack/react-start';
+import { db } from 'void/db';
 
 const getUsers = createServerFn().handler(async () => {
   return db.select().from(users);
 });
 
-export const Route = createFileRoute("/users")({
+export const Route = createFileRoute('/users')({
   loader: () => getUsers(),
   component: UsersPage,
 });
@@ -16,7 +16,7 @@ function UsersPage() {
   const users = Route.useLoaderData();
 
   return (
-    <div style={{ padding: "16px" }}>
+    <div style={{ padding: '16px' }}>
       <h1>Users</h1>
       <p>Fetched from D1 via a server function:</p>
       <table>

@@ -14,7 +14,7 @@ Each queue file should export a default handler wrapped with [`defineQueue`](../
 
 ```ts
 // queues/emails.ts
-import { defineQueue } from "void";
+import { defineQueue } from 'void';
 
 interface Message {
   to: string;
@@ -37,8 +37,8 @@ Import the typed `queues` proxy from `void/queues` to send messages. Each queue 
 
 ```ts
 // routes/api/orders.ts
-import { defineHandler } from "void";
-import { queues } from "void/queues";
+import { defineHandler } from 'void';
+import { queues } from 'void/queues';
 
 export const POST = defineHandler(async (c) => {
   const order = await c.req.json();
@@ -46,7 +46,7 @@ export const POST = defineHandler(async (c) => {
   // Message interface from queues/emails.ts
   await queues.emails.send({
     to: order.email,
-    subject: "Order confirmed",
+    subject: 'Order confirmed',
   });
   return c.json({ ok: true });
 });
@@ -86,7 +86,7 @@ Export named constants to configure how Cloudflare delivers batches to your cons
 
 ```ts
 // queues/emails.ts
-import { defineQueue } from "void";
+import { defineQueue } from 'void';
 
 interface Message {
   to: string;

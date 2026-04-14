@@ -1,6 +1,6 @@
-import { defineHandler } from "void";
-import { db } from "void/db";
-import { users } from "@schema";
+import { users } from '@schema';
+import { defineHandler } from 'void';
+import { db } from 'void/db';
 
 // GET /api/users — list all users
 export const GET = defineHandler(async () => {

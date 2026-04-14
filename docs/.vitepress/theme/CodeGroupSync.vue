@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { watch, onMounted } from "vue";
-import { selectedAdapter, syncCodeGroups, installCodeGroupListener } from "./FileTree.vue";
+import { watch, onMounted } from 'vue';
+import { selectedAdapter, syncCodeGroups, installCodeGroupListener } from './FileTree.vue';
 
 watch(selectedAdapter, (val) => {
   syncCodeGroups(val);

@@ -1,19 +1,19 @@
-import { readFileSync } from "node:fs";
-import { getToken } from "./auth";
-import { PlatformClient } from "./client";
-import { readProjectConfig } from "./project";
-import { getRequestedProjectSlug, resolveProjectBySlug } from "./resolve-project";
-import type { SecretArgs } from "./secret-args";
-import { intro, outro, log, note, cancel, isCancel, password, confirm } from "@clack/prompts";
-import { cliTitle } from "./output";
+import { readFileSync } from 'node:fs';
+import { intro, outro, log, note, cancel, isCancel, password, confirm } from '@clack/prompts';
+import { getToken } from './auth';
+import { PlatformClient } from './client';
+import { cliTitle } from './output';
+import { readProjectConfig } from './project';
+import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project';
+import type { SecretArgs } from './secret-args';
 
 export async function runSecretCommand(root: string, args: SecretArgs): Promise<void> {
   console.log();
-  intro(cliTitle("secret"));
+  intro(cliTitle('secret'));
 
   const token = getToken();
   if (!token) {
-    log.error("Not logged in. Run `void auth login` first.");
+    log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
   }
 
@@ -31,35 +31,35 @@ export async function runSecretCommand(root: string, args: SecretArgs): Promise<
     const config = readProjectConfig(root);
     if (!config) {
       throw new Error(
-        "No linked project found. Run `void project link`, `void deploy`, or pass --project <name>.",
+        'No linked project found. Run `void project link`, `void deploy`, or pass --project <name>.',
       );
     }
     projectId = config.projectId;
   }
 
-  if (args.action === "list") {
+  if (args.action === 'list') {
     const secrets = await client.listSecrets(projectId);
     if (secrets.length === 0) {
-      outro("No secrets set.");
+      outro('No secrets set.');
       return;
     }
-    note(secrets.map((s) => `  ${s.name}`).join("\n"), "Secrets");
+    note(secrets.map((s) => `  ${s.name}`).join('\n'), 'Secrets');
     outro(`${secrets.length} secret(s)`);
     return;
   }
 
-  if (args.action === "put") {
+  if (args.action === 'put') {
     const value = args.value ?? (await readSecretValue());
     await client.setSecret(projectId, args.name, value);
     outro(`Secret ${args.name} set.`);
     return;
   }
 
-  if (args.action === "sync") {
+  if (args.action === 'sync') {
     const secrets = parseDotenvFile(args.file);
     if (secrets.length === 0) {
-      log.warn("No secrets found in file.");
-      outro("Nothing to sync.");
+      log.warn('No secrets found in file.');
+      outro('Nothing to sync.');
       return;
     }
 
@@ -72,7 +72,7 @@ export async function runSecretCommand(root: string, args: SecretArgs): Promise<
       message: `This will overwrite ${secrets.length} secret(s) in the remote environment. Continue?`,
     });
     if (isCancel(proceed) || !proceed) {
-      cancel("Secret sync cancelled.");
+      cancel('Secret sync cancelled.');
       process.exit(0);
     }
 
@@ -91,14 +91,16 @@ export async function runSecretCommand(root: string, args: SecretArgs): Promise<
 const SECRET_KEY_RE = /^[A-Z][A-Z0-9_]*$/;
 
 export function parseDotenvFile(filePath: string): Array<{ name: string; value: string }> {
-  const content = readFileSync(filePath, "utf-8");
+  const content = readFileSync(filePath, 'utf-8');
   const secrets: Array<{ name: string; value: string }> = [];
 
-  for (const line of content.split("\n")) {
+  for (const line of content.split('\n')) {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (!trimmed || trimmed.startsWith('#')) {
+      continue;
+    }
 
-    const eqIndex = trimmed.indexOf("=");
+    const eqIndex = trimmed.indexOf('=');
     if (eqIndex === -1) {
       throw new Error(`Invalid line (missing =): ${trimmed}`);
     }
@@ -131,26 +133,26 @@ async function readSecretValue(): Promise<string> {
     for await (const chunk of process.stdin) {
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
     }
-    const value = Buffer.concat(chunks).toString("utf-8");
+    const value = Buffer.concat(chunks).toString('utf-8');
     if (value.length === 0) {
-      throw new Error("Secret value is required.");
+      throw new Error('Secret value is required.');
     }
     return value;
   }
 
   const result = await password({
-    message: "Enter secret value:",
-    mask: "*",
+    message: 'Enter secret value:',
+    mask: '*',
   });
 
   if (isCancel(result)) {
-    cancel("Secret command cancelled.");
+    cancel('Secret command cancelled.');
     process.exit(0);
   }
 
-  const value = result ?? "";
+  const value = result ?? '';
   if (value.length === 0) {
-    throw new Error("Secret value is required.");
+    throw new Error('Secret value is required.');
   }
   return value;
 }

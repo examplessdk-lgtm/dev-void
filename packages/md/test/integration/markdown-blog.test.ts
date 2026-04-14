@@ -1,10 +1,11 @@
-import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { execSync, spawn } from "node:child_process";
-import { join } from "node:path";
-import { chromium, type Browser, type Page } from "playwright";
-import { getPort, waitForServer, killChild } from "../../../../test/integration-helpers";
+import { execSync } from 'node:child_process';
+import { join } from 'node:path';
+import spawn from 'cross-spawn';
+import { chromium, type Browser, type Page } from 'playwright';
+import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers';
 
-const ROOT = join(import.meta.dirname, "..", "..", "..", "..");
+const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 let DEV_PORT: number;
 let DEV_BASE: string;
 let PREVIEW_PORT: number;
@@ -33,7 +34,7 @@ function defineMdClientEntryTests(getBase: () => string) {
     BASE = getBase();
   });
 
-  it("md page with client script has data-md-script attribute", async () => {
+  it('md page with client script has data-md-script attribute', async () => {
     const res = await fetch(`${BASE}/posts/client-script-test`);
     expect(res.status).toBe(200);
     const html = await res.text();
@@ -42,16 +43,16 @@ function defineMdClientEntryTests(getBase: () => string) {
     expect(html).toMatch(/<div id="app" data-md-script="/);
   });
 
-  it("static md page without script has no data-md-script attribute", async () => {
+  it('static md page without script has no data-md-script attribute', async () => {
     const res = await fetch(`${BASE}/posts/getting-started`);
     expect(res.status).toBe(200);
     const html = await res.text();
 
     // No data-md-script on pages without client scripts
-    expect(html).not.toContain("data-md-script");
+    expect(html).not.toContain('data-md-script');
   });
 
-  it("md page with client script includes script tags in body", async () => {
+  it('md page with client script includes script tags in body', async () => {
     const res = await fetch(`${BASE}/posts/client-script-test`);
     expect(res.status).toBe(200);
     const html = await res.text();
@@ -71,55 +72,55 @@ function defineClientScriptTests(getBase: () => string) {
     BASE = getBase();
   });
 
-  it("executes client script in markdown page", async () => {
+  it('executes client script in markdown page', async () => {
     const page = await newPage();
     try {
       await page.goto(`${BASE}/posts/client-script-test`);
-      await page.waitForSelector("#client-target");
+      await page.waitForSelector('#client-target');
 
       // SSR renders "pending", client script changes it to "hydrated (success)"
       await page.waitForFunction(
-        () => document.getElementById("client-target")?.textContent?.startsWith("hydrated"),
+        () => document.getElementById('client-target')?.textContent?.startsWith('hydrated'),
         { timeout: 5000 },
       );
 
-      const text = await page.textContent("#client-target");
-      expect(text).toBe("hydrated (success)");
+      const text = await page.textContent('#client-target');
+      expect(text).toBe('hydrated (success)');
     } finally {
       await page.context().close();
     }
   });
 
-  it("supports island imports and client script in same page", async () => {
+  it('supports island imports and client script in same page', async () => {
     const page = await newPage();
     try {
       await page.goto(`${BASE}/posts/mixed-test`);
 
       // Client script should execute
       await page.waitForFunction(
-        () => document.getElementById("mixed-target")?.textContent?.startsWith("hydrated"),
+        () => document.getElementById('mixed-target')?.textContent?.startsWith('hydrated'),
         { timeout: 5000 },
       );
 
       // Island component should be SSR'd (data-island marker present)
-      const island = await page.$("[data-island]");
+      const island = await page.$('[data-island]');
       expect(island).not.toBeNull();
 
       // Island component should be interactive — click ThemeToggle in main content
-      const button = await page.waitForSelector("main button.theme-toggle", {
+      const button = await page.waitForSelector('main button.theme-toggle', {
         timeout: 5000,
       });
       const initialText = await button.textContent();
-      expect(initialText?.trim()).toBe("Auto");
+      expect(initialText?.trim()).toBe('Auto');
 
       await button.click();
       await page.waitForFunction(
-        () => document.querySelector("main button.theme-toggle")?.textContent?.trim() === "Dark",
+        () => document.querySelector('main button.theme-toggle')?.textContent?.trim() === 'Dark',
         { timeout: 5000 },
       );
 
       const updatedText = await button.textContent();
-      expect(updatedText?.trim()).toBe("Dark");
+      expect(updatedText?.trim()).toBe('Dark');
     } finally {
       await page.context().close();
     }
@@ -132,95 +133,95 @@ function defineSidebarTests(getBase: () => string) {
     BASE = getBase();
   });
 
-  it("renders sidebar with post links", async () => {
+  it('renders sidebar with post links', async () => {
     const page = await newPage();
     try {
       await page.goto(`${BASE}/posts/getting-started`);
-      await page.waitForSelector("aside");
+      await page.waitForSelector('aside');
 
-      const links = await page.$$eval("aside a", (els) =>
-        els.map((a) => ({ text: a.textContent?.trim(), href: a.getAttribute("href") })),
+      const links = await page.$$eval('aside a', (els) =>
+        els.map((a) => ({ text: a.textContent?.trim(), href: a.getAttribute('href') })),
       );
 
       const texts = links.map((l) => l.text);
-      expect(texts).toContain("Getting Started");
-      expect(texts).toContain("Code Examples");
+      expect(texts).toContain('Getting Started');
+      expect(texts).toContain('Code Examples');
 
       const hrefs = links.map((l) => l.href);
-      expect(hrefs).toContain("/posts/getting-started");
-      expect(hrefs).toContain("/posts/code-examples");
+      expect(hrefs).toContain('/posts/getting-started');
+      expect(hrefs).toContain('/posts/code-examples');
     } finally {
       await page.context().close();
     }
   });
 
-  it("navigates between posts via sidebar", async () => {
+  it('navigates between posts via sidebar', async () => {
     const page = await newPage();
     try {
       await page.goto(`${BASE}/posts/getting-started`);
-      await page.waitForSelector("aside");
+      await page.waitForSelector('aside');
 
       // Click the "Code Examples" link in the sidebar
       await page.click('aside a[href="/posts/code-examples"]');
-      await page.waitForSelector("h1");
+      await page.waitForSelector('h1');
 
-      expect(page.url()).toContain("/posts/code-examples");
-      const heading = await page.textContent("h1");
-      expect(heading).toContain("Code Examples");
+      expect(page.url()).toContain('/posts/code-examples');
+      const heading = await page.textContent('h1');
+      expect(heading).toContain('Code Examples');
     } finally {
       await page.context().close();
     }
   });
 
-  it("blog index lists all posts", async () => {
+  it('blog index lists all posts', async () => {
     const page = await newPage();
     try {
       await page.goto(`${BASE}/`);
-      await page.waitForSelector("h1");
+      await page.waitForSelector('h1');
 
-      const body = await page.textContent("body");
-      expect(body).toContain("Getting Started");
-      expect(body).toContain("Code Examples");
-      expect(body).toContain("Learn how to use Void");
-      expect(body).toContain("Shiki syntax highlighting demos");
+      const body = await page.textContent('body');
+      expect(body).toContain('Getting Started');
+      expect(body).toContain('Code Examples');
+      expect(body).toContain('Learn how to use Void');
+      expect(body).toContain('Shiki syntax highlighting demos');
     } finally {
       await page.context().close();
     }
   });
 }
 
-describe("markdown-blog playground", () => {
-  describe("dev", () => {
+describe('markdown-blog playground', () => {
+  describe('dev', () => {
     let child: ReturnType<typeof spawn>;
-    let stderr = "";
+    let stderr = '';
 
     beforeAll(async () => {
       DEV_PORT = await getPort();
       DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
       child = spawn(
-        "pnpm",
+        'pnpm',
         [
-          "--dir",
-          "playground/markdown-blog",
-          "exec",
-          "vite",
-          "--host",
-          "127.0.0.1",
-          "--port",
+          '--dir',
+          'playground/markdown-blog',
+          'exec',
+          'vite',
+          '--host',
+          '127.0.0.1',
+          '--port',
           String(DEV_PORT),
         ],
         {
           cwd: ROOT,
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: ['ignore', 'pipe', 'pipe'],
           env: {
             ...process.env,
-            VOID_INSPECTOR_PORT: "false",
+            VOID_INSPECTOR_PORT: 'false',
           },
         },
       );
 
-      child.stderr!.on("data", (chunk: Buffer) => {
+      child.stderr!.on('data', (chunk: Buffer) => {
         stderr += String(chunk);
       });
 
@@ -228,33 +229,35 @@ describe("markdown-blog playground", () => {
     }, 30_000);
 
     afterAll(async () => {
-      if (child) await killChild(child);
-      if (stderr.includes("error when starting dev server")) {
+      if (child) {
+        await killChild(child);
+      }
+      if (stderr.includes('error when starting dev server')) {
         throw new Error(stderr);
       }
     });
 
-    it("injects style for @void/md/theme.css in dev mode", async () => {
+    it('injects style for @void/md/theme.css in dev mode', async () => {
       const res = await fetch(`${DEV_BASE}/posts/getting-started`);
       expect(res.status).toBe(200);
       const html = await res.text();
 
       // Dev mode includes Vite client
-      expect(html).toContain("/@vite/client");
+      expect(html).toContain('/@vite/client');
 
       // Theme CSS is injected (either inline <style> or CSS link referencing md/theme)
       const hasThemeStyle =
-        html.includes("void-md") || html.includes("md/theme") || html.includes("md/dist/theme");
+        html.includes('void-md') || html.includes('md/theme') || html.includes('md/dist/theme');
       expect(hasThemeStyle).toBe(true);
     });
 
-    it("renders head tags from frontmatter and config", async () => {
+    it('renders head tags from frontmatter and config', async () => {
       const res = await fetch(`${DEV_BASE}/posts/getting-started`);
       expect(res.status).toBe(200);
       const html = await res.text();
 
       // titleTemplate from void.json + frontmatter title
-      expect(html).toContain("<title>Getting Started | MD Blog</title>");
+      expect(html).toContain('<title>Getting Started | MD Blog</title>');
       // frontmatter description → <meta name="description">
       expect(html).toContain('<meta name="description" content="Learn how to use Void">');
       // htmlAttrs from void.json config
@@ -265,24 +268,24 @@ describe("markdown-blog playground", () => {
       // Different post has its own title
       const res2 = await fetch(`${DEV_BASE}/posts/code-examples`);
       const html2 = await res2.text();
-      expect(html2).toContain("<title>Code Examples | MD Blog</title>");
+      expect(html2).toContain('<title>Code Examples | MD Blog</title>');
     });
 
-    it("renders markdown content correctly", async () => {
+    it('renders markdown content correctly', async () => {
       const res = await fetch(`${DEV_BASE}/posts/getting-started`);
       expect(res.status).toBe(200);
       const html = await res.text();
 
       // Rendered heading
-      expect(html).toContain("Getting Started");
+      expect(html).toContain('Getting Started');
 
       // Container blocks (tip/warning custom blocks)
       expect(html).toMatch(/custom-block|tip|warning/);
 
       // Code blocks with Shiki highlighting
-      expect(html).toContain("<pre");
-      expect(html).toContain("<code");
-      expect(html).toContain("<span");
+      expect(html).toContain('<pre');
+      expect(html).toContain('<code');
+      expect(html).toContain('<span');
     });
 
     defineSidebarTests(() => DEV_BASE);
@@ -290,90 +293,98 @@ describe("markdown-blog playground", () => {
     defineClientScriptTests(() => DEV_BASE);
   }, 60_000);
 
-  describe("production (build + preview)", () => {
+  describe('production (build + preview)', () => {
     let child: ReturnType<typeof spawn>;
-    let stderr = "";
+    let stderr = '';
 
     beforeAll(async () => {
+      execSync('pnpm --dir playground/markdown-blog build', {
+        cwd: ROOT,
+        stdio: 'pipe',
+      });
+
       PREVIEW_PORT = await getPort();
       PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
 
-      execSync("pnpm --dir playground/markdown-blog build", {
-        cwd: ROOT,
-        stdio: "pipe",
-      });
-
       child = spawn(
-        "pnpm",
+        'pnpm',
         [
-          "--dir",
-          "playground/markdown-blog",
-          "exec",
-          "vite",
-          "preview",
-          "--host",
-          "127.0.0.1",
-          "--port",
+          '--dir',
+          'playground/markdown-blog',
+          'exec',
+          'vite',
+          'preview',
+          '--host',
+          '127.0.0.1',
+          '--port',
           String(PREVIEW_PORT),
         ],
         {
           cwd: ROOT,
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            VOID_INSPECTOR_PORT: 'false',
+          },
         },
       );
 
-      child.stderr!.on("data", (chunk: Buffer) => {
+      child.stderr!.on('data', (chunk: Buffer) => {
         stderr += String(chunk);
       });
 
-      await waitForServer(PREVIEW_BASE, 20_000);
+      await waitForServer(PREVIEW_BASE, 20_000, {
+        isAlive: () => child.exitCode === null,
+      });
     }, 60_000);
 
     afterAll(async () => {
-      if (child) await killChild(child);
-      if (stderr.includes("error when starting preview server")) {
+      if (child) {
+        await killChild(child);
+      }
+      if (stderr.includes('error when starting preview server')) {
         throw new Error(stderr);
       }
     });
 
-    it("serves pre-rendered markdown pages", async () => {
+    it('serves pre-rendered markdown pages', async () => {
       const res = await fetch(`${PREVIEW_BASE}/posts/getting-started`);
       expect(res.status).toBe(200);
       const html = await res.text();
 
       // Contains rendered markdown content
-      expect(html).toContain("Getting Started");
-      expect(html).toContain("<pre");
+      expect(html).toContain('Getting Started');
+      expect(html).toContain('<pre');
 
       // No Vite client script in production
-      expect(html).not.toContain("/@vite/client");
+      expect(html).not.toContain('/@vite/client');
     });
 
-    it("pre-rendered pages contain head tags from frontmatter and config", async () => {
+    it('pre-rendered pages contain head tags from frontmatter and config', async () => {
       const res = await fetch(`${PREVIEW_BASE}/posts/getting-started`);
       const html = await res.text();
 
-      expect(html).toContain("<title>Getting Started | MD Blog</title>");
+      expect(html).toContain('<title>Getting Started | MD Blog</title>');
       expect(html).toContain('<meta name="description" content="Learn how to use Void">');
       expect(html).toContain('<html lang="en"');
       expect(html).toContain('<meta charset="utf-8">');
 
       const res2 = await fetch(`${PREVIEW_BASE}/posts/code-examples`);
       const html2 = await res2.text();
-      expect(html2).toContain("<title>Code Examples | MD Blog</title>");
+      expect(html2).toContain('<title>Code Examples | MD Blog</title>');
     });
 
-    it("includes theme styles", async () => {
+    it('includes theme styles', async () => {
       const res = await fetch(`${PREVIEW_BASE}/posts/getting-started`);
       const html = await res.text();
 
       // Production should have theme CSS inlined or as a linked stylesheet
       const hasThemeCSS =
-        html.includes("void-md") || html.includes("<link") || html.includes("<style");
+        html.includes('void-md') || html.includes('<link') || html.includes('<style');
       expect(hasThemeCSS).toBe(true);
     });
 
-    it("md client entry is a separate script from islands client entry", async () => {
+    it('md client entry is a separate script from islands client entry', async () => {
       const res = await fetch(`${PREVIEW_BASE}/posts/client-script-test`);
       const html = await res.text();
       const body = html.match(/<body[^>]*>([\s\S]*)<\/body>/)![1];
@@ -384,9 +395,9 @@ describe("markdown-blog playground", () => {
       expect(tags!.length).toBeGreaterThanOrEqual(2);
 
       // One should be the islands client, another the md client (separate entries)
-      const srcs = tags!.map((t) => t.match(/src="([^"]+)"/)?.[1] ?? "");
-      const hasIslands = srcs.some((s) => s.includes("islands-client"));
-      const hasMdClient = srcs.some((s) => s.includes("md-client"));
+      const srcs = tags!.map((t) => t.match(/src="([^"]+)"/)?.[1] ?? '');
+      const hasIslands = srcs.some((s) => s.includes('islands-client'));
+      const hasMdClient = srcs.some((s) => s.includes('md-client'));
       expect(hasIslands).toBe(true);
       expect(hasMdClient).toBe(true);
     });

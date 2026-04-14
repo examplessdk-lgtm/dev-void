@@ -1,44 +1,49 @@
-import { availableParallelism } from "node:os";
-import { defineConfig } from "vitest/config";
+import { availableParallelism } from 'node:os';
+import { defineConfig } from 'vitest/config';
 
 const maxWorkers = process.env.CI ? 2 : Math.max(2, Math.floor(availableParallelism() * 0.75));
 
 const metaframeworks = [
-  "packages/void/test/integration/astro.test.ts",
-  "packages/void/test/integration/nuxt.test.ts",
-  "packages/void/test/integration/sveltekit.test.ts",
-  "packages/void/test/integration/tanstack-start.test.ts",
-  "packages/void/test/integration/vinext-pages.test.ts",
-  "packages/void/test/integration/vinext-app.test.ts",
-  "packages/void/test/integration/react-router.test.ts",
+  'packages/void/test/integration/astro.test.ts',
+  'packages/void/test/integration/nuxt.test.ts',
+  'packages/void/test/integration/sveltekit.test.ts',
+  'packages/void/test/integration/tanstack-start.test.ts',
+  'packages/void/test/integration/vinext-pages.test.ts',
+  'packages/void/test/integration/vinext-app.test.ts',
+  'packages/void/test/integration/react-router.test.ts',
 ];
 
 export default defineConfig({
   test: {
-    silent: "passed-only",
+    silent: 'passed-only',
     projects: [
       {
         test: {
-          name: "unit",
-          include: ["packages/*/test/unit/**/*.test.ts"],
+          name: 'unit',
+          include: ['packages/*/test/unit/**/*.test.ts'],
           sequence: { groupOrder: 1 },
         },
       },
       {
         test: {
-          name: "core-markdown",
-          sequence: { groupOrder: 2 },
+          name: 'core-markdown',
+          sequence: { groupOrder: 3 },
           include: [
-            "packages/void/test/integration/**/*.test.ts",
-            "packages/md/test/integration/**/*.test.ts",
+            'packages/void/test/integration/**/*.test.ts',
+            'packages/md/test/integration/**/*.test.ts',
           ],
           exclude: metaframeworks,
           maxWorkers,
+          // kitchen-sink.test.ts (dev server) and kitchen-sink-build.test.ts
+          // (build) both use playground/kitchen-sink/. The build test deletes
+          // .void/ before running, which destroys miniflare persistence that
+          // the dev server depends on. Serialize to prevent the conflict.
+          fileParallelism: false,
         },
       },
       {
         test: {
-          name: "metaframeworks",
+          name: 'metaframeworks',
           sequence: { groupOrder: 2 },
           include: metaframeworks,
           maxWorkers,
@@ -46,22 +51,22 @@ export default defineConfig({
       },
       {
         test: {
-          name: "pages-react-vue",
+          name: 'pages-react-vue',
           sequence: { groupOrder: 2 },
           include: [
-            "packages/react/test/integration/**/*.test.ts",
-            "packages/vue/test/integration/**/*.test.ts",
+            'packages/react/test/integration/**/*.test.ts',
+            'packages/vue/test/integration/**/*.test.ts',
           ],
           maxWorkers,
         },
       },
       {
         test: {
-          name: "pages-svelte-solid",
+          name: 'pages-svelte-solid',
           sequence: { groupOrder: 2 },
           include: [
-            "packages/svelte/test/integration/**/*.test.ts",
-            "packages/solid/test/integration/**/*.test.ts",
+            'packages/svelte/test/integration/**/*.test.ts',
+            'packages/solid/test/integration/**/*.test.ts',
           ],
           maxWorkers,
         },

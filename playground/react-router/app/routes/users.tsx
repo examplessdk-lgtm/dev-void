@@ -1,6 +1,6 @@
-import { db } from "void/db";
-import { users } from "@schema";
-import type { Route } from "./+types/users";
+import { users } from '@schema';
+import { db } from 'void/db';
+import type { Route } from './+types/users';
 
 export async function loader() {
   return { users: await db.select().from(users) };
@@ -10,7 +10,7 @@ export default function UsersPage({ loaderData }: Route.ComponentProps) {
   const { users } = loaderData;
 
   return (
-    <div style={{ padding: "16px" }}>
+    <div style={{ padding: '16px' }}>
       <h1>Users</h1>
       <p>Fetched from D1 via a loader:</p>
       <table>

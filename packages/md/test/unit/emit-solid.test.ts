@@ -1,51 +1,51 @@
-import { describe, expect, it } from "vitest";
-import { emitSolidComponent, emitSolidComponentWithIslands } from "../../src/emit-solid";
-import type { CompileResult } from "../../src/compile";
+import { describe, expect, it } from 'vitest';
+import type { CompileResult } from '../../src/compile';
+import { emitSolidComponent, emitSolidComponentWithIslands } from '../../src/emit-solid';
 
 function makeResult(overrides?: Partial<CompileResult>): CompileResult {
   return {
-    html: "<h1>Hello</h1>\n<p>World</p>\n",
-    frontmatter: { title: "Test" },
-    headings: [{ depth: 1, slug: "hello", text: "Hello" }],
-    title: "Test",
+    html: '<h1>Hello</h1>\n<p>World</p>\n',
+    frontmatter: { title: 'Test' },
+    headings: [{ depth: 1, slug: 'hello', text: 'Hello' }],
+    title: 'Test',
     ...overrides,
   };
 }
 
-describe("emitSolidComponent", () => {
-  it("emits valid Solid component code", () => {
+describe('emitSolidComponent', () => {
+  it('emits valid Solid component code', () => {
     const code = emitSolidComponent(makeResult());
-    expect(code).toContain("FrontmatterContext.Provider");
-    expect(code).toContain("innerHTML");
-    expect(code).toContain("export const frontmatter = __frontmatter");
-    expect(code).toContain("export const headings = __headings");
+    expect(code).toContain('FrontmatterContext.Provider');
+    expect(code).toContain('innerHTML');
+    expect(code).toContain('export const frontmatter = __frontmatter');
+    expect(code).toContain('export const headings = __headings');
   });
 });
 
-describe("emitSolidComponentWithIslands", () => {
-  it("emits island imports and wrapper markup", () => {
+describe('emitSolidComponentWithIslands', () => {
+  it('emits island imports and wrapper markup', () => {
     const result = makeResult({
-      html: "<h1>Hello</h1>\n<Counter />\n<p>More</p>\n",
+      html: '<h1>Hello</h1>\n<Counter />\n<p>More</p>\n',
     });
     const code = emitSolidComponentWithIslands(result, [
-      { name: "Counter", specifier: "./Counter.tsx", strategy: "visible" },
+      { name: 'Counter', specifier: './Counter.tsx', strategy: 'visible' },
     ]);
 
     expect(code).toContain('import RawIsland0 from "./Counter.tsx"');
     expect(code).toContain('data-island="./Counter"');
     expect(code).toContain('data-hydrate="visible"');
-    expect(code).toContain("<RawIsland0");
+    expect(code).toContain('<RawIsland0');
   });
 
-  it("exports frontmatter and headings", () => {
+  it('exports frontmatter and headings', () => {
     const result = makeResult({
-      html: "<Counter />\n",
+      html: '<Counter />\n',
     });
     const code = emitSolidComponentWithIslands(result, [
-      { name: "Counter", specifier: "./Counter.tsx", strategy: "load" },
+      { name: 'Counter', specifier: './Counter.tsx', strategy: 'load' },
     ]);
 
-    expect(code).toContain("export const frontmatter = __frontmatter");
-    expect(code).toContain("export const headings = __headings");
+    expect(code).toContain('export const frontmatter = __frontmatter');
+    expect(code).toContain('export const headings = __headings');
   });
 });

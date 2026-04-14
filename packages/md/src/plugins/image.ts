@@ -1,4 +1,4 @@
-import type MarkdownExit from "markdown-exit";
+import type MarkdownExit from 'markdown-exit';
 
 const EXTERNAL_URL_RE = /^[a-z]+:/i;
 
@@ -14,13 +14,15 @@ export function imagePlugin(md: MarkdownExit, options?: ImageOptions): void {
   const imageRule = md.renderer.rules.image!;
   md.renderer.rules.image = (tokens: any[], idx: number, mdOptions: any, env: any, self: any) => {
     const token = tokens[idx];
-    let url = token.attrGet("src");
+    let url = token.attrGet('src');
     if (url && !EXTERNAL_URL_RE.test(url)) {
-      if (!/^\.?\//.test(url)) url = "./" + url;
-      token.attrSet("src", decodeURIComponent(url));
+      if (!/^\.?\//.test(url)) {
+        url = './' + url;
+      }
+      token.attrSet('src', decodeURIComponent(url));
     }
     if (options?.lazyLoading) {
-      token.attrSet("loading", "lazy");
+      token.attrSet('loading', 'lazy');
     }
     return (imageRule as Function)(tokens, idx, mdOptions, env, self);
   };

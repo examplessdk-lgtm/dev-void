@@ -1,6 +1,6 @@
-import Counter from "./_Counter" with { island: "load" };
-import PostForm from "./_PostForm" with { island: "load" };
-import { For } from "solid-js";
+import { For } from 'solid-js';
+import Counter from './_Counter' with { island: 'load' };
+import PostForm from './_PostForm' with { island: 'load' };
 
 interface Props {
   posts: Array<{ slug: string; title: string }>;

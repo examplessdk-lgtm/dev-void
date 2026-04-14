@@ -1,11 +1,11 @@
-import { defineHandler, defineHead } from "void";
+import { defineHandler, defineHead } from 'void';
 
 export interface Props {
   title: string;
 }
 
 export const loader = defineHandler<Props>(() => {
-  return { title: "Home" };
+  return { title: 'Home' };
 });
 
 export const head = defineHead<Props>((c, props) => {

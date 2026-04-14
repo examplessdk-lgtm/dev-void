@@ -1,14 +1,14 @@
-import type { StandardSchemaV1 } from "../standard-schema";
-import { authContext, type AuthState, type AuthUser } from "./auth";
-import type { VoidAuthEnv, VoidAuthRuntimeOptions } from "./better-auth-shared";
-import type { CloudEnv } from "./handler";
+import type { StandardSchemaV1 } from '../standard-schema';
+import { authContext, type AuthState, type AuthUser } from './auth';
+import type { VoidAuthEnv, VoidAuthRuntimeOptions } from './better-auth-shared';
+import type { CloudEnv } from './handler';
 import type {
   AnyWebSocketDefinition,
   RoomController,
   RoomDefinition,
   SocketDefinition,
   WebSocketConnection,
-} from "./ws";
+} from './ws';
 
 export interface WebSocketRouteMeta {
   pattern: string;
@@ -54,8 +54,8 @@ function matchRoute(
   pattern: string,
   pathname: string,
 ): { matched: boolean; params: Record<string, string> } {
-  const patternSegments = pattern.split("/").filter(Boolean);
-  const pathSegments = pathname.split("/").filter(Boolean);
+  const patternSegments = pattern.split('/').filter(Boolean);
+  const pathSegments = pathname.split('/').filter(Boolean);
   const params: Record<string, string> = {};
 
   let i = 0;
@@ -63,12 +63,12 @@ function matchRoute(
     const patternSegment = patternSegments[i]!;
     const pathSegment = pathSegments[i];
 
-    if (patternSegment === "**") {
+    if (patternSegment === '*') {
       return { matched: true, params };
     }
 
-    if (patternSegment.startsWith("**:")) {
-      params[patternSegment.slice(3)] = decodeURIComponent(pathSegments.slice(i).join("/"));
+    if (patternSegment.endsWith('{.+}') && patternSegment.startsWith(':')) {
+      params[patternSegment.slice(1, -4)] = decodeURIComponent(pathSegments.slice(i).join('/'));
       return { matched: true, params };
     }
 
@@ -76,7 +76,7 @@ function matchRoute(
       return { matched: false, params: {} };
     }
 
-    if (patternSegment.startsWith(":")) {
+    if (patternSegment.startsWith(':')) {
       params[patternSegment.slice(1)] = decodeURIComponent(pathSegment);
       continue;
     }
@@ -100,11 +100,13 @@ function getRouteMatch(request: Request, route: WebSocketRouteMeta): Record<stri
 }
 
 export function buildWebSocketInstanceId(
-  route: Pick<WebSocketRouteMeta, "params">,
+  route: Pick<WebSocketRouteMeta, 'params'>,
   params: Record<string, string>,
 ): string {
-  if (route.params.length === 0) return "default";
-  return route.params.map((name) => `${name}=${params[name] ?? ""}`).join("&");
+  if (route.params.length === 0) {
+    return 'default';
+  }
+  return route.params.map((name) => `${name}=${params[name] ?? ''}`).join('&');
 }
 
 async function validateSchema(
@@ -113,7 +115,7 @@ async function validateSchema(
 ): Promise<
   { ok: true; value: unknown } | { ok: false; issues: readonly StandardSchemaV1.Issue[] }
 > {
-  const result = await schema["~standard"].validate(value);
+  const result = await schema['~standard'].validate(value);
   if (result.issues) {
     return { ok: false, issues: result.issues };
   }
@@ -123,14 +125,18 @@ async function validateSchema(
 async function serializeServerEvent(schema: StandardSchemaV1, event: unknown): Promise<string> {
   const result = await validateSchema(schema, event);
   if (!result.ok) {
-    throw new Error(result.issues.map((issue) => issue.message).join("; "));
+    throw new Error(result.issues.map((issue) => issue.message).join('; '));
   }
   return JSON.stringify(result.value);
 }
 
 function parseIncomingMessage(message: string | ArrayBuffer | ArrayBufferView): string {
-  if (typeof message === "string") return message;
-  if (message instanceof ArrayBuffer) return new TextDecoder().decode(message);
+  if (typeof message === 'string') {
+    return message;
+  }
+  if (message instanceof ArrayBuffer) {
+    return new TextDecoder().decode(message);
+  }
   return new TextDecoder().decode(
     message.buffer.slice(message.byteOffset, message.byteOffset + message.byteLength),
   );
@@ -157,7 +163,7 @@ function getStoredConnection(webSocket: WebSocket): StoredConnection {
   return {
     id: crypto.randomUUID(),
     params: {},
-    roomId: "default",
+    roomId: 'default',
     user: null,
     authState: null,
   };
@@ -202,7 +208,9 @@ function createRoomController<ServerEvent>(
       const payload = await serializeServerEvent(serverSchema, event);
       for (const socket of state.getWebSockets()) {
         const stored = getStoredConnection(socket);
-        if (excludeIds.includes(stored.id)) continue;
+        if (excludeIds.includes(stored.id)) {
+          continue;
+        }
         socket.send(payload);
       }
     },
@@ -231,7 +239,7 @@ function createRoomContext<ServerEvent>(
     params: stored.params,
     user: stored.user,
     request,
-    env: env as CloudEnv["Bindings"],
+    env: env as CloudEnv['Bindings'],
     storage: state.storage,
     room: createRoomController<ServerEvent>(state, serverSchema),
     connection: createConnection<ServerEvent>(webSocket, serverSchema),
@@ -251,7 +259,7 @@ function createSocketContext<ServerEvent>(
     params: stored.params,
     user: stored.user,
     request,
-    env: env as CloudEnv["Bindings"],
+    env: env as CloudEnv['Bindings'],
     storage: state.storage,
     socket: createConnection<ServerEvent>(webSocket, serverSchema),
   };
@@ -259,7 +267,7 @@ function createSocketContext<ServerEvent>(
 
 function assertDefinition(definition: AnyWebSocketDefinition): void {
   if (!definition?.messages?.client || !definition?.messages?.server) {
-    throw new Error("WebSocket routes must define both messages.client and messages.server");
+    throw new Error('WebSocket routes must define both messages.client and messages.server');
   }
 }
 
@@ -285,9 +293,9 @@ export function createWebSocketDurableObject(
           ? await resolveAuthState(request, this.env as VoidAuthEnv, authRuntime)
           : null;
       const user = authState?.user ?? null;
-      const upgrade = request.headers.get("upgrade");
+      const upgrade = request.headers.get('upgrade');
 
-      if (upgrade?.toLowerCase() === "websocket") {
+      if (upgrade?.toLowerCase() === 'websocket') {
         const pair = new WebSocketPair();
         const client = pair[0];
         const server = pair[1];
@@ -300,7 +308,7 @@ export function createWebSocketDurableObject(
         };
         setStoredConnection(server, stored);
 
-        if (definition.__kind === "room") {
+        if (definition.__kind === 'room') {
           const ctx = createRoomContext<any>(
             this.state,
             this.env,
@@ -312,7 +320,9 @@ export function createWebSocketDurableObject(
           const decision = await withAuthState(authState, () =>
             (definition as RoomDefinition).onBeforeConnect?.(ctx),
           );
-          if (decision instanceof Response) return decision;
+          if (decision instanceof Response) {
+            return decision;
+          }
         } else {
           const ctx = createSocketContext<any>(
             this.state,
@@ -325,12 +335,14 @@ export function createWebSocketDurableObject(
           const decision = await withAuthState(authState, () =>
             (definition as SocketDefinition).onBeforeConnect?.(ctx),
           );
-          if (decision instanceof Response) return decision;
+          if (decision instanceof Response) {
+            return decision;
+          }
         }
 
         this.state.acceptWebSocket(server);
 
-        if (definition.__kind === "room") {
+        if (definition.__kind === 'room') {
           const ctx = createRoomContext<any>(
             this.state,
             this.env,
@@ -356,7 +368,7 @@ export function createWebSocketDurableObject(
       }
 
       if (!definition.onRequest) {
-        return new Response("Upgrade Required", { status: 426 });
+        return new Response('Upgrade Required', { status: 426 });
       }
 
       const stored: StoredConnection = {
@@ -367,7 +379,7 @@ export function createWebSocketDurableObject(
         authState,
       };
 
-      if (definition.__kind === "room") {
+      if (definition.__kind === 'room') {
         const fakeSocket = new WebSocketPair()[1];
         const ctx = createRoomContext<any>(
           this.state,
@@ -403,19 +415,19 @@ export function createWebSocketDurableObject(
       try {
         parsed = JSON.parse(raw);
       } catch {
-        webSocket.close(1007, "Invalid JSON");
+        webSocket.close(1007, 'Invalid JSON');
         return;
       }
 
       const result = await validateSchema(definition.messages.client, parsed);
       if (!result.ok) {
-        webSocket.close(1007, "Invalid message");
+        webSocket.close(1007, 'Invalid message');
         return;
       }
 
       const request = new Request(`https://void.local${route.pattern}`);
 
-      if (definition.__kind === "room") {
+      if (definition.__kind === 'room') {
         const ctx = createRoomContext<any>(
           this.state,
           this.env,
@@ -451,7 +463,7 @@ export function createWebSocketDurableObject(
       const stored = getStoredConnection(webSocket);
       const request = new Request(`https://void.local${route.pattern}`);
 
-      if (definition.__kind === "room") {
+      if (definition.__kind === 'room') {
         const ctx = createRoomContext<any>(
           this.state,
           this.env,
@@ -489,7 +501,7 @@ function getStub(
 ) {
   const binding = env[route.bindingName] as DurableObjectNamespace | undefined;
   if (!binding) {
-    throw new Error(`Missing Durable Object binding "${route.bindingName}"`);
+    return null;
   }
   const id = binding.idFromName(buildWebSocketInstanceId(route, params));
   return binding.get(id);
@@ -500,14 +512,20 @@ export async function handleWebSocketUpgrade(
   env: Record<string, unknown>,
   routes: WebSocketRouteMeta[],
 ): Promise<Response | null> {
-  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+  if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
     return null;
   }
 
   for (const route of routes) {
     const params = getRouteMatch(request, route);
-    if (!params) continue;
-    return getStub(env, route, params).fetch(request);
+    if (!params) {
+      continue;
+    }
+    const stub = getStub(env, route, params);
+    if (!stub) {
+      return new Response(`Missing Durable Object binding "${route.bindingName}"`, { status: 503 });
+    }
+    return stub.fetch(request);
   }
 
   return null;
@@ -519,5 +537,9 @@ export async function forwardWebSocketRequest(
   route: WebSocketRouteMeta,
 ): Promise<Response> {
   const params = getRouteMatch(request, route) ?? {};
-  return getStub(env, route, params).fetch(request);
+  const stub = getStub(env, route, params);
+  if (!stub) {
+    return new Response(`Missing Durable Object binding "${route.bindingName}"`, { status: 503 });
+  }
+  return stub.fetch(request);
 }

@@ -1,8 +1,8 @@
-import { ofetch } from "ofetch";
-import { FetchError } from "./fetch-error";
+import { ofetch } from 'ofetch';
+import { FetchError } from './fetch-error';
 export { FetchError as StreamError };
 
-import type { RouteMap } from "void/routes";
+import type { RouteMap } from 'void/routes';
 type MethodsOf<P extends keyof RouteMap> = keyof RouteMap[P] & string;
 type InputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteMap[P][M] extends {
   input: infer I;
@@ -10,14 +10,14 @@ type InputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteMap[P][M] 
   ? I
   : {};
 
-type BodyOption<I> = "body" extends keyof I
-  ? { body: I["body" & keyof I] }
+type BodyOption<I> = 'body' extends keyof I
+  ? { body: I['body' & keyof I] }
   : { body?: Record<string, any> | BodyInit | null };
-type QueryOption<I> = "query" extends keyof I
-  ? { query: I["query" & keyof I] }
+type QueryOption<I> = 'query' extends keyof I
+  ? { query: I['query' & keyof I] }
   : { query?: Record<string, string> };
-type ParamsOption<I> = "params" extends keyof I
-  ? { params: I["params" & keyof I] }
+type ParamsOption<I> = 'params' extends keyof I
+  ? { params: I['params' & keyof I] }
   : { params?: Record<string, string> };
 
 type StreamOptions<P extends keyof RouteMap, M extends MethodsOf<P>> = BodyOption<InputOf<P, M>> &
@@ -50,7 +50,7 @@ type StreamOptions<P extends keyof RouteMap, M extends MethodsOf<P>> = BodyOptio
  */
 export async function* fetchStream<
   P extends keyof RouteMap & string,
-  M extends MethodsOf<P> = "POST" extends MethodsOf<P> ? "POST" : MethodsOf<P>,
+  M extends MethodsOf<P> = 'POST' extends MethodsOf<P> ? 'POST' : MethodsOf<P>,
 >(path: P, options?: StreamOptions<P, M>): AsyncGenerator<string, void, undefined> {
   // Interpolate :param segments
   let url: string = path;
@@ -61,50 +61,60 @@ export async function* fetchStream<
   }
 
   const response = await ofetch.raw(url, {
-    method: (options?.method ?? "POST") as string,
+    method: (options?.method ?? 'POST') as string,
     body: options?.body as any,
     query: options?.query as any,
     headers: options?.headers,
     signal: options?.signal,
     baseURL: options?.baseURL,
-    responseType: "stream",
+    responseType: 'stream',
   });
 
   const body = response._data as ReadableStream<Uint8Array> | null;
-  if (!body) return;
+  if (!body) {
+    return;
+  }
 
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
+  let buffer = '';
 
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        break;
+      }
 
       buffer += decoder.decode(value, { stream: true });
 
       // Process complete lines
-      const lines = buffer.split("\n");
+      const lines = buffer.split('\n');
       buffer = lines.pop()!; // Keep incomplete last line
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith(":")) continue;
+        if (!trimmed || trimmed.startsWith(':')) {
+          continue;
+        }
 
-        if (trimmed.startsWith("data: ")) {
+        if (trimmed.startsWith('data: ')) {
           const data = trimmed.slice(6);
-          if (data === "[DONE]") return;
+          if (data === '[DONE]') {
+            return;
+          }
 
           // Try to parse as Workers AI JSON response
           try {
             const parsed = JSON.parse(data);
-            if (typeof parsed.response === "string") {
+            if (typeof parsed.response === 'string') {
               yield parsed.response;
               continue;
             }
             // Parsed JSON with non-string response (e.g. null + usage metadata) — skip
-            if ("response" in parsed) continue;
+            if ('response' in parsed) {
+              continue;
+            }
           } catch {
             // Not JSON — yield as plain text
           }
@@ -117,14 +127,14 @@ export async function* fetchStream<
     // Process any remaining data in buffer
     if (buffer.trim()) {
       const trimmed = buffer.trim();
-      if (trimmed.startsWith("data: ")) {
+      if (trimmed.startsWith('data: ')) {
         const data = trimmed.slice(6);
-        if (data !== "[DONE]") {
+        if (data !== '[DONE]') {
           try {
             const parsed = JSON.parse(data);
-            if (typeof parsed.response === "string") {
+            if (typeof parsed.response === 'string') {
               yield parsed.response;
-            } else if (!("response" in parsed)) {
+            } else if (!('response' in parsed)) {
               yield data;
             }
           } catch {

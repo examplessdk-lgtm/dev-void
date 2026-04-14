@@ -1,7 +1,7 @@
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidReact } from "@void/react/plugin";
-import { voidMarkdown } from "@void/md/plugin";
+import { voidMarkdown } from '@void/md/plugin';
+import { voidReact } from '@void/react/plugin';
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidReact(), voidMarkdown()],

@@ -16,7 +16,7 @@ routes/api/
 middleware/
   01.logger.ts         # Logs method + path for every request
 migrations/
-  001_create_users.sql # Creates users table (id, name, email, created_at)
+  0000_create_users.sql # Creates users table (id, name, email, created_at)
   seed.sql             # Seeds sample data
 crons/
   hourly-heartbeat.ts  # Writes last-heartbeat timestamp to KV every hour

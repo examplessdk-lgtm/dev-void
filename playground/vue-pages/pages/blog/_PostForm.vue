@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { useIslandForm } from "@void/vue";
+import { useIslandForm } from '@void/vue';
 
-const form = useIslandForm({ title: "", body: "" });
+const form = useIslandForm({ title: '', body: '' });
 </script>
 
 <template>
@@ -17,7 +17,7 @@ const form = useIslandForm({ title: "", body: "" });
       <span v-if="form.errors.body" style="color: red">{{ form.errors.body }}</span>
     </div>
     <button type="submit" :disabled="form.processing">
-      {{ form.processing ? "Saving..." : "Add Post" }}
+      {{ form.processing ? 'Saving...' : 'Add Post' }}
     </button>
   </form>
 </template>

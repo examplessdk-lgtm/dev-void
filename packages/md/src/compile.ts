@@ -1,24 +1,24 @@
-import MarkdownExit from "markdown-exit";
-import matter from "gray-matter";
-import { createHighlighter, bundledLanguages, isSpecialLang, type BundledLanguage } from "shiki";
-import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
+import { createJavaScriptRegexEngine } from '@shikijs/engine-javascript';
 import {
   transformerMetaHighlight,
   transformerNotationDiff,
   transformerNotationHighlight,
   transformerNotationFocus,
   transformerNotationErrorLevel,
-} from "@shikijs/transformers";
-import anchor from "markdown-it-anchor";
-import attrs from "markdown-it-attrs";
-import { full as emoji } from "markdown-it-emoji";
-import { preWrapperPlugin } from "./plugins/pre-wrapper";
-import { containerPlugin } from "./plugins/containers";
-import { gitHubAlertsPlugin } from "./plugins/github-alerts";
-import { linkPlugin } from "./plugins/link";
-import { imagePlugin } from "./plugins/image";
-import { lineNumberPlugin } from "./plugins/line-numbers";
-import { tocPlugin } from "./plugins/toc";
+} from '@shikijs/transformers';
+import matter from 'gray-matter';
+import MarkdownExit from 'markdown-exit';
+import anchor from 'markdown-it-anchor';
+import attrs from 'markdown-it-attrs';
+import { full as emoji } from 'markdown-it-emoji';
+import { createHighlighter, bundledLanguages, isSpecialLang, type BundledLanguage } from 'shiki';
+import { containerPlugin } from './plugins/containers';
+import { gitHubAlertsPlugin } from './plugins/github-alerts';
+import { imagePlugin } from './plugins/image';
+import { lineNumberPlugin } from './plugins/line-numbers';
+import { linkPlugin } from './plugins/link';
+import { preWrapperPlugin } from './plugins/pre-wrapper';
+import { tocPlugin } from './plugins/toc';
 
 export interface Heading {
   depth: number;
@@ -43,7 +43,9 @@ export interface CompileOptions {
 let compilerPromise: Promise<MarkdownExit> | null = null;
 
 async function getCompiler(options?: CompileOptions): Promise<MarkdownExit> {
-  if (compilerPromise) return compilerPromise;
+  if (compilerPromise) {
+    return compilerPromise;
+  }
   compilerPromise = createCompiler(options);
   return compilerPromise;
 }
@@ -53,8 +55,8 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
 
   // Shiki highlighting with JS RegExp engine (no WASM) + lazy language loading
   const themes = options?.shiki?.themes ?? {
-    light: "github-light",
-    dark: "github-dark",
+    light: 'github-light',
+    dark: 'github-dark',
   };
   const highlighter = await createHighlighter({
     engine: createJavaScriptRegexEngine(),
@@ -71,18 +73,18 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
   md.renderer.rules.fence = async (tokens: any[], idx: number) => {
     const token = tokens[idx];
     const code = token.content;
-    let lang = token.info ? token.info.split(/\s+/g)[0] : "text";
+    let lang = token.info ? token.info.split(/\s+/g)[0] : 'text';
     if (!isSpecialLang(lang) && !highlighter.getLoadedLanguages().includes(lang)) {
       if (lang in bundledLanguages) {
         await highlighter.loadLanguage(lang as BundledLanguage);
       } else {
-        lang = "text";
+        lang = 'text';
       }
     }
     return highlighter.codeToHtml(code, {
       lang,
       themes,
-      defaultColor: "light",
+      defaultColor: 'light',
       transformers: shikiTransformers,
       meta: { __raw: token.info },
     });
@@ -115,7 +117,7 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
   // Heading anchors
   // @ts-expect-error markdown-it-anchor types reference @types/markdown-it, structurally incompatible with markdown-exit
   md.use(anchor, {
-    permalink: anchor.permalink.ariaHidden({ placement: "before" }),
+    permalink: anchor.permalink.ariaHidden({ placement: 'before' }),
   });
 
   // [[toc]] directive
@@ -128,15 +130,15 @@ function extractHeadings(tokens: any[]): Heading[] {
   const headings: Heading[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
-    if (token.type === "heading_open") {
+    if (token.type === 'heading_open') {
       const depth = Number(token.tag.slice(1));
-      const slug = token.attrGet?.("id") ?? "";
+      const slug = token.attrGet?.('id') ?? '';
       const inline = tokens[i + 1];
       const text = (
         inline?.children
-          ?.filter((t: any) => t.type === "text" || t.type === "code_inline")
+          ?.filter((t: any) => t.type === 'text' || t.type === 'code_inline')
           .map((t: any) => t.content)
-          .join("") ?? ""
+          .join('') ?? ''
       ).trim();
       headings.push({ depth, slug, text });
     }
@@ -153,7 +155,7 @@ export async function compile(source: string, options?: CompileOptions): Promise
   const headings = extractHeadings(tokens);
   const html = await compiler.renderAsync(content, env);
 
-  const title = (frontmatter.title as string) ?? headings.find((h) => h.depth === 1)?.text ?? "";
+  const title = (frontmatter.title as string) ?? headings.find((h) => h.depth === 1)?.text ?? '';
 
   return { html, frontmatter, headings, title };
 }

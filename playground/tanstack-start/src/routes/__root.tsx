@@ -1,11 +1,11 @@
-import { HeadContent, Link, Scripts, createRootRoute } from "@tanstack/react-router";
-import * as React from "react";
+import { HeadContent, Link, Scripts, createRootRoute } from '@tanstack/react-router';
+import * as React from 'react';
 
 export const Route = createRootRoute({
   head: () => ({
     meta: [
-      { charSet: "utf-8" },
-      { name: "viewport", content: "width=device-width, initial-scale=1" },
+      { charSet: 'utf-8' },
+      { name: 'viewport', content: 'width=device-width, initial-scale=1' },
     ],
   }),
   shellComponent: RootDocument,
@@ -18,11 +18,11 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <HeadContent />
       </head>
       <body>
-        <nav style={{ padding: "8px", display: "flex", gap: "16px" }}>
-          <Link to="/" activeProps={{ style: { fontWeight: "bold" } }}>
+        <nav style={{ padding: '8px', display: 'flex', gap: '16px' }}>
+          <Link to="/" activeProps={{ style: { fontWeight: 'bold' } }}>
             Home
           </Link>
-          <Link to="/users" activeProps={{ style: { fontWeight: "bold" } }}>
+          <Link to="/users" activeProps={{ style: { fontWeight: 'bold' } }}>
             Users
           </Link>
         </nav>

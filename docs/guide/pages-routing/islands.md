@@ -84,8 +84,8 @@ Use [import attributes](https://developer.mozilla.org/en-US/docs/Web/JavaScript/
 
 ```tsx [React]
 // pages/blog/index.island.tsx
-import Counter from "./_Counter" with { island: "load" };
-import PostForm from "./_PostForm" with { island: "visible" };
+import Counter from './_Counter' with { island: 'load' };
+import PostForm from './_PostForm' with { island: 'visible' };
 
 export default function BlogIndex({ posts }) {
   return (
@@ -106,8 +106,8 @@ export default function BlogIndex({ posts }) {
 ```vue [Vue]
 <!-- pages/blog/index.island.vue -->
 <script setup>
-import Counter from "./_Counter.vue" with { island: "load" };
-import PostForm from "./_PostForm.vue" with { island: "visible" };
+import Counter from './_Counter.vue' with { island: 'load' };
+import PostForm from './_PostForm.vue' with { island: 'visible' };
 
 defineProps({ posts: Array });
 </script>
@@ -145,9 +145,9 @@ let { posts } = $props();
 
 ```tsx [Solid]
 // pages/blog/index.island.tsx
-import Counter from "./_Counter" with { island: "load" };
-import PostForm from "./_PostForm" with { island: "visible" };
-import { For } from "solid-js";
+import Counter from './_Counter' with { island: 'load' };
+import PostForm from './_PostForm' with { island: 'visible' };
+import { For } from 'solid-js';
 
 export default function BlogIndex(props) {
   return (
@@ -190,9 +190,9 @@ The `island` attribute value controls _when_ the component hydrates:
 | `"media:(query)"` | CSS media query matches     | Responsive components (e.g., mobile-only)  |
 
 ```tsx
-import CookieBanner from "./_CookieBanner" with { island: "idle" };
-import MobileMenu from "./_MobileMenu" with { island: "media:(max-width: 768px)" };
-import Comments from "./_Comments" with { island: "visible" };
+import CookieBanner from './_CookieBanner' with { island: 'idle' };
+import MobileMenu from './_MobileMenu' with { island: 'media:(max-width: 768px)' };
+import Comments from './_Comments' with { island: 'visible' };
 ```
 
 ## Server Handlers
@@ -201,7 +201,7 @@ Island pages use the same `loader` and `action` pattern as regular pages. The `.
 
 ```ts
 // pages/blog/index.server.ts
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
 export const loader = defineHandler((c) => {
   return c.json({ posts: getAllPosts() });
@@ -223,23 +223,23 @@ Island pages cannot use `useForm` because it depends on the client-side router. 
 ::: code-group
 
 ```tsx [React]
-import { useIslandForm } from "@void/react";
+import { useIslandForm } from '@void/react';
 
 export default function PostForm() {
-  const form = useIslandForm({ title: "", body: "" });
+  const form = useIslandForm({ title: '', body: '' });
 
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        form.post("/blog");
+        form.post('/blog');
       }}
     >
       <label htmlFor="title">Title:</label>
       <input
         id="title"
         value={form.data.title}
-        onChange={(e) => form.setData("title", e.target.value)}
+        onChange={(e) => form.setData('title', e.target.value)}
       />
       {form.errors.title && <span>{form.errors.title}</span>}
 
@@ -247,11 +247,11 @@ export default function PostForm() {
       <textarea
         id="body"
         value={form.data.body}
-        onChange={(e) => form.setData("body", e.target.value)}
+        onChange={(e) => form.setData('body', e.target.value)}
       />
       {form.errors.body && <span>{form.errors.body}</span>}
 
-      <button disabled={form.processing}>{form.processing ? "Saving..." : "Add Post"}</button>
+      <button disabled={form.processing}>{form.processing ? 'Saving...' : 'Add Post'}</button>
     </form>
   );
 }
@@ -259,12 +259,12 @@ export default function PostForm() {
 
 ```vue [Vue]
 <script setup>
-import { useIslandForm } from "@void/vue";
+import { useIslandForm } from '@void/vue';
 
-const form = useIslandForm({ title: "", body: "" });
+const form = useIslandForm({ title: '', body: '' });
 
 function submit() {
-  form.post("/blog");
+  form.post('/blog');
 }
 </script>
 
@@ -279,7 +279,7 @@ function submit() {
     <span v-if="form.errors.body">{{ form.errors.body }}</span>
 
     <button :disabled="form.processing">
-      {{ form.processing ? "Saving..." : "Add Post" }}
+      {{ form.processing ? 'Saving...' : 'Add Post' }}
     </button>
   </form>
 </template>
@@ -312,24 +312,24 @@ function submit() {
 ```
 
 ```tsx [Solid]
-import { useIslandForm } from "@void/solid";
-import { Show } from "solid-js";
+import { useIslandForm } from '@void/solid';
+import { Show } from 'solid-js';
 
 export default function PostForm() {
-  const form = useIslandForm({ title: "", body: "" });
+  const form = useIslandForm({ title: '', body: '' });
 
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        form.post("/blog");
+        form.post('/blog');
       }}
     >
       <label for="title">Title:</label>
       <input
         id="title"
         value={form.data.title}
-        onInput={(e) => form.setData("title", e.target.value)}
+        onInput={(e) => form.setData('title', e.target.value)}
       />
       <Show when={form.errors.title}>
         <span>{form.errors.title}</span>
@@ -339,13 +339,13 @@ export default function PostForm() {
       <textarea
         id="body"
         value={form.data.body}
-        onInput={(e) => form.setData("body", e.target.value)}
+        onInput={(e) => form.setData('body', e.target.value)}
       />
       <Show when={form.errors.body}>
         <span>{form.errors.body}</span>
       </Show>
 
-      <button disabled={form.processing}>{form.processing ? "Saving..." : "Add Post"}</button>
+      <button disabled={form.processing}>{form.processing ? 'Saving...' : 'Add Post'}</button>
     </form>
   );
 }

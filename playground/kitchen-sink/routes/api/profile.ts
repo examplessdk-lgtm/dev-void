@@ -1,5 +1,5 @@
-import { defineHandler } from "void";
-import { requireAuth } from "void/auth";
+import { defineHandler } from 'void';
+import { requireAuth } from 'void/auth';
 
 export const GET = defineHandler((c) => {
   const user = requireAuth(c);

@@ -12,9 +12,9 @@ Export `action` from a `.server.ts` file. Use `withValidator()` with a [schema-d
 
 ```ts
 // pages/users/index.server.ts
-import { defineHandler } from "void";
-import { db } from "void/db";
-import { users, insertUserSchema } from "@schema";
+import { defineHandler } from 'void';
+import { db } from 'void/db';
+import { users, insertUserSchema } from '@schema';
 
 export const action = defineHandler.withValidator({
   body: insertUserSchema,
@@ -35,9 +35,9 @@ When a page needs multiple mutations, such as updating and deleting a user on th
 
 ```ts
 // pages/users/edit.server.ts
-import { defineHandler } from "void";
-import { db, eq } from "void/db";
-import { users } from "@schema";
+import { defineHandler } from 'void';
+import { db, eq } from 'void/db';
+import { users } from '@schema';
 
 export const actions = {
   update: defineHandler.withValidator({
@@ -46,7 +46,7 @@ export const actions = {
     await db
       .update(users)
       .set(body)
-      .where(eq(users.id, c.req.param("id")));
+      .where(eq(users.id, c.req.param('id')));
   }),
 
   delete: defineHandler(async (c) => {
@@ -81,10 +81,10 @@ First, define the action in your server handler:
 
 ```ts
 // pages/users/create.server.ts
-import { defineHandler } from "void";
-import { db } from "void/db";
-import { users } from "@schema";
-import * as v from "valibot";
+import { defineHandler } from 'void';
+import { db } from 'void/db';
+import { users } from '@schema';
+import * as v from 'valibot';
 
 const createUserSchema = v.object({
   name: v.pipe(v.string(), v.minLength(1)),
@@ -95,7 +95,7 @@ export const action = defineHandler.withValidator({
   body: createUserSchema,
 })(async (c, { body }) => {
   await db.insert(users).values(body);
-  return c.redirect("/users");
+  return c.redirect('/users');
 });
 ```
 
@@ -105,11 +105,11 @@ Then, use `useForm` in the page component to submit to this action:
 
 ```tsx [React]
 // pages/users/create.tsx
-import { useForm } from "@void/react";
+import { useForm } from '@void/react';
 
 export default function CreateUser() {
   // "/users/create" autocompletes; { name, email } is typed from the action's validator
-  const form = useForm("/users/create", { name: "", email: "" });
+  const form = useForm('/users/create', { name: '', email: '' });
 
   return (
     <form
@@ -118,10 +118,10 @@ export default function CreateUser() {
         form.post();
       }}
     >
-      <input value={form.data.name} onChange={(e) => form.setData("name", e.target.value)} />
+      <input value={form.data.name} onChange={(e) => form.setData('name', e.target.value)} />
       {form.errors.name && <span>{form.errors.name}</span>}
 
-      <input value={form.data.email} onChange={(e) => form.setData("email", e.target.value)} />
+      <input value={form.data.email} onChange={(e) => form.setData('email', e.target.value)} />
       {form.errors.email && <span>{form.errors.email}</span>}
 
       <button disabled={form.processing}>Create</button>
@@ -133,10 +133,10 @@ export default function CreateUser() {
 ```vue [Vue]
 <!-- pages/users/create.vue -->
 <script setup lang="ts">
-import { useForm } from "@void/vue";
+import { useForm } from '@void/vue';
 
 // "/users/create" autocompletes; { name, email } is typed from the action's validator
-const form = useForm("/users/create", { name: "", email: "" });
+const form = useForm('/users/create', { name: '', email: '' });
 </script>
 
 <template>
@@ -174,11 +174,11 @@ const form = useForm("/users/create", { name: "", email: "" });
 
 ```tsx [Solid]
 // pages/users/create.tsx
-import { useForm } from "@void/solid";
+import { useForm } from '@void/solid';
 
 export default function CreateUser() {
   // "/users/create" autocompletes; { name, email } is typed from the action's validator
-  const form = useForm("/users/create", { name: "", email: "" });
+  const form = useForm('/users/create', { name: '', email: '' });
 
   return (
     <form
@@ -187,10 +187,10 @@ export default function CreateUser() {
         form.post();
       }}
     >
-      <input value={form.data.name} onInput={(e) => form.setData("name", e.target.value)} />
+      <input value={form.data.name} onInput={(e) => form.setData('name', e.target.value)} />
       {form.errors.name && <span>{form.errors.name}</span>}
 
-      <input value={form.data.email} onInput={(e) => form.setData("email", e.target.value)} />
+      <input value={form.data.email} onInput={(e) => form.setData('email', e.target.value)} />
       {form.errors.email && <span>{form.errors.email}</span>}
 
       <button disabled={form.processing}>Create</button>
@@ -223,7 +223,7 @@ For dynamic routes, pass `params` in the options:
 
 ```ts
 // pages/users/[id].server.ts has an action
-const form = useForm("/users/:id", { name: "" }, { params: { id: "42" } });
+const form = useForm('/users/:id', { name: '' }, { params: { id: '42' } });
 form.put(); // submits to /users/42
 ```
 
@@ -232,7 +232,7 @@ form.put(); // submits to /users/42
 When a page exports named actions, append `?actionName` to the URL:
 
 ```ts
-const form = useForm("/users/:id?update", { name: "" }, { params: { id } });
+const form = useForm('/users/:id?update', { name: '' }, { params: { id } });
 form.put(); // submits to /users/42?update
 ```
 
@@ -243,13 +243,13 @@ The URL, body fields, and error keys are typed per action. Each named action get
 For one-shot mutations that do not need form state such as dirty tracking, reset, or field-level errors, use `action()` instead of `useForm`. It sends a request to a page action and triggers an Inertia page update, just like `useForm`, but without the reactive form object:
 
 ```ts
-import { useForm, action } from "@void/react"; // or "@void/vue", "@void/svelte", "@void/solid"
+import { useForm, action } from '@void/react'; // or "@void/vue", "@void/svelte", "@void/solid"
 
 // Form with state + Inertia page update
-const form = useForm("/?create-user", { name: "", email: "" });
+const form = useForm('/?create-user', { name: '', email: '' });
 
 // Programmatic call + Inertia page update (no form state)
-await action("/?delete-user", { id: 42 });
+await action('/?delete-user', { id: 42 });
 ```
 
 `action()` is useful in event handlers such as button clicks, confirmation dialogs, or any place where you want to call a server action without managing form state.
@@ -261,12 +261,12 @@ When an action throws a `ValidationError`, or validation fails through `withVali
 Actions can throw `ValidationError` for custom validation logic:
 
 ```ts
-import { defineHandler, ValidationError } from "void";
+import { defineHandler, ValidationError } from 'void';
 
 export const action = defineHandler(async (c) => {
   const body = await c.req.json();
   if (await emailExists(body.email)) {
-    throw new ValidationError({ email: "Email already taken" });
+    throw new ValidationError({ email: 'Email already taken' });
   }
   // ...
 });
@@ -281,11 +281,11 @@ Or use `withValidator()` for automatic schema-based validation. Errors are retur
 ::: code-group
 
 ```tsx [React]
-import { useForm } from "@void/react";
-import { useRef } from "react";
+import { useForm } from '@void/react';
+import { useRef } from 'react';
 
 export default function Upload() {
-  const form = useForm("/photos", { title: "", photo: null as File | null });
+  const form = useForm('/photos', { title: '', photo: null as File | null });
   const inputRef = useRef<HTMLInputElement>(null);
 
   return (
@@ -295,11 +295,11 @@ export default function Upload() {
         form.post();
       }}
     >
-      <input value={form.data.title} onChange={(e) => form.setData("title", e.target.value)} />
+      <input value={form.data.title} onChange={(e) => form.setData('title', e.target.value)} />
       <input
         type="file"
         ref={inputRef}
-        onChange={(e) => form.setData("photo", e.target.files?.[0] ?? null)}
+        onChange={(e) => form.setData('photo', e.target.files?.[0] ?? null)}
       />
       <button disabled={form.processing}>Upload</button>
     </form>
@@ -309,10 +309,10 @@ export default function Upload() {
 
 ```vue [Vue]
 <script setup lang="ts">
-import { ref } from "vue";
-import { useForm } from "@void/vue";
+import { ref } from 'vue';
+import { useForm } from '@void/vue';
 
-const form = useForm("/photos", { title: "", photo: null as File | null });
+const form = useForm('/photos', { title: '', photo: null as File | null });
 const fileInput = ref<HTMLInputElement>();
 
 function onFileChange() {
@@ -344,10 +344,10 @@ function onFileChange() {
 ```
 
 ```tsx [Solid]
-import { useForm } from "@void/solid";
+import { useForm } from '@void/solid';
 
 export default function Upload() {
-  const form = useForm("/photos", { title: "", photo: null as File | null });
+  const form = useForm('/photos', { title: '', photo: null as File | null });
 
   return (
     <form
@@ -356,8 +356,8 @@ export default function Upload() {
         form.post();
       }}
     >
-      <input value={form.data.title} onInput={(e) => form.setData("title", e.target.value)} />
-      <input type="file" onChange={(e) => form.setData("photo", e.target.files?.[0] ?? null)} />
+      <input value={form.data.title} onInput={(e) => form.setData('title', e.target.value)} />
+      <input type="file" onChange={(e) => form.setData('photo', e.target.files?.[0] ?? null)} />
       <button disabled={form.processing}>Upload</button>
     </form>
   );
@@ -370,12 +370,12 @@ On the server, use `c.req.parseBody()` to access the uploaded file:
 
 ```ts
 // pages/photos.server.ts
-import { defineHandler } from "void";
-import { storage } from "void/storage";
+import { defineHandler } from 'void';
+import { storage } from 'void/storage';
 
 export const action = defineHandler(async (c) => {
   const body = await c.req.parseBody();
-  const file = body["photo"] as File;
+  const file = body['photo'] as File;
   if (file && file.size > 0) {
     await storage.put(file.name, file.stream(), {
       httpMetadata: { contentType: file.type },

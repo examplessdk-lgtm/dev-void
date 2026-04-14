@@ -1,5 +1,5 @@
-import type { StandardSchemaV1 } from "../standard-schema";
-import type { CloudContext } from "./handler";
+import type { StandardSchemaV1 } from '../standard-schema';
+import type { CloudContext } from './handler';
 
 export interface ValidatorSlots {
   body?: StandardSchemaV1;
@@ -28,7 +28,7 @@ function flattenIssues(
 ): { message: string; path?: string }[] {
   return Array.from(issues, (issue) => ({
     message: issue.message,
-    path: issue.path?.map((p) => (typeof p === "object" ? p.key : p)).join("."),
+    path: issue.path?.map((p) => (typeof p === 'object' ? p.key : p)).join('.'),
   }));
 }
 
@@ -38,7 +38,7 @@ async function validateSlot(
 ): Promise<
   { ok: true; value: unknown } | { ok: false; issues: readonly StandardSchemaV1.Issue[] }
 > {
-  const result = await schema["~standard"].validate(value);
+  const result = await schema['~standard'].validate(value);
   if (result.issues) {
     return { ok: false, issues: result.issues };
   }
@@ -58,7 +58,7 @@ export async function runValidation<V extends ValidatorSlots>(
     if (result.ok) {
       input.params = result.value;
     } else {
-      allIssues.push({ slot: "params", issues: flattenIssues(result.issues) });
+      allIssues.push({ slot: 'params', issues: flattenIssues(result.issues) });
     }
   }
 
@@ -72,7 +72,7 @@ export async function runValidation<V extends ValidatorSlots>(
     if (result.ok) {
       input.query = result.value;
     } else {
-      allIssues.push({ slot: "query", issues: flattenIssues(result.issues) });
+      allIssues.push({ slot: 'query', issues: flattenIssues(result.issues) });
     }
   }
 
@@ -83,21 +83,21 @@ export async function runValidation<V extends ValidatorSlots>(
     } catch {
       return {
         ok: false,
-        response: Response.json({ error: "Invalid JSON body" }, { status: 400 }),
+        response: Response.json({ error: 'Invalid JSON body' }, { status: 400 }),
       };
     }
     const result = await validateSlot(validators.body, raw);
     if (result.ok) {
       input.body = result.value;
     } else {
-      allIssues.push({ slot: "body", issues: flattenIssues(result.issues) });
+      allIssues.push({ slot: 'body', issues: flattenIssues(result.issues) });
     }
   }
 
   if (allIssues.length > 0) {
     return {
       ok: false,
-      response: Response.json({ error: "Validation failed", issues: allIssues }, { status: 400 }),
+      response: Response.json({ error: 'Validation failed', issues: allIssues }, { status: 400 }),
     };
   }
 

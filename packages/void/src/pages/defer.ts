@@ -1,4 +1,4 @@
-export const DEFERRED: unique symbol = Symbol("deferred");
+export const DEFERRED: unique symbol = Symbol('deferred');
 
 export interface DeferredSentinel {
   [DEFERRED]: true;
@@ -23,7 +23,7 @@ export function defer(
   maybeResolver?: (c: any) => Promise<unknown>,
 ): any {
   const [group, resolver] =
-    typeof groupOrResolver === "string"
+    typeof groupOrResolver === 'string'
       ? [groupOrResolver, maybeResolver!]
       : [null, groupOrResolver];
   return { [DEFERRED]: true, group, resolver };
@@ -47,7 +47,7 @@ export function separateDeferred(props: Record<string, unknown>): {
   const deferredMap: Record<string, ResolvedDeferredGroup> = {};
 
   for (const [key, value] of Object.entries(props)) {
-    if (value && typeof value === "object" && DEFERRED in value) {
+    if (value && typeof value === 'object' && DEFERRED in value) {
       const sentinel = value as DeferredSentinel;
       const groupName = sentinel.group ?? key;
       if (!deferredMap[groupName]) {

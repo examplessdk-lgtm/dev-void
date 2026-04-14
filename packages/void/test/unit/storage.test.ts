@@ -1,8 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from 'vitest';
 
-vi.mock("cloudflare:workers", () => ({ env: {} }));
+vi.mock('cloudflare:workers', () => ({ env: {} }));
 
-import { createStorage } from "../../src/runtime/storage";
+import { createStorage } from '../../src/runtime/storage';
 
 function createMockR2Bucket() {
   return {
@@ -18,36 +18,36 @@ function createMockR2Bucket() {
   };
 }
 
-describe("createStorage", () => {
-  it("returns the bucket directly", () => {
+describe('createStorage', () => {
+  it('returns the bucket directly', () => {
     const mockBucket = createMockR2Bucket();
     const s = createStorage(mockBucket);
     expect(s).toBe(mockBucket);
   });
 
-  it("get passes through to bucket", async () => {
+  it('get passes through to bucket', async () => {
     const mockBucket = createMockR2Bucket();
-    const mockBody = { key: "file.txt", body: "content" };
+    const mockBody = { key: 'file.txt', body: 'content' };
     mockBucket.get.mockResolvedValue(mockBody);
     const s = createStorage(mockBucket);
-    const result = await s.get("file.txt");
-    expect(mockBucket.get).toHaveBeenCalledWith("file.txt");
+    const result = await s.get('file.txt');
+    expect(mockBucket.get).toHaveBeenCalledWith('file.txt');
     expect(result).toBe(mockBody);
   });
 
-  it("put passes through to bucket", async () => {
+  it('put passes through to bucket', async () => {
     const mockBucket = createMockR2Bucket();
     const s = createStorage(mockBucket);
-    await s.put("file.txt", "content", { httpMetadata: { contentType: "text/plain" } });
-    expect(mockBucket.put).toHaveBeenCalledWith("file.txt", "content", {
-      httpMetadata: { contentType: "text/plain" },
+    await s.put('file.txt', 'content', { httpMetadata: { contentType: 'text/plain' } });
+    expect(mockBucket.put).toHaveBeenCalledWith('file.txt', 'content', {
+      httpMetadata: { contentType: 'text/plain' },
     });
   });
 
-  it("delete passes through to bucket", async () => {
+  it('delete passes through to bucket', async () => {
     const mockBucket = createMockR2Bucket();
     const s = createStorage(mockBucket);
-    await s.delete("file.txt");
-    expect(mockBucket.delete).toHaveBeenCalledWith("file.txt");
+    await s.delete('file.txt');
+    expect(mockBucket.delete).toHaveBeenCalledWith('file.txt');
   });
 });

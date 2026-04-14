@@ -42,9 +42,9 @@ Add both plugins to your Vite config:
 
 ```ts [React]
 // vite.config.ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidReact } from "@void/react/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidReact } from '@void/react/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidReact()],
@@ -53,9 +53,9 @@ export default defineConfig({
 
 ```ts [Vue]
 // vite.config.ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidVue } from "@void/vue/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidVue } from '@void/vue/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidVue()],
@@ -64,9 +64,9 @@ export default defineConfig({
 
 ```ts [Svelte]
 // vite.config.ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidSvelte } from "@void/svelte/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidSvelte } from '@void/svelte/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidSvelte()],
@@ -75,9 +75,9 @@ export default defineConfig({
 
 ```ts [Solid]
 // vite.config.ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidSolid } from "@void/solid/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidSolid } from '@void/solid/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidSolid()],
@@ -128,7 +128,7 @@ import { Link } from "@void/react";
 
 ```vue [Vue]
 <script setup lang="ts">
-import { Link } from "@void/vue";
+import { Link } from '@void/vue';
 </script>
 
 <template>
@@ -158,12 +158,12 @@ import { Link } from "@void/solid";
 For programmatic navigation, use `useRouter()`:
 
 ```ts
-import { useRouter } from "@void/vue"; // or "@void/react", "@void/svelte", "@void/solid"
+import { useRouter } from '@void/vue'; // or "@void/react", "@void/svelte", "@void/solid"
 
 const router = useRouter();
-router.visit("/users");
+router.visit('/users');
 router.reload(); // re-fetch current page props
-router.post("/logout"); // non-GET navigation
+router.post('/logout'); // non-GET navigation
 ```
 
 ## Scroll Restoration
@@ -177,7 +177,7 @@ The pages router automatically saves and restores scroll position during client-
 This works out of the box with no configuration. If you need to opt out for a specific navigation, pass `preserveScroll: true`:
 
 ```ts
-router.visit("/users", { preserveScroll: true });
+router.visit('/users', { preserveScroll: true });
 ```
 
 `Link` also accepts `preserveScroll`:

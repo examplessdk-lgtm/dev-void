@@ -1,13 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from 'vitest';
 import {
   generateVoidAuthDatabaseModule,
   generateVoidAuthDrizzleSchema,
-} from "../../src/auth/drizzle";
+} from '../../src/auth/drizzle';
 
-describe("Better Auth Drizzle codegen", () => {
-  it("generates sqlite auth tables with Drizzle-friendly types", () => {
+describe('Better Auth Drizzle codegen', () => {
+  it('generates sqlite auth tables with Drizzle-friendly types', () => {
     const code = generateVoidAuthDrizzleSchema({
-      dialect: "sqlite",
+      dialect: 'sqlite',
       providers: null,
     });
 
@@ -23,20 +23,20 @@ describe("Better Auth Drizzle codegen", () => {
     );
     expect(code).toContain('index("session_userId_idx").on(table["userId"])');
     expect(code).toContain('"user": userTable');
-    expect(code).toContain("export const migrationSchema = {");
+    expect(code).toContain('export const migrationSchema = {');
     expect(code).toContain('"dialect": "sqlite"');
   });
 
-  it("keeps schema keys stable when users rename tables and columns", () => {
+  it('keeps schema keys stable when users rename tables and columns', () => {
     const code = generateVoidAuthDrizzleSchema({
-      dialect: "postgresql",
-      providers: ["github"],
+      dialect: 'postgresql',
+      providers: ['github'],
       userConfig: ({ defaults }) => ({
         ...defaults,
         user: {
-          modelName: "members",
+          modelName: 'members',
           fields: {
-            email: "email_address",
+            email: 'email_address',
           },
         },
       }),
@@ -51,15 +51,15 @@ describe("Better Auth Drizzle codegen", () => {
     expect(code).toContain('"name": "members"');
   });
 
-  it("can generate an auth database module that reuses void/db", () => {
+  it('can generate an auth database module that reuses void/db', () => {
     const code = generateVoidAuthDatabaseModule({
-      dialect: "postgresql",
-      schemaImportPath: "/project/.void/better-auth-schema.ts",
-      drizzleAdapterPath: "/resolved/better-auth/adapters/drizzle.mjs",
+      dialect: 'postgresql',
+      schemaImportPath: '/project/.void/better-auth-schema.ts',
+      drizzleAdapterPath: '/resolved/better-auth/adapters/drizzle.mjs',
     });
 
     expect(code).toContain('import { db as __voidDb } from "void/db"');
-    expect(code).toContain("drizzleAdapter(__voidDb");
-    expect(code).not.toContain("import pg from");
+    expect(code).toContain('drizzleAdapter(__voidDb');
+    expect(code).not.toContain('import pg from');
   });
 });

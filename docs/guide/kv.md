@@ -11,9 +11,9 @@ Void provides a typed KV client with automatic JSON serialization for [Cloudflar
 ### Get
 
 ```ts
-import { kv } from "void/kv";
+import { kv } from 'void/kv';
 
-const user = await kv.get<User>("user:123");
+const user = await kv.get<User>('user:123');
 // User | null
 ```
 
@@ -22,7 +22,7 @@ Values are automatically parsed as JSON. If the stored value isn't valid JSON, t
 ### Put
 
 ```ts
-await kv.put("user:123", { name: "Alice", role: "admin" });
+await kv.put('user:123', { name: 'Alice', role: 'admin' });
 ```
 
 Objects are automatically JSON-stringified. Strings are stored as-is.
@@ -30,44 +30,44 @@ Objects are automatically JSON-stringified. Strings are stored as-is.
 Add a TTL (in seconds) or absolute expiration (Unix timestamp):
 
 ```ts
-await kv.put("session:abc", sessionData, { ttl: 3600 });
-await kv.put("token:xyz", tokenData, { expiration: 1700000000 });
+await kv.put('session:abc', sessionData, { ttl: 3600 });
+await kv.put('token:xyz', tokenData, { expiration: 1700000000 });
 ```
 
 Attach metadata to a key:
 
 ```ts
-await kv.put("user:123", userData, {
-  metadata: { updatedBy: "admin" },
+await kv.put('user:123', userData, {
+  metadata: { updatedBy: 'admin' },
 });
 ```
 
 ### Delete
 
 ```ts
-await kv.delete("user:123");
+await kv.delete('user:123');
 ```
 
 ### List
 
 ```ts
-const result = await kv.list({ prefix: "user:" });
+const result = await kv.list({ prefix: 'user:' });
 // { keys: [{ name: "user:1" }, { name: "user:2" }], list_complete: true }
 ```
 
 Paginate with `limit` and `cursor`:
 
 ```ts
-const page = await kv.list({ prefix: "user:", limit: 100 });
+const page = await kv.list({ prefix: 'user:', limit: 100 });
 if (!page.list_complete) {
-  const next = await kv.list({ prefix: "user:", limit: 100, cursor: page.cursor });
+  const next = await kv.list({ prefix: 'user:', limit: 100, cursor: page.cursor });
 }
 ```
 
 ### Get with Metadata
 
 ```ts
-const result = await kv.getWithMetadata<User, { updatedBy: string }>("user:123");
+const result = await kv.getWithMetadata<User, { updatedBy: string }>('user:123');
 // { value: User | null, metadata: { updatedBy: string } | null }
 ```
 
@@ -76,15 +76,15 @@ const result = await kv.getWithMetadata<User, { updatedBy: string }>("user:123")
 For collections of the same type, use `kv.map()` to create a scoped, typed client with automatic key prefixing:
 
 ```ts
-const sessions = kv.map<Session>("sessions");
+const sessions = kv.map<Session>('sessions');
 
-await sessions.put("abc", { userId: 1, token: "..." }, { ttl: 3600 });
+await sessions.put('abc', { userId: 1, token: '...' }, { ttl: 3600 });
 // KV key: "sessions:abc"
 
-const session = await sessions.get("abc");
+const session = await sessions.get('abc');
 // Session | null
 
-await sessions.delete("abc");
+await sessions.delete('abc');
 ```
 
 The map automatically prefixes all keys with `"sessions:"` and strips the prefix when listing:

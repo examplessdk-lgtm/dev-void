@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { TreeRoot, TreeItem } from "reka-ui";
-import { Icon } from "@iconify/vue";
-import { useData } from "vitepress";
-import { computed, watch, ref } from "vue";
+import { Icon } from '@iconify/vue';
+import { TreeRoot, TreeItem } from 'reka-ui';
+import { useData } from 'vitepress';
+import { computed, watch, ref } from 'vue';
 
 export interface FileTreeItem {
   name: string;
@@ -19,7 +19,7 @@ const props = defineProps<{
 }>();
 
 function isFolder(item: FileTreeItem): boolean {
-  return !!item.children || item.name.endsWith("/");
+  return !!item.children || item.name.endsWith('/');
 }
 
 function getAllFolderNames(items: FileTreeItem[]): string[] {
@@ -38,7 +38,7 @@ function getAllFolderNames(items: FileTreeItem[]): string[] {
 }
 
 const resolvedItems = computed(() => {
-  if (typeof props.items === "function") {
+  if (typeof props.items === 'function') {
     return props.items(extMap[selectedAdapter.value]);
   }
   return props.items;
@@ -86,57 +86,69 @@ const { isDark } = useData();
 </template>
 
 <script lang="ts">
-import { defineComponent, h, ref } from "vue";
+import { defineComponent, h, ref } from 'vue';
 
-const adapters = ["React", "Vue", "Svelte", "Solid"] as const;
+const adapters = ['React', 'Vue', 'Svelte', 'Solid'] as const;
 
 const adapterIcons: Record<string, string> = {
-  React: "logos:react",
-  Vue: "logos:vue",
-  Svelte: "logos:svelte-icon",
-  Solid: "logos:solidjs-icon",
+  React: 'logos:react',
+  Vue: 'logos:vue',
+  Svelte: 'logos:svelte-icon',
+  Solid: 'logos:solidjs-icon',
 };
 
 const extMap: Record<string, string> = {
-  React: ".tsx",
-  Vue: ".vue",
-  Svelte: ".svelte",
-  Solid: ".tsx",
+  React: '.tsx',
+  Vue: '.vue',
+  Svelte: '.svelte',
+  Solid: '.tsx',
 };
 
-const ADAPTER_KEY = "vitepress:code-group-tab";
+const ADAPTER_KEY = 'vitepress:code-group-tab';
 export const selectedAdapter = ref(
-  typeof window !== "undefined" ? localStorage.getItem(ADAPTER_KEY) || "React" : "React",
+  typeof window !== 'undefined' ? localStorage.getItem(ADAPTER_KEY) || 'React' : 'React',
 );
 
 export function syncCodeGroups(title: string) {
-  document.querySelectorAll(".vp-code-group").forEach((group) => {
+  document.querySelectorAll('.vp-code-group').forEach((group) => {
     const label = group.querySelector(`.tabs label[data-title="${title}"]`);
-    if (!label) return;
+    if (!label) {
+      return;
+    }
     const input = group.querySelector(
-      `#${CSS.escape(label.getAttribute("for")!)}`,
+      `#${CSS.escape(label.getAttribute('for')!)}`,
     ) as HTMLInputElement | null;
-    if (!input || input.checked) return;
-    const i = Array.from(group.querySelectorAll(".tabs input")).indexOf(input);
-    const blocks = group.querySelector(".blocks");
-    if (!blocks || i < 0) return;
+    if (!input || input.checked) {
+      return;
+    }
+    const i = Array.from(group.querySelectorAll('.tabs input')).indexOf(input);
+    const blocks = group.querySelector('.blocks');
+    if (!blocks || i < 0) {
+      return;
+    }
     input.checked = true;
-    const current = blocks.querySelector(".active");
-    if (current) current.classList.remove("active");
-    blocks.children[i]?.classList.add("active");
+    const current = blocks.querySelector('.active');
+    if (current) {
+      current.classList.remove('active');
+    }
+    blocks.children[i]?.classList.add('active');
   });
 }
 
 let codeGroupListenerInstalled = false;
 export function installCodeGroupListener() {
-  if (codeGroupListenerInstalled) return;
+  if (codeGroupListenerInstalled) {
+    return;
+  }
   codeGroupListenerInstalled = true;
-  window.addEventListener("click", (e) => {
+  window.addEventListener('click', (e) => {
     const label = (e.target as Element)?.closest?.(
-      ".vp-code-group .tabs label",
+      '.vp-code-group .tabs label',
     ) as HTMLElement | null;
-    if (!label) return;
-    const title = label.getAttribute("data-title");
+    if (!label) {
+      return;
+    }
+    const title = label.getAttribute('data-title');
     if (title && (adapters as readonly string[]).includes(title)) {
       selectedAdapter.value = title;
     }
@@ -144,28 +156,48 @@ export function installCodeGroupListener() {
 }
 
 function isFolder(item: FileTreeItem): boolean {
-  return !!item.children || item.name.endsWith("/");
+  return !!item.children || item.name.endsWith('/');
 }
 
-const iconSize = { width: "16px", height: "16px", flexShrink: "0" };
+const iconSize = { width: '16px', height: '16px', flexShrink: '0' };
 
 function getFileIcon(name: string, dark: boolean): string {
-  const light = dark ? "" : "light-";
-  if (name === "vite.config.ts") return `vscode-icons:file-type-${light}vite`;
-  if (name.endsWith(".d.ts")) return "vscode-icons:file-type-typescriptdef";
-  if (name.endsWith(".ts")) return "vscode-icons:file-type-typescript";
-  if (name.endsWith(".vue")) return "vscode-icons:file-type-vue";
-  if (name.endsWith(".tsx")) return "vscode-icons:file-type-reactts";
-  if (name.endsWith(".svelte")) return "vscode-icons:file-type-svelte";
-  if (name.endsWith(".sql")) return "vscode-icons:file-type-sql";
-  if (name.endsWith(".json")) return `vscode-icons:file-type-${light}json`;
-  if (name === ".env") return "vscode-icons:file-type-dotenv";
-  if (name.endsWith(".ico")) return "vscode-icons:file-type-favicon";
-  return "lucide:file";
+  const light = dark ? '' : 'light-';
+  if (name === 'vite.config.ts') {
+    return `vscode-icons:file-type-${light}vite`;
+  }
+  if (name.endsWith('.d.ts')) {
+    return 'vscode-icons:file-type-typescriptdef';
+  }
+  if (name.endsWith('.ts')) {
+    return 'vscode-icons:file-type-typescript';
+  }
+  if (name.endsWith('.vue')) {
+    return 'vscode-icons:file-type-vue';
+  }
+  if (name.endsWith('.tsx')) {
+    return 'vscode-icons:file-type-reactts';
+  }
+  if (name.endsWith('.svelte')) {
+    return 'vscode-icons:file-type-svelte';
+  }
+  if (name.endsWith('.sql')) {
+    return 'vscode-icons:file-type-sql';
+  }
+  if (name.endsWith('.json')) {
+    return `vscode-icons:file-type-${light}json`;
+  }
+  if (name === '.env') {
+    return 'vscode-icons:file-type-dotenv';
+  }
+  if (name.endsWith('.ico')) {
+    return 'vscode-icons:file-type-favicon';
+  }
+  return 'lucide:file';
 }
 
 const TreeNode = defineComponent({
-  name: "TreeNode",
+  name: 'TreeNode',
   props: {
     treeItems: { type: Array as () => FileTreeItem[], required: true },
     level: { type: Number, default: 0 },
@@ -173,40 +205,40 @@ const TreeNode = defineComponent({
   },
   setup(props) {
     const nodeStyle = (level: number, folder: boolean) => ({
-      display: "flex",
-      alignItems: "center",
-      gap: "6px",
-      padding: "7px 8px",
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
+      padding: '7px 8px',
       paddingLeft: `${level * 20 + 6}px`,
-      borderRadius: "4px",
-      cursor: folder ? "pointer" : "default",
-      whiteSpace: "nowrap" as const,
+      borderRadius: '4px',
+      cursor: folder ? 'pointer' : 'default',
+      whiteSpace: 'nowrap' as const,
     });
 
     const nameStyle = {
-      color: "var(--vp-c-text-1)",
-      fontSize: "14px",
+      color: 'var(--vp-c-text-1)',
+      fontSize: '14px',
     };
 
     const descStyle = {
-      color: "var(--vp-c-text-2)",
-      fontSize: "12px",
-      marginLeft: "auto",
-      paddingLeft: "16px",
+      color: 'var(--vp-c-text-2)',
+      fontSize: '12px',
+      marginLeft: 'auto',
+      paddingLeft: '16px',
     };
 
     const chevronStyle = {
       ...iconSize,
-      color: "var(--vp-c-text-3)",
-      transition: "transform 0.15s",
+      color: 'var(--vp-c-text-3)',
+      transition: 'transform 0.15s',
     };
 
-    const spacerStyle = { width: "16px", flexShrink: "0" };
+    const spacerStyle = { width: '16px', flexShrink: '0' };
 
     return () =>
       props.treeItems.map((item) => {
         const folder = isFolder(item);
-        return h("li", { key: item.name, style: { listStyle: "none" } }, [
+        return h('li', { key: item.name, style: { listStyle: 'none' } }, [
           h(
             TreeItem,
             {
@@ -223,9 +255,9 @@ const TreeNode = defineComponent({
                 handleToggle: () => void;
               }) => [
                 h(
-                  "div",
+                  'div',
                   {
-                    class: "tree-node",
+                    class: 'tree-node',
                     style: nodeStyle(props.level, folder),
                     onClick: folder ? handleToggle : undefined,
                   },
@@ -233,17 +265,17 @@ const TreeNode = defineComponent({
                     // Expand/collapse chevron (folders only)
                     folder
                       ? h(Icon, {
-                          icon: "lucide:chevron-right",
+                          icon: 'lucide:chevron-right',
                           style: {
                             ...chevronStyle,
-                            transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)",
+                            transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
                           },
                         })
-                      : h("span", { style: spacerStyle }),
+                      : h('span', { style: spacerStyle }),
                     // Icon
                     folder
                       ? h(Icon, {
-                          icon: isExpanded ? "lucide:folder-open" : "lucide:folder",
+                          icon: isExpanded ? 'lucide:folder-open' : 'lucide:folder',
                           style: iconSize,
                         })
                       : h(Icon, {
@@ -253,30 +285,30 @@ const TreeNode = defineComponent({
                     // Name
                     item.link
                       ? h(
-                          "a",
+                          'a',
                           {
                             href: item.link,
                             style: {
                               ...nameStyle,
-                              textDecoration: "none",
+                              textDecoration: 'none',
                             },
                           },
                           item.name,
                         )
-                      : h("span", { style: nameStyle }, item.name),
+                      : h('span', { style: nameStyle }, item.name),
                     // Description
-                    item.description ? h("span", { style: descStyle }, item.description) : null,
+                    item.description ? h('span', { style: descStyle }, item.description) : null,
                   ],
                 ),
                 // Children
                 isExpanded && item.children
                   ? h(
-                      "ul",
+                      'ul',
                       {
                         style: {
-                          listStyle: "none",
-                          padding: "0",
-                          margin: "0",
+                          listStyle: 'none',
+                          padding: '0',
+                          margin: '0',
                         },
                       },
                       [
@@ -368,7 +400,7 @@ const TreeNode = defineComponent({
 }
 
 .adapter-tabs button.active::after {
-  content: "";
+  content: '';
   position: absolute;
   bottom: 0;
   left: 20px;

@@ -1,10 +1,10 @@
 <script setup>
-import FeatureGrid from "@components/oss/FeatureGrid.vue";
-import Footer from "@components/oss/Footer.vue";
-import Hero from "@components/oss/Hero.vue";
-import Spacer from "@components/shared/Spacer.vue";
-import { useData } from "vitepress";
-import bg from "./hero-bg.jpg";
+import FeatureGrid from '@components/oss/FeatureGrid.vue';
+import Footer from '@components/oss/Footer.vue';
+import Hero from '@components/oss/Hero.vue';
+import Spacer from '@components/shared/Spacer.vue';
+import { useData } from 'vitepress';
+import bg from './hero-bg.jpg';
 
 const { frontmatter } = useData();
 </script>

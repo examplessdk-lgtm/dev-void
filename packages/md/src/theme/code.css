@@ -1,6 +1,6 @@
 /* Void Markdown — Code Blocks */
 
-.void-md div[class*="language-"] {
+.void-md div[class*='language-'] {
   position: relative;
   margin: 1em 0;
   border-radius: 8px;
@@ -9,24 +9,24 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .void-md div[class*="language-"] {
+  :root:not([data-theme='light']) .void-md div[class*='language-'] {
     background: #1e293b;
   }
 }
 
-:root[data-theme="dark"] .void-md div[class*="language-"] {
+:root[data-theme='dark'] .void-md div[class*='language-'] {
   background: #1e293b;
 }
 
-.void-md div[class*="language-"] pre {
+.void-md div[class*='language-'] pre {
   margin: 0;
   padding: 1.25em 1.5em;
   overflow-x: auto;
   background: transparent;
 }
 
-.void-md div[class*="language-"] code {
-  font-family: var(--vmd-font-mono, ui-monospace, "Cascadia Code", Menlo, monospace);
+.void-md div[class*='language-'] code {
+  font-family: var(--vmd-font-mono, ui-monospace, 'Cascadia Code', Menlo, monospace);
   font-size: 0.875em;
   line-height: 1.7;
   display: block;
@@ -35,7 +35,7 @@
 }
 
 /* Language label */
-.void-md div[class*="language-"] .lang {
+.void-md div[class*='language-'] .lang {
   position: absolute;
   top: 0.5em;
   right: 3em;
@@ -47,7 +47,7 @@
 }
 
 /* Copy button */
-.void-md div[class*="language-"] .copy {
+.void-md div[class*='language-'] .copy {
   position: absolute;
   top: 0.5em;
   right: 0.5em;
@@ -61,12 +61,12 @@
   transition: opacity 0.15s;
 }
 
-.void-md div[class*="language-"]:hover .copy {
+.void-md div[class*='language-']:hover .copy {
   opacity: 1;
 }
 
-.void-md div[class*="language-"] .copy::before {
-  content: "";
+.void-md div[class*='language-'] .copy::before {
+  content: '';
   display: block;
   width: 100%;
   height: 100%;
@@ -81,22 +81,22 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .void-md pre.shiki.shiki-themes {
+  :root:not([data-theme='light']) .void-md pre.shiki.shiki-themes {
     background-color: var(--shiki-dark-bg, #1e293b) !important;
     color: var(--shiki-dark, #e1e4e8) !important;
   }
 
-  :root:not([data-theme="light"]) .void-md pre.shiki.shiki-themes span[style*="--shiki-dark"] {
+  :root:not([data-theme='light']) .void-md pre.shiki.shiki-themes span[style*='--shiki-dark'] {
     color: var(--shiki-dark) !important;
   }
 }
 
-:root[data-theme="dark"] .void-md pre.shiki.shiki-themes {
+:root[data-theme='dark'] .void-md pre.shiki.shiki-themes {
   background-color: var(--shiki-dark-bg, #1e293b) !important;
   color: var(--shiki-dark, #e1e4e8) !important;
 }
 
-:root[data-theme="dark"] .void-md pre.shiki.shiki-themes span[style*="--shiki-dark"] {
+:root[data-theme='dark'] .void-md pre.shiki.shiki-themes span[style*='--shiki-dark'] {
   color: var(--shiki-dark) !important;
 }
 
@@ -106,7 +106,7 @@
 }
 
 .void-md pre .diff.add::before {
-  content: "+";
+  content: '+';
   position: absolute;
   left: 0.5em;
   color: #10b981;
@@ -118,7 +118,7 @@
 }
 
 .void-md pre .diff.remove::before {
-  content: "-";
+  content: '-';
   position: absolute;
   left: 0.5em;
   color: #ef4444;
@@ -157,7 +157,7 @@
 }
 
 /* Line numbers */
-.void-md div[class*="language-"].line-numbers-mode {
+.void-md div[class*='language-'].line-numbers-mode {
   padding-left: 2.5em;
 }
 
@@ -178,11 +178,11 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .void-md .line-numbers-wrapper {
+  :root:not([data-theme='light']) .void-md .line-numbers-wrapper {
     background: #1e293b;
   }
 }
 
-:root[data-theme="dark"] .void-md .line-numbers-wrapper {
+:root[data-theme='dark'] .void-md .line-numbers-wrapper {
   background: #1e293b;
 }

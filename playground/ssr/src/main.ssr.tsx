@@ -1,6 +1,6 @@
-import { renderToString } from "react-dom/server";
-import { defineRender } from "void";
-import App from "./App";
+import { renderToString } from 'react-dom/server';
+import { defineRender } from 'void';
+import App from './App';
 
 async function readBlogPost(slug: string): Promise<string | null> {
   return (await import(`../blog/${slug}.md?raw`)).default;
@@ -8,9 +8,9 @@ async function readBlogPost(slug: string): Promise<string | null> {
 
 export default defineRender(async (c, assetTags) => {
   const url = new URL(c.req.url);
-  const currentCount = Number((await c.env.KV.get("ssr:visits")) ?? "0");
+  const currentCount = Number((await c.env.KV.get('ssr:visits')) ?? '0');
   const nextCount = currentCount + 1;
-  await c.env.KV.put("ssr:visits", String(nextCount));
+  await c.env.KV.put('ssr:visits', String(nextCount));
 
   const blogMatch = url.pathname.match(/^\/blog\/(.+)$/);
   const blogContent = blogMatch ? await readBlogPost(blogMatch[1]) : null;
@@ -18,7 +18,7 @@ export default defineRender(async (c, assetTags) => {
   const appHtml = renderToString(
     <App url={url.pathname} visitCount={nextCount} blogContent={blogContent} />,
   );
-  const stateJson = JSON.stringify({ visits: nextCount, blogContent }).replace(/</g, "\\u003c");
+  const stateJson = JSON.stringify({ visits: nextCount, blogContent }).replace(/</g, '\\u003c');
   const html = `<!doctype html>
 <html lang="en">
   <head>
@@ -35,6 +35,6 @@ export default defineRender(async (c, assetTags) => {
 </html>`;
 
   return new Response(html, {
-    headers: { "content-type": "text/html; charset=utf-8" },
+    headers: { 'content-type': 'text/html; charset=utf-8' },
   });
 });

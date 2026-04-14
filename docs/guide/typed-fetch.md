@@ -9,20 +9,20 @@ Void ships a typed `fetch` client that knows every route in your app. Import it 
 ## Basic Usage
 
 ```ts
-import { fetch } from "void/client";
+import { fetch } from 'void/client';
 
 // GET: return type inferred from your handler
-const users = await fetch("/api/users");
+const users = await fetch('/api/users');
 
 // POST: body type-checked against your handler's validator
-await fetch("/api/users", {
-  method: "POST",
-  body: { name: "Alice", email: "alice@example.com" },
+await fetch('/api/users', {
+  method: 'POST',
+  body: { name: 'Alice', email: 'alice@example.com' },
 });
 
 // Dynamic params interpolated from the route pattern
-const user = await fetch("/api/users/:id", {
-  params: { id: "42" },
+const user = await fetch('/api/users/:id', {
+  params: { id: '42' },
 });
 ```
 
@@ -50,8 +50,8 @@ export const GET = defineHandler.withValidator({
 });
 
 // Client: query is type-checked
-const data = await fetch("/api/search", {
-  query: { q: "hello" },
+const data = await fetch('/api/search', {
+  query: { q: 'hello' },
 });
 // data: { results: never[]; term: string }
 ```
@@ -61,10 +61,10 @@ const data = await fetch("/api/search", {
 Non-2xx responses throw a `FetchError`:
 
 ```ts
-import { fetch, FetchError } from "void/client";
+import { fetch, FetchError } from 'void/client';
 
 try {
-  await fetch("/api/users/:id", { params: { id: "999" } });
+  await fetch('/api/users/:id', { params: { id: '999' } });
 } catch (e) {
   if (e instanceof FetchError) {
     console.log(e.status); // 404

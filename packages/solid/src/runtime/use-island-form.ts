@@ -1,5 +1,5 @@
-import { createSignal, createMemo } from "solid-js";
-import { createStore, reconcile } from "solid-js/store";
+import { createSignal, createMemo } from 'solid-js';
+import { createStore, reconcile } from 'solid-js/store';
 
 export interface IslandFormReturn<T extends Record<string, unknown>> {
   data: T;
@@ -57,7 +57,9 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     } else {
       setErrors((prev) => {
         const next = { ...prev };
-        for (const f of fields) delete next[f];
+        for (const f of fields) {
+          delete next[f];
+        }
         return next;
       });
     }
@@ -67,13 +69,15 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     setProcessing(true);
     setWasSuccessful(false);
     setRecentlySuccessful(false);
-    if (successTimeout) clearTimeout(successTimeout);
+    if (successTimeout) {
+      clearTimeout(successTimeout);
+    }
     setErrors({});
 
     try {
       const response = await fetch(url, {
         method,
-        headers: { "Content-Type": "application/json" },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       });
 
@@ -90,7 +94,9 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
         window.location.reload();
       } else if (response.status === 422) {
         const body = (await response.json()) as { errors?: Record<string, string> };
-        if (body?.errors) setErrors(body.errors);
+        if (body?.errors) {
+          setErrors(body.errors);
+        }
       }
     } catch {
       // Request failed
@@ -103,7 +109,7 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     get data() {
       return data as T;
     },
-    setData: setData as IslandFormReturn<T>["setData"],
+    setData: setData as IslandFormReturn<T>['setData'],
     get errors() {
       return errors();
     },
@@ -121,9 +127,9 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     },
     reset,
     clearErrors,
-    post: (url: string) => submit(url, "POST"),
-    put: (url: string) => submit(url, "PUT"),
-    patch: (url: string) => submit(url, "PATCH"),
-    delete: (url: string) => submit(url, "DELETE"),
+    post: (url: string) => submit(url, 'POST'),
+    put: (url: string) => submit(url, 'PUT'),
+    patch: (url: string) => submit(url, 'PATCH'),
+    delete: (url: string) => submit(url, 'DELETE'),
   };
 }

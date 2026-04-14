@@ -1,8 +1,8 @@
-import { useContext, splitProps, createMemo, onMount, onCleanup } from "solid-js";
-import type { JSX } from "solid-js";
-import { RouterContext } from "./context";
+import { useContext, splitProps, createMemo, onMount, onCleanup } from 'solid-js';
+import type { JSX } from 'solid-js';
+import { RouterContext } from './context';
 
-type PrefetchStrategy = "hover" | "click" | "mount" | "visible";
+type PrefetchStrategy = 'hover' | 'click' | 'mount' | 'visible';
 
 type CommonProps = {
   href: string;
@@ -20,39 +20,57 @@ export type LinkProps = CommonProps &
 
 export function Link(props: LinkProps): JSX.Element {
   const [local, rest] = splitProps(props, [
-    "href",
-    "method",
-    "data",
-    "preserveScroll",
-    "viewTransition",
-    "prefetch",
-    "cacheFor",
-    "children",
+    'href',
+    'method',
+    'data',
+    'preserveScroll',
+    'viewTransition',
+    'prefetch',
+    'cacheFor',
+    'children',
   ]);
   const router = useContext(RouterContext);
 
   function getStrategies(): PrefetchStrategy[] {
     const p = local.prefetch;
-    if (p === false || p === undefined) return [];
-    if (p === true) return ["hover"];
-    if (typeof p === "string") return [p];
+    if (p === false || p === undefined) {
+      return [];
+    }
+    if (p === true) {
+      return ['hover'];
+    }
+    if (typeof p === 'string') {
+      return [p];
+    }
     return p;
   }
 
   function doPrefetch() {
-    if (!router?.prefetch) return;
+    if (!router?.prefetch) {
+      return;
+    }
     const current = window.location.pathname + window.location.search;
-    if (local.href === current) return;
+    if (local.href === current) {
+      return;
+    }
     const options: any = {};
-    if (local.cacheFor !== undefined) options.cacheFor = local.cacheFor;
-    if (local.method) options.method = local.method;
+    if (local.cacheFor !== undefined) {
+      options.cacheFor = local.cacheFor;
+    }
+    if (local.method) {
+      options.method = local.method;
+    }
     router.prefetch(local.href, options);
   }
 
   function onClick(e: MouseEvent) {
-    if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0) {
+      return;
+    }
     const url = new URL(local.href, window.location.origin);
-    if (url.origin !== window.location.origin) return;
+    if (url.origin !== window.location.origin) {
+      return;
+    }
 
     e.preventDefault();
     router?.visit(local.href, {
@@ -84,10 +102,10 @@ export function Link(props: LinkProps): JSX.Element {
 
   onMount(() => {
     const strategies = getStrategies();
-    if (strategies.includes("mount")) {
+    if (strategies.includes('mount')) {
       doPrefetch();
     }
-    if (strategies.includes("visible") && el) {
+    if (strategies.includes('visible') && el) {
       observer = new IntersectionObserver(
         (entries) => {
           if (entries.some((e) => e.isIntersecting)) {
@@ -96,21 +114,23 @@ export function Link(props: LinkProps): JSX.Element {
             observer = null;
           }
         },
-        { rootMargin: "0px" },
+        { rootMargin: '0px' },
       );
       observer.observe(el);
     }
   });
 
   onCleanup(() => {
-    if (hoverTimer) clearTimeout(hoverTimer);
+    if (hoverTimer) {
+      clearTimeout(hoverTimer);
+    }
     if (observer) {
       observer.disconnect();
       observer = null;
     }
   });
 
-  const isGet = createMemo(() => (local.method || "GET").toUpperCase() === "GET");
+  const isGet = createMemo(() => (local.method || 'GET').toUpperCase() === 'GET');
   const strategies = createMemo(() => getStrategies());
 
   return (
@@ -122,10 +142,10 @@ export function Link(props: LinkProps): JSX.Element {
           }}
           href={local.href}
           onClick={onClick}
-          onMouseEnter={strategies().includes("hover") ? onMouseEnter : undefined}
-          onMouseLeave={strategies().includes("hover") ? onMouseLeave : undefined}
-          onFocus={strategies().includes("hover") ? doPrefetch : undefined}
-          onMouseDown={strategies().includes("click") ? onMouseDown : undefined}
+          onMouseEnter={strategies().includes('hover') ? onMouseEnter : undefined}
+          onMouseLeave={strategies().includes('hover') ? onMouseLeave : undefined}
+          onFocus={strategies().includes('hover') ? doPrefetch : undefined}
+          onMouseDown={strategies().includes('click') ? onMouseDown : undefined}
           {...rest}
         >
           {local.children}
@@ -137,10 +157,10 @@ export function Link(props: LinkProps): JSX.Element {
           }}
           type="button"
           onClick={onClick}
-          onMouseEnter={strategies().includes("hover") ? onMouseEnter : undefined}
-          onMouseLeave={strategies().includes("hover") ? onMouseLeave : undefined}
-          onFocus={strategies().includes("hover") ? doPrefetch : undefined}
-          onMouseDown={strategies().includes("click") ? onMouseDown : undefined}
+          onMouseEnter={strategies().includes('hover') ? onMouseEnter : undefined}
+          onMouseLeave={strategies().includes('hover') ? onMouseLeave : undefined}
+          onFocus={strategies().includes('hover') ? doPrefetch : undefined}
+          onMouseDown={strategies().includes('click') ? onMouseDown : undefined}
           {...(rest as any)}
         >
           {local.children}

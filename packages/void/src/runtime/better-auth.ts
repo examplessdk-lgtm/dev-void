@@ -1,10 +1,10 @@
+import { applySqliteAuthMigrations } from './auth-migrations';
 import {
   createVoidAuthRuntime,
   type ResolvedDatabase,
   type VoidAuthEnv,
   type VoidAuthRuntimeApi,
-} from "./better-auth-shared";
-import { applySqliteAuthMigrations } from "./auth-migrations";
+} from './better-auth-shared';
 
 async function resolveDatabase(env: VoidAuthEnv): Promise<ResolvedDatabase> {
   if (!env.DB) {
@@ -19,16 +19,16 @@ async function resolveDatabase(env: VoidAuthEnv): Promise<ResolvedDatabase> {
 async function runSqliteAuthMigrations(
   _request: Request,
   env: VoidAuthEnv,
-  runtime: Parameters<VoidAuthRuntimeApi["runVoidAuthMigrations"]>[2],
-  migrationSchema: Parameters<VoidAuthRuntimeApi["runVoidAuthMigrations"]>[3],
+  runtime: Parameters<VoidAuthRuntimeApi['runVoidAuthMigrations']>[2],
+  migrationSchema: Parameters<VoidAuthRuntimeApi['runVoidAuthMigrations']>[3],
 ): Promise<void> {
   if (!migrationSchema) {
-    throw new Error("Void auth migration schema is unavailable.");
+    throw new Error('Void auth migration schema is unavailable.');
   }
-  if (runtime.dialect !== "sqlite") {
+  if (runtime.dialect !== 'sqlite') {
     throw new Error(`Void auth runtime mismatch: expected sqlite, received ${runtime.dialect}.`);
   }
-  if (migrationSchema.dialect !== "sqlite") {
+  if (migrationSchema.dialect !== 'sqlite') {
     throw new Error(
       `Void auth runtime mismatch: expected sqlite, received ${migrationSchema.dialect}.`,
     );
@@ -51,18 +51,18 @@ async function runSqliteAuthMigrations(
   );
 }
 
-const runtime = createVoidAuthRuntime("sqlite", resolveDatabase, runSqliteAuthMigrations);
+const runtime = createVoidAuthRuntime('sqlite', resolveDatabase, runSqliteAuthMigrations);
 
-export const resolveVoidAuthOptions: VoidAuthRuntimeApi["resolveVoidAuthOptions"] =
+export const resolveVoidAuthOptions: VoidAuthRuntimeApi['resolveVoidAuthOptions'] =
   runtime.resolveVoidAuthOptions;
-export const createVoidAuth: VoidAuthRuntimeApi["createVoidAuth"] = runtime.createVoidAuth;
-export const resolveVoidAuthState: VoidAuthRuntimeApi["resolveVoidAuthState"] =
+export const createVoidAuth: VoidAuthRuntimeApi['createVoidAuth'] = runtime.createVoidAuth;
+export const resolveVoidAuthState: VoidAuthRuntimeApi['resolveVoidAuthState'] =
   runtime.resolveVoidAuthState;
-export const runVoidAuthMiddleware: VoidAuthRuntimeApi["runVoidAuthMiddleware"] =
+export const runVoidAuthMiddleware: VoidAuthRuntimeApi['runVoidAuthMiddleware'] =
   runtime.runVoidAuthMiddleware;
-export const handleVoidAuthRequest: VoidAuthRuntimeApi["handleVoidAuthRequest"] =
+export const handleVoidAuthRequest: VoidAuthRuntimeApi['handleVoidAuthRequest'] =
   runtime.handleVoidAuthRequest;
-export const runVoidAuthMigrations: VoidAuthRuntimeApi["runVoidAuthMigrations"] =
+export const runVoidAuthMigrations: VoidAuthRuntimeApi['runVoidAuthMigrations'] =
   runtime.runVoidAuthMigrations;
 
-export type { VoidAuthDialect, VoidAuthEnv, VoidAuthRuntimeOptions } from "./better-auth-shared";
+export type { VoidAuthDialect, VoidAuthEnv, VoidAuthRuntimeOptions } from './better-auth-shared';

@@ -1,28 +1,32 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { useForm } from "@void/vue";
-import type { Props } from "./storage.server";
+import { useForm } from '@void/vue';
+import { ref } from 'vue';
+import type { Props } from './storage.server';
 
 defineProps<Props>();
 
 const fileInput = ref<HTMLInputElement>();
 
-const uploadForm = useForm("/storage", {
+const uploadForm = useForm('/storage', {
   file: null as File | null,
 });
 
 async function handleUpload() {
   const file = fileInput.value?.files?.[0];
-  if (!file) return;
+  if (!file) {
+    return;
+  }
   uploadForm.data.file = file;
   await uploadForm.post();
-  if (fileInput.value) fileInput.value.value = "";
+  if (fileInput.value) {
+    fileInput.value.value = '';
+  }
   uploadForm.data.file = null;
 }
 
-const deleteForm = useForm("/storage", {
-  intent: "delete",
-  key: "",
+const deleteForm = useForm('/storage', {
+  intent: 'delete',
+  key: '',
 });
 
 function deleteObject(key: string) {
@@ -31,9 +35,13 @@ function deleteObject(key: string) {
 }
 
 function formatSize(bytes: number): string {
-  if (bytes < 1024) return bytes + " B";
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  if (bytes < 1024) {
+    return bytes + ' B';
+  }
+  if (bytes < 1024 * 1024) {
+    return (bytes / 1024).toFixed(1) + ' KB';
+  }
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 </script>
 <template>
@@ -45,7 +53,7 @@ function formatSize(bytes: number): string {
     <form @submit.prevent="handleUpload">
       <input type="file" ref="fileInput" required />
       <button type="submit" :disabled="uploadForm.processing" style="margin-left: 5px">
-        {{ uploadForm.processing ? "Uploading..." : "Upload" }}
+        {{ uploadForm.processing ? 'Uploading...' : 'Upload' }}
       </button>
     </form>
 

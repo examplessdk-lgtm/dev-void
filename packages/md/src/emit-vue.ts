@@ -1,6 +1,6 @@
-import type { CompileResult } from "./compile";
-import type { IslandImport } from "./extract-script";
-import { toIslandId } from "./emit-shared";
+import type { CompileResult } from './compile';
+import { toIslandId } from './emit-shared';
+import type { IslandImport } from './extract-script';
 
 export function emitVueComponent(result: CompileResult): string {
   return `
@@ -46,8 +46,8 @@ function findIslandTags(html: string, names: Set<string>): IslandMatch[] {
         name,
         start: m.index,
         end: m.index + m[0].length,
-        attrs: (m[2] ?? m[4] ?? "").trim(),
-        children: m[5] ?? "",
+        attrs: (m[2] ?? m[4] ?? '').trim(),
+        children: m[5] ?? '',
       });
     }
   }
@@ -59,7 +59,7 @@ function parseAttrs(attrStr: string): Record<string, string> {
   const re = /(\w[\w-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+)))?/g;
   let m;
   while ((m = re.exec(attrStr)) !== null) {
-    result[m[1]] = m[2] ?? m[3] ?? m[4] ?? "";
+    result[m[1]] = m[2] ?? m[3] ?? m[4] ?? '';
   }
   return result;
 }
@@ -106,7 +106,7 @@ export function emitVueComponentWithIslands(
     }
 
     const attrs = parseAttrs(tag.attrs);
-    const propsStr = Object.keys(attrs).length > 0 ? JSON.stringify(attrs) : "null";
+    const propsStr = Object.keys(attrs).length > 0 ? JSON.stringify(attrs) : 'null';
     // Use the wrapper component
     vnodes.push(`h(${tag.name}, ${propsStr})`);
 
@@ -132,7 +132,7 @@ export default defineComponent({
   setup() {
     provide("__void_frontmatter", __frontmatter);
     return () => [
-      ${vnodes.join(",\n      ")}
+      ${vnodes.join(',\n      ')}
     ];
   }
 });

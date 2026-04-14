@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -6,15 +6,22 @@ import {
   readdirSync,
   unlinkSync,
   writeFileSync,
-} from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, join, relative } from "node:path";
-import { loadEnv } from "vite";
-import { voidLog, voidWarn } from "./log";
+} from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { loadEnv } from 'vite';
+import { getToken, isStagingMode } from './cli/auth';
+import { readWranglerCompat } from './cli/wrangler';
+import { readConfig } from './config';
+import { voidLog, voidWarn } from './log';
+import { filterLoadedEnv, stripInternalEnvKeys } from './shared/env';
+import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy';
 
-const PRERENDER_PATHS_ENDPOINT = "/__void/prerender-paths";
+const PRERENDER_PATHS_ENDPOINT = '/__void/prerender-paths';
+const STATIC_PAGE_DATA_DIR = '_void/pages';
 
-type PrerenderWorkerModuleType = "ESModule" | "CommonJS" | "CompiledWasm" | "Text" | "Data";
+type PrerenderWorkerModuleType = 'ESModule' | 'CommonJS' | 'CompiledWasm' | 'Text' | 'Data';
 
 export interface PrerenderWorkerModule {
   path: string;
@@ -32,7 +39,13 @@ export interface PrerenderRunResult extends PrerenderResult {
 }
 
 function outputFileForPath(path: string): string {
-  return path === "/" ? "index.html" : `${path.slice(1)}.html`;
+  return path === '/' ? 'index.html' : `${path.slice(1)}.html`;
+}
+
+function pageDataFileForPath(path: string): string {
+  return path === '/'
+    ? `${STATIC_PAGE_DATA_DIR}/index.json`
+    : `${STATIC_PAGE_DATA_DIR}/${path.slice(1)}.json`;
 }
 
 async function readPrerenderPathsResponse(response: Response): Promise<string[]> {
@@ -41,8 +54,8 @@ async function readPrerenderPathsResponse(response: Response): Promise<string[]>
   }
 
   const payload = (await response.json()) as { paths?: unknown };
-  if (!Array.isArray(payload.paths) || !payload.paths.every((path) => typeof path === "string")) {
-    throw new Error("Failed to collect prerender paths: invalid response payload");
+  if (!Array.isArray(payload.paths) || !payload.paths.every((path) => typeof path === 'string')) {
+    throw new Error('Failed to collect prerender paths: invalid response payload');
   }
 
   return payload.paths;
@@ -52,6 +65,7 @@ async function renderPrerenderPaths(
   paths: string[],
   clientDir: string,
   fetchPath: (path: string) => Promise<Response>,
+  fetchPageData?: (path: string) => Promise<Response>,
 ): Promise<PrerenderResult> {
   const result: PrerenderResult = { rendered: [], failed: [] };
 
@@ -70,6 +84,18 @@ async function renderPrerenderPaths(
       const outputPath = join(clientDir, outputFile);
       mkdirSync(dirname(outputPath), { recursive: true });
       writeFileSync(outputPath, html);
+
+      if (fetchPageData) {
+        const pageDataResponse = await fetchPageData(path);
+        if (pageDataResponse.headers.get('X-VoidPages')) {
+          const pageData = await pageDataResponse.json();
+          const pageDataFile = pageDataFileForPath(path);
+          const pageDataPath = join(clientDir, pageDataFile);
+          mkdirSync(dirname(pageDataPath), { recursive: true });
+          writeFileSync(pageDataPath, JSON.stringify(pageData));
+        }
+      }
+
       result.rendered.push(path);
       voidLog(`prerender \x1b[36m${outputFile}\x1b[39m`);
     } catch (err) {
@@ -83,32 +109,32 @@ async function renderPrerenderPaths(
 }
 
 function normalizeWorkerModulePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/^\.\//, "");
+  return path.replace(/\\/g, '/').replace(/^\.\//, '');
 }
 
 function resolveWorkerModuleType(relativePath: string): PrerenderWorkerModuleType | null {
   const normalized = normalizeWorkerModulePath(relativePath);
 
-  if (normalized.includes("/.vite/") || normalized.startsWith(".vite/")) {
+  if (normalized.includes('/.vite/') || normalized.startsWith('.vite/')) {
     return null;
   }
-  if (normalized === "wrangler.json" || normalized === "wrangler.jsonc") {
+  if (normalized === 'wrangler.json' || normalized === 'wrangler.jsonc') {
     return null;
   }
-  if (normalized.endsWith(".mjs") || normalized.endsWith(".js")) {
-    return "ESModule";
+  if (normalized.endsWith('.mjs') || normalized.endsWith('.js')) {
+    return 'ESModule';
   }
-  if (normalized.endsWith(".cjs")) {
-    return "CommonJS";
+  if (normalized.endsWith('.cjs')) {
+    return 'CommonJS';
   }
-  if (normalized.endsWith(".wasm")) {
-    return "CompiledWasm";
+  if (normalized.endsWith('.wasm')) {
+    return 'CompiledWasm';
   }
-  if (normalized.endsWith(".txt")) {
-    return "Text";
+  if (normalized.endsWith('.txt')) {
+    return 'Text';
   }
-  if (normalized.endsWith(".bin")) {
-    return "Data";
+  if (normalized.endsWith('.bin')) {
+    return 'Data';
   }
 
   return null;
@@ -142,18 +168,24 @@ export function collectPrerenderWorkerModules(
   const modules: CollectedPrerenderWorkerModule[] = collectFiles(workerDir).flatMap((filePath) => {
     const relativePath = normalizeWorkerModulePath(relative(workerDir, filePath));
     const type = resolveWorkerModuleType(relativePath);
-    if (!type) return [];
+    if (!type) {
+      return [];
+    }
 
     const file = readFileSync(filePath);
-    const contents: PrerenderWorkerModule["contents"] =
-      type === "CompiledWasm" || type === "Data" ? new Uint8Array(file) : file.toString("utf-8");
+    const contents: PrerenderWorkerModule['contents'] =
+      type === 'CompiledWasm' || type === 'Data' ? new Uint8Array(file) : file.toString('utf-8');
 
     return [{ path: filePath, relativePath, type, contents }];
   });
 
   modules.sort((a, b) => {
-    if (a.relativePath === normalizedEntry) return -1;
-    if (b.relativePath === normalizedEntry) return 1;
+    if (a.relativePath === normalizedEntry) {
+      return -1;
+    }
+    if (b.relativePath === normalizedEntry) {
+      return 1;
+    }
     return a.relativePath.localeCompare(b.relativePath);
   });
 
@@ -164,27 +196,98 @@ export function collectPrerenderWorkerModules(
   return modules.map(({ relativePath: _relativePath, ...module }) => module);
 }
 
+export interface PrerenderBindingsInput {
+  wranglerVars: Record<string, unknown> | undefined;
+  env: Record<string, string>;
+  voidToken: string | null | undefined;
+  voidProjectId: string | undefined;
+  voidStaging: boolean;
+  remoteMode: boolean | undefined;
+}
+
+export function buildPrerenderBindings(input: PrerenderBindingsInput): Record<string, unknown> {
+  const { sanitized: wranglerVars, stripped: wranglerStripped } = stripInternalEnvKeys(
+    input.wranglerVars,
+  );
+  const { sanitized: env, stripped: envStripped } = stripInternalEnvKeys(input.env);
+  const allStripped = [...new Set([...wranglerStripped, ...envStripped])];
+  if (allStripped.length > 0) {
+    voidWarn(
+      `Ignoring internal env keys in prerender inputs: ${allStripped.join(', ')}. These are reserved for Void runtime use.`,
+    );
+  }
+
+  const voidBindings: Record<string, string> = {};
+  if (input.voidToken && input.voidProjectId) {
+    voidBindings.__VOID_TOKEN = input.voidToken;
+    voidBindings.__VOID_PROJECT_ID = input.voidProjectId;
+    if (input.voidStaging) {
+      voidBindings.__VOID_STAGING = '1';
+    }
+    voidBindings.__VOID_PROXY_URL = input.voidStaging ? STAGING_PROXY_URL : DEFAULT_PROXY_URL;
+    if (input.remoteMode) {
+      voidBindings.__VOID_REMOTE = '1';
+    }
+  }
+  return { ...wranglerVars, ...env, ...voidBindings };
+}
+
 async function createCloudflarePrerenderRunner(options: {
   root: string;
   workerDir: string;
   persistDir: string;
   clientDir?: string;
+  remoteMode?: boolean;
+  projectId?: string;
 }) {
-  const { root, workerDir, persistDir, clientDir } = options;
+  const { root, workerDir, persistDir, clientDir, remoteMode } = options;
 
-  const wranglerPath = join(workerDir, "wrangler.json");
+  const wranglerPath = join(workerDir, 'wrangler.json');
   if (!existsSync(wranglerPath)) {
     throw new Error(`[void] wrangler.json not found in ${workerDir}`);
   }
-  const wranglerConfig = JSON.parse(readFileSync(wranglerPath, "utf-8"));
-  const workerMain = wranglerConfig.main ?? "index.js";
+  const wranglerConfig = JSON.parse(readFileSync(wranglerPath, 'utf-8'));
+  const wranglerCompat = readWranglerCompat(root, readConfig(root), workerDir);
+  const workerMain = wranglerConfig.main ?? 'index.js';
 
-  const env = loadEnv("production", root, "");
+  const env = filterLoadedEnv(loadEnv('production', root, ''));
 
-  const wranglerUrl = import.meta.resolve("wrangler/package.json");
+  // Resolve Void projectId via a three-level chain:
+  //   1. explicit options.projectId — passed from runFullDeploy so the
+  //      `void deploy --project <slug>` flow works even when the in-memory
+  //      config hasn't been persisted to .void/project.json yet.
+  //   2. VOID_DEPLOY_PROJECT_ID env var — crosses the process boundary for
+  //      the static-output path, where plugin-prerender's closeBundle runs
+  //      inside the vite build subprocess and can't see the parent's config.
+  //   3. .void/project.json — existing on-disk fallback for linked projects.
+  const voidToken = getToken();
+  let voidProjectId: string | undefined = options.projectId;
+  if (!voidProjectId) {
+    voidProjectId = process.env.VOID_DEPLOY_PROJECT_ID || undefined;
+  }
+  if (!voidProjectId) {
+    const projectJsonPath = join(root, '.void', 'project.json');
+    try {
+      voidProjectId = JSON.parse(readFileSync(projectJsonPath, 'utf-8')).projectId;
+    } catch {
+      // No linked project — prerender without Void credentials.
+    }
+  }
+  const voidStaging = isStagingMode();
+
+  const bindings = buildPrerenderBindings({
+    wranglerVars: wranglerConfig.vars,
+    env,
+    voidToken,
+    voidProjectId,
+    voidStaging,
+    remoteMode,
+  });
+
+  const wranglerUrl = import.meta.resolve('wrangler/package.json');
   const require = createRequire(wranglerUrl);
-  const miniflarePath = require.resolve("miniflare");
-  const { Miniflare } = (await import(miniflarePath)) as {
+  const miniflarePath = require.resolve('miniflare');
+  const { Miniflare } = (await import(pathToFileURL(miniflarePath).href)) as {
     Miniflare: new (options: Record<string, unknown>) => {
       dispatchFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
       dispose(): Promise<void>;
@@ -194,21 +297,21 @@ async function createCloudflarePrerenderRunner(options: {
   const mfOptions: Record<string, unknown> = {
     modules: collectPrerenderWorkerModules(workerDir, workerMain),
     modulesRoot: workerDir,
-    compatibilityDate: wranglerConfig.compatibility_date ?? "2024-01-01",
-    compatibilityFlags: wranglerConfig.compatibility_flags ?? [],
-    bindings: { ...wranglerConfig.vars, ...env },
+    compatibilityDate: wranglerCompat.compatibilityDate,
+    compatibilityFlags: wranglerCompat.compatibilityFlags ?? [],
+    bindings,
   };
 
   if (clientDir) {
     mfOptions.serviceBindings = {
-      [wranglerConfig.assets?.binding ?? "ASSETS"](request: Request) {
+      [wranglerConfig.assets?.binding ?? 'ASSETS'](request: Request) {
         const url = new URL(request.url);
         const filePath = join(clientDir, url.pathname);
         try {
           const content = readFileSync(filePath);
           return new Response(content);
         } catch {
-          return new Response("Not Found", { status: 404 });
+          return new Response('Not Found', { status: 404 });
         }
       },
     };
@@ -245,15 +348,29 @@ async function createCloudflarePrerenderRunner(options: {
   }
 
   const mf = new Miniflare(mfOptions);
+  const allBindings = mfOptions.bindings as Record<string, unknown> | undefined;
+  const proxyToken = allBindings?.__VOID_PROXY_TOKEN as string | undefined;
 
   return {
     async collectPaths(): Promise<string[]> {
+      const headers: Record<string, string> = {};
+      if (proxyToken) {
+        headers['x-void-internal'] = proxyToken;
+      }
       return readPrerenderPathsResponse(
-        await mf.dispatchFetch(`http://localhost${PRERENDER_PATHS_ENDPOINT}`, { method: "POST" }),
+        await mf.dispatchFetch(`http://localhost${PRERENDER_PATHS_ENDPOINT}`, {
+          method: 'POST',
+          headers,
+        }),
       );
     },
     async fetchPath(path: string): Promise<Response> {
       return mf.dispatchFetch(`http://localhost${path}`);
+    },
+    async fetchPageData(path: string): Promise<Response> {
+      return mf.dispatchFetch(`http://localhost${path}`, {
+        headers: { Accept: 'application/json', Purpose: 'prefetch', 'X-VoidPages': 'true' },
+      });
     },
     async close() {
       await mf.dispose();
@@ -266,6 +383,8 @@ export async function collectPrerenderPaths(options: {
   workerDir: string;
   persistDir: string;
   clientDir?: string;
+  remoteMode?: boolean;
+  projectId?: string;
 }): Promise<string[]> {
   const runner = await createCloudflarePrerenderRunner(options);
   try {
@@ -285,14 +404,21 @@ export async function prerenderPages(options: {
   workerDir: string;
   clientDir: string;
   persistDir: string;
+  remoteMode?: boolean;
+  projectId?: string;
 }): Promise<PrerenderRunResult> {
   const runner = await createCloudflarePrerenderRunner(options);
   try {
     const paths = await runner.collectPaths();
-    if (paths.length === 0) return { paths, rendered: [], failed: [] };
+    if (paths.length === 0) {
+      return { paths, rendered: [], failed: [] };
+    }
 
-    const result = await renderPrerenderPaths(paths, options.clientDir, (path) =>
-      runner.fetchPath(path),
+    const result = await renderPrerenderPaths(
+      paths,
+      options.clientDir,
+      (path) => runner.fetchPath(path),
+      (path) => runner.fetchPageData(path),
     );
     return { paths, ...result };
   } finally {
@@ -301,12 +427,24 @@ export async function prerenderPages(options: {
 }
 
 type NodeRunnerConfig =
-  | { mode: "collect"; ssrDir: string; clientDir?: string }
-  | { mode: "collect-and-render"; ssrDir: string; clientDir: string };
+  | { mode: 'collect'; ssrDir: string; clientDir?: string }
+  | { mode: 'collect-and-render'; ssrDir: string; clientDir: string };
 
 async function runNodePrerenderRunner<T>(root: string, config: NodeRunnerConfig): Promise<T> {
-  const env = loadEnv("production", root, "");
-  const runnerPath = join(root, ".void", "prerender-runner.mjs");
+  // Mirror the sanitization pipeline used by envPlugin.config (index.ts),
+  // buildPrerenderBindings (CF runner), and loadDeployEnv (deploy.ts): strip
+  // any internal Void keys a user may have placed in .env.production so they
+  // can't shadow or pollute the child process env via the `...env` spread
+  // below. Consistency matters — all sites that ingest user .env files must
+  // run the same sanitizer, or drift will reintroduce the leak.
+  const filtered = filterLoadedEnv(loadEnv('production', root, ''));
+  const { sanitized: env, stripped } = stripInternalEnvKeys(filtered);
+  if (stripped.length > 0) {
+    voidWarn(
+      `Ignoring internal env keys from .env files in Node prerender runner: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
+    );
+  }
+  const runnerPath = join(root, '.void', 'prerender-runner.mjs');
   mkdirSync(dirname(runnerPath), { recursive: true });
   writeFileSync(
     runnerPath,
@@ -322,7 +460,9 @@ if (clientDir) {
   try {
     const manifestPath = join(clientDir, ".vite", "manifest.json");
     globalThis.__VITE_MANIFEST__ = JSON.parse(readFileSync(manifestPath, "utf-8"));
-  } catch {}
+  } catch {
+    // Ignore missing manifests so prerender can continue without client assets.
+  }
 }
 
 const appUrl = pathToFileURL(join(ssrDir, "app.js")).href;
@@ -334,8 +474,10 @@ if (!fetch) {
 }
 
 async function collectPaths() {
+  const headers = {};
+  if (process.env.__VOID_PROXY_TOKEN) headers["x-void-internal"] = process.env.__VOID_PROXY_TOKEN;
   const response = await fetch(
-    new Request("http://localhost${PRERENDER_PATHS_ENDPOINT}", { method: "POST" }),
+    new Request("http://localhost${PRERENDER_PATHS_ENDPOINT}", { method: "POST", headers }),
   );
   if (!response.ok) {
     throw new Error("Failed to collect prerender paths: HTTP " + response.status);
@@ -363,6 +505,16 @@ async function renderPaths(paths) {
       const outputPath = join(clientDir, outputFile);
       mkdirSync(dirname(outputPath), { recursive: true });
       writeFileSync(outputPath, html);
+      const pageDataResponse = await fetch(new Request("http://localhost" + path, {
+        headers: { "Accept": "application/json", "Purpose": "prefetch", "X-VoidPages": "true" },
+      }));
+      if (pageDataResponse.headers.get("X-VoidPages")) {
+        const pageData = await pageDataResponse.json();
+        const pageDataFile = path === "/" ? "_void/pages/index.json" : "_void/pages/" + path.slice(1) + ".json";
+        const pageDataPath = join(clientDir, pageDataFile);
+        mkdirSync(dirname(pageDataPath), { recursive: true });
+        writeFileSync(pageDataPath, JSON.stringify(pageData));
+      }
       result.rendered.push(path);
     } catch (err) {
       result.failed.push({ path, error: err instanceof Error ? err.message : String(err) });
@@ -389,7 +541,9 @@ if (mode === "collect") {
         [runnerPath, JSON.stringify(config)],
         { env: { ...process.env, ...env }, cwd: root, maxBuffer: 10 * 1024 * 1024 },
         (error, stdout, stderr) => {
-          if (stderr) process.stderr.write(stderr);
+          if (stderr) {
+            process.stderr.write(stderr);
+          }
           if (error) {
             reject(new Error(`Prerender child process failed: ${error.message}`));
             return;
@@ -405,7 +559,9 @@ if (mode === "collect") {
   } finally {
     try {
       unlinkSync(runnerPath);
-    } catch {}
+    } catch {
+      // Ignore cleanup failures for the temporary prerender runner.
+    }
   }
 }
 
@@ -415,7 +571,7 @@ export async function collectPrerenderPathsNode(options: {
   clientDir?: string;
 }): Promise<string[]> {
   const result = await runNodePrerenderRunner<{ paths: string[] }>(options.root, {
-    mode: "collect",
+    mode: 'collect',
     ssrDir: options.ssrDir,
     clientDir: options.clientDir,
   });
@@ -435,7 +591,7 @@ export async function prerenderPagesNode(options: {
   clientDir: string;
 }): Promise<PrerenderRunResult> {
   const result = await runNodePrerenderRunner<PrerenderRunResult>(options.root, {
-    mode: "collect-and-render",
+    mode: 'collect-and-render',
     ssrDir: options.ssrDir,
     clientDir: options.clientDir,
   });

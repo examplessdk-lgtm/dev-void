@@ -1,1 +1,1 @@
-export { generateComponentManifest } from "void/pages";
+export { generateComponentManifest } from 'void/pages';

@@ -1,15 +1,15 @@
-import { describe, expect, it } from "vitest";
-import { extractScript } from "../../src/extract-script";
+import { describe, expect, it } from 'vitest';
+import { extractScript } from '../../src/extract-script';
 
-describe("extractScript", () => {
-  it("returns null script when no <script> block", () => {
-    const result = extractScript("# Hello\n\nWorld");
+describe('extractScript', () => {
+  it('returns null script when no <script> block', () => {
+    const result = extractScript('# Hello\n\nWorld');
     expect(result.script).toBeNull();
-    expect(result.body).toBe("# Hello\n\nWorld");
+    expect(result.body).toBe('# Hello\n\nWorld');
     expect(result.islandImports).toEqual([]);
   });
 
-  it("extracts <script> block and returns body without it", () => {
+  it('extracts <script> block and returns body without it', () => {
     const source = `<script>
 import Foo from "./Foo.vue" with { island: "load" }
 </script>
@@ -17,10 +17,10 @@ import Foo from "./Foo.vue" with { island: "load" }
 # Hello`;
     const result = extractScript(source);
     expect(result.script).toBe('import Foo from "./Foo.vue" with { island: "load" }');
-    expect(result.body.trim()).toBe("# Hello");
+    expect(result.body.trim()).toBe('# Hello');
   });
 
-  it("parses island imports with correct name/specifier/strategy", () => {
+  it('parses island imports with correct name/specifier/strategy', () => {
     const source = `<script>
 import Counter from "../components/Counter.vue" with { island: "visible" }
 import CodePlayground from "../components/CodePlayground.vue" with { island: "idle" }
@@ -30,18 +30,18 @@ import CodePlayground from "../components/CodePlayground.vue" with { island: "id
     const result = extractScript(source);
     expect(result.islandImports).toHaveLength(2);
     expect(result.islandImports[0]).toEqual({
-      name: "Counter",
-      specifier: "../components/Counter.vue",
-      strategy: "visible",
+      name: 'Counter',
+      specifier: '../components/Counter.vue',
+      strategy: 'visible',
     });
     expect(result.islandImports[1]).toEqual({
-      name: "CodePlayground",
-      specifier: "../components/CodePlayground.vue",
-      strategy: "idle",
+      name: 'CodePlayground',
+      specifier: '../components/CodePlayground.vue',
+      strategy: 'idle',
     });
   });
 
-  it("handles single-quoted imports", () => {
+  it('handles single-quoted imports', () => {
     const source = `<script>
 import Widget from './Widget.vue' with { island: 'load' }
 </script>
@@ -50,13 +50,13 @@ import Widget from './Widget.vue' with { island: 'load' }
     const result = extractScript(source);
     expect(result.islandImports).toHaveLength(1);
     expect(result.islandImports[0]).toEqual({
-      name: "Widget",
-      specifier: "./Widget.vue",
-      strategy: "load",
+      name: 'Widget',
+      specifier: './Widget.vue',
+      strategy: 'load',
     });
   });
 
-  it("handles <script> before frontmatter", () => {
+  it('handles <script> before frontmatter', () => {
     const source = `<script>
 import A from "./A.vue" with { island: "load" }
 </script>
@@ -67,27 +67,27 @@ title: Test
 
 # Hello`;
     const result = extractScript(source);
-    expect(result.script).toContain("import A");
-    expect(result.body).toContain("---");
-    expect(result.body).toContain("# Hello");
+    expect(result.script).toContain('import A');
+    expect(result.body).toContain('---');
+    expect(result.body).toContain('# Hello');
   });
 
-  it("handles media strategy", () => {
+  it('handles media strategy', () => {
     const source = `<script>
 import Sidebar from "./Sidebar.vue" with { island: "media:(min-width: 768px)" }
 </script>
 
 # Page`;
     const result = extractScript(source);
-    expect(result.islandImports[0].strategy).toBe("media:(min-width: 768px)");
+    expect(result.islandImports[0].strategy).toBe('media:(min-width: 768px)');
   });
 
-  it("returns clientCode as null when no script block", () => {
-    const result = extractScript("# Hello\n\nWorld");
+  it('returns clientCode as null when no script block', () => {
+    const result = extractScript('# Hello\n\nWorld');
     expect(result.clientCode).toBeNull();
   });
 
-  it("returns clientCode as null when script has only island imports", () => {
+  it('returns clientCode as null when script has only island imports', () => {
     const source = `<script>
 import Counter from "./Counter.vue" with { island: "visible" }
 </script>
@@ -97,7 +97,7 @@ import Counter from "./Counter.vue" with { island: "visible" }
     expect(result.clientCode).toBeNull();
   });
 
-  it("extracts non-island code as clientCode", () => {
+  it('extracts non-island code as clientCode', () => {
     const source = `<script>
 import Counter from "./Counter.vue" with { island: "visible" }
 import { format } from "date-fns"
@@ -110,7 +110,7 @@ console.log("hello")
     expect(result.clientCode).toBe(`import { format } from "date-fns"\n\nconsole.log("hello")`);
   });
 
-  it("returns entire script as clientCode when no island imports", () => {
+  it('returns entire script as clientCode when no island imports', () => {
     const source = `<script>
 console.log("client only")
 </script>
@@ -121,7 +121,7 @@ console.log("client only")
     expect(result.islandImports).toEqual([]);
   });
 
-  it("preserves non-island imports in clientCode alongside statements", () => {
+  it('preserves non-island imports in clientCode alongside statements', () => {
     const source = `<script>
 import Counter from "./Counter.vue" with { island: "load" }
 import { ref } from "vue"

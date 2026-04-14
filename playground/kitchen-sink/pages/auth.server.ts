@@ -1,5 +1,5 @@
-import { defineHandler, type InferProps } from "void";
-import { getSession } from "void/auth";
+import { defineHandler, type InferProps } from 'void';
+import { getSession } from 'void/auth';
 
 export type Props = InferProps<typeof loader>;
 

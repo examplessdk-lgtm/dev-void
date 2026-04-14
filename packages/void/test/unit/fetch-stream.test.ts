@@ -1,7 +1,7 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 // Mock ofetch before importing the module
-vi.mock("ofetch", () => {
+vi.mock('ofetch', () => {
   return {
     ofetch: Object.assign(vi.fn(), {
       raw: vi.fn(),
@@ -9,25 +9,25 @@ vi.mock("ofetch", () => {
     FetchError: class FetchError extends Error {
       constructor(message: string) {
         super(message);
-        this.name = "FetchError";
+        this.name = 'FetchError';
       }
     },
   };
 });
 
-declare module "void/routes" {
+declare module 'void/routes' {
   interface RouteMap {
-    "/api/chat": {
+    '/api/chat': {
       POST: { input: { body: { messages: unknown[] } }; output: unknown };
     };
-    "/api/stream": {
+    '/api/stream': {
       POST: { input: {}; output: unknown };
     };
   }
 }
 
-import { fetchStream } from "../../src/runtime/fetch-stream";
-import { ofetch } from "ofetch";
+import { ofetch } from 'ofetch';
+import { fetchStream } from '../../src/runtime/fetch-stream';
 
 function makeSSEStream(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -45,12 +45,12 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe("fetchStream", () => {
-  it("parses Workers AI JSON SSE format", async () => {
+describe('fetchStream', () => {
+  it('parses Workers AI JSON SSE format', async () => {
     const stream = makeSSEStream([
       'data: {"response":"Hello"}\n\n',
       'data: {"response":" world"}\n\n',
-      "data: [DONE]\n\n",
+      'data: [DONE]\n\n',
     ]);
 
     vi.mocked(ofetch.raw).mockResolvedValue({
@@ -60,18 +60,18 @@ describe("fetchStream", () => {
     } as any);
 
     const chunks: string[] = [];
-    for await (const chunk of fetchStream("/api/chat", {
-      method: "POST",
+    for await (const chunk of fetchStream('/api/chat', {
+      method: 'POST',
       body: { messages: [] },
     })) {
       chunks.push(chunk);
     }
 
-    expect(chunks).toEqual(["Hello", " world"]);
+    expect(chunks).toEqual(['Hello', ' world']);
   });
 
-  it("parses plain text SSE data", async () => {
-    const stream = makeSSEStream(["data: hello\n\n", "data: world\n\n", "data: [DONE]\n\n"]);
+  it('parses plain text SSE data', async () => {
+    const stream = makeSSEStream(['data: hello\n\n', 'data: world\n\n', 'data: [DONE]\n\n']);
 
     vi.mocked(ofetch.raw).mockResolvedValue({
       _data: stream,
@@ -80,18 +80,18 @@ describe("fetchStream", () => {
     } as any);
 
     const chunks: string[] = [];
-    for await (const chunk of fetchStream("/api/stream", { method: "POST" })) {
+    for await (const chunk of fetchStream('/api/stream', { method: 'POST' })) {
       chunks.push(chunk);
     }
 
-    expect(chunks).toEqual(["hello", "world"]);
+    expect(chunks).toEqual(['hello', 'world']);
   });
 
-  it("handles chunked SSE data split across reads", async () => {
+  it('handles chunked SSE data split across reads', async () => {
     const stream = makeSSEStream([
       'data: {"respo',
       'nse":"chunk1"}\n\ndata: {"response":"chunk2"}\n\n',
-      "data: [DONE]\n\n",
+      'data: [DONE]\n\n',
     ]);
 
     vi.mocked(ofetch.raw).mockResolvedValue({
@@ -101,18 +101,18 @@ describe("fetchStream", () => {
     } as any);
 
     const chunks: string[] = [];
-    for await (const chunk of fetchStream("/api/stream", { method: "POST" })) {
+    for await (const chunk of fetchStream('/api/stream', { method: 'POST' })) {
       chunks.push(chunk);
     }
 
-    expect(chunks).toEqual(["chunk1", "chunk2"]);
+    expect(chunks).toEqual(['chunk1', 'chunk2']);
   });
 
-  it("ignores SSE comments (lines starting with :)", async () => {
+  it('ignores SSE comments (lines starting with :)', async () => {
     const stream = makeSSEStream([
-      ": this is a comment\n",
+      ': this is a comment\n',
       'data: {"response":"hello"}\n\n',
-      "data: [DONE]\n\n",
+      'data: [DONE]\n\n',
     ]);
 
     vi.mocked(ofetch.raw).mockResolvedValue({
@@ -122,14 +122,14 @@ describe("fetchStream", () => {
     } as any);
 
     const chunks: string[] = [];
-    for await (const chunk of fetchStream("/api/stream", { method: "POST" })) {
+    for await (const chunk of fetchStream('/api/stream', { method: 'POST' })) {
       chunks.push(chunk);
     }
 
-    expect(chunks).toEqual(["hello"]);
+    expect(chunks).toEqual(['hello']);
   });
 
-  it("handles empty body gracefully", async () => {
+  it('handles empty body gracefully', async () => {
     vi.mocked(ofetch.raw).mockResolvedValue({
       _data: null,
       status: 200,
@@ -137,15 +137,15 @@ describe("fetchStream", () => {
     } as any);
 
     const chunks: string[] = [];
-    for await (const chunk of fetchStream("/api/stream", { method: "POST" })) {
+    for await (const chunk of fetchStream('/api/stream', { method: 'POST' })) {
       chunks.push(chunk);
     }
 
     expect(chunks).toEqual([]);
   });
 
-  it("passes correct options to ofetch", async () => {
-    const stream = makeSSEStream(["data: [DONE]\n\n"]);
+  it('passes correct options to ofetch', async () => {
+    const stream = makeSSEStream(['data: [DONE]\n\n']);
 
     vi.mocked(ofetch.raw).mockResolvedValue({
       _data: stream,
@@ -153,22 +153,22 @@ describe("fetchStream", () => {
       headers: new Headers(),
     } as any);
 
-    // eslint-disable-next-line no-empty -- consume the generator
-    for await (const _ of fetchStream("/api/chat", {
-      method: "POST",
+    for await (const _ of fetchStream('/api/chat', {
+      method: 'POST',
       body: { messages: [] },
-      headers: { "x-custom": "value" },
+      headers: { 'x-custom': 'value' },
     })) {
+      // Consume the generator to exhaust the mocked stream.
     }
 
-    expect(ofetch.raw).toHaveBeenCalledWith("/api/chat", {
-      method: "POST",
+    expect(ofetch.raw).toHaveBeenCalledWith('/api/chat', {
+      method: 'POST',
       body: { messages: [] },
       query: undefined,
-      headers: { "x-custom": "value" },
+      headers: { 'x-custom': 'value' },
       signal: undefined,
       baseURL: undefined,
-      responseType: "stream",
+      responseType: 'stream',
     });
   });
 });

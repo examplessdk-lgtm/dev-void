@@ -1,16 +1,16 @@
-import { betterAuth, type BetterAuthOptions } from "better-auth";
-import type { Context } from "hono";
-import type { VoidAuthMigrationSchema } from "../auth/drizzle";
+import { betterAuth, type BetterAuthOptions } from 'better-auth';
+import type { Context } from 'hono';
+import type { VoidAuthMigrationSchema } from '../auth/drizzle';
 import {
   VOID_EMAIL_AUTH_PROVIDER,
   getVoidAuthProviderEnvNames,
   isVoidSocialAuthProvider,
   type VoidAuthProvider,
   type VoidSocialAuthProvider,
-} from "../auth/providers";
-import { authContext, type AuthState, type VoidAuthConfig } from "./auth";
+} from '../auth/providers';
+import { authContext, type AuthState, type VoidAuthConfig } from './auth';
 
-export type VoidAuthDialect = "sqlite" | "postgresql";
+export type VoidAuthDialect = 'sqlite' | 'postgresql';
 
 export interface VoidAuthRuntimeOptions {
   dialect: VoidAuthDialect;
@@ -30,7 +30,7 @@ export interface VoidAuthEnv extends Record<string, unknown> {
 }
 
 export interface ResolvedDatabase {
-  database: NonNullable<BetterAuthOptions["database"]>;
+  database: NonNullable<BetterAuthOptions['database']>;
   dispose(): Promise<void>;
 }
 
@@ -41,34 +41,34 @@ export interface VoidAuthRuntimeApi {
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions["database"]>,
+    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
     disposeOverride?: () => Promise<void>,
   ): Promise<{ options: BetterAuthOptions; dispose(): Promise<void> }>;
   createVoidAuth(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions["database"]>,
+    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
     disposeOverride?: () => Promise<void>,
   ): Promise<{ auth: ReturnType<typeof betterAuth>; dispose(): Promise<void> }>;
   resolveVoidAuthState(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions["database"]>,
+    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
     disposeOverride?: () => Promise<void>,
   ): Promise<AuthState | null>;
   runVoidAuthMiddleware(
     c: Context,
     next: () => Promise<void>,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions["database"]>,
+    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
     disposeOverride?: () => Promise<void>,
   ): Promise<void>;
   handleVoidAuthRequest(
     c: Context,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions["database"]>,
+    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
     disposeOverride?: () => Promise<void>,
   ): Promise<Response>;
   runVoidAuthMigrations(
@@ -80,28 +80,30 @@ export interface VoidAuthRuntimeApi {
 }
 
 function isLocalHost(hostname: string): boolean {
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname.endsWith(".local");
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname.endsWith('.local');
 }
 
 function resolveSecret(request: Request, env: VoidAuthEnv): string {
   const explicit =
-    typeof env.BETTER_AUTH_SECRET === "string" && env.BETTER_AUTH_SECRET.length > 0
+    typeof env.BETTER_AUTH_SECRET === 'string' && env.BETTER_AUTH_SECRET.length > 0
       ? env.BETTER_AUTH_SECRET
       : undefined;
-  if (explicit) return explicit;
+  if (explicit) {
+    return explicit;
+  }
 
   const url = new URL(request.url);
   if (isLocalHost(url.hostname)) {
-    return "void-dev-better-auth-secret-1234567890";
+    return 'void-dev-better-auth-secret-1234567890';
   }
 
-  throw new Error("Missing Better Auth secret. Set BETTER_AUTH_SECRET.");
+  throw new Error('Missing Better Auth secret. Set BETTER_AUTH_SECRET.');
 }
 
 function readEnvString(env: VoidAuthEnv, ...keys: string[]): string | undefined {
   for (const key of keys) {
     const value = env[key];
-    if (typeof value === "string" && value.length > 0) {
+    if (typeof value === 'string' && value.length > 0) {
       return value;
     }
   }
@@ -110,7 +112,7 @@ function readEnvString(env: VoidAuthEnv, ...keys: string[]): string | undefined 
 
 function resolveEmailAndPassword(
   configuredProviders: readonly VoidAuthProvider[] | null,
-): BetterAuthOptions["emailAndPassword"] | undefined {
+): BetterAuthOptions['emailAndPassword'] | undefined {
   if (!configuredProviders || configuredProviders.includes(VOID_EMAIL_AUTH_PROVIDER)) {
     return { enabled: true };
   }
@@ -124,8 +126,12 @@ function resolveSocialProviderCredentials(
   const envNames = getVoidAuthProviderEnvNames(provider);
   const clientIdKeys = [envNames.clientId];
   const clientSecretKeys = [envNames.clientSecret];
-  if (envNames.legacyClientId) clientIdKeys.push(envNames.legacyClientId);
-  if (envNames.legacyClientSecret) clientSecretKeys.push(envNames.legacyClientSecret);
+  if (envNames.legacyClientId) {
+    clientIdKeys.push(envNames.legacyClientId);
+  }
+  if (envNames.legacyClientSecret) {
+    clientSecretKeys.push(envNames.legacyClientSecret);
+  }
   const clientId = readEnvString(env, ...clientIdKeys);
   const clientSecret = readEnvString(env, ...clientSecretKeys);
 
@@ -141,13 +147,17 @@ function resolveSocialProviderCredentials(
 function resolveSocialProviders(
   env: VoidAuthEnv,
   configuredProviders: readonly VoidAuthProvider[] | null,
-): BetterAuthOptions["socialProviders"] | undefined {
-  if (!configuredProviders) return undefined;
+): BetterAuthOptions['socialProviders'] | undefined {
+  if (!configuredProviders) {
+    return undefined;
+  }
 
   const providers: Record<string, { clientId: string; clientSecret: string }> = {};
 
   for (const provider of configuredProviders) {
-    if (!isVoidSocialAuthProvider(provider)) continue;
+    if (!isVoidSocialAuthProvider(provider)) {
+      continue;
+    }
     providers[provider] = resolveSocialProviderCredentials(env, provider);
   }
 
@@ -155,10 +165,12 @@ function resolveSocialProviders(
 }
 
 function appendAuthHeaders(target: Headers, source?: Headers): void {
-  if (!source) return;
+  if (!source) {
+    return;
+  }
 
   source.forEach((value, key) => {
-    if (key.toLowerCase() === "set-cookie") {
+    if (key.toLowerCase() === 'set-cookie') {
       target.append(key, value);
       return;
     }
@@ -173,9 +185,11 @@ function resolveUserConfig(
   env: VoidAuthEnv,
   dialect: VoidAuthDialect,
 ): BetterAuthOptions {
-  if (!userConfig) return defaults;
+  if (!userConfig) {
+    return defaults;
+  }
 
-  if (typeof userConfig === "function") {
+  if (typeof userConfig === 'function') {
     return userConfig({ defaults, request, env, dialect });
   }
 
@@ -193,13 +207,13 @@ function assertRuntimeDialect(runtime: VoidAuthRuntimeOptions, dialect: VoidAuth
 export function createVoidAuthRuntime(
   dialect: VoidAuthDialect,
   resolveDatabase: ResolveDatabase,
-  runVoidAuthMigrations: VoidAuthRuntimeApi["runVoidAuthMigrations"],
+  runVoidAuthMigrations: VoidAuthRuntimeApi['runVoidAuthMigrations'],
 ): VoidAuthRuntimeApi {
   async function resolveVoidAuthOptions(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions["database"]>,
+    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
     disposeOverride?: () => Promise<void>,
   ): Promise<{ options: BetterAuthOptions; dispose(): Promise<void> }> {
     assertRuntimeDialect(runtime, dialect);
@@ -216,7 +230,7 @@ export function createVoidAuthRuntime(
 
     const defaults: BetterAuthOptions = {
       baseURL: origin,
-      basePath: "/api/auth",
+      basePath: '/api/auth',
       secret: resolveSecret(request, env),
       database,
       ...(emailAndPassword ? { emailAndPassword } : {}),
@@ -234,7 +248,7 @@ export function createVoidAuthRuntime(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions["database"]>,
+    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
     disposeOverride?: () => Promise<void>,
   ): Promise<{ auth: ReturnType<typeof betterAuth>; dispose(): Promise<void> }> {
     const { options, dispose } = await resolveVoidAuthOptions(
@@ -254,7 +268,7 @@ export function createVoidAuthRuntime(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions["database"]>,
+    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
     disposeOverride?: () => Promise<void>,
   ): Promise<AuthState | null> {
     const { auth, dispose } = await createVoidAuth(
@@ -282,15 +296,15 @@ export function createVoidAuthRuntime(
     c: Context,
     next: () => Promise<void>,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions["database"]>,
+    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
     disposeOverride?: () => Promise<void>,
   ): Promise<void> {
     // Skip auth for internal routes (cron, queue, migration, binding proxy).
     // Still set user/session to null so downstream middleware that checks
     // these context variables gets the expected sentinel (not undefined).
-    if (c.req.path.startsWith("/__")) {
-      c.set("user", null);
-      c.set("session", null);
+    if (c.req.path.startsWith('/__')) {
+      c.set('user', null);
+      c.set('session', null);
       return next();
     }
 
@@ -301,7 +315,7 @@ export function createVoidAuthRuntime(
       databaseOverride,
       disposeOverride,
     );
-    c.set("__voidAuth", auth);
+    c.set('__voidAuth', auth);
 
     try {
       const result = await auth.api.getSession({
@@ -311,8 +325,8 @@ export function createVoidAuthRuntime(
       });
 
       const state = (result.response ?? null) as AuthState | null;
-      c.set("user", state?.user ?? null);
-      c.set("session", state?.session ?? null);
+      c.set('user', state?.user ?? null);
+      c.set('session', state?.session ?? null);
 
       await authContext.run({ user: state?.user ?? null, state }, async () => {
         await next();
@@ -327,10 +341,10 @@ export function createVoidAuthRuntime(
   async function handleVoidAuthRequest(
     c: Context,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions["database"]>,
+    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
     disposeOverride?: () => Promise<void>,
   ): Promise<Response> {
-    const existingAuth = c.get("__voidAuth") as ReturnType<typeof betterAuth> | undefined;
+    const existingAuth = c.get('__voidAuth') as ReturnType<typeof betterAuth> | undefined;
     if (existingAuth) {
       return existingAuth.handler(c.req.raw);
     }

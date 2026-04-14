@@ -13,7 +13,7 @@ This page is the source of truth for public `void` exports. Use it when you alre
 Named export from `"void"`. Returns an array of Vite plugins that set up file-based routing, migration support, and the Cloudflare Workers runtime. Application-level configuration is read from [`void.json`](./config.md); the optional `options` object controls Vite/Cloudflare plugin behavior.
 
 ```ts
-import { voidPlugin } from "void";
+import { voidPlugin } from 'void';
 
 export default defineConfig({
   plugins: [voidPlugin()],
@@ -34,10 +34,10 @@ Imported from `"void"` or `"void/handler"`.
 Wraps a route handler function. The handler receives a [`CloudContext`](#cloudcontext) and can return a plain value (auto-converted to a Response) or use the Hono `c.json()` / `c.text()` APIs directly.
 
 ```ts
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
 export const GET = defineHandler((c) => {
-  return { message: "hello" };
+  return { message: 'hello' };
 });
 ```
 
@@ -64,8 +64,8 @@ Creates a handler with input validation using any [Standard Schema](https://gith
 Validated input is passed as the second argument to the handler.
 
 ```ts
-import { defineHandler } from "void";
-import * as v from "valibot";
+import { defineHandler } from 'void';
+import * as v from 'valibot';
 
 export const POST = defineHandler.withValidator({
   body: v.object({
@@ -104,7 +104,7 @@ The inferred output types of each validator slot. For a `ValidatorSlots` with `b
 Type-safe wrapper for Hono middleware. At runtime, returns the function unchanged.
 
 ```ts
-import { defineMiddleware } from "void";
+import { defineMiddleware } from 'void';
 
 export default defineMiddleware(async (c, next) => {
   console.log(`${c.req.method} ${c.req.path}`);
@@ -123,10 +123,10 @@ function defineMiddleware(handler: MiddlewareHandler<CloudEnv>): MiddlewareHandl
 Wraps a Cloudflare [Scheduled handler](https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/) with type inference.
 
 ```ts
-import { defineScheduled } from "void";
+import { defineScheduled } from 'void';
 
 export default defineScheduled(async (controller, env, ctx) => {
-  const { results } = await env.DB.prepare("SELECT * FROM stale").all();
+  const { results } = await env.DB.prepare('SELECT * FROM stale').all();
   // ...
 });
 ```
@@ -137,7 +137,7 @@ export default defineScheduled(async (controller, env, ctx) => {
 function defineScheduled(
   handler: (
     controller: ScheduledController,
-    env: CloudEnv["Bindings"],
+    env: CloudEnv['Bindings'],
     ctx: ExecutionContext,
   ) => unknown | Promise<unknown>,
 ): ScheduledFn;
@@ -148,7 +148,7 @@ function defineScheduled(
 Wraps a [queue](../guide/queues.md) consumer handler with typed message bodies. The generic `<T>` defines the message body type, which flows through to the typed `queues` proxy for `send()` calls.
 
 ```ts
-import { defineQueue } from "void";
+import { defineQueue } from 'void';
 
 export default defineQueue<{ to: string; subject: string }>(async (batch, env) => {
   for (const msg of batch.messages) {
@@ -161,7 +161,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch, env) =
 
 ```ts
 function defineQueue<T>(
-  handler: (batch: QueueBatch<T>, env: CloudEnv["Bindings"]) => void | Promise<void>,
+  handler: (batch: QueueBatch<T>, env: CloudEnv['Bindings']) => void | Promise<void>,
 ): QueueFn;
 ```
 
@@ -203,13 +203,13 @@ interface RenderAssetTags {
 Type-safe wrapper for the page `head()` export in `.server.ts` files. Provides [`CloudContext`](#cloudcontext) typing for the first argument and generic props typing for the second.
 
 ```ts
-import { defineHandler, defineHead } from "void";
-import type { InferProps } from "void";
+import { defineHandler, defineHead } from 'void';
+import type { InferProps } from 'void';
 
 export type Props = InferProps<typeof loader>;
 
 export const loader = defineHandler(async (c) => {
-  const post = await getPost(c.req.param("slug"));
+  const post = await getPost(c.req.param('slug'));
   return { post };
 });
 
@@ -217,8 +217,8 @@ export const head = defineHead<Props>((c, props) => {
   return {
     title: props.post.title,
     meta: [
-      { name: "description", content: props.post.excerpt },
-      { property: "og:title", content: props.post.title },
+      { name: 'description', content: props.post.excerpt },
+      { property: 'og:title', content: props.post.title },
     ],
   };
 });
@@ -241,11 +241,11 @@ Imported from `"void"` or `"void/auth"`. Client-side helpers imported from `"voi
 Advanced escape hatch for customizing Void's Better Auth config.
 
 ```ts
-import { defineAuth } from "void/auth";
+import { defineAuth } from 'void/auth';
 
 export default defineAuth(({ defaults }) => ({
   ...defaults,
-  trustedOrigins: ["https://example.com"],
+  trustedOrigins: ['https://example.com'],
 }));
 ```
 
@@ -260,7 +260,7 @@ function defineAuth(config: VoidAuthConfig): VoidAuthConfig;
 Returns the current authenticated user from AsyncLocalStorage, or `null` when no user is present.
 
 ```ts
-import { getUser } from "void/auth";
+import { getUser } from 'void/auth';
 
 const user = getUser();
 ```
@@ -276,7 +276,7 @@ function getUser(): AuthUser | null;
 Returns the current Better Auth request state, or `null`.
 
 ```ts
-import { getSession } from "void/auth";
+import { getSession } from 'void/auth';
 
 const state = getSession();
 ```
@@ -292,8 +292,8 @@ function getSession(): AuthState | null;
 Extracts the authenticated user from the request context. Throws a 401 `HTTPException` if no session is present.
 
 ```ts
-import { defineHandler } from "void";
-import { requireAuth } from "void/auth";
+import { defineHandler } from 'void';
+import { requireAuth } from 'void/auth';
 
 export const GET = defineHandler((c) => {
   const user = requireAuth(c);
@@ -356,7 +356,7 @@ interface AuthState {
 Imported from `"void/client"`. This is a ready-to-use Better Auth client instance preconfigured with `basePath: "/api/auth"`.
 
 ```ts
-import { auth } from "void/client";
+import { auth } from 'void/client';
 
 await auth.signIn.email({ email, password });
 await auth.signOut();
@@ -369,9 +369,9 @@ The exact client methods come from Better Auth. In pages apps, Void automaticall
 Imported from `"void/client"`. Re-export of Better Auth's `createAuthClient` for advanced usage.
 
 ```ts
-import { createAuthClient } from "void/client";
+import { createAuthClient } from 'void/client';
 
-const auth = createAuthClient({ basePath: "/api/auth" });
+const auth = createAuthClient({ basePath: '/api/auth' });
 ```
 
 ## Fetch Client
@@ -383,12 +383,12 @@ Imported from `"void/client"`.
 Type-safe fetch client for calling your API routes from client code, built on top of [ofetch](https://github.com/unjs/ofetch). Route paths and return types are inferred from the generated `RouteMap`.
 
 ```ts
-import { fetch } from "void/client";
+import { fetch } from 'void/client';
 
 // Types are fully inferred from your route handlers
-const users = await fetch("/api/users");
-const user = await fetch("/api/users/:id", {
-  params: { id: "1" },
+const users = await fetch('/api/users');
+const user = await fetch('/api/users/:id', {
+  params: { id: '1' },
 });
 ```
 
@@ -422,10 +422,10 @@ Returns the parsed JSON response body, or `undefined` for 204 responses. Throws 
 Error class thrown by `fetch` on non-2xx responses.
 
 ```ts
-import { fetch, FetchError } from "void/client";
+import { fetch, FetchError } from 'void/client';
 
 try {
-  await fetch("/api/users/:id", { params: { id: "999" } });
+  await fetch('/api/users/:id', { params: { id: '999' } });
 } catch (e) {
   if (e instanceof FetchError) {
     console.log(e.status); // 404
@@ -467,8 +467,8 @@ Imported from `"void/db"`. The `db` export is a [Drizzle ORM](https://orm.drizzl
 Default Drizzle D1 instance, pre-wired with the `env.DB` binding and your schema from `db/schema.ts`.
 
 ```ts
-import { db } from "void/db";
-import { users } from "@schema";
+import { db } from 'void/db';
+import { users } from '@schema';
 
 const allUsers = await db.select().from(users).all();
 ```
@@ -480,8 +480,8 @@ When the Void plugin is active, `void/db` is served as a virtual module that aut
 Creates a Drizzle D1 instance from a specific D1 binding. Use this when you have multiple D1 databases or need a non-default binding.
 
 ```ts
-import { createDb } from "void/db";
-import { env } from "cloudflare:workers";
+import { createDb } from 'void/db';
+import { env } from 'cloudflare:workers';
 
 const db = createDb(env.MY_OTHER_DB);
 ```
@@ -497,10 +497,37 @@ function createDb(d1: D1Database): DrizzleD1Database;
 `void/db` re-exports commonly used [Drizzle operators](https://orm.drizzle.team/docs/operators) so you never need to depend on `drizzle-orm` directly:
 
 ```ts
-import { db, eq, and, or, desc, like, inArray, sql } from "void/db";
+import { db, eq, and, or, desc, like, inArray, sql } from 'void/db';
 ```
 
 **Full list:** `sql`, `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `and`, `or`, `not`, `desc`, `asc`, `like`, `ilike`, `notLike`, `inArray`, `notInArray`, `isNull`, `isNotNull`, `between`, `notBetween`, `exists`, `notExists`, `count`, `sum`, `avg`, `min`, `max`.
+
+## Seeding
+
+Imported from `"void/seed"`.
+
+### `defineSeed(fn)`
+
+Identity helper for programmatic seed modules used by `void db seed`.
+
+```ts
+import { defineSeed } from 'void/seed';
+
+export default defineSeed<typeof import('./schema')>(async ({ db, schema }) => {
+  await db.insert(schema.users).values([
+    { name: 'Alice', email: 'alice@example.com' },
+    { name: 'Bob', email: 'bob@example.com' },
+  ]);
+});
+```
+
+The callback receives:
+
+- `dialect`: `"sqlite"` or `"postgresql"`
+- `db`: a local Drizzle instance for the active dialect
+- `schema`: the exports from `db/schema.ts` or `db/schema/`
+
+Seed modules can export either `default` or a named `seed` function.
 
 ## Types
 
@@ -509,7 +536,7 @@ import { db, eq, and, or, desc, like, inArray, sql } from "void/db";
 Hono `Context` pre-typed with [`CloudEnv`](#cloudenv). This is the type of the `c` parameter in all route handlers and middleware.
 
 ```ts
-import type { CloudContext } from "void";
+import type { CloudContext } from 'void';
 ```
 
 ### `CloudEnv`
@@ -543,7 +570,7 @@ interface CloudContextVariables {
 **Augmentation example:**
 
 ```ts
-declare module "void" {
+declare module 'void' {
   interface CloudContextVariables {
     requestId: string;
   }
@@ -586,7 +613,7 @@ interface HeadDescriptor {
 Empty stub interface augmented at build time by the generated `.void/routes.d.ts`. It contains the full type information for routes, methods, inputs, and outputs, and the typed `fetch` client reads from it.
 
 ```ts
-import type { RouteMap } from "void/routes";
+import type { RouteMap } from 'void/routes';
 ```
 
 ## Environment Types
@@ -612,7 +639,7 @@ Framework adaptors for [Pages Routing](../guide/pages-routing/overview). Each ad
 Imported from `"@void/vue/plugin"`. Returns an array of Vite plugins that handle Vue SFC compilation and SSR or hydration entry generation. It already includes `@vitejs/plugin-vue`, so you do not need to install or configure that separately.
 
 ```ts
-import { voidVue } from "@void/vue/plugin";
+import { voidVue } from '@void/vue/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidVue()],
@@ -651,7 +678,7 @@ Imported from `"@void/vue"`.
 Imported from `"@void/react/plugin"`. Returns an array of Vite plugins that handle SSR and hydration entry generation. It already includes `@vitejs/plugin-react`, so you do not need to install or configure that separately.
 
 ```ts
-import { voidReact } from "@void/react/plugin";
+import { voidReact } from '@void/react/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidReact()],
@@ -689,7 +716,7 @@ Imported from `"@void/react"`.
 Imported from `"@void/svelte/plugin"`. Returns an array of Vite plugins that handle SSR and hydration entry generation for Svelte 5. It already includes `@sveltejs/vite-plugin-svelte`, so you do not need to install or configure that separately.
 
 ```ts
-import { voidSvelte } from "@void/svelte/plugin";
+import { voidSvelte } from '@void/svelte/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidSvelte()],
@@ -739,6 +766,7 @@ Imported from `"@void/svelte"`.
 | `void/schema-d1`       | Re-exports [`drizzle-orm/sqlite-core`](https://orm.drizzle.team/docs/column-types/sqlite) for D1 table and column builders                                       |
 | `void/schema-pg`       | Re-exports [`drizzle-orm/pg-core`](https://orm.drizzle.team/docs/column-types/pg) for PostgreSQL table and column builders                                       |
 | `void/db`              | `db` ([Drizzle D1](https://orm.drizzle.team/docs/get-started/d1-new) instance), `createDb`, query operators (`eq`, `and`, `or`, `desc`, `like`, `inArray`, etc.) |
+| `void/seed`            | `defineSeed`, `SeedContext`, `SeedFn` for programmatic `void db seed` modules                                                                                    |
 | `void/routes`          | `RouteMap` and `WebSocketRouteMap` stubs (types only)                                                                                                            |
 | `void/queues`          | `queues` proxy for sending messages to typed queues                                                                                                              |
 | `void/env`             | Global Cloudflare env types (types only)                                                                                                                         |

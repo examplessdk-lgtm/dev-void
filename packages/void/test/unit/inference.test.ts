@@ -1,52 +1,52 @@
-import { describe, expect, it } from "vitest";
-import { inferBindingsFromSource, mergeBindings } from "../../src/inference/walk";
+import { describe, expect, it } from 'vitest';
+import { inferBindingsFromSource, mergeBindings } from '../../src/inference/walk';
 
-describe("inferBindingsFromSource", () => {
-  it("detects c.env.DB", () => {
+describe('inferBindingsFromSource', () => {
+  it('detects c.env.DB', () => {
     const code = `
       export default defineHandler((c) => {
         return c.env.DB.prepare('SELECT 1').first()
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsD1).toBe(true);
     expect(result.needsKV).toBe(false);
     expect(result.needsR2).toBe(false);
   });
 
-  it("detects c.env.KV", () => {
+  it('detects c.env.KV', () => {
     const code = `
       export default defineHandler(async (c) => {
         return c.env.KV.get('key')
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsKV).toBe(true);
   });
 
-  it("detects env.DB in SSR-style handlers", () => {
+  it('detects env.DB in SSR-style handlers', () => {
     const code = `
       export async function render(request, env) {
         return Response.json(await env.DB.prepare('SELECT 1').first())
       }
     `;
-    const result = inferBindingsFromSource(code, "main.ssr.ts");
+    const result = inferBindingsFromSource(code, 'main.ssr.ts');
     expect(result.needsD1).toBe(true);
     expect(result.needsKV).toBe(false);
     expect(result.needsR2).toBe(false);
   });
 
-  it("detects c.env.STORAGE", () => {
+  it('detects c.env.STORAGE', () => {
     const code = `
       export default defineHandler(async (c) => {
         await c.env.STORAGE.put('key', 'value')
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsR2).toBe(true);
   });
 
-  it("detects multiple bindings in one file", () => {
+  it('detects multiple bindings in one file', () => {
     const code = `
       export default defineHandler(async (c) => {
         const user = c.env.DB.prepare('SELECT 1').first()
@@ -54,22 +54,22 @@ describe("inferBindingsFromSource", () => {
         return user
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsD1).toBe(true);
     expect(result.needsKV).toBe(true);
     expect(result.needsR2).toBe(false);
   });
 
-  it("ignores unrelated member expressions", () => {
+  it('ignores unrelated member expressions', () => {
     const code = `
       const x = foo.bar.DB
       const y = something.env.other
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsD1).toBe(false);
   });
 
-  it("handles env access patterns", () => {
+  it('handles env access patterns', () => {
     // This pattern: obj.env.DB — any *.env.DB triggers it
     const code = `
       const handler = (c) => {
@@ -77,17 +77,17 @@ describe("inferBindingsFromSource", () => {
         return result
       }
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsD1).toBe(true);
   });
 
-  it("returns empty for files with no bindings", () => {
+  it('returns empty for files with no bindings', () => {
     const code = `
       export default defineHandler(() => {
         return { status: 'ok' }
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsD1).toBe(false);
     expect(result.needsKV).toBe(false);
     expect(result.needsR2).toBe(false);
@@ -101,7 +101,7 @@ describe("inferBindingsFromSource", () => {
         return db.list("users");
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsD1).toBe(true);
     expect(result.needsKV).toBe(false);
     expect(result.needsR2).toBe(false);
@@ -114,7 +114,7 @@ describe("inferBindingsFromSource", () => {
         return kv.get("key");
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsKV).toBe(true);
     expect(result.needsD1).toBe(false);
     expect(result.needsR2).toBe(false);
@@ -127,7 +127,7 @@ describe("inferBindingsFromSource", () => {
         await storage.put("file.txt", "content");
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsR2).toBe(true);
     expect(result.needsD1).toBe(false);
     expect(result.needsKV).toBe(false);
@@ -141,12 +141,12 @@ describe("inferBindingsFromSource", () => {
         return myDb.list("users");
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsD1).toBe(true);
   });
 
-  it("handles invalid code gracefully", () => {
-    const result = inferBindingsFromSource("not { valid {{{ code", "bad.ts");
+  it('handles invalid code gracefully', () => {
+    const result = inferBindingsFromSource('not { valid {{{ code', 'bad.ts');
     expect(result.needsD1).toBe(false);
     expect(result.needsKV).toBe(false);
     expect(result.needsR2).toBe(false);
@@ -158,7 +158,7 @@ describe("inferBindingsFromSource", () => {
       import { auth } from "void/client";
       await auth.signOut();
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsAuth).toBe(true);
   });
 
@@ -168,7 +168,7 @@ describe("inferBindingsFromSource", () => {
       await auth.signIn.email({ email, password });
       await fetch("/api/hello");
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsAuth).toBe(true);
   });
 
@@ -177,7 +177,7 @@ describe("inferBindingsFromSource", () => {
       import { fetch } from "void/client";
       const data = await fetch("/api/hello");
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsAuth).toBe(false);
   });
 
@@ -189,48 +189,48 @@ describe("inferBindingsFromSource", () => {
         return { user };
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsAuth).toBe(true);
   });
 
-  it("does not detect auth from unrelated imports", () => {
+  it('does not detect auth from unrelated imports', () => {
     const code = `
       import { db } from "void/db";
       import { fetch } from "void/client";
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsAuth).toBe(false);
     expect(result.needsD1).toBe(true);
   });
 
-  it("detects needsQueues from void/queue import", () => {
+  it('detects needsQueues from void/queue import', () => {
     const code = `
       import { defineQueue } from "void/queue";
       export const queue = "emails";
       export default defineQueue(async (batch) => {});
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsQueues).toBe(true);
   });
 
-  it("detects needsQueues from env.QUEUE_* access", () => {
+  it('detects needsQueues from env.QUEUE_* access', () => {
     const code = `
       export const POST = defineHandler(async (c) => {
         await c.env.QUEUE_EMAILS.send({ to: "test@example.com" });
         return c.json({ ok: true });
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsQueues).toBe(true);
   });
 
-  it("does not detect needsQueues from unrelated identifiers", () => {
+  it('does not detect needsQueues from unrelated identifiers', () => {
     const code = `
       export const GET = defineHandler(() => {
         return { status: 'ok' }
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsQueues).toBe(false);
   });
 
@@ -244,12 +244,12 @@ describe("inferBindingsFromSource", () => {
         return result;
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsAI).toBe(true);
     expect(result.needsD1).toBe(false);
   });
 
-  it("detects c.env.AI access", () => {
+  it('detects c.env.AI access', () => {
     const code = `
       export const POST = defineHandler(async (c) => {
         const result = await c.env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
@@ -258,33 +258,33 @@ describe("inferBindingsFromSource", () => {
         return c.json(result);
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsAI).toBe(true);
   });
 
-  it("detects env.AI access", () => {
+  it('detects env.AI access', () => {
     const code = `
       export async function handler(request, env) {
         return Response.json(await env.AI.run("@cf/meta/llama-3.1-8b-instruct", { prompt: "Hi" }))
       }
     `;
-    const result = inferBindingsFromSource(code, "main.ssr.ts");
+    const result = inferBindingsFromSource(code, 'main.ssr.ts');
     expect(result.needsAI).toBe(true);
   });
 
-  it("does not detect needsAI from unrelated identifiers", () => {
+  it('does not detect needsAI from unrelated identifiers', () => {
     const code = `
       const AI = someLibrary;
       export const GET = defineHandler(() => {
         return { status: 'ok' }
       })
     `;
-    const result = inferBindingsFromSource(code, "test.ts");
+    const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsAI).toBe(false);
   });
 });
 
-describe("mergeBindings", () => {
+describe('mergeBindings', () => {
   const empty = {
     needsD1: false,
     needsKV: false,
@@ -294,7 +294,7 @@ describe("mergeBindings", () => {
     needsAI: false,
   };
 
-  it("merges multiple binding results (union)", () => {
+  it('merges multiple binding results (union)', () => {
     const result = mergeBindings([
       { ...empty, needsD1: true },
       { ...empty, needsKV: true },
@@ -307,7 +307,7 @@ describe("mergeBindings", () => {
     expect(result.needsAI).toBe(false);
   });
 
-  it("handles empty array", () => {
+  it('handles empty array', () => {
     const result = mergeBindings([]);
     expect(result.needsD1).toBe(false);
     expect(result.needsKV).toBe(false);
@@ -316,22 +316,22 @@ describe("mergeBindings", () => {
     expect(result.needsAI).toBe(false);
   });
 
-  it("merges auth flag", () => {
+  it('merges auth flag', () => {
     const result = mergeBindings([empty, { ...empty, needsAuth: true }]);
     expect(result.needsAuth).toBe(true);
   });
 
-  it("merges queues flag", () => {
+  it('merges queues flag', () => {
     const result = mergeBindings([empty, { ...empty, needsQueues: true }]);
     expect(result.needsQueues).toBe(true);
   });
 
-  it("merges AI flag", () => {
+  it('merges AI flag', () => {
     const result = mergeBindings([empty, { ...empty, needsAI: true }]);
     expect(result.needsAI).toBe(true);
   });
 
-  it("merges AI with other bindings", () => {
+  it('merges AI with other bindings', () => {
     const result = mergeBindings([
       { ...empty, needsD1: true },
       { ...empty, needsAI: true },

@@ -1,9 +1,9 @@
-import type { CompileResult } from "./compile";
-import type { IslandImport } from "./extract-script";
-import { buildRenderChunks, toIslandId } from "./emit-shared";
+import type { CompileResult } from './compile';
+import { buildRenderChunks, toIslandId } from './emit-shared';
+import type { IslandImport } from './extract-script';
 
 function toSvelteLiteral(value: unknown): string {
-  return JSON.stringify(value).replace(/<\//g, "<\\/");
+  return JSON.stringify(value).replace(/<\//g, '<\\/');
 }
 
 export function emitSvelteComponent(result: CompileResult): string {
@@ -63,14 +63,14 @@ setFrontmatter(__frontmatter);
   let index = 0;
 
   for (const chunk of chunks) {
-    if (chunk.type === "html") {
+    if (chunk.type === 'html') {
       body.push(`{@html ${toSvelteLiteral(chunk.html)}}`);
       continue;
     }
 
     const propsName = `__island_props_${index++}`;
     const alias = importAliasByName.get(chunk.islandImport.name) ?? chunk.islandImport.name;
-    const propsLiteral = Object.keys(chunk.props).length > 0 ? toSvelteLiteral(chunk.props) : "{}";
+    const propsLiteral = Object.keys(chunk.props).length > 0 ? toSvelteLiteral(chunk.props) : '{}';
     source += `const ${propsName} = ${propsLiteral};
 `;
     body.push(
@@ -80,7 +80,7 @@ setFrontmatter(__frontmatter);
 
   source += `</script>
 
-${body.join("\n")}
+${body.join('\n')}
 `;
 
   return source;

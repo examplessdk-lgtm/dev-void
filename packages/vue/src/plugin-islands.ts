@@ -1,30 +1,37 @@
-import type { Plugin } from "vite";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve, relative } from "node:path";
-import { scanPages, resolveEffectiveLayoutChain } from "void/pages";
-import type { PageScanResult } from "void/pages";
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve, relative } from 'node:path';
+import { normalizePath, type Plugin } from 'vite';
+import { scanPages, resolveEffectiveLayoutChain } from 'void/pages';
+import type { PageScanResult } from 'void/pages';
 import {
   resolveSpecifier,
   needsIslandClientBundle,
+  rewriteCssImportForVirtualModule,
   rebuildIslandCssMap as rebuildIslandCssMapShared,
   computePagesNeedingClientJS as computePagesNeedingClientJSShared,
   configureIslandCssServer,
+  watchPagesForRescan,
   ISLANDS_RENDERER_ID,
   ISLANDS_CLIENT_ENTRY_ID,
-} from "void/pages-islands-plugin";
-import type { IslandEntry } from "void/pages-islands-plugin";
-import { generateComponentManifest } from "./pages-manifest";
+} from 'void/pages-islands-plugin';
+import type { IslandEntry } from 'void/pages-islands-plugin';
+import { generateComponentManifest } from './pages-manifest';
 
-const COMPONENT_EXTENSIONS = [".vue", ".tsx", ".jsx", ".ts", ".js"];
+const COMPONENT_EXTENSIONS = ['.vue', '.tsx', '.jsx', '.ts', '.js'];
 
 function fileHasCss(filePath: string): boolean {
   try {
-    const code = readFileSync(filePath, "utf-8");
+    const code = readFileSync(filePath, 'utf-8');
     // JS-style CSS imports
-    if (/import\b[^"']*["'][^"']+\.(?:css|scss|sass|less|styl|stylus|pcss|postcss)["']/.test(code))
+    if (
+      /import\b[^"']*["'][^"']+\.(?:css|scss|sass|less|styl|stylus|pcss|postcss)["']/.test(code)
+    ) {
       return true;
+    }
     // Vue <style> blocks (non-scoped — scoped needs Vue plugin processing)
-    if (/<style\b(?![^>]*\bscoped\b)[^>]*>/.test(code)) return true;
+    if (/<style\b(?![^>]*\bscoped\b)[^>]*>/.test(code)) {
+      return true;
+    }
     return false;
   } catch {
     return false;
@@ -32,7 +39,7 @@ function fileHasCss(filePath: string): boolean {
 }
 
 function extractCss(filePath: string): string {
-  const code = readFileSync(filePath, "utf-8");
+  const code = readFileSync(filePath, 'utf-8');
   const parts: string[] = [];
 
   // JS-style CSS imports → @import
@@ -47,12 +54,16 @@ function extractCss(filePath: string): string {
   const styleBlockRe = /<style\b([^>]*)>([\s\S]*?)<\/style>/g;
   while ((match = styleBlockRe.exec(code)) !== null) {
     const attrs = match[1];
-    if (/\bscoped\b/.test(attrs)) continue;
+    if (/\bscoped\b/.test(attrs)) {
+      continue;
+    }
     const content = match[2].trim();
-    if (content) parts.push(content);
+    if (content) {
+      parts.push(content);
+    }
   }
 
-  return parts.join("\n");
+  return parts.join('\n');
 }
 
 export function islandsPlugin(pagesDir: string): Plugin[] {
@@ -61,30 +72,34 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
   const islandManifest = new Map<string, IslandEntry>();
   const islandCssFiles = new Set<string>();
   let isDev = false;
-  let viteRoot = "";
+  let viteRoot = '';
   const islandCssMap = new Map<string, string[]>();
   let resolvedConfig: any;
 
   /** Rebuild islandCssMap from current file contents (re-runs fileHasCss). */
   function rebuildIslandCssMap(): void {
-    if (!pageScan) return;
+    if (!pageScan) {
+      return;
+    }
     rebuildIslandCssMapShared(pageScan, pagesDir, islandCssMap, fileHasCss);
   }
 
   function computePagesNeedingClientJS(): Set<string> {
-    if (!pageScan) return new Set();
+    if (!pageScan) {
+      return new Set();
+    }
     return computePagesNeedingClientJSShared(pageScan, pagesDir, resolvedConfig);
   }
 
   return [
     {
-      name: "void-vue:islands",
-      enforce: "pre",
+      name: 'void-vue:islands',
+      enforce: 'pre',
 
       configResolved(config) {
         resolvedConfig = config;
         viteRoot = config.root;
-        isDev = config.command === "serve";
+        isDev = config.command === 'serve';
       },
 
       // Serve virtual island CSS as raw text/css in dev. The client transform
@@ -92,6 +107,10 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
       // the CSS string and serve it directly for render-blocking <link> tags.
       configureServer(server) {
         configureIslandCssServer(server, islandCssFiles, viteRoot, rebuildIslandCssMap);
+        watchPagesForRescan(server, pagesDir, root, (scan: PageScanResult) => {
+          pageScan = scan;
+          rebuildIslandCssMap();
+        });
       },
 
       async buildStart() {
@@ -102,10 +121,21 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
           // islands-client entry before island page transforms run.
           const importAttrRe =
             /import\s+\w+\s+from\s+("[^"]+"|'[^']+')\s+with\s*\{\s*island\s*:\s*("[^"]+"|'[^']+')\s*\}/g;
-          for (const page of pageScan.pages) {
-            if (!page.island) continue;
-            const filePath = resolve(pagesDir, page.componentPath);
-            const code = readFileSync(filePath, "utf-8");
+          // Scan both pages AND layouts for island imports
+          const filesToScan: { filePath: string; island: boolean }[] = [
+            ...pageScan.pages.map((p: any) => ({ filePath: p.componentPath, island: p.island })),
+            ...pageScan.layouts.map((l: any) => ({ filePath: l.filePath, island: l.island })),
+            ...pageScan.namedLayouts.map((nl: any) => ({
+              filePath: nl.filePath,
+              island: nl.island,
+            })),
+          ];
+          for (const entry of filesToScan) {
+            if (!entry.island) {
+              continue;
+            }
+            const filePath = resolve(pagesDir, entry.filePath);
+            const code = readFileSync(filePath, 'utf-8');
             const importerDir = dirname(filePath);
             importAttrRe.lastIndex = 0;
             let m;
@@ -114,7 +144,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
               const strategy = m[2].slice(1, -1);
               const absPath = resolveSpecifier(spec, importerDir, COMPONENT_EXTENSIONS);
               if (absPath) {
-                const islandId = relative(root, absPath).replace(/\.[^.]+$/, "");
+                const islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '');
                 islandManifest.set(islandId, {
                   componentPath: absPath,
                   islandId,
@@ -126,9 +156,11 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
 
           // Collect .vue files needing CSS for island pages
           for (const page of pageScan.pages) {
-            if (!page.island) continue;
-            if (page.componentPath.endsWith(".vue")) {
-              islandCssFiles.add(resolve(pagesDir, page.componentPath));
+            if (!page.island) {
+              continue;
+            }
+            if (page.componentPath.endsWith('.vue')) {
+              islandCssFiles.add(normalizePath(resolve(pagesDir, page.componentPath)));
             }
             const layoutChain = resolveEffectiveLayoutChain(
               page,
@@ -136,7 +168,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
               pageScan.namedLayouts,
             );
             for (const layout of layoutChain) {
-              islandCssFiles.add(resolve(pagesDir, layout.filePath));
+              islandCssFiles.add(normalizePath(resolve(pagesDir, layout.filePath)));
             }
           }
 
@@ -149,16 +181,20 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
         filter: { id: /^virtual:void-islands-(renderer|client)$|\.vue\.css$/ },
         handler(source) {
           if (source === ISLANDS_RENDERER_ID || source === ISLANDS_CLIENT_ENTRY_ID) {
-            return "\0" + source;
+            return '\0' + source;
           }
           // Virtual island CSS modules — no \0 prefix so Vite CSS pipeline processes them.
           // Return absolute path so CSS @import resolution uses the correct directory.
-          if (source.endsWith(".css")) {
-            const srcPath = source.slice(0, -4);
-            if (islandCssFiles.has(srcPath)) return srcPath + ".css";
-            if (srcPath.startsWith("/")) {
-              const absPath = resolve(viteRoot, srcPath.slice(1));
-              if (islandCssFiles.has(absPath)) return absPath + ".css";
+          if (source.endsWith('.css')) {
+            const srcPath = normalizePath(source.slice(0, -4));
+            if (islandCssFiles.has(srcPath)) {
+              return srcPath + '.css';
+            }
+            if (srcPath.startsWith('/')) {
+              const absPath = normalizePath(resolve(viteRoot, srcPath.slice(1)));
+              if (islandCssFiles.has(absPath)) {
+                return absPath + '.css';
+              }
             }
           }
         },
@@ -168,11 +204,11 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
         // eslint-disable-next-line no-control-regex -- Vite virtual module null-byte prefix
         filter: { id: /^\0virtual:void-islands-(renderer|client)$|\.vue\.css$/ },
         handler(id) {
-          if (id === "\0" + ISLANDS_RENDERER_ID) {
+          if (id === '\0' + ISLANDS_RENDERER_ID) {
             if (!pageScan) {
               return "export function renderIslandPage() { throw new Error('No pages found'); }";
             }
-            const mdPlugin = resolvedConfig?.plugins?.find((p: any) => p.name === "void-md");
+            const mdPlugin = resolvedConfig?.plugins?.find((p: any) => p.name === 'void-md');
             const mdScriptIds: Set<string> = new Set(
               mdPlugin?.api?.getClientScripts?.()?.keys() ?? [],
             );
@@ -187,12 +223,14 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
               needsJS,
             );
           }
-          if (id === "\0" + ISLANDS_CLIENT_ENTRY_ID) {
-            if (!pageScan) return "";
+          if (id === '\0' + ISLANDS_CLIENT_ENTRY_ID) {
+            if (!pageScan) {
+              return '';
+            }
             return generateIslandClientEntry(islandManifest, islandCssFiles, isDev);
           }
           // Virtual island CSS module — resolveId returns absolute path
-          if (id.endsWith(".css") && !id.startsWith("\0")) {
+          if (id.endsWith('.css') && !id.startsWith('\0')) {
             const srcPath = id.slice(0, -4);
             if (islandCssFiles.has(srcPath)) {
               return extractCss(srcPath);
@@ -236,7 +274,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
             // Resolve to absolute path for the island manifest
             const absPath = resolveSpecifier(spec, importerDir, COMPONENT_EXTENSIONS);
             if (absPath) {
-              const islandId = relative(root, absPath).replace(/\.[^.]+$/, "");
+              const islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '');
               islandManifest.set(islandId, {
                 componentPath: absPath,
                 islandId,
@@ -244,7 +282,9 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
               });
             }
 
-            const islandId = absPath ? relative(root, absPath).replace(/\.[^.]+$/, "") : spec;
+            const islandId = absPath
+              ? normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '')
+              : spec;
 
             // Replace the import with a renamed import
             const replacement = `import ${rawName} from ${specRaw}`;
@@ -275,15 +315,15 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
             const setupMatch = transformed.match(scriptSetupRe);
             if (setupMatch) {
               const openEnd = setupMatch.index! + setupMatch[0].length;
-              const closeIdx = transformed.indexOf("</script>", openEnd);
+              const closeIdx = transformed.indexOf('</script>', openEnd);
               if (closeIdx !== -1) {
                 transformed =
                   transformed.slice(0, openEnd) +
                   '\nimport { h as _h_island } from "vue";' +
                   transformed.slice(openEnd, closeIdx) +
-                  "\n" +
-                  wrappers.join("\n") +
-                  "\n" +
+                  '\n' +
+                  wrappers.join('\n') +
+                  '\n' +
                   transformed.slice(closeIdx);
               }
             }
@@ -293,9 +333,11 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
       },
 
       config(_, env) {
-        if (!existsSync(pagesDir)) return;
-        if (env.command === "serve") {
-          return { optimizeDeps: { include: ["vue"] } };
+        if (!existsSync(pagesDir)) {
+          return;
+        }
+        if (env.command === 'serve') {
+          return { optimizeDeps: { include: ['vue'] } };
         }
         // Only add the islands client entry when content needs it
         if (needsIslandClientBundle(pagesDir, /\.island\.vue$/, true)) {
@@ -305,7 +347,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
                 build: {
                   manifest: true,
                   rollupOptions: {
-                    input: { "islands-client": ISLANDS_CLIENT_ENTRY_ID },
+                    input: { 'islands-client': ISLANDS_CLIENT_ENTRY_ID },
                   },
                 },
               },
@@ -327,11 +369,11 @@ function generateIslandRenderer(
   pagesNeedingClientJS: Set<string>,
 ): string {
   // Build CSS link map for dev FOUC prevention
-  let cssMapCode = "";
+  let cssMapCode = '';
   if (isDev && islandCssMap.size > 0) {
     const cssMapObj: Record<string, string[]> = {};
     for (const [compId, paths] of islandCssMap) {
-      cssMapObj[compId] = paths.map((p) => "/" + relative(viteRoot, p) + ".css");
+      cssMapObj[compId] = paths.map((p) => '/' + normalizePath(relative(viteRoot, p)) + '.css');
     }
     cssMapCode = `const __cssPaths = ${JSON.stringify(cssMapObj)};`;
   }
@@ -422,7 +464,7 @@ function generateIslandClientEntry(
     const cssImportRe =
       /^\s*import\b[^"']*["']([^"']+\.(?:css|scss|sass|less|styl|stylus|pcss|postcss))["']/gm;
     for (const file of cssFiles) {
-      const content = readFileSync(file, "utf-8");
+      const content = readFileSync(file, 'utf-8');
       // Extract <style> blocks via Vue SFC query params
       styleRe.lastIndex = 0;
       let index = 0;
@@ -431,25 +473,27 @@ function generateIslandClientEntry(
         const attrs = match[1];
         const scoped = /\bscoped\b/.test(attrs);
         const langMatch = attrs.match(/\blang\s*=\s*["'](\w+)["']/);
-        const lang = langMatch ? langMatch[1] : "css";
+        const lang = langMatch ? langMatch[1] : 'css';
         let query = `?vue&type=style&index=${index}&lang.${lang}`;
-        if (scoped) query += "&scoped=true";
+        if (scoped) {
+          query += '&scoped=true';
+        }
         lines.push(`import ${JSON.stringify(file + query)};`);
         index++;
       }
       // Extract JS-style CSS imports (e.g. import "@void/md/theme.css")
       cssImportRe.lastIndex = 0;
       while ((match = cssImportRe.exec(content)) !== null) {
-        lines.push(match[0].trim() + ";");
+        lines.push(rewriteCssImportForVirtualModule(match[0], match[1], file));
       }
     }
   }
 
-  lines.push("const islands = {");
+  lines.push('const islands = {');
   for (const [id, path] of uniqueIslands) {
     lines.push(`  ${JSON.stringify(id)}: () => import(${JSON.stringify(path)}),`);
   }
-  lines.push("};");
+  lines.push('};');
 
   lines.push(`
 async function hydrateIsland(el, mod, props) {
@@ -463,5 +507,5 @@ async function hydrateIsland(el, mod, props) {
 initIslands(islands, hydrateIsland);
 `);
 
-  return lines.join("\n");
+  return lines.join('\n');
 }

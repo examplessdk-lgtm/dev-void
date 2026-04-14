@@ -5,13 +5,13 @@ packages:
   - playground-local/*
 
 catalog:
-  "@clack/prompts": ^1.1.0
-  "@cloudflare/workers-types": ^4.20260317.1
-  "@types/node": ^25.5.0
-  "@typescript/native-preview": 7.0.0-dev.20260325.1
-  tsdown: ^0.21.5
-  vite: ^8.0.2
-  wrangler: ^4.77.0
+  '@clack/prompts': ^1.2.0
+  '@cloudflare/workers-types': ^4.20260412.2
+  '@types/node': ^25.6.0
+  '@typescript/native-preview': 7.0.0-dev.20260412.1
+  tsdown: ^0.21.7
+  vite: ^8.0.8
+  wrangler: ^4.81.1
 
 onlyBuiltDependencies:
   - better-sqlite3
@@ -19,5 +19,5 @@ onlyBuiltDependencies:
   - workerd
 
 overrides:
-  vite: "catalog:"
   esbuild: ^0.27.3
+  vite: 'catalog:'

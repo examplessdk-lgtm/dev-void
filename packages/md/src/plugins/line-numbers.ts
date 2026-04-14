@@ -1,4 +1,4 @@
-import type MarkdownExit from "markdown-exit";
+import type MarkdownExit from 'markdown-exit';
 
 /**
  * Adds line number gutter to code blocks.
@@ -22,11 +22,11 @@ export function lineNumberPlugin(md: MarkdownExit, enable = false): void {
       startLineNumber = parseInt(matchStart[1]);
     }
 
-    const code = rawCode.slice(rawCode.indexOf("<code>"), rawCode.indexOf("</code>"));
-    const lines = code.split("\n");
+    const code = rawCode.slice(rawCode.indexOf('<code>'), rawCode.indexOf('</code>'));
+    const lines = code.split('\n');
     const lineNumbersCode = [...Array(lines.length)]
       .map((_, i) => `<span class="line-number">${i + startLineNumber}</span><br>`)
-      .join("");
+      .join('');
     const lineNumbersWrapper = `<div class="line-numbers-wrapper" aria-hidden="true">${lineNumbersCode}</div>`;
 
     return rawCode

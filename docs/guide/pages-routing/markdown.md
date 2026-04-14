@@ -67,10 +67,10 @@ Add the plugin to your Vite config **after** the framework adapter:
 
 ```ts [React]
 // vite.config.ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidReact } from "@void/react/plugin";
-import { voidMarkdown } from "@void/md/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidReact } from '@void/react/plugin';
+import { voidMarkdown } from '@void/md/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidReact(), voidMarkdown()],
@@ -79,10 +79,10 @@ export default defineConfig({
 
 ```ts [Vue]
 // vite.config.ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidVue } from "@void/vue/plugin";
-import { voidMarkdown } from "@void/md/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidVue } from '@void/vue/plugin';
+import { voidMarkdown } from '@void/md/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidVue(), voidMarkdown()],
@@ -91,10 +91,10 @@ export default defineConfig({
 
 ```ts [Svelte]
 // vite.config.ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidSvelte } from "@void/svelte/plugin";
-import { voidMarkdown } from "@void/md/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidSvelte } from '@void/svelte/plugin';
+import { voidMarkdown } from '@void/md/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidSvelte(), voidMarkdown()],
@@ -103,10 +103,10 @@ export default defineConfig({
 
 ```ts [Solid]
 // vite.config.ts
-import { defineConfig } from "vite";
-import { voidPlugin } from "void";
-import { voidSolid } from "@void/solid/plugin";
-import { voidMarkdown } from "@void/md/plugin";
+import { defineConfig } from 'vite';
+import { voidPlugin } from 'void';
+import { voidSolid } from '@void/solid/plugin';
+import { voidMarkdown } from '@void/md/plugin';
 
 export default defineConfig({
   plugins: [voidPlugin(), voidSolid(), voidMarkdown()],
@@ -187,7 +187,7 @@ Use `useFrontmatter()` in layout components to read the current page's frontmatt
 ::: code-group
 
 ```tsx [React]
-import { useFrontmatter } from "@void/md";
+import { useFrontmatter } from '@void/md';
 
 export default function DocsLayout({ children }) {
   const fm = useFrontmatter();
@@ -202,7 +202,7 @@ export default function DocsLayout({ children }) {
 
 ```vue [Vue]
 <script setup>
-import { useFrontmatter } from "@void/md";
+import { useFrontmatter } from '@void/md';
 
 const fm = useFrontmatter();
 // fm.title, fm.description, etc.
@@ -226,7 +226,7 @@ const fm = useFrontmatter();
 ```
 
 ```tsx [Solid]
-import { useFrontmatter } from "@void/md";
+import { useFrontmatter } from '@void/md';
 
 export default function DocsLayout(props) {
   const fm = useFrontmatter();
@@ -246,7 +246,7 @@ export default function DocsLayout(props) {
 Import `@void/md/pages` to get metadata for all markdown pages at build time. Use it to build sidebars, navigation, or search indexes:
 
 ```ts
-import pages from "@void/md/pages";
+import pages from '@void/md/pages';
 // [{ path: "/docs/getting-started", title: "Getting Started", frontmatter: {...}, headings: [...] }, ...]
 ```
 
@@ -272,7 +272,7 @@ The markdown plugin provides a minimal default theme. Unlike Vitepress, this the
 For standalone markdown sites that need a complete stylesheet, use this package. It includes a modern CSS reset, baseline body styles, and all markdown content styles:
 
 ```css
-@import "@void/md/theme.css";
+@import '@void/md/theme.css';
 ```
 
 ### Content only (scoped to `.void-md`)
@@ -280,7 +280,7 @@ For standalone markdown sites that need a complete stylesheet, use this package.
 For embedding markdown in an existing app that already has its own reset and global styles, use this one. It only includes the `.void-md`-scoped content styles:
 
 ```css
-@import "@void/md/theme-content.css";
+@import '@void/md/theme-content.css';
 ```
 
 ### Usage
@@ -400,11 +400,11 @@ Use inline comments to annotate lines:
 
 ```ts
 export function hello() {
-  console.log("old"); // [!code --]
-  console.log("new"); // [!code ++]
-  console.log("look here"); // [!code focus]
-  console.log("problem"); // [!code error]
-  console.log("careful"); // [!code warning]
+  console.log('old'); // [!code --]
+  console.log('new'); // [!code ++]
+  console.log('look here'); // [!code focus]
+  console.log('problem'); // [!code error]
+  console.log('careful'); // [!code warning]
 }
 ```
 
@@ -468,8 +468,8 @@ External links automatically get `target="_blank" rel="noreferrer"`. Internal `.
 ```ts
 voidMarkdown({
   shiki: {
-    themes: { light: "github-light", dark: "github-dark" }, // Shiki themes
-    langs: ["sql", "graphql"], // additional languages
+    themes: { light: 'github-light', dark: 'github-dark' }, // Shiki themes
+    langs: ['sql', 'graphql'], // additional languages
   },
 });
 ```
@@ -487,12 +487,12 @@ Here's a full example of a docs layout using `useFrontmatter()` and `@void/md/pa
 
 ```tsx [React]
 // pages/docs/layout.island.tsx
-import "@void/md/theme-content.css";
-import { useFrontmatter } from "@void/md";
-import pages from "@void/md/pages";
-import { useRouter } from "@void/react";
+import '@void/md/theme-content.css';
+import { useFrontmatter } from '@void/md';
+import pages from '@void/md/pages';
+import { useRouter } from '@void/react';
 
-const docPages = pages.filter((p) => p.path.startsWith("/docs/"));
+const docPages = pages.filter((p) => p.path.startsWith('/docs/'));
 
 export default function DocsLayout({ children }) {
   const fm = useFrontmatter();
@@ -503,7 +503,7 @@ export default function DocsLayout({ children }) {
       <aside>
         <nav>
           {docPages.map((page) => (
-            <a key={page.path} href={page.path} className={page.path === path ? "active" : ""}>
+            <a key={page.path} href={page.path} className={page.path === path ? 'active' : ''}>
               {page.title}
             </a>
           ))}
@@ -521,17 +521,17 @@ export default function DocsLayout({ children }) {
 ```vue [Vue]
 <!-- pages/docs/layout.island.vue -->
 <script setup>
-import { useFrontmatter } from "@void/md";
-import pages from "@void/md/pages";
-import { useRouter } from "@void/vue";
+import { useFrontmatter } from '@void/md';
+import pages from '@void/md/pages';
+import { useRouter } from '@void/vue';
 
 const fm = useFrontmatter();
 const { path } = useRouter();
-const docPages = pages.filter((p) => p.path.startsWith("/docs/"));
+const docPages = pages.filter((p) => p.path.startsWith('/docs/'));
 </script>
 
 <style>
-@import "@void/md/theme-content.css";
+@import '@void/md/theme-content.css';
 </style>
 
 <template>
@@ -588,13 +588,13 @@ const docPages = pages.filter((p) => p.path.startsWith("/docs/"));
 
 ```tsx [Solid]
 // pages/docs/layout.island.tsx
-import "@void/md/theme-content.css";
-import { useFrontmatter } from "@void/md";
-import pages from "@void/md/pages";
-import { useRouter } from "@void/solid";
-import { For } from "solid-js";
+import '@void/md/theme-content.css';
+import { useFrontmatter } from '@void/md';
+import pages from '@void/md/pages';
+import { useRouter } from '@void/solid';
+import { For } from 'solid-js';
 
-const docPages = pages.filter((p) => p.path.startsWith("/docs/"));
+const docPages = pages.filter((p) => p.path.startsWith('/docs/'));
 
 export default function DocsLayout(props) {
   const fm = useFrontmatter();

@@ -1,20 +1,20 @@
-import { describe, expect, it } from "vitest";
-import { Hono } from "hono";
-import { z } from "zod";
-import * as v from "valibot";
-import { type } from "arktype";
-import { defineHandler } from "../../src/runtime/handler";
-import { convertReturnValue } from "../../src/runtime/response";
+import { type } from 'arktype';
+import { Hono } from 'hono';
+import * as v from 'valibot';
+import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
+import { defineHandler } from '../../src/runtime/handler';
+import { convertReturnValue } from '../../src/runtime/response';
 
 function postJson(path: string, body: unknown) {
   return new Request(`http://localhost${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
 }
 
-function createPostApp(handler: (c: any) => unknown, path = "/test") {
+function createPostApp(handler: (c: any) => unknown, path = '/test') {
   const app = new Hono();
   app.post(path, async (c) => {
     return convertReturnValue(await handler(c));
@@ -22,7 +22,7 @@ function createPostApp(handler: (c: any) => unknown, path = "/test") {
   return app;
 }
 
-function createGetApp(handler: (c: any) => unknown, path = "/test") {
+function createGetApp(handler: (c: any) => unknown, path = '/test') {
   const app = new Hono();
   app.get(path, async (c) => {
     return convertReturnValue(await handler(c));
@@ -32,13 +32,13 @@ function createGetApp(handler: (c: any) => unknown, path = "/test") {
 
 // ─── Zod ─────────────────────────────────────────────────────────────────────
 
-describe("withValidator + zod", () => {
+describe('withValidator + zod', () => {
   const CreateUser = z.object({
     name: z.string().min(1),
     email: z.string().email(),
   });
 
-  it("type: infers body and rejects undeclared slots", () => {
+  it('type: infers body and rejects undeclared slots', () => {
     defineHandler.withValidator({
       body: CreateUser,
     })((_c, { body }) => {
@@ -59,7 +59,7 @@ describe("withValidator + zod", () => {
     expect(true).toBe(true); // compile-time type test
   });
 
-  it("accepts valid body", async () => {
+  it('accepts valid body', async () => {
     const handler = defineHandler.withValidator({
       body: CreateUser,
     })((_c, { body }) => {
@@ -67,13 +67,13 @@ describe("withValidator + zod", () => {
     });
 
     const app = createPostApp(handler);
-    const res = await app.request(postJson("/test", { name: "Alice", email: "alice@example.com" }));
+    const res = await app.request(postJson('/test', { name: 'Alice', email: 'alice@example.com' }));
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ name: "Alice", email: "alice@example.com" });
+    expect(await res.json()).toEqual({ name: 'Alice', email: 'alice@example.com' });
   });
 
-  it("rejects invalid body with 400", async () => {
+  it('rejects invalid body with 400', async () => {
     const handler = defineHandler.withValidator({
       body: CreateUser,
     })((_c, { body }) => {
@@ -81,16 +81,16 @@ describe("withValidator + zod", () => {
     });
 
     const app = createPostApp(handler);
-    const res = await app.request(postJson("/test", { name: "", email: "not-an-email" }));
+    const res = await app.request(postJson('/test', { name: '', email: 'not-an-email' }));
 
     expect(res.status).toBe(400);
     const json: any = await res.json();
-    expect(json.error).toBe("Validation failed");
-    expect(json.issues[0].slot).toBe("body");
+    expect(json.error).toBe('Validation failed');
+    expect(json.issues[0].slot).toBe('body');
     expect(json.issues[0].issues.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("rejects completely wrong shape", async () => {
+  it('rejects completely wrong shape', async () => {
     const handler = defineHandler.withValidator({
       body: CreateUser,
     })((_c, { body }) => {
@@ -98,12 +98,12 @@ describe("withValidator + zod", () => {
     });
 
     const app = createPostApp(handler);
-    const res = await app.request(postJson("/test", { garbage: 123 }));
+    const res = await app.request(postJson('/test', { garbage: 123 }));
 
     expect(res.status).toBe(400);
   });
 
-  it("validates query params", async () => {
+  it('validates query params', async () => {
     const Pagination = z.object({
       page: z.string(),
       limit: z.string(),
@@ -116,15 +116,15 @@ describe("withValidator + zod", () => {
     });
 
     const app = createGetApp(handler);
-    const res = await app.request(new Request("http://localhost/test?page=2&limit=20"));
+    const res = await app.request(new Request('http://localhost/test?page=2&limit=20'));
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ page: "2", limit: "20" });
+    expect(await res.json()).toEqual({ page: '2', limit: '20' });
   });
 
-  it("validates params + body together", async () => {
+  it('validates params + body together', async () => {
     const Params = z.object({ id: z.string() });
-    const Body = z.object({ role: z.enum(["admin", "user"]) });
+    const Body = z.object({ role: z.enum(['admin', 'user']) });
 
     const handler = defineHandler.withValidator({
       params: Params,
@@ -134,26 +134,26 @@ describe("withValidator + zod", () => {
     });
 
     const app = new Hono();
-    app.post("/users/:id/role", async (c) => {
+    app.post('/users/:id/role', async (c) => {
       return convertReturnValue(await (handler as any)(c));
     });
 
-    const res = await app.request(postJson("/users/42/role", { role: "admin" }));
+    const res = await app.request(postJson('/users/42/role', { role: 'admin' }));
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ userId: "42", role: "admin" });
+    expect(await res.json()).toEqual({ userId: '42', role: 'admin' });
   });
 });
 
 // ─── Valibot ─────────────────────────────────────────────────────────────────
 
-describe("withValidator + valibot", () => {
+describe('withValidator + valibot', () => {
   const CreateUser = v.object({
     name: v.pipe(v.string(), v.minLength(1)),
     email: v.pipe(v.string(), v.email()),
   });
 
-  it("type: infers body and query types from schema", () => {
+  it('type: infers body and query types from schema', () => {
     defineHandler.withValidator({
       body: CreateUser,
     })((_c, { body }) => {
@@ -175,7 +175,7 @@ describe("withValidator + valibot", () => {
     expect(true).toBe(true); // compile-time type test
   });
 
-  it("accepts valid body", async () => {
+  it('accepts valid body', async () => {
     const handler = defineHandler.withValidator({
       body: CreateUser,
     })((_c, { body }) => {
@@ -183,13 +183,13 @@ describe("withValidator + valibot", () => {
     });
 
     const app = createPostApp(handler);
-    const res = await app.request(postJson("/test", { name: "Bob", email: "bob@example.com" }));
+    const res = await app.request(postJson('/test', { name: 'Bob', email: 'bob@example.com' }));
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ name: "Bob", email: "bob@example.com" });
+    expect(await res.json()).toEqual({ name: 'Bob', email: 'bob@example.com' });
   });
 
-  it("rejects invalid body with 400", async () => {
+  it('rejects invalid body with 400', async () => {
     const handler = defineHandler.withValidator({
       body: CreateUser,
     })((_c, { body }) => {
@@ -197,16 +197,16 @@ describe("withValidator + valibot", () => {
     });
 
     const app = createPostApp(handler);
-    const res = await app.request(postJson("/test", { name: "", email: "bad" }));
+    const res = await app.request(postJson('/test', { name: '', email: 'bad' }));
 
     expect(res.status).toBe(400);
     const json: any = await res.json();
-    expect(json.error).toBe("Validation failed");
-    expect(json.issues[0].slot).toBe("body");
+    expect(json.error).toBe('Validation failed');
+    expect(json.issues[0].slot).toBe('body');
     expect(json.issues[0].issues.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("validates query params", async () => {
+  it('validates query params', async () => {
     const Search = v.object({
       q: v.string(),
     });
@@ -218,13 +218,13 @@ describe("withValidator + valibot", () => {
     });
 
     const app = createGetApp(handler);
-    const res = await app.request(new Request("http://localhost/test?q=hello"));
+    const res = await app.request(new Request('http://localhost/test?q=hello'));
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ q: "hello" });
+    expect(await res.json()).toEqual({ q: 'hello' });
   });
 
-  it("validates params + body together", async () => {
+  it('validates params + body together', async () => {
     const Params = v.object({ id: v.string() });
     const Body = v.object({ title: v.string() });
 
@@ -236,26 +236,26 @@ describe("withValidator + valibot", () => {
     });
 
     const app = new Hono();
-    app.post("/items/:id", async (c) => {
+    app.post('/items/:id', async (c) => {
       return convertReturnValue(await (handler as any)(c));
     });
 
-    const res = await app.request(postJson("/items/7", { title: "Updated" }));
+    const res = await app.request(postJson('/items/7', { title: 'Updated' }));
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ id: "7", title: "Updated" });
+    expect(await res.json()).toEqual({ id: '7', title: 'Updated' });
   });
 });
 
 // ─── ArkType ─────────────────────────────────────────────────────────────────
 
-describe("withValidator + arktype", () => {
+describe('withValidator + arktype', () => {
   const CreateUser = type({
-    name: "string >= 1",
-    email: "string.email",
+    name: 'string >= 1',
+    email: 'string.email',
   });
 
-  it("type: infers body and params types from schema", () => {
+  it('type: infers body and params types from schema', () => {
     defineHandler.withValidator({
       body: CreateUser,
     })((_c, { body }) => {
@@ -267,7 +267,7 @@ describe("withValidator + arktype", () => {
     });
 
     defineHandler.withValidator({
-      params: type({ id: "string" }),
+      params: type({ id: 'string' }),
     })((_c, { params }) => {
       // @ts-expect-error - 'slug' does not exist on { id: string }
       void params.slug;
@@ -277,7 +277,7 @@ describe("withValidator + arktype", () => {
     expect(true).toBe(true); // compile-time type test
   });
 
-  it("accepts valid body", async () => {
+  it('accepts valid body', async () => {
     const handler = defineHandler.withValidator({
       body: CreateUser,
     })((_c, { body }) => {
@@ -286,14 +286,14 @@ describe("withValidator + arktype", () => {
 
     const app = createPostApp(handler);
     const res = await app.request(
-      postJson("/test", { name: "Charlie", email: "charlie@example.com" }),
+      postJson('/test', { name: 'Charlie', email: 'charlie@example.com' }),
     );
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ name: "Charlie", email: "charlie@example.com" });
+    expect(await res.json()).toEqual({ name: 'Charlie', email: 'charlie@example.com' });
   });
 
-  it("rejects invalid body with 400", async () => {
+  it('rejects invalid body with 400', async () => {
     const handler = defineHandler.withValidator({
       body: CreateUser,
     })((_c, { body }) => {
@@ -301,17 +301,17 @@ describe("withValidator + arktype", () => {
     });
 
     const app = createPostApp(handler);
-    const res = await app.request(postJson("/test", { name: "", email: "not-email" }));
+    const res = await app.request(postJson('/test', { name: '', email: 'not-email' }));
 
     expect(res.status).toBe(400);
     const json: any = await res.json();
-    expect(json.error).toBe("Validation failed");
-    expect(json.issues[0].slot).toBe("body");
+    expect(json.error).toBe('Validation failed');
+    expect(json.issues[0].slot).toBe('body');
     expect(json.issues[0].issues.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("validates query params", async () => {
-    const Query = type({ tag: "string" });
+  it('validates query params', async () => {
+    const Query = type({ tag: 'string' });
 
     const handler = defineHandler.withValidator({
       query: Query,
@@ -320,15 +320,15 @@ describe("withValidator + arktype", () => {
     });
 
     const app = createGetApp(handler);
-    const res = await app.request(new Request("http://localhost/test?tag=featured"));
+    const res = await app.request(new Request('http://localhost/test?tag=featured'));
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ tag: "featured" });
+    expect(await res.json()).toEqual({ tag: 'featured' });
   });
 
-  it("validates params + body together", async () => {
-    const Params = type({ slug: "string" });
-    const Body = type({ published: "boolean" });
+  it('validates params + body together', async () => {
+    const Params = type({ slug: 'string' });
+    const Body = type({ published: 'boolean' });
 
     const handler = defineHandler.withValidator({
       params: Params,
@@ -338,13 +338,13 @@ describe("withValidator + arktype", () => {
     });
 
     const app = new Hono();
-    app.post("/posts/:slug", async (c) => {
+    app.post('/posts/:slug', async (c) => {
       return convertReturnValue(await (handler as any)(c));
     });
 
-    const res = await app.request(postJson("/posts/my-post", { published: true }));
+    const res = await app.request(postJson('/posts/my-post', { published: true }));
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ slug: "my-post", published: true });
+    expect(await res.json()).toEqual({ slug: 'my-post', published: true });
   });
 });

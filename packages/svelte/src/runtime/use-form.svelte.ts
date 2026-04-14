@@ -1,5 +1,5 @@
-import { getContext } from "svelte";
-import type { ActionUrl, ResolveActionBody, ActionFormOptions } from "void/routes";
+import { getContext } from 'svelte';
+import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
 
 // Typed overload — full inference from PageActionMap (requires codegen)
 export function useForm<U extends ActionUrl & string>(
@@ -29,8 +29,8 @@ export function useForm(
   let resolvedUrl = url;
 
   // Strip ?action query before param resolution, then re-append
-  let actionQuery = "";
-  const qIdx = resolvedUrl.indexOf("?");
+  let actionQuery = '';
+  const qIdx = resolvedUrl.indexOf('?');
   if (qIdx !== -1) {
     actionQuery = resolvedUrl.slice(qIdx);
     resolvedUrl = resolvedUrl.slice(0, qIdx);
@@ -44,7 +44,7 @@ export function useForm(
 
   resolvedUrl = resolvedUrl + actionQuery;
 
-  const router = getContext<any>("__void_router");
+  const router = getContext<any>('__void_router');
 
   let data = $state({ ...defaults });
   let errors: Record<string, string> = $state({});
@@ -85,7 +85,9 @@ export function useForm(
     processing = true;
     wasSuccessful = false;
     recentlySuccessful = false;
-    if (successTimeout) clearTimeout(successTimeout);
+    if (successTimeout) {
+      clearTimeout(successTimeout);
+    }
     clearErrors();
 
     try {
@@ -134,9 +136,9 @@ export function useForm(
     },
     reset,
     clearErrors,
-    post: (opts?: any) => submit("POST", opts),
-    put: (opts?: any) => submit("PUT", opts),
-    patch: (opts?: any) => submit("PATCH", opts),
-    delete: (opts?: any) => submit("DELETE", opts),
+    post: (opts?: any) => submit('POST', opts),
+    put: (opts?: any) => submit('PUT', opts),
+    patch: (opts?: any) => submit('PATCH', opts),
+    delete: (opts?: any) => submit('DELETE', opts),
   };
 }

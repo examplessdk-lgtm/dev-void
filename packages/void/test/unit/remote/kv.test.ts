@@ -1,21 +1,21 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { ProxyKVNamespace } from "../../../src/runtime/remote/kv";
-import { ProxyClient } from "../../../src/runtime/remote/client";
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { ProxyClient } from '../../../src/runtime/remote/client';
+import { ProxyKVNamespace } from '../../../src/runtime/remote/kv';
 
 function createClient() {
-  return new ProxyClient("https://proxy.void.cloud", "jwt-token", "proj_1");
+  return new ProxyClient('https://proxy.void.cloud', 'jwt-token', 'proj_1');
 }
 
-function mockFetch(response: unknown, contentType = "application/json") {
+function mockFetch(response: unknown, contentType = 'application/json') {
   globalThis.fetch = vi.fn(
     async () =>
       new Response(JSON.stringify(response), {
-        headers: { "content-type": contentType },
+        headers: { 'content-type': contentType },
       }),
   ) as any;
 }
 
-describe("ProxyKVNamespace", () => {
+describe('ProxyKVNamespace', () => {
   const originalFetch = globalThis.fetch;
 
   afterEach(() => {
@@ -23,101 +23,101 @@ describe("ProxyKVNamespace", () => {
     vi.restoreAllMocks();
   });
 
-  describe("get()", () => {
-    it("returns string by default", async () => {
-      mockFetch("hello world");
+  describe('get()', () => {
+    it('returns string by default', async () => {
+      mockFetch('hello world');
 
-      const kv = new ProxyKVNamespace(createClient(), "KV");
-      const value = await kv.get("my-key");
+      const kv = new ProxyKVNamespace(createClient(), 'KV');
+      const value = await kv.get('my-key');
 
-      expect(value).toBe("hello world");
+      expect(value).toBe('hello world');
 
       const call = (globalThis.fetch as any).mock.calls[0];
       const body = JSON.parse(call[1].body);
-      expect(body.key).toBe("my-key");
-      expect(body.type).toBe("text");
-      expect(body.binding).toBe("KV");
+      expect(body.key).toBe('my-key');
+      expect(body.type).toBe('text');
+      expect(body.binding).toBe('KV');
     });
 
-    it("returns parsed JSON with type=json", async () => {
-      mockFetch({ name: "Alice", age: 30 });
+    it('returns parsed JSON with type=json', async () => {
+      mockFetch({ name: 'Alice', age: 30 });
 
-      const kv = new ProxyKVNamespace(createClient(), "KV");
-      const value = await kv.get("user:1", "json");
+      const kv = new ProxyKVNamespace(createClient(), 'KV');
+      const value = await kv.get('user:1', 'json');
 
-      expect(value).toEqual({ name: "Alice", age: 30 });
+      expect(value).toEqual({ name: 'Alice', age: 30 });
     });
 
-    it("returns ArrayBuffer with type=arrayBuffer", async () => {
+    it('returns ArrayBuffer with type=arrayBuffer', async () => {
       // For arrayBuffer type, the proxy returns binary data
       const binaryData = new Uint8Array([1, 2, 3, 4]);
       globalThis.fetch = vi.fn(
         async () =>
           new Response(binaryData, {
-            headers: { "content-type": "application/octet-stream" },
+            headers: { 'content-type': 'application/octet-stream' },
           }),
       ) as any;
 
-      const kv = new ProxyKVNamespace(createClient(), "KV");
-      const value = await kv.get("binary-key", "arrayBuffer");
+      const kv = new ProxyKVNamespace(createClient(), 'KV');
+      const value = await kv.get('binary-key', 'arrayBuffer');
 
       expect(value).toBeInstanceOf(ArrayBuffer);
       expect(new Uint8Array(value as ArrayBuffer)).toEqual(binaryData);
     });
 
-    it("returns null for missing key", async () => {
+    it('returns null for missing key', async () => {
       mockFetch(null);
 
-      const kv = new ProxyKVNamespace(createClient(), "KV");
-      const value = await kv.get("missing");
+      const kv = new ProxyKVNamespace(createClient(), 'KV');
+      const value = await kv.get('missing');
 
       expect(value).toBeNull();
     });
 
-    it("accepts options object with type field", async () => {
+    it('accepts options object with type field', async () => {
       mockFetch({ data: true });
 
-      const kv = new ProxyKVNamespace(createClient(), "KV");
-      await kv.get("key", { type: "json" });
+      const kv = new ProxyKVNamespace(createClient(), 'KV');
+      await kv.get('key', { type: 'json' });
 
       const call = (globalThis.fetch as any).mock.calls[0];
       const body = JSON.parse(call[1].body);
-      expect(body.type).toBe("json");
+      expect(body.type).toBe('json');
     });
   });
 
-  describe("getWithMetadata()", () => {
-    it("returns value and null metadata", async () => {
-      mockFetch("hello");
+  describe('getWithMetadata()', () => {
+    it('returns value and null metadata', async () => {
+      mockFetch('hello');
 
-      const kv = new ProxyKVNamespace(createClient(), "KV");
-      const result = await kv.getWithMetadata("key");
+      const kv = new ProxyKVNamespace(createClient(), 'KV');
+      const result = await kv.getWithMetadata('key');
 
-      expect(result.value).toBe("hello");
+      expect(result.value).toBe('hello');
       expect(result.metadata).toBeNull();
       expect(result.cacheStatus).toBeNull();
     });
   });
 
-  describe("put()", () => {
-    it("sends value to proxy", async () => {
+  describe('put()', () => {
+    it('sends value to proxy', async () => {
       mockFetch({ success: true });
 
-      const kv = new ProxyKVNamespace(createClient(), "KV");
-      await kv.put("my-key", "my-value");
+      const kv = new ProxyKVNamespace(createClient(), 'KV');
+      await kv.put('my-key', 'my-value');
 
       const call = (globalThis.fetch as any).mock.calls[0];
       const body = JSON.parse(call[1].body);
-      expect(body.key).toBe("my-key");
-      expect(body.value).toBe("my-value");
-      expect(body.binding).toBe("KV");
+      expect(body.key).toBe('my-key');
+      expect(body.value).toBe('my-value');
+      expect(body.binding).toBe('KV');
     });
 
-    it("sends expiration options", async () => {
+    it('sends expiration options', async () => {
       mockFetch({ success: true });
 
-      const kv = new ProxyKVNamespace(createClient(), "KV");
-      await kv.put("key", "val", { expiration: 1700000000, expirationTtl: 3600 });
+      const kv = new ProxyKVNamespace(createClient(), 'KV');
+      await kv.put('key', 'val', { expiration: 1700000000, expirationTtl: 3600 });
 
       const call = (globalThis.fetch as any).mock.calls[0];
       const body = JSON.parse(call[1].body);
@@ -126,50 +126,50 @@ describe("ProxyKVNamespace", () => {
     });
   });
 
-  describe("delete()", () => {
-    it("sends delete request", async () => {
+  describe('delete()', () => {
+    it('sends delete request', async () => {
       mockFetch({ success: true });
 
-      const kv = new ProxyKVNamespace(createClient(), "KV");
-      await kv.delete("my-key");
+      const kv = new ProxyKVNamespace(createClient(), 'KV');
+      await kv.delete('my-key');
 
       const call = (globalThis.fetch as any).mock.calls[0];
       const body = JSON.parse(call[1].body);
-      expect(body.key).toBe("my-key");
-      expect(body.binding).toBe("KV");
-      expect(call[0]).toContain("/kv/delete");
+      expect(body.key).toBe('my-key');
+      expect(body.binding).toBe('KV');
+      expect(call[0]).toContain('/kv/delete');
     });
   });
 
-  describe("list()", () => {
-    it("returns keys and pagination info", async () => {
+  describe('list()', () => {
+    it('returns keys and pagination info', async () => {
       mockFetch({
-        keys: [{ name: "key1" }, { name: "key2" }],
+        keys: [{ name: 'key1' }, { name: 'key2' }],
         list_complete: false,
-        cursor: "next-cursor",
+        cursor: 'next-cursor',
       });
 
-      const kv = new ProxyKVNamespace(createClient(), "KV");
-      const result = await kv.list({ prefix: "user:", limit: 2 });
+      const kv = new ProxyKVNamespace(createClient(), 'KV');
+      const result = await kv.list({ prefix: 'user:', limit: 2 });
 
-      expect(result.keys).toEqual([{ name: "key1" }, { name: "key2" }]);
+      expect(result.keys).toEqual([{ name: 'key1' }, { name: 'key2' }]);
       expect(result.list_complete).toBe(false);
-      expect((result as any).cursor).toBe("next-cursor");
+      expect((result as any).cursor).toBe('next-cursor');
 
       const call = (globalThis.fetch as any).mock.calls[0];
       const body = JSON.parse(call[1].body);
-      expect(body.prefix).toBe("user:");
+      expect(body.prefix).toBe('user:');
       expect(body.limit).toBe(2);
     });
 
-    it("returns complete list when no cursor", async () => {
+    it('returns complete list when no cursor', async () => {
       mockFetch({
-        keys: [{ name: "key1" }],
+        keys: [{ name: 'key1' }],
         list_complete: true,
         cursor: null,
       });
 
-      const kv = new ProxyKVNamespace(createClient(), "KV");
+      const kv = new ProxyKVNamespace(createClient(), 'KV');
       const result = await kv.list();
 
       expect(result.list_complete).toBe(true);

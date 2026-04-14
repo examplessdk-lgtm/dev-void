@@ -3,20 +3,20 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
     "build": "vite build",
+    "dev": "vite",
     "preview": "vite preview",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "hono": "^4.12.9",
+    "hono": "^4.12.12",
     "solid-js": "^1.9.12",
     "valibot": "^1.3.1"
   },
   "devDependencies": {
     "@typescript/native-preview": "catalog:",
-    "@void/solid": "workspace:*",
+    "@void/solid": "workspace:@void-sdk/solid@*",
     "vite": "catalog:",
-    "void": "workspace:*"
+    "void": "workspace:@void-sdk/void@*"
   }
 }

@@ -3,5 +3,5 @@
  * Use this entry for standalone markdown sites that need a complete stylesheet.
  * For embedding markdown in an existing app, use content.css instead.
  */
-@import "./reset.css";
-@import "./content.css";
+@import './reset.css';
+@import './content.css';

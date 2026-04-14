@@ -19,12 +19,12 @@ Example:
 
 ```ts
 // crons/hourly-heartbeat.ts
-import { defineScheduled } from "void";
+import { defineScheduled } from 'void';
 
-export const cron = "0 * * * *";
+export const cron = '0 * * * *';
 
 export default defineScheduled(async (controller, env) => {
-  await env.KV.put("jobs:last-heartbeat", controller.scheduledTime.toString());
+  await env.KV.put('jobs:last-heartbeat', controller.scheduledTime.toString());
 });
 ```
 
@@ -34,9 +34,9 @@ A single job file can export an array of cron expressions:
 
 ```ts
 // crons/cleanup.ts
-import { defineScheduled } from "void";
+import { defineScheduled } from 'void';
 
-export const cron = ["0 * * * *", "30 * * * *"];
+export const cron = ['0 * * * *', '30 * * * *'];
 
 export default defineScheduled(async (controller, env) => {
   // Runs at :00 and :30 every hour
@@ -50,7 +50,7 @@ export default defineScheduled(async (controller, env) => {
 Handler signature:
 
 ```ts
-(controller: ScheduledController, env: CloudEnv["Bindings"], ctx: ExecutionContext) =>
+(controller: ScheduledController, env: CloudEnv['Bindings'], ctx: ExecutionContext) =>
   unknown | Promise<unknown>;
 ```
 

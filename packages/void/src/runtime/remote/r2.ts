@@ -1,4 +1,4 @@
-import type { ProxyClient } from "./client";
+import type { ProxyClient } from './client';
 
 /**
  * R2Bucket implementation backed by the remote proxy.
@@ -11,7 +11,7 @@ export class ProxyR2Bucket {
   ) {}
 
   async head(key: string): Promise<R2Object | null> {
-    const res = await this.client.fetch("/r2/head", {
+    const res = await this.client.fetch('/r2/head', {
       binding: this.binding,
       key,
     });
@@ -22,24 +22,28 @@ export class ProxyR2Bucket {
       lastModified: string;
       contentType: string;
     } | null;
-    if (!data) return null;
+    if (!data) {
+      return null;
+    }
     return makeR2Object(data);
   }
 
   async get(key: string): Promise<R2ObjectBody | null> {
-    const res = await this.client.stream("/r2/get", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    const res = await this.client.stream('/r2/get', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ binding: this.binding, key }),
     });
 
     // Check if the proxy returned null (JSON response for 404).
     // Clone first so we don't consume the body if the object exists.
-    const ct = res.headers.get("content-type") ?? "";
-    if (ct.includes("application/json")) {
+    const ct = res.headers.get('content-type') ?? '';
+    if (ct.includes('application/json')) {
       const clone = res.clone();
       const data = await clone.json();
-      if (data === null) return null;
+      if (data === null) {
+        return null;
+      }
     }
 
     return makeR2ObjectBody(key, res);
@@ -54,10 +58,10 @@ export class ProxyR2Bucket {
     let base64: string | undefined;
     let textValue: string | undefined;
 
-    if (typeof value === "string") {
+    if (typeof value === 'string') {
       textValue = value;
     } else if (value === null) {
-      textValue = "";
+      textValue = '';
     } else if (value instanceof ArrayBuffer) {
       base64 = arrayBufferToBase64(value);
     } else if (ArrayBuffer.isView(value)) {
@@ -70,7 +74,9 @@ export class ProxyR2Bucket {
       const chunks: Uint8Array[] = [];
       while (true) {
         const { done, value: chunk } = await reader.read();
-        if (done) break;
+        if (done) {
+          break;
+        }
         chunks.push(chunk);
       }
       const total = chunks.reduce((sum, c) => sum + c.length, 0);
@@ -87,27 +93,32 @@ export class ProxyR2Bucket {
       binding: this.binding,
       key,
     };
-    if (base64) body.base64 = base64;
-    else body.value = textValue;
+    if (base64) {
+      body.base64 = base64;
+    } else {
+      body.value = textValue;
+    }
     if (options?.httpMetadata) {
       const meta = options.httpMetadata;
       if (meta instanceof Headers) {
-        body.contentType = meta.get("content-type") ?? undefined;
+        body.contentType = meta.get('content-type') ?? undefined;
       } else {
         body.contentType = meta.contentType;
       }
     }
-    if (options?.customMetadata) body.customMetadata = options.customMetadata;
+    if (options?.customMetadata) {
+      body.customMetadata = options.customMetadata;
+    }
 
-    await this.client.fetch("/r2/put", body);
+    await this.client.fetch('/r2/put', body);
 
     // Return a minimal R2Object
     return makeR2Object({
       key,
       size: 0,
-      etag: "",
+      etag: '',
       lastModified: new Date().toISOString(),
-      contentType: "application/octet-stream",
+      contentType: 'application/octet-stream',
     });
   }
 
@@ -118,11 +129,11 @@ export class ProxyR2Bucket {
     } else {
       body.key = keys;
     }
-    await this.client.fetch("/r2/delete", body);
+    await this.client.fetch('/r2/delete', body);
   }
 
   async list(options?: R2ListOptions): Promise<R2Objects> {
-    const res = await this.client.fetch("/r2/list", {
+    const res = await this.client.fetch('/r2/list', {
       binding: this.binding,
       prefix: options?.prefix,
       limit: options?.limit,
@@ -140,9 +151,9 @@ export class ProxyR2Bucket {
         makeR2Object({
           key: o.key,
           size: o.size,
-          etag: "",
+          etag: '',
           lastModified: o.lastModified,
-          contentType: "application/octet-stream",
+          contentType: 'application/octet-stream',
         }),
       ),
       truncated: data.truncated,
@@ -152,17 +163,17 @@ export class ProxyR2Bucket {
   }
 
   createMultipartUpload(): never {
-    throw new Error("createMultipartUpload() is not supported with remote bindings");
+    throw new Error('createMultipartUpload() is not supported with remote bindings');
   }
 
   resumeMultipartUpload(): never {
-    throw new Error("resumeMultipartUpload() is not supported with remote bindings");
+    throw new Error('resumeMultipartUpload() is not supported with remote bindings');
   }
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
-  let binary = "";
+  let binary = '';
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
   }
@@ -178,15 +189,15 @@ function makeR2Object(data: {
 }): R2Object {
   return {
     key: data.key,
-    version: "",
+    version: '',
     size: data.size,
     etag: data.etag,
-    httpEtag: data.etag ? `"${data.etag}"` : "",
+    httpEtag: data.etag ? `"${data.etag}"` : '',
     checksums: { toJSON: () => ({}) } as R2Checksums,
     uploaded: new Date(data.lastModified || Date.now()),
     httpMetadata: { contentType: data.contentType },
     customMetadata: {},
-    storageClass: "Standard",
+    storageClass: 'Standard',
     range: undefined,
     writeHttpMetadata(_headers: Headers) {
       // no-op for remote proxy
@@ -195,10 +206,10 @@ function makeR2Object(data: {
 }
 
 function makeR2ObjectBody(key: string, res: Response): R2ObjectBody {
-  const size = parseInt(res.headers.get("content-length") ?? "0");
-  const etag = res.headers.get("etag") ?? "";
-  const contentType = res.headers.get("content-type") ?? "application/octet-stream";
-  const lastModified = res.headers.get("last-modified") ?? new Date().toISOString();
+  const size = parseInt(res.headers.get('content-length') ?? '0');
+  const etag = res.headers.get('etag') ?? '';
+  const contentType = res.headers.get('content-type') ?? 'application/octet-stream';
+  const lastModified = res.headers.get('last-modified') ?? new Date().toISOString();
 
   const obj = makeR2Object({ key, size, etag, lastModified, contentType });
 

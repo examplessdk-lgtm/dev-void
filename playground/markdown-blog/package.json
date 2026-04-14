@@ -3,20 +3,20 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
     "build": "vite build",
+    "dev": "vite",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "vue": "^3.5.31"
+    "vue": "^3.5.32"
   },
   "devDependencies": {
-    "@void/md": "workspace:*",
-    "@void/vue": "workspace:*",
+    "@void/md": "workspace:@void-sdk/md@*",
+    "@void/vue": "workspace:@void-sdk/vue@*",
     "typescript": "~6.0.2",
     "vite": "catalog:",
-    "void": "workspace:*",
+    "void": "workspace:@void-sdk/void@*",
     "vue-tsc": "^3.2.6"
   }
 }

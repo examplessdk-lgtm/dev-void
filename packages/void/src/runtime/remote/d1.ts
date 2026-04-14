@@ -1,4 +1,4 @@
-import type { ProxyClient } from "./client";
+import type { ProxyClient } from './client';
 
 /**
  * D1Database implementation backed by the remote proxy.
@@ -19,7 +19,7 @@ export class ProxyD1Database {
       sql: (s as any)._sql as string,
       params: (s as any)._params as unknown[],
     }));
-    const res = await this.client.fetch("/d1/batch", {
+    const res = await this.client.fetch('/d1/batch', {
       binding: this.binding,
       statements,
     });
@@ -27,10 +27,10 @@ export class ProxyD1Database {
   }
 
   async exec(sql: string): Promise<D1ExecResult> {
-    const res = await this.client.fetch("/d1/query", {
+    const res = await this.client.fetch('/d1/query', {
       binding: this.binding,
       sql,
-      method: "run",
+      method: 'run',
     });
     const data = (await res.json()) as { meta?: { changes?: number; duration?: number } };
     return {
@@ -40,7 +40,7 @@ export class ProxyD1Database {
   }
 
   dump(): Promise<ArrayBuffer> {
-    throw new Error("dump() is not supported with remote bindings");
+    throw new Error('dump() is not supported with remote bindings');
   }
 }
 
@@ -69,11 +69,11 @@ export class ProxyD1PreparedStatement {
   }
 
   async all<T = Record<string, unknown>>(): Promise<D1Result<T>> {
-    const res = await this.client.fetch("/d1/query", {
+    const res = await this.client.fetch('/d1/query', {
       binding: this.binding,
       sql: this._sql,
       params: this._params,
-      method: "all",
+      method: 'all',
     });
     return (await res.json()) as D1Result<T>;
   }
@@ -81,34 +81,38 @@ export class ProxyD1PreparedStatement {
   async first<T = Record<string, unknown>>(): Promise<T | null>;
   async first<T = unknown>(col: string): Promise<T | null>;
   async first<T = unknown>(col?: string): Promise<T | null> {
-    const res = await this.client.fetch("/d1/query", {
+    const res = await this.client.fetch('/d1/query', {
       binding: this.binding,
       sql: this._sql,
       params: this._params,
-      method: "first",
+      method: 'first',
     });
     const row = (await res.json()) as Record<string, unknown> | null;
-    if (row === null) return null;
-    if (col) return row[col] as T;
+    if (row === null) {
+      return null;
+    }
+    if (col) {
+      return row[col] as T;
+    }
     return row as T;
   }
 
   async run<T = Record<string, unknown>>(): Promise<D1Result<T>> {
-    const res = await this.client.fetch("/d1/query", {
+    const res = await this.client.fetch('/d1/query', {
       binding: this.binding,
       sql: this._sql,
       params: this._params,
-      method: "run",
+      method: 'run',
     });
     return (await res.json()) as D1Result<T>;
   }
 
   async raw<T = unknown[]>(options?: { columnNames?: boolean }): Promise<T[]> {
-    const res = await this.client.fetch("/d1/query", {
+    const res = await this.client.fetch('/d1/query', {
       binding: this.binding,
       sql: this._sql,
       params: this._params,
-      method: "raw",
+      method: 'raw',
     });
     const data = (await res.json()) as { columns: string[]; results: unknown[][] };
     if (options?.columnNames) {

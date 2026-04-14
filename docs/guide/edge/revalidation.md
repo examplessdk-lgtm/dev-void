@@ -87,9 +87,9 @@ Route handlers can set the `x-revalidate` response header to override the TTL fo
 ```ts
 export const GET = defineHandler(async (c) => {
   // Don't cache this particular response
-  c.header("x-revalidate", "0");
+  c.header('x-revalidate', '0');
 
-  return c.html("...");
+  return c.html('...');
 });
 ```
 
@@ -107,13 +107,13 @@ Requests with `Cookie` or `Authorization` headers bypass the ISR cache entirely 
 You can purge ISR cache entries programmatically from a route handler:
 
 ```ts
-import { revalidate } from "void/isr";
+import { revalidate } from 'void/isr';
 
 export const POST = defineHandler(async (c) => {
   // ... update content in database ...
 
   // Purge specific pages
-  await revalidate({ paths: ["/", "/blog/hello-world"] });
+  await revalidate({ paths: ['/', '/blog/hello-world'] });
 
   // Or purge all cached pages
   await revalidate({ all: true });

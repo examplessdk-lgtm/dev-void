@@ -1,4 +1,4 @@
 /* Void Markdown — Content Styles (scoped to .void-md) */
-@import "./prose.css";
-@import "./code.css";
-@import "./containers.css";
+@import './prose.css';
+@import './code.css';
+@import './containers.css';

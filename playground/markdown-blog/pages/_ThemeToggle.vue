@@ -1,12 +1,12 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, onMounted } from 'vue';
 
-const theme = ref("system");
+const theme = ref('system');
 
-const labels = { system: "Auto", dark: "Dark", light: "Light" };
+const labels = { system: 'Auto', dark: 'Dark', light: 'Light' };
 
 function applyTheme(value) {
-  if (value === "system") {
+  if (value === 'system') {
     delete document.documentElement.dataset.theme;
   } else {
     document.documentElement.dataset.theme = value;
@@ -14,15 +14,15 @@ function applyTheme(value) {
 }
 
 function toggle() {
-  const next = { system: "dark", dark: "light", light: "system" };
+  const next = { system: 'dark', dark: 'light', light: 'system' };
   theme.value = next[theme.value];
-  localStorage.setItem("theme", theme.value);
+  localStorage.setItem('theme', theme.value);
   applyTheme(theme.value);
 }
 
 onMounted(() => {
-  const saved = localStorage.getItem("theme");
-  if (saved === "dark" || saved === "light") {
+  const saved = localStorage.getItem('theme');
+  if (saved === 'dark' || saved === 'light') {
     theme.value = saved;
     applyTheme(saved);
   }
@@ -49,20 +49,20 @@ onMounted(() => {
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .theme-toggle {
+  :root:not([data-theme='light']) .theme-toggle {
     border-color: #334155;
   }
 
-  :root:not([data-theme="light"]) .theme-toggle:hover {
+  :root:not([data-theme='light']) .theme-toggle:hover {
     background: #1e293b;
   }
 }
 
-:root[data-theme="dark"] .theme-toggle {
+:root[data-theme='dark'] .theme-toggle {
   border-color: #334155;
 }
 
-:root[data-theme="dark"] .theme-toggle:hover {
+:root[data-theme='dark'] .theme-toggle:hover {
   background: #1e293b;
 }
 </style>

@@ -22,7 +22,7 @@ If your Vite config customizes `build.assetsDir`, Void automatically detects thi
 // vite.config.ts
 export default defineConfig({
   build: {
-    assetsDir: "static", // hashed assets go to dist/client/static/
+    assetsDir: 'static', // hashed assets go to dist/client/static/
   },
 });
 ```

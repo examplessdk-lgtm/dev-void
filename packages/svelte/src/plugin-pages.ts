@@ -1,12 +1,12 @@
-import type { Plugin } from "vite";
-import { existsSync, readdirSync } from "node:fs";
-import { dirname } from "node:path";
-import { scanPages } from "void/pages";
-import type { PageScanResult } from "void/pages";
-import { generateComponentManifest } from "./pages-manifest";
+import { existsSync, readdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import type { Plugin } from 'vite';
+import { scanPages } from 'void/pages';
+import type { PageScanResult } from 'void/pages';
+import { generateComponentManifest } from './pages-manifest';
 
-const RENDERER_ID = "virtual:void-pages-renderer";
-const CLIENT_ENTRY_ID = "virtual:void-pages-client";
+const RENDERER_ID = 'virtual:void-pages-renderer';
+const CLIENT_ENTRY_ID = 'virtual:void-pages-client';
 
 interface PrefetchConfig {
   hoverDelay?: number;
@@ -22,10 +22,16 @@ interface PagesPluginOptions {
 function hasNonIslandPages(dir: string): boolean {
   try {
     for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
-      if (!entry.isFile()) continue;
+      if (!entry.isFile()) {
+        continue;
+      }
       const name = entry.name;
-      if (name.startsWith("_") || name.startsWith("layout.")) continue;
-      if (name.endsWith(".svelte") && !name.includes(".island.")) return true;
+      if (name.startsWith('_') || name.startsWith('layout.')) {
+        continue;
+      }
+      if (name.endsWith('.svelte') && !name.includes('.island.')) {
+        return true;
+      }
     }
   } catch {
     // ignore
@@ -39,7 +45,7 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
   const root = dirname(pagesDir);
 
   return {
-    name: "void-svelte:pages",
+    name: 'void-svelte:pages',
 
     async buildStart() {
       if (existsSync(pagesDir)) {
@@ -50,7 +56,7 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
     resolveId: {
       filter: { id: /^virtual:void-pages-(renderer|client)$/ },
       handler(id) {
-        return "\0" + id;
+        return '\0' + id;
       },
     },
 
@@ -58,13 +64,16 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
       // eslint-disable-next-line no-control-regex -- Vite virtual module null-byte prefix
       filter: { id: /^\0virtual:void-pages-(renderer|client)$/ },
       handler(id) {
-        if (id === "\0" + RENDERER_ID) {
-          if (!pageScan)
+        if (id === '\0' + RENDERER_ID) {
+          if (!pageScan) {
             return "export function renderPage() { throw new Error('No pages found'); }";
+          }
           return generateRendererModule(pageScan, pagesDir, isDev);
         }
-        if (id === "\0" + CLIENT_ENTRY_ID) {
-          if (!pageScan) return "";
+        if (id === '\0' + CLIENT_ENTRY_ID) {
+          if (!pageScan) {
+            return '';
+          }
           return generateClientEntry(
             pageScan,
             pagesDir,
@@ -76,29 +85,33 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
     },
 
     config(_, env) {
-      if (!existsSync(pagesDir)) return;
+      if (!existsSync(pagesDir)) {
+        return;
+      }
 
-      if (env.command === "serve") {
+      if (env.command === 'serve') {
         isDev = true;
         return {
           optimizeDeps: {
             // Exclude @void/svelte so the virtual module and user
             // components share the same Svelte context (identity).
-            exclude: ["@void/svelte"],
+            exclude: ['@void/svelte'],
             // Pre-include Svelte so it's not discovered late via dynamic imports.
-            include: ["svelte", "svelte/store", "svelte/internal", "svelte/internal/client"],
+            include: ['svelte', 'svelte/store', 'svelte/internal', 'svelte/internal/client'],
           },
         };
       }
 
       // Skip the pages-client bundle when all pages are island pages
-      if (!hasNonIslandPages(pagesDir)) return;
+      if (!hasNonIslandPages(pagesDir)) {
+        return;
+      }
 
       return {
         build: {
           manifest: true,
           rollupOptions: {
-            input: { "pages-client": CLIENT_ENTRY_ID },
+            input: { 'pages-client': CLIENT_ENTRY_ID },
           },
         },
       };
@@ -203,7 +216,7 @@ const { router, initialPageData, initialComponent, initialLayouts, start } =
     components, layoutTree, routeMeta, matchRoute,
     viewTransitions: ${!!viewTransitions},
     prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
-    prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? "30s")}),
+    prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? '30s')}),
   });
 
 setActionRouter(router);

@@ -1,8 +1,8 @@
-import type { Context, Env, MiddlewareHandler } from "hono";
-import type { AuthSession, AuthUser } from "./auth";
-import type { HeadDescriptor } from "../pages/head";
-import { convertReturnValue } from "./response";
-import { runValidation, type ValidatorSlots, type HandlerInput } from "./validator";
+import type { Context, Env, MiddlewareHandler } from 'hono';
+import type { HeadDescriptor } from '../pages/head';
+import type { AuthSession, AuthUser } from './auth';
+import { convertReturnValue } from './response';
+import { runValidation, type ValidatorSlots, type HandlerInput } from './validator';
 
 /**
  * Hono environment type for Void workers.
@@ -13,7 +13,7 @@ import { runValidation, type ValidatorSlots, type HandlerInput } from "./validat
 export interface CloudContextVariables {
   user: AuthUser | null;
   session: AuthSession | null;
-  headDefaults?: import("../pages/head").HeadDescriptor;
+  headDefaults?: import('../pages/head').HeadDescriptor;
   [key: string]: unknown;
 }
 
@@ -53,7 +53,7 @@ type JobController = ScheduledController;
 type JobExecutionContext = ExecutionContext;
 type ScheduledFn = (
   controller: JobController,
-  env: CloudEnv["Bindings"],
+  env: CloudEnv['Bindings'],
   ctx: JobExecutionContext,
 ) => unknown | Promise<unknown>;
 
@@ -79,7 +79,7 @@ export type QueueBatch<T = unknown> = {
 
 type QueueFn<T = unknown> = (
   batch: QueueBatch<T>,
-  env: CloudEnv["Bindings"],
+  env: CloudEnv['Bindings'],
 ) => void | Promise<void>;
 
 /**
@@ -88,7 +88,7 @@ type QueueFn<T = unknown> = (
  * TypeScript's `typeof import(...)` reads it for codegen.
  */
 export interface TypedQueueHandler<T = unknown> {
-  (batch: QueueBatch<T>, env: CloudEnv["Bindings"]): void | Promise<void>;
+  (batch: QueueBatch<T>, env: CloudEnv['Bindings']): void | Promise<void>;
   readonly __payload: T;
 }
 
@@ -178,7 +178,9 @@ export namespace defineHandler {
     return <R>(handler: (c: CloudContext, input: HandlerInput<V>) => R): TypedHandler<V, R> => {
       return (async (c: CloudContext) => {
         const result = await runValidation(validators, c);
-        if (!result.ok) return result.response;
+        if (!result.ok) {
+          return result.response;
+        }
         return convertReturnValue(await handler(c, result.input));
       }) as TypedHandler<V, R>;
     };
@@ -229,7 +231,7 @@ export function defineQueue<T = unknown>(handler: QueueFn<T>): TypedQueueHandler
   return handler as TypedQueueHandler<T>;
 }
 
-export type { ValidatorSlots, HandlerInput } from "./validator";
-export { ValidationError } from "../pages/validation-error";
-export { defer } from "../pages/defer";
-export type { Deferred, InferProps } from "../pages/defer";
+export type { ValidatorSlots, HandlerInput } from './validator';
+export { ValidationError } from '../pages/validation-error';
+export { defer } from '../pages/defer';
+export type { Deferred, InferProps } from '../pages/defer';

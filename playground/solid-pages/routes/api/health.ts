@@ -1,5 +1,5 @@
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
 export const GET = defineHandler(() => {
-  return { status: "ok" };
+  return { status: 'ok' };
 });

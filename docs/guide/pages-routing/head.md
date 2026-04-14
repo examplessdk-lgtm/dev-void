@@ -12,14 +12,14 @@ Export a `head()` function from your `.server.ts` file. It receives the Hono con
 
 ```ts
 // pages/posts/[slug].server.ts
-import { defineHandler, defineHead } from "void";
+import { defineHandler, defineHead } from 'void';
 
 export interface Props {
   post: { title: string; excerpt: string; slug: string };
 }
 
 export const loader = defineHandler<Props>(async (c) => {
-  const post = await getPost(c.req.param("slug"));
+  const post = await getPost(c.req.param('slug'));
   return { post };
 });
 
@@ -28,8 +28,8 @@ export const head = defineHead<Props>((c, props) => {
   return {
     title: props.post.title,
     meta: [
-      { name: "description", content: props.post.excerpt },
-      { property: "og:title", content: props.post.title },
+      { name: 'description', content: props.post.excerpt },
+      { property: 'og:title', content: props.post.title },
     ],
   };
 });
@@ -62,10 +62,10 @@ Middleware can inject head defaults that apply to every page. This is useful for
 
 ```ts
 // middleware/01.head.ts
-import { defineMiddleware } from "void";
+import { defineMiddleware } from 'void';
 
 export default defineMiddleware(async (c, next) => {
-  c.set("headDefaults", {
+  c.set('headDefaults', {
     script: [
       {
         innerHTML: `const t = localStorage.getItem("theme");

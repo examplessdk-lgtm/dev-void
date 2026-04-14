@@ -1,6 +1,6 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { discoverSchema, schemaSpecifier } from "./discover";
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { discoverSchema, schemaSpecifier } from './discover';
 
 /**
  * Write a temporary drizzle-kit config to `.void/drizzle.config.json`.
@@ -12,32 +12,34 @@ import { discoverSchema, schemaSpecifier } from "./discover";
 export function writeDrizzleConfig(
   root: string,
   dbPath: string,
-  dialect: "sqlite" | "postgresql" = "sqlite",
+  dialect: 'sqlite' | 'postgresql' = 'sqlite',
 ): string {
   const schema = discoverSchema(root);
   if (!schema) {
     throw new Error('No Drizzle schema found. Create db/schema.ts or run "void gen model <name>".');
   }
 
-  const outDir = join(root, ".void");
+  const outDir = join(root, '.void');
   mkdirSync(outDir, { recursive: true });
 
   const config =
-    dialect === "postgresql"
+    dialect === 'postgresql'
       ? {
-          dialect: "postgresql",
+          dialect: 'postgresql',
           schema: schemaSpecifier(schema),
-          out: "./db/migrations",
+          out: './db/migrations',
+          migrations: { prefix: 'timestamp' },
           dbCredentials: { url: dbPath },
         }
       : {
-          dialect: "sqlite",
+          dialect: 'sqlite',
           schema: schemaSpecifier(schema),
-          out: "./db/migrations",
+          out: './db/migrations',
+          migrations: { prefix: 'timestamp' },
           dbCredentials: { url: dbPath },
         };
 
-  const configPath = join(outDir, "drizzle.config.json");
-  writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
+  const configPath = join(outDir, 'drizzle.config.json');
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
   return configPath;
 }

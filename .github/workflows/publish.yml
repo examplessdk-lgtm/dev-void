@@ -3,46 +3,51 @@ name: Publish
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
+
+env:
+  PUBLISH_TARGET: github-packages
 
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
+    with:
+      skip_windows: true
 
   publish:
     needs: ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    environment: Release
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+      - id: publish-config
+        env:
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ "$PUBLISH_TARGET" = "npm" ]; then
+            echo "registry_url=https://registry.npmjs.org" >> "$GITHUB_OUTPUT"
+            echo "publish_args=--provenance --access public" >> "$GITHUB_OUTPUT"
+            echo "NODE_AUTH_TOKEN=$NPM_TOKEN" >> "$GITHUB_ENV"
+          else
+            echo "registry_url=https://npm.pkg.github.com" >> "$GITHUB_OUTPUT"
+            echo "publish_args=--access restricted" >> "$GITHUB_OUTPUT"
+            echo "NODE_AUTH_TOKEN=$GH_PACKAGES_TOKEN" >> "$GITHUB_ENV"
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
+          registry-url: ${{ steps.publish-config.outputs.registry_url }}
           cache: pnpm
-          registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -r build
+      - run: pnpm build
 
-      # Publish in dependency order: void first, then support packages
-      - run: pnpm -F void publish --provenance --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: pnpm -F @void/md publish --provenance --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: pnpm -F @void/react publish --provenance --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: pnpm -F @void/vue publish --provenance --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: pnpm -F @void/svelte publish --provenance --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: pnpm -F @void/solid publish --provenance --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: pnpm --filter ./packages/void publish ${{ steps.publish-config.outputs.publish_args }} --no-git-checks
+      - run: pnpm --filter ./packages/md publish ${{ steps.publish-config.outputs.publish_args }} --no-git-checks
+      - run: pnpm --filter ./packages/react publish ${{ steps.publish-config.outputs.publish_args }} --no-git-checks
+      - run: pnpm --filter ./packages/vue publish ${{ steps.publish-config.outputs.publish_args }} --no-git-checks
+      - run: pnpm --filter ./packages/svelte publish ${{ steps.publish-config.outputs.publish_args }} --no-git-checks
+      - run: pnpm --filter ./packages/solid publish ${{ steps.publish-config.outputs.publish_args }} --no-git-checks

@@ -1,11 +1,11 @@
-import { Link, useForm } from "@void/solid";
-import { For, Show } from "solid-js";
-import type { Props } from "./index.server";
+import { Link, useForm } from '@void/solid';
+import { For, Show } from 'solid-js';
+import type { Props } from './index.server';
 
 export default function UsersPage(props: Props) {
-  const form = useForm("/users", {
-    name: "",
-    email: "",
+  const form = useForm('/users', {
+    name: '',
+    email: '',
   });
 
   return (
@@ -18,7 +18,7 @@ export default function UsersPage(props: Props) {
             <li>
               <Link href={`/users/${user.id}`} prefetch="visible">
                 {user.name}
-              </Link>{" "}
+              </Link>{' '}
               ({user.email})
             </li>
           )}
@@ -36,24 +36,24 @@ export default function UsersPage(props: Props) {
           <label>Name:</label>
           <input
             value={form.data.name as string}
-            onInput={(e) => form.setData("name", e.target.value)}
+            onInput={(e) => form.setData('name', e.target.value)}
           />
           <Show when={form.errors.name}>
-            <span style={{ color: "red" }}>{form.errors.name}</span>
+            <span style={{ color: 'red' }}>{form.errors.name}</span>
           </Show>
         </div>
         <div>
           <label>Email:</label>
           <input
             value={form.data.email as string}
-            onInput={(e) => form.setData("email", e.target.value)}
+            onInput={(e) => form.setData('email', e.target.value)}
           />
           <Show when={form.errors.email}>
-            <span style={{ color: "red" }}>{form.errors.email}</span>
+            <span style={{ color: 'red' }}>{form.errors.email}</span>
           </Show>
         </div>
         <button type="submit" disabled={form.processing}>
-          {form.processing ? "Saving..." : "Add User"}
+          {form.processing ? 'Saving...' : 'Add User'}
         </button>
       </form>
     </div>

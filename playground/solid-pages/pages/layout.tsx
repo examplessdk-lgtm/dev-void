@@ -1,5 +1,5 @@
-import { Link, useShared } from "@void/solid";
-import type { JSX } from "solid-js";
+import { Link, useShared } from '@void/solid';
+import type { JSX } from 'solid-js';
 
 export default function Layout(props: { children: JSX.Element }) {
   const shared = useShared();
@@ -8,19 +8,19 @@ export default function Layout(props: { children: JSX.Element }) {
       <nav>
         <Link href="/" prefetch>
           Home
-        </Link>{" "}
-        |{" "}
+        </Link>{' '}
+        |{' '}
         <Link href="/users" prefetch>
           Users
-        </Link>{" "}
-        |{" "}
+        </Link>{' '}
+        |{' '}
         <Link href="/blog" prefetch>
           Blog
-        </Link>{" "}
-        |{" "}
+        </Link>{' '}
+        |{' '}
         <Link href="/deferred" prefetch>
           Deferred
-        </Link>{" "}
+        </Link>{' '}
         | <span>{shared.appName}</span>
       </nav>
       <hr />

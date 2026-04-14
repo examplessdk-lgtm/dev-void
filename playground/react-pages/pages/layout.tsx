@@ -1,4 +1,4 @@
-import { Link, useShared } from "@void/react";
+import { Link, useShared } from '@void/react';
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const shared = useShared();
@@ -7,19 +7,19 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       <nav>
         <Link href="/" prefetch>
           Home
-        </Link>{" "}
-        |{" "}
+        </Link>{' '}
+        |{' '}
         <Link href="/users" prefetch>
           Users
-        </Link>{" "}
-        |{" "}
+        </Link>{' '}
+        |{' '}
         <Link href="/blog" prefetch>
           Blog
-        </Link>{" "}
-        |{" "}
+        </Link>{' '}
+        |{' '}
         <Link href="/deferred" prefetch>
           Deferred
-        </Link>{" "}
+        </Link>{' '}
         | <span>{shared.appName}</span>
       </nav>
       <hr />

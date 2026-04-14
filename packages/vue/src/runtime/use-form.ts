@@ -1,5 +1,5 @@
-import { reactive, ref, inject, watch } from "vue";
-import type { ActionUrl, ResolveActionBody, ActionFormOptions } from "void/routes";
+import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
+import { reactive, ref, inject, watch } from 'vue';
 
 export function useForm<U extends ActionUrl & string>(
   url: U,
@@ -29,8 +29,8 @@ export function useForm(
   const formDefaults = defaults;
 
   // Strip ?action query before param resolution, then re-append
-  let actionQuery = "";
-  const qIdx = resolvedUrl.indexOf("?");
+  let actionQuery = '';
+  const qIdx = resolvedUrl.indexOf('?');
   if (qIdx !== -1) {
     actionQuery = resolvedUrl.slice(qIdx);
     resolvedUrl = resolvedUrl.slice(0, qIdx);
@@ -44,7 +44,7 @@ export function useForm(
 
   resolvedUrl = resolvedUrl + actionQuery;
 
-  const router = inject<any>("__void_router", null);
+  const router = inject<any>('__void_router', null);
   const data = reactive({ ...formDefaults }) as Record<string, unknown>;
   const errors = reactive<Record<string, string>>({});
   const processing = ref(false);
@@ -78,9 +78,13 @@ export function useForm(
 
   function clearErrors(...fields: string[]) {
     if (fields.length === 0) {
-      for (const key of Object.keys(errors)) delete errors[key];
+      for (const key of Object.keys(errors)) {
+        delete errors[key];
+      }
     } else {
-      for (const field of fields) delete errors[field];
+      for (const field of fields) {
+        delete errors[field];
+      }
     }
   }
 
@@ -88,7 +92,9 @@ export function useForm(
     processing.value = true;
     wasSuccessful.value = false;
     recentlySuccessful.value = false;
-    if (successTimeout) clearTimeout(successTimeout);
+    if (successTimeout) {
+      clearTimeout(successTimeout);
+    }
     clearErrors();
 
     try {
@@ -127,9 +133,9 @@ export function useForm(
     recentlySuccessful,
     reset,
     clearErrors,
-    post: (opts?: any) => submit("POST", opts),
-    put: (opts?: any) => submit("PUT", opts),
-    patch: (opts?: any) => submit("PATCH", opts),
-    delete: (opts?: any) => submit("DELETE", opts),
+    post: (opts?: any) => submit('POST', opts),
+    put: (opts?: any) => submit('PUT', opts),
+    patch: (opts?: any) => submit('PATCH', opts),
+    delete: (opts?: any) => submit('DELETE', opts),
   });
 }

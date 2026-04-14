@@ -20,10 +20,10 @@ Each file exports named HTTP method constants to handle specific methods:
 
 ```ts
 // routes/api/hello.ts  →  GET /api/hello
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
 export const GET = defineHandler((c) => {
-  return { message: "Hello!", timestamp: Date.now() };
+  return { message: 'Hello!', timestamp: Date.now() };
 });
 ```
 
@@ -31,9 +31,9 @@ A file can export multiple methods:
 
 ```ts
 // routes/api/users/index.ts  →  GET + POST /api/users
-import { defineHandler } from "void";
-import { db } from "void/db";
-import { users } from "@schema";
+import { defineHandler } from 'void';
+import { db } from 'void/db';
+import { users } from '@schema';
 
 export const GET = defineHandler(async () => {
   return await db.select().from(users);
@@ -53,10 +53,10 @@ The `db` helper provides a typed query API over D1. See [Database](./database.md
 `defineHandler` wraps a route handler function:
 
 ```ts
-import { defineHandler } from "void";
+import { defineHandler } from 'void';
 
 export const GET = defineHandler((c) => {
-  return { data: "hello" };
+  return { data: 'hello' };
 });
 ```
 
@@ -75,9 +75,9 @@ Return values are automatically converted:
 
 ```ts
 // routes/api/users/index.ts
-import { defineHandler } from "void";
-import { db } from "void/db";
-import { users, insertUserSchema } from "@schema";
+import { defineHandler } from 'void';
+import { db } from 'void/db';
+import { users, insertUserSchema } from '@schema';
 
 export const POST = defineHandler.withValidator({
   body: insertUserSchema,
@@ -93,14 +93,14 @@ You can validate multiple slots at once:
 
 ```ts
 // routes/api/users/[id].ts
-import { defineHandler } from "void";
-import { db, eq } from "void/db";
-import { users, updateUserSchema } from "@schema";
+import { defineHandler } from 'void';
+import { db, eq } from 'void/db';
+import { users, updateUserSchema } from '@schema';
 
 export const PUT = defineHandler.withValidator({
   body: updateUserSchema,
 })(async (c, { body }) => {
-  const id = Number(c.req.param("id"));
+  const id = Number(c.req.param('id'));
   const [updated] = await db.update(users).set(body).where(eq(users.id, id)).returning();
   return updated;
 });
@@ -111,8 +111,8 @@ export const PUT = defineHandler.withValidator({
 For endpoints that don't map to a database table, you can write validators by hand using any [Standard Schema](https://standardschema.dev/)-compatible library (Valibot, Zod, ArkType, etc.):
 
 ```ts
-import * as v from "valibot";
-import { defineHandler } from "void";
+import * as v from 'valibot';
+import { defineHandler } from 'void';
 
 export const POST = defineHandler.withValidator({
   body: v.object({
@@ -150,12 +150,12 @@ Validator schemas also power the [typed fetch client](./typed-fetch.md), so `bod
 Void middlewares are just Hono middlewares. `defineMiddleware()` is a thin typing helper around the standard Hono `(c, next)` shape, and `defineHandler()` also accepts raw Hono middleware directly.
 
 ```ts
-import { defineMiddleware } from "void";
+import { defineMiddleware } from 'void';
 
 export const addServerTiming = defineMiddleware(async (c, next) => {
   const start = performance.now();
   await next();
-  c.header("Server-Timing", `app;dur=${Math.round(performance.now() - start)}`);
+  c.header('Server-Timing', `app;dur=${Math.round(performance.now() - start)}`);
 });
 ```
 
@@ -166,9 +166,9 @@ npm install hono
 ```
 
 ```ts
-import { cors } from "hono/cors";
+import { cors } from 'hono/cors';
 
-const allowDashboard = cors({ origin: "https://app.example.com" });
+const allowDashboard = cors({ origin: 'https://app.example.com' });
 ```
 
 You can apply middleware globally or per-route.
@@ -181,7 +181,7 @@ Global middleware runs on every request. Place files in `middleware/` and use nu
 - `middleware/02.auth.ts`
 
 ```ts
-import { defineMiddleware } from "void";
+import { defineMiddleware } from 'void';
 
 export default defineMiddleware(async (c, next) => {
   console.log(c.req.method, c.req.path);
@@ -195,16 +195,16 @@ Middleware can set typed context variables using `c.set()`. Augment the `CloudCo
 
 ```ts
 // middleware/01.request-id.ts
-import { defineMiddleware } from "void";
+import { defineMiddleware } from 'void';
 
-declare module "void" {
+declare module 'void' {
   interface CloudContextVariables {
     requestId: string;
   }
 }
 
 export default defineMiddleware(async (c, next) => {
-  c.set("requestId", crypto.randomUUID());
+  c.set('requestId', crypto.randomUUID());
   await next();
 });
 ```
@@ -223,20 +223,20 @@ Middleware runs in order. Each can short-circuit (return a response without call
 
 ```ts
 // routes/api/stats.ts
-import { defineHandler } from "void";
-import { cors } from "hono/cors";
+import { defineHandler } from 'void';
+import { cors } from 'hono/cors';
 
 const addServerTiming = async (c, next) => {
   const start = performance.now();
   await next();
-  c.header("Server-Timing", `app;dur=${Math.round(performance.now() - start)}`);
+  c.header('Server-Timing', `app;dur=${Math.round(performance.now() - start)}`);
 };
 
 export const GET = defineHandler(
-  cors({ origin: "https://app.example.com" }),
+  cors({ origin: 'https://app.example.com' }),
   addServerTiming,
   (c) => {
-    return { stats: "..." };
+    return { stats: '...' };
   },
 );
 ```
