@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -26,6 +27,13 @@ const DEFAULT_SEED_FILES = [
   'db/seed.sql',
 ];
 const MODULE_SEED_EXTENSIONS = new Set(['.ts', '.mts', '.js', '.mjs']);
+
+function runDrizzleKit(root: string, args: string[]): void {
+  execFileSync(process.execPath, [drizzleKitBin, ...args], {
+    cwd: root,
+    stdio: 'inherit',
+  });
+}
 
 type SeedTarget = {
   displayPath: string;
@@ -128,7 +136,6 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
 }
 
 async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
-  const { execSync } = await import('node:child_process');
   const { writeDrizzleConfig } = await import('../drizzle/config');
 
   let configPath: string;
@@ -146,10 +153,7 @@ async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
   }
 
   try {
-    execSync(`node ${drizzleKitBin} push --config ${configPath}`, {
-      cwd: root,
-      stdio: 'inherit',
-    });
+    runDrizzleKit(root, ['push', '--config', configPath]);
   } catch {
     process.exit(1);
   }
@@ -157,7 +161,6 @@ async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
 }
 
 async function runGenerate(root: string, dialect: DatabaseDialect): Promise<void> {
-  const { execSync } = await import('node:child_process');
   const { writeDrizzleConfig } = await import('../drizzle/config');
 
   const configPath =
@@ -166,10 +169,7 @@ async function runGenerate(root: string, dialect: DatabaseDialect): Promise<void
       : writeDrizzleConfig(root, ':memory:');
 
   try {
-    execSync(`node ${drizzleKitBin} generate --config ${configPath}`, {
-      cwd: root,
-      stdio: 'inherit',
-    });
+    runDrizzleKit(root, ['generate', '--config', configPath]);
   } catch {
     process.exit(1);
   }
@@ -585,25 +585,19 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
 
 async function runStudio(root: string, dialect: DatabaseDialect): Promise<void> {
   if (dialect === 'postgresql') {
-    const { execSync } = await import('node:child_process');
     const { writeDrizzleConfig } = await import('../drizzle/config');
     const url = getPgUrl(root);
     const configPath = writeDrizzleConfig(root, url, 'postgresql');
 
     log.info('Opening Drizzle Studio...');
     try {
-      execSync(`node ${drizzleKitBin} studio --config ${configPath}`, {
-        cwd: root,
-        stdio: 'inherit',
-      });
+      runDrizzleKit(root, ['studio', '--config', configPath]);
     } catch {
       process.exit(1);
     }
     return;
   }
 
-  const { existsSync } = await import('node:fs');
-  const { execSync } = await import('node:child_process');
   const { writeDrizzleConfig } = await import('../drizzle/config');
   const { getMiniflareDatabasePath } = await import('../migrations/runner');
 
@@ -619,10 +613,7 @@ async function runStudio(root: string, dialect: DatabaseDialect): Promise<void> 
 
   log.info('Opening Drizzle Studio...');
   try {
-    execSync(`node ${drizzleKitBin} studio --config ${configPath}`, {
-      cwd: root,
-      stdio: 'inherit',
-    });
+    runDrizzleKit(root, ['studio', '--config', configPath]);
   } catch {
     process.exit(1);
   }

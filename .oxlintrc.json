@@ -9,6 +9,12 @@
     "es2024": true,
     "node": true
   },
+  "jsPlugins": [
+    {
+      "name": "react-hooks-js",
+      "specifier": "eslint-plugin-react-hooks"
+    }
+  ],
   "plugins": ["typescript", "import", "react", "unicorn", "vitest", "node"],
   "ignorePatterns": [
     "**/node_modules/**",
@@ -46,6 +52,40 @@
         "no-with": "off",
         "prefer-rest-params": "error",
         "prefer-spread": "error"
+      }
+    },
+    {
+      "files": [
+        "packages/react/**/*",
+        "playground/named-layouts/**/*",
+        "playground/node-app/**/*",
+        "playground/node-static/**/*",
+        "playground/pg-test/**/*",
+        "playground/react-pages/**/*",
+        "playground/react-router/**/*",
+        "playground/spa/**/*",
+        "playground/ssr/**/*",
+        "playground/tanstack-start/**/*",
+        "playground/vinext-app/**/*",
+        "playground/vinext-pages/**/*",
+        "playground/websockets/**/*"
+      ],
+      "rules": {
+        "react-hooks-js/component-hook-factories": "error",
+        "react-hooks-js/config": "error",
+        "react-hooks-js/error-boundaries": "error",
+        "react-hooks-js/gating": "error",
+        "react-hooks-js/globals": "error",
+        "react-hooks-js/immutability": "error",
+        "react-hooks-js/incompatible-library": "error",
+        "react-hooks-js/preserve-manual-memoization": "error",
+        "react-hooks-js/purity": "error",
+        "react-hooks-js/refs": "error",
+        "react-hooks-js/set-state-in-effect": "error",
+        "react-hooks-js/set-state-in-render": "error",
+        "react-hooks-js/static-components": "error",
+        "react-hooks-js/unsupported-syntax": "error",
+        "react-hooks-js/use-memo": "error"
       }
     },
     {

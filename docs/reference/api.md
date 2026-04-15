@@ -664,12 +664,14 @@ interface VoidVueOptions {
 
 Imported from `"@void/vue"`.
 
-| Export                             | Description                                                                                                                                                                              |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Link`                             | Vue component for SPA navigation. Renders `<a>` for GET, `<button>` for non-GET methods. Props: `href`, `method`, `data`, `preserveScroll`.                                              |
-| `useRouter()`                      | Returns the page router for programmatic navigation: `visit`, `reload`, `post`, `put`, `patch`, `delete`.                                                                                |
-| `useForm(url, defaults, options?)` | Typed reactive form helper bound to a page action URL. Returns `{ data, post, put, patch, delete, processing, errors, isDirty, wasSuccessful, recentlySuccessful, reset, clearErrors }`. |
-| `useShared()`                      | Returns shared data injected by middleware via `c.set("shared", {...})`.                                                                                                                 |
+| Export                             | Description                                                                                                                                                                                                                                       |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Link`                             | Vue component for SPA navigation. Renders `<a>` for GET, `<button>` for non-GET methods. Props: `href`, `method`, `data`, `prefetch`, `cacheFor`, `preserveScroll`, `preserveState`, `replace`, `reloadDocument`, `viewTransition`, `onNavigate`. |
+| `useRouter()`                      | Returns the page router for programmatic navigation: `visit`, `reload`, `post`, `put`, `patch`, `delete`.                                                                                                                                         |
+| `useForm(url, defaults, options?)` | Typed reactive form helper bound to a page action URL. Returns `{ data, post, put, patch, delete, processing, errors, isDirty, wasSuccessful, recentlySuccessful, reset, clearErrors }`.                                                          |
+| `useShared()`                      | Returns shared data injected by middleware via `c.set("shared", {...})`.                                                                                                                                                                          |
+
+Vue `Link` GET `data` is merged into the rendered `href` query string. Primitive values are serialized with `String(value)`, arrays become repeated keys, `null` and `undefined` are omitted, and nested objects throw. `prefetch` and `reloadDocument` are GET-only and throw for mutation links.
 
 ### `@void/react`
 
@@ -703,11 +705,13 @@ interface VoidReactOptions {
 
 Imported from `"@void/react"`.
 
-| Export                             | Description                                                                                                                                                  |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `Link`                             | React component for SPA navigation. Renders `<a>` for GET, `<button>` for non-GET methods. Props: `href`, `method`, `data`, `preserveScroll`.                |
-| `useForm(url, defaults, options?)` | Form helper hook. Returns `{ data, setData, post, put, patch, delete, processing, errors, isDirty, wasSuccessful, recentlySuccessful, reset, clearErrors }`. |
-| `useShared()`                      | Returns shared data injected by middleware via `c.set("shared", {...})`.                                                                                     |
+| Export                             | Description                                                                                                                                                                                                                                         |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Link`                             | React component for SPA navigation. Renders `<a>` for GET, `<button>` for non-GET methods. Props: `href`, `method`, `data`, `prefetch`, `cacheFor`, `preserveScroll`, `preserveState`, `replace`, `reloadDocument`, `viewTransition`, `onNavigate`. |
+| `useForm(url, defaults, options?)` | Form helper hook. Returns `{ data, setData, post, put, patch, delete, processing, errors, isDirty, wasSuccessful, recentlySuccessful, reset, clearErrors }`.                                                                                        |
+| `useShared()`                      | Returns shared data injected by middleware via `c.set("shared", {...})`.                                                                                                                                                                            |
+
+React `Link` GET `data` is merged into the rendered `href` query string. Primitive values are serialized with `String(value)`, arrays become repeated keys, `null` and `undefined` are omitted, and nested objects throw. `prefetch` and `reloadDocument` are GET-only and throw for mutation links.
 
 ### `@void/svelte`
 
@@ -742,12 +746,56 @@ interface VoidSvelteOptions {
 
 Imported from `"@void/svelte"`.
 
-| Export                             | Description                                                                                                                                                         |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Link`                             | Svelte component for SPA navigation. Renders `<a>` for GET, `<button>` for non-GET methods. Props: `href`, `method`, `data`, `preserveScroll`.                      |
-| `useForm(url, defaults, options?)` | Form helper using Svelte 5 runes. Returns `{ data, post, put, patch, delete, processing, errors, isDirty, wasSuccessful, recentlySuccessful, reset, clearErrors }`. |
-| `useShared()`                      | Returns shared data injected by middleware via `c.set("shared", {...})`.                                                                                            |
-| `useRouter()`                      | Returns the page router for programmatic navigation: `visit`, `reload`, `post`, `put`, `patch`, `delete`.                                                           |
+| Export                             | Description                                                                                                                                                                                                                                          |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Link`                             | Svelte component for SPA navigation. Renders `<a>` for GET, `<button>` for non-GET methods. Props: `href`, `method`, `data`, `prefetch`, `cacheFor`, `preserveScroll`, `preserveState`, `replace`, `reloadDocument`, `viewTransition`, `onNavigate`. |
+| `useForm(url, defaults, options?)` | Form helper using Svelte 5 runes. Returns `{ data, post, put, patch, delete, processing, errors, isDirty, wasSuccessful, recentlySuccessful, reset, clearErrors }`.                                                                                  |
+| `useShared()`                      | Returns shared data injected by middleware via `c.set("shared", {...})`.                                                                                                                                                                             |
+| `useRouter()`                      | Returns the page router for programmatic navigation: `visit`, `reload`, `post`, `put`, `patch`, `delete`.                                                                                                                                            |
+
+Svelte `Link` GET `data` is merged into the rendered `href` query string. Primitive values are serialized with `String(value)`, arrays become repeated keys, `null` and `undefined` are omitted, and nested objects throw. `prefetch` and `reloadDocument` are GET-only and throw for mutation links.
+
+### `@void/solid`
+
+#### `voidSolid(options?)`
+
+Imported from `"@void/solid/plugin"`. Returns an array of Vite plugins that handle SSR and hydration entry generation for Solid. It already includes `vite-plugin-solid`, so you do not need to install or configure that separately.
+
+```ts
+import { voidSolid } from '@void/solid/plugin';
+
+export default defineConfig({
+  plugins: [voidPlugin(), voidSolid()],
+});
+```
+
+**Signature:**
+
+```ts
+function voidSolid(options?: VoidSolidOptions): Plugin[];
+```
+
+**Options:**
+
+```ts
+interface VoidSolidOptions {
+  solid?: SolidPluginOptions; // passed through to vite-plugin-solid
+  viewTransitions?: boolean; // enable View Transitions API
+}
+```
+
+#### Solid Runtime
+
+Imported from `"@void/solid"`.
+
+| Export                             | Description                                                                                                                                                                                                                                         |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Link`                             | Solid component for SPA navigation. Renders `<a>` for GET, `<button>` for non-GET methods. Props: `href`, `method`, `data`, `prefetch`, `cacheFor`, `preserveScroll`, `preserveState`, `replace`, `reloadDocument`, `viewTransition`, `onNavigate`. |
+| `useForm(url, defaults, options?)` | Form helper using Solid stores. Returns `{ data, setData, post, put, patch, delete, processing, errors, isDirty, wasSuccessful, recentlySuccessful, reset, clearErrors }`.                                                                          |
+| `useShared()`                      | Returns shared data injected by middleware via `c.set("shared", {...})`.                                                                                                                                                                            |
+| `useRouter()`                      | Returns the page router for programmatic navigation: `visit`, `reload`, `post`, `put`, `patch`, `delete`.                                                                                                                                           |
+
+Solid `Link` GET `data` is merged into the rendered `href` query string. Primitive values are serialized with `String(value)`, arrays become repeated keys, `null` and `undefined` are omitted, and nested objects throw. `prefetch` and `reloadDocument` are GET-only and throw for mutation links.
 
 ## Subpath Exports
 

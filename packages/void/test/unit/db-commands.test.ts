@@ -11,11 +11,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
+const mockExecFileSync = vi.hoisted(() => vi.fn());
 const mockGetMiniflareDatabasePath = vi.fn();
 const mockOpenSqliteDatabase = vi.fn();
 const mockGetAppliedMigrations = vi.fn();
 const mockRunMigrations = vi.fn();
 const mockWriteJournal = vi.fn();
+
+vi.mock('node:child_process', () => ({
+  execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
+}));
 
 vi.mock('../../src/migrations/runner', async () => {
   const actual = await vi.importActual<typeof import('../../src/migrations/runner')>(
@@ -196,6 +201,53 @@ function createRenameProjectRoot(options: {
 
   return root;
 }
+
+function createDrizzleProjectRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), 'void db subprocess test-'));
+  rootsToClean.push(root);
+  mkdirSync(join(root, 'db'), { recursive: true });
+  writeFileSync(join(root, 'db', 'schema.ts'), 'export const users = {};\n');
+  writeFileSync(join(root, 'void.json'), JSON.stringify({}));
+  return root;
+}
+
+describe('void db drizzle-kit subprocesses', () => {
+  let runDbCommand: typeof import('../../src/cli/db').runDbCommand;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit:${code ?? 0}`);
+    }) as never);
+    runDbCommand = (await import('../../src/cli/db')).runDbCommand;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    mockExecFileSync.mockReset();
+    for (const root of rootsToClean.splice(0, rootsToClean.length)) {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('passes drizzle-kit arguments without shell interpolation', async () => {
+    const root = createDrizzleProjectRoot();
+
+    await runDbCommand(root, { action: 'generate' });
+
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+    const [command, args, options] = mockExecFileSync.mock.calls[0];
+    expect(command).toBe(process.execPath);
+    expect(args).toEqual([
+      expect.stringContaining(join('drizzle-kit', 'bin.cjs')),
+      'generate',
+      '--config',
+      join(root, '.void', 'drizzle.config.json'),
+    ]);
+    expect(options).toEqual({ cwd: root, stdio: 'inherit' });
+  });
+});
 
 describe('void db reset', () => {
   let runDbCommand: typeof import('../../src/cli/db').runDbCommand;

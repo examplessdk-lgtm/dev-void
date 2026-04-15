@@ -5,8 +5,14 @@ export function useNavigation(onStart?: () => void, onEnd?: () => void): void {
   const router = useContext(RouterContext);
   const startRef = useRef(onStart);
   const endRef = useRef(onEnd);
-  startRef.current = onStart;
-  endRef.current = onEnd;
+
+  useEffect(() => {
+    startRef.current = onStart;
+  }, [onStart]);
+
+  useEffect(() => {
+    endRef.current = onEnd;
+  }, [onEnd]);
 
   useEffect(() => {
     if (!router) {

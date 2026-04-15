@@ -13,3 +13,5 @@ export type {
 export { resolveHead, renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from './head';
 export type { HeadDescriptor, HeadConfig } from './head';
 export { generateComponentManifest } from './manifest';
+export { resolveStaticPageDataBuildOptions } from './static-data';
+export type { StaticPageDataBuildOptions } from './static-data';

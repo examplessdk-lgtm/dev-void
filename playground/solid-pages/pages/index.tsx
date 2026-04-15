@@ -9,6 +9,7 @@ export default function HomePage(props: Props) {
       <Link href="/users" prefetch="mount">
         Go to Users
       </Link>
+      <Link href="/link-behavior">Link behavior</Link>
     </div>
   );
 }

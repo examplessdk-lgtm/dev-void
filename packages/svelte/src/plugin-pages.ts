@@ -1,8 +1,8 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import type { Plugin } from 'vite';
-import { scanPages } from 'void/pages';
-import type { PageScanResult } from 'void/pages';
+import { dirname, join } from 'node:path';
+import type { Plugin, ResolvedConfig } from 'vite';
+import { resolveStaticPageDataBuildOptions, scanPages } from 'void/pages';
+import type { PageScanResult, StaticPageDataBuildOptions } from 'void/pages';
 import { generateComponentManifest } from './pages-manifest';
 
 const RENDERER_ID = 'virtual:void-pages-renderer';
@@ -42,6 +42,7 @@ function hasNonIslandPages(dir: string): boolean {
 export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plugin {
   let pageScan: PageScanResult | null = null;
   let isDev = false;
+  let viteConfig: ResolvedConfig | undefined;
   const root = dirname(pagesDir);
 
   return {
@@ -79,9 +80,14 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
             pagesDir,
             options?.viewTransitions,
             options?.prefetch,
+            resolveStaticPageDataBuildOptions(root, { publicDir: viteConfig?.publicDir }),
           );
         }
       },
+    },
+
+    configResolved(config) {
+      viteConfig = config;
     },
 
     config(_, env) {
@@ -178,6 +184,7 @@ function generateClientEntry(
   pagesDir: string,
   viewTransitions?: boolean,
   prefetch?: PrefetchConfig,
+  staticPageData?: StaticPageDataBuildOptions,
 ): string {
   return `
 import { hydrate } from "svelte";
@@ -214,6 +221,8 @@ const { router, initialPageData, initialComponent, initialLayouts, start } =
       },
     },
     components, layoutTree, routeMeta, matchRoute,
+    staticPageData: ${!!staticPageData?.enabled},
+    staticPageDataFastPath: ${!!staticPageData?.fastPath},
     viewTransitions: ${!!viewTransitions},
     prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
     prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? '30s')}),

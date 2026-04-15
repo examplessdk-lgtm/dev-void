@@ -14,6 +14,7 @@ export default function Layout({ children }: { children: ReactNode }) {
         <Link href="/about" prefetch>
           About
         </Link>{' '}
+        | <Link href="/legacy">Legacy</Link> | <Link href="/external-legacy">External Legacy</Link>{' '}
         | <button onClick={() => setCount((value) => value + 1)}>Layout count: {count}</button>
       </nav>
       <hr />

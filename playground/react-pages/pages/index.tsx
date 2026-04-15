@@ -8,7 +8,8 @@ export default function HomePage({ title }: Props) {
       <p>This is the React Pages playground.</p>
       <Link href="/users" prefetch="mount">
         Go to Users
-      </Link>
+      </Link>{' '}
+      <Link href="/link-behavior">Link behavior</Link>
     </div>
   );
 }

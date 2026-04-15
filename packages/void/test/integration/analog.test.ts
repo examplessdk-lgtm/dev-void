@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
@@ -9,11 +8,40 @@ const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/analog';
 const PLAYGROUND_ROOT = join(ROOT, PLAYGROUND);
 const CONFIG_FILES = ['void.json', 'wrangler.jsonc', 'wrangler.json'];
+const CLEAN_ENV_KEYS = [
+  'APPDATA',
+  'ComSpec',
+  'HOME',
+  'LOCALAPPDATA',
+  'PATHEXT',
+  'PNPM_HOME',
+  'SystemDrive',
+  'SystemRoot',
+  'TEMP',
+  'TMP',
+  'USERPROFILE',
+] as const;
 const configSnapshot = new Map<string, string | undefined>();
 
 function removeWranglerConfig(root: string) {
   rmSync(join(root, 'wrangler.jsonc'), { force: true });
   rmSync(join(root, 'wrangler.json'), { force: true });
+}
+
+function getCleanEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path');
+  if (pathKey && process.env[pathKey]) {
+    env[pathKey] = process.env[pathKey];
+  }
+
+  for (const key of CLEAN_ENV_KEYS) {
+    if (process.env[key]) {
+      env[key] = process.env[key];
+    }
+  }
+
+  return env;
 }
 
 beforeAll(() => {
@@ -42,22 +70,18 @@ describe('playground/analog build', () => {
     rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
     removeWranglerConfig(pg);
     // Angular's compiler conflicts with vitest's Node.js module hooks.
-    // Use env -i to fully isolate the child process, preserving only PATH and HOME.
-    const result = spawnSync(
-      'env',
-      [
-        '-i',
-        `PATH=${process.env.PATH}`,
-        `HOME=${process.env.HOME}`,
-        'pnpm',
-        '--dir',
-        PLAYGROUND,
-        'build',
-      ],
-      { cwd: ROOT, stdio: 'pipe', timeout: 90_000 },
-    );
+    // Use a clean child environment while letting cross-spawn resolve pnpm.cmd on Windows.
+    const result = spawn.sync('pnpm', ['--dir', PLAYGROUND, 'build'], {
+      cwd: ROOT,
+      stdio: 'pipe',
+      timeout: 90_000,
+      env: getCleanEnv(),
+    });
     if (result.status !== 0) {
-      throw new Error(`Build failed (exit ${result.status}):\n${result.stderr?.toString()}`);
+      const output = [result.error?.message, result.stderr?.toString(), result.stdout?.toString()]
+        .filter(Boolean)
+        .join('\n');
+      throw new Error(`Build failed (exit ${result.status ?? result.signal}):\n${output}`);
     }
   }, 120_000);
 

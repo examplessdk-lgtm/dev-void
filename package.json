@@ -24,6 +24,7 @@
     "@types/cross-spawn": "^6.0.6",
     "@typescript/native-preview": "catalog:",
     "cross-spawn": "^7.0.6",
+    "eslint-plugin-react-hooks": "^7.0.1",
     "husky": "^9.1.7",
     "lint-staged": "^16.4.0",
     "oxfmt": "^0.45.0",

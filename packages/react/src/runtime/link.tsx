@@ -1,40 +1,135 @@
-import { useContext, useRef, useEffect, type JSX } from 'react';
-import type { MouseEvent, AnchorHTMLAttributes, ButtonHTMLAttributes } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, type JSX } from 'react';
+import type {
+  MouseEvent,
+  TouchEvent,
+  FocusEvent,
+  AnchorHTMLAttributes,
+  ButtonHTMLAttributes,
+  CSSProperties,
+  RefObject,
+} from 'react';
 import { RouterContext } from './context';
 
 type PrefetchStrategy = 'hover' | 'click' | 'mount' | 'visible';
+type LinkMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 type CommonProps = {
   href: string;
-  method?: string;
+  method?: LinkMethod | Lowercase<LinkMethod>;
   data?: Record<string, unknown>;
   preserveScroll?: boolean;
+  preserveState?: boolean;
+  replace?: boolean;
+  reloadDocument?: boolean;
   viewTransition?: boolean;
   prefetch?: boolean | PrefetchStrategy | PrefetchStrategy[];
   cacheFor?: number | string | [string, string];
+  onNavigate?: (event: { preventDefault(): void }) => void;
 };
 
 export type LinkProps = CommonProps &
   Omit<AnchorHTMLAttributes<HTMLAnchorElement>, keyof CommonProps> &
   Omit<ButtonHTMLAttributes<HTMLButtonElement>, keyof CommonProps>;
 
+function appendQueryValue(params: URLSearchParams, key: string, value: unknown): boolean {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  if (value instanceof Date) {
+    params.append(key, value.toISOString());
+    return true;
+  }
+  if (Array.isArray(value)) {
+    let appended = false;
+    for (const item of value) {
+      appended = appendQueryValue(params, key, item) || appended;
+    }
+    return appended;
+  }
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    params.append(key, String(value));
+    return true;
+  }
+  throw new Error(
+    `Void Link GET data only supports primitive values and arrays. Received nested data for "${key}".`,
+  );
+}
+
+function mergeDataIntoHref(href: string, data?: Record<string, unknown>): string {
+  if (!data) {
+    return href;
+  }
+
+  const hashIndex = href.indexOf('#');
+  const beforeHash = hashIndex === -1 ? href : href.slice(0, hashIndex);
+  const hash = hashIndex === -1 ? '' : href.slice(hashIndex);
+  const searchIndex = beforeHash.indexOf('?');
+  const path = searchIndex === -1 ? beforeHash : beforeHash.slice(0, searchIndex);
+  const search = searchIndex === -1 ? '' : beforeHash.slice(searchIndex + 1);
+  const params = new URLSearchParams(search);
+  let appended = false;
+
+  for (const [key, value] of Object.entries(data)) {
+    appended = appendQueryValue(params, key, value) || appended;
+  }
+
+  if (!appended) {
+    return href;
+  }
+
+  const query = params.toString();
+  return `${path}${query ? `?${query}` : ''}${hash}`;
+}
+
+function hasPrefetch(prefetch: LinkProps['prefetch']): boolean {
+  return prefetch !== false;
+}
+
+function isModifiedEvent(e: MouseEvent): boolean {
+  const target = (e.currentTarget as HTMLElement).getAttribute('target');
+  return (
+    (target !== null && target !== '_self') ||
+    e.ctrlKey ||
+    e.metaKey ||
+    e.shiftKey ||
+    e.altKey ||
+    e.button !== 0
+  );
+}
+
 export function Link({
   href,
   method = 'GET',
   data,
   preserveScroll = false,
+  preserveState = false,
+  replace = false,
+  reloadDocument = false,
   viewTransition,
   prefetch: prefetchProp = false,
   cacheFor,
+  onNavigate,
   children,
+  style,
+  onClick: onClickProp,
+  onMouseEnter: onMouseEnterProp,
+  onMouseLeave: onMouseLeaveProp,
+  onFocus: onFocusProp,
+  onMouseDown: onMouseDownProp,
+  onTouchStart: onTouchStartProp,
   ...rest
 }: LinkProps): JSX.Element {
   const router = useContext(RouterContext);
-  const elRef = useRef<HTMLElement | null>(null);
+  const elementRef = useRef<HTMLElement | null>(null);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  function getStrategies(): PrefetchStrategy[] {
-    if (prefetchProp === false) {
+  const normalizedMethod = useMemo(() => method.toUpperCase() as LinkMethod, [method]);
+  const isGet = normalizedMethod === 'GET';
+  const hrefWithData = useMemo(
+    () => (isGet ? mergeDataIntoHref(href, data) : href),
+    [data, href, isGet],
+  );
+  const strategies = useMemo<PrefetchStrategy[]>(() => {
+    if (prefetchProp === false || reloadDocument) {
       return [];
     }
     if (prefetchProp === true) {
@@ -44,112 +139,176 @@ export function Link({
       return [prefetchProp];
     }
     return prefetchProp;
+  }, [prefetchProp, reloadDocument]);
+  const hoverDelay = router?._hoverDelay ?? 75;
+
+  if (hasPrefetch(prefetchProp) && !isGet) {
+    throw new Error(
+      'Void Link prefetch only supports GET links. Remove `prefetch` or use method="GET".',
+    );
+  }
+  if (reloadDocument && !isGet) {
+    throw new Error('Void Link reloadDocument only supports GET links.');
   }
 
-  function doPrefetch() {
+  const doPrefetch = useCallback(() => {
     if (!router?.prefetch) {
       return;
     }
     const current = window.location.pathname + window.location.search;
-    if (href === current) {
+    if (hrefWithData === current) {
       return;
     }
     const options: any = {};
     if (cacheFor !== undefined) {
       options.cacheFor = cacheFor;
     }
-    if (method) {
-      options.method = method;
+    if (normalizedMethod) {
+      options.method = normalizedMethod;
     }
-    router.prefetch(href, options);
-  }
+    router.prefetch(hrefWithData, options);
+  }, [cacheFor, hrefWithData, normalizedMethod, router]);
 
-  function onClick(e: MouseEvent) {
-    if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0) {
-      return;
-    }
-    const url = new URL(href, window.location.origin);
-    if (url.origin !== window.location.origin) {
-      return;
-    }
+  const shouldHandleClick = useCallback(
+    (event: MouseEvent): boolean => {
+      if (reloadDocument || !router || event.defaultPrevented || isModifiedEvent(event)) {
+        return false;
+      }
+      if ((event.currentTarget as HTMLElement).hasAttribute('download')) {
+        return false;
+      }
 
-    e.preventDefault();
-    router.visit(href, {
-      method,
+      const url = new URL(hrefWithData, window.location.origin);
+      if (url.origin !== window.location.origin) {
+        return false;
+      }
+
+      return true;
+    },
+    [hrefWithData, reloadDocument, router],
+  );
+
+  const onClick = useCallback(
+    (event: MouseEvent) => {
+      onClickProp?.(event as any);
+      if (!shouldHandleClick(event)) {
+        return;
+      }
+
+      let navigatePrevented = false;
+      onNavigate?.({
+        preventDefault() {
+          navigatePrevented = true;
+        },
+      });
+      if (navigatePrevented) {
+        event.preventDefault();
+        return;
+      }
+
+      event.preventDefault();
+      router?.visit(hrefWithData, {
+        method: normalizedMethod,
+        data: isGet ? undefined : data,
+        preserveScroll,
+        preserveState,
+        replace,
+        viewTransition,
+      });
+    },
+    [
       data,
+      hrefWithData,
+      isGet,
+      normalizedMethod,
+      onClickProp,
+      onNavigate,
       preserveScroll,
+      preserveState,
+      replace,
+      router,
+      shouldHandleClick,
       viewTransition,
-    });
-  }
+    ],
+  );
 
-  const strategies = getStrategies();
+  const onMouseEnter = useCallback(
+    (event: MouseEvent) => {
+      onMouseEnterProp?.(event as any);
+      if (event.defaultPrevented) {
+        return;
+      }
+      if (hoverTimerRef.current) {
+        clearTimeout(hoverTimerRef.current);
+      }
+      hoverTimerRef.current = setTimeout(doPrefetch, hoverDelay);
+    },
+    [doPrefetch, hoverDelay, onMouseEnterProp],
+  );
 
-  function onMouseEnter() {
-    if (hoverTimerRef.current) {
-      clearTimeout(hoverTimerRef.current);
-    }
-    hoverTimerRef.current = setTimeout(doPrefetch, router?._hoverDelay ?? 75);
-  }
+  const onMouseLeave = useCallback(
+    (event: MouseEvent) => {
+      onMouseLeaveProp?.(event as any);
+      if (hoverTimerRef.current) {
+        clearTimeout(hoverTimerRef.current);
+        hoverTimerRef.current = null;
+      }
+    },
+    [onMouseLeaveProp],
+  );
 
-  function onMouseLeave() {
-    if (hoverTimerRef.current) {
-      clearTimeout(hoverTimerRef.current);
-      hoverTimerRef.current = null;
-    }
-  }
+  const onFocus = useCallback(
+    (event: FocusEvent) => {
+      onFocusProp?.(event as any);
+      if (!event.defaultPrevented) {
+        doPrefetch();
+      }
+    },
+    [doPrefetch, onFocusProp],
+  );
 
-  function onMouseDown() {
-    doPrefetch();
-  }
+  const onMouseDown = useCallback(
+    (event: MouseEvent) => {
+      onMouseDownProp?.(event as any);
+      if (!event.defaultPrevented) {
+        doPrefetch();
+      }
+    },
+    [doPrefetch, onMouseDownProp],
+  );
+
+  const onTouchStart = useCallback(
+    (event: TouchEvent) => {
+      onTouchStartProp?.(event as any);
+      if (!event.defaultPrevented) {
+        doPrefetch();
+      }
+    },
+    [doPrefetch, onTouchStartProp],
+  );
 
   useEffect(() => {
-    const strategies =
-      prefetchProp === false
-        ? []
-        : prefetchProp === true
-          ? ['hover']
-          : typeof prefetchProp === 'string'
-            ? [prefetchProp]
-            : prefetchProp;
     if (strategies.length === 0) {
       return;
     }
 
-    const prefetch = () => {
-      if (!router?.prefetch) {
-        return;
-      }
-      const current = window.location.pathname + window.location.search;
-      if (href === current) {
-        return;
-      }
-      const options: any = {};
-      if (cacheFor !== undefined) {
-        options.cacheFor = cacheFor;
-      }
-      if (method) {
-        options.method = method;
-      }
-      router.prefetch(href, options);
-    };
-
     if (strategies.includes('mount')) {
-      prefetch();
+      doPrefetch();
     }
 
     let observer: IntersectionObserver | null = null;
-    if (strategies.includes('visible') && elRef.current) {
+    if (strategies.includes('visible') && elementRef.current) {
       observer = new IntersectionObserver(
         (entries) => {
           if (entries.some((e) => e.isIntersecting)) {
-            prefetch();
+            doPrefetch();
             observer?.disconnect();
             observer = null;
           }
         },
         { rootMargin: '0px' },
       );
-      observer.observe(elRef.current);
+      observer.observe(elementRef.current);
     }
 
     return () => {
@@ -161,24 +320,63 @@ export function Link({
         observer.disconnect();
       }
     };
-  }, [cacheFor, href, method, prefetchProp, router]);
-  const isGet = method.toUpperCase() === 'GET';
+  }, [doPrefetch, strategies]);
 
-  const eventHandlers: Record<string, any> = { onClick };
+  const eventHandlers = useMemo<Record<string, any>>(() => {
+    const handlers: Record<string, any> = {
+      onClick,
+      onFocus: onFocusProp,
+      onMouseDown: onMouseDownProp,
+      onMouseEnter: onMouseEnterProp,
+      onMouseLeave: onMouseLeaveProp,
+      onTouchStart: onTouchStartProp,
+    };
 
-  if (strategies.includes('hover')) {
-    eventHandlers.onMouseEnter = onMouseEnter;
-    eventHandlers.onMouseLeave = onMouseLeave;
-    eventHandlers.onFocus = doPrefetch;
-  }
+    if (strategies.includes('hover')) {
+      handlers.onMouseEnter = onMouseEnter;
+      handlers.onMouseLeave = onMouseLeave;
+      handlers.onFocus = onFocus;
+      handlers.onTouchStart = onTouchStart;
+    }
 
-  if (strategies.includes('click')) {
-    eventHandlers.onMouseDown = onMouseDown;
-  }
+    if (strategies.includes('click')) {
+      handlers.onMouseDown = onMouseDown;
+      handlers.onTouchStart = onTouchStart;
+    }
+
+    return handlers;
+  }, [
+    onClick,
+    onFocus,
+    onFocusProp,
+    onMouseDown,
+    onMouseDownProp,
+    onMouseEnter,
+    onMouseEnterProp,
+    onMouseLeave,
+    onMouseLeaveProp,
+    onTouchStart,
+    onTouchStartProp,
+    strategies,
+  ]);
+
+  const resolvedStyle = useMemo(
+    () => ({
+      touchAction: 'manipulation',
+      ...(style as CSSProperties | undefined),
+    }),
+    [style],
+  );
 
   if (isGet) {
     return (
-      <a ref={elRef as any} href={href} {...eventHandlers} {...rest}>
+      <a
+        ref={elementRef as RefObject<HTMLAnchorElement>}
+        href={hrefWithData}
+        style={resolvedStyle}
+        {...rest}
+        {...eventHandlers}
+      >
         {children}
       </a>
     );
@@ -186,10 +384,11 @@ export function Link({
 
   return (
     <button
-      ref={elRef as any}
+      ref={elementRef as RefObject<HTMLButtonElement>}
       type="button"
-      {...eventHandlers}
+      style={resolvedStyle}
       {...(rest as ButtonHTMLAttributes<HTMLButtonElement>)}
+      {...eventHandlers}
     >
       {children}
     </button>

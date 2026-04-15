@@ -1,6 +1,6 @@
 {
   "name": "@void-sdk/md",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "files": [
     "dist",
     "pages.d.ts"

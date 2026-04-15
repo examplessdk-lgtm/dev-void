@@ -52,9 +52,6 @@ export default function ChatPage({ initialRoom, initialName }: Props) {
   });
 
   useEffect(() => {
-    setStatus('connecting');
-    setTimeline([]);
-
     const socket: ChatSocket = connect('/ws/chat/:room', {
       params: { room: activeRoom },
     });
@@ -87,6 +84,8 @@ export default function ChatPage({ initialRoom, initialName }: Props) {
   const reconnect = () => {
     const nextRoom = roomInput.trim() || 'general';
     const nextName = nameInput.trim() || initialName;
+    setStatus('connecting');
+    setTimeline([]);
     setActiveRoom(nextRoom);
     setActiveName(nextName);
   };

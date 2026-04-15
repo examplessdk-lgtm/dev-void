@@ -155,6 +155,35 @@ import { Link } from "@void/solid";
 
 :::
 
+The `Link` components also support query data, history replacement, document navigation, and cancellable client-side navigation:
+
+```tsx
+<Link href="/users" data={{ page: 2, tag: ['active', 'new'] }}>
+  Filtered users
+</Link>
+
+<Link href="/users" replace>
+  Users
+</Link>
+
+<Link href="/logout" reloadDocument>
+  Sign out
+</Link>
+
+<Link
+  href="/settings"
+  onNavigate={(event) => {
+    if (!confirm('Leave this page?')) {
+      event.preventDefault();
+    }
+  }}
+>
+  Settings
+</Link>
+```
+
+`prefetch` and `reloadDocument` are GET-only. Passing either prop to a mutation link throws. GET `data` is merged into the rendered `href` query string; arrays become repeated keys, `null` and `undefined` are omitted, and nested objects throw.
+
 For programmatic navigation, use `useRouter()`:
 
 ```ts

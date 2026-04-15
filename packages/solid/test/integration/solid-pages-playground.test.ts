@@ -264,6 +264,188 @@ function defineClientTests(getBase: () => string) {
       await page.context().close();
     }
   });
+
+  it('Link composes user onClick before SPA navigation', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/link-behavior');
+      await waitForHydration(page);
+
+      await page.evaluate(() => {
+        (window as any).__SPA_MARKER = true;
+      });
+      await page.click('[data-testid="onclick-link"]');
+      await page.waitForFunction(() =>
+        document.querySelector('h1')?.textContent?.includes('Users'),
+      );
+
+      expect(await page.evaluate(() => (window as any).__linkOnClick)).toBe(true);
+      expect(await page.evaluate(() => (window as any).__SPA_MARKER)).toBe(true);
+      expect(page.url()).toBe(BASE + '/users');
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('Link preserves Solid bound onClick handler arguments', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/link-behavior');
+      await waitForHydration(page);
+
+      await page.click('[data-testid="bound-click-link"]');
+      await page.waitForFunction(() => (window as any).__boundClickData === 'bound-data');
+
+      expect(await page.evaluate(() => (window as any).__boundClickData)).toBe('bound-data');
+      expect(await page.evaluate(() => (window as any).__boundClickEventType)).toBe('click');
+      expect(page.url()).toBe(BASE + '/link-behavior');
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('Link respects onClick preventDefault', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/link-behavior');
+      await waitForHydration(page);
+
+      await page.click('[data-testid="prevented-click-link"]');
+      await page.waitForFunction(() => (window as any).__preventedClick === true);
+
+      expect(page.url()).toBe(BASE + '/link-behavior');
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('Link supports cancellable onNavigate', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/link-behavior');
+      await waitForHydration(page);
+
+      await page.click('[data-testid="prevented-navigate-link"]');
+      await page.waitForFunction(() => (window as any).__preventedNavigate === true);
+
+      expect(page.url()).toBe(BASE + '/link-behavior');
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('Link replace updates the current history entry', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/');
+      await waitForHydration(page);
+
+      await page.click('a[href="/link-behavior"]');
+      await page.waitForFunction(() =>
+        document.querySelector('h1')?.textContent?.includes('Link Behavior'),
+      );
+      await waitForHydration(page);
+
+      await page.click('[data-testid="replace-link"]');
+      await page.waitForFunction(() =>
+        document.querySelector('h1')?.textContent?.includes('Users'),
+      );
+      expect(page.url()).toBe(BASE + '/users');
+
+      await page.goBack();
+      await page.waitForFunction(() =>
+        document.querySelector('h1')?.textContent?.includes('Welcome'),
+      );
+      expect(page.url()).toBe(BASE + '/');
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('Link reloadDocument uses browser navigation', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/link-behavior');
+      await waitForHydration(page);
+
+      await page.evaluate(() => {
+        (window as any).__SPA_MARKER = true;
+      });
+      await page.click('[data-testid="reload-link"]');
+      await page.waitForFunction(() =>
+        document.querySelector('h1')?.textContent?.includes('Users'),
+      );
+
+      expect(page.url()).toBe(BASE + '/users');
+      expect(await page.evaluate(() => (window as any).__SPA_MARKER)).toBeUndefined();
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('Link leaves target and download links to the browser', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/link-behavior');
+      await waitForHydration(page);
+
+      const popupPromise = page.context().waitForEvent('page');
+      await page.click('[data-testid="blank-link"]');
+      const popup = await popupPromise;
+      await popup.waitForLoadState();
+      expect(page.url()).toBe(BASE + '/link-behavior');
+      expect(popup.url()).toBe(BASE + '/users');
+      await popup.close();
+
+      const downloadPromise = page.waitForEvent('download');
+      await page.click('[data-testid="download-link"]');
+      const download = await downloadPromise;
+      expect(download.suggestedFilename()).toBe('users.html');
+      expect(page.url()).toBe(BASE + '/link-behavior');
+      await download.delete();
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('Link merges GET data into href and navigation URL', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/link-behavior');
+      await waitForHydration(page);
+
+      const href = await page.getAttribute('[data-testid="query-data-link"]', 'href');
+      expect(href).toBe('/link-behavior?tag=a&tag=b&page=2&active=true');
+
+      await page.click('[data-testid="query-data-link"]');
+      await page.waitForURL(BASE + '/link-behavior?tag=a&tag=b&page=2&active=true');
+      expect(page.url()).toBe(BASE + '/link-behavior?tag=a&tag=b&page=2&active=true');
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('Link rejects dynamic mutation props with prefetch or reloadDocument', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/link-behavior');
+      await waitForHydration(page);
+
+      await page.click('[data-testid="toggle-prefetch-method"]');
+      await page.waitForSelector('[data-testid="reactive-prefetch-error"]');
+      expect(await page.textContent('[data-testid="reactive-prefetch-error"]')).toContain(
+        'Void Link prefetch only supports GET links',
+      );
+
+      await page.click('[data-testid="toggle-reload-method"]');
+      await page.waitForSelector('[data-testid="reactive-reload-error"]');
+      expect(await page.textContent('[data-testid="reactive-reload-error"]')).toContain(
+        'Void Link reloadDocument only supports GET links',
+      );
+    } finally {
+      await page.context().close();
+    }
+  });
 }
 
 function defineIslandTests(getBase: () => string) {
