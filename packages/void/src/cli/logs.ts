@@ -13,7 +13,7 @@ export async function runLogsCommand(
   console.log();
   intro(cliTitle('project logs'));
 
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
@@ -30,7 +30,7 @@ export async function runLogsCommand(
     process.exit(1);
   }
 
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root });
 
   let entries: LogEntry[];
   try {

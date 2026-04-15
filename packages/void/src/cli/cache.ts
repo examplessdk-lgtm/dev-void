@@ -9,13 +9,13 @@ export async function runPurgeCacheCommand(root: string, projectSlug?: string): 
   console.log();
   intro(cliTitle('project purge-cache'));
 
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
   }
 
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root });
   const requestedSlug = getRequestedProjectSlug({ projectSlug });
   let projectId: string;
   if (requestedSlug) {

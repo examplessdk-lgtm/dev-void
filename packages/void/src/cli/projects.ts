@@ -3,17 +3,17 @@ import { getToken, getSiteDomain } from './auth';
 import { PlatformClient } from './client';
 import { cliTitle, dim, pc, tablePrefix } from './output';
 
-export async function runProjectsCommand(): Promise<void> {
+export async function runProjectsCommand(root: string): Promise<void> {
   console.log();
   intro(cliTitle('project list'));
 
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
   }
 
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root });
   const projects = await client.listProjects();
 
   if (projects.length === 0) {
@@ -24,7 +24,9 @@ export async function runProjectsCommand(): Promise<void> {
   const rows = projects.map((p) => ({
     slug: p.slug,
     appType: p.type ?? 'worker',
-    url: p.custom_domain ? `https://${p.custom_domain}` : `https://${p.slug}.${getSiteDomain()}`,
+    url: p.custom_domain
+      ? `https://${p.custom_domain}`
+      : `https://${p.slug}.${getSiteDomain(root)}`,
   }));
 
   const slugWidth = Math.max('slug'.length, ...rows.map((r) => r.slug.length));

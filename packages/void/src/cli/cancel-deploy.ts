@@ -10,7 +10,7 @@ export async function runCancelDeployCommand(root: string, deployId?: string): P
   console.log();
   intro(cliTitle('project cancel'));
 
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
@@ -22,7 +22,7 @@ export async function runCancelDeployCommand(root: string, deployId?: string): P
     process.exit(1);
   }
 
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root });
   const { deployments } = await client.listDeployments(linked.projectId);
   const target = deployId
     ? deployments.find((d) => d.id === deployId)

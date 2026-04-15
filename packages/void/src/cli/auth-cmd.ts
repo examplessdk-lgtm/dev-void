@@ -5,33 +5,33 @@ import type { AuthArgs } from './auth-args';
 import { PlatformClient } from './client';
 import { runLoginCommand } from './login';
 
-export async function runAuthCommand(_root: string, args: AuthArgs): Promise<void> {
+export async function runAuthCommand(root: string, args: AuthArgs): Promise<void> {
   switch (args.subcommand) {
     case 'login':
-      return runLoginCommand();
+      return runLoginCommand(root);
     case 'logout':
-      if (removeToken()) {
+      if (removeToken(root)) {
         log.success('Logged out.');
       } else {
         log.info('Not logged in.');
       }
       return;
     case 'whoami': {
-      const token = getToken();
+      const token = getToken(root);
       if (!token) {
         log.error('Not logged in. Run `void auth login` first.');
         process.exit(1);
       }
-      const client = new PlatformClient(token);
+      const client = new PlatformClient(token, { root });
       const user = await client.whoami();
       log.info(`${user.login} (${user.plan})`);
       return;
     }
     case 'token': {
-      if (!getToken()) {
-        await runLoginCommand();
+      if (!getToken(root)) {
+        await runLoginCommand(root);
       }
-      const token = getToken();
+      const token = getToken(root);
       if (!token) {
         log.error('Login failed. Run `void auth login` to try again.');
         process.exit(1);

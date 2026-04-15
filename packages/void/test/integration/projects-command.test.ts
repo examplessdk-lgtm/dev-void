@@ -5,16 +5,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const tempHomes: string[] = [];
 
-function setIsolatedHome(opts?: { staging?: boolean }): void {
+function setIsolatedHome(): void {
   const dir = mkdtempSync(join(tmpdir(), 'void-home-'));
   tempHomes.push(dir);
   process.env.HOME = dir;
   process.env.USERPROFILE = dir;
+}
+
+function createProjectRoot(opts?: { staging?: boolean }): string {
+  const dir = mkdtempSync(join(tmpdir(), 'void-project-'));
+  tempHomes.push(dir);
   if (opts?.staging) {
-    const configDir = join(dir, '.void');
-    mkdirSync(configDir, { recursive: true });
-    writeFileSync(join(configDir, 'config.json'), JSON.stringify({ staging: true }));
+    const voidDir = join(dir, '.void');
+    mkdirSync(voidDir, { recursive: true });
+    writeFileSync(join(voidDir, 'project.json'), JSON.stringify({ voidInternalStaging: true }));
   }
+  return dir;
 }
 
 async function importRunProjectsCommand() {
@@ -61,7 +67,8 @@ describe('runProjectsCommand', () => {
   });
 
   it('prints projects for the authenticated user', async () => {
-    setIsolatedHome({ staging: true });
+    setIsolatedHome();
+    const root = createProjectRoot({ staging: true });
     process.env.VOID_TOKEN = 'test-token';
     process.env.VOID_API_URL = 'https://api.example.test';
 
@@ -85,7 +92,7 @@ describe('runProjectsCommand', () => {
 
     const capture = captureOutput();
     const runProjectsCommand = await importRunProjectsCommand();
-    await runProjectsCommand();
+    await runProjectsCommand(root);
     const out = capture.output();
     capture.restore();
 
@@ -100,6 +107,7 @@ describe('runProjectsCommand', () => {
 
   it('prints a friendly message when there are no projects', async () => {
     setIsolatedHome();
+    const root = createProjectRoot();
     process.env.VOID_TOKEN = 'test-token';
     process.env.VOID_API_URL = 'https://api.example.test';
 
@@ -110,7 +118,7 @@ describe('runProjectsCommand', () => {
 
     const capture = captureOutput();
     const runProjectsCommand = await importRunProjectsCommand();
-    await runProjectsCommand();
+    await runProjectsCommand(root);
     const out = capture.output();
     capture.restore();
 
@@ -119,6 +127,7 @@ describe('runProjectsCommand', () => {
 
   it('exits with error when not logged in', async () => {
     setIsolatedHome();
+    const root = createProjectRoot();
 
     const capture = captureOutput();
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
@@ -126,7 +135,7 @@ describe('runProjectsCommand', () => {
     }) as never);
 
     const runProjectsCommand = await importRunProjectsCommand();
-    await expect(runProjectsCommand()).rejects.toThrow('process.exit:1');
+    await expect(runProjectsCommand(root)).rejects.toThrow('process.exit:1');
     const out = capture.output();
     capture.restore();
 

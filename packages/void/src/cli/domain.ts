@@ -6,13 +6,13 @@ import { pc } from './output';
 import { readProjectConfig } from './project';
 
 export async function runDomainCommand(root: string, args: DomainArgs): Promise<void> {
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
   }
 
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root });
 
   // Resolve project
   const requestedSlug = args.projectSlug ?? process.env.VOID_PROJECT?.trim();

@@ -1326,8 +1326,8 @@ describe('isScaffoldableEmptyProject', () => {
       expect(mockConfirm.mock.calls[1]?.[0]).toMatchObject({
         message: 'Set up your Void project now? (log in + link project)',
       });
-      expect(mockRunLogin).toHaveBeenCalledWith('github');
-      expect(mockSaveToken).toHaveBeenCalledWith('token_123');
+      expect(mockRunLogin).toHaveBeenCalledWith(root, 'github');
+      expect(mockSaveToken).toHaveBeenCalledWith('token_123', root);
       expect(mockListProjects).toHaveBeenCalledOnce();
       expect(mockCreateProject).toHaveBeenCalledWith('my-live-app');
       expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({

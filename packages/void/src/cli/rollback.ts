@@ -8,7 +8,7 @@ export async function runRollbackCommand(root: string, deployId?: string): Promi
   console.log();
   intro(cliTitle('project rollback'));
 
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
@@ -20,7 +20,7 @@ export async function runRollbackCommand(root: string, deployId?: string): Promi
     process.exit(1);
   }
 
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root });
   const { deployments, activeDeploymentId } = await client.listDeployments(linked.projectId);
 
   // Filter to retained deployments that aren't the active one

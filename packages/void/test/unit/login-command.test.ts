@@ -87,11 +87,13 @@ beforeEach(() => {
 });
 
 describe('runLoginCommand', () => {
+  const root = '/project';
+
   it('keeps the logout-first flow when the stored token is still valid', async () => {
     mockGetToken.mockReturnValue('existing-token');
     mockWhoami.mockResolvedValue({ login: 'cpojer', plan: 'pro' });
 
-    await runLoginCommand();
+    await runLoginCommand(root);
 
     expect(mockWhoami).toHaveBeenCalledTimes(1);
     expect(mockWarn).toHaveBeenCalledWith('Already logged in.');
@@ -105,12 +107,12 @@ describe('runLoginCommand', () => {
     mockWhoami.mockRejectedValue(new Error('expired'));
     mockIsExpiredTokenError.mockReturnValue(true);
 
-    await runLoginCommand();
+    await runLoginCommand(root);
 
     expect(mockRemoveToken).toHaveBeenCalledTimes(1);
     expect(mockWarn).toHaveBeenCalledWith('Stored auth token expired. Starting a new login.');
-    expect(mockRunLogin).toHaveBeenCalledWith('github');
-    expect(mockSaveToken).toHaveBeenCalledWith('fresh-token');
+    expect(mockRunLogin).toHaveBeenCalledWith(root, 'github');
+    expect(mockSaveToken).toHaveBeenCalledWith('fresh-token', root);
     expect(mockSpinnerStop).toHaveBeenCalledWith('Logged in!');
   });
 
@@ -120,14 +122,14 @@ describe('runLoginCommand', () => {
     mockWhoami.mockRejectedValue(new Error('expired'));
     mockIsExpiredTokenError.mockReturnValue(true);
 
-    await runLoginCommand();
+    await runLoginCommand(root);
 
     expect(mockRemoveToken).not.toHaveBeenCalled();
     expect(mockWarn).toHaveBeenCalledWith(
       '`VOID_TOKEN` is invalid or expired. Continuing with a new login.',
     );
-    expect(mockRunLogin).toHaveBeenCalledWith('github');
-    expect(mockSaveToken).toHaveBeenCalledWith('fresh-token');
+    expect(mockRunLogin).toHaveBeenCalledWith(root, 'github');
+    expect(mockSaveToken).toHaveBeenCalledWith('fresh-token', root);
     expect(mockOutro).toHaveBeenCalledWith('Token saved. Unset `VOID_TOKEN` to use it.');
   });
 });

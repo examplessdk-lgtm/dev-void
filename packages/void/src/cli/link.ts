@@ -13,19 +13,19 @@ export async function runLink(root: string, slug?: string): Promise<void> {
   // Check if already linked
   const existing = readProjectConfig(root);
   if (existing) {
-    log.warn(`Already linked to ${existing.slug} (${existing.slug}.${getSiteDomain()})`);
+    log.warn(`Already linked to ${existing.slug} (${existing.slug}.${getSiteDomain(root)})`);
     outro('To re-link, delete .void/project.json and run again.');
     return;
   }
 
   // Auth
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     cancel('No auth token found. Run `void auth login` first.');
     process.exit(1);
   }
 
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root });
   const projects = await client.listProjects();
 
   if (slug) {
@@ -36,19 +36,19 @@ export async function runLink(root: string, slug?: string): Promise<void> {
       process.exit(1);
     }
     writeProjectConfig(root, { projectId: project.id, slug: project.slug });
-    outro(`Linked to ${project.slug} (${project.slug}.${getSiteDomain()})`);
+    outro(`Linked to ${project.slug} (${project.slug}.${getSiteDomain(root)})`);
     return;
   }
 
   // Interactive: prompt user to select or create
-  const result = await promptProjectSelection(projects);
+  const result = await promptProjectSelection(projects, 'Select a project:', root);
 
   if (result.action === 'create') {
     const config = await promptAndCreateProject(root, client);
-    outro(`Created and linked to ${config.slug} (${config.slug}.${getSiteDomain()})`);
+    outro(`Created and linked to ${config.slug} (${config.slug}.${getSiteDomain(root)})`);
     return;
   }
 
   writeProjectConfig(root, { projectId: result.project.id, slug: result.project.slug });
-  outro(`Linked to ${result.project.slug} (${result.project.slug}.${getSiteDomain()})`);
+  outro(`Linked to ${result.project.slug} (${result.project.slug}.${getSiteDomain(root)})`);
 }

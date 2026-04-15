@@ -63,7 +63,7 @@ vi.mock('../../src/migrations/collect', async () => {
 });
 
 const mockGetToken = vi.fn<() => string | null>(() => null);
-const mockReadProjectConfig = vi.fn<() => { projectId: string } | null>(() => null);
+const mockReadProjectConfig = vi.fn<() => { projectId: string; slug: string } | null>(() => null);
 const mockRenameMigrations =
   vi.fn<(projectId: string, renames: { from: string; to: string }[]) => Promise<{ ok: boolean }>>();
 
@@ -1070,7 +1070,7 @@ describe('void db rename-migrations', () => {
     //   3. The on-disk state is byte-identical to the seed (no local
     //      mutation either — the preflight runs before file renames too).
     mockGetToken.mockReturnValue('test-token');
-    mockReadProjectConfig.mockReturnValue({ projectId: 'proj-under-test' });
+    mockReadProjectConfig.mockReturnValue({ projectId: 'proj-under-test', slug: 'under-test' });
     mockRenameMigrations.mockImplementation(() => {
       throw new Error('client.renameMigrations must not run before preflight');
     });

@@ -3,7 +3,7 @@ import { getToken, getTokenSource, removeToken, runLogin, saveToken, isStagingMo
 import { isExpiredTokenError, PlatformClient } from './client';
 import { cliTitle, createSpinner } from './output';
 
-export async function promptForLoginToken(): Promise<string> {
+export async function promptForLoginToken(root: string = process.cwd()): Promise<string> {
   const provider = await select({
     message: 'Choose a login provider:',
     options: [
@@ -22,8 +22,8 @@ export async function promptForLoginToken(): Promise<string> {
   s.start(`Opening browser for ${providerName} login...`);
 
   try {
-    const token = await runLogin(provider);
-    saveToken(token);
+    const token = await runLogin(root, provider);
+    saveToken(token, root);
     s.stop('Logged in!');
     return token;
   } catch (err) {
@@ -32,15 +32,15 @@ export async function promptForLoginToken(): Promise<string> {
   }
 }
 
-export async function runLoginCommand(): Promise<void> {
+export async function runLoginCommand(root: string = process.cwd()): Promise<void> {
   console.log();
   intro(cliTitle('login'));
 
-  const existing = getToken();
+  const existing = getToken(root);
   let expiredEnvToken = false;
   if (existing) {
     const tokenSource = getTokenSource();
-    const client = new PlatformClient(existing);
+    const client = new PlatformClient(existing, { root });
     try {
       await client.whoami();
       if (tokenSource === 'ci') {
@@ -60,18 +60,18 @@ export async function runLoginCommand(): Promise<void> {
         expiredEnvToken = true;
         log.warn('`VOID_TOKEN` is invalid or expired. Continuing with a new login.');
       } else {
-        removeToken();
+        removeToken(root);
         log.warn('Stored auth token expired. Starting a new login.');
       }
     }
   }
 
-  await promptForLoginToken();
+  await promptForLoginToken(root);
   if (expiredEnvToken) {
     outro(
-      `${isStagingMode() ? 'Staging token saved.' : 'Token saved.'} Unset \`VOID_TOKEN\` to use it.`,
+      `${isStagingMode(root) ? 'Staging token saved.' : 'Token saved.'} Unset \`VOID_TOKEN\` to use it.`,
     );
     return;
   }
-  outro(isStagingMode() ? 'Staging token saved.' : 'Token saved.');
+  outro(isStagingMode(root) ? 'Staging token saved.' : 'Token saved.');
 }

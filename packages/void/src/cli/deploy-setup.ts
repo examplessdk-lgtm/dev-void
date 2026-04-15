@@ -6,14 +6,14 @@ import { promptForLoginToken } from './login';
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project';
 import { promptProjectSelection } from './prompt';
 
-async function ensureToken(): Promise<string> {
-  const existing = getToken();
+async function ensureToken(root: string): Promise<string> {
+  const existing = getToken(root);
   if (existing) {
     return existing;
   }
 
-  const token = await promptForLoginToken();
-  log.success(isStagingMode() ? 'Staging token saved.' : 'Token saved.');
+  const token = await promptForLoginToken(root);
+  log.success(isStagingMode(root) ? 'Staging token saved.' : 'Token saved.');
   return token;
 }
 
@@ -24,7 +24,7 @@ export async function maybeSetupDeployProject(root: string): Promise<ProjectConf
     return existing;
   }
 
-  const existingToken = getToken();
+  const existingToken = getToken(root);
   const shouldSetup = await confirm({
     message: existingToken
       ? 'Link your Void project now?'
@@ -38,15 +38,15 @@ export async function maybeSetupDeployProject(root: string): Promise<ProjectConf
     return null;
   }
 
-  const token = existingToken ?? (await ensureToken());
-  const client = new PlatformClient(token);
+  const token = existingToken ?? (await ensureToken(root));
+  const client = new PlatformClient(token, { root });
   const projects = await client.listProjects();
 
   if (projects.length === 0) {
     return promptAndCreateProject(root, client);
   }
 
-  const result = await promptProjectSelection(projects, 'Select a project to link:');
+  const result = await promptProjectSelection(projects, 'Select a project to link:', root);
   if (result.action === 'select') {
     const config = { projectId: result.project.id, slug: result.project.slug };
     writeProjectConfig(root, config);

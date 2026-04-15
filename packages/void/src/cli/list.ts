@@ -9,13 +9,13 @@ export async function runListCommand(root: string, slug?: string): Promise<void>
   console.log();
   intro(cliTitle('project status'));
 
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
   }
 
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root });
 
   let projectId: string;
   let projectSlug: string;

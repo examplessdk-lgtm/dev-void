@@ -166,7 +166,7 @@ export function searchDocs(pages: DocPage[], query: string): SearchResult[] {
 // --- Query SDK ---
 
 function createQuerySdk(token: string) {
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root: process.cwd() });
 
   // Auto-bind all PlatformClient methods without exposing private fields
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -441,7 +441,7 @@ export function handleRequest(
 
 export function runMcp(): void {
   const pages = loadDocs();
-  const token = getToken();
+  const token = getToken(process.cwd());
   const ctx: McpContext = { pages, token };
 
   const rl = createInterface({ input: process.stdin });

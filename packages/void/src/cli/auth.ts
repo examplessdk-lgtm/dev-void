@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Entry } from '@napi-rs/keyring';
 import { pc } from './output';
+import { isVoidInternalStaging } from './project';
 
 const CONFIG_DIR = join(homedir(), '.void');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
@@ -41,14 +42,13 @@ function keyringDelete(account: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Config file — non-sensitive fields only (staging, api).
+// Config file — non-sensitive fields only (api).
 // Token fields are kept in the interface for migration reads.
 // ---------------------------------------------------------------------------
 
 interface Config {
   token?: string;
   stagingToken?: string;
-  staging?: boolean;
   api?: string;
 }
 
@@ -65,41 +65,25 @@ function writeConfig(config: Config): void {
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
 }
 
-export function isStagingMode(): boolean {
-  return readConfig().staging === true || !!process.env.STAGING;
+export function isStagingMode(root: string = process.cwd()): boolean {
+  return isVoidInternalStaging(root);
 }
 
-export function setStagingMode(on: boolean): void {
-  const config = readConfig();
-  if (on) {
-    config.staging = true;
-  } else {
-    delete config.staging;
-  }
-  writeConfig(config);
-}
-
-export function getSiteDomain(): string {
-  return isStagingMode() ? 'staging.void.app' : 'void.app';
-}
-
-export function printStagingBanner(): void {
-  if (isStagingMode()) {
-    console.log(pc.black(pc.bgYellow(' ⚠ STAGING MODE ')) + '\n');
-  }
+export function getSiteDomain(root: string = process.cwd()): string {
+  return isStagingMode(root) ? 'staging.void.app' : 'void.app';
 }
 
 /**
  * Read the deploy token.
  * Priority: VOID_TOKEN env var > system keychain > ~/.void/config.json (auto-migrated)
  */
-export function getToken(): string | null {
+export function getToken(root: string = process.cwd()): string | null {
   const envToken = process.env.VOID_TOKEN;
   if (envToken) {
     return envToken;
   }
 
-  const account = isStagingMode() ? 'stagingToken' : 'token';
+  const account = isStagingMode(root) ? 'stagingToken' : 'token';
 
   // Try keyring first
   const keyringToken = keyringGet(account);
@@ -132,8 +116,8 @@ export function getTokenSource(): 'ci' | 'manual' {
   return process.env.VOID_TOKEN ? 'ci' : 'manual';
 }
 
-export function saveToken(token: string): void {
-  const account = isStagingMode() ? 'stagingToken' : 'token';
+export function saveToken(token: string, root: string = process.cwd()): void {
+  const account = isStagingMode(root) ? 'stagingToken' : 'token';
   if (keyringSet(account, token)) {
     return;
   }
@@ -145,8 +129,8 @@ export function saveToken(token: string): void {
   writeConfig(config);
 }
 
-export function removeToken(): boolean {
-  const account = isStagingMode() ? 'stagingToken' : 'token';
+export function removeToken(root: string = process.cwd()): boolean {
+  const account = isStagingMode(root) ? 'stagingToken' : 'token';
   let removed = false;
 
   // Remove from keyring
@@ -176,11 +160,11 @@ const STAGING_API_URL = 'https://api.staging.void.cloud';
  * Read the API URL from environment or config file.
  * Priority: VOID_API_URL env var > ~/.void/config.json > default
  */
-export function getApiUrl(): string {
+export function getApiUrl(root: string = process.cwd()): string {
   return (
     process.env.VOID_API_URL ??
     readConfig().api ??
-    (isStagingMode() ? STAGING_API_URL : DEFAULT_API_URL)
+    (isStagingMode(root) ? STAGING_API_URL : DEFAULT_API_URL)
   );
 }
 
@@ -196,11 +180,11 @@ function page(title: string, message: string): string {
  * Start a local HTTP server, open the browser to the platform login page,
  * and wait for the OAuth callback with a JWT token.
  */
-export async function runLogin(provider = 'github'): Promise<string> {
+export async function runLogin(root: string = process.cwd(), provider = 'github'): Promise<string> {
   const http = await import('node:http');
   const { exec } = await import('node:child_process');
 
-  const apiUrl = getApiUrl();
+  const apiUrl = getApiUrl(root);
 
   return new Promise<string>((resolve, reject) => {
     const server = http.createServer((req, res) => {
