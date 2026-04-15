@@ -17,6 +17,7 @@ import {
   isNodeTarget,
   convertHeadersConfig,
   convertRedirectsConfig,
+  convertRewritesConfig,
   getDatabaseDialect,
 } from './config';
 import { scanJobsSync } from './crons/scan';
@@ -928,7 +929,10 @@ export function voidPlugin(options?: {
         prerenderPaths: config.routing?.prerender,
         target: config.target as 'node' | 'bun' | 'deno',
         headerRules: convertHeadersConfig(config.routing?.headers),
-        redirectRules: convertRedirectsConfig(config.routing?.redirects),
+        redirectRules: [
+          ...(convertRedirectsConfig(config.routing?.redirects) ?? []),
+          ...(convertRewritesConfig(config.routing?.rewrites) ?? []),
+        ],
       }),
       prerenderPlugin(root, config),
       ...nodeTargetPlugin(config.target as 'node' | 'bun' | 'deno'),
