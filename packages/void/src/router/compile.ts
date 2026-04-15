@@ -1069,7 +1069,7 @@ window.__vite_plugin_react_preamble_installed__ = true;
   }
 
   if (scan.jobs.length > 0) {
-    lines.push('app.post("/__scheduled", async (c) => {');
+    lines.push('const __scheduledHandler = async (c) => {');
     lines.push('  const __token = c.req.header("x-void-internal");');
     lines.push('  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;');
     lines.push('  if (!(__expected ? __token === __expected : __token === __VOID_BUILD_KEY)) {');
@@ -1079,7 +1079,8 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('  const controller = { cron, scheduledTime, noRetry() {} };');
     lines.push('  await scheduled(controller, c.env, c.executionCtx);');
     lines.push('  return c.json({ ok: true });');
-    lines.push('});');
+    lines.push('};');
+    lines.push('app.post("/__void/scheduled", __scheduledHandler);');
     lines.push('');
   }
 
@@ -1135,8 +1136,8 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('}');
     lines.push('');
 
-    // HTTP route — unconditionally requires token (same as /__scheduled)
-    lines.push('app.post("/__queue", async (c) => {');
+    // HTTP route — unconditionally requires token (same as /__void/scheduled)
+    lines.push('const __queueHandler = async (c) => {');
     lines.push('  const __token = c.req.header("x-void-internal");');
     lines.push('  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;');
     lines.push('  if (!(__expected ? __token === __expected : __token === __VOID_BUILD_KEY)) {');
@@ -1145,7 +1146,8 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('  const payload = await c.req.json();');
     lines.push('  const result = await __processQueue(payload, c.env);');
     lines.push('  return c.json(result);');
-    lines.push('});');
+    lines.push('};');
+    lines.push('app.post("/__void/queue", __queueHandler);');
     lines.push('');
   }
 
@@ -1777,7 +1779,7 @@ function compilePageRoutes(
  *
  * When `hasQueues` is true, also exports a `queue()` handler that
  * serializes the native MessageBatch and dispatches it to the
- * `/__queue` Hono route. In local dev Miniflare delivers batches
+ * `/__void/queue` Hono route. In local dev Miniflare delivers batches
  * natively to this export; in production the relay worker does it.
  *
  * When `remotePath` is provided, wraps the fetch handler to detect

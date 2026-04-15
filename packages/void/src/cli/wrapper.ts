@@ -228,7 +228,7 @@ function generateWrapperSource(
 
     // Cron handler
     if (features.crons.length > 0) {
-      lines.push('  if (request.method === "POST" && url.pathname === "/__scheduled") {');
+      lines.push('  if (request.method === "POST" && url.pathname === "/__void/scheduled") {');
       lines.push('    const __token = request.headers.get("x-void-internal");');
       lines.push('    const __expected = env?.__VOID_PROXY_TOKEN || env?.CRON_SECRET;');
       lines.push('    if (__expected && __token !== __expected) {');

@@ -237,7 +237,7 @@ describe('compileRouteTable', () => {
     expect(code).toContain('__vite_plugin_react_preamble_installed__ = true');
   });
 
-  it('generates /__queue route for queue consumers', () => {
+  it('generates /__void/queue route for queue consumers', () => {
     const scan: ScanResult = {
       routes: [],
       middleware: [],
@@ -262,7 +262,7 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    expect(code).toContain('app.post("/__queue"');
+    expect(code).toContain('app.post("/__void/queue"');
     expect(code).toContain('const queue0Name = "emails"');
     expect(code).toContain('import("/queues/emails.ts")');
     expect(code).toContain('mod.default(batch, env)');
@@ -297,7 +297,7 @@ describe('compileRouteTable', () => {
     expect(code).toContain('queueSuffix.endsWith("-" + queue0Name)');
   });
 
-  it('omits /__queue route when no queues defined', () => {
+  it('omits /__void/queue route when no queues defined', () => {
     const scan: ScanResult = {
       routes: [],
       middleware: [],
@@ -315,10 +315,10 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    expect(code).not.toContain('/__queue');
+    expect(code).not.toContain('/__void/queue');
   });
 
-  it('generates /__scheduled auth guard with getRuntimeEnv and x-void-internal check', () => {
+  it('generates /__void/scheduled auth guard with getRuntimeEnv and x-void-internal check', () => {
     const scan: ScanResult = {
       routes: [],
       middleware: [],
@@ -337,14 +337,14 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    // The /__scheduled handler: token check OR build key fallback
-    expect(code).toContain('app.post("/__scheduled"');
+    // The /__void/scheduled handler: token check OR build key fallback
+    expect(code).toContain('app.post("/__void/scheduled"');
     expect(code).toContain('c.req.header("x-void-internal")');
     expect(code).toContain('__getRawEnv()?.__VOID_PROXY_TOKEN');
     expect(code).toContain('__VOID_BUILD_KEY');
   });
 
-  it('generates /__queue auth guard with __getRawEnv() and x-void-internal check', () => {
+  it('generates /__void/queue auth guard with __getRawEnv() and x-void-internal check', () => {
     const scan: ScanResult = {
       routes: [],
       middleware: [],
@@ -369,8 +369,8 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    // The /__queue HTTP route: token check OR build key fallback
-    expect(code).toContain('app.post("/__queue"');
+    // The /__void/queue HTTP route: token check OR build key fallback
+    expect(code).toContain('app.post("/__void/queue"');
     expect(code).toContain('c.req.header("x-void-internal")');
     expect(code).toContain('__VOID_BUILD_KEY');
     // Queue dispatch logic must be exported as __processQueue for direct native handler use
@@ -556,7 +556,7 @@ describe('compileWorkerEntry', () => {
   it('native queue handler calls __processQueue directly without HTTP', () => {
     const code = compileWorkerEntry(true);
 
-    // Native queue handler must call __processQueue directly (no /__queue HTTP round-trip)
+    // Native queue handler must call __processQueue directly (no /__void/queue HTTP round-trip)
     // This avoids the global-flag race condition with concurrent fetch events
     expect(code).toContain('__processQueue(payload, userEnv)');
     expect(code).not.toContain('__voidInternalCall');
