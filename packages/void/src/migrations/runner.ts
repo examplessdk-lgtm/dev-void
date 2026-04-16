@@ -95,31 +95,53 @@ export function getMiniflareDatabasePath(persistRoot: string, databaseId: string
 /**
  * One-time migration: rename legacy `_migrations` table to `_void_migrations`.
  * Copies all rows from the old table to the new one, then drops the old table.
+ *
+ * Wrapped in an IMMEDIATE transaction + re-checked inside, so two concurrent
+ * local runners (e.g. two `vite dev` processes against the same DB file)
+ * don't race each other. Without the lock, both could observe `_migrations`
+ * exists, both enter the body, and the loser crashes on `SELECT … FROM
+ * _migrations` after the winner already dropped it.
  */
 function upgradeTrackingTable(db: any): void {
-  const legacy = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")
-    .get();
-  if (!legacy) {
-    return;
-  }
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS _void_migrations (
-      name TEXT PRIMARY KEY,
-      applied_at TEXT DEFAULT (datetime('now'))
-    )
-  `);
-  db.exec(
-    `INSERT OR IGNORE INTO _void_migrations (name, applied_at) SELECT name, applied_at FROM _migrations`,
-  );
-  db.exec(`DROP TABLE _migrations`);
+  const tx = db.transaction(() => {
+    const legacy = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")
+      .get();
+    if (!legacy) {
+      return;
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS _void_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    db.exec(
+      `INSERT OR IGNORE INTO _void_migrations (name, applied_at) SELECT name, applied_at FROM _migrations`,
+    );
+    db.exec(`DROP TABLE IF EXISTS _migrations`);
+  });
+  tx.immediate();
 }
 
 /**
  * Apply unapplied SQL migrations from the migrations directory.
  * Tracks applied migrations in the `_void_migrations` table.
- * Each .sql file is split into statements and executed individually
- * because D1's `exec()` with multi-statement SQL can fail.
+ *
+ * Each .sql file is executed as a single `db.exec()` call — better-sqlite3's
+ * `exec` natively handles multi-statement SQL and lets SQLite do the parsing,
+ * so semicolons inside string literals, comments, or trigger bodies don't
+ * fracture the migration. A naive `split(';')` pre-processor would misparse
+ * a statement like `CREATE TABLE t (msg TEXT DEFAULT 'a;b')` into garbage
+ * fragments.
+ *
+ * Concurrent-runner safety: two local `void` processes can race against the
+ * same SQLite file. Both can snapshot the applied-set before either writes,
+ * and if both decide a migration is pending, the loser would crash on a
+ * `table already exists` error. Each per-migration apply therefore runs
+ * inside an IMMEDIATE transaction that re-checks the tracking row under the
+ * SQLite write lock — the loser sees the winner's insert and skips, instead
+ * of re-running the DDL.
  */
 export async function runMigrations(migrationsDir: string, dbPath: string): Promise<string[]> {
   const allMigrations = collectMigrations(migrationsDir);
@@ -142,37 +164,40 @@ export async function runMigrations(migrationsDir: string, dbPath: string): Prom
       )
     `);
 
-    const applied = new Set(
+    const appliedSet = new Set(
       (db.prepare('SELECT name FROM _void_migrations').all() as { name: string }[]).map(
         (r) => r.name,
       ),
     );
 
-    const pending = allMigrations.filter((m) => !applied.has(m.name));
+    const pending = allMigrations.filter((m) => !appliedSet.has(m.name));
     if (pending.length === 0) {
       return [];
     }
 
     const insertStmt = db.prepare('INSERT INTO _void_migrations (name) VALUES (?)');
+    const checkStmt = db.prepare('SELECT 1 FROM _void_migrations WHERE name = ?');
+    const appliedNames: string[] = [];
 
     for (const migration of pending) {
-      // Split into individual statements — D1/better-sqlite3 can choke on multi-statement exec
-      const statements = migration.sql
-        .split(';')
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0);
-
-      const transaction = db.transaction(() => {
-        for (const stmt of statements) {
-          db.exec(stmt);
+      const tx = db.transaction(() => {
+        // Re-check under the write lock. A concurrent runner may have
+        // applied this migration between our pending-filter snapshot and
+        // now; if so, skip instead of re-running the DDL.
+        if (checkStmt.get(migration.name)) {
+          return false;
         }
+        db.exec(migration.sql);
         insertStmt.run(migration.name);
+        return true;
       });
 
-      transaction();
+      if (tx.immediate()) {
+        appliedNames.push(migration.name);
+      }
     }
 
-    return pending.map((m) => m.name);
+    return appliedNames;
   } finally {
     db.close();
   }
