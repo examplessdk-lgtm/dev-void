@@ -125,7 +125,7 @@ export default defineMiddleware(async (c, next) => {
 
 `rewrite(c, path)` re-dispatches the request through the router with the new pathname. You must `return` the result (same pattern as `c.redirect()`).
 
-**Loop prevention:** The re-dispatched request carries an `X-Void-Rewritten` header that prevents static routing rules from re-evaluating. Your middleware is responsible for its own loop prevention — typically by checking whether the path already has the expected prefix before rewriting.
+**Loop prevention:** The re-dispatched request is tracked internally so that static routing rules do not re-evaluate on it. The request also carries an `X-Void-Rewritten` header for observability, but the loop guard does not rely on it (client-supplied headers cannot bypass routing rules). Your middleware is responsible for its own loop prevention — typically by checking whether the path already has the expected prefix before rewriting.
 
 ::: tip
 This is the recommended approach for i18n libraries. The library can export a middleware factory that handles locale detection and rewriting, and users just drop it into their `middleware/` directory.

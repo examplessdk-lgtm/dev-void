@@ -224,9 +224,10 @@ export function defineMiddleware(
  * ```
  *
  * The request is re-dispatched through the Hono router with the new pathname.
- * The re-dispatched request carries an `X-Void-Rewritten` header to prevent
- * static routing rules from re-evaluating. Your middleware is responsible for
- * its own loop prevention (e.g., checking if the path already has a prefix).
+ * The re-dispatched request is tracked internally so that static routing rules
+ * do not re-evaluate on it. It also carries an `X-Void-Rewritten` header for
+ * observability. Your middleware is responsible for its own loop prevention
+ * (e.g., checking if the path already has a prefix).
  */
 export function rewrite(c: CloudContext, path: string): Promise<Response> {
   const fn = c.get('__rewrite');

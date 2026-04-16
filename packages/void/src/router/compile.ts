@@ -752,6 +752,7 @@ export function compileRouteTable(
 
   lines.push(`const app = new Hono();`);
   lines.push(`export const requestContext = new AsyncLocalStorage();`);
+  lines.push('const __rewrittenReqs = new WeakSet();');
   lines.push('');
 
   // Inject rewrite utility into context — closure over `app` for re-dispatch
@@ -761,6 +762,7 @@ export function compileRouteTable(
   lines.push('    rewriteUrl.pathname = path;');
   lines.push('    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
   lines.push('    rewriteReq.headers.set("X-Void-Rewritten", "1");');
+  lines.push('    __rewrittenReqs.add(rewriteReq);');
   lines.push('    return app.fetch(rewriteReq, c.env, c.executionCtx);');
   lines.push('  });');
   lines.push('  await next();');
@@ -2157,7 +2159,7 @@ function compileRoutingRulesMiddleware(lines: Array<string>, rules: Array<Redire
   lines.push('// Routing rules: redirects + rewrites (applied before route handlers)');
   lines.push(`const __routingRules = ${JSON.stringify(rules)};`);
   lines.push('app.use("*", async (c, next) => {');
-  lines.push('  if (c.req.header("X-Void-Rewritten")) return next();');
+  lines.push('  if (__rewrittenReqs.has(c.req.raw)) return next();');
   lines.push('  const pathname = new URL(c.req.url).pathname;');
   lines.push('  let matched;');
   lines.push('  for (const rule of __routingRules) {');
@@ -2175,7 +2177,8 @@ function compileRoutingRulesMiddleware(lines: Array<string>, rules: Array<Redire
   lines.push('      rewriteUrl.pathname = dest;');
   lines.push('      const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
   lines.push('      rewriteReq.headers.set("X-Void-Rewritten", "1");');
-  lines.push('      return app.fetch(rewriteReq, c.env);');
+  lines.push('      __rewrittenReqs.add(rewriteReq);');
+  lines.push('      return app.fetch(rewriteReq, c.env, c.executionCtx);');
   lines.push('    }');
   lines.push('    return c.redirect(dest, matched.status);');
   lines.push('  }');
