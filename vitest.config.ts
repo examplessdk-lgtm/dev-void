@@ -3,6 +3,9 @@ import { defineConfig } from 'vitest/config';
 
 const maxWorkers = process.env.CI ? 2 : Math.max(2, Math.floor(availableParallelism() * 0.75));
 
+// Windows CI runners are 2–3× slower for builds and server startup.
+const ciTimeoutScale = process.platform === 'win32' ? 3 : 1;
+
 const metaframeworks = [
   'packages/void/test/integration/analog.test.ts',
   'packages/void/test/integration/astro.test.ts',
@@ -17,6 +20,8 @@ const metaframeworks = [
 export default defineConfig({
   test: {
     silent: 'passed-only',
+    testTimeout: 120_000 * ciTimeoutScale,
+    hookTimeout: 120_000 * ciTimeoutScale,
     projects: [
       {
         test: {

@@ -23,7 +23,7 @@ describe('playground/nuxt build', () => {
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     removeWranglerConfig(pg);
     execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
-  }, 120_000);
+  });
 
   it('produces expected build artifacts', () => {
     const serverEntry = join(ROOT, `${PLAYGROUND}/.output/server/index.mjs`);
@@ -75,7 +75,7 @@ describe('playground/nuxt dev', () => {
     });
 
     await waitForServer(DEV_BASE, 30_000);
-  }, 45_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -131,4 +131,4 @@ describe('playground/nuxt dev', () => {
       await browser.close();
     }
   });
-}, 60_000);
+});

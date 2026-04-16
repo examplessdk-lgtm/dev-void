@@ -42,7 +42,7 @@ describe('playground/node-app dev', () => {
     });
 
     await waitForServer(DEV_BASE, 20_000);
-  }, 30_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -89,7 +89,7 @@ describe('playground/node-app dev', () => {
     const response = await fetch(`${DEV_BASE}/api/nonexistent`);
     expect(response.status).toBe(404);
   });
-}, 60_000);
+});
 
 describe('playground/node-app build + production', () => {
   let child: ReturnType<typeof spawn>;
@@ -110,7 +110,7 @@ describe('playground/node-app build + production', () => {
     await waitForServer(PROD_BASE, 20_000, {
       isAlive: () => child.exitCode === null,
     });
-  }, 60_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -141,4 +141,4 @@ describe('playground/node-app build + production', () => {
     expect(html).toContain('Welcome');
     expect(html).toContain('<title>Home | Node App</title>');
   });
-}, 120_000);
+});

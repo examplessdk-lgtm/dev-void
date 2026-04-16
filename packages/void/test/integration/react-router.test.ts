@@ -18,7 +18,7 @@ describe('playground/react-router build', () => {
     rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
     rmSync(join(pg, '.react-router'), { recursive: true, force: true });
     execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
-  }, 60_000);
+  });
 
   it('produces expected build artifacts', () => {
     const workerEntry = join(ROOT, `${PLAYGROUND}/build/server/index.js`);
@@ -43,7 +43,7 @@ describe('playground/react-router build', () => {
   });
 });
 
-describe('playground/react-router dev', { retry: 2, timeout: 60_000 }, () => {
+describe('playground/react-router dev', { retry: 2 }, () => {
   let child: ReturnType<typeof spawn>;
   let stderr = '';
 
@@ -69,7 +69,7 @@ describe('playground/react-router dev', { retry: 2, timeout: 60_000 }, () => {
     });
 
     await waitForServer(DEV_BASE, 30_000);
-  }, 45_000);
+  });
 
   afterAll(async () => {
     if (child) {

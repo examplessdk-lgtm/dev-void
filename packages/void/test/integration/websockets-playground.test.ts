@@ -86,7 +86,7 @@ describe('playground/websockets', () => {
     });
 
     await waitForServer(base, 20_000);
-  }, 30_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -186,4 +186,4 @@ describe('playground/websockets', () => {
       await page.context().close();
     }
   });
-}, 60_000);
+});

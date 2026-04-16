@@ -83,7 +83,7 @@ describe('playground/kitchen-sink', () => {
 
     const { runLocalVoidAuthMigrations } = await import('../../src/auth/node');
     await runLocalVoidAuthMigrations(pg, 'sqlite', join(pg, '.void'), 'local', null);
-  }, 120_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -518,4 +518,4 @@ describe('playground/kitchen-sink', () => {
   });
 
   // Cron: skipped — __scheduled endpoint is only available via wrangler, not Vite dev/preview
-}, 120_000);
+});

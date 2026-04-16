@@ -3,6 +3,12 @@ import { once } from 'node:events';
 import { createServer, type Server } from 'node:net';
 
 /**
+ * Timeout multiplier for Windows CI runners, which are 2–3× slower
+ * for builds and server startup.
+ */
+const CI_TIMEOUT_SCALE = process.platform === 'win32' ? 3 : 1;
+
+/**
  * Ports held by getPort() until waitForServer() releases them.
  * Prevents TOCTOU races when many integration tests run in parallel —
  * without this, another test's getPort() can grab the same port
@@ -41,13 +47,14 @@ export async function waitForServer(
     heldServers.delete(urlPort);
   }
 
+  const effectiveTimeout = timeoutMs * CI_TIMEOUT_SCALE;
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  while (Date.now() - start < effectiveTimeout) {
     if (options?.isAlive && !options.isAlive()) {
       throw new Error(`Server process exited while waiting for ${url}`);
     }
     try {
-      const remainingMs = timeoutMs - (Date.now() - start);
+      const remainingMs = effectiveTimeout - (Date.now() - start);
       const response = await fetch(url, {
         signal: AbortSignal.timeout(Math.min(options?.requestTimeoutMs ?? 5_000, remainingMs)),
       });
@@ -65,7 +72,9 @@ export async function waitForServer(
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error(`Timed out waiting for server at ${url}`);
+  throw new Error(
+    `Timed out waiting for server at ${url} (waited ${effectiveTimeout}ms, scale=${CI_TIMEOUT_SCALE})`,
+  );
 }
 
 export async function killChild(child: ReturnType<typeof spawn>): Promise<void> {

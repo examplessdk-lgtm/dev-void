@@ -42,7 +42,7 @@ describe('named-layouts integration', () => {
     });
 
     await waitForServer(DEV_BASE, 20_000);
-  }, 30_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -126,4 +126,4 @@ describe('named-layouts integration', () => {
     expect(html).not.toContain('data-layout=');
     expect(html).toContain('No Layout');
   });
-}, 60_000);
+});

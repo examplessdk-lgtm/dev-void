@@ -90,7 +90,7 @@ describe('playground/node-static build (target: node, output: static)', () => {
       throw new Error('Failed to start static test server');
     }
     staticBase = `http://127.0.0.1:${address.port}`;
-  }, 120_000);
+  });
 
   afterAll(async () => {
     if (staticServer) {
@@ -283,7 +283,7 @@ describe('playground/node-static build (target: node, output: static)', () => {
     expect(existsSync(join(DIST, 'ssr/wrangler.json'))).toBe(false);
     expect(existsSync(join(DIST, 'ssr/wrangler.jsonc'))).toBe(false);
   });
-}, 120_000);
+});
 
 describe('playground/node-static redirects (target: node, output: static)', () => {
   let redirectedServer: Server | undefined;
@@ -346,7 +346,7 @@ describe('playground/node-static redirects (target: node, output: static)', () =
       throw new Error('Failed to start redirected static test server');
     }
     redirectedBase = `http://127.0.0.1:${address.port}`;
-  }, 120_000);
+  });
 
   afterAll(async () => {
     if (originalConfig !== undefined) {
@@ -407,4 +407,4 @@ describe('playground/node-static redirects (target: node, output: static)', () =
       await browser.close();
     }
   });
-}, 120_000);
+});
