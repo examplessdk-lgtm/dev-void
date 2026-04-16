@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { chromium, type Browser, type Page } from 'playwright';
@@ -1011,10 +1011,12 @@ describe('react-pages client (preview)', { retry: 2 }, () => {
   let stderr = '';
 
   beforeAll(async () => {
-    execSync('pnpm --dir playground/react-pages build', {
-      cwd: ROOT,
-      stdio: 'pipe',
-    });
+    if (!existsSync(join(ROOT, 'playground/react-pages/dist'))) {
+      execSync('pnpm --dir playground/react-pages build', {
+        cwd: ROOT,
+        stdio: 'pipe',
+      });
+    }
 
     PREVIEW_PORT = await getPort();
     PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;

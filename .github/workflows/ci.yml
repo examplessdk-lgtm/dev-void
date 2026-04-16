@@ -48,9 +48,11 @@ jobs:
           - suite: pages-react-vue
             script: test:pages:react-vue
             retry: 2
+            prebuild: playground/react-pages playground/vue-pages
           - suite: pages-svelte-solid
             script: test:pages:svelte-solid
             retry: 2
+            prebuild: playground/svelte-pages playground/solid-pages
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -60,6 +62,15 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+
+      - name: Pre-build playgrounds for preview tests
+        if: matrix.prebuild
+        shell: bash
+        run: |
+          for pg in ${{ matrix.prebuild }}; do
+            pnpm --dir "$pg" build &
+          done
+          wait
 
       - run: pnpm exec playwright install --with-deps chromium
         if: matrix.suite != 'unit' && !contains(matrix.os, 'windows')
