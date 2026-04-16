@@ -11,7 +11,7 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
     return runLink(root, args.name || undefined);
   }
   if (args.subcommand === 'list') {
-    return runProjectsCommand();
+    return runProjectsCommand(root);
   }
   if (args.subcommand === 'logs') {
     const { runLogsCommand } = await import('./logs');

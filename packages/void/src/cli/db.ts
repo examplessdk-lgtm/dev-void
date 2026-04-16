@@ -217,11 +217,11 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
 
   // Try to get remote status
   let remoteApplied: { name: string; applied_at: string }[] | null = null;
-  const token = getToken();
+  const token = getToken(root);
   const config = readProjectConfig(root);
   if (token && config) {
     try {
-      const client = new PlatformClient(token);
+      const client = new PlatformClient(token, { root });
       const result = await client.getMigrationStatus(config.projectId);
       remoteApplied = result.applied;
     } catch {
@@ -457,7 +457,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
   }
 
   if (remote) {
-    const token = getToken();
+    const token = getToken(root);
     if (!token) {
       log.error('Not logged in. Run `void auth login` first.');
       process.exit(1);
@@ -475,7 +475,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
       return;
     }
 
-    const client = new PlatformClient(token);
+    const client = new PlatformClient(token, { root });
 
     // Fetch remote applied set so we only validate and send pending migrations.
     // This is required — if we can't determine what's already applied, we must
@@ -802,7 +802,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
   // Update remote tracking — the snapshot preflight above has already
   // verified that the local filesystem is in a state we can safely
   // mutate. If this fails, nothing local has changed yet.
-  const token = getToken();
+  const token = getToken(root);
   const config = readProjectConfig(root);
   let remoteRenamed = false;
   if (config && !token) {
@@ -814,7 +814,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
   }
   if (token && config) {
     try {
-      const client = new PlatformClient(token);
+      const client = new PlatformClient(token, { root });
       await client.renameMigrations(config.projectId, renames);
       remoteRenamed = true;
       log.info('Remote migration records updated.');
@@ -834,7 +834,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       return;
     }
     try {
-      const client = new PlatformClient(token);
+      const client = new PlatformClient(token, { root });
       const reversed = renames.map(({ from, to }) => ({ from: to, to: from }));
       await client.renameMigrations(config.projectId, reversed);
     } catch {
@@ -1231,7 +1231,7 @@ async function runSetUrl(root: string): Promise<void> {
     process.exit(1);
   }
 
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     log.error('No auth token found. Run `void auth login` first.');
     process.exit(1);
@@ -1259,7 +1259,7 @@ async function runSetUrl(root: string): Promise<void> {
     process.exit(0);
   }
 
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root });
   await client.setDatabaseUrl(projectConfig.projectId, connectionString as string);
 
   log.success('Database URL updated.');

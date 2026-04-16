@@ -16,12 +16,13 @@ export type PromptResult = SelectResult | CreateResult;
 export async function promptProjectSelection(
   projects: ProjectResponse[],
   message = 'Select a project:',
+  root: string = process.cwd(),
 ): Promise<PromptResult> {
   const options = [
     { value: '__create__', label: 'Create new project' },
     ...projects.map((p) => ({
       value: p.id,
-      label: `${p.slug} (${p.slug}.${getSiteDomain()})`,
+      label: `${p.slug} (${p.slug}.${getSiteDomain(root)})`,
     })),
   ];
 

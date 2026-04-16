@@ -13,13 +13,13 @@ export async function runDeleteCommand(
   console.log();
   intro(cliTitle('delete'));
 
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
   }
 
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root });
 
   // Resolve project: positional arg, or fall back to linked project
   let projectId: string;

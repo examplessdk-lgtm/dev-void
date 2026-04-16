@@ -260,7 +260,7 @@ async function createCloudflarePrerenderRunner(options: {
   //      the static-output path, where plugin-prerender's closeBundle runs
   //      inside the vite build subprocess and can't see the parent's config.
   //   3. .void/project.json — existing on-disk fallback for linked projects.
-  const voidToken = getToken();
+  const voidToken = getToken(root);
   let voidProjectId: string | undefined = options.projectId;
   if (!voidProjectId) {
     voidProjectId = process.env.VOID_DEPLOY_PROJECT_ID || undefined;
@@ -273,7 +273,7 @@ async function createCloudflarePrerenderRunner(options: {
       // No linked project — prerender without Void credentials.
     }
   }
-  const voidStaging = isStagingMode();
+  const voidStaging = isStagingMode(root);
 
   const bindings = buildPrerenderBindings({
     wranglerVars: wranglerConfig.vars,

@@ -120,9 +120,13 @@ export class PlatformClient {
   private baseUrl: string;
   private token: string;
 
-  constructor(token: string, apiUrl?: string) {
+  constructor(token: string, options?: string | { apiUrl?: string; root?: string }) {
     this.token = token;
-    this.baseUrl = apiUrl ?? getApiUrl();
+    if (typeof options === 'string') {
+      this.baseUrl = options;
+    } else {
+      this.baseUrl = options?.apiUrl ?? getApiUrl(options?.root);
+    }
   }
 
   async whoami(): Promise<{ login: string; plan: string }> {

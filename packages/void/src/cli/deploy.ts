@@ -108,13 +108,13 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
   while (true) {
     try {
       // 1. Auth
-      const token = getToken();
+      const token = getToken(root);
       if (!token) {
         log.error('No auth token found. Run `void auth login` first.');
         process.exit(1);
       }
 
-      const client = new PlatformClient(token);
+      const client = new PlatformClient(token, { root });
 
       // 2. Resolve target project (CLI flag > env var > linked project file)
       const requestedProjectSlug = getRequestedProjectSlug(options);
@@ -156,7 +156,11 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
 
         if (projects.length > 0) {
           // User has existing projects — let them choose
-          const result = await promptProjectSelection(projects, 'Select a project to deploy to:');
+          const result = await promptProjectSelection(
+            projects,
+            'Select a project to deploy to:',
+            root,
+          );
 
           if (result.action === 'select') {
             config = { projectId: result.project.id, slug: result.project.slug };
@@ -271,7 +275,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
           throw new Error('Auth token expired. Run `void auth login` and try again.');
         }
         log.warn('Auth token expired. Re-authenticating...');
-        await promptForLoginToken();
+        await promptForLoginToken(root);
         log.success('Re-authenticated. Retrying deploy...');
         reauthenticated = true;
         continue;

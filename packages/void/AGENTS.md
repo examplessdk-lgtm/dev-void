@@ -106,17 +106,26 @@ src/
 
 The CLI binary is at `dist/cli/cli.mjs` (declared in `bin` field of package.json).
 
-### CLI Staging Mode
+### Internal Staging Projects
 
-Internal-only staging toggle (`void staging on|off`) that switches the CLI to use the staging environment. Not listed in help text.
+Internal-only staging is selected per linked project with `.void/project.json`:
 
-When staging mode is active:
+```json
+{
+  "projectId": "proj_...",
+  "slug": "my-app",
+  "voidInternalStaging": true
+}
+```
+
+A pre-link file containing only `{ "voidInternalStaging": true }` is valid for Void platform developers who need `void auth login` or `void project link` to target staging before a project is linked.
+
+When `voidInternalStaging` is true:
 
 - **Token**: reads/writes `stagingToken` in `~/.void/config.json` instead of `token`
 - **API URL**: defaults to `https://api.void.cloud` (prod); when staging is active, uses `https://api.staging.void.cloud` (unless overridden by `VOID_API_URL` or `api` config field)
-- **Banner**: prints a yellow `⚠ STAGING MODE` banner before every command
-
-Activation: `void staging on` sets `"staging": true` in config. `STAGING` env var also activates it. `void staging off` removes the field. `void staging` (no arg) prints current status.
+- **Site domain**: uses `staging.void.app` for generated project URLs
+- **Proxy**: injects staging proxy bindings for local dev AI and prerendering
 
 Build output uses `.mjs` / `.d.mts` extensions (tsdown 0.20.3 default).
 

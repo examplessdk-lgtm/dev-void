@@ -4,6 +4,7 @@ import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vi
 import { loadEnv, type Plugin } from 'vite';
 import { findVoidAuthConfig } from './auth/config';
 import { getToken, isStagingMode } from './cli/auth';
+import { readProjectConfig } from './cli/project';
 import {
   ensureWranglerCompatibilityDate,
   ensureWranglerNodejsAlsFlag,
@@ -146,20 +147,14 @@ type CredentialStatus =
  * "no token" from "no project" for targeted onboarding guidance.
  */
 function readVoidDevCredentials(root: string): CredentialStatus {
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     return { status: 'no-token' };
   }
-  const staging = isStagingMode() || undefined;
+  const staging = isStagingMode(root) || undefined;
 
-  const projectPath = join(root, '.void', 'project.json');
-  let project: { projectId?: string };
-  try {
-    project = JSON.parse(readFileSync(projectPath, 'utf-8'));
-  } catch {
-    return { status: 'no-project', token, staging };
-  }
-  if (!project.projectId) {
+  const project = readProjectConfig(root);
+  if (!project) {
     return { status: 'no-project', token, staging };
   }
 

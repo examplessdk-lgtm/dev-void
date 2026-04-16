@@ -6,7 +6,6 @@ import { log, outro, note } from '@clack/prompts';
 import { getPackageDir } from './agents';
 import { parseDeployArgs } from './args';
 import { asciiArts } from './ascii';
-import { isStagingMode, setStagingMode, printStagingBanner } from './auth';
 import { authSubcommands, parseAuthArgs } from './auth-args';
 import { dbSubcommands, parseDbArgs } from './db-args';
 import { domainSubcommands, parseDomainArgs } from './domain-args';
@@ -156,23 +155,7 @@ async function runSubcommandGroup<T>(
 const args = process.argv.slice(2);
 const command = args[0];
 
-// MCP uses stdout for JSON-RPC — don't print anything to stdout before it starts
-if (command !== 'mcp') {
-  printStagingBanner();
-}
-
-if (command === 'staging') {
-  const sub = args[1];
-  if (sub === 'on') {
-    setStagingMode(true);
-    log.success('Staging mode enabled.');
-  } else if (sub === 'off') {
-    setStagingMode(false);
-    log.success('Staging mode disabled.');
-  } else {
-    log.info(`Staging mode is ${isStagingMode() ? 'on' : 'off'}.`);
-  }
-} else if (command === 'deploy') {
+if (command === 'deploy') {
   const root = process.cwd();
   let deployArgs;
   try {

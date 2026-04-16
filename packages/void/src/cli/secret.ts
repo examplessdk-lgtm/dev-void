@@ -11,13 +11,13 @@ export async function runSecretCommand(root: string, args: SecretArgs): Promise<
   console.log();
   intro(cliTitle('secret'));
 
-  const token = getToken();
+  const token = getToken(root);
   if (!token) {
     log.error('Not logged in. Run `void auth login` first.');
     process.exit(1);
   }
 
-  const client = new PlatformClient(token);
+  const client = new PlatformClient(token, { root });
   const requestedProjectName = getRequestedProjectSlug({ projectSlug: args.projectName });
   let projectId: string;
   if (requestedProjectName) {
