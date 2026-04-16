@@ -174,14 +174,19 @@ export class PlatformClient {
   async rollback(
     projectId: string,
     deploymentId: string,
+    options?: { allowDestructive?: string[] },
   ): Promise<{ ok: boolean; deploymentId?: string; migrationDiff?: string[]; error?: string }> {
+    const body: { deploymentId: string; allowDestructive?: string[] } = { deploymentId };
+    if (options?.allowDestructive && options.allowDestructive.length > 0) {
+      body.allowDestructive = options.allowDestructive;
+    }
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/rollback`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.token}`,
       },
-      body: JSON.stringify({ deploymentId }),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {
