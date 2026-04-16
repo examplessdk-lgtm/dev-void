@@ -761,7 +761,7 @@ export function compileRouteTable(
   lines.push('    rewriteUrl.pathname = path;');
   lines.push('    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
   lines.push('    rewriteReq.headers.set("X-Void-Rewritten", "1");');
-  lines.push('    return app.fetch(rewriteReq, c.env);');
+  lines.push('    return app.fetch(rewriteReq, c.env, c.executionCtx);');
   lines.push('  });');
   lines.push('  await next();');
   lines.push('});');
