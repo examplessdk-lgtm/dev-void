@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { join } from 'pathe';
 import type { Plugin } from 'vite';
 import solid from 'vite-plugin-solid';
 import { islandsPlugin } from './plugin-islands';

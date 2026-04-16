@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { dirname, join, relative } from 'pathe';
 import { loadEnv, type Plugin } from 'vite';
 import { findVoidAuthConfig, loadVoidAuthConfig } from './auth/config';
 import { generateVoidAuthDatabaseModule, generateVoidAuthDrizzleSchema } from './auth/drizzle';

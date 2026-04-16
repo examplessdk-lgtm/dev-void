@@ -39,6 +39,7 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
+    "pathe": "catalog:",
     "solid-js": "^1.9.12",
     "tsdown": "catalog:",
     "vite": "catalog:",

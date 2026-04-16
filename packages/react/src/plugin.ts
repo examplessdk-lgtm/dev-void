@@ -1,5 +1,5 @@
-import { join } from 'node:path';
 import react from '@vitejs/plugin-react';
+import { join } from 'pathe';
 import type { Plugin } from 'vite';
 import { islandsPlugin } from './plugin-islands';
 import { pagesPlugin } from './plugin-pages';

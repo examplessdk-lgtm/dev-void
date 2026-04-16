@@ -127,6 +127,7 @@ export default defineConfig({
       'sisteransi',
       'picocolors',
       'ofetch',
+      'pathe',
     ],
   },
 });

@@ -8,7 +8,7 @@ import {
   readdirSync,
   readFileSync,
 } from 'node:fs';
-import { join, extname } from 'node:path';
+import { join, extname } from 'pathe';
 import { build } from 'vite';
 
 export interface WrapperFeatures {
@@ -285,7 +285,7 @@ function generateHandlersSource(root: string, features: WrapperFeatures): string
   // Scheduled handlers
   if (features.crons.length > 0) {
     for (let i = 0; i < features.crons.length; i++) {
-      const absPath = join(root, 'crons', features.crons[i].filePath).replaceAll('\\', '/');
+      const absPath = join(root, 'crons', features.crons[i].filePath);
       lines.push(`import cronHandler${i} from "${absPath}";`);
     }
 
@@ -315,7 +315,7 @@ function generateHandlersSource(root: string, features: WrapperFeatures): string
   if (features.queues.length > 0) {
     lines.push('');
     for (let i = 0; i < features.queues.length; i++) {
-      const absPath = join(root, 'queues', features.queues[i].filePath).replaceAll('\\', '/');
+      const absPath = join(root, 'queues', features.queues[i].filePath);
       lines.push(`import queueHandler${i} from "${absPath}";`);
     }
 
