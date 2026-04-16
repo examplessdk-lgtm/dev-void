@@ -5,6 +5,8 @@ const maxWorkers = process.env.CI ? 2 : Math.max(2, Math.floor(availableParallel
 
 // Windows CI runners are 2–3× slower for builds and server startup.
 const ciTimeoutScale = process.platform === 'win32' ? 3 : 1;
+const testTimeout = 120_000 * ciTimeoutScale;
+const hookTimeout = 120_000 * ciTimeoutScale;
 
 const metaframeworks = [
   'packages/void/test/integration/analog.test.ts',
@@ -20,8 +22,6 @@ const metaframeworks = [
 export default defineConfig({
   test: {
     silent: 'passed-only',
-    testTimeout: 120_000 * ciTimeoutScale,
-    hookTimeout: 120_000 * ciTimeoutScale,
     projects: [
       {
         test: {
@@ -34,6 +34,8 @@ export default defineConfig({
         test: {
           name: 'core-markdown',
           sequence: { groupOrder: 3 },
+          testTimeout,
+          hookTimeout,
           include: [
             'packages/void/test/integration/**/*.test.ts',
             'packages/md/test/integration/**/*.test.ts',
@@ -53,6 +55,8 @@ export default defineConfig({
           sequence: { groupOrder: 2 },
           include: metaframeworks,
           maxWorkers,
+          testTimeout,
+          hookTimeout,
         },
       },
       {
@@ -64,6 +68,8 @@ export default defineConfig({
             'packages/vue/test/integration/**/*.test.ts',
           ],
           maxWorkers,
+          testTimeout,
+          hookTimeout,
         },
       },
       {
@@ -75,6 +81,8 @@ export default defineConfig({
             'packages/solid/test/integration/**/*.test.ts',
           ],
           maxWorkers,
+          testTimeout,
+          hookTimeout,
         },
       },
     ],
