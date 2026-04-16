@@ -6,3 +6,4 @@ export { useNavigation } from './use-navigation';
 export { useIslandForm } from './use-island-form';
 export { action, setActionRouter } from './action';
 export { SharedContext, ErrorsContext, RouterContext } from './context';
+export type { DeferredState as Deferred, InferProps } from 'void';

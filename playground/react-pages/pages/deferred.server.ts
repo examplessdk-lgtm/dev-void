@@ -1,5 +1,5 @@
+import type { Deferred } from '@void/react';
 import { defineHandler, defer } from 'void';
-import type { Deferred } from 'void';
 
 export interface Props {
   title: string;

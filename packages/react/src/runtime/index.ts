@@ -5,4 +5,6 @@ export { useForm } from './use-form';
 export { useNavigation } from './use-navigation';
 export { useIslandForm } from './use-island-form';
 export { action, setActionRouter } from './action';
-export { SharedContext, ErrorsContext, RouterContext } from './context';
+export { SharedContext, ErrorsContext, RouterContext, NavigationContext } from './context';
+export type { InferProps } from 'void';
+export type Deferred<T> = Promise<T>;

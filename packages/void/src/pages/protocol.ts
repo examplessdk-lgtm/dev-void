@@ -29,6 +29,8 @@ export interface PageObject {
   deferredKeys?: Record<string, string>;
 }
 
+export type PageRenderResult = string | ReadableStream<Uint8Array>;
+
 function isPagesRequest(c: any): boolean {
   return c.req.header('x-voidpages') === 'true';
 }
@@ -37,6 +39,10 @@ function pageJsonResponse(pageObj: PageObject): Response {
   return Response.json(pageObj, {
     headers: { 'X-VoidPages': 'true', Vary: 'X-VoidPages', ...POWERED_BY },
   });
+}
+
+function requestPathWithSearch(c: any): string {
+  return c.req.path + new URL(c.req.url).search;
 }
 
 /** Extract props from a handler result, handling Response wrapping from withValidator */
@@ -81,9 +87,38 @@ function stripDeferred(props: Record<string, unknown>): Record<string, unknown> 
   return result;
 }
 
+async function writeRenderResult(
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+  encoder: TextEncoder,
+  result: PageRenderResult,
+): Promise<void> {
+  if (typeof result === 'string') {
+    await writer.write(encoder.encode(result));
+    return;
+  }
+
+  const reader = result.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      return;
+    }
+    await writer.write(value);
+  }
+}
+
+function renderedResponse(result: PageRenderResult, contentType: string): Response {
+  return new Response(result, {
+    headers: {
+      'content-type': contentType,
+      ...POWERED_BY,
+    },
+  });
+}
+
 /** Build a streaming response that sends an initial chunk then streams deferred results. */
 function streamDeferredResponse(
-  initialChunk: string,
+  initialChunk: PageRenderResult,
   deferredMap: Record<string, ResolvedDeferredGroup>,
   c: any,
   contentType: string,
@@ -94,25 +129,24 @@ function streamDeferredResponse(
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
 
-  writer.write(encoder.encode(initialChunk));
-
   const entries = Object.entries(deferredMap);
-  let remaining = entries.length;
-
-  for (const [group, { resolver }] of entries) {
+  const pendingChunks = entries.map(([group, { resolver }]) =>
     resolver(c)
-      .then((data) => writer.write(encoder.encode(formatResolved(group, data))))
+      .then((data) => formatResolved(group, data))
       .catch((err: unknown) =>
-        writer.write(
-          encoder.encode(formatRejected(group, err instanceof Error ? err.message : String(err))),
-        ),
-      )
-      .finally(() => {
-        if (--remaining === 0) {
-          writer.close();
-        }
-      });
-  }
+        formatRejected(group, err instanceof Error ? err.message : String(err)),
+      ),
+  );
+
+  (async () => {
+    await writeRenderResult(writer, encoder, initialChunk);
+    await Promise.all(
+      pendingChunks.map(async (chunk) => writer.write(encoder.encode(await chunk))),
+    );
+    await writer.close();
+  })().catch((error: unknown) => {
+    writer.abort(error).catch(() => {});
+  });
 
   return new Response(readable, {
     headers: { 'content-type': contentType, ...POWERED_BY },
@@ -128,7 +162,7 @@ export async function handlePageGet(
   renderFn: (
     pageObj: PageObject,
     assetTags: { css: string; preloads: string; body: string },
-  ) => Promise<string>,
+  ) => Promise<PageRenderResult>,
   getAssetTags: (
     req: Request,
     env: any,
@@ -183,7 +217,7 @@ export async function handlePageGet(
     component: componentId,
     props: immediateProps,
     shared,
-    url: c.req.path,
+    url: requestPathWithSearch(c),
     errors: null,
     ...(head && { head }),
     ...(hasDeferred && {
@@ -242,12 +276,7 @@ export async function handlePageGet(
   const html = await renderFn(pageObj, assetTags);
 
   if (!hasDeferred) {
-    return new Response(html, {
-      headers: {
-        'content-type': 'text/html; charset=utf-8',
-        ...POWERED_BY,
-      },
-    });
+    return renderedResponse(html, 'text/html; charset=utf-8');
   }
 
   // Stream HTML followed by deferred <script> tags
@@ -273,7 +302,7 @@ export async function handlePageMutation(
   renderFn: (
     pageObj: PageObject,
     assetTags: { css: string; preloads: string; body: string },
-  ) => Promise<string>,
+  ) => Promise<PageRenderResult>,
   getAssetTags: (
     req: Request,
     env: any,
@@ -295,7 +324,7 @@ export async function handlePageMutation(
       component: componentId,
       props,
       shared,
-      url: c.req.path,
+      url: requestPathWithSearch(c),
       errors,
       ...(head && { head }),
     };
@@ -316,9 +345,7 @@ export async function handlePageMutation(
         return pageJsonResponse(pageObj);
       }
       const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
-      return new Response(await renderFn(pageObj, assetTags), {
-        headers: { 'content-type': 'text/html; charset=utf-8', ...POWERED_BY },
-      });
+      return renderedResponse(await renderFn(pageObj, assetTags), 'text/html; charset=utf-8');
     }
     throw e;
   }
@@ -344,9 +371,7 @@ export async function handlePageMutation(
         return pageJsonResponse(pageObj);
       }
       const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
-      return new Response(await renderFn(pageObj, assetTags), {
-        headers: { 'content-type': 'text/html; charset=utf-8', ...POWERED_BY },
-      });
+      return renderedResponse(await renderFn(pageObj, assetTags), 'text/html; charset=utf-8');
     }
     // 204 (void from withValidator) — fall through to re-run GET
     if (status !== 204) {
@@ -365,7 +390,5 @@ export async function handlePageMutation(
     return pageJsonResponse(pageObj);
   }
   const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
-  return new Response(await renderFn(pageObj, assetTags), {
-    headers: { 'content-type': 'text/html; charset=utf-8', ...POWERED_BY },
-  });
+  return renderedResponse(await renderFn(pageObj, assetTags), 'text/html; charset=utf-8');
 }

@@ -96,6 +96,48 @@ function defineClientTests(getBase: () => string) {
     }
   });
 
+  it('router.visit resolves after the React navigation commits', async () => {
+    const page = await newPage();
+
+    try {
+      await page.goto(BASE + '/visit-await');
+      await waitForHydration(page);
+
+      await page.click('button:has-text("Visit users")');
+      await page.waitForFunction(() =>
+        document.querySelector('h1')?.textContent?.includes('Users'),
+      );
+      await page.waitForFunction(() => (window as any).__visitAwaitObserved != null);
+
+      const observedHeading = await page.evaluate(() => (window as any).__visitAwaitObserved);
+      expect(observedHeading).toBe('Users');
+      expect(page.url()).toBe(BASE + '/users');
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('router.visit works from an initial layout effect', async () => {
+    const page = await newPage();
+    const errors: string[] = [];
+    page.on('pageerror', (error) => {
+      errors.push(error.message);
+    });
+
+    try {
+      await page.goto(BASE + '/initial-redirect');
+      await waitForHydration(page);
+      await page.waitForFunction(() =>
+        document.querySelector('h1')?.textContent?.includes('Users'),
+      );
+
+      expect(page.url()).toBe(BASE + '/users');
+      expect(errors).not.toContain('router.visit() called before router initialized');
+    } finally {
+      await page.context().close();
+    }
+  });
+
   it('SPA navigation: users → user detail', async () => {
     const page = await newPage();
 
@@ -446,6 +488,36 @@ function defineClientTests(getBase: () => string) {
       await page.click('[data-testid="query-data-link"]');
       await page.waitForURL(BASE + '/link-behavior?tag=a&tag=b&page=2&active=true');
       expect(page.url()).toBe(BASE + '/link-behavior?tag=a&tag=b&page=2&active=true');
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('Link hash navigation runs the navigation lifecycle', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/link-behavior');
+      await waitForHydration(page);
+      await page.waitForFunction(() => (window as any).__hashNavigationReady === true);
+
+      await page.click('[data-testid="hash-link"]');
+      await page.waitForURL(BASE + '/link-behavior#hash-target');
+      await page.waitForFunction(
+        () =>
+          (window as any).__hashNavigationStarts === 1 &&
+          (window as any).__hashNavigationEnds === 1 &&
+          document.querySelector('[data-testid="navigation-location"]')?.textContent ===
+            '/link-behavior#hash-target',
+      );
+
+      const lifecycle = await page.evaluate(() => ({
+        ends: (window as any).__hashNavigationEnds,
+        starts: (window as any).__hashNavigationStarts,
+      }));
+      expect(lifecycle).toEqual({ ends: 1, starts: 1 });
+      expect(await page.textContent('[data-testid="navigation-location"]')).toBe(
+        '/link-behavior#hash-target',
+      );
     } finally {
       await page.context().close();
     }
@@ -838,6 +910,8 @@ describe('react-pages client (dev)', () => {
     const deferredHtml = await deferredSsr.text();
     expect(deferredHtml).toContain('__VOID_PAGE_DATA__');
     expect(deferredHtml).toContain('Deferred Page');
+    expect(deferredHtml).not.toContain('Switched to client rendering');
+    expect(deferredHtml).not.toContain('server rendering aborted');
     expect(deferredHtml).toContain('window.__resolveDeferred("stats"');
     expect(deferredHtml).toContain('"count":42');
   });

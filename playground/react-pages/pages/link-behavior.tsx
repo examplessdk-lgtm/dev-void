@@ -1,7 +1,23 @@
-import { Link } from '@void/react';
+import { Link, useNavigation } from '@void/react';
+import { useEffect } from 'react';
 import type { Props } from './link-behavior.server';
 
 export default function LinkBehaviorPage({ title }: Props) {
+  useEffect(() => {
+    (window as any).__hashNavigationStarts = 0;
+    (window as any).__hashNavigationEnds = 0;
+    (window as any).__hashNavigationReady = true;
+  }, []);
+
+  const navigation = useNavigation(
+    () => {
+      (window as any).__hashNavigationStarts = ((window as any).__hashNavigationStarts ?? 0) + 1;
+    },
+    () => {
+      (window as any).__hashNavigationEnds = ((window as any).__hashNavigationEnds ?? 0) + 1;
+    },
+  );
+
   return (
     <div>
       <h1>{title}</h1>
@@ -83,6 +99,19 @@ export default function LinkBehaviorPage({ title }: Props) {
           Query data
         </Link>
       </p>
+
+      <p>
+        <Link href="#hash-target" data-testid="hash-link">
+          Hash target
+        </Link>
+      </p>
+
+      <p data-testid="navigation-location">{navigation.location}</p>
+      <p data-testid="navigation-pending">{navigation.pendingLocation ?? ''}</p>
+
+      <section id="hash-target">
+        <h2>Hash target</h2>
+      </section>
     </div>
   );
 }

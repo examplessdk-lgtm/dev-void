@@ -72,8 +72,10 @@ describe('playground/pg-test', () => {
       stderr += String(chunk);
     });
 
-    await waitForServer(BASE, 20_000);
-  }, 30_000);
+    await waitForServer(BASE, 30_000, {
+      isAlive: () => devChild.exitCode === null && devChild.signalCode === null,
+    });
+  }, 45_000);
 
   afterAll(async () => {
     if (devChild) {

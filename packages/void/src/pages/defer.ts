@@ -6,11 +6,18 @@ export interface DeferredSentinel {
   resolver: (c: any) => Promise<unknown>;
 }
 
-/** Reactive wrapper for a deferred prop on the client. */
-export type Deferred<T> =
+/** Reactive wrapper for a deferred prop on non-React clients. */
+export type DeferredState<T> =
   | { readonly loading: true; readonly value: null; readonly error: null }
   | { readonly loading: false; readonly value: T; readonly error: null }
   | { readonly loading: false; readonly value: null; readonly error: Error };
+
+/**
+ * Deferred props are represented as framework-native resources on the client.
+ * React treats them as promises consumed with `use()`, while the other adapters
+ * expose the historical `{ loading, value, error }` state object.
+ */
+export type Deferred<T> = DeferredState<T> & Promise<T>;
 
 /** Extract the props type from a typed handler (loader). */
 export type InferProps<T> = T extends { __output: infer R } ? R : never;

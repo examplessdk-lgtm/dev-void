@@ -5,3 +5,4 @@ export { useForm } from './use-form';
 export { useNavigation } from './use-navigation';
 export { useIslandForm } from './use-island-form';
 export { action, setActionRouter } from './action';
+export type { DeferredState as Deferred, InferProps } from 'void';

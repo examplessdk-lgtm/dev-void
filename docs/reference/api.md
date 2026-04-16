@@ -698,6 +698,11 @@ function voidReact(options?: VoidReactOptions): Plugin[];
 ```ts
 interface VoidReactOptions {
   react?: ReactPluginOptions; // passed through to @vitejs/plugin-react
+  viewTransitions?: boolean; // enable View Transitions API for navigations
+  prefetch?: {
+    hoverDelay?: number;
+    cacheFor?: number | string | [string, string];
+  };
 }
 ```
 
@@ -708,10 +713,22 @@ Imported from `"@void/react"`.
 | Export                             | Description                                                                                                                                                                                                                                         |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Link`                             | React component for SPA navigation. Renders `<a>` for GET, `<button>` for non-GET methods. Props: `href`, `method`, `data`, `prefetch`, `cacheFor`, `preserveScroll`, `preserveState`, `replace`, `reloadDocument`, `viewTransition`, `onNavigate`. |
+| `useRouter()`                      | Returns the Pages router. React navigations are scheduled as transitions and include `visit`, `reload`, `refresh`, `setParams`, HTTP verb helpers, prefetch cache controls, and navigation state getters.                                           |
+| `useNavigation()`                  | Returns `{ isPending, location, pendingLocation, type }` for transition-aware pending UI. It still accepts the legacy `(onStart, onEnd)` callback form.                                                                                             |
 | `useForm(url, defaults, options?)` | Form helper hook. Returns `{ data, setData, post, put, patch, delete, processing, errors, isDirty, wasSuccessful, recentlySuccessful, reset, clearErrors }`.                                                                                        |
 | `useShared()`                      | Returns shared data injected by middleware via `c.set("shared", {...})`.                                                                                                                                                                            |
+| `Deferred<T>`                      | React-only prop type for `defer()` results. It is `Promise<T>` and is consumed with React `use()`.                                                                                                                                                  |
 
 React `Link` GET `data` is merged into the rendered `href` query string. Primitive values are serialized with `String(value)`, arrays become repeated keys, `null` and `undefined` are omitted, and nested objects throw. `prefetch` and `reloadDocument` are GET-only and throw for mutation links.
+
+React deferred props returned from `defer()` are Suspense resources. Read them
+with React's `use()` inside a `<Suspense>` boundary. React Pages requires React
+19 and uses streaming SSR for the initial deferred shell. Rejections throw from
+`use()`, so use a normal React error boundary for custom deferred error UI. Vue,
+Svelte, and Solid keep the `{ loading, value, error }` deferred state object.
+When explicitly annotating props, import `Deferred` from the framework adapter
+package (`@void/react`, `@void/vue`, `@void/svelte`, or `@void/solid`) so the
+type matches that adapter's client runtime shape.
 
 ### `@void/svelte`
 

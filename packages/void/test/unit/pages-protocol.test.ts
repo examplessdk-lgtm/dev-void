@@ -70,6 +70,24 @@ describe('handlePageGet', () => {
     expect(body.errors).toBeNull();
   });
 
+  it('includes the request query string in page object URLs', async () => {
+    const c = await createTestContext('GET', '/users?page=2', {
+      headers: { 'x-voidpages': 'true' },
+    });
+
+    const response = await handlePageGet(
+      () => ({ users: [] }),
+      undefined,
+      c,
+      'users',
+      mockRenderFn,
+      mockGetAssetTags,
+    );
+
+    const body = (await response.json()) as any;
+    expect(body.url).toBe('/users?page=2');
+  });
+
   it('calls renderFn and returns HTML when no X-VoidPages header', async () => {
     const c = await createTestContext('GET', '/users');
 
@@ -243,6 +261,25 @@ describe('handlePageMutation', () => {
     const body = (await response.json()) as any;
     expect(body.props).toEqual({ users: ['new'] });
     expect(body.errors).toBeNull();
+  });
+
+  it('includes the request query string in mutation page object URLs', async () => {
+    const c = await createTestContext('POST', '/users?page=2', {
+      headers: { 'x-voidpages': 'true' },
+    });
+
+    const response = await handlePageMutation(
+      () => undefined,
+      () => ({ users: [] }),
+      undefined,
+      c,
+      'users',
+      mockRenderFn,
+      mockGetAssetTags,
+    );
+
+    const body = (await response.json()) as any;
+    expect(body.url).toBe('/users?page=2');
   });
 
   it('Response redirect — passes through', async () => {
