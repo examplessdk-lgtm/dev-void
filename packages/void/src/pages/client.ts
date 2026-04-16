@@ -23,6 +23,8 @@ export interface VisitOptions {
   viewTransition?: boolean;
   /** @internal Used by popstate handler to pass saved scroll position */
   _scrollPosition?: { x: number; y: number } | null;
+  /** @internal Used by popstate handler to avoid writing history while traversing */
+  _popstate?: boolean;
 }
 
 export interface PrefetchOptions {

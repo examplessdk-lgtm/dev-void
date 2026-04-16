@@ -106,11 +106,21 @@ export default function LinkBehaviorPage({ title }: Props) {
         </Link>
       </p>
 
+      <p>
+        <a href="#plain-hash-target" data-testid="plain-hash-link">
+          Plain hash target
+        </a>
+      </p>
+
       <p data-testid="navigation-location">{navigation.location}</p>
       <p data-testid="navigation-pending">{navigation.pendingLocation ?? ''}</p>
 
       <section id="hash-target">
         <h2>Hash target</h2>
+      </section>
+
+      <section id="plain-hash-target">
+        <h2>Plain hash target</h2>
       </section>
     </div>
   );

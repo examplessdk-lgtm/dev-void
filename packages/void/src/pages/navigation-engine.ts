@@ -13,6 +13,8 @@ export interface VisitOptions {
   viewTransition?: boolean;
   /** @internal Used by popstate handler to pass saved scroll position */
   _scrollPosition?: { x: number; y: number } | null;
+  /** @internal Used by popstate handler to avoid writing history while traversing */
+  _popstate?: boolean;
 }
 
 export interface PrefetchOptions {
@@ -220,6 +222,7 @@ export async function createPageNavigationEngine(
   let _committedResource: PageNavigationResource | null = null;
   let _committedDeferredRegistry: DeferredRegistry | null = null;
   let _htmlDeferredRegistry: DeferredRegistry | null = null;
+  let _currentFetchUrl = window.location.pathname + window.location.search;
   let popStateHandler: ((url: string, options: VisitOptions) => void) | null = null;
 
   function getPageDataCacheKey(url: string, method = 'GET'): string {
@@ -523,19 +526,29 @@ export async function createPageNavigationEngine(
     effectiveFetchUrl: string,
     hash: string,
     options: VisitOptions,
+    writeHistory: boolean,
   ): void {
-    if (options.replace) {
-      history.replaceState({}, '', effectiveFetchUrl + hash);
-    } else {
-      history.replaceState({ scrollX: window.scrollX, scrollY: window.scrollY }, '');
-      history.pushState({}, '', effectiveFetchUrl + hash);
+    _currentFetchUrl = effectiveFetchUrl;
+    if (writeHistory) {
+      if (options.replace) {
+        history.replaceState({}, '', effectiveFetchUrl + hash);
+      } else {
+        history.replaceState({ scrollX: window.scrollX, scrollY: window.scrollY }, '');
+        history.pushState({}, '', effectiveFetchUrl + hash);
+      }
     }
-    const el = document.getElementById(hash.slice(1));
-    if (el) {
-      el.scrollIntoView();
-    } else {
-      window.scrollTo(0, 0);
+    if (options._scrollPosition) {
+      window.scrollTo(options._scrollPosition.x, options._scrollPosition.y);
+      return;
     }
+    if (hash) {
+      const el = document.getElementById(hash.slice(1));
+      if (el) {
+        el.scrollIntoView();
+        return;
+      }
+    }
+    window.scrollTo(0, 0);
   }
 
   async function loadNavigationShell(
@@ -839,6 +852,7 @@ export async function createPageNavigationEngine(
         deferredRegistry.dispose();
       }
       applyClientHead(result.pageData.head);
+      _currentFetchUrl = commitTarget.fetchUrl;
 
       if (!options.preserveState) {
         const historyUrl = commitTarget.fetchUrl + commitTarget.hash;
@@ -898,15 +912,24 @@ export async function createPageNavigationEngine(
       const effectiveFetchUrl = fetchUrl || currentPath;
       const method = (options.method || 'GET').toUpperCase();
       const id = ++_nextNavigationId;
+      const hashNavigationBaseUrl = options._popstate ? _currentFetchUrl : currentPath;
 
-      if (
-        effectiveFetchUrl === currentPath &&
-        hash &&
+      _pendingResource?.abort();
+      _pendingResource = null;
+
+      const isSamePageHashNavigation =
+        effectiveFetchUrl === hashNavigationBaseUrl &&
         method === 'GET' &&
         !options.data &&
-        !options.preserveState
-      ) {
-        commitHashNavigation(effectiveFetchUrl, hash, options);
+        Boolean(hash || options._popstate);
+
+      if (isSamePageHashNavigation) {
+        commitHashNavigation(
+          effectiveFetchUrl,
+          hash,
+          options,
+          !options._popstate && !options.preserveState,
+        );
         return {
           id,
           url,
@@ -922,7 +945,6 @@ export async function createPageNavigationEngine(
         };
       }
 
-      _pendingResource?.abort();
       const controller = new AbortController();
       const deferredRegistry = new DeferredRegistry();
       const commitTarget = { fetchUrl: effectiveFetchUrl, hash };
@@ -1079,6 +1101,7 @@ export async function createPageNavigationEngine(
         const options = {
           preserveState: true,
           _scrollPosition: saved ? { x: saved.scrollX ?? 0, y: saved.scrollY ?? 0 } : null,
+          _popstate: true,
         };
         if (popStateHandler) {
           popStateHandler(url, options);

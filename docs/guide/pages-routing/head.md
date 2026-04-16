@@ -125,6 +125,6 @@ This produces `<title>Getting Started</title>` and `<meta name="description" con
 
 ## Client-Side Updates
 
-On SPA navigation, head tags update automatically. The framework tracks managed tags with a `data-void-head` attribute. Previous tags are removed and new ones are inserted on each navigation, which keeps `document.title` and your meta tags in sync without a full page reload.
+On SPA navigation, head tags update automatically. The framework tracks managed tags with a `data-void-head` attribute and preserves matching tags across navigations, so unchanged stylesheet and preload links are not torn down and re-added. Tags that are no longer present are removed, and new tags are inserted.
 
 `script`, `htmlAttrs`, and `bodyAttrs` are SSR-only. They are not re-applied on client-side navigation.

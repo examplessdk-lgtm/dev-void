@@ -185,13 +185,16 @@ describe('createPageRouter prefetch', () => {
   });
 
   it('runs navigation listeners for same-page hash visits', async () => {
-    stubClientGlobals();
+    const documentStub = stubClientGlobals();
     window.location.pathname = '/docs';
     window.location.search = '?tab=api';
+    const applyUpdate = vi.fn();
+    const matchRoute = vi.fn(() => 'home');
+    vi.stubGlobal('fetch', vi.fn());
 
     const { router } = await createPageRouter({
       adapter: {
-        applyUpdate: vi.fn(),
+        applyUpdate,
         createDeferred: vi.fn(() => ({})),
         isLoading: vi.fn(() => false),
         rejectDeferred: vi.fn((_ref, error) => error),
@@ -201,7 +204,7 @@ describe('createPageRouter prefetch', () => {
         home: vi.fn(async () => ({ default: {} })),
       },
       layoutTree: {},
-      matchRoute: vi.fn(() => 'home'),
+      matchRoute,
       prefetchDefaultCacheFor: parseCacheFor('30s'),
       prefetchHoverDelay: 75,
       routeMeta: {},
@@ -218,6 +221,310 @@ describe('createPageRouter prefetch', () => {
     expect(events).toEqual(['start', 'end']);
     expect(history.pushState).toHaveBeenCalledWith({}, '', '/docs?tab=api#section');
     expect(window.scrollTo).toHaveBeenCalledWith(0, 0);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(applyUpdate).not.toHaveBeenCalled();
+    expect(matchRoute).not.toHaveBeenCalled();
+    expect(documentStub.head.appendChild).not.toHaveBeenCalled();
+  });
+
+  it('does not fetch or write history for same-page hash popstate visits', async () => {
+    stubClientGlobals();
+    window.location.pathname = '/docs';
+    window.location.search = '?tab=api';
+    const applyUpdate = vi.fn();
+    vi.stubGlobal('fetch', vi.fn());
+
+    const { router } = await createPageRouter({
+      adapter: {
+        applyUpdate,
+        createDeferred: vi.fn(() => ({})),
+        isLoading: vi.fn(() => false),
+        rejectDeferred: vi.fn((_ref, error) => error),
+        resolveDeferred: vi.fn((_ref, value) => value),
+      },
+      components: {
+        home: vi.fn(async () => ({ default: {} })),
+      },
+      layoutTree: {},
+      matchRoute: vi.fn(() => 'home'),
+      prefetchDefaultCacheFor: parseCacheFor('30s'),
+      prefetchHoverDelay: 75,
+      routeMeta: {},
+      viewTransitions: false,
+    });
+
+    await router.visit('/docs?tab=api#section', {
+      preserveState: true,
+      _popstate: true,
+      _scrollPosition: { x: 0, y: 42 },
+    });
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(applyUpdate).not.toHaveBeenCalled();
+    expect(history.pushState).not.toHaveBeenCalled();
+    expect(history.replaceState).not.toHaveBeenCalled();
+    expect(window.scrollTo).toHaveBeenCalledWith(0, 42);
+  });
+
+  it('does not fetch or write history for same-page hash removal popstate visits', async () => {
+    stubClientGlobals();
+    window.location.pathname = '/docs';
+    window.location.search = '?tab=api';
+    const applyUpdate = vi.fn();
+    const matchRoute = vi.fn(() => 'home');
+    vi.stubGlobal('fetch', vi.fn());
+
+    const { router } = await createPageRouter({
+      adapter: {
+        applyUpdate,
+        createDeferred: vi.fn(() => ({})),
+        isLoading: vi.fn(() => false),
+        rejectDeferred: vi.fn((_ref, error) => error),
+        resolveDeferred: vi.fn((_ref, value) => value),
+      },
+      components: {
+        home: vi.fn(async () => ({ default: {} })),
+      },
+      layoutTree: {},
+      matchRoute,
+      prefetchDefaultCacheFor: parseCacheFor('30s'),
+      prefetchHoverDelay: 75,
+      routeMeta: {},
+      viewTransitions: false,
+    });
+
+    await router.visit('/docs?tab=api', {
+      preserveState: true,
+      _popstate: true,
+      _scrollPosition: { x: 0, y: 42 },
+    });
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(applyUpdate).not.toHaveBeenCalled();
+    expect(matchRoute).not.toHaveBeenCalled();
+    expect(history.pushState).not.toHaveBeenCalled();
+    expect(history.replaceState).not.toHaveBeenCalled();
+    expect(window.scrollTo).toHaveBeenCalledWith(0, 42);
+  });
+
+  it('does not write history for same-page hash visits when state is preserved', async () => {
+    stubClientGlobals();
+    window.location.pathname = '/docs';
+    window.location.search = '?tab=api';
+    const applyUpdate = vi.fn();
+    vi.stubGlobal('fetch', vi.fn());
+
+    const { router } = await createPageRouter({
+      adapter: {
+        applyUpdate,
+        createDeferred: vi.fn(() => ({})),
+        isLoading: vi.fn(() => false),
+        rejectDeferred: vi.fn((_ref, error) => error),
+        resolveDeferred: vi.fn((_ref, value) => value),
+      },
+      components: {
+        home: vi.fn(async () => ({ default: {} })),
+      },
+      layoutTree: {},
+      matchRoute: vi.fn(() => 'home'),
+      prefetchDefaultCacheFor: parseCacheFor('30s'),
+      prefetchHoverDelay: 75,
+      routeMeta: {},
+      viewTransitions: false,
+    });
+
+    await router.visit('#section', { preserveState: true });
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(applyUpdate).not.toHaveBeenCalled();
+    expect(history.pushState).not.toHaveBeenCalled();
+    expect(history.replaceState).not.toHaveBeenCalled();
+    expect(window.scrollTo).toHaveBeenCalledWith(0, 0);
+  });
+
+  it('uses the browser URL for non-popstate hash visits after preserved navigation', async () => {
+    stubClientGlobals();
+    window.location.pathname = '/';
+    const applyUpdate = vi.fn();
+    const fetchMock = vi.fn((url: string) => {
+      if (url !== '/next') {
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+      return Promise.resolve(
+        Response.json(
+          {
+            component: 'next',
+            props: { title: 'Next' },
+          },
+          { headers: { 'X-VoidPages': 'true' } },
+        ),
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { router } = await createPageRouter({
+      adapter: {
+        applyUpdate,
+        createDeferred: vi.fn(() => ({})),
+        isLoading: vi.fn(() => false),
+        rejectDeferred: vi.fn((_ref, error) => error),
+        resolveDeferred: vi.fn((_ref, value) => value),
+      },
+      components: {
+        home: vi.fn(async () => ({ default: {} })),
+        next: vi.fn(async () => ({ default: {} })),
+      },
+      layoutTree: {},
+      matchRoute: vi.fn((url) => (url === '/next' ? 'next' : 'home')),
+      prefetchDefaultCacheFor: parseCacheFor('30s'),
+      prefetchHoverDelay: 75,
+      routeMeta: {},
+      viewTransitions: false,
+    });
+
+    await router.visit('/next', { preserveState: true });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/next',
+      expect.objectContaining({ headers: { 'X-VoidPages': 'true', Accept: 'application/json' } }),
+    );
+    expect(applyUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ component: 'next' }),
+      {},
+      [],
+    );
+
+    fetchMock.mockClear();
+    applyUpdate.mockClear();
+    vi.mocked(history.pushState).mockClear();
+    vi.mocked(history.replaceState).mockClear();
+    vi.mocked(window.scrollTo).mockClear();
+
+    await router.visit('#section');
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(applyUpdate).not.toHaveBeenCalled();
+    expect(history.pushState).toHaveBeenCalledWith({}, '', '/#section');
+    expect(window.scrollTo).toHaveBeenCalledWith(0, 0);
+  });
+
+  it('aborts pending navigations before same-page hash popstate visits', async () => {
+    stubClientGlobals();
+    window.location.pathname = '/docs';
+    const applyUpdate = vi.fn();
+    let aborted = false;
+    let resolveSlow!: (response: Response) => void;
+    const fetchMock = vi.fn((url: string, init: RequestInit) => {
+      if (url !== '/slow') {
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+      init.signal?.addEventListener('abort', () => {
+        aborted = true;
+      });
+      return new Promise<Response>((resolve) => {
+        resolveSlow = resolve;
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { router } = await createPageRouter({
+      adapter: {
+        applyUpdate,
+        createDeferred: vi.fn(() => ({})),
+        isLoading: vi.fn(() => false),
+        rejectDeferred: vi.fn((_ref, error) => error),
+        resolveDeferred: vi.fn((_ref, value) => value),
+      },
+      components: {
+        home: vi.fn(async () => ({ default: {} })),
+        slow: vi.fn(async () => ({ default: {} })),
+      },
+      layoutTree: {},
+      matchRoute: vi.fn((url) => (url === '/slow' ? 'slow' : 'home')),
+      prefetchDefaultCacheFor: parseCacheFor('30s'),
+      prefetchHoverDelay: 75,
+      routeMeta: {},
+      viewTransitions: false,
+    });
+
+    const slowVisit = router.visit('/slow').catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await router.visit('/docs#section', {
+      preserveState: true,
+      _popstate: true,
+      _scrollPosition: { x: 0, y: 42 },
+    });
+
+    expect(aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(window.scrollTo).toHaveBeenCalledWith(0, 42);
+
+    resolveSlow(
+      Response.json(
+        {
+          component: 'slow',
+          props: { title: 'Slow' },
+        },
+        { headers: { 'X-VoidPages': 'true' } },
+      ),
+    );
+    await slowVisit;
+
+    expect(applyUpdate).not.toHaveBeenCalled();
+  });
+
+  it('fetches when a popstate hash visit targets a different committed page', async () => {
+    stubClientGlobals();
+    window.location.pathname = '/users';
+    const applyUpdate = vi.fn();
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        Response.json(
+          {
+            component: 'docs',
+            props: { title: 'Docs' },
+          },
+          { headers: { 'X-VoidPages': 'true' } },
+        ),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { router } = await createPageRouter({
+      adapter: {
+        applyUpdate,
+        createDeferred: vi.fn(() => ({})),
+        isLoading: vi.fn(() => false),
+        rejectDeferred: vi.fn((_ref, error) => error),
+        resolveDeferred: vi.fn((_ref, value) => value),
+      },
+      components: {
+        docs: vi.fn(async () => ({ default: {} })),
+        home: vi.fn(async () => ({ default: {} })),
+      },
+      layoutTree: {},
+      matchRoute: vi.fn(() => 'docs'),
+      prefetchDefaultCacheFor: parseCacheFor('30s'),
+      prefetchHoverDelay: 75,
+      routeMeta: {},
+      viewTransitions: false,
+    });
+
+    window.location.pathname = '/docs';
+    await router.visit('/docs#section', {
+      preserveState: true,
+      _popstate: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/docs',
+      expect.objectContaining({ headers: { 'X-VoidPages': 'true', Accept: 'application/json' } }),
+    );
+    expect(applyUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ component: 'docs' }),
+      {},
+      [],
+    );
   });
 
   it('keeps preserved initial deferred props alive after a mutation commits', async () => {

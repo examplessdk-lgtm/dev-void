@@ -522,6 +522,52 @@ function defineClientTests(getBase: () => string) {
       await page.context().close();
     }
   });
+
+  it('plain hash anchor navigation does not fetch or replace managed head links', async () => {
+    const page = await newPage();
+    const requests: string[] = [];
+
+    try {
+      await page.goto(BASE + '/link-behavior');
+      await waitForHydration(page);
+      await page.waitForLoadState('networkidle');
+
+      await page.evaluate(() => {
+        (window as any).__headRefs = {
+          font: document.querySelector('link[rel="preload"][href="/hash-navigation-test.woff2"]'),
+          stylesheet: document.querySelector(
+            'link[rel="stylesheet"][href="/hash-navigation-test.css"]',
+          ),
+        };
+      });
+
+      page.on('request', (request) => {
+        requests.push(request.url());
+      });
+
+      await page.click('[data-testid="plain-hash-link"]');
+      await page.waitForURL(BASE + '/link-behavior#plain-hash-target');
+      await page.waitForTimeout(100);
+
+      const headRefs = await page.evaluate(() => {
+        const refs = (window as any).__headRefs;
+        return {
+          fontPreserved:
+            refs.font ===
+            document.querySelector('link[rel="preload"][href="/hash-navigation-test.woff2"]'),
+          stylesheetPreserved:
+            refs.stylesheet ===
+            document.querySelector('link[rel="stylesheet"][href="/hash-navigation-test.css"]'),
+        };
+      });
+      expect(headRefs).toEqual({ fontPreserved: true, stylesheetPreserved: true });
+      expect(
+        requests.filter((url) => url.startsWith(BASE) && !url.endsWith('/favicon.ico')),
+      ).toEqual([]);
+    } finally {
+      await page.context().close();
+    }
+  });
 }
 
 function defineIslandTests(getBase: () => string) {
