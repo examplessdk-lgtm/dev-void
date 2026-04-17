@@ -6,7 +6,6 @@
   },
   "files": [
     "dist",
-    "env.d.ts",
     "schema.json",
     "skills",
     "AGENT_PROMPT.md",
@@ -17,6 +16,7 @@
   "imports": {
     "#self": "./dist/index.mjs",
     "#self/_env": "./dist/runtime/env.mjs",
+    "#self/env": "./dist/runtime/env-public.mjs",
     "#self/client": "./dist/runtime/client.mjs",
     "#self/handler": "./dist/runtime/handler.mjs",
     "#self/pages-head": "./dist/pages/head.mjs",
@@ -201,7 +201,19 @@
       "require": "./dist/pages/islands-plugin.mjs"
     },
     "./env": {
-      "types": "./env.d.ts"
+      "types": "./dist/runtime/env-public.d.mts",
+      "browser": {
+        "import": "./dist/runtime/env-public-client.mjs",
+        "require": "./dist/runtime/env-public-client.mjs"
+      },
+      "worker": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
+      },
+      "default": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
+      }
     },
     "./_env": {
       "types": "./dist/runtime/env.d.mts",

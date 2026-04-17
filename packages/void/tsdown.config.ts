@@ -23,8 +23,9 @@ function injectWorkersTypesReferencePlugin() {
     // so we inject the reference into the emitted .d.mts to keep consumer DX zero-config.
     generateBundle(_options: unknown, bundle: Record<string, any>) {
       for (const output of Object.values(bundle)) {
-        // Only patch the public handler declaration entrypoint.
-        if (output.fileName !== 'runtime/handler.d.mts') {
+        // Patch declaration entrypoints whose source uses Cloudflare globals.
+        const targets = new Set(['runtime/handler.d.mts', 'runtime/env-public.d.mts']);
+        if (!targets.has(output.fileName)) {
           continue;
         }
 
@@ -67,6 +68,9 @@ export default defineConfig({
     'src/runtime/better-auth.ts',
     'src/runtime/better-auth-pg.ts',
     'src/runtime/env.ts',
+    'src/runtime/env-public.ts',
+    'src/runtime/env-public-client.ts',
+    'src/runtime/env-helpers.ts',
     'src/runtime/db.ts',
     'src/runtime/db-pg.ts',
     'src/runtime/seed.ts',

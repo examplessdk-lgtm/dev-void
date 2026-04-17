@@ -23,11 +23,13 @@ export function ensureProjectTsconfig(
   const includeRoutes = hasRouteTypes ?? existsSync(join(root, 'routes'));
   const includeQueues = existsSync(join(root, 'queues'));
   const includeMd = existsSync(join(outDir, 'md.d.ts'));
+  const includeEnv = existsSync(join(outDir, 'env.d.ts'));
   const files = [
     ...(includeRoutes ? ['routes.d.ts'] : []),
     ...(hasDb ? ['db.d.ts'] : []),
     ...(includeQueues ? ['queues.d.ts'] : []),
     ...(includeMd ? ['md.d.ts'] : []),
+    ...(includeEnv ? ['env.d.ts'] : []),
   ];
 
   const tsconfig: Record<string, unknown> = { files };

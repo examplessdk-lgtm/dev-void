@@ -17,14 +17,24 @@ export interface CloudContextVariables {
   [key: string]: unknown;
 }
 
+/**
+ * Hono `Bindings` shape for Void workers.
+ *
+ * Augmented by the generated `.void/env.d.ts` so user-declared env keys
+ * become typed on `c.env`. The index signature keeps untyped access
+ * working for bindings that aren't in the schema (queues, custom
+ * bindings, etc.).
+ */
+export interface CloudBindings {
+  DB: D1Database;
+  KV: KVNamespace;
+  STORAGE: R2Bucket;
+  AI: Ai;
+  [key: string]: unknown;
+}
+
 export interface CloudEnv extends Env {
-  Bindings: {
-    DB: D1Database;
-    KV: KVNamespace;
-    STORAGE: R2Bucket;
-    AI: Ai;
-    [key: string]: unknown;
-  };
+  Bindings: CloudBindings;
   Variables: CloudContextVariables;
 }
 
