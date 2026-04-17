@@ -51,6 +51,7 @@ import {
   formatDeployFailureMessage,
   formatStreamDeployError,
 } from './deploy-errors';
+import { fetchRemoteSecretNames, formatEnvReport, validateProdEnv } from './env-validation';
 import { parseHeadersFile, parseRedirectsFile } from './headers';
 import { promptForLoginToken } from './login';
 import { cliTitle, createSpinner } from './output';
@@ -656,6 +657,9 @@ async function runFrameworkDeploy(
   // 10. Load .env vars for production (excludes .local files)
   const envVars = loadDeployEnv(root);
 
+  // 10a. Validate against env.ts schema if present.
+  await assertEnvSchemaValid(root, client, config.projectId);
+
   // 11. Package & deploy
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
@@ -988,6 +992,9 @@ async function runFullDeploy(
   // 9. Load .env vars for production (excludes .local files)
   const envVars = loadDeployEnv(root);
 
+  // 9a. Validate against env.ts schema if present.
+  await assertEnvSchemaValid(root, client, config.projectId);
+
   // 10. Package & Upload
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
@@ -1301,6 +1308,35 @@ function migrationSnapshotsEqual(
     const [rightPath, rightContent] = rightEntries[index] ?? [];
     return leftPath === rightPath && leftContent === rightContent;
   });
+}
+
+/**
+ * If the project has an `env.ts`, validate its schema against the union of
+ * production env files and remote secret names. Hard-error before upload so
+ * deploys never ship missing required env vars.
+ */
+async function assertEnvSchemaValid(
+  root: string,
+  client: PlatformClient,
+  projectId: string,
+): Promise<void> {
+  const remoteSecrets = await fetchRemoteSecretNames(client, projectId);
+  const { hasSchema, report } = await validateProdEnv(root, {
+    productionOnly: true,
+    remoteSecrets,
+  });
+  if (!hasSchema || report.valid) {
+    return;
+  }
+
+  const formatted = formatEnvReport(report);
+  log.error(`Env validation failed:\n${formatted}`);
+  if (report.missing.length > 0) {
+    log.info(
+      `Add the missing values to .env / .env.production, or upload them with \`void secret put <NAME>\`.`,
+    );
+  }
+  throw new DeployEventError('Aborting deploy — env.ts schema is not satisfied.');
 }
 
 /**
