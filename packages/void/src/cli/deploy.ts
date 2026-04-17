@@ -16,6 +16,7 @@ const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '.
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
 import { intro, outro, log, note, confirm, isCancel, type SpinnerResult } from '@clack/prompts';
 import { findVoidAuthConfig } from '../auth/config';
+import { findEnvFile } from '../codegen/env-types';
 import {
   readConfig,
   resolveBindingNames,
@@ -1320,6 +1321,11 @@ async function assertEnvSchemaValid(
   client: PlatformClient,
   projectId: string,
 ): Promise<void> {
+  // Skip the remote secret round-trip when the project has no typed env schema.
+  if (findEnvFile(root) == null) {
+    return;
+  }
+
   const remoteSecrets = await fetchRemoteSecretNames(client, projectId);
   const { hasSchema, report } = await validateProdEnv(root, {
     productionOnly: true,
