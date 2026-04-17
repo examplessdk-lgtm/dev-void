@@ -23,6 +23,7 @@ import { scanJobsSync } from './crons/scan';
 import { inferBindingsFromSource } from './inference/walk';
 import { voidLog, voidWarn, voidError } from './log';
 import { drizzlePlugin } from './plugin-drizzle';
+import { envSchemaPlugin } from './plugin-env-schema';
 import {
   inferProjectBindings,
   detectFramework,
@@ -826,6 +827,7 @@ export function voidPlugin(options?: {
       restartPlugin(),
       bindingWatchPlugin,
       envPlugin,
+      envSchemaPlugin(root),
       clientStubsPlugin,
       drizzlePlugin(root, false, getDatabaseDialect(config), {
         forceVirtualDb: authEnabled,
@@ -872,6 +874,7 @@ export function voidPlugin(options?: {
     return [
       restartPlugin(),
       envPlugin,
+      envSchemaPlugin(root),
       routingPlugin(root, {
         isAuthEnabled: () => false,
         headConfig: config.head,
@@ -929,6 +932,7 @@ export function voidPlugin(options?: {
     restartPlugin(),
     bindingWatchPlugin,
     envPlugin,
+    envSchemaPlugin(root),
     clientStubsPlugin,
     routingPlugin(root, {
       isAuthEnabled: () => authEnabled,
