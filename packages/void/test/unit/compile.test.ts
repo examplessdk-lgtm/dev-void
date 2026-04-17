@@ -645,6 +645,44 @@ describe('compileNodeApp', () => {
     expect(code).toContain('export default app');
     expect(code).not.toContain('@hono/node-server');
   });
+
+  it('omits boot-time env validation when no envSchemaModule is provided', () => {
+    const code = compileNodeApp('node', '/resolved/hono/index.mjs');
+    expect(code).not.toContain('_validateEnvOnce');
+  });
+
+  it('splices boot-time env validation when envSchemaModule is provided (node)', () => {
+    const code = compileNodeApp('node', '/resolved/hono/index.mjs', {
+      importPath: '/abs/path/to/env.ts',
+      helperPath: '/resolved/env-public.mjs',
+    });
+    // Side-effect import of user env.ts so the schema is registered
+    expect(code).toContain('import "/abs/path/to/env.ts"');
+    // Helper import
+    expect(code).toContain('import { _validateEnvOnce } from "/resolved/env-public.mjs"');
+    // Middleware runs validation on every request before route handlers,
+    // including the /__void/prerender-paths endpoint used by the prerender
+    // child process. Node/Bun read env from process.env.
+    expect(code).toContain('app.use("*", async (c, next)');
+    expect(code).toContain('await _validateEnvOnce(process.env)');
+  });
+
+  it('uses Deno.env.toObject() as the env source on the deno target', () => {
+    const code = compileNodeApp('deno', '/resolved/hono/index.mjs', {
+      importPath: '/abs/path/to/env.ts',
+      helperPath: '/resolved/env-public.mjs',
+    });
+    expect(code).toContain('await _validateEnvOnce(Deno.env.toObject())');
+    expect(code).not.toContain('process.env');
+  });
+
+  it('splices boot-time env validation on the bun target', () => {
+    const code = compileNodeApp('bun', '/resolved/hono/index.mjs', {
+      importPath: '/abs/path/to/env.ts',
+      helperPath: '/resolved/env-public.mjs',
+    });
+    expect(code).toContain('await _validateEnvOnce(process.env)');
+  });
 });
 
 describe('compileNodeServer', () => {

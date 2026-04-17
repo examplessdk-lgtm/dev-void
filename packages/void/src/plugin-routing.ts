@@ -255,7 +255,10 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   mkdirSync(outDir, { recursive: true });
   // Write initial entry — will be re-written with hasQueues once scan completes
   if (options.target) {
-    writeFileSync(join(outDir, 'app.ts'), compileNodeApp(options.target, compileOptions.honoPath));
+    writeFileSync(
+      join(outDir, 'app.ts'),
+      compileNodeApp(options.target, compileOptions.honoPath, getEnvSchemaModule()),
+    );
     writeFileSync(join(outDir, 'index.ts'), compileNodeServer(options.target));
   } else {
     writeFileSync(
@@ -349,7 +352,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       if (options.target) {
         writeFileSync(
           join(outDir, 'app.ts'),
-          compileNodeApp(options.target, compileOptions.honoPath),
+          compileNodeApp(options.target, compileOptions.honoPath, getEnvSchemaModule()),
         );
         writeFileSync(join(outDir, 'index.ts'), compileNodeServer(options.target));
       } else {
@@ -459,7 +462,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         if (options.target) {
           writeFileSync(
             join(outDir, 'app.ts'),
-            compileNodeApp(options.target, compileOptions.honoPath),
+            compileNodeApp(options.target, compileOptions.honoPath, getEnvSchemaModule()),
           );
           writeFileSync(join(outDir, 'index.ts'), compileNodeServer(options.target));
         } else {
