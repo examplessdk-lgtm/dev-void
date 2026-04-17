@@ -52,6 +52,31 @@ describe('findEnvFile', () => {
       cleanup();
     }
   });
+
+  it('discovers env.ts inside src/ when no root-level file exists', () => {
+    const { root, cleanup } = withTempProject((r) => {
+      mkdirSync(join(r, 'src'), { recursive: true });
+      writeFileSync(join(r, 'src', 'env.ts'), 'export default {};');
+    });
+    try {
+      expect(findEnvFile(root)).toBe(join(root, 'src', 'env.ts'));
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('prefers root-level env.ts over src/env.ts', () => {
+    const { root, cleanup } = withTempProject((r) => {
+      writeFileSync(join(r, 'env.ts'), '');
+      mkdirSync(join(r, 'src'), { recursive: true });
+      writeFileSync(join(r, 'src', 'env.ts'), '');
+    });
+    try {
+      expect(findEnvFile(root)).toBe(join(root, 'env.ts'));
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 describe('generateEnvTypes', () => {
@@ -68,6 +93,28 @@ describe('generateEnvTypes', () => {
       expect(dts).toContain('interface CloudBindings extends _VoidEnvShape');
       // Path is relative to outDir and stripped of extension.
       expect(dts).toContain('typeof import("../env")');
+      // Resolves both `export default defineEnv(...)` and
+      // `export const env = defineEnv(...)` source forms.
+      expect(dts).toContain('_VoidEnvSchema extends { default: infer D } ? D');
+      expect(dts).toContain('_VoidEnvSchema extends { env: infer E } ? E');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('generates shape resolution that covers `export const env` source form', () => {
+    const { root, outDir, cleanup } = withTempProject((r) => {
+      writeFileSync(
+        join(r, 'env.ts'),
+        'import { defineEnv, string } from "void/env";\nexport const env = defineEnv({ FOO: string() });',
+      );
+    });
+    try {
+      const { dts } = generateEnvTypes(join(root, 'env.ts'), outDir);
+      // Conditional falls back from `default` to `env` to `{}`.
+      expect(dts).toContain(
+        'type _VoidEnvShape = _VoidEnvSchema extends { default: infer D } ? D : _VoidEnvSchema extends { env: infer E } ? E : {};',
+      );
     } finally {
       cleanup();
     }

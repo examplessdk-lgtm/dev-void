@@ -1,8 +1,18 @@
 import { existsSync } from 'node:fs';
 import { join, relative } from 'pathe';
 
-/** Possible source locations for the user env schema, in priority order. */
-export const ENV_FILE_CANDIDATES = ['env.ts', 'env.mts', 'env.js', 'env.mjs'] as const;
+/** Possible source locations for the user env schema, in priority order.
+ *  Root-level files win over `src/`-nested ones. */
+export const ENV_FILE_CANDIDATES = [
+  'env.ts',
+  'env.mts',
+  'env.js',
+  'env.mjs',
+  'src/env.ts',
+  'src/env.mts',
+  'src/env.js',
+  'src/env.mjs',
+] as const;
 
 /** Find the user's env schema file, if any. */
 export function findEnvFile(root: string): string | null {
@@ -42,10 +52,13 @@ export function generateEnvTypes(envFileAbs: string, outDir: string): EnvTypesRe
   lines.push('export {}');
   lines.push('');
   lines.push(`type _VoidEnvSchema = typeof import("${importPath}");`);
-  // The user's env.ts default-exports `defineEnv({...})`, which returns the
-  // typed `env` proxy. Using `default` here gives us the inferred shape
-  // directly — no schema introspection required.
-  lines.push('type _VoidEnvShape = _VoidEnvSchema extends { default: infer D } ? D : {};');
+  // The user's env.ts may either `export default defineEnv({...})` or
+  // `export const env = defineEnv({...})`. Both return the typed `env` proxy;
+  // using either export here gives us the inferred shape directly — no schema
+  // introspection required.
+  lines.push(
+    'type _VoidEnvShape = _VoidEnvSchema extends { default: infer D } ? D : _VoidEnvSchema extends { env: infer E } ? E : {};',
+  );
   lines.push('');
   lines.push('declare module "void/env" {');
   lines.push('  interface ValidatedEnv extends _VoidEnvShape {}');
