@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
 import { join } from 'pathe';
 import { type Plugin } from 'vite';
 import { findEnvFile, generateEnvTypes } from './codegen/env-types';
+import { loadUserEnvFile } from './host/load-user-env';
 import { voidLog, voidWarn } from './log';
 import { filterLoadedEnv } from './shared/env';
 
@@ -84,11 +84,11 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       return;
     }
     try {
-      // Cache-bust on each import so HMR picks up edits.
-      const url = pathToFileURL(envFile).href + `?t=${Date.now()}`;
-      await import(/* @vite-ignore */ url);
+      // Loaded through jiti so tsconfig path aliases (e.g. `@/*`) resolve
+      // and HMR re-imports re-evaluate the file (caches are disabled).
+      await loadUserEnvFile(envFile);
     } catch (err) {
-      voidWarn(`Failed to load ${envFile}: ${(err as Error).message}`);
+      voidWarn((err as Error).message);
     }
   }
 
