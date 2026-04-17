@@ -582,6 +582,25 @@ describe('compileWorkerEntry', () => {
     expect(code).toContain('__processQueue(payload, userEnv)');
   });
 
+  it('omits boot-time env validation when no envSchemaModule is provided', () => {
+    const code = compileWorkerEntry();
+    expect(code).not.toContain('_validateEnvOnce');
+  });
+
+  it('splices boot-time env validation when envSchemaModule is provided', () => {
+    const code = compileWorkerEntry(true, undefined, 'assets', [], 'void/_env', {
+      importPath: '/abs/path/to/env.ts',
+      helperPath: '/resolved/env-public.mjs',
+    });
+    // Side-effect import of user env.ts so the schema is registered
+    expect(code).toContain('import "/abs/path/to/env.ts"');
+    // Helper import
+    expect(code).toContain('import { _validateEnvOnce } from "/resolved/env-public.mjs"');
+    // Spliced into fetch, scheduled, AND queue handlers
+    const callCount = (code.match(/_validateEnvOnce\(env\)/g) ?? []).length;
+    expect(callCount).toBe(3);
+  });
+
   it('wraps remote-mode fetch and scheduled handlers with resolved runtime env', () => {
     const code = compileWorkerEntry(
       false,

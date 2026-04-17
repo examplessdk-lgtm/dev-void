@@ -1792,12 +1792,20 @@ export function compileWorkerEntry(
   assetsDir = 'assets',
   webSocketClasses: string[] = [],
   runtimeEnvPath = 'void/_env',
+  envSchemaModule?: { importPath: string; helperPath: string },
 ): string {
   const remotePath = remote?.remotePath;
   const runtimeEnvImport = `import { withRuntimeEnv } from ${JSON.stringify(runtimeEnvPath)};\n`;
   const remoteImport = remote
     ? `import { createRemoteEnv } from ${JSON.stringify(remote.remotePath)};\n`
     : '';
+  // Boot-time env validation: import the user's env.ts so the schema is
+  // registered, plus the validator helper. The helper short-circuits after
+  // the first call per isolate and throws EnvValidationError on bad values.
+  const envSchemaImport = envSchemaModule
+    ? `import ${JSON.stringify(envSchemaModule.importPath)};\nimport { _validateEnvOnce } from ${JSON.stringify(envSchemaModule.helperPath)};\n`
+    : '';
+  const envValidateCall = envSchemaModule ? '  _validateEnvOnce(env);\n' : '';
 
   // Filter internal platform bindings so user code cannot access them via c.env.
   // The original env is preserved for framework internals (withRuntimeEnv, etc.).
@@ -1853,7 +1861,7 @@ async function serveWithAssets(request, env, response) {
 
   const fetchHandler = remotePath
     ? `async (request, env, ctx) => {
-  const ws = await __voidHandleWebSocket(request, env);
+${envValidateCall}  const ws = await __voidHandleWebSocket(request, env);
   if (ws) return ws;
   if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
   return __withRawEnv(env, () => {
@@ -1866,7 +1874,7 @@ async function serveWithAssets(request, env, response) {
   });
 }`
     : `async (request, env, ctx) => {
-  const ws = await __voidHandleWebSocket(request, env);
+${envValidateCall}  const ws = await __voidHandleWebSocket(request, env);
   if (ws) return ws;
   return __withRawEnv(env, () => {
     const userEnv = __filterInternalBindings(env);
@@ -1899,22 +1907,22 @@ async function serveWithAssets(request, env, response) {
 
   const scheduledHandler = remotePath
     ? `async function handleScheduled(controller, env, ctx) {
-  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
+${envValidateCall}  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
   const userEnv = __filterInternalBindings(env);
   return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
 }`
     : `async function handleScheduled(controller, env, ctx) {
-  const userEnv = __filterInternalBindings(env);
+${envValidateCall}  const userEnv = __filterInternalBindings(env);
   return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
 }`;
 
   if (hasQueues) {
     return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv, __processQueue${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
-${runtimeEnvImport}${remoteImport}${filterBindingsHelper}${assetHelper}
+${runtimeEnvImport}${envSchemaImport}${remoteImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${scheduledHandler}
-async function queue(batch, env, ctx) {${remotePath ? `\n  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);` : ''}
-  const userEnv = __filterInternalBindings(env);
+async function queue(batch, env, ctx) {
+${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);\n` : ''}  const userEnv = __filterInternalBindings(env);
   const messages = [...batch.messages].map(m => ({
     id: m.id, timestamp: m.timestamp.toISOString(),
     body: m.body, attempts: m.attempts,
@@ -1938,7 +1946,7 @@ ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
 export default { fetch: ${fetchHandler}, scheduled: handleScheduled, queue };`;
   }
   return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
-${runtimeEnvImport}${remoteImport}${filterBindingsHelper}${assetHelper}
+${runtimeEnvImport}${envSchemaImport}${remoteImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${scheduledHandler}
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
