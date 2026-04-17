@@ -7,6 +7,7 @@ import {
   EnvValidationError,
   validateAllEnv,
   _getRegisteredSchema,
+  _hasRegisteredSchema,
   _validateEnvOnce,
 } from '../../src/runtime/env-public';
 
@@ -152,6 +153,17 @@ describe('defineEnv + env proxy', () => {
     defineEnv({ FOO: string() });
     expect(Object.keys(_getRegisteredSchema() ?? {})).toEqual(['FOO']);
   });
+
+  it('_hasRegisteredSchema distinguishes defineEnv({}) from never-called', () => {
+    // resetSchema() already called defineEnv({}) in beforeEach.
+    expect(_hasRegisteredSchema()).toBe(true);
+    // Registered schema is still an empty object — not null — but the
+    // presence flag tells us defineEnv was explicitly invoked.
+    expect(_getRegisteredSchema()).toEqual({});
+    // Calling with a real schema also keeps the flag on.
+    defineEnv({ FOO: string() });
+    expect(_hasRegisteredSchema()).toBe(true);
+  });
 });
 
 describe('validateAllEnv (used by dev plugin and CLI)', () => {
@@ -159,30 +171,56 @@ describe('validateAllEnv (used by dev plugin and CLI)', () => {
     resetSchema();
   });
 
-  it('reports valid when all keys satisfied', () => {
+  it('reports valid when all keys satisfied', async () => {
     defineEnv({ STRIPE_KEY: string(), PORT: number().default(3000) });
-    const report = validateAllEnv({ STRIPE_KEY: 'sk' });
+    const report = await validateAllEnv({ STRIPE_KEY: 'sk' });
     expect(report.valid).toBe(true);
     expect(report.missing).toEqual([]);
     expect(report.invalid).toEqual([]);
   });
 
-  it('separates missing vs invalid', () => {
+  it('separates missing vs invalid', async () => {
     defineEnv({
       STRIPE_KEY: string(),
       PORT: number(),
       MODE: oneOf(['a', 'b'] as const),
     });
-    const report = validateAllEnv({ PORT: 'not-num', MODE: 'c' });
+    const report = await validateAllEnv({ PORT: 'not-num', MODE: 'c' });
     expect(report.valid).toBe(false);
     expect(report.missing).toEqual(['STRIPE_KEY']);
     expect(report.invalid.map((i) => i.key).sort()).toEqual(['MODE', 'PORT']);
   });
 
-  it('returns valid=true when no schema registered', () => {
+  it('returns valid=true when no schema registered', async () => {
     // After resetSchema(), the schema is empty {} — still counts as registered.
-    const report = validateAllEnv({});
+    const report = await validateAllEnv({});
     expect(report.valid).toBe(true);
+  });
+
+  it('awaits async Standard Schema validators', async () => {
+    const asyncValidator = {
+      '~standard': {
+        version: 1 as const,
+        vendor: 'test',
+        validate: async (v: unknown) => {
+          await Promise.resolve();
+          if (typeof v === 'string' && v.startsWith('ok-')) {
+            return { value: v.slice(3) };
+          }
+          return { issues: [{ message: 'must start with ok-' }] };
+        },
+      },
+    };
+    defineEnv({ TOKEN: asyncValidator });
+    const good = await validateAllEnv({ TOKEN: 'ok-value' });
+    expect(good.valid).toBe(true);
+    expect(good.values.get('TOKEN')).toBe('value');
+
+    // Reset the boot state before re-registering to avoid stale caching.
+    defineEnv({ TOKEN: asyncValidator });
+    const bad = await validateAllEnv({ TOKEN: 'nope' });
+    expect(bad.valid).toBe(false);
+    expect(bad.invalid.map((i) => i.key)).toEqual(['TOKEN']);
   });
 });
 
@@ -191,16 +229,16 @@ describe('_validateEnvOnce (boot-time worker check)', () => {
     resetSchema();
   });
 
-  it('passes when env satisfies the schema', () => {
+  it('passes when env satisfies the schema', async () => {
     defineEnv({ STRIPE_KEY: string() });
-    expect(() => _validateEnvOnce({ STRIPE_KEY: 'sk_test' })).not.toThrow();
+    await expect(_validateEnvOnce({ STRIPE_KEY: 'sk_test' })).resolves.toBeUndefined();
   });
 
-  it('throws EnvValidationError listing all missing/invalid keys', () => {
+  it('throws EnvValidationError listing all missing/invalid keys', async () => {
     defineEnv({ STRIPE_KEY: string(), PORT: number() });
-    expect(() => _validateEnvOnce({ PORT: 'oops' })).toThrow(EnvValidationError);
+    await expect(_validateEnvOnce({ PORT: 'oops' })).rejects.toBeInstanceOf(EnvValidationError);
     try {
-      _validateEnvOnce({ PORT: 'oops' });
+      await _validateEnvOnce({ PORT: 'oops' });
     } catch (err) {
       const msg = (err as Error).message;
       expect(msg).toContain('STRIPE_KEY is required');
@@ -208,7 +246,7 @@ describe('_validateEnvOnce (boot-time worker check)', () => {
     }
   });
 
-  it('caches success — schema is only run once per isolate', () => {
+  it('caches success — schema is only run once per isolate', async () => {
     let calls = 0;
     const inner = string();
     const counted = {
@@ -222,41 +260,104 @@ describe('_validateEnvOnce (boot-time worker check)', () => {
       },
     };
     defineEnv({ X: counted });
-    _validateEnvOnce({ X: 'hello' });
-    _validateEnvOnce({ X: 'hello' });
-    _validateEnvOnce({ X: 'hello' });
+    await _validateEnvOnce({ X: 'hello' });
+    await _validateEnvOnce({ X: 'hello' });
+    await _validateEnvOnce({ X: 'hello' });
     expect(calls).toBe(1);
   });
 
-  it('caches failure so repeat calls re-throw the same error', () => {
+  it('caches failure so repeat calls re-throw the same error', async () => {
     defineEnv({ STRIPE_KEY: string() });
     let firstError: unknown;
     let secondError: unknown;
     try {
-      _validateEnvOnce({});
+      await _validateEnvOnce({});
     } catch (e) {
       firstError = e;
     }
     try {
-      _validateEnvOnce({});
+      await _validateEnvOnce({});
     } catch (e) {
       secondError = e;
     }
     expect(firstError).toBe(secondError);
   });
 
-  it('is a no-op when no schema is registered', () => {
+  it('is a no-op when no schema is registered', async () => {
     // resetSchema() registers an empty schema, so re-define with truly empty
     // input to verify the no-validate path still passes.
     defineEnv({});
-    expect(() => _validateEnvOnce(undefined)).not.toThrow();
+    await expect(_validateEnvOnce(undefined)).resolves.toBeUndefined();
   });
 
-  it('is reset by a new defineEnv call (HMR semantics)', () => {
+  it('is reset by a new defineEnv call (HMR semantics)', async () => {
     defineEnv({ A: string() });
-    expect(() => _validateEnvOnce({})).toThrow(EnvValidationError);
+    await expect(_validateEnvOnce({})).rejects.toBeInstanceOf(EnvValidationError);
     // Re-import / HMR: schema swaps, boot state resets, new env satisfies new schema
     defineEnv({ B: string() });
-    expect(() => _validateEnvOnce({ B: 'value' })).not.toThrow();
+    await expect(_validateEnvOnce({ B: 'value' })).resolves.toBeUndefined();
+  });
+
+  it('awaits async validators and caches resolved values for sync proxy reads', async () => {
+    const asyncUpper = {
+      '~standard': {
+        version: 1 as const,
+        vendor: 'test',
+        validate: async (v: unknown) => {
+          await Promise.resolve();
+          return typeof v === 'string'
+            ? { value: v.toUpperCase() }
+            : { issues: [{ message: 'must be a string' }] };
+        },
+      },
+    };
+    defineEnv({ TOKEN: asyncUpper });
+    const rawEnv = { TOKEN: 'sk_test' };
+    // Pre-validate seeds the cache so subsequent sync reads are free.
+    await withRuntimeEnv(rawEnv, async () => {
+      await _validateEnvOnce(rawEnv);
+      expect(env.TOKEN).toBe('SK_TEST');
+    });
+  });
+
+  it('rethrows from async validator failure', async () => {
+    const alwaysFail = {
+      '~standard': {
+        version: 1 as const,
+        vendor: 'test',
+        validate: async () => {
+          await Promise.resolve();
+          return { issues: [{ message: 'nope' }] };
+        },
+      },
+    };
+    defineEnv({ TOKEN: alwaysFail });
+    await expect(_validateEnvOnce({ TOKEN: 'anything' })).rejects.toBeInstanceOf(
+      EnvValidationError,
+    );
+  });
+});
+
+describe('env proxy with async validators', () => {
+  beforeEach(() => {
+    resetSchema();
+  });
+
+  it('throws a helpful error when sync proxy read hits an async validator (no pre-validation)', () => {
+    const asyncValidator = {
+      '~standard': {
+        version: 1 as const,
+        vendor: 'test',
+        validate: async (v: unknown) => {
+          await Promise.resolve();
+          return typeof v === 'string' ? { value: v } : { issues: [{ message: 'must be string' }] };
+        },
+      },
+    };
+    defineEnv({ TOKEN: asyncValidator });
+    withRuntimeEnv({ TOKEN: 'value' }, () => {
+      expect(() => env.TOKEN).toThrow(/Async env validator for "TOKEN"/);
+      expect(() => env.TOKEN).toThrow(/_validateEnvOnce/);
+    });
   });
 });

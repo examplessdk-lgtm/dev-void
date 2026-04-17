@@ -36,6 +36,7 @@ interface AnyValidator extends StandardSchemaV1<unknown, unknown> {}
 type AnySchema = Record<string, AnyValidator>;
 
 let registeredSchema: AnySchema | null = null;
+let hasDefineEnvBeenCalled = false;
 const validatedCache = new WeakMap<object, Map<string, unknown>>();
 
 /**
@@ -65,6 +66,9 @@ type InferEnv<S extends AnySchema> = {
  */
 export function defineEnv<S extends AnySchema>(schema: S): InferEnv<S> {
   registeredSchema = schema;
+  // Flip the presence flag once and leave it on — even if a future call
+  // swaps in an empty schema, we still know defineEnv was declared.
+  hasDefineEnvBeenCalled = true;
   // Drop any cached entries from a prior schema (HMR / re-import).
   for (const map of validatedCacheValues()) {
     map.clear();
@@ -85,8 +89,16 @@ let bootValidationState: BootValidationState | null = null;
  *
  * Spliced into the generated worker entry by `compileWorkerEntry`. Cached
  * after the first call so subsequent requests pay no cost.
+ *
+ * Async lifecycle: this function awaits any async Standard Schema
+ * validators (zod `refine`, arktype async narrows, etc.) and seeds the
+ * per-key cache with the resolved values. Subsequent reads via `env.X`
+ * hit the sync cache — async work only happens here, at boot. If a user
+ * accesses `env.X` for a key with an async validator *before* this
+ * function has run (e.g. during module-top-level code), the proxy will
+ * throw with guidance pointing back to this boot-time pre-validation.
  */
-export function _validateEnvOnce(envValues: unknown): void {
+export async function _validateEnvOnce(envValues: unknown): Promise<void> {
   if (bootValidationState) {
     if (!bootValidationState.ok) {
       throw bootValidationState.error;
@@ -98,8 +110,30 @@ export function _validateEnvOnce(envValues: unknown): void {
     return;
   }
   const values = (envValues ?? {}) as Record<string, unknown>;
-  const report = validateAllEnv(values);
+  const report = await validateAllEnvWithValues(registeredSchema, values);
   if (report.valid) {
+    // Seed the sync cache with already-validated values so subsequent
+    // `env.X` reads (including ones with async validators) hit the cache
+    // instead of re-running validation. The cache key is the current raw
+    // runtime env (matches what `readKey` will use). If no runtime env is
+    // bound (e.g. called in an isolated test), skip seeding — the validator
+    // result is still cached via bootValidationState.
+    try {
+      const cacheKey = getRawRuntimeEnv() as object;
+      let cache = validatedCache.get(cacheKey);
+      if (!cache) {
+        cache = new Map();
+        validatedCache.set(cacheKey, cache);
+        cacheList.push(cache);
+      }
+      for (const [key, value] of report.values) {
+        if (!cache.has(key)) {
+          cache.set(key, value);
+        }
+      }
+    } catch {
+      // No runtime env available — no proxy reads will happen, so no seeding needed.
+    }
     bootValidationState = { ok: true };
     return;
   }
@@ -124,6 +158,16 @@ const cacheList: Map<string, unknown>[] = [];
 /** Internal: framework-only access to the registered schema (for plugin/CLI). */
 export function _getRegisteredSchema(): AnySchema | null {
   return registeredSchema;
+}
+
+/**
+ * Internal: returns `true` once `defineEnv()` has been called at least once,
+ * regardless of whether the caller passed an empty schema. Gives tooling a
+ * reliable signal — `_getRegisteredSchema()` alone can't distinguish
+ * `defineEnv({})` (an intentional empty schema) from "never called".
+ */
+export function _hasRegisteredSchema(): boolean {
+  return hasDefineEnvBeenCalled;
 }
 
 export class EnvValidationError extends Error {
@@ -162,7 +206,12 @@ function readKey(key: string): unknown {
   const result = validator['~standard'].validate(rawValue);
   if (result instanceof Promise) {
     throw new Error(
-      `Async env validators are not supported (key "${key}"). Use a synchronous validator.`,
+      `Async env validator for "${key}" cannot be resolved synchronously. ` +
+        `Proxy property access is synchronous, so async Standard Schema ` +
+        `validators must be pre-resolved by calling \`_validateEnvOnce(env)\` ` +
+        `at worker boot (Void splices this into the generated entry) or by ` +
+        `awaiting \`validateAllEnv(env)\` before the first \`env.${key}\` read. ` +
+        `Once pre-validated, the resolved value is cached and served synchronously here.`,
     );
   }
   if (result.issues) {
@@ -175,6 +224,13 @@ function readKey(key: string): unknown {
 /**
  * Typed env proxy. Reads from the runtime env, validating declared keys
  * on first access and passing through bindings / unknown keys unchanged.
+ *
+ * Sync-only: the `get` trap must be synchronous, so validators that return
+ * a `Promise` cannot be awaited here. For async Standard Schema validators,
+ * `_validateEnvOnce()` pre-resolves them at worker boot and seeds the
+ * per-env cache; property reads then serve the cached value synchronously.
+ * If an async validator is encountered here without a prior pre-validation,
+ * the trap throws with guidance on how to resolve it.
  */
 export const env = new Proxy({} as Record<string, unknown>, {
   get(_target, key) {
@@ -209,26 +265,49 @@ export interface EnvValidationReport {
   valid: boolean;
   missing: string[];
   invalid: { key: string; messages: string[] }[];
+  /**
+   * Resolved values for keys that validated successfully. Used to seed the
+   * per-env cache after async pre-validation so sync `env.X` reads hit the
+   * cache.
+   */
+  values: Map<string, unknown>;
 }
 
 /**
  * Validate an env record (e.g. merged `.env*` + remote secret list) against
- * the registered schema. Used by the dev plugin (warnings) and the deploy
- * CLI (hard error).
+ * the registered schema. Used by the dev plugin (warnings), the deploy CLI
+ * (hard error), and `_validateEnvOnce` at worker boot.
+ *
+ * Async: awaits any validators that return a `Promise` (zod async refines,
+ * arktype narrows, etc.). Callers already run in async contexts.
  */
-export function validateAllEnv(envValues: Record<string, unknown>): EnvValidationReport {
-  const report: EnvValidationReport = { valid: true, missing: [], invalid: [] };
+export async function validateAllEnv(
+  envValues: Record<string, unknown>,
+): Promise<EnvValidationReport> {
   if (!registeredSchema) {
-    return report;
+    return { valid: true, missing: [], invalid: [], values: new Map() };
   }
-  for (const [key, validator] of Object.entries(registeredSchema)) {
+  return await validateAllEnvWithValues(registeredSchema, envValues);
+}
+
+/**
+ * Internal: shared core that validates a schema against values and also
+ * returns the resolved values (for cache seeding).
+ */
+async function validateAllEnvWithValues(
+  schema: AnySchema,
+  envValues: Record<string, unknown>,
+): Promise<EnvValidationReport> {
+  const report: EnvValidationReport = {
+    valid: true,
+    missing: [],
+    invalid: [],
+    values: new Map(),
+  };
+  for (const [key, validator] of Object.entries(schema)) {
     const raw = envValues[key];
-    const result = validator['~standard'].validate(raw);
-    if (result instanceof Promise) {
-      report.valid = false;
-      report.invalid.push({ key, messages: ['Async validators are not supported'] });
-      continue;
-    }
+    const resultMaybe = validator['~standard'].validate(raw);
+    const result = resultMaybe instanceof Promise ? await resultMaybe : resultMaybe;
     if (result.issues) {
       report.valid = false;
       const isMissing = raw === undefined || raw === null || raw === '';
@@ -240,6 +319,8 @@ export function validateAllEnv(envValues: Record<string, unknown>): EnvValidatio
           messages: result.issues.map((i) => i.message),
         });
       }
+    } else {
+      report.values.set(key, result.value);
     }
   }
   return report;

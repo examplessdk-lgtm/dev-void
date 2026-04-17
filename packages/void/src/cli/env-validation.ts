@@ -17,7 +17,8 @@ import type { PlatformClient } from './client';
 
 interface EnvPublicModule {
   _getRegisteredSchema(): Record<string, unknown> | null;
-  validateAllEnv(values: Record<string, unknown>): EnvValidationReport;
+  _hasRegisteredSchema(): boolean;
+  validateAllEnv(values: Record<string, unknown>): Promise<EnvValidationReport>;
 }
 
 /** Load the registered schema by importing the user's env.ts. */
@@ -29,7 +30,7 @@ async function loadSchema(envFile: string): Promise<EnvPublicModule | null> {
     throw new Error(`Failed to load ${envFile}: ${(err as Error).message}`);
   }
   const mod = (await import('../runtime/env-public')) as unknown as EnvPublicModule;
-  if (!mod._getRegisteredSchema()) {
+  if (!mod._hasRegisteredSchema()) {
     return null;
   }
   return mod;
@@ -76,6 +77,10 @@ export interface ProdEnvValidationResult {
   report: EnvValidationReport;
 }
 
+function emptyReport(): EnvValidationReport {
+  return { valid: true, missing: [], invalid: [], values: new Map() };
+}
+
 /**
  * Validate the user's env schema against the union of .env files and
  * remote secret names. Remote secrets are treated as "present" (we can't
@@ -87,11 +92,11 @@ export async function validateProdEnv(
 ): Promise<ProdEnvValidationResult> {
   const envFile = findEnvFile(root);
   if (!envFile) {
-    return { hasSchema: false, report: { valid: true, missing: [], invalid: [] } };
+    return { hasSchema: false, report: emptyReport() };
   }
   const mod = await loadSchema(envFile);
   if (!mod) {
-    return { hasSchema: false, report: { valid: true, missing: [], invalid: [] } };
+    return { hasSchema: false, report: emptyReport() };
   }
 
   const merged: Record<string, unknown> = {};
@@ -108,7 +113,7 @@ export async function validateProdEnv(
     }
   }
 
-  return { hasSchema: true, report: mod.validateAllEnv(merged) };
+  return { hasSchema: true, report: await mod.validateAllEnv(merged) };
 }
 
 /** Format an EnvValidationReport into a human-readable multi-line string. */

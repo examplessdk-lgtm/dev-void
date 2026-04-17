@@ -1805,7 +1805,7 @@ export function compileWorkerEntry(
   const envSchemaImport = envSchemaModule
     ? `import ${JSON.stringify(envSchemaModule.importPath)};\nimport { _validateEnvOnce } from ${JSON.stringify(envSchemaModule.helperPath)};\n`
     : '';
-  const envValidateCall = envSchemaModule ? '  _validateEnvOnce(env);\n' : '';
+  const envValidateCall = envSchemaModule ? '  await _validateEnvOnce(env);\n' : '';
 
   // Filter internal platform bindings so user code cannot access them via c.env.
   // The original env is preserved for framework internals (withRuntimeEnv, etc.).

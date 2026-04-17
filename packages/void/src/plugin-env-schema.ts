@@ -11,11 +11,12 @@ interface RegisteredSchemaModule {
     string,
     { '~standard': { validate: (v: unknown) => unknown } }
   > | null;
-  validateAllEnv(values: Record<string, unknown>): {
+  _hasRegisteredSchema(): boolean;
+  validateAllEnv(values: Record<string, unknown>): Promise<{
     valid: boolean;
     missing: string[];
     invalid: { key: string; messages: string[] }[];
-  };
+  }>;
 }
 
 let cachedSchemaModule: RegisteredSchemaModule | null = null;
@@ -71,13 +72,13 @@ export function envSchemaPlugin(root: string): Plugin {
     if (!envFile) {
       return;
     }
-    const { _getRegisteredSchema, validateAllEnv } = await loadSchemaModule();
-    if (!_getRegisteredSchema()) {
+    const { _hasRegisteredSchema, validateAllEnv } = await loadSchemaModule();
+    if (!_hasRegisteredSchema()) {
       return;
     }
     const { loadEnv } = await import('vite');
     const merged = filterLoadedEnv(loadEnv(viteMode, root, ''));
-    const report = validateAllEnv(merged as Record<string, unknown>);
+    const report = await validateAllEnv(merged as Record<string, unknown>);
     if (report.valid) {
       return;
     }
