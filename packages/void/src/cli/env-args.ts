@@ -16,9 +16,22 @@ export const envSubcommands: SubcommandDef[] = [
     name: 'types',
     description: 'Regenerate .void/env.d.ts from env.ts',
   },
+  {
+    name: 'example',
+    description: 'Generate .env.example from env.ts schema',
+    flags: [
+      {
+        name: '--force',
+        description: 'Overwrite .env.example without confirmation',
+      },
+    ],
+  },
 ];
 
-export type EnvArgs = { subcommand: 'check'; useRemoteSecrets: boolean } | { subcommand: 'types' };
+export type EnvArgs =
+  | { subcommand: 'check'; useRemoteSecrets: boolean }
+  | { subcommand: 'types' }
+  | { subcommand: 'example'; force: boolean };
 
 export function parseEnvArgs(args: string[]): EnvArgs {
   const [subcommand, ...rest] = args;
@@ -40,5 +53,17 @@ export function parseEnvArgs(args: string[]): EnvArgs {
     }
     return { subcommand: 'types' };
   }
-  throw new Error('Error: Usage: void env <check|types>');
+  if (subcommand === 'example') {
+    const parsed = parseArgs({
+      args: rest,
+      options: { force: { type: 'boolean' } },
+      allowPositionals: true,
+      strict: true,
+    });
+    if (parsed.positionals.length > 0) {
+      throw new Error(`Error: Unexpected argument: ${parsed.positionals[0]}`);
+    }
+    return { subcommand: 'example', force: !!parsed.values.force };
+  }
+  throw new Error('Error: Usage: void env <check|types|example>');
 }

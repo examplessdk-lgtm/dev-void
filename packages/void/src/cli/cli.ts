@@ -79,6 +79,8 @@ function printHelp() {
       helpLine('void env check', 'Validate env.ts against .env files'),
       helpLine('  --remote', 'Also check that required keys exist as remote secrets'),
       helpLine('void env types', 'Regenerate .void/env.d.ts from env.ts'),
+      helpLine('void env example', 'Generate .env.example from env.ts schema'),
+      helpLine('  --force', 'Overwrite .env.example without confirmation'),
       '',
       categoryTitle('codegen'),
       helpLine('void gen model <name> [cols...]', 'Generate migration + CRUD routes + db types'),
@@ -261,7 +263,11 @@ if (command === 'deploy') {
       hint: 'status | reset | seed | execute | migrate | studio | export | rename-migrations',
       description: 'Database migrations and management',
     },
-    { name: 'env', hint: 'check | types', description: 'Validate and generate env.ts types' },
+    {
+      name: 'env',
+      hint: 'check | types | example',
+      description: 'Validate env.ts, generate types, or scaffold .env.example',
+    },
     {
       name: 'gen',
       hint: 'model | migration | route | middleware | ssr | cron | queue',

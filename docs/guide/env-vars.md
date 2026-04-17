@@ -104,6 +104,17 @@ Types are auto-generated to `.void/env.d.ts` on dev server start and whenever `e
 void env types
 ```
 
+## Scaffolding `.env.example`
+
+Generate (or refresh) a `.env.example` from your `env.ts` schema:
+
+```bash
+void env example           # prompts before overwriting an existing file
+void env example --force   # overwrite without prompting (use in CI)
+```
+
+The generated file is grouped into `required`, `with defaults`, and `optional` sections. Keys defined via `oneOf([...])` get a leading `# enum: A | B | C` comment listing the valid values, and keys with a `.default(x)` are prefilled. Commit the `.env.example` — it's the single source of truth for teammates and coding agents setting up the project.
+
 ## Migration from untyped `c.env`
 
 If you don't have an `env.ts`, `c.env.X` continues to work as `unknown` — no breaking change. To opt in, create `env.ts`, declare your keys, and the existing call sites become typed automatically. The recommended access pattern for new code is `import { env } from "void/env"`.

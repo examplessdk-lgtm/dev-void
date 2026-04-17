@@ -5,6 +5,7 @@ import { findEnvFile, generateEnvTypes } from '../codegen/env-types';
 import { getToken } from './auth';
 import { PlatformClient } from './client';
 import type { EnvArgs } from './env-args';
+import { runEnvExample } from './env-example';
 import { fetchRemoteSecretNames, formatEnvReport, validateProdEnv } from './env-validation';
 import { cliTitle } from './output';
 import { readProjectConfig } from './project';
@@ -19,6 +20,10 @@ export async function runEnvCommand(root: string, args: EnvArgs): Promise<void> 
   }
   if (args.subcommand === 'types') {
     runTypes(root);
+    return;
+  }
+  if (args.subcommand === 'example') {
+    await runEnvExample(root, { force: args.force });
     return;
   }
 }
