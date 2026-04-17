@@ -19,7 +19,7 @@ describe.skip('playground/vinext-pages build', () => {
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
     execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
-  }, 60_000);
+  });
 
   it('produces expected build artifacts', () => {
     const workerEntry = join(ROOT, `${PLAYGROUND}/dist/ssr/index.js`);
@@ -71,7 +71,7 @@ describe.skip('playground/vinext-pages dev', () => {
     });
 
     await waitForServer(DEV_BASE, 20_000);
-  }, 30_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -96,4 +96,4 @@ describe.skip('playground/vinext-pages dev', () => {
     expect(html).toContain('Alice');
     expect(html).toContain('ok');
   });
-}, 60_000);
+});

@@ -131,11 +131,43 @@ export const loader = defineHandler(async (c) => {
 });
 ```
 
-The page renders immediately with `projects` available. The `usage` prop starts in a loading state and resolves once the deferred function completes, so there is no waterfall and no blocking render.
+The page renders immediately with `projects` available. The `usage` prop is a framework-native deferred resource: React consumes it with Suspense and `use()`, while the other adapters expose a `{ loading, value, error }` state object.
 
 ### Handling Deferred State
 
-`Deferred<T>` is a [discriminated union](https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions) with three states:
+In React, `Deferred<T>` is consumed as a promise. Put the deferred read under a `<Suspense>` boundary and call `use()` where the value is needed:
+
+::: code-group
+
+```tsx [React]
+import { Suspense, use } from 'react';
+import type { Props } from './dashboard.server';
+
+function Usage({ usage }: Pick<Props, 'usage'>) {
+  const resolved = use(usage);
+  return <p>{resolved.requests} requests</p>;
+}
+
+export default function Dashboard({ projects, usage }: Props) {
+  return (
+    <div>
+      <h1>Projects ({projects.length})</h1>
+      <Suspense fallback={<p>Loading usage...</p>}>
+        <Usage usage={usage} />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+:::
+
+Rejected deferred props throw from `use()`. Put a normal React error boundary
+around the Suspense boundary when the page should render a custom failure state.
+For explicit React prop annotations, import `Deferred` from `@void/react`; the
+adapter export is typed as `Promise<T>`.
+
+In Vue, Svelte, and Solid, `Deferred<T>` behaves as a [discriminated union](https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions) with three states:
 
 ```ts
 type Deferred<T> =
@@ -147,25 +179,6 @@ type Deferred<T> =
 Check `loading` first, then `error`. TypeScript narrows `value` to `T` in the resolved branch:
 
 ::: code-group
-
-```tsx [React]
-import type { Props } from './dashboard.server';
-
-export default function Dashboard({ projects, usage }: Props) {
-  return (
-    <div>
-      <h1>Projects ({projects.length})</h1>
-      {usage.loading ? (
-        <p>Loading usage...</p>
-      ) : usage.error ? (
-        <p>Failed: {usage.error.message}</p>
-      ) : (
-        <p>{usage.value.requests} requests</p>
-      )}
-    </div>
-  );
-}
-```
 
 ```vue [Vue]
 <script setup lang="ts">
@@ -224,7 +237,7 @@ export default function Dashboard(props: Props) {
 
 ### How Streaming Works
 
-On the initial page load (SSR), the page renders with deferred props in their loading state. As each deferred function resolves, the server streams an inline `<script>` tag that delivers the data, so no extra HTTP request is needed. On SPA navigation, deferred data streams via NDJSON over the same response.
+On the initial page load (SSR), React uses React 19 streaming SSR and renders the nearest Suspense fallback for deferred props; the other adapters render their loading state. As each deferred function resolves, the server streams an inline `<script>` tag that delivers the data, so no extra HTTP request is needed. On SPA navigation, deferred data streams via NDJSON over the same response.
 
 ### Deferred Props After Mutations
 

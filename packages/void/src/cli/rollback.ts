@@ -97,7 +97,11 @@ export async function runRollbackCommand(root: string, deployId?: string): Promi
   s.start('Rolling back...');
 
   try {
-    const result = await client.rollback(linked.projectId, targetId);
+    // Echo the confirmed diff so the server can reject if `currentActive`
+    // drifted between our preflight and its in-lock re-read.
+    const result = await client.rollback(linked.projectId, targetId, {
+      allowDestructive: migrationDiff.length > 0 ? migrationDiff : undefined,
+    });
     s.stop('Rollback complete.');
 
     if (result.ok) {

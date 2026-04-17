@@ -3,3 +3,9 @@ import { createContext, type Context } from 'react';
 export const SharedContext: Context<any> = createContext<any>(null);
 export const ErrorsContext: Context<any> = createContext<any>(null);
 export const RouterContext: Context<any> = createContext<any>(null);
+export const NavigationContext: Context<any> = createContext<any>({
+  isPending: false,
+  location: '',
+  pendingLocation: null,
+  type: null,
+});

@@ -158,6 +158,6 @@ describe('generateWrapper with migrations', () => {
 
     const wrapper = readFileSync(join(workerDir, 'index.mjs'), 'utf-8');
     expect(wrapper).not.toContain('/__void/migrate');
-    expect(wrapper).toContain('/__scheduled');
+    expect(wrapper).toContain('/__void/scheduled');
   });
 });

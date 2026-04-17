@@ -20,7 +20,7 @@ describe('playground/static-pages build (output: static)', () => {
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     removeWranglerConfig(pg);
     execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
-  }, 120_000);
+  });
 
   it('emits worker entry and client manifest', () => {
     const workerEntry = join(DIST, 'ssr/index.js');
@@ -156,4 +156,4 @@ describe('playground/static-pages build (output: static)', () => {
     expect(wranglerConfig.assets?.directory).toBe('../client');
     expect(wranglerConfig.assets?.run_worker_first).toBeDefined();
   });
-}, 120_000);
+});

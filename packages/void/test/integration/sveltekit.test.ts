@@ -23,7 +23,7 @@ describe('playground/sveltekit build', () => {
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     writeFileSync(join(pg, 'wrangler.jsonc'), MINIMAL_WRANGLER);
     execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
-  }, 60_000);
+  });
 
   it('produces expected build artifacts', () => {
     const workerEntry = join(ROOT, `${PLAYGROUND}/.svelte-kit/cloudflare/_worker.js`);
@@ -62,7 +62,7 @@ describe('playground/sveltekit dev', () => {
     });
 
     await waitForServer(DEV_BASE, 20_000);
-  }, 30_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -121,4 +121,4 @@ describe('playground/sveltekit dev', () => {
       await browser.close();
     }
   });
-}, 60_000);
+});

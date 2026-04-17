@@ -18,6 +18,9 @@ catalogs:
     '@typescript/native-preview':
       specifier: 7.0.0-dev.20260413.1
       version: 7.0.0-dev.20260413.1
+    pathe:
+      specifier: ^2.0.3
+      version: 2.0.3
     tsdown:
       specifier: ^0.21.8
       version: 0.21.8
@@ -167,6 +170,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.14)
+      pathe:
+        specifier: 'catalog:'
+        version: 2.0.3
       react:
         specifier: ^19.2.5
         version: 19.2.5
@@ -192,6 +198,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 25.6.0
+      pathe:
+        specifier: 'catalog:'
+        version: 2.0.3
       solid-js:
         specifier: ^1.9.12
         version: 1.9.12
@@ -214,6 +223,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 25.6.0
+      pathe:
+        specifier: 'catalog:'
+        version: 2.0.3
       svelte:
         specifier: ^5.55.3
         version: 5.55.3(@typescript-eslint/types@8.57.2)
@@ -326,6 +338,9 @@ importers:
       ofetch:
         specifier: 2.0.0-alpha.3
         version: 2.0.0-alpha.3
+      pathe:
+        specifier: 'catalog:'
+        version: 2.0.3
       pglite-server:
         specifier: 0.1.5
         version: 0.1.5(@electric-sql/pglite@0.4.4)
@@ -357,6 +372,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 25.6.0
+      pathe:
+        specifier: 'catalog:'
+        version: 2.0.3
       tsdown:
         specifier: 'catalog:'
         version: 0.21.8(@typescript/native-preview@7.0.0-dev.20260413.1)(typescript@6.0.2)(vue-tsc@3.2.6(typescript@6.0.2))

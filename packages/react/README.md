@@ -4,6 +4,8 @@ React adapter for Void Pages mode.
 
 ## Setup
 
+`@void/react` requires React 19.
+
 ```ts
 import { defineConfig } from 'vite';
 import { voidPlugin } from 'void';
@@ -39,6 +41,62 @@ Main runtime APIs live at `@void/react`:
 - `useForm()`
 - `useIslandForm()`
 - `action()`
+
+### Async React Routing
+
+React Pages navigations are scheduled as React transitions. Route data,
+component modules, layouts, and deferred props are prepared as resources, then
+revealed through Suspense so the current screen can stay visible while the next
+page loads.
+
+```tsx
+import { Suspense, use } from 'react';
+import { useNavigation, useRouter } from '@void/react';
+import type { Props } from './dashboard.server';
+
+function Usage({ usage }: Pick<Props, 'usage'>) {
+  const resolved = use(usage);
+  return <p>{resolved.requests} requests</p>;
+}
+
+export default function Dashboard({ usage }: Props) {
+  const router = useRouter();
+  const navigation = useNavigation();
+
+  return (
+    <>
+      <button onClick={() => router.refresh()} disabled={navigation.isPending}>
+        Refresh
+      </button>
+      <Suspense fallback={<p>Loading usage...</p>}>
+        <Usage usage={usage} />
+      </Suspense>
+    </>
+  );
+}
+```
+
+Breaking change: React deferred props returned from `defer()` are consumed as
+promises with `use()` under a Suspense boundary. The old
+`prop.loading` / `prop.value` shape remains the runtime shape for the Vue,
+Svelte, and Solid adapters.
+
+SSR uses React 19's streaming renderer. Deferred props render the nearest
+Suspense fallback in the initial shell, then Void streams the resolved values to
+the hydrated client. Put deferred reads behind Suspense, and use a normal React
+error boundary around that Suspense boundary when rejected deferred values need a
+custom error state.
+
+For explicit prop annotations in React pages, import `Deferred` from
+`@void/react`:
+
+```ts
+import type { Deferred } from '@void/react';
+
+export interface Props {
+  usage: Deferred<{ requests: number }>;
+}
+```
 
 ### `Link`
 

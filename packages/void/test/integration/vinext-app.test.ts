@@ -19,7 +19,7 @@ describe.skip('playground/vinext-app build', () => {
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
     execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
-  }, 120_000);
+  });
 
   it('produces expected build artifacts', () => {
     const workerEntry = join(ROOT, `${PLAYGROUND}/dist/server/index.js`);
@@ -71,7 +71,7 @@ describe.skip('playground/vinext-app dev', () => {
     });
 
     await waitForServer(DEV_BASE, 30_000);
-  }, 45_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -96,4 +96,4 @@ describe.skip('playground/vinext-app dev', () => {
     expect(html).toContain('Alice');
     expect(html).toContain('ok');
   });
-}, 60_000);
+});

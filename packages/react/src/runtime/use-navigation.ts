@@ -1,8 +1,18 @@
 import { useContext, useEffect, useRef } from 'react';
-import { RouterContext } from './context';
+import { NavigationContext, RouterContext } from './context';
 
-export function useNavigation(onStart?: () => void, onEnd?: () => void): void {
+export interface NavigationState {
+  isPending: boolean;
+  location: string;
+  pendingLocation: string | null;
+  type: string | null;
+}
+
+export function useNavigation(): NavigationState;
+export function useNavigation(onStart?: () => void, onEnd?: () => void): NavigationState;
+export function useNavigation(onStart?: () => void, onEnd?: () => void): NavigationState {
   const router = useContext(RouterContext);
+  const navigation = useContext(NavigationContext);
   const startRef = useRef(onStart);
   const endRef = useRef(onEnd);
 
@@ -23,4 +33,6 @@ export function useNavigation(onStart?: () => void, onEnd?: () => void): void {
       () => endRef.current?.(),
     );
   }, [router]);
+
+  return navigation;
 }

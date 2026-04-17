@@ -252,7 +252,10 @@ Available methods on the "void_" object:
 
   Deployments:
     void_.listDeployments(projectId) → { deployments, activeDeploymentId }
-    void_.rollback(projectId, deploymentId) → { ok, deploymentId?, migrationDiff?, error? }
+    void_.rollback(projectId, deploymentId, options?) → { ok, deploymentId?, migrationDiff?, error? }
+      options.allowDestructive: string[] of migration names the current
+      active has that target lacks. Required for destructive rollbacks;
+      server returns 400 if omitted or if its view of the set has drifted.
 
   Logs:
     void_.getLogs(projectId, since, limit?, deploymentId?) → { timestamp, outcome, logs, exceptions, url, method, status }[]

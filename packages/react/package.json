@@ -21,6 +21,14 @@
     "./prefetch": {
       "types": "./dist/runtime/prefetch.d.mts",
       "import": "./dist/runtime/prefetch.mjs"
+    },
+    "./pages-client": {
+      "types": "./dist/runtime/pages-client.d.mts",
+      "import": "./dist/runtime/pages-client.mjs"
+    },
+    "./pages-server": {
+      "types": "./dist/runtime/pages-server.d.mts",
+      "import": "./dist/runtime/pages-server.mjs"
     }
   },
   "publishConfig": {
@@ -38,6 +46,7 @@
     "@types/node": "catalog:",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "pathe": "catalog:",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "tsdown": "catalog:",
@@ -45,8 +54,8 @@
     "void": "workspace:@void-sdk/void@*"
   },
   "peerDependencies": {
-    "react": "^18.0.0 || ^19.0.0",
-    "react-dom": "^18.0.0 || ^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "vite": "catalog:",
     "void": "workspace:@void-sdk/void@*"
   }

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { join } from 'pathe';
 import { normalizePath, type Plugin } from 'vite';
 import { ensureProjectTsconfig } from './codegen/project-tsconfig';
 import { discoverSchema, type SchemaLocation } from './drizzle/discover';

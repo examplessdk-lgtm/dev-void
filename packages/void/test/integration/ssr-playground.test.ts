@@ -46,7 +46,7 @@ describe('playground/ssr dev', () => {
     });
 
     await waitForServer(DEV_BASE, 20_000);
-  }, 30_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -77,7 +77,7 @@ describe('playground/ssr dev', () => {
     const contentType = clientEntryResponse.headers.get('content-type') ?? '';
     expect(contentType).toContain('javascript');
   });
-}, 60_000);
+});
 
 describe('playground/ssr build + preview', () => {
   let child: ReturnType<typeof spawn>;
@@ -120,7 +120,7 @@ describe('playground/ssr build + preview', () => {
     await waitForServer(PREVIEW_BASE, 20_000, {
       isAlive: () => child.exitCode === null,
     });
-  }, 60_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -162,4 +162,4 @@ describe('playground/ssr build + preview', () => {
     const previewAboutHtml = await (await fetch(`${PREVIEW_BASE}/about`)).text();
     expect(previewAboutHtml).toContain('Rendered URL: <!-- -->/about');
   });
-}, 60_000);
+});

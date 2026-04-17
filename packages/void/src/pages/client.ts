@@ -1,8 +1,16 @@
 /// <reference lib="dom" />
 
 import { initClientHead, applyClientHead } from './head-client';
+import { createPageNavigationEngine as createNavigationEngine } from './navigation-engine';
 import { PrefetchCache, parseCacheFor } from './prefetch';
 import type { CacheForResult, CacheForInput } from './prefetch';
+
+export { createPageNavigationEngine } from './navigation-engine';
+export type {
+  PageNavigationEngine,
+  PageNavigationResource,
+  PageNavigationResult,
+} from './navigation-engine';
 
 // --- Types ---
 
@@ -24,12 +32,19 @@ export interface PrefetchOptions {
 
 export interface VoidRouter {
   _hoverDelay: number;
+  readonly isPending?: boolean;
+  readonly location?: string;
+  readonly pendingLocation?: string | null;
+  readonly type?: string | null;
   onNavigation(onStart?: () => void, onEnd?: () => void): () => void;
   visit(url: string, options?: VisitOptions): Promise<any>;
   prefetch(url: string, options?: PrefetchOptions): void;
   flush(url: string, method?: string): void;
   flushAll(): void;
   reload(): Promise<any>;
+  refresh(): Promise<any>;
+  setParams(key: string, value: string): Promise<any>;
+  setParams(params: Record<string, string | null | undefined>): Promise<any>;
   post(url: string, data?: unknown, options?: VisitOptions): Promise<any>;
   put(url: string, data?: unknown, options?: VisitOptions): Promise<any>;
   patch(url: string, data?: unknown, options?: VisitOptions): Promise<any>;
@@ -126,6 +141,15 @@ export const ssrProxy: VoidRouter = new Proxy({} as VoidRouter, {
     if (typeof prop === 'symbol') {
       return undefined;
     }
+    if (prop === 'isPending') {
+      return false;
+    }
+    if (prop === 'location') {
+      return '';
+    }
+    if (prop === 'pendingLocation' || prop === 'type') {
+      return null;
+    }
     return () => {
       throw new Error(`router.${prop}() is not available during SSR`);
     };
@@ -141,741 +165,131 @@ export async function createPageRouter(config: PageRouterConfig): Promise<{
   initialLayouts: any[];
   start(): void;
 }> {
-  const {
-    adapter,
-    components,
-    layoutTree,
-    routeMeta,
-    matchRoute,
-    staticPageData: STATIC_PAGE_DATA_ENABLED = false,
-    staticPageDataFastPath: STATIC_PAGE_DATA_FAST_PATH = STATIC_PAGE_DATA_ENABLED,
-    viewTransitions: VIEW_TRANSITIONS_ENABLED,
-    prefetchHoverDelay: PREFETCH_HOVER_DELAY,
-    prefetchDefaultCacheFor: PREFETCH_DEFAULT_CACHE_FOR,
-  } = config;
+  {
+    const engine = await createNavigationEngine(config);
+    const _navListeners = new Set<{ onStart?: () => void; onEnd?: () => void }>();
 
-  const _prefetchCache = new PrefetchCache();
-  const _staticPageDataCacheKeys = new Set<string>();
-
-  function getPageDataCacheKey(url: string, method = 'GET'): string {
-    return `${method}:${url}`;
-  }
-
-  function clonePageData(pageData: any): any {
-    return JSON.parse(JSON.stringify(pageData));
-  }
-
-  function readInitialPageData(appEl: HTMLElement): any {
-    const scriptEl = document.getElementById(PAGE_DATA_SCRIPT_ID);
-    if (scriptEl?.textContent) {
-      return JSON.parse(scriptEl.textContent);
-    }
-
-    const legacyData = appEl.getAttribute('data-page');
-    if (legacyData) {
-      return JSON.parse(legacyData);
-    }
-
-    throw new Error('Missing initial page payload');
-  }
-
-  async function resolveComponent(id: string) {
-    const loader = components[id];
-    if (!loader) {
-      throw new Error('Unknown page component: ' + id);
-    }
-    return (await loader()).default;
-  }
-
-  async function resolveLayouts(componentId: string) {
-    const ids = layoutTree[componentId] || [];
-    return Promise.all(ids.map(async (id: string) => (await components[id]()).default));
-  }
-
-  function getStaticPageDataUrl(url: string): string {
-    const { pathname } = new URL(url || '/', window.location.origin);
-    const filePath = pathname === '/' ? 'index' : pathname.replace(/^\/+/, '');
-    return `${STATIC_PAGE_DATA_PREFIX}/${filePath}.json`;
-  }
-
-  function parsePageDataFromHtml(html: string): any | null {
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    const scriptEl = doc.getElementById(PAGE_DATA_SCRIPT_ID);
-    if (!scriptEl?.textContent) {
-      return null;
-    }
-    try {
-      return JSON.parse(scriptEl.textContent);
-    } catch {
-      return null;
-    }
-  }
-
-  function isUsablePageData(pageData: any, matchedId: string): boolean {
-    return (
-      pageData &&
-      typeof pageData.component === 'string' &&
-      pageData.component === matchedId &&
-      !routeMeta[pageData.component]?.island &&
-      Boolean(components[pageData.component])
-    );
-  }
-
-  function wrapResolvedDeferredProps(pageData: any): void {
-    if (!pageData.deferredKeys) {
-      return;
-    }
-    for (const key of Object.keys(pageData.deferredKeys)) {
-      const value = pageData.props[key];
-      const ref = adapter.createDeferred();
-      pageData.props[key] = adapter.resolveDeferred(ref, value);
-    }
-  }
-
-  function isAbortError(error: unknown): boolean {
-    return (
-      typeof error === 'object' &&
-      error !== null &&
-      'name' in error &&
-      (error as { name?: unknown }).name === 'AbortError'
-    );
-  }
-
-  async function fetchPageResponse(fetchUrl: string, init: RequestInit): Promise<Response | null> {
-    try {
-      return await fetch(fetchUrl, init);
-    } catch (error) {
-      if (init.signal?.aborted || isAbortError(error)) {
-        throw error;
-      }
-      return null;
-    }
-  }
-
-  async function loadStaticPageDataFile(
-    fetchUrl: string,
-    signal?: AbortSignal,
-  ): Promise<{
-    pageData: any;
-    resolvedDeferred: boolean;
-  } | null> {
-    const matchedId = matchRoute(fetchUrl || window.location.pathname + window.location.search);
-    if (!matchedId || routeMeta[matchedId]?.island || !components[matchedId]) {
-      return null;
-    }
-
-    try {
-      const pageDataResponse = await fetch(getStaticPageDataUrl(fetchUrl), {
-        headers: { Accept: 'application/json' },
-        signal,
-      });
-      if (pageDataResponse.ok) {
-        const pageData = await pageDataResponse.json();
-        if (isUsablePageData(pageData, matchedId)) {
-          return { pageData, resolvedDeferred: true };
-        }
-      }
-    } catch (error) {
-      if (signal?.aborted || isAbortError(error)) {
-        throw error;
-      }
-      // Fall back to parsing the HTML response below.
-    }
-
-    return null;
-  }
-
-  async function loadStaticPageData(
-    fetchUrl: string,
-    response: Response,
-    signal?: AbortSignal,
-    verifyPageResponse = false,
-  ): Promise<{
-    pageData: any;
-    resolvedDeferred: boolean;
-  } | null> {
-    if (!response.ok) {
-      return null;
-    }
-
-    const matchedId = matchRoute(fetchUrl || window.location.pathname + window.location.search);
-    if (!matchedId || routeMeta[matchedId]?.island || !components[matchedId]) {
-      return null;
-    }
-
-    const contentType = response.headers.get('content-type') || '';
-    if (contentType && !contentType.includes('text/html')) {
-      return null;
-    }
-
-    if (verifyPageResponse) {
-      const pageData = parsePageDataFromHtml(await response.text());
-      if (!isUsablePageData(pageData, matchedId)) {
-        return null;
-      }
-      if (!pageData.deferredKeys) {
-        return { pageData, resolvedDeferred: false };
-      }
-      return loadStaticPageDataFile(fetchUrl, signal);
-    }
-
-    const filePageData = await loadStaticPageDataFile(fetchUrl, signal);
-    if (filePageData) {
-      return filePageData;
-    }
-
-    const pageData = parsePageDataFromHtml(await response.text());
-    if (!isUsablePageData(pageData, matchedId) || pageData.deferredKeys) {
-      return null;
-    }
-    return { pageData, resolvedDeferred: false };
-  }
-
-  // --- Deferred props ---
-
-  let activeKeyRefs: Record<string, unknown> = {};
-  let currentPropsObj: Record<string, unknown> = {};
-  let _abortController: AbortController | null = null;
-
-  function setupDeferredProps(pageData: any): Record<string, unknown> {
-    const keyRefs: Record<string, unknown> = {};
-    if (!pageData.deferredKeys) {
-      return keyRefs;
-    }
-    for (const key of Object.keys(pageData.deferredKeys)) {
-      const ref = adapter.createDeferred();
-      keyRefs[key] = ref;
-      pageData.props[key] = ref;
-    }
-    return keyRefs;
-  }
-
-  function handleDeferredMessage(group: string, data: unknown, error: unknown): void {
-    if (data !== undefined) {
-      if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
-        let resolvedAny = false;
-        for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
-          if (activeKeyRefs[key]) {
-            const updated = adapter.resolveDeferred(activeKeyRefs[key], value);
-            activeKeyRefs[key] = updated;
-            currentPropsObj[key] = updated;
-            resolvedAny = true;
-          }
-        }
-        if (!resolvedAny && activeKeyRefs[group]) {
-          const updated = adapter.resolveDeferred(activeKeyRefs[group], data);
-          activeKeyRefs[group] = updated;
-          currentPropsObj[group] = updated;
-        }
-      } else {
-        if (activeKeyRefs[group]) {
-          const updated = adapter.resolveDeferred(activeKeyRefs[group], data);
-          activeKeyRefs[group] = updated;
-          currentPropsObj[group] = updated;
-        }
-      }
-    } else if (error !== undefined) {
-      const errStr = typeof error === 'string' ? error : String(error);
-      for (const [key, ref] of Object.entries(activeKeyRefs)) {
-        if (adapter.isLoading(ref)) {
-          const updated = adapter.rejectDeferred(ref, errStr);
-          activeKeyRefs[key] = updated;
-          currentPropsObj[key] = updated;
-        }
-      }
-    }
-    adapter.onDeferredUpdate?.(currentPropsObj);
-  }
-
-  // SSR deferred resolution via streamed script tags
-  (window as any).__resolveDeferred = (group: string, data: unknown) =>
-    handleDeferredMessage(group, data, undefined);
-  (window as any).__rejectDeferred = (group: string, error: unknown) =>
-    handleDeferredMessage(group, undefined, error);
-
-  // --- Navigation listeners ---
-
-  const _navListeners = new Set<{ onStart?: () => void; onEnd?: () => void }>();
-
-  // --- Router ---
-
-  const router: VoidRouter = {
-    _hoverDelay: PREFETCH_HOVER_DELAY,
-
-    onNavigation(onStart, onEnd) {
-      const entry = { onStart, onEnd };
-      _navListeners.add(entry);
-      return () => {
-        _navListeners.delete(entry);
-      };
-    },
-
-    async visit(url, options = {}) {
-      for (const l of _navListeners) {
-        l.onStart?.();
+    async function applyNavigationResource(resource: ReturnType<typeof engine.prepareVisit>) {
+      for (const listener of _navListeners) {
+        listener.onStart?.();
       }
       try {
-        // Extract hash before fetching (hash is not sent to server)
-        const hashIndex = url.indexOf('#');
-        const hash = hashIndex !== -1 ? url.slice(hashIndex) : '';
-        const fetchUrl = hashIndex !== -1 ? url.slice(0, hashIndex) : url;
-
-        // Same-page hash navigation — skip server fetch, just scroll
-        const currentPath = window.location.pathname + window.location.search;
-        const effectiveFetchUrl = fetchUrl || currentPath;
-        const method = (options.method || 'GET').toUpperCase();
-        if (
-          effectiveFetchUrl === currentPath &&
-          hash &&
-          method === 'GET' &&
-          !options.data &&
-          !options.preserveState
-        ) {
-          if (options.replace) {
-            history.replaceState({}, '', effectiveFetchUrl + hash);
-          } else {
-            history.replaceState({ scrollX: window.scrollX, scrollY: window.scrollY }, '');
-            history.pushState({}, '', effectiveFetchUrl + hash);
-          }
-          const el = document.getElementById(hash.slice(1));
-          if (el) {
-            el.scrollIntoView();
-          } else {
-            window.scrollTo(0, 0);
-          }
-          return;
+        const result = await resource.shell;
+        if (!result) {
+          return undefined;
         }
 
-        _abortController?.abort();
-        _abortController = new AbortController();
+        const applyUpdate = () =>
+          config.adapter.applyUpdate(result.pageData, result.component, result.layouts);
 
-        if (method !== 'GET') {
-          _prefetchCache.flushAll();
-          _staticPageDataCacheKeys.clear();
-        }
-
-        const headers: Record<string, string> = {
-          'X-VoidPages': 'true',
-          Accept: 'application/json',
-        };
-        const visitSignal = _abortController.signal;
-        const fetchOptions: any = { method, headers, signal: visitSignal };
-
-        if (options.data && method !== 'GET') {
-          if (hasFiles(options.data)) {
-            fetchOptions.body = objectToFormData(options.data as Record<string, unknown>);
-          } else {
-            headers['Content-Type'] = 'application/json';
-            fetchOptions.body = JSON.stringify(options.data);
-          }
-        }
-
-        let pageData: any;
-        const cacheEntry = method === 'GET' ? _prefetchCache.get(fetchUrl, method) : null;
-
-        if (cacheEntry) {
-          const cachedPageData = await cacheEntry.response;
-          pageData = _staticPageDataCacheKeys.has(getPageDataCacheKey(fetchUrl, method))
-            ? clonePageData(cachedPageData)
-            : cachedPageData;
-          _prefetchCache.consume(fetchUrl, method);
-          if (pageData === null) {
-            window.location.href = url;
-            return;
-          }
-          // Prefetch responses have deferred props pre-resolved — wrap them
-          wrapResolvedDeferredProps(pageData);
-          // If stale, fire background refetch to refresh cache
-          if (!_prefetchCache.isFresh(cacheEntry)) {
-            const bgHeaders = {
-              'X-VoidPages': 'true',
-              Accept: 'application/json',
-              Purpose: 'prefetch',
-            };
-            const bgFetch = (
-              STATIC_PAGE_DATA_ENABLED && STATIC_PAGE_DATA_FAST_PATH && method === 'GET'
-                ? loadStaticPageDataFile(fetchUrl).then((result) => result?.pageData)
-                : Promise.resolve(undefined)
-            ).then((pageData) => {
-              if (pageData !== undefined) {
-                return pageData;
-              }
-              return fetchPageResponse(fetchUrl, { method, headers: bgHeaders }).then(async (r) => {
-                if (!r) {
-                  return null;
-                }
-                if (r.redirected) {
-                  return null;
-                }
-                if (!r.headers.get('X-VoidPages')) {
-                  return (
-                    (await loadStaticPageData(fetchUrl, r, undefined, !STATIC_PAGE_DATA_FAST_PATH))
-                      ?.pageData ?? null
-                  );
-                }
-                return r.json();
-              });
-            });
-            _prefetchCache.set(fetchUrl, method, bgFetch, PREFETCH_DEFAULT_CACHE_FOR);
-          }
-        } else {
-          if (method === 'GET' && STATIC_PAGE_DATA_ENABLED && STATIC_PAGE_DATA_FAST_PATH) {
-            const staticPageData = await loadStaticPageDataFile(fetchUrl, visitSignal);
-            if (staticPageData) {
-              pageData = staticPageData.pageData;
-              _staticPageDataCacheKeys.add(getPageDataCacheKey(fetchUrl, method));
-              _prefetchCache.set(
-                fetchUrl,
-                method,
-                Promise.resolve(clonePageData(pageData)),
-                PREFETCH_DEFAULT_CACHE_FOR,
-              );
-              if (staticPageData.resolvedDeferred) {
-                wrapResolvedDeferredProps(pageData);
-              }
-            }
-          }
-
-          const response =
-            pageData === undefined
-              ? method === 'GET'
-                ? await fetchPageResponse(fetchUrl, fetchOptions)
-                : await fetch(fetchUrl, fetchOptions)
-              : null;
-
-          if (pageData === undefined && !response) {
-            window.location.href = url;
-            return;
-          }
-
-          if (response?.redirected) {
-            const redirectUrl = new URL(response.url, window.location.origin);
-            if (redirectUrl.origin !== window.location.origin) {
-              window.location.href = method === 'GET' ? url : response.url;
-              return;
-            }
-            return router.visit(redirectUrl.pathname + redirectUrl.search + redirectUrl.hash, {
-              preserveScroll: options.preserveScroll,
-              preserveState: options.preserveState,
-              replace: options.replace,
-              viewTransition: options.viewTransition,
-            });
-          }
-
-          if (response && !response.headers.get('X-VoidPages')) {
-            if (method === 'GET') {
-              const staticPageData = await loadStaticPageData(
-                fetchUrl,
-                response,
-                visitSignal,
-                !STATIC_PAGE_DATA_FAST_PATH,
-              );
-              if (staticPageData) {
-                pageData = staticPageData.pageData;
-                if (staticPageData.resolvedDeferred) {
-                  wrapResolvedDeferredProps(pageData);
-                }
-              } else {
-                window.location.href = url;
-                return;
-              }
-            } else {
-              window.location.href = url;
-              return;
-            }
-          }
-
-          const contentType = response?.headers.get('content-type') || '';
-
-          if (pageData !== undefined) {
-            // Static page-data fallback already loaded the page object.
-          } else if (contentType.includes('application/x-ndjson')) {
-            const reader = response!.body!.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-            let firstLine = true;
-            const signal = visitSignal;
-
-            const processLines = () => {
-              let newlineIdx;
-              while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
-                const line = buffer.slice(0, newlineIdx);
-                buffer = buffer.slice(newlineIdx + 1);
-                if (!line) {
-                  continue;
-                }
-
-                if (firstLine) {
-                  pageData = JSON.parse(line);
-                  activeKeyRefs = setupDeferredProps(pageData);
-                  currentPropsObj = pageData.props;
-                  firstLine = false;
-                } else {
-                  const msg = JSON.parse(line);
-                  if (msg.__deferred) {
-                    handleDeferredMessage(msg.__deferred, msg.data, msg.error);
-                  }
-                }
-              }
-            };
-
-            // Read first line to get pageData for mounting
-            while (firstLine) {
-              const { done, value } = await reader.read();
-              if (done) {
-                break;
-              }
-              buffer += decoder.decode(value, { stream: true });
-              processLines();
-            }
-
-            // Continue reading deferred data in background
-            (async () => {
-              try {
-                while (!signal.aborted) {
-                  const { done, value } = await reader.read();
-                  if (done) {
-                    break;
-                  }
-                  buffer += decoder.decode(value, { stream: true });
-                  processLines();
-                }
-                if (buffer.trim()) {
-                  processLines();
-                }
-              } catch (e: any) {
-                if (e.name !== 'AbortError') {
-                  for (const [key, ref] of Object.entries(activeKeyRefs)) {
-                    if (adapter.isLoading(ref)) {
-                      const updated = adapter.rejectDeferred(
-                        ref,
-                        'Stream closed before resolution',
-                      );
-                      activeKeyRefs[key] = updated;
-                      currentPropsObj[key] = updated;
-                    }
-                  }
-                  adapter.onDeferredUpdate?.(currentPropsObj);
-                }
-              }
-            })();
-          } else {
-            pageData = await response!.json();
-          }
-        }
-
-        // Preserve stale deferred values after mutations (non-GET can't stream)
-        if (method !== 'GET') {
-          for (const key of Object.keys(activeKeyRefs)) {
-            if (pageData.props[key] === null && currentPropsObj[key] !== undefined) {
-              pageData.props[key] = currentPropsObj[key];
-            }
-          }
-        }
-
-        // Resolve async work before starting the transition
-        const [comp, layouts] = await Promise.all([
-          resolveComponent(pageData.component),
-          resolveLayouts(pageData.component),
-        ]);
-
-        // Head and pushState don't depend on DOM paint — run before transition
-        applyClientHead(pageData.head);
-
-        if (!options.preserveState) {
-          const historyUrl = effectiveFetchUrl + hash;
-          if (options.replace) {
-            history.replaceState({}, '', historyUrl);
-          } else {
-            history.replaceState({ scrollX: window.scrollX, scrollY: window.scrollY }, '');
-            history.pushState({}, '', historyUrl);
-          }
-        }
-
-        // Scroll logic — runs after DOM update
-        const doScroll = () => {
-          if (options.preserveScroll) {
-            return;
-          }
-          if (options._scrollPosition) {
-            window.scrollTo(options._scrollPosition.x, options._scrollPosition.y);
-          } else if (hash) {
-            const el = document.getElementById(hash.slice(1));
-            if (el) {
-              el.scrollIntoView();
-            } else {
-              window.scrollTo(0, 0);
-            }
-          } else {
-            window.scrollTo(0, 0);
-          }
-        };
-
-        const useTransition = options.viewTransition ?? VIEW_TRANSITIONS_ENABLED;
+        const useTransition = resource.options.viewTransition ?? config.viewTransitions;
         if (useTransition && document.startViewTransition) {
-          const transition = document.startViewTransition(() =>
-            adapter.applyUpdate(pageData, comp, layouts),
-          );
-          transition.updateCallbackDone.then(doScroll, doScroll);
+          const transition = document.startViewTransition(() => applyUpdate());
+          await transition.updateCallbackDone;
         } else {
-          adapter.applyUpdate(pageData, comp, layouts);
-          requestAnimationFrame(doScroll);
+          await applyUpdate();
         }
 
-        return pageData;
+        await resource.commit();
+        return result.pageData;
       } finally {
-        for (const l of _navListeners) {
-          l.onEnd?.();
+        for (const listener of _navListeners) {
+          listener.onEnd?.();
         }
       }
-    },
-
-    prefetch(url, options = {}) {
-      const method = (options.method || 'GET').toUpperCase();
-      if (method !== 'GET') {
-        throw new Error('router.prefetch() only supports GET requests.');
-      }
-
-      const id = matchRoute(url);
-      if (!id) {
-        return;
-      }
-
-      if (routeMeta[id]?.island) {
-        if (!document.querySelector('link[rel="prefetch"][href="' + url + '"]')) {
-          const link = document.createElement('link');
-          link.rel = 'prefetch';
-          link.href = url;
-          link.as = 'document';
-          document.head.appendChild(link);
-        }
-        return;
-      }
-
-      if (components[id]) {
-        components[id]();
-      }
-      const layoutIds = layoutTree[id] || [];
-      for (const lid of layoutIds) {
-        if (components[lid]) {
-          components[lid]();
-        }
-      }
-
-      // Strip hash — it's client-only, and cache keys must match visit()
-      const hashIdx = url.indexOf('#');
-      const prefetchUrl = hashIdx !== -1 ? url.slice(0, hashIdx) : url;
-
-      if (_prefetchCache.has(prefetchUrl, method)) {
-        return;
-      }
-      const ttl = options.cacheFor ? parseCacheFor(options.cacheFor) : PREFETCH_DEFAULT_CACHE_FOR;
-      const headers = {
-        'X-VoidPages': 'true',
-        Accept: 'application/json',
-        Purpose: 'prefetch',
-      };
-      const fetchPromise = (
-        STATIC_PAGE_DATA_ENABLED && STATIC_PAGE_DATA_FAST_PATH && method === 'GET'
-          ? loadStaticPageDataFile(prefetchUrl).then((result) => result?.pageData)
-          : Promise.resolve(undefined)
-      ).then((pageData) => {
-        if (pageData !== undefined) {
-          return pageData;
-        }
-        return fetchPageResponse(prefetchUrl, { method, headers }).then((r) => {
-          if (!r) {
-            return null;
-          }
-          if (r.redirected) {
-            return null;
-          }
-          if (!r.headers.get('X-VoidPages')) {
-            if (method !== 'GET') {
-              return null;
-            }
-            return loadStaticPageData(prefetchUrl, r, undefined, !STATIC_PAGE_DATA_FAST_PATH).then(
-              (result) => result?.pageData ?? null,
-            );
-          }
-          return r.json();
-        });
-      });
-      _prefetchCache.set(prefetchUrl, method, fetchPromise, ttl);
-    },
-
-    flush(url, method = 'GET') {
-      _prefetchCache.flush(url, method);
-      _staticPageDataCacheKeys.delete(getPageDataCacheKey(url, method));
-    },
-
-    flushAll() {
-      _prefetchCache.flushAll();
-      _staticPageDataCacheKeys.clear();
-    },
-
-    async reload() {
-      return router.visit(window.location.pathname + window.location.search, {
-        preserveState: true,
-        preserveScroll: true,
-      });
-    },
-
-    post(url, data, options = {}) {
-      return router.visit(url, { ...options, method: 'POST', data });
-    },
-    put(url, data, options = {}) {
-      return router.visit(url, { ...options, method: 'PUT', data });
-    },
-    patch(url, data, options = {}) {
-      return router.visit(url, { ...options, method: 'PATCH', data });
-    },
-    delete(url, options = {}) {
-      return router.visit(url, { ...options, method: 'DELETE' });
-    },
-  };
-
-  // --- Initialization ---
-
-  const appEl = document.getElementById('app')!;
-  const initialPageData = readInitialPageData(appEl);
-
-  const [initialComponent, initialLayouts] = await Promise.all([
-    resolveComponent(initialPageData.component),
-    resolveLayouts(initialPageData.component),
-  ]);
-
-  activeKeyRefs = setupDeferredProps(initialPageData);
-  currentPropsObj = initialPageData.props;
-
-  function start(): void {
-    history.scrollRestoration = 'manual';
-    history.replaceState({ scrollX: window.scrollX, scrollY: window.scrollY }, '');
-
-    initClientHead(initialPageData.head);
-
-    // Drain any deferred resolutions that arrived before the module loaded
-    if ((window as any).__deferredQueue) {
-      for (const entry of (window as any).__deferredQueue) {
-        if (entry.length === 3) {
-          handleDeferredMessage(entry[0], undefined, entry[2]);
-        } else {
-          handleDeferredMessage(entry[0], entry[1], undefined);
-        }
-      }
-      delete (window as any).__deferredQueue;
     }
 
-    window.addEventListener('popstate', (e) => {
-      const saved = e.state;
-      router.visit(window.location.pathname + window.location.search + window.location.hash, {
-        preserveState: true,
-        _scrollPosition: saved ? { x: saved.scrollX ?? 0, y: saved.scrollY ?? 0 } : null,
-      });
-    });
-  }
+    const router: VoidRouter = {
+      _hoverDelay: engine._hoverDelay,
 
-  return { router, initialPageData, initialComponent, initialLayouts, start };
+      onNavigation(onStart, onEnd) {
+        const entry = { onStart, onEnd };
+        _navListeners.add(entry);
+        return () => {
+          _navListeners.delete(entry);
+        };
+      },
+
+      visit(url, options = {}) {
+        const resource = engine.prepareVisit(url, options);
+        return applyNavigationResource(resource);
+      },
+
+      prefetch(url, options = {}) {
+        engine.prefetch(url, options);
+      },
+
+      flush(url, method = 'GET') {
+        engine.flush(url, method);
+      },
+
+      flushAll() {
+        engine.flushAll();
+      },
+
+      reload() {
+        return router.visit(window.location.pathname + window.location.search, {
+          preserveState: true,
+          preserveScroll: true,
+        });
+      },
+
+      refresh() {
+        return router.reload();
+      },
+
+      setParams(keyOrParams: string | Record<string, string | null | undefined>, value?: string) {
+        const params = new URLSearchParams(window.location.search);
+        if (typeof keyOrParams === 'string') {
+          if (value === null || value === undefined || value === '') {
+            params.delete(keyOrParams);
+          } else {
+            params.set(keyOrParams, value);
+          }
+        } else {
+          for (const [key, nextValue] of Object.entries(keyOrParams)) {
+            if (nextValue === null || nextValue === undefined || nextValue === '') {
+              params.delete(key);
+            } else {
+              params.set(key, nextValue);
+            }
+          }
+        }
+        const search = params.toString();
+        return router.visit(window.location.pathname + (search ? `?${search}` : ''), {
+          preserveScroll: true,
+        });
+      },
+
+      post(url, data, options = {}) {
+        return router.visit(url, { ...options, method: 'POST', data });
+      },
+
+      put(url, data, options = {}) {
+        return router.visit(url, { ...options, method: 'PUT', data });
+      },
+
+      patch(url, data, options = {}) {
+        return router.visit(url, { ...options, method: 'PATCH', data });
+      },
+
+      delete(url, options = {}) {
+        return router.visit(url, { ...options, method: 'DELETE' });
+      },
+    };
+
+    engine.setPopStateHandler((url, options) => {
+      router.visit(url, options);
+    });
+
+    return {
+      router,
+      initialPageData: engine.initialPageData,
+      initialComponent: engine.initialComponent,
+      initialLayouts: engine.initialLayouts,
+      start: engine.start,
+    };
+  }
 }
 
 // --- Island hydration ---

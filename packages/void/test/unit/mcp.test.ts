@@ -371,6 +371,54 @@ describe('query tool', () => {
     );
   });
 
+  it('rollback without options omits allowDestructive from the request body', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, deploymentId: 'd2' }),
+    });
+
+    await handleRequest(ctx, {
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'tools/call',
+      params: {
+        name: 'query',
+        arguments: { code: 'async () => await void_.rollback("p1", "d1")' },
+      },
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.deploymentId).toBe('d1');
+    expect(body).not.toHaveProperty('allowDestructive');
+  });
+
+  it('rollback with allowDestructive forwards the snapshot array in the request body', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, deploymentId: 'd2', migrationDiff: ['m2.sql'] }),
+    });
+
+    await handleRequest(ctx, {
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'tools/call',
+      params: {
+        name: 'query',
+        arguments: {
+          code: 'async () => await void_.rollback("p1", "d1", { allowDestructive: ["m2.sql"] })',
+        },
+      },
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.deploymentId).toBe('d1');
+    expect(body.allowDestructive).toEqual(['m2.sql']);
+  });
+
   it('executes addDomain via void_.addDomain()', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

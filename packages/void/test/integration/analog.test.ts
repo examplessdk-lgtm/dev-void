@@ -74,7 +74,6 @@ describe('playground/analog build', () => {
     const result = spawn.sync('pnpm', ['--dir', PLAYGROUND, 'build'], {
       cwd: ROOT,
       stdio: 'pipe',
-      timeout: 90_000,
       env: getCleanEnv(),
     });
     if (result.status !== 0) {
@@ -83,7 +82,7 @@ describe('playground/analog build', () => {
         .join('\n');
       throw new Error(`Build failed (exit ${result.status ?? result.signal}):\n${output}`);
     }
-  }, 120_000);
+  });
 
   it('produces expected build artifacts', () => {
     const serverEntry = join(ROOT, `${PLAYGROUND}/dist/analog/server/index.mjs`);
@@ -134,7 +133,7 @@ describe('playground/analog dev', () => {
     child.stderr!.on('data', () => {});
 
     await waitForServer(DEV_BASE, 30_000);
-  }, 45_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -153,4 +152,4 @@ describe('playground/analog dev', () => {
     expect(wranglerConfig.d1_databases?.some((b) => b.binding === 'DB')).toBe(true);
     expect(wranglerConfig.kv_namespaces?.some((b) => b.binding === 'KV')).toBe(true);
   });
-}, 60_000);
+});

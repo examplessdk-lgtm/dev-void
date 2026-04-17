@@ -148,64 +148,20 @@ function generateRendererModule(scan: PageScanResult, pagesDir: string, isDev: b
     : '';
 
   return `
-import React from "react";
-import { renderToString } from "react-dom/server";
-import { SharedContext, ErrorsContext, RouterContext } from "@void/react";
-import { renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from "void/pages-head";
+import { renderReactPage } from "@void/react/pages-server";
 
 ${generateComponentManifest(scan, pagesDir)}
 
-const PREAMBLE_SCRIPT = ${JSON.stringify(preambleScript)};
-
-function serializePageData(pageObj) {
-  return JSON.stringify(pageObj).replace(/[<>&\\u2028\\u2029]/g, function(c) {
-    return String.fromCharCode(92) + "u" + c.charCodeAt(0).toString(16).padStart(4, "0");
-  });
-}
-
-export async function renderPage(pageObj, assetTags) {
-  const PageComponent = (await components[pageObj.component]()).default;
-  const layoutIds = layoutTree[pageObj.component] || [];
-  const layoutComponents = await Promise.all(
-    layoutIds.map(async (id) => (await components[id]()).default)
-  );
-
-  // Build layout chain: outermost layout wraps inner layouts wrapping the page
-  let element = React.createElement(PageComponent, pageObj.props);
-  for (let i = layoutComponents.length - 1; i >= 0; i--) {
-    element = React.createElement(layoutComponents[i], null, element);
-  }
-
-  // Wrap in context providers
-  element = React.createElement(
-    SharedContext.Provider,
-    { value: pageObj.shared || {} },
-    React.createElement(
-      ErrorsContext.Provider,
-      { value: pageObj.errors || {} },
-      React.createElement(
-        RouterContext.Provider,
-        { value: null },
-        element
-      )
-    )
-  );
-
-  const html = renderToString(element);
-  const pageData = serializePageData(pageObj);
-  const headHtml = pageObj.head ? renderHeadToString(pageObj.head) : "";
-  const htmlAttrs = pageObj.head ? renderHtmlAttrs(pageObj.head) : "";
-  const bodyAttrs = pageObj.head ? renderBodyAttrs(pageObj.head) : "";
-
-  return \`<!doctype html>
-<html\${htmlAttrs}>
-<head>\${headHtml}\${PREAMBLE_SCRIPT}\${assetTags.css}\${assetTags.preloads}</head>
-<body\${bodyAttrs}>
-  <script id="__VOID_PAGE_DATA__" type="application/json">\${pageData}</script>
-  <div id="app">\${html}</div>
-  \${assetTags.body}
-</body>
-</html>\`;
+	const PREAMBLE_SCRIPT = ${JSON.stringify(preambleScript)};
+	
+	export async function renderPage(pageObj, assetTags) {
+	  return renderReactPage({
+	    pageObj,
+	    assetTags,
+	    components,
+	    layoutTree,
+	    preambleScript: PREAMBLE_SCRIPT,
+	  });
 }
 `;
 }
@@ -218,106 +174,22 @@ function generateClientEntry(
   staticPageData?: StaticPageDataBuildOptions,
 ): string {
   return `
-import React, { useSyncExternalStore } from "react";
-import { hydrateRoot } from "react-dom/client";
-import { flushSync } from "react-dom";
-import { SharedContext, ErrorsContext, RouterContext, setActionRouter } from "@void/react";
-import { createPageRouter } from "void/pages-client";
-import { parseCacheFor } from "void/pages-prefetch";
+	import { startReactPages } from "@void/react/pages-client";
+	import { parseCacheFor } from "void/pages-prefetch";
+	
+	${generateComponentManifest(scan, pagesDir)}
 
-${generateComponentManifest(scan, pagesDir)}
-
-// --- Module-level store ---
-let state = {
-  component: null,
-  props: {},
-  layouts: [],
-  shared: {},
-  errors: {},
-};
-
-const listeners = new Set();
-function subscribe(listener) {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
-function getSnapshot() {
-  return state;
-}
-function setState(partial) {
-  state = { ...state, ...partial };
-  for (const l of listeners) l();
-}
-
-const { router, initialPageData, initialComponent, initialLayouts, start } =
-  await createPageRouter({
-    adapter: {
-      createDeferred: () => ({ value: null, loading: true, error: null }),
-      resolveDeferred(ref, value) { return { value, loading: false, error: null }; },
-      rejectDeferred(ref, error) { return { value: null, loading: false, error: new Error(error) }; },
-      isLoading: (ref) => ref.loading,
-      applyUpdate(pageData, comp, layouts) {
-        flushSync(() => {
-          setState({
-            component: comp,
-            props: pageData.props,
-            layouts,
-            shared: { ...state.shared, ...(pageData.shared || {}) },
-            errors: pageData.errors || {},
-          });
-        });
-      },
-      onDeferredUpdate(props) {
-        setState({ props: { ...props } });
-      },
-    },
-    components, layoutTree, routeMeta, matchRoute,
-    staticPageData: ${!!staticPageData?.enabled},
-    staticPageDataFastPath: ${!!staticPageData?.fastPath},
-    viewTransitions: ${!!viewTransitions},
-    prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
-    prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? '30s')}),
-  });
-
-setActionRouter(router);
-
-state = {
-  component: initialComponent,
-  props: initialPageData.props,
-  layouts: initialLayouts,
-  shared: initialPageData.shared || {},
-  errors: initialPageData.errors || {},
-};
-
-function App() {
-  const snap = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-
-  if (!snap.component) return null;
-
-  let element = React.createElement(snap.component, snap.props);
-  for (let i = snap.layouts.length - 1; i >= 0; i--) {
-    element = React.createElement(snap.layouts[i], null, element);
-  }
-
-  return React.createElement(
-    SharedContext.Provider,
-    { value: snap.shared },
-    React.createElement(
-      ErrorsContext.Provider,
-      { value: snap.errors },
-      React.createElement(
-        RouterContext.Provider,
-        { value: router },
-        element
-      )
-    )
-  );
-}
-
-const appEl = document.getElementById("app");
-hydrateRoot(appEl, React.createElement(App));
-appEl.setAttribute("data-hydrated", "true");
-export { router };
-start();
-`;
+	const { router } = await startReactPages({
+	  components,
+	  layoutTree,
+	  routeMeta,
+	  matchRoute,
+	  staticPageData: ${!!staticPageData?.enabled},
+	  staticPageDataFastPath: ${!!staticPageData?.fastPath},
+	  viewTransitions: ${!!viewTransitions},
+	  prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
+	  prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? '30s')}),
+	});
+	export { router };
+	`;
 }

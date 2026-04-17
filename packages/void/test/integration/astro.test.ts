@@ -37,7 +37,7 @@ describe('playground/astro build', () => {
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     removeWranglerConfig(pg);
     execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
-  }, 120_000);
+  });
 
   it('produces expected build artifacts', () => {
     const workerEntry = join(ROOT, `${PLAYGROUND}/dist/server/entry.mjs`);
@@ -95,7 +95,7 @@ describe('playground/astro dev', () => {
 
     // Second boot: adapter reads synced config so runtime bindings are available.
     await startDev();
-  }, 60_000);
+  });
 
   afterAll(async () => {
     if (child) {
@@ -134,4 +134,4 @@ describe('playground/astro dev', () => {
       await browser.close();
     }
   });
-}, 60_000);
+});

@@ -23,7 +23,7 @@ describe('playground/nuxt build', () => {
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     removeWranglerConfig(pg);
     execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
-  }, 120_000);
+  });
 
   it('produces expected build artifacts', () => {
     const serverEntry = join(ROOT, `${PLAYGROUND}/.output/server/index.mjs`);

@@ -72,8 +72,10 @@ describe('playground/pg-test', () => {
       stderr += String(chunk);
     });
 
-    await waitForServer(BASE, 20_000);
-  }, 30_000);
+    await waitForServer(BASE, 30_000, {
+      isAlive: () => devChild.exitCode === null && devChild.signalCode === null,
+    });
+  });
 
   afterAll(async () => {
     if (devChild) {
@@ -236,4 +238,4 @@ describe('playground/pg-test', () => {
     const user = (await getRes.json()) as any;
     expect(user.name).toBe('Bob');
   });
-}, 60_000);
+});

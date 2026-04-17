@@ -226,7 +226,7 @@ describe('markdown-blog playground', () => {
       });
 
       await waitForServer(DEV_BASE, 20_000);
-    }, 30_000);
+    });
 
     afterAll(async () => {
       if (child) {
@@ -291,7 +291,7 @@ describe('markdown-blog playground', () => {
     defineSidebarTests(() => DEV_BASE);
     defineMdClientEntryTests(() => DEV_BASE);
     defineClientScriptTests(() => DEV_BASE);
-  }, 60_000);
+  });
 
   describe('production (build + preview)', () => {
     let child: ReturnType<typeof spawn>;
@@ -336,7 +336,7 @@ describe('markdown-blog playground', () => {
       await waitForServer(PREVIEW_BASE, 20_000, {
         isAlive: () => child.exitCode === null,
       });
-    }, 60_000);
+    });
 
     afterAll(async () => {
       if (child) {
@@ -405,5 +405,5 @@ describe('markdown-blog playground', () => {
     defineSidebarTests(() => PREVIEW_BASE);
     defineMdClientEntryTests(() => PREVIEW_BASE);
     defineClientScriptTests(() => PREVIEW_BASE);
-  }, 60_000);
-}, 60_000);
+  });
+});

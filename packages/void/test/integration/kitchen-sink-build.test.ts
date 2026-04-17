@@ -58,7 +58,7 @@ describe('playground/kitchen-sink build', () => {
 
     buildOutput = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     expect(result.status).toBe(0);
-  }, 120_000);
+  });
 
   afterAll(() => {
     if (!envProductionSnapshotTaken) {

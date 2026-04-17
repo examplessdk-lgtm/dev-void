@@ -1,4 +1,4 @@
-import { relative } from 'node:path';
+import { relative } from 'pathe';
 import type { QueueDefinition } from '../queues/scan';
 
 /**
@@ -19,7 +19,7 @@ export function generateQueueTypes(
 
   for (const q of queues) {
     const absPath = `${queuesDir}/${q.filePath}`;
-    const relPath = relative(outDir, absPath).replace(/\\/g, '/');
+    const relPath = relative(outDir, absPath);
     const importPath = relPath.replace(/\.(ts|mts|js|mjs)$/, '');
 
     lines.push(
