@@ -594,6 +594,20 @@ export function voidPlugin(options?: {
     return result as Partial<WorkerConfig>;
   }
 
+  // Merge schema defaults from env.ts into workerConfig.vars without
+  // shadowing values already provided by .env files / shell. Wired into
+  // envSchemaPlugin's onDefaults callback for CF targets only (the node
+  // target reads from process.env at runtime).
+  function applySchemaDefaultsToWorkerVars(defaults: Record<string, string>): void {
+    const vars = (workerConfig.vars as Record<string, string> | undefined) ?? {};
+    for (const [key, value] of Object.entries(defaults)) {
+      if (vars[key] === undefined) {
+        vars[key] = value;
+      }
+    }
+    workerConfig.vars = vars;
+  }
+
   // Plugin that loads .env files and merges them into workerConfig.vars.
   // Runs before the Cloudflare plugin so vars are available as worker bindings.
   const envPlugin: Plugin = {
@@ -827,7 +841,7 @@ export function voidPlugin(options?: {
       restartPlugin(),
       bindingWatchPlugin,
       envPlugin,
-      envSchemaPlugin(root),
+      envSchemaPlugin(root, { onDefaults: applySchemaDefaultsToWorkerVars }),
       clientStubsPlugin,
       drizzlePlugin(root, false, getDatabaseDialect(config), {
         forceVirtualDb: authEnabled,
@@ -932,7 +946,7 @@ export function voidPlugin(options?: {
     restartPlugin(),
     bindingWatchPlugin,
     envPlugin,
-    envSchemaPlugin(root),
+    envSchemaPlugin(root, { onDefaults: applySchemaDefaultsToWorkerVars }),
     clientStubsPlugin,
     routingPlugin(root, {
       isAuthEnabled: () => authEnabled,

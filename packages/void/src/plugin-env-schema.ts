@@ -12,11 +12,24 @@ interface RegisteredSchemaModule {
     { '~standard': { validate: (v: unknown) => unknown } }
   > | null;
   _hasRegisteredSchema(): boolean;
+  _getSchemaDefaults(): Record<string, string>;
   validateAllEnv(values: Record<string, unknown>): Promise<{
     valid: boolean;
     missing: string[];
     invalid: { key: string; messages: string[] }[];
   }>;
+}
+
+export interface EnvSchemaPluginOptions {
+  /**
+   * Called with the schema's `.default(value)` entries (stringified) so the
+   * caller can seed worker bindings, deploy manifest vars, or any other env
+   * sink. Invoked after the user's `env.ts` has been imported so the
+   * registered schema is up-to-date. User-provided values in `.env*` /
+   * shell env should take precedence — the caller is responsible for
+   * "skip if already set" semantics.
+   */
+  onDefaults?: (defaults: Record<string, string>) => void;
 }
 
 let cachedSchemaModule: RegisteredSchemaModule | null = null;
@@ -41,10 +54,21 @@ async function loadSchemaModule(): Promise<RegisteredSchemaModule> {
  * Hard errors are reserved for `void deploy`; dev keeps moving with warnings
  * so unrelated work isn't blocked by a stale .env.local.
  */
-export function envSchemaPlugin(root: string): Plugin {
+export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = {}): Plugin {
   const outDir = join(root, '.void');
   let envFile: string | null = null;
   let viteMode = 'development';
+
+  async function emitDefaults() {
+    if (!envFile || !options.onDefaults) {
+      return;
+    }
+    const { _hasRegisteredSchema, _getSchemaDefaults } = await loadSchemaModule();
+    if (!_hasRegisteredSchema()) {
+      return;
+    }
+    options.onDefaults(_getSchemaDefaults());
+  }
 
   function regenerateTypes() {
     if (!envFile) {
@@ -100,6 +124,10 @@ export function envSchemaPlugin(root: string): Plugin {
         return;
       }
       regenerateTypes();
+      // Import env.ts at config time so onDefaults can fire before the
+      // Cloudflare plugin's mergeBindings reads workerConfig.vars.
+      await importUserEnv();
+      await emitDefaults();
     },
     async configResolved(config) {
       viteMode = config.mode;
@@ -124,6 +152,7 @@ export function envSchemaPlugin(root: string): Plugin {
           voidLog('env.ts changed — regenerating types');
           regenerateTypes();
           await importUserEnv();
+          await emitDefaults();
           await validateAndWarn();
         }
       });

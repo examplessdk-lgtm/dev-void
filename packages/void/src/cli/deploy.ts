@@ -52,7 +52,12 @@ import {
   formatDeployFailureMessage,
   formatStreamDeployError,
 } from './deploy-errors';
-import { fetchRemoteSecretNames, formatEnvReport, validateProdEnv } from './env-validation';
+import {
+  fetchRemoteSecretNames,
+  formatEnvReport,
+  getDeployEnvDefaults,
+  validateProdEnv,
+} from './env-validation';
 import { parseHeadersFile, parseRedirectsFile } from './headers';
 import { promptForLoginToken } from './login';
 import { cliTitle, createSpinner } from './output';
@@ -661,6 +666,11 @@ async function runFrameworkDeploy(
   // 10a. Validate against env.ts schema if present.
   await assertEnvSchemaValid(root, client, config.projectId);
 
+  // 10b. Overlay schema `.default(value)` entries for keys not set in
+  //     .env files so the deployed worker sees the same fallback as the
+  //     typed `env.X` proxy.
+  await applySchemaDefaultsToVars(root, envVars);
+
   // 11. Package & deploy
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
@@ -996,6 +1006,11 @@ async function runFullDeploy(
   // 9a. Validate against env.ts schema if present.
   await assertEnvSchemaValid(root, client, config.projectId);
 
+  // 9b. Overlay schema `.default(value)` entries for keys not set in
+  //     .env files so the deployed worker sees the same fallback as the
+  //     typed `env.X` proxy.
+  await applySchemaDefaultsToVars(root, envVars);
+
   // 10. Package & Upload
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
@@ -1309,6 +1324,24 @@ function migrationSnapshotsEqual(
     const [rightPath, rightContent] = rightEntries[index] ?? [];
     return leftPath === rightPath && leftContent === rightContent;
   });
+}
+
+/**
+ * Overlay schema `.default(value)` entries onto the deploy manifest vars so
+ * the deployed worker sees the same fallback as the typed `env.X` proxy at
+ * runtime. User-provided `.env*` values always win — defaults only fill
+ * gaps. No-op when the project has no `env.ts`.
+ */
+async function applySchemaDefaultsToVars(
+  root: string,
+  envVars: Record<string, string>,
+): Promise<void> {
+  const defaults = await getDeployEnvDefaults(root);
+  for (const [key, value] of Object.entries(defaults)) {
+    if (envVars[key] === undefined) {
+      envVars[key] = value;
+    }
+  }
 }
 
 /**

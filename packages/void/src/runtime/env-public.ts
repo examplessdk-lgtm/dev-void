@@ -170,6 +170,49 @@ export function _hasRegisteredSchema(): boolean {
   return hasDefineEnvBeenCalled;
 }
 
+/**
+ * Internal: extract `.default(value)` values from the registered schema as
+ * stringified env values. Used by the plugin and deploy CLI to seed worker
+ * `vars` so `c.env.X` and `process.env.X` see the same fallback that the
+ * typed `env.X` proxy returns.
+ *
+ * Detection is schema-agnostic: probe each validator with `undefined` and,
+ * if it succeeds with a non-undefined value, that value is the default.
+ * Works for our built-in `.default(...)` helpers and for any Standard
+ * Schema validator with intrinsic default behaviour. Async validators are
+ * skipped (we can't get a sync default).
+ *
+ * Keys with no default — required keys, plain `.optional()` — are omitted
+ * from the result so they don't shadow user `.env*` entries with empty
+ * strings.
+ */
+export function _getSchemaDefaults(): Record<string, string> {
+  const defaults: Record<string, string> = {};
+  if (!registeredSchema) {
+    return defaults;
+  }
+  for (const [key, validator] of Object.entries(registeredSchema)) {
+    let result: unknown;
+    try {
+      result = validator['~standard'].validate(undefined);
+    } catch {
+      continue;
+    }
+    if (result instanceof Promise) {
+      continue;
+    }
+    const r = result as { value?: unknown; issues?: unknown };
+    if (r.issues) {
+      continue;
+    }
+    if (r.value === undefined || r.value === null) {
+      continue;
+    }
+    defaults[key] = typeof r.value === 'string' ? r.value : String(r.value);
+  }
+  return defaults;
+}
+
 export class EnvValidationError extends Error {
   constructor(
     public readonly key: string,

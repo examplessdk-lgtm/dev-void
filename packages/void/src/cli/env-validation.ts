@@ -18,7 +18,25 @@ import type { PlatformClient } from './client';
 interface EnvPublicModule {
   _getRegisteredSchema(): Record<string, unknown> | null;
   _hasRegisteredSchema(): boolean;
+  _getSchemaDefaults(): Record<string, string>;
   validateAllEnv(values: Record<string, unknown>): Promise<EnvValidationReport>;
+}
+
+/**
+ * After the user's env.ts has been imported (via `validateProdEnv` or
+ * `loadSchema`), read the registered schema's `.default(value)` entries.
+ * Returns `{}` if no schema was registered.
+ */
+export async function getDeployEnvDefaults(root: string): Promise<Record<string, string>> {
+  const envFile = findEnvFile(root);
+  if (!envFile) {
+    return {};
+  }
+  const mod = await loadSchema(envFile);
+  if (!mod) {
+    return {};
+  }
+  return mod._getSchemaDefaults();
 }
 
 /** Load the registered schema by importing the user's env.ts. */

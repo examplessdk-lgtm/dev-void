@@ -7,6 +7,7 @@ import {
   EnvValidationError,
   validateAllEnv,
   _getRegisteredSchema,
+  _getSchemaDefaults,
   _hasRegisteredSchema,
   _validateEnvOnce,
 } from '../../src/runtime/env-public';
@@ -359,5 +360,64 @@ describe('env proxy with async validators', () => {
       expect(() => env.TOKEN).toThrow(/Async env validator for "TOKEN"/);
       expect(() => env.TOKEN).toThrow(/_validateEnvOnce/);
     });
+  });
+});
+
+describe('_getSchemaDefaults (used by plugin and deploy CLI)', () => {
+  beforeEach(() => {
+    resetSchema();
+  });
+
+  it('returns defaults for keys with .default(value)', () => {
+    defineEnv({
+      PORT: number().default(3000),
+      MODE: oneOf(['dev', 'prod'] as const).default('dev'),
+      DEBUG: boolean().default(false),
+    });
+    const defaults = _getSchemaDefaults();
+    expect(defaults).toEqual({ PORT: '3000', MODE: 'dev', DEBUG: 'false' });
+  });
+
+  it('omits required keys (no default)', () => {
+    defineEnv({ STRIPE_KEY: string(), PORT: number().default(3000) });
+    const defaults = _getSchemaDefaults();
+    expect(defaults).toEqual({ PORT: '3000' });
+    expect(defaults).not.toHaveProperty('STRIPE_KEY');
+  });
+
+  it('omits .optional() keys without a default (undefined value)', () => {
+    defineEnv({ DEBUG: string().optional(), MODE: string().default('x') });
+    const defaults = _getSchemaDefaults();
+    expect(defaults).toEqual({ MODE: 'x' });
+    expect(defaults).not.toHaveProperty('DEBUG');
+  });
+
+  it('returns {} when no schema is registered', () => {
+    expect(_getSchemaDefaults()).toEqual({});
+  });
+
+  it('skips async validators (cannot extract sync default)', () => {
+    const asyncWithoutDefault = {
+      '~standard': {
+        version: 1 as const,
+        vendor: 'test',
+        validate: async (v: unknown) => {
+          await Promise.resolve();
+          return v === undefined ? { value: 'never-used' } : { value: v };
+        },
+      },
+    };
+    defineEnv({ ASYNC: asyncWithoutDefault, SYNC: string().default('s') });
+    expect(_getSchemaDefaults()).toEqual({ SYNC: 's' });
+  });
+
+  it('stringifies non-string default values', () => {
+    defineEnv({
+      PORT: number().default(8080),
+      ON: boolean().default(true),
+    });
+    const defaults = _getSchemaDefaults();
+    expect(defaults.PORT).toBe('8080');
+    expect(defaults.ON).toBe('true');
   });
 });
