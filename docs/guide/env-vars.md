@@ -4,41 +4,106 @@ outline: deep
 
 # Environment Variables
 
-Void uses Vite's standard `.env` convention for environment variables.
+Void provides typed, validated environment variables via a single `env.ts` file at the root of your project. The schema serves three purposes:
 
-## `.env` (committed)
+1. **Runtime validation** — declared keys are validated on first access; missing/invalid values produce a clear error
+2. **TypeScript** — `env.X` and `c.env.X` become typed automatically (no manual interface to maintain)
+3. **Deploy safety** — `void deploy` refuses to upload if a required key is missing from `.env*` files or remote secrets
 
-Non-secret configuration. All variables are injected into the worker `env` object. Variables prefixed with `VITE_` are also available on `import.meta.env` in client code.
+## `env.ts` (recommended)
 
-```
-API_URL=https://api.example.com
-VITE_APP_TITLE=My App
-```
-
-Access in route handlers via `c.env`:
+Place an `env.ts` at your project root and call `defineEnv` once:
 
 ```ts
-export const GET = defineHandler((c) => {
-  const apiUrl = c.env.API_URL;
-  return { apiUrl };
+// env.ts
+import { defineEnv, string, number, boolean, oneOf, url } from 'void/env';
+
+export default defineEnv({
+  STRIPE_KEY: string(),
+  PORT: number().default(3000),
+  NODE_ENV: oneOf(['development', 'production']),
+  WEBHOOK_URL: url(),
+  DEBUG: boolean().optional(),
+  VITE_APP_TITLE: string(),
 });
 ```
 
-## `.env.local` (gitignored)
+Then read values from anywhere in your app:
 
-Secrets for local development. This file should be added to `.gitignore` and never committed.
+```ts
+import { env } from 'void/env';
 
+console.log(env.STRIPE_KEY); // typed as string
+console.log(env.PORT); // typed as number
 ```
-GITHUB_SECRET=your-github-client-secret
-STRIPE_KEY=sk_test_...
+
+`c.env.STRIPE_KEY` inside Hono handlers is also typed once the schema is declared.
+
+### Built-in helpers
+
+`string()`, `number()`, `boolean()`, `url()`, `email()`, `oneOf([...])`, `json<T>()` cover the common cases. Each helper returns a Standard Schema-conformant builder with `.optional()` and `.default(value)` modifiers.
+
+For richer validation (regex, transforms, branded types), drop in any [Standard Schema](https://standardschema.dev) library — valibot, zod, or arktype work out of the box, and you can mix them with the built-ins:
+
+```ts
+import * as v from 'valibot';
+
+export default defineEnv({
+  STRIPE_KEY: string(), // built-in
+  WEBHOOK_URL: v.pipe(v.string(), v.url(), v.endsWith('/webhook')), // valibot
+});
 ```
 
-To push local secrets to production, use [`void secret sync`](../reference/cli#void-secret-sync).
+### Client vs server
 
-## How it works
+Keys prefixed with `VITE_` are exposed to client code (Vite already enforces this at the bundler level). All other keys are server-only — accessing one from a client module throws a clear runtime error pointing at the fix.
 
-**Dev** (`vite dev`): All `.env` files are loaded, including `.env.local` and `.env.production.local`. Secrets are available locally via `c.env`.
+## `.env` files
 
-**Deploy** (`void deploy`): only `.env` and `.env.production` are included in the deploy manifest as `plain_text` bindings. `.local` files such as `.env.local` and `.env.production.local` are excluded because they are meant for local secrets only.
+Void uses Vite's standard `.env` convention to populate the schema:
 
-**Production secrets**: Use [`void secret put`](../reference/cli#void-secret-put) or [`void secret sync`](../reference/cli#void-secret-sync) to set secret bindings on your deployed worker. These are stored as encrypted `secret_text` bindings, not plain text.
+| File                    | Loaded in dev | Shipped on deploy  |
+| ----------------------- | ------------- | ------------------ |
+| `.env`                  | yes           | yes (`plain_text`) |
+| `.env.local`            | yes           | no                 |
+| `.env.production`       | yes           | yes (`plain_text`) |
+| `.env.production.local` | yes           | no                 |
+
+`.local` files are gitignored by convention — use them for secrets you don't want in source control.
+
+## Production secrets
+
+For values that should never live in a `.env` file (Stripe keys, OAuth secrets, etc.), upload them as encrypted secret bindings on your deployed worker:
+
+```bash
+void secret put STRIPE_KEY            # prompts for value
+void secret put STRIPE_KEY < key.txt  # from stdin
+void secret sync .env.production      # bulk upload from a dotenv file
+void secret list
+void secret delete STRIPE_KEY
+```
+
+Remote secrets count as "present" for deploy validation — `void deploy` checks both `.env*` and the remote secret list before uploading.
+
+## Validation behavior
+
+| Phase                | Behavior                                                                                                         |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Dev server start     | Warns about missing/invalid keys (does not block).                                                               |
+| First runtime access | Throws `EnvValidationError` with the failing key and reason.                                                     |
+| `void env check`     | Validates `.env` + `.env.production` (and optionally remote secrets with `--remote`); exits non-zero on failure. |
+| `void deploy`        | Hard-errors before upload if any required key is missing from the union of `.env*` and remote secrets.           |
+
+Use `void env check --remote` in CI before deploying — it catches missing prod secrets without running a full build.
+
+## Manual type regeneration
+
+Types are auto-generated to `.void/env.d.ts` on dev server start and whenever `env.ts` changes. To regenerate manually (e.g. after a fresh clone):
+
+```bash
+void env types
+```
+
+## Migration from untyped `c.env`
+
+If you don't have an `env.ts`, `c.env.X` continues to work as `unknown` — no breaking change. To opt in, create `env.ts`, declare your keys, and the existing call sites become typed automatically. The recommended access pattern for new code is `import { env } from "void/env"`.

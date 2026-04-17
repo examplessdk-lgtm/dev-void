@@ -102,7 +102,7 @@ src/
 | `void/db`        | `db` Drizzle D1 instance (auto-wired with user schema) + `createDb()` for custom D1 bindings                            |
 | `void/queues`    | `queues` typed proxy + `QueueMap` stub interface (augmented by generated `queues.d.ts`)                                 |
 | `void/ai`        | `ai` proxy — `ai.run()`, `ai.stream()`, `ai.models()` with auto-detected backend (service binding / HTTPS / direct)     |
-| `void/env`       | Global Cloudflare env types (`D1Database`, `KVNamespace`, `R2Bucket`, `Ai`)                                             |
+| `void/env`       | `defineEnv()`, typed `env` proxy, built-in schema helpers (`string`, `number`, `oneOf`, …) + global Cloudflare types    |
 
 The CLI binary is at `dist/cli/cli.mjs` (declared in `bin` field of package.json).
 

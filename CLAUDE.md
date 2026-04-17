@@ -70,6 +70,7 @@ The `void` package contains two parts:
 
 - **Routing** — file-based API routing on Hono with named HTTP method exports
 - **Validation** — request body/query/params validation via any Standard Schema library
+- **Typed env** — `defineEnv()` in `env.ts` validates and types env vars; `void deploy` hard-fails on missing prod secrets
 - **Typed fetch client** — fully-inferred client from route definitions
 - **Typed DB** — auto-generated types from SQL migrations
 - **Auth** — built-in email/password + OAuth, auto-detected from imports and env vars

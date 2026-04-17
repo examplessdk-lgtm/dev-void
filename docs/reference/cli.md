@@ -21,6 +21,8 @@ Use this page as a command reference. If you are setting up a project for the fi
 | `void db studio`                  | Open Drizzle Studio for local database              |
 | `void secret put <name=value>`    | Set a production secret                             |
 | `void secret sync .env.local`     | Bulk upload secrets from dotenv file                |
+| `void env check [--remote]`       | Validate env.ts schema (CI-friendly)                |
+| `void env types`                  | Regenerate .void/env.d.ts from env.ts               |
 | `void auth login`                 | Authenticate with Void                              |
 | `void project link`               | Link directory to a project                         |
 | `void project logs`               | Show runtime logs from deployed project             |
@@ -403,6 +405,30 @@ void secret delete <name> [--project <name>]
 ```
 
 Project resolution for secrets follows the same order as deploy (`--project`, env var, linked project).
+
+## Env Schema
+
+### `void env check`
+
+```
+void env check [--remote]
+```
+
+Validate `env.ts` against `.env` + `.env.production` (and, with `--remote`, also against the remote secret list). Exits non-zero if any required key is missing or invalid. Use in CI before deploy.
+
+### `void env types`
+
+```
+void env types
+```
+
+Regenerate `.void/env.d.ts` from `env.ts`. Normally happens automatically on dev server start and HMR; use this command after a fresh clone or to refresh stale types in non-dev contexts.
+
+::: tip Deploy validation
+`void deploy` runs the same schema validation automatically (with remote secrets) and refuses to upload if any required key is missing — no need to call `env check` separately when deploying.
+:::
+
+See [Environment Variables](../guide/env-vars.md) for the full guide.
 
 ## Custom Domains
 

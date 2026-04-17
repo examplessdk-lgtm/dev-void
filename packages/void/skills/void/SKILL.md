@@ -52,6 +52,7 @@ Then ask what to do next.
 | Cache purging                             | `docs/reference/cli.md`                                                                   |
 | Project logs, runtime errors              | `docs/reference/cli.md`                                                                   |
 | Secrets management (put/sync/delete)      | `docs/reference/cli.md`, `docs/guide/env-vars.md`                                         |
+| Typed env vars (`defineEnv`, `env.ts`)    | `docs/guide/env-vars.md`                                                                  |
 | Custom domain setup                       | `docs/reference/cli.md`                                                                   |
 | Database status, reset, seed, export      | `docs/reference/cli.md`, `docs/guide/database.md`                                         |
 | Auth login/logout/whoami                  | `docs/reference/cli.md`                                                                   |
@@ -70,3 +71,4 @@ Then ask what to do next.
 - Never guess or infer `void` CLI command names or flags. Always consult `docs/reference/cli.md` for the exact command before running it.
 - For multi-topic tasks, combine only the needed doc files.
 - If docs and memory differ, follow docs.
+- **Env vars:** When the project has `env.ts`, the canonical access pattern is `import { env } from "void/env"`. Declare every env key in `env.ts` via `defineEnv({...})` so values are typed and validated. Do not introduce ad-hoc `process.env.X` or untyped `c.env.X` access in new code — add the key to `env.ts` first.
