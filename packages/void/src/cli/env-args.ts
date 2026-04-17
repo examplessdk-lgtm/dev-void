@@ -18,11 +18,11 @@ export const envSubcommands: SubcommandDef[] = [
   },
   {
     name: 'example',
-    description: 'Generate .env.example from env.ts schema',
+    description: 'Refresh the void-managed block in .env.example',
     flags: [
       {
         name: '--force',
-        description: 'Overwrite .env.example without confirmation',
+        description: 'Suppress the "appended block" notice (for scripted runs)',
       },
     ],
   },

@@ -109,11 +109,25 @@ void env types
 Generate (or refresh) a `.env.example` from your `env.ts` schema:
 
 ```bash
-void env example           # prompts before overwriting an existing file
-void env example --force   # overwrite without prompting (use in CI)
+void env example           # creates or refreshes the void-managed block
+void env example --force   # silences the "appended block" notice (use in CI)
 ```
 
-The generated file is grouped into `required`, `with defaults`, and `optional` sections. Keys defined via `oneOf([...])` get a leading `# enum: A | B | C` comment listing the valid values, and keys with a `.default(x)` are prefilled. Commit the `.env.example` — it's the single source of truth for teammates and coding agents setting up the project.
+`void env example` manages a marker-delimited block inside `.env.example` — anything outside the markers (custom CI tokens, build flags, comments) is preserved verbatim across refreshes. The block looks like this:
+
+```ini
+# >>> void env: managed block — do not edit between markers <<<
+# Run `void env example` to refresh.
+# required
+STRIPE_KEY=
+# with defaults
+PORT=3000
+# >>> end void env <<<
+```
+
+On first run, Void writes a fresh `.env.example` containing only the marker block. On subsequent runs, only the lines between the markers are replaced. If the file already exists with no markers, the block is appended at the end and Void prints a one-line notice (suppressed by `--force`).
+
+The managed block is grouped into `required`, `with defaults`, and `optional` sections. Keys defined via `oneOf([...])` get a leading `# enum: A | B | C` comment listing the valid values, and keys with a `.default(x)` are prefilled. Commit the `.env.example` — it's the single source of truth for teammates and coding agents setting up the project.
 
 ## Migration from untyped `c.env`
 
