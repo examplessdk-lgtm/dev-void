@@ -613,17 +613,24 @@ export function voidPlugin(options?: {
   // Runs before the Cloudflare plugin so vars are available as worker bindings.
   const envPlugin: Plugin = {
     name: 'void:env',
-    config(_, { mode, command }) {
+    config(userConfig, { mode, command }) {
       viteCommand = command;
       // Exclude the .void cache directory from the file watcher so that
       // miniflare SQLite writes don't trigger infinite HMR refreshes.
       const ignored = ['**/.void/**'];
+      // Honour the user's `envDir` config — projects that keep .env files
+      // in `config/` or similar would otherwise be silently ignored. Falls
+      // back to the project root, matching Vite's own default.
+      const envDir =
+        typeof userConfig.envDir === 'string' && userConfig.envDir.length > 0
+          ? join(root, userConfig.envDir)
+          : root;
       // loadEnv with prefix "" returns .env file vars AND all process.env vars.
       // filterLoadedEnv strips shell pollution (PATH, HOME, etc.) so only
       // .env-file vars reach worker bindings. stripInternalEnvKeys then
       // removes any internal Void keys a user may have set in their .env
       // files, so they can't hijack credential-shaped worker bindings.
-      const filtered = filterLoadedEnv(loadEnv(mode, root, ''));
+      const filtered = filterLoadedEnv(loadEnv(mode, envDir, ''));
       const { sanitized: env, stripped } = stripInternalEnvKeys(filtered);
       if (stripped.length > 0) {
         voidWarn(

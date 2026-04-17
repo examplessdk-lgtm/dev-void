@@ -1,10 +1,11 @@
 /**
  * Client-side variant of `void/env`.
  *
- * Selected via the `browser` export condition. Only `VITE_*` env keys are
- * accessible — Vite already strips non-prefixed keys from the client bundle,
- * so reaching for one here would silently return `undefined`. Instead we
- * throw a clear error pointing at the fix.
+ * Selected via the `browser` export condition. Vite already strips
+ * non-prefixed env keys from the client bundle (the prefix is configurable
+ * via `envPrefix`, defaulting to `VITE_*`). If a server-only key is read
+ * here it isn't on `import.meta.env`, so we throw a clear error rather than
+ * silently returning `undefined`.
  *
  * Schema builders (`string`, `number`, …) and `defineEnv` are re-exported
  * unchanged so that `env.ts` can be imported into any module without
@@ -15,15 +16,20 @@ interface ImportMetaEnvLike {
   readonly env?: Record<string, unknown>;
 }
 
+function getClientEnv(): Record<string, unknown> | undefined {
+  return (import.meta as unknown as ImportMetaEnvLike).env;
+}
+
 function readClientKey(key: string): unknown {
-  if (!key.startsWith('VITE_')) {
-    throw new Error(
-      `Server-only env "${key}" was accessed from client code. ` +
-        `Add the VITE_ prefix to expose it to the browser, or move the usage to a server module.`,
-    );
+  const meta = getClientEnv();
+  if (meta && key in meta) {
+    return meta[key];
   }
-  const meta = import.meta as unknown as ImportMetaEnvLike;
-  return meta.env?.[key];
+  throw new Error(
+    `Env key "${key}" is not exposed to the client. ` +
+      `Vite only injects keys matching the configured envPrefix (default: VITE_*). ` +
+      `Either rename the key in env.ts to match envPrefix, or move this access to a server module.`,
+  );
 }
 
 export const env = new Proxy({} as Record<string, unknown>, {
@@ -37,30 +43,25 @@ export const env = new Proxy({} as Record<string, unknown>, {
     if (typeof key !== 'string') {
       return false;
     }
-    if (!key.startsWith('VITE_')) {
-      return false;
-    }
-    const meta = import.meta as unknown as ImportMetaEnvLike;
-    return meta.env ? key in meta.env : false;
+    const meta = getClientEnv();
+    return meta ? key in meta : false;
   },
   ownKeys() {
-    const meta = import.meta as unknown as ImportMetaEnvLike;
-    if (!meta.env) {
-      return [];
-    }
-    return Object.keys(meta.env).filter((k) => k.startsWith('VITE_'));
+    const meta = getClientEnv();
+    return meta ? Object.keys(meta) : [];
   },
   getOwnPropertyDescriptor(_target, key) {
     if (typeof key !== 'string') {
       return undefined;
     }
-    if (!key.startsWith('VITE_')) {
+    const meta = getClientEnv();
+    if (!meta || !(key in meta)) {
       return undefined;
     }
     return {
       enumerable: true,
       configurable: true,
-      value: readClientKey(key),
+      value: meta[key],
     };
   },
 }) as Record<string, unknown>;

@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { envSchemaPlugin } from '../../src/plugin-env-schema';
 
 /**
@@ -32,6 +32,21 @@ async function runConfig(plugin: ReturnType<typeof envSchemaPlugin>): Promise<vo
   if (hook && typeof hook === 'object' && 'handler' in hook) {
     const handler = (hook as { handler: (c: unknown, e: unknown) => unknown }).handler;
     await handler.call({}, {}, { mode: 'development' });
+  }
+}
+
+async function runConfigResolved(
+  plugin: ReturnType<typeof envSchemaPlugin>,
+  resolved: Record<string, unknown>,
+): Promise<void> {
+  const hook = plugin.configResolved as unknown;
+  if (typeof hook === 'function') {
+    await (hook as (c: unknown) => unknown).call({}, resolved);
+    return;
+  }
+  if (hook && typeof hook === 'object' && 'handler' in hook) {
+    const handler = (hook as { handler: (c: unknown) => unknown }).handler;
+    await handler.call({}, resolved);
   }
 }
 
@@ -96,5 +111,79 @@ describe('envSchemaPlugin auto-discovery', () => {
     await runConfig(plugin);
 
     expect(existsSync(join(root, '.void', 'env.d.ts'))).toBe(false);
+  });
+
+  // The define-overlap warning runs in `configResolved`. We register the
+  // schema directly via `defineEnv` (rather than through a temp env.ts loaded
+  // by jiti) so the singleton the plugin reads matches the one the test
+  // mutated — jiti's own module instance is invisible to vitest imports.
+  it('warns when vite `define` shadows a schema env key', async () => {
+    const { defineEnv } = await import('../../src/runtime/env-public');
+    const { string } = await import('../../src/runtime/env-helpers');
+    defineEnv({ STRIPE_KEY: string(), VITE_TITLE: string() });
+
+    const root = createTempRoot();
+    writeFileSync(
+      join(root, 'env.ts'),
+      'import { defineEnv, string } from "void/env";\n' +
+        'export default defineEnv({ STRIPE_KEY: string(), VITE_TITLE: string() });\n',
+    );
+
+    const plugin = envSchemaPlugin(root);
+    await runConfig(plugin); // sets envFile so configResolved emits the warning
+
+    // voidWarn writes via console.log (with ANSI yellow), not console.warn.
+    const warnSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runConfigResolved(plugin, {
+      mode: 'development',
+      envDir: root,
+      define: {
+        'process.env.STRIPE_KEY': '"shadowed"',
+        'import.meta.env.VITE_TITLE': '"hello"',
+        // unrelated define — should not be flagged
+        __BUILD_VERSION__: '"1.2.3"',
+      },
+    });
+
+    const calls = warnSpy.mock.calls.map((c) => String(c[0] ?? ''));
+    warnSpy.mockRestore();
+    const joined = calls.join('\n');
+    expect(joined).toContain('shadowing schema env keys');
+    expect(joined).toContain('STRIPE_KEY');
+    expect(joined).toContain('VITE_TITLE');
+    expect(joined).not.toContain('__BUILD_VERSION__');
+  });
+
+  it('does not warn when define has no overlap with the schema', async () => {
+    const { defineEnv } = await import('../../src/runtime/env-public');
+    const { string } = await import('../../src/runtime/env-helpers');
+    defineEnv({ STRIPE_KEY: string() });
+
+    const root = createTempRoot();
+    writeFileSync(
+      join(root, 'env.ts'),
+      'import { defineEnv, string } from "void/env";\n' +
+        'export default defineEnv({ STRIPE_KEY: string() });\n',
+    );
+
+    const plugin = envSchemaPlugin(root);
+    await runConfig(plugin);
+
+    const warnSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runConfigResolved(plugin, {
+      mode: 'development',
+      envDir: root,
+      define: {
+        'process.env.UNRELATED': '"x"',
+        __BUILD_VERSION__: '"1.2.3"',
+      },
+    });
+
+    const calls = warnSpy.mock.calls.map((c) => String(c[0] ?? ''));
+    warnSpy.mockRestore();
+    const joined = calls.join('\n');
+    expect(joined).not.toContain('shadowing schema env keys');
   });
 });

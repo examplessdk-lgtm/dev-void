@@ -54,10 +54,15 @@ async function loadSchemaModule(): Promise<RegisteredSchemaModule> {
  * Hard errors are reserved for `void deploy`; dev keeps moving with warnings
  * so unrelated work isn't blocked by a stale .env.local.
  */
+/** Patterns Vite's `define` typically uses for env-shaped constants. */
+const DEFINE_ENV_PATTERN =
+  /^(?:globalThis\.)?(?:process\.env|import\.meta\.env)\.([A-Z_][A-Z0-9_]*)$/;
+
 export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = {}): Plugin {
   const outDir = join(root, '.void');
   let envFile: string | null = null;
   let viteMode = 'development';
+  let envDir = root;
 
   async function emitDefaults() {
     if (!envFile || !options.onDefaults) {
@@ -92,6 +97,39 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     }
   }
 
+  async function warnOnDefineOverlap(define: Record<string, unknown>): Promise<void> {
+    const { _hasRegisteredSchema, _getRegisteredSchema } = await loadSchemaModule();
+    if (!_hasRegisteredSchema()) {
+      return;
+    }
+    const schema = _getRegisteredSchema();
+    if (!schema) {
+      return;
+    }
+    const overlaps: { defineKey: string; schemaKey: string }[] = [];
+    for (const defineKey of Object.keys(define)) {
+      const match = DEFINE_ENV_PATTERN.exec(defineKey);
+      if (!match) {
+        continue;
+      }
+      const name = match[1]!;
+      if (name in schema) {
+        overlaps.push({ defineKey, schemaKey: name });
+      }
+    }
+    if (overlaps.length === 0) {
+      return;
+    }
+    const lines = ['Vite `define` is shadowing schema env keys:'];
+    for (const { defineKey, schemaKey } of overlaps) {
+      lines.push(
+        `  • "${defineKey}" → schema key "${schemaKey}". ` +
+          `The compiled client code receives the define value, but the typed env.X proxy and validation still source from the schema. Prefer one or the other for any given key.`,
+      );
+    }
+    voidWarn(lines.join('\n'));
+  }
+
   async function validateAndWarn() {
     if (!envFile) {
       return;
@@ -101,7 +139,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       return;
     }
     const { loadEnv } = await import('vite');
-    const merged = filterLoadedEnv(loadEnv(viteMode, root, ''));
+    const merged = filterLoadedEnv(loadEnv(viteMode, envDir, ''));
     const report = await validateAllEnv(merged as Record<string, unknown>);
     if (report.valid) {
       return;
@@ -131,6 +169,16 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     },
     async configResolved(config) {
       viteMode = config.mode;
+      // `envDir: false` disables Vite's .env loading entirely — fall back to
+      // root so our own validate-against-merged-env still picks up shell vars.
+      envDir = typeof config.envDir === 'string' ? config.envDir : root;
+      // Warn when vite `define` shadows a schema key. The two systems coexist
+      // — define replaces source literals at build time; defineEnv types and
+      // validates the runtime env — but using both for the same name causes
+      // silent skew (client sees the define value, server sees .env / schema).
+      if (envFile && config.define) {
+        await warnOnDefineOverlap(config.define as Record<string, unknown>);
+      }
     },
     async configureServer(server) {
       if (!envFile) {

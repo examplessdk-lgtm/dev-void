@@ -56,7 +56,17 @@ export default defineEnv({
 
 ### Client vs server
 
-Keys prefixed with `VITE_` are exposed to client code (Vite already enforces this at the bundler level). All other keys are server-only — accessing one from a client module throws a clear runtime error pointing at the fix.
+Keys matching Vite's `envPrefix` (default `VITE_`) are exposed to client code; Vite enforces this at the bundler level. All other keys are server-only — referencing one from a client module fails the build with a file:line:col error from `void:env-client-guard`, and the runtime proxy still throws as a backstop.
+
+If your project sets a custom `envPrefix` (e.g. `'PUBLIC_'` or an array like `['PUBLIC_', 'NEXT_PUBLIC_']`) in `vite.config.ts`, the build guard honours it automatically. Schema keys that match any configured prefix pass the client check.
+
+### Vite `define` interop
+
+Vite's `define` option performs build-time literal replacement (e.g. `define: { 'process.env.VERSION': '"1.0"' }`). It does **not** flow through schema validation or the typed `env` proxy — using both `define` and `defineEnv` for the same name causes silent skew (compiled client code sees the define value, runtime proxy and validation see the schema source). Void emits a warning at config time when this overlap is detected.
+
+### `envDir`
+
+Void honours Vite's `envDir` option for `.env` file loading (both the worker `vars` injection and dev-time validation). Defaults to the project root. The deploy CLI still reads from the project root regardless — keep production `.env` files there.
 
 ## `.env` files
 

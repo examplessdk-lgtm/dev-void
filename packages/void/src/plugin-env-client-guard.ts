@@ -177,9 +177,25 @@ function recordHit(node: any, hits: Hit[]): void {
  * No-op when no `env.ts` is registered. Server / SSR / worker environments
  * are skipped — only the `client` environment is checked.
  */
+/** Default value matches Vite's default `envPrefix`. */
+const DEFAULT_ENV_PREFIXES = ['VITE_'] as const;
+
 export function envClientGuardPlugin(root: string): Plugin {
+  let envPrefixes: readonly string[] = DEFAULT_ENV_PREFIXES;
+
   return {
     name: 'void:env-client-guard',
+    configResolved(config) {
+      // Honour the user's `envPrefix` (string or string[]) so projects that
+      // customise it — e.g. `envPrefix: 'PUBLIC_'` for SvelteKit-like setups
+      // — don't get false-positive errors on their public keys.
+      const prefix = config.envPrefix;
+      if (typeof prefix === 'string') {
+        envPrefixes = [prefix];
+      } else if (Array.isArray(prefix) && prefix.length > 0) {
+        envPrefixes = prefix;
+      }
+    },
     async transform(code, id) {
       // Only run on the client environment. SSR, worker, RSC etc. legitimately
       // read server keys via the same `void/env` import.
@@ -267,15 +283,19 @@ export function envClientGuardPlugin(root: string): Plugin {
         if (!(key in schema)) {
           continue;
         }
-        // Already exposed to the client by Vite's own filter.
-        if (key.startsWith('VITE_')) {
+        // Already exposed to the client by Vite's own envPrefix filter.
+        if (envPrefixes.some((p) => key.startsWith(p))) {
           continue;
         }
 
+        const prefixHint =
+          envPrefixes.length === 1
+            ? `${envPrefixes[0]}* prefix`
+            : `one of these prefixes: ${envPrefixes.join(', ')}`;
         this.error({
           message:
             `Server-only env "${key}" referenced from client code at ${relPath}:${line}:${column}.\n` +
-            `If this should be available in the browser, rename it with a VITE_ prefix in env.ts.\n` +
+            `If this should be available in the browser, rename it with the ${prefixHint} in env.ts.\n` +
             `If it must stay server-only, remove this reference and read the value via a server route or loader.`,
           loc: { line, column, file: id },
         });

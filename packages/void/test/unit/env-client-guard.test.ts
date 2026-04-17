@@ -48,12 +48,36 @@ function getTransformHandler(
   throw new Error('plugin.transform missing handler');
 }
 
+function getConfigResolvedHandler(
+  plugin: ReturnType<typeof envClientGuardPlugin>,
+): ((this: any, config: any) => unknown | Promise<unknown>) | null {
+  const c = plugin.configResolved;
+  if (typeof c === 'function') {
+    return c as any;
+  }
+  if (c && typeof c === 'object' && 'handler' in c) {
+    return (c as any).handler;
+  }
+  return null;
+}
+
+interface RunTransformOptions {
+  envPrefix?: string | string[];
+}
+
 async function runTransform(
   ctx: ReturnType<typeof makeContext>,
   code: string,
   id: string,
+  options: RunTransformOptions = {},
 ): Promise<{ threw: boolean; error?: Error }> {
   const plugin = envClientGuardPlugin(ROOT);
+  if (options.envPrefix !== undefined) {
+    const cr = getConfigResolvedHandler(plugin);
+    if (cr) {
+      await cr.call(ctx, { envPrefix: options.envPrefix });
+    }
+  }
   const handler = getTransformHandler(plugin);
   try {
     await handler.call(ctx, code, id);
@@ -258,5 +282,44 @@ describe('envClientGuardPlugin', () => {
     );
     expect(result.threw).toBe(true);
     expect(ctx.errors).toHaveLength(1);
+  });
+
+  it('honours a custom envPrefix string', async () => {
+    defineEnv({ PUBLIC_TITLE: string() });
+    const ctx = makeContext('client');
+    const result = await runTransform(
+      ctx,
+      `import { env } from "void/env";\nconst t = env.PUBLIC_TITLE;\n`,
+      `${ROOT}/src/page.ts`,
+      { envPrefix: 'PUBLIC_' },
+    );
+    expect(result.threw).toBe(false);
+    expect(ctx.errors).toEqual([]);
+  });
+
+  it('honours a custom envPrefix array', async () => {
+    defineEnv({ PUBLIC_A: string(), NEXT_PUBLIC_B: string() });
+    const ctx = makeContext('client');
+    const result = await runTransform(
+      ctx,
+      `import { env } from "void/env";\nconst a = env.PUBLIC_A;\nconst b = env.NEXT_PUBLIC_B;\n`,
+      `${ROOT}/src/page.ts`,
+      { envPrefix: ['PUBLIC_', 'NEXT_PUBLIC_'] },
+    );
+    expect(result.threw).toBe(false);
+    expect(ctx.errors).toEqual([]);
+  });
+
+  it('errors with custom envPrefix in the message when set', async () => {
+    defineEnv({ STRIPE_KEY: string() });
+    const ctx = makeContext('client');
+    const result = await runTransform(
+      ctx,
+      `import { env } from "void/env";\nconst k = env.STRIPE_KEY;\n`,
+      `${ROOT}/src/page.ts`,
+      { envPrefix: 'PUBLIC_' },
+    );
+    expect(result.threw).toBe(true);
+    expect(ctx.errors[0]!.message).toContain('PUBLIC_*');
   });
 });
