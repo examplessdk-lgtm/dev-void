@@ -1,1 +1,13 @@
-{ "version": "7", "dialect": "sqlite", "entries": [] }
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1776332896051,
+      "tag": "20260416094816_volatile_blizzard",
+      "breakpoints": true
+    }
+  ]
+}
