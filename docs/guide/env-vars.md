@@ -109,6 +109,22 @@ Void uses Vite's standard `.env` convention to populate the schema:
 
 `.local` files are gitignored by convention — use them for secrets you don't want in source control.
 
+### Dotenv variable expansion
+
+Values can reference other keys defined in the same (or earlier-precedence) `.env` file using `${VAR}` or `$VAR`:
+
+```ini
+# .env
+BASE_URL=https://api.example.com
+API_URL=${BASE_URL}/v1        # → "https://api.example.com/v1"
+BUILD=$BASE_URL/build.json    # bare form also works
+LITERAL=\$NOT_EXPANDED        # → "$NOT_EXPANDED" (backslash-escape)
+```
+
+Nested references resolve transitively (`A=${B}`, `B=${C}`, `C=value` → `A=value`). Cycles are detected and leave the raw literal (Void emits a warning rather than looping). Missing references expand to the empty string.
+
+Expansion runs identically across every path that reads your `.env*` files: the runtime typed `env` proxy, `void env check`, `void deploy`, and the `void init` scaffold inference. Importantly, references **only** resolve against values declared in the `.env*` files themselves — shell `process.env` values are not substituted in. This stops a developer-machine variable from silently materialising in committed examples or deploy manifests. (Vite's own `loadEnv` does consult `process.env` during expansion for the dev-server path; Void filters the shell pollution back out via `filterLoadedEnv` so the observable surface stays the same.)
+
 ## Production secrets
 
 For values that should never live in a `.env` file (Stripe keys, OAuth secrets, etc.), upload them as encrypted secret bindings on your deployed worker:
@@ -179,6 +195,32 @@ On first run, Void writes a fresh `.env.example` containing only the marker bloc
 
 The managed block is grouped into `required`, `with defaults`, and `optional` sections. Keys defined via `oneOf([...])` get a leading `# enum: A | B | C` comment listing the valid values, and keys with a `.default(x)` are prefilled. Commit the `.env.example` — it's the single source of truth for teammates and coding agents setting up the project.
 
+## Secret redaction
+
+Env validation errors, dev-server warnings, and CLI reports automatically replace secret-looking values with `<redacted>` before they surface. This keeps tokens out of Discord screenshots, GitHub issues, and CI logs when you paste an `EnvValidationError` stack.
+
+Redaction is belt-and-braces:
+
+1. **Explicit override.** The built-in helpers support `.secret()` and `.public()` modifiers, and they win over every heuristic:
+
+   ```ts
+   export default defineEnv({
+     STRIPE_KEY: string().secret(), // always redacted
+     PUBLIC_KEY: string().public(), // never redacted (opts out of the KEY heuristic)
+     PORT: number(),
+   });
+   ```
+
+   Third-party Standard Schema validators (valibot, zod, arktype) can't carry this flag — they fall back to the heuristics below.
+
+2. **Key-name heuristic.** Values for keys matching `/KEY|TOKEN|SECRET|PASSWORD|PASS(WD)?|CREDENTIAL|PRIVATE|AUTH|BEARER|APIKEY|DSN/i` are redacted by default.
+
+3. **Value-content heuristic.** Even on neutral keys, values that start with `sk_` / `pk_` / `ghp_` / `xoxb-` / `AKIA` or look like a ≥24-char high-entropy string are redacted. This catches wrong-file typos like `PORT=sk_live_abc123`, where the key is innocent but the value is a Stripe key.
+
+The **key name itself is never masked** — you need it to locate the offending entry.
+
+For local debugging, set `VOID_ENV_UNMASK=1` in your shell to see raw values in error output. On activation Void prints a one-shot notice to stderr so the loosened output is visibly attributed; unset it before sharing logs.
+
 ## Migration from untyped `c.env`
 
 If you don't have an `env.ts`, `c.env.X` continues to work as `unknown` — no breaking change. To opt in, create `env.ts`, declare your keys, and the existing call sites become typed automatically. The recommended access pattern for new code is `import { env } from "void/env"`.
@@ -200,9 +242,11 @@ Most frameworks ship _parts_ of an env story — loading, typing, validation, de
 | Async validators                                |      yes      |      no       |        no         |        no        |           no           |          no          |          yes           |
 | `.env.example` scaffolding from schema          |      yes      |      no       |        no         |        no        |           no           |          no          |           no           |
 | Deploy-time check (local + remote secrets)      |      yes      |      no       |        no         |        no        |           no           |          no          |           no           |
+| Automatic secret redaction in validation errors |      yes      |      no       |        no         |        no        |           no           |          no          |           no           |
 | Cloudflare secret store integration             |      yes      |      no       |        no         |        no        |           no           |          no          |           no           |
 | Zero-config (auto-discovered, no plugin wiring) |      yes      |      no       |        yes        |       yes        |          yes           |         yes          |           no           |
 | Schema scaffolded from existing `.env` files    |      yes      |      no       |        no         |        no        |           no           |          no          |           no           |
+| `${VAR}` expansion, no `process.env` leakage    |      yes      |      no       |        no         |        no        |    partial (leaks)     |          no          |      needs plugin      |
 
 ### Where Void differs
 

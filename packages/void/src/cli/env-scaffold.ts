@@ -9,8 +9,9 @@
  * This is a best-effort DX sweetener, not a correctness boundary — a
  * wrong guess only costs the user a single-line edit.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { expandDotenv, parseDotenvFile as sharedParseDotenvFile } from '../shared/dotenv';
 
 /** Dotenv files we harvest keys from, in trust order (first wins per key). */
 export const SCAFFOLD_SOURCE_FILES = [
@@ -62,44 +63,38 @@ export function inferHelperForValue(value: string | undefined): InferredHelper {
   return 'string';
 }
 
-/** Minimal dotenv parser — same surface as cli/env-validation.ts's copy. */
+/**
+ * Thin re-export of the shared dotenv parser. Kept as a named export so the
+ * unit test surface (`parseDotenvFile`) is unchanged from when this module
+ * carried its own copy.
+ */
 export function parseDotenvFile(filePath: string): Record<string, string> {
-  if (!existsSync(filePath)) {
-    return {};
-  }
-  const env: Record<string, string> = {};
-  const content = readFileSync(filePath, 'utf-8');
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
-      continue;
-    }
-    const eq = trimmed.indexOf('=');
-    if (eq === -1) {
-      continue;
-    }
-    const key = trimmed.slice(0, eq).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-      continue;
-    }
-    let value = trimmed.slice(eq + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    env[key] = value;
-  }
-  return env;
+  return sharedParseDotenvFile(filePath);
 }
 
 /** Collect a deduped list of inferred entries from the dotenv files we find. */
 export function collectInferredEntries(root: string): InferredEntry[] {
   const seen = new Map<string, InferredEntry>();
+  // Walk files in trust order (first wins). At each step we expand the
+  // current file's values against the cumulative "earliest-wins" record so
+  // that a value like `API_URL=${BASE_URL}/v1` resolves even when
+  // `BASE_URL` lives in a previously-seen file. A per-file expanded view is
+  // what feeds type inference, so an unresolved literal isn't mis-classified
+  // as a plain string when it would have been a URL after expansion.
+  const cumulative: Record<string, string> = {};
   for (const file of SCAFFOLD_SOURCE_FILES) {
-    const parsed = parseDotenvFile(join(root, file));
-    for (const [key, value] of Object.entries(parsed)) {
+    const parsed = sharedParseDotenvFile(join(root, file), { expand: false });
+    // Build an expansion view: cumulative entries overlaid with this file's
+    // raw values (earlier files win for already-seen keys, but this file's
+    // new keys are still available as expansion targets).
+    const expansionView: Record<string, string> = { ...parsed, ...cumulative };
+    const expanded = expandDotenv(expansionView);
+    for (const key of Object.keys(parsed)) {
+      const value = expanded[key] ?? '';
+      // Lock in cumulative with earliest-wins semantics.
+      if (!(key in cumulative)) {
+        cumulative[key] = parsed[key]!;
+      }
       const existing = seen.get(key);
       // First file to mention the key wins for the sample value, but a
       // later file with a non-empty value can still upgrade inference if

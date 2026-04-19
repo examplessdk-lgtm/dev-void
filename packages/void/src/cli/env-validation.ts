@@ -8,11 +8,12 @@
  * Used by both `void deploy` (hard error on missing prod env) and
  * `void env check` (CI/pre-push validation).
  */
-import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { findEnvFile } from '../codegen/env-types';
 import { loadUserEnvFile } from '../host/load-user-env';
+import { voidWarn } from '../log';
 import type { EnvValidationReport } from '../runtime/env-public';
+import { mergeAndExpand, parseDotenvFile } from '../shared/dotenv';
 import type { PlatformClient } from './client';
 
 interface EnvPublicModule {
@@ -49,35 +50,6 @@ async function loadSchema(envFile: string): Promise<EnvPublicModule | null> {
   return mod;
 }
 
-/** Parse a dotenv-style file into a record. Returns {} if missing. */
-function parseDotenvFile(filePath: string): Record<string, string> {
-  if (!existsSync(filePath)) {
-    return {};
-  }
-  const env: Record<string, string> = {};
-  const content = readFileSync(filePath, 'utf-8');
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
-      continue;
-    }
-    const eq = trimmed.indexOf('=');
-    if (eq === -1) {
-      continue;
-    }
-    const key = trimmed.slice(0, eq).trim();
-    let value = trimmed.slice(eq + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    env[key] = value;
-  }
-  return env;
-}
-
 export interface ValidateProdEnvOptions {
   /** When true (deploy mode), only `.env` + `.env.production` are read. */
   productionOnly: boolean;
@@ -112,13 +84,15 @@ export async function validateProdEnv(
     return { hasSchema: false, report: emptyReport() };
   }
 
-  const merged: Record<string, unknown> = {};
   const files = options.productionOnly
     ? ['.env', '.env.production']
     : ['.env', '.env.local', '.env.production', '.env.production.local'];
-  for (const file of files) {
-    Object.assign(merged, parseDotenvFile(join(root, file)));
-  }
+  // Parse each file with expansion disabled, then merge + expand across the
+  // union so that (e.g.) `.env.local` can reference a key declared in `.env`.
+  const parsedFiles = files.map((file) => parseDotenvFile(join(root, file), { expand: false }));
+  const merged: Record<string, unknown> = mergeAndExpand(parsedFiles, {
+    onWarn: (msg) => voidWarn(msg),
+  });
   // Treat remote secrets as present (placeholder string).
   for (const name of options.remoteSecrets ?? []) {
     if (merged[name] === undefined) {
