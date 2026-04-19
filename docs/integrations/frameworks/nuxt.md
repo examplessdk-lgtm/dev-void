@@ -146,38 +146,25 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-Void's CLI env features plus typed `env.d.ts`, the client leak guard, and constant folding all work with Nuxt. Server-side runtime reads via `import { env }` do not — Nitro bundles the server separately from Vite. Use `env.ts` as the single schema source of truth and read actual values via Nuxt's own mechanisms.
-
-**What works:**
-
-- `void env check [--remote]` validates `.env*` + remote secret names against your `env.ts`.
-- `void deploy` hard-fails before upload if required keys are missing.
-- `void env example` generates a managed `.env.example` block from the schema.
-- `void init` scaffolds `env.ts` from existing dotenv files.
-- Typed `.void/env.d.ts` is emitted on dev startup so `env.X` autocompletes in editors.
-- `void:env-client-guard` fails `nuxt build` with a file:line:col error when a server-only key is referenced from a `.vue` client component or any client-bundled module.
-- Static reads of `VITE_*`-prefixed keys in client code are folded into string literals so `if (env.VITE_FEATURE === "on") { … }` branches tree-shake in production.
-
-**What does NOT work in Nuxt mode:**
-
-- `import { env } from "void/env"` in server routes — Nitro bundles the server side separately from Vite, and the resolved module throws at worker runtime with "Env key … is not exposed to the client." Use `useRuntimeConfig()` or `event.context.cloudflare.env` instead.
+Full `env.ts` support. Typed `.void/env.d.ts`, the client leak guard, constant folding, and CLI features all work, and `import { env }` reads through the runtime proxy on both client and server — even though Nitro bundles the server side separately from Vite, `void/env` resolves to the runtime module via the `workerd`/`node` export conditions.
 
 ```ts
-// env.ts — single schema source of truth
+// env.ts
 import { defineEnv, string } from 'void/env';
 export default defineEnv({
   STRIPE_KEY: string(),
-  NUXT_PUBLIC_SITE_URL: string(),
+  VITE_APP_TITLE: string(),
 });
 
-// server/api/charge.post.ts — read via Nuxt, not void/env
-export default defineEventHandler((event) => {
-  const { STRIPE_KEY } = event.context.cloudflare.env;
-  return stripe(STRIPE_KEY).charges.create(/* … */);
+// server/api/charge.post.ts
+import { env } from 'void/env';
+
+export default defineEventHandler(async () => {
+  return stripe(env.STRIPE_KEY).charges.create(/* … */);
 });
 ```
 
-Wire `NUXT_*` keys into `runtimeConfig` as usual — Nuxt reads them from `.env` and Void's deploy manifest. See the [env guide](../../guide/env-vars.md) for the schema feature set.
+A deliberately-wrong `env.STRIPE_KEY` read from a client component fails `nuxt build` with a file:line:col error from `void:env-client-guard`. Client reads of `VITE_*` keys get folded into string literals for DCE in production. Nuxt's own `useRuntimeConfig()` and `event.context.cloudflare.env` still work fine alongside — use whichever fits the call site. See the [env guide](../../guide/env-vars.md).
 
 ## Accessing Bindings Directly
 

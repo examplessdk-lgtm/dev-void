@@ -162,34 +162,23 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-Void's CLI env features plus typed `env.d.ts`, the client leak guard, and constant folding all work with Analog. Server-side runtime reads via `import { env }` do not — Nitro bundles the server separately from Vite. Use `env.ts` as the single schema source of truth and read actual values via the `cloudflare:workers` `env` export (or the H3 event context).
-
-**What works:**
-
-- `void env check [--remote]` validates `.env*` + remote secret names against your `env.ts`.
-- `void deploy` hard-fails before upload if required keys are missing.
-- `void env example` generates a managed `.env.example` block from the schema.
-- Typed `.void/env.d.ts` is emitted on dev startup so `env.X` autocompletes in editors.
-- `void:env-client-guard` fails `vite build` with a file:line:col error when a server-only key is referenced from an Angular component or any client-bundled module.
-- Static reads of `VITE_*`-prefixed keys in client code are folded into string literals for DCE in production.
-
-**What does NOT work in Analog mode:**
-
-- `import { env } from "void/env"` in server handlers — Nitro bundles the server side separately from Vite, and the module throws at worker runtime. Use `import { env } from "cloudflare:workers"` (or the H3 event context) instead.
+Full `env.ts` support. Typed `.void/env.d.ts`, the client leak guard, constant folding, and CLI features all work, and `import { env }` reads through the runtime proxy on both client and server — Nitro bundles the server separately from Vite, but `void/env` resolves to the runtime module via the `workerd`/`node` export conditions.
 
 ```ts
-// env.ts — single schema source of truth
+// env.ts
 import { defineEnv, string } from 'void/env';
 export default defineEnv({ STRIPE_KEY: string() });
 
-// src/server/routes/api/charge.ts — read via cloudflare:workers
-import { env } from 'cloudflare:workers';
-export default defineEventHandler(async () => {
+// src/server/routes/api/charge.ts
+import { env } from 'void/env';
+import { eventHandler } from 'h3';
+
+export default eventHandler(async () => {
   return stripe(env.STRIPE_KEY).charges.create(/* … */);
 });
 ```
 
-See the [env guide](../../guide/env-vars.md) for the schema feature set.
+Leaks from client code (e.g. an Angular component importing a server-only key) fail `vite build` with a file:line:col error. `VITE_*`-prefixed reads fold into string literals for DCE. The H3 event context and `import { env } from "cloudflare:workers"` still work if you need raw binding access. See the [env guide](../../guide/env-vars.md).
 
 ## Accessing Bindings Directly
 
