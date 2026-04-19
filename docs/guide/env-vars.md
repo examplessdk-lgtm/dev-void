@@ -64,6 +64,30 @@ Keys matching Vite's `envPrefix` (default `VITE_`) are exposed to client code; V
 
 If your project sets a custom `envPrefix` (e.g. `'PUBLIC_'` or an array like `['PUBLIC_', 'NEXT_PUBLIC_']`) in `vite.config.ts`, the build guard honours it automatically. Schema keys that match any configured prefix pass the client check.
 
+### Build-time constant folding
+
+In production client builds, static reads of a client-exposed key are folded into string literals so the bundler can dead-code-eliminate conditional branches — exactly what Vite already does for `import.meta.env.MODE`.
+
+```ts
+// source
+import { env } from 'void/env';
+if (env.MODE === 'production') {
+  initAnalytics();
+}
+
+// production client bundle (after folding + DCE)
+initAnalytics();
+```
+
+Rules:
+
+- **Client bundles only.** Server / SSR / worker code keeps the full runtime proxy so secrets, runtime-injected vars, and HMR keep working.
+- **Prefix-gated.** Only keys matching Vite's `envPrefix` (default `VITE_`, honours custom string or array config) are ever folded — server-only keys never appear as literals in client output.
+- **Static access only.** `env.FOO` and `env["FOO"]` get folded. Dynamic access (`env[key]`), destructuring, and reassignment fall back to the runtime proxy.
+- **Values come from** the same source Vite already uses for `import.meta.env`: `.env*` files (respecting `envDir`) plus schema `.default(x)` values for missing keys. Unknown keys are left untouched and the proxy serves them at runtime.
+- **Build-only.** Dev keeps going through the proxy so editing `.env.local` takes effect without a full rebuild.
+- **Zero-config.** No flags, no opt-in — just works.
+
 ### Vite `define` interop
 
 Vite's `define` option performs build-time literal replacement (e.g. `define: { 'process.env.VERSION': '"1.0"' }`). It does **not** flow through schema validation or the typed `env` proxy — using both `define` and `defineEnv` for the same name causes silent skew (compiled client code sees the define value, runtime proxy and validation see the schema source). Void emits a warning at config time when this overlap is detected.
@@ -185,6 +209,7 @@ Most frameworks ship _parts_ of an env story — loading, typing, validation, de
 - **One file, one call.** `defineEnv({...})` is the whole API surface. `@t3-oss/env` is the closest analogue but splits into `server`/`client`/`runtimeEnv` blocks and expects you to hand it `process.env`. Void auto-discovers `env.ts`, loads `.env*` via Vite's own resolver (honouring `envDir`), and wires the result into the plugin, the worker bundle, the CLI, and generated types without extra config.
 - **Helpers _and_ Standard Schema, mixable.** Most solutions force a choice: either Zod-only (t3-env, many DIY setups), or a bespoke helper DSL with no escape hatch (Astro, SvelteKit). Void ships `string()`, `number()`, `boolean()`, `url()`, `email()`, `oneOf()`, `json<T>()` so a small project pulls in zero validator dependencies, and any [Standard Schema](https://standardschema.dev) library (valibot, zod, arktype) drops into the same object for richer rules.
 - **Build-time leak prevention with source locations.** The `void:env-client-guard` plugin walks client module graphs and fails the build with a file:line:col pointer when a non-prefixed key is imported from the browser bundle. Frameworks like Next.js and Vite only enforce this through the _prefix convention_ — a renamed variable silently leaks. Void enforces both the prefix rule and the schema's server/client split.
+- **Build-time constant folding for client reads.** Production client builds inline static `env.VITE_FOO` reads as literals so `if (env.MODE === 'production') { … }` branches tree-shake the same way `import.meta.env.MODE` already does. Server / SSR / worker code keeps the runtime proxy untouched, and only prefix-matching keys are ever folded — no schema-required validation is bypassed because the same values still flow through `defineEnv` on boot.
 - **Defaults propagate everywhere.** `PORT: number().default(3000)` fills the typed proxy, the worker `vars` block in dev, the deploy manifest, and the prerender bindings — so `process.env.PORT`, `c.env.PORT`, and `env.PORT` all return `3000` when unset. t3-env and Nuxt only surface defaults in the typed object; the raw `process.env` still reads `undefined`.
 - **Deploy is the enforcement point.** `void deploy` unions `.env*` with the remote secret list and hard-fails on any missing required key _before_ upload. No competing solution in the table treats deploy as a validation gate — the closest substitute is a handwritten CI script calling `zod.parse(process.env)`, which doesn't know about the target platform's remote secrets.
 - **`.env.example` is generated, not maintained by hand.** `void env example` writes a marker-delimited block grouped into `required`, `with defaults`, `optional`, with enum hints for `oneOf` keys. Everything outside the markers (team CI tokens, comments) survives refresh. No other tool in the comparison ships this.
@@ -194,4 +219,4 @@ Most frameworks ship _parts_ of an env story — loading, typing, validation, de
 ### When to pick something else
 
 - You're on **pure Next.js/Nuxt/SvelteKit** without a Void worker — use the framework-native option plus `@t3-oss/env` if you want validation. Void's value compounds when the same schema drives dev, typegen, client-guard, worker bindings, and deploy.
-- You explicitly want **build-time constant folding** (e.g. `import.meta.env.MODE` tree-shaking `if (MODE === 'production')` branches). Void's `env` is a runtime proxy — it gives you types and validation, not static replacement. Use Vite's `define` for the narrow cases where folding matters, and keep `defineEnv` for everything else. Void warns when a `define` key collides with a schema key.
+- You explicitly want **non-env global replacement** (e.g. `define: { __BUILD_SHA__: '"abc123"' }`) that flows into both client and worker bundles as a free-standing identifier. Vite's `define` option is still the right tool there — `defineEnv` scopes to typed env keys. Void warns when a `define` key collides with a schema key to avoid silent skew.

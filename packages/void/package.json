@@ -269,6 +269,7 @@
     "arktype": "^2.2.0",
     "es-module-lexer": "^2.0.0",
     "estree-walker": "^3.0.3",
+    "magic-string": "^0.30.21",
     "ofetch": "2.0.0-alpha.3",
     "pathe": "catalog:",
     "pglite-server": "0.1.5",
