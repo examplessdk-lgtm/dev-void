@@ -202,13 +202,37 @@
     },
     "./env": {
       "types": "./dist/runtime/env-public.d.mts",
-      "browser": {
-        "import": "./dist/runtime/env-public-client.mjs",
-        "require": "./dist/runtime/env-public-client.mjs"
+      "workerd": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
       },
       "worker": {
         "import": "./dist/runtime/env-public.mjs",
         "require": "./dist/runtime/env-public.mjs"
+      },
+      "edge-light": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
+      },
+      "wintercg": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
+      },
+      "deno": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
+      },
+      "bun": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
+      },
+      "node": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
+      },
+      "browser": {
+        "import": "./dist/runtime/env-public-client.mjs",
+        "require": "./dist/runtime/env-public-client.mjs"
       },
       "default": {
         "import": "./dist/runtime/env-public.mjs",
