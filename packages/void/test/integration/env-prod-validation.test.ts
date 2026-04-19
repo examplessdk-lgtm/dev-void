@@ -137,6 +137,21 @@ describe('validateProdEnv — deploy-time schema enforcement', () => {
     expect(formatted).toContain('PORT');
   });
 
+  it('redacts invalid values in formatEnvReport when the value or key looks secret', async () => {
+    const root = createTempProject();
+    defineEnv({ PORT: number() });
+    // `PORT=sk_live_abc123` is a "wrong-file typo" — the value itself is
+    // secret-looking, so it must not surface in the CLI report.
+    writeDotenv(root, '.env.production', 'PORT=sk_live_abc123\n');
+
+    const { report } = await validateProdEnv(root, { productionOnly: true });
+    const formatted = formatEnvReport(report);
+    expect(formatted).not.toContain('sk_live_abc123');
+    expect(formatted).toContain('<redacted>');
+    // Key name is still there so the user can find it.
+    expect(formatted).toContain('PORT');
+  });
+
   it('strips surrounding quotes in .env values so quoted prod secrets validate correctly', async () => {
     const root = createTempProject();
     defineEnv({ STRIPE_KEY: string() });

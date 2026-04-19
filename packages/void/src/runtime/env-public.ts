@@ -28,8 +28,10 @@
  */
 /// <reference types="@cloudflare/workers-types" />
 
+import { isUnmaskActive, redactMessage, type SecretOverride } from '../shared/env-mask';
 import type { StandardSchemaV1 } from '../standard-schema';
 import { getRuntimeEnv } from './env';
+import { getSecretOverride } from './env-helpers';
 import { getRawRuntimeEnv } from './env-raw';
 
 interface AnyValidator extends StandardSchemaV1<unknown, unknown> {}
@@ -142,6 +144,7 @@ export async function _validateEnvOnce(envValues: unknown): Promise<void> {
     lines.push(`  • ${key} is required but missing`);
   }
   for (const { key, messages } of report.invalid) {
+    // Messages are already redacted inside validateAllEnvWithValues.
     lines.push(`  • ${key}: ${messages.join('; ')}`);
   }
   const error = new EnvValidationError('__init__', [{ message: lines.join('\n') }]);
@@ -218,6 +221,10 @@ export class EnvValidationError extends Error {
     public readonly key: string,
     public readonly issues: ReadonlyArray<StandardSchemaV1.Issue>,
   ) {
+    // Messages supplied to this constructor are expected to be pre-redacted
+    // by the caller (readKey / _validateEnvOnce / validateAllEnvWithValues).
+    // We intentionally don't re-scan here — we don't know the raw value at
+    // this point in the chain — so the contract is enforced upstream.
     super(`Invalid env "${key}": ${issues.map((i) => i.message).join(', ')}`);
     this.name = 'EnvValidationError';
   }
@@ -258,7 +265,13 @@ function readKey(key: string): unknown {
     );
   }
   if (result.issues) {
-    throw new EnvValidationError(key, result.issues);
+    const unmask = isUnmaskActive();
+    const override = getSecretOverride(validator);
+    const redactedIssues = result.issues.map((i) => ({
+      ...i,
+      message: redactMessage(key, rawValue, i.message, { override, unmask }),
+    }));
+    throw new EnvValidationError(key, redactedIssues);
   }
   cache.set(key, result.value);
   return result.value;
@@ -347,6 +360,7 @@ async function validateAllEnvWithValues(
     invalid: [],
     values: new Map(),
   };
+  const unmask = isUnmaskActive();
   for (const [key, validator] of Object.entries(schema)) {
     const raw = envValues[key];
     const resultMaybe = validator['~standard'].validate(raw);
@@ -357,9 +371,12 @@ async function validateAllEnvWithValues(
       if (isMissing) {
         report.missing.push(key);
       } else {
+        const override: SecretOverride = getSecretOverride(validator);
         report.invalid.push({
           key,
-          messages: result.issues.map((i) => i.message),
+          messages: result.issues.map((i) =>
+            redactMessage(key, raw, i.message, { override, unmask }),
+          ),
         });
       }
     } else {

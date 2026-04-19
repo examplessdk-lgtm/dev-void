@@ -91,6 +91,18 @@ describe('void env check (subprocess)', () => {
     expect(stdout).toContain('All required env vars');
   });
 
+  it('redacts secret-looking values from invalid-env report output', () => {
+    // PORT expects a number; the user accidentally pasted an API key.
+    // The CLI output must NOT contain the raw token.
+    const root = createProject('{ PORT: number() }');
+    writeFileSync(join(root, '.env.production'), 'PORT=sk_live_abc123456\n');
+    const { stdout, status } = runVoid(root, ['env', 'check']);
+    expect(status).toBe(1);
+    expect(stdout).toContain('PORT');
+    expect(stdout).not.toContain('sk_live_abc123456');
+    expect(stdout).toContain('<redacted>');
+  });
+
   it('ignores .env.local in the deploy-style productionOnly check', () => {
     // This is the guardrail behaviour: `void env check` defaults to the
     // same productionOnly filter deploy uses. A dev-only .env.local must

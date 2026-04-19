@@ -167,6 +167,91 @@ describe('defineEnv + env proxy', () => {
   });
 });
 
+describe('.secret() / .public() modifiers', () => {
+  it('.secret() marks the schema for forced redaction', async () => {
+    defineEnv({ TOKEN: string().secret() });
+    const report = await validateAllEnv({ TOKEN: 'sk_live_abc' });
+    expect(report.valid).toBe(true);
+    // Force a validation failure to observe redaction in messages:
+    defineEnv({ FLAG: oneOf(['a', 'b'] as const).secret() });
+    const bad = await validateAllEnv({ FLAG: 'c' });
+    expect(bad.valid).toBe(false);
+    const msg = bad.invalid[0]!.messages.join(' ');
+    expect(msg).not.toContain('"c"');
+    expect(msg).toContain('<redacted>');
+  });
+
+  it('.public() disables redaction even for secret-looking keys', async () => {
+    defineEnv({
+      // A key whose NAME looks like a secret (matches /KEY/) but whose value
+      // is deliberately public; `.public()` preserves the value in errors.
+      APIKEY: oneOf(['a', 'b'] as const).public(),
+    });
+    const bad = await validateAllEnv({ APIKEY: 'nope' });
+    expect(bad.valid).toBe(false);
+    expect(bad.invalid[0]!.messages.join(' ')).toContain('"nope"');
+  });
+
+  it('.secret() / .public() compose with .optional() and .default()', () => {
+    const s = string().secret().default('x');
+    expect(s['~standard'].validate(undefined)).toEqual({ value: 'x' });
+    const p = string().public().optional();
+    expect(p['~standard'].validate(undefined)).toEqual({ value: undefined });
+  });
+});
+
+describe('redaction roundtrip (heuristic + content)', () => {
+  beforeEach(() => {
+    resetSchema();
+  });
+
+  it('omits placeholder values when a required STRIPE_KEY is missing', async () => {
+    defineEnv({ STRIPE_KEY: string() });
+    const report = await validateAllEnv({});
+    const formatted = report.missing.join(' ');
+    expect(formatted).toContain('STRIPE_KEY');
+    // No secret-looking fragment leaked into the report.
+    expect(formatted).not.toMatch(/sk_|ghp_/);
+  });
+
+  it('redacts a secret-looking value even when the key name is neutral (wrong-file typo)', async () => {
+    // Scenario: user pastes `PORT=sk_live_abc123` into the wrong line.
+    // `number()` rejects it, and the error message must NOT echo the token.
+    defineEnv({ PORT: number() });
+    const bad = await validateAllEnv({ PORT: 'sk_live_abc123' });
+    expect(bad.valid).toBe(false);
+    const msg = bad.invalid[0]!.messages.join(' ');
+    expect(msg).not.toContain('sk_live_abc123');
+    expect(msg).toContain('<redacted>');
+  });
+
+  it('redacts invalid values when the KEY name matches the heuristic', async () => {
+    defineEnv({ STRIPE_KEY: url() });
+    const bad = await validateAllEnv({ STRIPE_KEY: 'not a url' });
+    expect(bad.valid).toBe(false);
+    // Key-name heuristic alone forces redaction even though the value
+    // itself ("not a url") is not high-entropy.
+    const msg = bad.invalid[0]!.messages.join(' ');
+    expect(msg).not.toContain('not a url');
+    expect(msg).toContain('<redacted>');
+  });
+
+  it('runtime proxy throws EnvValidationError with redacted message', () => {
+    defineEnv({ STRIPE_KEY: url() });
+    withRuntimeEnv({ STRIPE_KEY: 'sk_live_abc_not_a_url' }, () => {
+      try {
+        void env.STRIPE_KEY;
+        throw new Error('expected throw');
+      } catch (e) {
+        const msg = (e as Error).message;
+        expect(msg).not.toContain('sk_live_abc_not_a_url');
+        expect(msg).toContain('STRIPE_KEY'); // key name survives
+        expect(msg).toContain('<redacted>');
+      }
+    });
+  });
+});
+
 describe('validateAllEnv (used by dev plugin and CLI)', () => {
   beforeEach(() => {
     resetSchema();
