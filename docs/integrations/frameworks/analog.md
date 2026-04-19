@@ -162,18 +162,20 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-Void's CLI env features work with Analog — runtime reads do not. Use `env.ts` as the single schema source of truth and read actual values via the `cloudflare:workers` `env` export.
+Void's CLI env features plus typed `env.d.ts`, the client leak guard, and constant folding all work with Analog. Server-side runtime reads via `import { env }` do not — Nitro bundles the server separately from Vite. Use `env.ts` as the single schema source of truth and read actual values via the `cloudflare:workers` `env` export (or the H3 event context).
 
 **What works:**
 
 - `void env check [--remote]` validates `.env*` + remote secret names against your `env.ts`.
 - `void deploy` hard-fails before upload if required keys are missing.
 - `void env example` generates a managed `.env.example` block from the schema.
+- Typed `.void/env.d.ts` is emitted on dev startup so `env.X` autocompletes in editors.
+- `void:env-client-guard` fails `vite build` with a file:line:col error when a server-only key is referenced from an Angular component or any client-bundled module.
+- Static reads of `VITE_*`-prefixed keys in client code are folded into string literals for DCE in production.
 
 **What does NOT work in Analog mode:**
 
 - `import { env } from "void/env"` in server handlers — Nitro bundles the server side separately from Vite, and the module throws at worker runtime. Use `import { env } from "cloudflare:workers"` (or the H3 event context) instead.
-- Typed `env.d.ts`, the client-leak guard, and constant folding are not wired.
 
 ```ts
 // env.ts — single schema source of truth

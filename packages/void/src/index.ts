@@ -432,6 +432,14 @@ export function voidPlugin(options?: {
       wranglerSyncPlugin,
       svelteKitHooksInjectPlugin,
       clientStubsPlugin,
+      // Framework-agnostic env DX: typegen, client leak guard, and build-time
+      // folding all operate on env.ts + the Vite client module graph, so they
+      // apply equally to SvelteKit/Nuxt/Analog/Astro. We intentionally omit
+      // envPlugin itself — it mutates workerConfig.vars for Void's own CF
+      // build, which Class B/C frameworks don't go through.
+      envSchemaPlugin(root),
+      envClientGuardPlugin(root),
+      envClientFoldPlugin(),
       drizzlePlugin(root, false, dialect, { forceVirtualDb: authEnabled }),
       migrationPlugin(root, dialect, 'local', frameworkPersistRoot, {
         enabled: false,

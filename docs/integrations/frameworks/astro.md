@@ -162,18 +162,20 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-Void's CLI env features work with Astro — runtime reads do not. Use `env.ts` as the single schema source of truth and read actual values via Astro's own mechanisms.
+Void's CLI env features plus typed `env.d.ts`, the client leak guard, and constant folding all work with Astro. Server-side runtime reads via `import { env }` do not — Astro's adapter resolves `void/env` to the client variant in both contexts. Use `env.ts` as the single schema source of truth and read actual values via Astro's own mechanisms.
 
 **What works:**
 
 - `void env check [--remote]` validates `.env*` + remote secret names against your `env.ts`.
 - `void deploy` hard-fails before upload if required keys are missing.
 - `void env example` generates a managed `.env.example` block from the schema.
+- Typed `.void/env.d.ts` is emitted on dev startup so `env.X` autocompletes in editors.
+- `void:env-client-guard` fails `astro build` with a file:line:col error when a server-only key is referenced from an `.astro` client `<script>` block or any client-bundled module. The guard honours Astro's default `envPrefix` (`PUBLIC_`) automatically — name public keys `PUBLIC_FOO` rather than `VITE_FOO`.
+- Static reads of `envPrefix`-matched keys (e.g. `env.PUBLIC_API_URL`) in client scripts are folded into string literals for DCE in production.
 
 **What does NOT work in Astro mode:**
 
-- `import { env } from "void/env"` on both server and client — Astro's adapter resolves `void/env` to the client variant in both contexts, so every non-`VITE_` key throws with "Env key … is not exposed to the client." Use `Astro.locals.runtime.env` or [`astro:env`](https://docs.astro.build/en/guides/environment-variables/) instead.
-- Typed `env.d.ts`, the client-leak guard, and constant folding are not wired.
+- `import { env } from "void/env"` on both server and client — Astro's adapter resolves `void/env` to the client variant in both contexts, so every non-`PUBLIC_` key throws with "Env key … is not exposed to the client." Use `Astro.locals.runtime.env` or [`astro:env`](https://docs.astro.build/en/guides/environment-variables/) instead.
 
 ```ts
 // env.ts — single schema source of truth

@@ -237,9 +237,12 @@ describe('envClientFoldPlugin', () => {
     expect(result!.code).not.toContain('Default');
   });
 
-  it('reports apply: build and enforce: pre', () => {
+  it('reports apply: build and enforce: post', () => {
     const plugin = envClientFoldPlugin();
     expect(plugin.apply).toBe('build');
-    expect(plugin.enforce).toBe('pre');
+    // `enforce: 'post'` ensures we run AFTER framework SFC compilers (Svelte,
+    // Vue, Astro) so `.svelte`/`.vue`/`.astro` ids arrive as compiled JS we
+    // can parse and fold.
+    expect(plugin.enforce).toBe('post');
   });
 });

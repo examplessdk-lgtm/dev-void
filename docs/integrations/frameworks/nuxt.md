@@ -146,7 +146,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-Void's CLI env features work with Nuxt — runtime reads do not. Use `env.ts` as the single schema source of truth and read actual values via Nuxt's own mechanisms.
+Void's CLI env features plus typed `env.d.ts`, the client leak guard, and constant folding all work with Nuxt. Server-side runtime reads via `import { env }` do not — Nitro bundles the server separately from Vite. Use `env.ts` as the single schema source of truth and read actual values via Nuxt's own mechanisms.
 
 **What works:**
 
@@ -154,11 +154,13 @@ Void's CLI env features work with Nuxt — runtime reads do not. Use `env.ts` as
 - `void deploy` hard-fails before upload if required keys are missing.
 - `void env example` generates a managed `.env.example` block from the schema.
 - `void init` scaffolds `env.ts` from existing dotenv files.
+- Typed `.void/env.d.ts` is emitted on dev startup so `env.X` autocompletes in editors.
+- `void:env-client-guard` fails `nuxt build` with a file:line:col error when a server-only key is referenced from a `.vue` client component or any client-bundled module.
+- Static reads of `VITE_*`-prefixed keys in client code are folded into string literals so `if (env.VITE_FEATURE === "on") { … }` branches tree-shake in production.
 
 **What does NOT work in Nuxt mode:**
 
 - `import { env } from "void/env"` in server routes — Nitro bundles the server side separately from Vite, and the resolved module throws at worker runtime with "Env key … is not exposed to the client." Use `useRuntimeConfig()` or `event.context.cloudflare.env` instead.
-- Typed `env.d.ts`, the `void:env-client-guard` build-time check, and constant folding are not wired in Nuxt mode.
 
 ```ts
 // env.ts — single schema source of truth

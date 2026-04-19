@@ -225,15 +225,15 @@ For local debugging, set `VOID_ENV_UNMASK=1` in your shell to see raw values in 
 
 How much of the env story applies depends on how deeply `voidPlugin()` owns your bundler. Every project gets the CLI-level features; runtime `import { env }` only lights up on Vite-native frameworks that keep Void in the client + server plugin chain.
 
-| Framework         | `env.ts` typegen | Client leak guard | Constant folding |   `env` on server   | `env` on client | `void env check` + deploy gate |
-| ----------------- | :--------------: | :---------------: | :--------------: | :-----------------: | :-------------: | :----------------------------: |
-| Void (Pages mode) |       yes        |        yes        |       yes        |         yes         | yes (`VITE_*`)  |              yes               |
-| TanStack Start    |       yes        |        yes        |       yes        |         yes         | yes (`VITE_*`)  |              yes               |
-| React Router v7   |       yes        |        yes        |       yes        | yes (in `loader()`) | yes (`VITE_*`)  |              yes               |
-| SvelteKit         |        no        |        no         |        no        | yes (runtime proxy) | yes (via Vite)  |              yes               |
-| Nuxt              |        no        |        no         |        no        |     **throws**      | yes (via Vite)  |              yes               |
-| Analog            |        no        |        no         |        no        |     **throws**      | yes (via Vite)  |              yes               |
-| Astro             |        no        |        no         |        no        |     **throws**      |   **throws**    |              yes               |
+| Framework         | `env.ts` typegen | Client leak guard | Constant folding |   `env` on server   |     `env` on client     | `void env check` + deploy gate |
+| ----------------- | :--------------: | :---------------: | :--------------: | :-----------------: | :---------------------: | :----------------------------: |
+| Void (Pages mode) |       yes        |        yes        |       yes        |         yes         |     yes (`VITE_*`)      |              yes               |
+| TanStack Start    |       yes        |        yes        |       yes        |         yes         |     yes (`VITE_*`)      |              yes               |
+| React Router v7   |       yes        |        yes        |       yes        | yes (in `loader()`) |     yes (`VITE_*`)      |              yes               |
+| SvelteKit         |       yes        |        yes        |       yes        | yes (runtime proxy) |     yes (`VITE_*`)      |              yes               |
+| Nuxt              |       yes        |        yes        |       yes        |     **throws**      |     yes (`VITE_*`)      |              yes               |
+| Analog            |       yes        |        yes        |       yes        |     **throws**      |     yes (`VITE_*`)      |              yes               |
+| Astro             |       yes        |        yes        |       yes        |     **throws**      | yes (`envPrefix`-gated) |              yes               |
 
 What you always get, regardless of framework:
 
@@ -242,9 +242,9 @@ What you always get, regardless of framework:
 - `void env example` generates the marker-delimited `.env.example` block.
 - `void init` scaffolds `env.ts` from existing dotenv files.
 
-On **Nuxt / Analog / Astro**, don't read env at runtime via `import { env }` — use the framework's native mechanism (`useRuntimeConfig()`, `event.context.cloudflare.env`, `Astro.locals.runtime.env`, `astro:env`). Void's CLI features still pay off: `env.ts` is the single schema source of truth for `.env.example` generation, deploy validation, and CI env-check.
+Typegen, client leak guard, and build-time constant folding are wired for every Vite-orchestrated framework in the table. That means editor autocomplete on `env.X`, file:line:col build errors when a server-only key is referenced from a client module, and literal inlining of prefix-matched keys in the client bundle — regardless of whether Void also owns the server runtime.
 
-Full Class B/C integration (typegen, client guard, folding, runtime proxy) is on the roadmap but not a v1 gate — those frameworks have solid native env stories already.
+On **Nuxt / Analog / Astro**, runtime `import { env }` from a server module still throws — Nitro / Astro's adapter bundles the server side separately from Vite, and the resolved module falls back to the client variant. Use the framework's native mechanism for server reads (`useRuntimeConfig()`, `event.context.cloudflare.env`, `import { env } from "cloudflare:workers"`, `Astro.locals.runtime.env`, `astro:env`). Client reads via `import { env }` work on all of them for any key matching the framework's `envPrefix` (Vite default `VITE_`, Astro defaults to `PUBLIC_`).
 
 ## Migration from untyped `c.env`
 

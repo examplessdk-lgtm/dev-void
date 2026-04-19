@@ -183,7 +183,12 @@ export function envClientFoldPlugin(): Plugin {
   return {
     name: 'void:env-client-fold',
     apply: 'build',
-    enforce: 'pre',
+    // Run after SFC compilers (Svelte/Vue/Astro) so the `.svelte` / `.vue` /
+    // `.astro` id arrives as compiled JS we can parse and fold. The inner
+    // `transform.order: 'pre'` still runs this pass before Vite's
+    // `import.meta.env` replacement pass, which is the only ordering we care
+    // about for folding correctness.
+    enforce: 'post',
     async configResolved(config: ResolvedConfig) {
       const prefix = config.envPrefix;
       if (typeof prefix === 'string') {
@@ -217,81 +222,76 @@ export function envClientFoldPlugin(): Plugin {
         // Proxy still handles unfoldable reads at runtime.
       }
     },
-    transform: {
-      // Run before Vite's own `import.meta.env` replacement so we don't
-      // interfere — we only touch `env.X` (an identifier bound to the
-      // `void/env` import), never `import.meta.env.X`.
-      order: 'pre',
-      async handler(code, id) {
-        if (this.environment?.name !== 'client') {
-          return;
-        }
-        if (id.includes('/node_modules/')) {
-          return;
-        }
-        if (SKIP_EXT.test(id)) {
-          return;
-        }
+    async transform(code, id) {
+      if (this.environment?.name !== 'client') {
+        return;
+      }
+      if (id.includes('/node_modules/')) {
+        return;
+      }
+      if (SKIP_EXT.test(id)) {
+        return;
+      }
 
-        const langMatch = SCRIPT_LANG_RE.exec(id);
-        const isScriptQuery = langMatch !== null && /^(?:m?[jt]sx?|cjs)$/i.test(langMatch[1]!);
-        const isPlainScript = /\.(?:[mc]?[jt]sx?)(?:\?|$)/.test(id);
-        if (!isScriptQuery && !isPlainScript) {
-          return;
-        }
+      const langMatch = SCRIPT_LANG_RE.exec(id);
+      const isScriptQuery = langMatch !== null && /^(?:m?[jt]sx?|cjs)$/i.test(langMatch[1]!);
+      const isPlainScript = /\.(?:[mc]?[jt]sx?)(?:\?|$)/.test(id);
+      const isSfc = /\.(?:svelte|vue|astro)(?:\?|$)/.test(id);
+      if (!isScriptQuery && !isPlainScript && !isSfc) {
+        return;
+      }
 
-        if (!mentionsVoidEnv(code)) {
-          return;
-        }
+      if (!mentionsVoidEnv(code)) {
+        return;
+      }
 
-        // Nothing to fold against — bail out before parsing.
-        if (Object.keys(loadedEnv).length === 0 && Object.keys(schemaDefaults).length === 0) {
-          return;
-        }
+      // Nothing to fold against — bail out before parsing.
+      if (Object.keys(loadedEnv).length === 0 && Object.keys(schemaDefaults).length === 0) {
+        return;
+      }
 
-        let parsed: ReturnType<typeof parseSync>;
-        try {
-          parsed = parseSync(id, code);
-        } catch {
-          return;
-        }
+      let parsed: ReturnType<typeof parseSync>;
+      try {
+        parsed = parseSync(id, code);
+      } catch {
+        return;
+      }
 
-        const bindings = extractEnvBindings(parsed.program);
-        if (!bindings) {
-          return;
-        }
+      const bindings = extractEnvBindings(parsed.program);
+      if (!bindings) {
+        return;
+      }
 
-        const hits = findFoldHits(parsed.program, bindings);
-        if (hits.length === 0) {
-          return;
-        }
+      const hits = findFoldHits(parsed.program, bindings);
+      if (hits.length === 0) {
+        return;
+      }
 
-        let ms: MagicString | null = null;
-        for (const hit of hits) {
-          if (!isExposedToClient(hit.property)) {
-            // Server-only key — let the client-guard plugin handle it.
-            continue;
-          }
-          const value = resolveValue(hit.property);
-          if (value === undefined) {
-            // Client-exposed but no known build-time value — Proxy will
-            // read it from `import.meta.env` at runtime.
-            continue;
-          }
-          if (!ms) {
-            ms = new MagicString(code);
-          }
-          ms.overwrite(hit.start, hit.end, JSON.stringify(value));
+      let ms: MagicString | null = null;
+      for (const hit of hits) {
+        if (!isExposedToClient(hit.property)) {
+          // Server-only key — let the client-guard plugin handle it.
+          continue;
         }
-
+        const value = resolveValue(hit.property);
+        if (value === undefined) {
+          // Client-exposed but no known build-time value — Proxy will
+          // read it from `import.meta.env` at runtime.
+          continue;
+        }
         if (!ms) {
-          return;
+          ms = new MagicString(code);
         }
-        return {
-          code: ms.toString(),
-          map: ms.generateMap({ hires: 'boundary' }),
-        };
-      },
+        ms.overwrite(hit.start, hit.end, JSON.stringify(value));
+      }
+
+      if (!ms) {
+        return;
+      }
+      return {
+        code: ms.toString(),
+        map: ms.generateMap({ hires: 'boundary' }),
+      };
     },
   };
 }

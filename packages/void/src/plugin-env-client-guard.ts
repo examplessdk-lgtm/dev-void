@@ -185,6 +185,12 @@ export function envClientGuardPlugin(root: string): Plugin {
 
   return {
     name: 'void:env-client-guard',
+    // Run after framework SFC compilers (svelte, vue, astro) so that when we
+    // see a `.svelte` / `.vue` / `.astro` id the `code` we get is already
+    // plain JS we can parse. Without this, our AST walk runs against the raw
+    // SFC source and `parseSync` bails — the server-only leak then slips
+    // through to runtime. `.ts`/`.tsx` files don't care about order.
+    enforce: 'post',
     configResolved(config) {
       // Honour the user's `envPrefix` (string or string[]) so projects that
       // customise it — e.g. `envPrefix: 'PUBLIC_'` for SvelteKit-like setups
@@ -216,11 +222,15 @@ export function envClientGuardPlugin(root: string): Plugin {
 
       // For SFC virtual modules with a `?vue&type=script&lang.ts` style query
       // (or analogous Svelte/Solid output), make sure we still cover them.
-      // For other files, require a recognised JS/TS extension.
+      // For SFC files themselves (`.svelte`, `.vue`, `.astro`), rely on the
+      // framework compiler running before us (see `enforce: 'post'` above) —
+      // by the time we see them the file content is plain JS. For everything
+      // else, require a recognised JS/TS extension.
       const langMatch = SCRIPT_LANG_RE.exec(id);
       const isScriptQuery = langMatch !== null && /^(?:m?[jt]sx?|cjs)$/i.test(langMatch[1]!);
       const isPlainScript = /\.(?:[mc]?[jt]sx?)(?:\?|$)/.test(id);
-      if (!isScriptQuery && !isPlainScript) {
+      const isSfc = /\.(?:svelte|vue|astro)(?:\?|$)/.test(id);
+      if (!isScriptQuery && !isPlainScript && !isSfc) {
         return;
       }
 
