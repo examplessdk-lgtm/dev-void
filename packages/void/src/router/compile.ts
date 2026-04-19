@@ -2136,52 +2136,120 @@ export async function fetch(path, options) {
 }
 
 /**
- * Emit inline `matchPattern()` — glob `*` → regex matching.
- * Mirrors the dispatch worker's `matchPattern()` from `packages/dispatch/src/headers.ts`.
+ * Emit inline `__compilePattern()` and `__matchPattern()` — pattern compilation
+ * with named captures, matching the dispatch worker's behavior in
+ * `packages/dispatch/src/headers.ts`.
+ *
+ * Syntax:
+ *   :name    — single path segment (captured as `name`)
+ *   :name*   — zero or more segments (captured as `name`)
+ *   *        — zero or more segments (captured as `splat`, legacy)
  */
-function emitMatchPattern(lines: Array<string>): void {
+function emitCompilePattern(lines: Array<string>): void {
+  lines.push('function __compilePattern(source) {');
+  lines.push('  const names = [];');
+  lines.push('  let pattern = "";');
+  lines.push('  let i = 0;');
+  lines.push('  while (i < source.length) {');
+  lines.push('    const ch = source[i];');
+  lines.push('    if (ch === ":") {');
+  lines.push('      let j = i + 1;');
+  lines.push('      while (j < source.length && /[A-Za-z0-9_]/.test(source[j])) j++;');
+  lines.push('      const name = source.slice(i + 1, j);');
+  lines.push('      if (!name) { pattern += "\\\\:"; i++; continue; }');
+  lines.push('      if (source[j] === "*") {');
+  lines.push('        names.push(name);');
+  lines.push('        pattern += `(?<${name}>.*)`;');
+  lines.push('        i = j + 1;');
+  lines.push('      } else {');
+  lines.push('        names.push(name);');
+  lines.push('        pattern += `(?<${name}>[^/]+)`;');
+  lines.push('        i = j;');
+  lines.push('      }');
+  lines.push('    } else if (ch === "*") {');
+  lines.push('      names.push("splat");');
+  lines.push('      pattern += "(?<splat>.*)";');
+  lines.push('      i++;');
+  lines.push('    } else {');
+  lines.push('      if (/[.+?^${}()|[\\]\\\\]/.test(ch)) pattern += "\\\\";');
+  lines.push('      pattern += ch;');
+  lines.push('      i++;');
+  lines.push('    }');
+  lines.push('  }');
+  lines.push('  return { regex: new RegExp(`^${pattern}$`), names };');
+  lines.push('}');
   lines.push('function __matchPattern(pattern, pathname) {');
-  lines.push(
-    '  const escaped = pattern.replace(/[.+?^${}()|[\\]\\\\]/g, "\\\\$&").replaceAll("*", ".*");',
-  );
-  lines.push('  return new RegExp(`^${escaped}$`).test(pathname);');
+  lines.push('  return __compilePattern(pattern).regex.test(pathname);');
+  lines.push('}');
+  lines.push('function __substituteParams(destination, params) {');
+  lines.push('  return destination.replace(/:([A-Za-z0-9_]+)\\*?/g, (whole, name) => {');
+  lines.push('    return params[name] != null ? params[name] : whole;');
+  lines.push('  });');
+  lines.push('}');
+  lines.push('function __mergeQueryIntoLocation(destination, search) {');
+  lines.push('  if (!search || search === "?") return destination;');
+  lines.push('  const q = destination.indexOf("?");');
+  lines.push('  if (q === -1) return destination + search;');
+  lines.push('  const dp = new URLSearchParams(destination.slice(q + 1));');
+  lines.push('  for (const [k, v] of new URLSearchParams(search)) {');
+  lines.push('    if (!dp.has(k)) dp.append(k, v);');
+  lines.push('  }');
+  lines.push('  return destination.slice(0, q) + "?" + dp.toString();');
   lines.push('}');
   lines.push('');
 }
 
+function ensureCompilePatternEmitted(lines: Array<string>): void {
+  if (!lines.some((l) => l.includes('function __compilePattern'))) {
+    emitCompilePattern(lines);
+  }
+}
+
+/**
+ * Shared body for routing-rule evaluation: match rules in order (last wins),
+ * substitute captures into destination, handle rewrite (200) or redirect (3xx).
+ * Used by both the pre-pipeline routing middleware and the post-pipeline
+ * fallback (notFound) middleware.
+ */
+function emitApplyRoutingRules(lines: Array<string>, rulesVar: string, indent: string): void {
+  lines.push(`${indent}let matched;`);
+  lines.push(`${indent}for (const rule of ${rulesVar}) {`);
+  lines.push(`${indent}  const { regex } = __compilePattern(rule.source);`);
+  lines.push(`${indent}  const m = regex.exec(pathname);`);
+  lines.push(`${indent}  if (m) matched = { rule, params: m.groups || {} };`);
+  lines.push(`${indent}}`);
+  lines.push(`${indent}if (matched) {`);
+  lines.push(
+    `${indent}  const dest = __substituteParams(matched.rule.destination, matched.params);`,
+  );
+  lines.push(`${indent}  if (matched.rule.status === 200) {`);
+  lines.push(`${indent}    const rewriteUrl = new URL(c.req.url);`);
+  lines.push(`${indent}    rewriteUrl.pathname = dest;`);
+  lines.push(`${indent}    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);`);
+  lines.push(`${indent}    rewriteReq.headers.set("X-Void-Rewritten", "1");`);
+  lines.push(`${indent}    __rewrittenReqs.add(rewriteReq);`);
+  lines.push(`${indent}    return app.fetch(rewriteReq, c.env, c.executionCtx);`);
+  lines.push(`${indent}  }`);
+  lines.push(
+    `${indent}  const location = __mergeQueryIntoLocation(dest, new URL(c.req.url).search);`,
+  );
+  lines.push(`${indent}  return c.redirect(location, matched.rule.status);`);
+  lines.push(`${indent}}`);
+}
+
 /**
  * Emit routing rules middleware — handles both redirects (3xx) and rewrites (200).
- * Last match wins, consistent with dispatch worker behavior.
- * Rewrites re-dispatch through the Hono app with a guard header to prevent loops.
+ * Last match wins. Rewrites re-dispatch with a guard header to prevent loops.
+ * Redirects preserve the request's query string in the Location header.
  */
 function compileRoutingRulesMiddleware(lines: Array<string>, rules: Array<RedirectRule>): void {
-  emitMatchPattern(lines);
+  ensureCompilePatternEmitted(lines);
   lines.push('// Routing rules: redirects + rewrites (applied before route handlers)');
   lines.push(`const __routingRules = ${JSON.stringify(rules)};`);
   lines.push('app.use("*", async (c, next) => {');
   lines.push('  if (__rewrittenReqs.has(c.req.raw)) return next();');
   lines.push('  const pathname = new URL(c.req.url).pathname;');
-  lines.push('  let matched;');
-  lines.push('  for (const rule of __routingRules) {');
-  lines.push('    if (__matchPattern(rule.source, pathname)) matched = rule;');
-  lines.push('  }');
-  lines.push('  if (matched) {');
-  lines.push('    let dest = matched.destination;');
-  lines.push('    if (dest.includes(":splat") && matched.source.includes("*")) {');
-  lines.push('      const prefix = matched.source.split("*")[0];');
-  lines.push('      const splat = pathname.slice(prefix.length);');
-  lines.push('      dest = dest.replace(":splat", splat);');
-  lines.push('    }');
-  lines.push('    if (matched.status === 200) {');
-  lines.push('      const rewriteUrl = new URL(c.req.url);');
-  lines.push('      rewriteUrl.pathname = dest;');
-  lines.push('      const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
-  lines.push('      rewriteReq.headers.set("X-Void-Rewritten", "1");');
-  lines.push('      __rewrittenReqs.add(rewriteReq);');
-  lines.push('      return app.fetch(rewriteReq, c.env, c.executionCtx);');
-  lines.push('    }');
-  lines.push('    return c.redirect(dest, matched.status);');
-  lines.push('  }');
+  emitApplyRoutingRules(lines, '__routingRules', '  ');
   lines.push('  return next();');
   lines.push('});');
   lines.push('');
@@ -2192,10 +2260,7 @@ function compileRoutingRulesMiddleware(lines: Array<string>, rules: Array<Redire
  * All matching rules merge; last match wins for same header name.
  */
 function compileHeaderMiddleware(lines: Array<string>, rules: Array<HeaderRule>): void {
-  // matchPattern may already be emitted by redirect middleware
-  if (!lines.some((l) => l.includes('function __matchPattern'))) {
-    emitMatchPattern(lines);
-  }
+  ensureCompilePatternEmitted(lines);
   lines.push('// Header rules (applied to responses)');
   lines.push(`const __headerRules = ${JSON.stringify(rules)};`);
   lines.push('app.use("*", async (c, next) => {');
