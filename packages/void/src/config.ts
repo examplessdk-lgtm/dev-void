@@ -17,13 +17,14 @@ export interface WranglerConfig {
   compatibility_flags?: Array<string>;
 }
 
-/** Routing configuration — headers, redirects, rewrites, revalidation, prerendering. */
+/** Routing configuration — headers, redirects, rewrites, fallbacks, revalidation, prerendering. */
 export interface RoutingConfig {
   revalidate?: number | Record<string, number>;
   prerender?: Array<string>;
   headers?: Record<string, Array<string>>;
   redirects?: Record<string, RedirectDestination>;
   rewrites?: Record<string, string>;
+  fallbacks?: Record<string, string>;
 }
 
 /** Inference configuration — bindings, scanDirs, build, outputDir, appType. */
@@ -346,6 +347,33 @@ export function readConfig(root: string): VoidConfig {
         }
       }
     }
+
+    // Validate routing.fallbacks
+    if (routing.fallbacks !== undefined) {
+      if (
+        typeof routing.fallbacks !== 'object' ||
+        routing.fallbacks === null ||
+        Array.isArray(routing.fallbacks)
+      ) {
+        throw new Error(`"routing.fallbacks" in ${CONFIG_FILE} must be an object`);
+      }
+      const fb = routing.fallbacks as Record<string, unknown>;
+      for (const [source, dest] of Object.entries(fb)) {
+        if (!source.startsWith('/')) {
+          throw new Error(`Fallback source "${source}" in ${CONFIG_FILE} must start with "/"`);
+        }
+        if (typeof dest !== 'string') {
+          throw new Error(
+            `Fallback destination for "${source}" in ${CONFIG_FILE} must be a string`,
+          );
+        }
+        if (!dest.startsWith('/')) {
+          throw new Error(
+            `Fallback destination for "${source}" in ${CONFIG_FILE} must start with "/" (only internal paths are supported)`,
+          );
+        }
+      }
+    }
   }
 
   // Validate inference
@@ -585,6 +613,29 @@ export function convertRewritesConfig(
 
   const rules: RedirectRule[] = [];
   for (const [source, destination] of Object.entries(rewrites)) {
+    rules.push({ source, destination, status: 200 });
+  }
+
+  return rules.length > 0 ? rules : undefined;
+}
+
+/**
+ * Convert the `fallbacks` config field into `RedirectRule[]` with status 200.
+ *
+ * Fallbacks fire only when the static asset resolver would otherwise return
+ * 404. They share the rewrite shape (status 200, pathname-only destination)
+ * but are evaluated at a different pipeline phase — post-lookup instead of
+ * pre-lookup. Returns undefined if the input is empty or undefined.
+ */
+export function convertFallbacksConfig(
+  fallbacks: Record<string, string> | undefined,
+): RedirectRule[] | undefined {
+  if (!fallbacks) {
+    return undefined;
+  }
+
+  const rules: RedirectRule[] = [];
+  for (const [source, destination] of Object.entries(fallbacks)) {
     rules.push({ source, destination, status: 200 });
   }
 

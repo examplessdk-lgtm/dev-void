@@ -228,6 +228,7 @@ export async function packageBuild(
   hashedAssetsPrefix?: string,
   headerRules?: Array<HeaderRule>,
   redirectRules?: Array<RedirectRule>,
+  fallbackRules?: Array<RedirectRule>,
   dialect?: 'sqlite' | 'postgresql',
   webSockets?: Array<WebSocketRouteDefinition>,
   onProgress?: ProgressCallback,
@@ -327,6 +328,10 @@ export async function packageBuild(
     manifest.redirectRules = redirectRules;
   }
 
+  if (fallbackRules && fallbackRules.length > 0) {
+    manifest.fallbackRules = fallbackRules;
+  }
+
   const websocketManifest = toWebSocketManifest(webSockets);
   if (websocketManifest) {
     manifest.websocket = websocketManifest;
@@ -392,6 +397,7 @@ export async function packageStaticBuild(
   hashedAssetsPrefix?: string,
   headerRules?: Array<HeaderRule>,
   redirectRules?: Array<RedirectRule>,
+  fallbackRules?: Array<RedirectRule>,
   onProgress?: ProgressCallback,
 ): Promise<FormData> {
   const formData = new FormData();
@@ -415,6 +421,10 @@ export async function packageStaticBuild(
 
   if (redirectRules && redirectRules.length > 0) {
     manifest.redirectRules = redirectRules;
+  }
+
+  if (fallbackRules && fallbackRules.length > 0) {
+    manifest.fallbackRules = fallbackRules;
   }
 
   formData.append('manifest', JSON.stringify(manifest));
@@ -470,6 +480,7 @@ export async function packageFrameworkBuild(opts: {
   hashedAssetsPrefix?: string;
   headerRules?: Array<HeaderRule>;
   redirectRules?: Array<RedirectRule>;
+  fallbackRules?: Array<RedirectRule>;
   dialect?: 'sqlite' | 'postgresql';
   webSockets?: Array<WebSocketRouteDefinition>;
   onProgress?: ProgressCallback;
@@ -550,6 +561,10 @@ export async function packageFrameworkBuild(opts: {
 
   if (opts.redirectRules && opts.redirectRules.length > 0) {
     manifest.redirectRules = opts.redirectRules;
+  }
+
+  if (opts.fallbackRules && opts.fallbackRules.length > 0) {
+    manifest.fallbackRules = opts.fallbackRules;
   }
 
   const websocketManifest = toWebSocketManifest(opts.webSockets);

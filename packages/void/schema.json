@@ -137,7 +137,7 @@
     },
     "routing": {
       "type": "object",
-      "description": "Routing configuration — headers, redirects, rewrites, revalidation, prerendering.",
+      "description": "Routing configuration — headers, redirects, rewrites, fallbacks, revalidation, prerendering.",
       "properties": {
         "revalidate": {
           "description": "Edge caching TTL in seconds. A number sets a global TTL for all SSR pages. An object maps URL patterns to TTLs (first match wins). Set to 0 to disable caching for a path.",
@@ -199,6 +199,14 @@
         "rewrites": {
           "type": "object",
           "description": "URL rewrites. Keys are source URL patterns; values are destination paths. Serves content from the destination without changing the browser URL.",
+          "patternProperties": {
+            "^/": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "fallbacks": {
+          "type": "object",
+          "description": "Fallback rewrites. Same shape as `rewrites`, but only fire when no static asset matched the request. Useful for SPA shells or default-locale catch-alls without pre-empting real routes.",
           "patternProperties": {
             "^/": { "type": "string" }
           },

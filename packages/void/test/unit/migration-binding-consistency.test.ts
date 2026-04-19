@@ -215,6 +215,7 @@ describe('packageBuild postgresql migration-binding consistency', () => {
       /* hashedAssetsPrefix */ undefined,
       /* headerRules */ undefined,
       /* redirectRules */ undefined,
+      /* fallbackRules */ undefined,
       /* dialect */ 'postgresql',
     );
     const manifest = getManifest(form);
@@ -245,6 +246,7 @@ describe('packageBuild postgresql migration-binding consistency', () => {
       /* hashedAssetsPrefix */ undefined,
       /* headerRules */ undefined,
       /* redirectRules */ undefined,
+      /* fallbackRules */ undefined,
       /* dialect */ 'postgresql',
     );
     const manifest = getManifest(form);

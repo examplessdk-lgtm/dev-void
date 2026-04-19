@@ -80,6 +80,7 @@ export interface DeployManifest {
   hashedAssetsPrefix?: string;
   headerRules?: Array<HeaderRule>;
   redirectRules?: Array<RedirectRule>;
+  fallbackRules?: Array<RedirectRule>;
   websocket?: WebSocketManifestMeta;
 }
 

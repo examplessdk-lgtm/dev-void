@@ -4,6 +4,7 @@ import { describe, it, expect } from 'vitest';
 import {
   readConfig,
   convertHeadersConfig,
+  convertFallbacksConfig,
   convertRedirectsConfig,
   convertRewritesConfig,
   resolveBindingNames,
@@ -558,6 +559,39 @@ describe('routing.rewrites validation', () => {
   });
 });
 
+describe('routing.fallbacks validation', () => {
+  it('accepts valid fallbacks', () => {
+    setup(JSON.stringify({ routing: { fallbacks: { '/*': '/index.html' } } }));
+    const config = readConfig(tmpDir);
+    expect(config.routing?.fallbacks).toEqual({ '/*': '/index.html' });
+    cleanup();
+  });
+
+  it('throws when fallbacks is not an object', () => {
+    setup(JSON.stringify({ routing: { fallbacks: ['/*', '/index.html'] } }));
+    expect(() => readConfig(tmpDir)).toThrow('"routing.fallbacks" in void.json must be an object');
+    cleanup();
+  });
+
+  it('throws when source does not start with /', () => {
+    setup(JSON.stringify({ routing: { fallbacks: { '*': '/index.html' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
+    cleanup();
+  });
+
+  it('throws when destination is not a string', () => {
+    setup(JSON.stringify({ routing: { fallbacks: { '/*': 42 } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be a string');
+    cleanup();
+  });
+
+  it('throws when destination does not start with /', () => {
+    setup(JSON.stringify({ routing: { fallbacks: { '/*': 'index.html' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
+    cleanup();
+  });
+});
+
 describe('convertHeadersConfig', () => {
   it('returns undefined for undefined input', () => {
     expect(convertHeadersConfig(undefined)).toBeUndefined();
@@ -690,6 +724,32 @@ describe('convertRewritesConfig', () => {
     expect(result).toEqual([
       { source: '/', destination: '/en', status: 200 },
       { source: '/docs/*', destination: '/en/docs/:splat', status: 200 },
+    ]);
+  });
+});
+
+describe('convertFallbacksConfig', () => {
+  it('returns undefined for undefined input', () => {
+    expect(convertFallbacksConfig(undefined)).toBeUndefined();
+  });
+
+  it('returns undefined for empty object', () => {
+    expect(convertFallbacksConfig({})).toBeUndefined();
+  });
+
+  it('converts entries with status 200', () => {
+    const result = convertFallbacksConfig({ '/*': '/index.html' });
+    expect(result).toEqual([{ source: '/*', destination: '/index.html', status: 200 }]);
+  });
+
+  it('converts multiple entries preserving order', () => {
+    const result = convertFallbacksConfig({
+      '/api/*': '/api/fallback',
+      '/*': '/index.html',
+    });
+    expect(result).toEqual([
+      { source: '/api/*', destination: '/api/fallback', status: 200 },
+      { source: '/*', destination: '/index.html', status: 200 },
     ]);
   });
 });

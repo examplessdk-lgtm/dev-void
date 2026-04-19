@@ -25,7 +25,12 @@ import {
   getDatabaseDialect,
   isNodeTarget,
 } from '../config';
-import { convertHeadersConfig, convertRedirectsConfig, convertRewritesConfig } from '../config';
+import {
+  convertFallbacksConfig,
+  convertHeadersConfig,
+  convertRedirectsConfig,
+  convertRewritesConfig,
+} from '../config';
 import { scanJobsSync } from '../crons/scan';
 import { writeDrizzleConfig } from '../drizzle/config';
 import { discoverSchema } from '../drizzle/discover';
@@ -294,6 +299,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
             ...(convertRedirectsConfig(voidConfig.routing?.redirects) ?? []),
             ...(convertRewritesConfig(voidConfig.routing?.rewrites) ?? []),
           ],
+          convertFallbacksConfig(voidConfig.routing?.fallbacks) ?? [],
         );
       } else {
         await runFullDeploy(root, config, client, undefined, options?.skipBuild, gitCommit);
@@ -461,6 +467,7 @@ async function runStaticDeploy(
   hashedAssetsPrefix?: string,
   headerRules?: Array<HeaderRule>,
   redirectRules?: Array<RedirectRule>,
+  fallbackRules?: Array<RedirectRule>,
 ): Promise<void> {
   const typeLabel = preset.appType === 'spa' ? 'Static SPA' : 'Static Site';
   log.info(`${typeLabel} deploy`);
@@ -498,6 +505,7 @@ async function runStaticDeploy(
     hashedAssetsPrefix ?? 'assets',
     headerRules,
     redirectRules,
+    fallbackRules,
     onProgress,
   );
   formData.append('assetManifest', JSON.stringify(assetManifest));
@@ -559,6 +567,7 @@ async function runFrameworkDeploy(
     ...(cfgRedirectRules ?? []),
     ...(cfgRewriteRules ?? []),
   ];
+  const fallbackRules = convertFallbacksConfig(voidConfig.routing?.fallbacks);
 
   if (!existsSync(workerDir)) {
     log.error(`Worker output not found at "${fwPreset.workerDir}". Run "${buildCmd}" first.`);
@@ -740,6 +749,7 @@ async function runFrameworkDeploy(
     hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? 'assets',
     headerRules,
     redirectRules,
+    fallbackRules,
     dialect,
     onProgress,
   });
@@ -870,6 +880,7 @@ async function runFullDeploy(
     ...(cfgRedirectRules ?? []),
     ...(cfgRewriteRules ?? []),
   ];
+  const fallbackRules = convertFallbacksConfig(deployConfig.routing?.fallbacks);
 
   const migrationsDir = join(root, 'db', 'migrations');
 
@@ -1003,6 +1014,7 @@ async function runFullDeploy(
         assetsPrefix,
         headerRules,
         redirectRules,
+        fallbackRules,
       );
     }
   }
@@ -1091,6 +1103,7 @@ async function runFullDeploy(
     assetsPrefix,
     headerRules,
     redirectRules,
+    fallbackRules,
     dialect,
     webSockets,
     onProgress,
