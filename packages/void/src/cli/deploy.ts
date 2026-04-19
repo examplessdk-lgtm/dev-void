@@ -301,6 +301,70 @@ export function resolveStaticBuildCommand(
   return buildOverride ?? preset.buildCommand;
 }
 
+export type ApplyDeployEventResult =
+  | { kind: 'continue' }
+  | { kind: 'start'; deploymentId: string }
+  | { kind: 'done'; event: DeployDoneEvent }
+  | { kind: 'error'; message: string };
+
+/**
+ * Apply the visible side effects of a streamed deploy event (spinner
+ * message or log warning). Returns a discriminated result so the caller
+ * advances its own state (deploymentId capture, final return, error
+ * throw). Pure function of (event, s) so the switch stays unit-testable.
+ */
+export function applyDeployEvent(event: DeployEvent, s: SpinnerResult): ApplyDeployEventResult {
+  switch (event.event) {
+    case 'start':
+      s.message('Deploying...');
+      return { kind: 'start', deploymentId: event.deploymentId };
+    case 'heartbeat':
+      return { kind: 'continue' };
+    case 'asset_upload':
+      if (event.new > 0) {
+        s.message(`Uploading assets (${event.new} new, ${event.cached} cached)`);
+      } else {
+        s.message(`Uploading assets (${event.total} cached)`);
+      }
+      return { kind: 'continue' };
+    case 'provisioning':
+      s.message(`Provisioning ${event.bindings.join(', ')}`);
+      return { kind: 'continue' };
+    case 'migration_start':
+      s.message(`Running ${event.pending} migration${event.pending > 1 ? 's' : ''}...`);
+      return { kind: 'continue' };
+    case 'migration':
+      s.message(`Applied migration: ${event.name} (${event.durationMs}ms)`);
+      return { kind: 'continue' };
+    case 'worker_upload':
+      s.message('Uploading worker...');
+      return { kind: 'continue' };
+    case 'queue_setup':
+      s.message(`Configuring queue consumers: ${event.queues.join(', ')}`);
+      return { kind: 'continue' };
+    case 'queue_consumer_conflict':
+      // log.warn persists above the spinner so the warning survives the
+      // next s.message call — the user needs to see this after deploy
+      // completes, not just as a transient spinner frame.
+      log.warn(
+        `Queue consumer conflict on "${event.queue}": owned by "${event.ownerScript}". ` +
+          `Messages for this queue will not be delivered to this deployment ` +
+          `until the owning script is removed.`,
+      );
+      return { kind: 'continue' };
+    case 'prerender':
+      s.message(`Prerendering ${event.pages} pages...`);
+      return { kind: 'continue' };
+    case 'done':
+      s.stop('Deployed!');
+      return { kind: 'done', event };
+    case 'error':
+      s.stop('Deploy failed');
+      return { kind: 'error', message: event.message };
+  }
+  return { kind: 'continue' };
+}
+
 async function streamDeploy(
   client: PlatformClient,
   projectId: string,
@@ -324,41 +388,13 @@ async function streamDeploy(
 
   try {
     for await (const event of client.deploy(projectId, formData)) {
-      switch (event.event) {
-        case 'start':
-          deploymentId = event.deploymentId;
-          s.message('Deploying...');
-          break;
-        case 'heartbeat':
-          break;
-        case 'asset_upload':
-          if (event.new > 0) {
-            s.message(`Uploading assets (${event.new} new, ${event.cached} cached)`);
-          } else {
-            s.message(`Uploading assets (${event.total} cached)`);
-          }
-          break;
-        case 'provisioning':
-          s.message(`Provisioning ${event.bindings.join(', ')}`);
-          break;
-        case 'migration_start':
-          s.message(`Running ${event.pending} migration${event.pending > 1 ? 's' : ''}...`);
-          break;
-        case 'migration':
-          s.message(`Applied migration: ${event.name} (${event.durationMs}ms)`);
-          break;
-        case 'worker_upload':
-          s.message('Uploading worker...');
-          break;
-        case 'prerender':
-          s.message(`Prerendering ${event.pages} pages...`);
-          break;
-        case 'done':
-          s.stop('Deployed!');
-          return event;
-        case 'error':
-          s.stop('Deploy failed');
-          throw new DeployEventError(formatDeployFailureMessage(event.message, deploymentId));
+      const result = applyDeployEvent(event, s);
+      if (result.kind === 'start') {
+        deploymentId = result.deploymentId;
+      } else if (result.kind === 'done') {
+        return result.event;
+      } else if (result.kind === 'error') {
+        throw new DeployEventError(formatDeployFailureMessage(result.message, deploymentId));
       }
     }
   } catch (err) {

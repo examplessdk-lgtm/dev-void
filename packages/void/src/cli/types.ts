@@ -95,6 +95,7 @@ export type DeployEvent =
   | { event: 'worker_upload'; modules: number }
   | { event: 'worker_upload_done' }
   | { event: 'queue_setup'; queues: string[] }
+  | { event: 'queue_consumer_conflict'; queue: string; ownerScript: string }
   | { event: 'prerender'; pages: number }
   | { event: 'prerender_done' }
   | {
