@@ -25,6 +25,7 @@ import {
   type McpConfigTarget,
 } from './agents';
 import { maybeSetupDeployProject } from './deploy-setup';
+import { maybeScaffoldEnvTs } from './env-scaffold';
 import { cliTitle } from './output';
 import { formatProjectCommand } from './preset';
 import {
@@ -2657,6 +2658,20 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     log.info(
       'Skipping GitHub Actions setup: workflow files must live at the repo root, not in a workspace subpackage.',
     );
+  }
+
+  if (!targeted) {
+    const scaffoldResult = maybeScaffoldEnvTs(root);
+    if (scaffoldResult.written) {
+      const rel = relative(root, scaffoldResult.written) || 'env.ts';
+      if (scaffoldResult.entries.length > 0) {
+        log.success(
+          `Scaffolded ${rel} from your .env files — review inferred types before running dev.`,
+        );
+      } else {
+        log.success(`Created empty ${rel} — add your env keys with \`defineEnv({...})\`.`);
+      }
+    }
   }
 
   if (!targeted) {

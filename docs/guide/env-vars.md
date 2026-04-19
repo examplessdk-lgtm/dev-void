@@ -14,6 +14,10 @@ Void provides typed, validated environment variables via a single `env.ts` file 
 
 Place an `env.ts` at your project root and call `defineEnv` once:
 
+::: tip Scaffolded on `void init`
+If you already have `.env` or `.env.example` files when you run `void init`, Void generates an `env.ts` seeded from those keys. Inference is conservative — values that unambiguously parse as a boolean (`true`/`false`), an `http(s)://` URL, or a small integer get typed accordingly; everything else stays `string()`. The generated file carries a banner comment asking you to review and tighten types before running dev.
+:::
+
 ```ts
 // env.ts
 import { defineEnv, string, number, boolean, oneOf, url } from 'void/env';
@@ -154,3 +158,40 @@ The managed block is grouped into `required`, `with defaults`, and `optional` se
 ## Migration from untyped `c.env`
 
 If you don't have an `env.ts`, `c.env.X` continues to work as `unknown` — no breaking change. To opt in, create `env.ts`, declare your keys, and the existing call sites become typed automatically. The recommended access pattern for new code is `import { env } from "void/env"`.
+
+## How it compares
+
+Most frameworks ship _parts_ of an env story — loading, typing, validation, deploy checks — but stitching them together is left to the user. Here's how Void's single `env.ts` stacks up against the tools people reach for today.
+
+| Feature                                         | Void `env.ts` | `@t3-oss/env` | Astro `astro:env` | SvelteKit `$env` | Vite `import.meta.env` | Nuxt `runtimeConfig` | `dotenv` + `zod` (DIY) |
+| ----------------------------------------------- | :-----------: | :-----------: | :---------------: | :--------------: | :--------------------: | :------------------: | :--------------------: |
+| Single schema file                              |      yes      |      yes      |   yes (config)    |        no        |           no           |       partial        |          yes           |
+| Runtime validation                              |      yes      |      yes      |        yes        |        no        |           no           |          no          |          yes           |
+| Auto-generated types                            |      yes      |      yes      |        yes        |       yes        |   manual `env.d.ts`    |      yes (aug.)      |         manual         |
+| Bring-your-own validator (Standard Schema)      |      yes      |      yes      |        no         |        no        |           no           |          no          |          yes           |
+| Built-in helpers without installing a validator |      yes      |      no       |        yes        |        —         |           —            |          —           |           no           |
+| Build-time guard against leaking server env     |      yes      |      yes      |        yes        |       yes        |      prefix only       |     prefix only      |           no           |
+| Custom `envPrefix` honoured                     |      yes      |      yes      |        n/a        |       n/a        |          yes           |         n/a          |          n/a           |
+| Schema defaults flow into runtime bindings      |      yes      |    partial    |        yes        |        no        |           no           |       partial        |         manual         |
+| Async validators                                |      yes      |      no       |        no         |        no        |           no           |          no          |          yes           |
+| `.env.example` scaffolding from schema          |      yes      |      no       |        no         |        no        |           no           |          no          |           no           |
+| Deploy-time check (local + remote secrets)      |      yes      |      no       |        no         |        no        |           no           |          no          |           no           |
+| Cloudflare secret store integration             |      yes      |      no       |        no         |        no        |           no           |          no          |           no           |
+| Zero-config (auto-discovered, no plugin wiring) |      yes      |      no       |        yes        |       yes        |          yes           |         yes          |           no           |
+| Schema scaffolded from existing `.env` files    |      yes      |      no       |        no         |        no        |           no           |          no          |           no           |
+
+### Where Void differs
+
+- **One file, one call.** `defineEnv({...})` is the whole API surface. `@t3-oss/env` is the closest analogue but splits into `server`/`client`/`runtimeEnv` blocks and expects you to hand it `process.env`. Void auto-discovers `env.ts`, loads `.env*` via Vite's own resolver (honouring `envDir`), and wires the result into the plugin, the worker bundle, the CLI, and generated types without extra config.
+- **Helpers _and_ Standard Schema, mixable.** Most solutions force a choice: either Zod-only (t3-env, many DIY setups), or a bespoke helper DSL with no escape hatch (Astro, SvelteKit). Void ships `string()`, `number()`, `boolean()`, `url()`, `email()`, `oneOf()`, `json<T>()` so a small project pulls in zero validator dependencies, and any [Standard Schema](https://standardschema.dev) library (valibot, zod, arktype) drops into the same object for richer rules.
+- **Build-time leak prevention with source locations.** The `void:env-client-guard` plugin walks client module graphs and fails the build with a file:line:col pointer when a non-prefixed key is imported from the browser bundle. Frameworks like Next.js and Vite only enforce this through the _prefix convention_ — a renamed variable silently leaks. Void enforces both the prefix rule and the schema's server/client split.
+- **Defaults propagate everywhere.** `PORT: number().default(3000)` fills the typed proxy, the worker `vars` block in dev, the deploy manifest, and the prerender bindings — so `process.env.PORT`, `c.env.PORT`, and `env.PORT` all return `3000` when unset. t3-env and Nuxt only surface defaults in the typed object; the raw `process.env` still reads `undefined`.
+- **Deploy is the enforcement point.** `void deploy` unions `.env*` with the remote secret list and hard-fails on any missing required key _before_ upload. No competing solution in the table treats deploy as a validation gate — the closest substitute is a handwritten CI script calling `zod.parse(process.env)`, which doesn't know about the target platform's remote secrets.
+- **`.env.example` is generated, not maintained by hand.** `void env example` writes a marker-delimited block grouped into `required`, `with defaults`, `optional`, with enum hints for `oneOf` keys. Everything outside the markers (team CI tokens, comments) survives refresh. No other tool in the comparison ships this.
+- **Async validators.** A validator can return a `Promise` — useful for probing a URL, fetching a JWKS, or resolving a secret reference at startup. t3-env and schema-based systems assume synchronous parsing.
+- **Onboarding from an existing `.env`.** `void init` detects pre-existing dotenv files and writes a seeded `env.ts` with conservative type inference (boolean/URL/number/string) and a banner comment prompting you to tighten the guesses. Every other solution in the table requires you to hand-write the schema from scratch even when your team already has a `.env.example` committed.
+
+### When to pick something else
+
+- You're on **pure Next.js/Nuxt/SvelteKit** without a Void worker — use the framework-native option plus `@t3-oss/env` if you want validation. Void's value compounds when the same schema drives dev, typegen, client-guard, worker bindings, and deploy.
+- You explicitly want **build-time constant folding** (e.g. `import.meta.env.MODE` tree-shaking `if (MODE === 'production')` branches). Void's `env` is a runtime proxy — it gives you types and validation, not static replacement. Use Vite's `define` for the narrow cases where folding matters, and keep `defineEnv` for everything else. Void warns when a `define` key collides with a schema key.

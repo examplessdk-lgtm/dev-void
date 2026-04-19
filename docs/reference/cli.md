@@ -62,7 +62,8 @@ After that, the full interactive flow walks through:
 5. **MCP config:** writes MCP server config using that same agent context.
 6. **Demo code:** for existing non-Pages projects, optionally scaffolds a `db/migrations/` directory plus an API route and typed fetch example.
 7. **GitHub Actions:** optionally creates `.github/workflows/deploy.yml` with the right package manager commands.
-8. **Project setup:** optionally logs you in, lets you select or create a project, and writes `.void/project.json` so your first deploy can just be `void deploy`.
+8. **`env.ts` scaffold:** if the project has no `env.ts` but has `.env` / `.env.example` / `.env.local` / `.env.development*` files on disk, generates an `env.ts` pre-populated with their keys. Values get conservative type inference (`boolean`/`url`/`number`/`string`) — the file carries a banner nudging you to tighten anything the heuristic got wrong.
+9. **Project setup:** optionally logs you in, lets you select or create a project, and writes `.void/project.json` so your first deploy can just be `void deploy`.
 
 If no agent is detected, `void init` asks you to choose one from a short list (Claude, Cursor, Codex, Gemini CLI, Generic). That single choice is reused across all agent steps.
 
