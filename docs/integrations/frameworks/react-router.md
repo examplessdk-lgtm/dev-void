@@ -120,6 +120,30 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 });
 ```
 
+### Environment Variables
+
+Full `env.ts` support — typegen, client-leak guard, and build-time constant folding all work.
+
+```ts
+// env.ts
+import { defineEnv, string } from 'void/env';
+export default defineEnv({
+  STRIPE_KEY: string(),
+  VITE_APP_TITLE: string(),
+});
+
+// inside a loader
+import { env } from 'void/env';
+
+export async function loader() {
+  return { charge: await stripe(env.STRIPE_KEY).charges.create(/* … */) };
+}
+```
+
+**React Router-specific caveat:** because `loader()` and the component live in the same route file, the client guard treats the module as client-reachable. Reading `env.SERVER_ONLY_KEY` inside `loader()` is still safe at runtime (RR strips loaders from the client bundle), but the guard flags it as a potential leak. Move server-only secrets into a `.server.ts` companion file to silence the guard cleanly.
+
+See the [env guide](../../guide/env-vars.md) for the full feature set.
+
 ## Accessing Bindings Directly
 
 You can also access Cloudflare bindings via the `cloudflare:workers` module:

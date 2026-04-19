@@ -160,6 +160,35 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 });
 ```
 
+### Environment Variables
+
+Void's CLI env features work with Analog — runtime reads do not. Use `env.ts` as the single schema source of truth and read actual values via the `cloudflare:workers` `env` export.
+
+**What works:**
+
+- `void env check [--remote]` validates `.env*` + remote secret names against your `env.ts`.
+- `void deploy` hard-fails before upload if required keys are missing.
+- `void env example` generates a managed `.env.example` block from the schema.
+
+**What does NOT work in Analog mode:**
+
+- `import { env } from "void/env"` in server handlers — Nitro bundles the server side separately from Vite, and the module throws at worker runtime. Use `import { env } from "cloudflare:workers"` (or the H3 event context) instead.
+- Typed `env.d.ts`, the client-leak guard, and constant folding are not wired.
+
+```ts
+// env.ts — single schema source of truth
+import { defineEnv, string } from 'void/env';
+export default defineEnv({ STRIPE_KEY: string() });
+
+// src/server/routes/api/charge.ts — read via cloudflare:workers
+import { env } from 'cloudflare:workers';
+export default defineEventHandler(async () => {
+  return stripe(env.STRIPE_KEY).charges.create(/* … */);
+});
+```
+
+See the [env guide](../../guide/env-vars.md) for the schema feature set.
+
 ## Accessing Bindings Directly
 
 You can also access raw Cloudflare bindings via the H3 event context or the `cloudflare:workers` module:

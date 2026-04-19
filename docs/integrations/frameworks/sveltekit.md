@@ -141,6 +141,33 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 });
 ```
 
+### Environment Variables
+
+Partial `env.ts` support. The CLI features (`void env check`, deploy-time validation, `.env.example` generation) work fully. At runtime, `env.X` works on the server via a hook Void injects into `src/hooks.server.ts`, and `VITE_*` keys reach the client through Vite's native `import.meta.env` path.
+
+```ts
+// env.ts
+import { defineEnv, string } from 'void/env';
+export default defineEnv({
+  STRIPE_KEY: string(),
+  VITE_APP_TITLE: string(),
+});
+
+// +page.server.ts
+import { env } from 'void/env';
+export async function load() {
+  return { charge: await stripe(env.STRIPE_KEY).charges.create(/* … */) };
+}
+```
+
+**Limitations in framework mode:**
+
+- Typed `env.d.ts` is not generated — `env.X` stays `unknown` (runtime validation still works).
+- The `void:env-client-guard` build-time check is not wired, so a `env.SERVER_ONLY_KEY` read from `+page.svelte` compiles cleanly and only fails at runtime.
+- Build-time constant folding is not applied.
+
+For anything performance- or DX-sensitive, prefer SvelteKit's own `$env/static/*` and `$env/dynamic/*` — Void's `env` on SvelteKit is best thought of as "the single schema source of truth for deploy validation + `.env.example` generation, with optional runtime reads." See the [env guide](../../guide/env-vars.md).
+
 ## Accessing Bindings Directly
 
 You can also use SvelteKit's `platform.env` in server hooks and load functions:

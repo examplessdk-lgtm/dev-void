@@ -221,13 +221,40 @@ The **key name itself is never masked** — you need it to locate the offending 
 
 For local debugging, set `VOID_ENV_UNMASK=1` in your shell to see raw values in error output. On activation Void prints a one-shot notice to stderr so the loosened output is visibly attributed; unset it before sharing logs.
 
+## Using `env.ts` with a meta-framework
+
+How much of the env story applies depends on how deeply `voidPlugin()` owns your bundler. Every project gets the CLI-level features; runtime `import { env }` only lights up on Vite-native frameworks that keep Void in the client + server plugin chain.
+
+| Framework         | `env.ts` typegen | Client leak guard | Constant folding |   `env` on server   | `env` on client | `void env check` + deploy gate |
+| ----------------- | :--------------: | :---------------: | :--------------: | :-----------------: | :-------------: | :----------------------------: |
+| Void (Pages mode) |       yes        |        yes        |       yes        |         yes         | yes (`VITE_*`)  |              yes               |
+| TanStack Start    |       yes        |        yes        |       yes        |         yes         | yes (`VITE_*`)  |              yes               |
+| React Router v7   |       yes        |        yes        |       yes        | yes (in `loader()`) | yes (`VITE_*`)  |              yes               |
+| SvelteKit         |        no        |        no         |        no        | yes (runtime proxy) | yes (via Vite)  |              yes               |
+| Nuxt              |        no        |        no         |        no        |     **throws**      | yes (via Vite)  |              yes               |
+| Analog            |        no        |        no         |        no        |     **throws**      | yes (via Vite)  |              yes               |
+| Astro             |        no        |        no         |        no        |     **throws**      |   **throws**    |              yes               |
+
+What you always get, regardless of framework:
+
+- `void env check [--remote]` validates `.env*` files + remote secret names against the schema.
+- `void deploy` hard-fails before upload when any required key is missing.
+- `void env example` generates the marker-delimited `.env.example` block.
+- `void init` scaffolds `env.ts` from existing dotenv files.
+
+On **Nuxt / Analog / Astro**, don't read env at runtime via `import { env }` — use the framework's native mechanism (`useRuntimeConfig()`, `event.context.cloudflare.env`, `Astro.locals.runtime.env`, `astro:env`). Void's CLI features still pay off: `env.ts` is the single schema source of truth for `.env.example` generation, deploy validation, and CI env-check.
+
+Full Class B/C integration (typegen, client guard, folding, runtime proxy) is on the roadmap but not a v1 gate — those frameworks have solid native env stories already.
+
 ## Migration from untyped `c.env`
 
 If you don't have an `env.ts`, `c.env.X` continues to work as `unknown` — no breaking change. To opt in, create `env.ts`, declare your keys, and the existing call sites become typed automatically. The recommended access pattern for new code is `import { env } from "void/env"`.
 
 ## How it compares
 
-Most frameworks ship _parts_ of an env story — loading, typing, validation, deploy checks — but stitching them together is left to the user. Here's how Void's single `env.ts` stacks up against the tools people reach for today.
+`void/env` is a Void-only module — it isn't a standalone env library you'd pull into a Nuxt, SvelteKit, or bare-Vite project. This section exists so you can see what the integrated Void env story includes relative to what you'd otherwise assemble yourself on those stacks, not as a pick-one-of-many benchmark.
+
+Most frameworks ship _parts_ of an env story — loading, typing, validation, deploy checks — but stitching them together is left to the user. Here's how Void's single `env.ts` stacks up against the tools people reach for on other stacks today.
 
 | Feature                                         | Void `env.ts` | `@t3-oss/env` | Astro `astro:env` | SvelteKit `$env` | Vite `import.meta.env` | Nuxt `runtimeConfig` | `dotenv` + `zod` (DIY) |
 | ----------------------------------------------- | :-----------: | :-----------: | :---------------: | :--------------: | :--------------------: | :------------------: | :--------------------: |
@@ -252,15 +279,10 @@ Most frameworks ship _parts_ of an env story — loading, typing, validation, de
 
 - **One file, one call.** `defineEnv({...})` is the whole API surface. `@t3-oss/env` is the closest analogue but splits into `server`/`client`/`runtimeEnv` blocks and expects you to hand it `process.env`. Void auto-discovers `env.ts`, loads `.env*` via Vite's own resolver (honouring `envDir`), and wires the result into the plugin, the worker bundle, the CLI, and generated types without extra config.
 - **Helpers _and_ Standard Schema, mixable.** Most solutions force a choice: either Zod-only (t3-env, many DIY setups), or a bespoke helper DSL with no escape hatch (Astro, SvelteKit). Void ships `string()`, `number()`, `boolean()`, `url()`, `email()`, `oneOf()`, `json<T>()` so a small project pulls in zero validator dependencies, and any [Standard Schema](https://standardschema.dev) library (valibot, zod, arktype) drops into the same object for richer rules.
-- **Build-time leak prevention with source locations.** The `void:env-client-guard` plugin walks client module graphs and fails the build with a file:line:col pointer when a non-prefixed key is imported from the browser bundle. Frameworks like Next.js and Vite only enforce this through the _prefix convention_ — a renamed variable silently leaks. Void enforces both the prefix rule and the schema's server/client split.
+- **Build-time leak prevention with source locations.** The `void:env-client-guard` plugin walks client module graphs and fails the build with a file:line:col pointer when a non-prefixed key is imported from the browser bundle. Vite on its own only enforces this through the _prefix convention_ — a renamed variable silently leaks. Void enforces both the prefix rule and the schema's server/client split.
 - **Build-time constant folding for client reads.** Production client builds inline static `env.VITE_FOO` reads as literals so `if (env.MODE === 'production') { … }` branches tree-shake the same way `import.meta.env.MODE` already does. Server / SSR / worker code keeps the runtime proxy untouched, and only prefix-matching keys are ever folded — no schema-required validation is bypassed because the same values still flow through `defineEnv` on boot.
 - **Defaults propagate everywhere.** `PORT: number().default(3000)` fills the typed proxy, the worker `vars` block in dev, the deploy manifest, and the prerender bindings — so `process.env.PORT`, `c.env.PORT`, and `env.PORT` all return `3000` when unset. t3-env and Nuxt only surface defaults in the typed object; the raw `process.env` still reads `undefined`.
 - **Deploy is the enforcement point.** `void deploy` unions `.env*` with the remote secret list and hard-fails on any missing required key _before_ upload. No competing solution in the table treats deploy as a validation gate — the closest substitute is a handwritten CI script calling `zod.parse(process.env)`, which doesn't know about the target platform's remote secrets.
 - **`.env.example` is generated, not maintained by hand.** `void env example` writes a marker-delimited block grouped into `required`, `with defaults`, `optional`, with enum hints for `oneOf` keys. Everything outside the markers (team CI tokens, comments) survives refresh. No other tool in the comparison ships this.
 - **Async validators.** A validator can return a `Promise` — useful for probing a URL, fetching a JWKS, or resolving a secret reference at startup. t3-env and schema-based systems assume synchronous parsing.
 - **Onboarding from an existing `.env`.** `void init` detects pre-existing dotenv files and writes a seeded `env.ts` with conservative type inference (boolean/URL/number/string) and a banner comment prompting you to tighten the guesses. Every other solution in the table requires you to hand-write the schema from scratch even when your team already has a `.env.example` committed.
-
-### When to pick something else
-
-- You're on **pure Next.js/Nuxt/SvelteKit** without a Void worker — use the framework-native option plus `@t3-oss/env` if you want validation. Void's value compounds when the same schema drives dev, typegen, client-guard, worker bindings, and deploy.
-- You explicitly want **non-env global replacement** (e.g. `define: { __BUILD_SHA__: '"abc123"' }`) that flows into both client and worker bundles as a free-standing identifier. Vite's `define` option is still the right tool there — `defineEnv` scopes to typed env keys. Void warns when a `define` key collides with a schema key to avoid silent skew.

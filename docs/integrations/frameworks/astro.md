@@ -160,6 +160,35 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 });
 ```
 
+### Environment Variables
+
+Void's CLI env features work with Astro — runtime reads do not. Use `env.ts` as the single schema source of truth and read actual values via Astro's own mechanisms.
+
+**What works:**
+
+- `void env check [--remote]` validates `.env*` + remote secret names against your `env.ts`.
+- `void deploy` hard-fails before upload if required keys are missing.
+- `void env example` generates a managed `.env.example` block from the schema.
+
+**What does NOT work in Astro mode:**
+
+- `import { env } from "void/env"` on both server and client — Astro's adapter resolves `void/env` to the client variant in both contexts, so every non-`VITE_` key throws with "Env key … is not exposed to the client." Use `Astro.locals.runtime.env` or [`astro:env`](https://docs.astro.build/en/guides/environment-variables/) instead.
+- Typed `env.d.ts`, the client-leak guard, and constant folding are not wired.
+
+```ts
+// env.ts — single schema source of truth
+import { defineEnv, string } from 'void/env';
+export default defineEnv({ STRIPE_KEY: string() });
+
+// src/pages/api/charge.ts — read via Astro
+export const POST: APIRoute = async ({ locals }) => {
+  const { STRIPE_KEY } = locals.runtime.env;
+  // …
+};
+```
+
+See the [env guide](../../guide/env-vars.md) for the schema feature set.
+
 ## Accessing Bindings Directly
 
 Access bindings via `Astro.locals.runtime.env` (works in both dev and production):
