@@ -1,12 +1,13 @@
 import { getApiUrl } from './auth';
 import type { DeployEvent } from './types';
 
-type PlatformErrorPayload = {
+export type PlatformErrorPayload = {
   error?: string;
   message?: string;
+  deployment?: string;
 };
 
-function parsePlatformErrorBody(body: string): PlatformErrorPayload | null {
+export function parsePlatformErrorBody(body: string): PlatformErrorPayload | null {
   try {
     const parsed = JSON.parse(body);
     if (!parsed || typeof parsed !== 'object') {

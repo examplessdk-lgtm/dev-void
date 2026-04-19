@@ -46,6 +46,11 @@ import { validateSsrEntry } from '../ssr/entry';
 import { getToken, getTokenSource } from './auth';
 import { isExpiredTokenError, PlatformClient } from './client';
 import { promptAndCreateProject } from './create-project';
+import {
+  formatConnectionLostMessage,
+  formatDeployFailureMessage,
+  formatStreamDeployError,
+} from './deploy-errors';
 import { parseHeadersFile, parseRedirectsFile } from './headers';
 import { promptForLoginToken } from './login';
 import { cliTitle, createSpinner } from './output';
@@ -364,21 +369,13 @@ async function streamDeploy(
       throw err;
     }
     s.stop('Deploy failed');
-    throw new Error(formatConnectionLostMessage(deploymentId));
+    throw formatStreamDeployError(err, deploymentId);
   } finally {
     process.removeListener('SIGINT', onSigint);
   }
 
   s.stop('Deploy failed');
   throw new Error(formatConnectionLostMessage(deploymentId));
-}
-
-function formatDeployFailureMessage(message: string, deploymentId: string | null): string {
-  return deploymentId ? `${message}\nDeployment: ${deploymentId}` : message;
-}
-
-function formatConnectionLostMessage(deploymentId: string | null): string {
-  return formatDeployFailureMessage('Connection lost during deploy', deploymentId);
 }
 
 function formatKnownAssetSummary(result: DeployDoneEvent, skipped: number): string {
