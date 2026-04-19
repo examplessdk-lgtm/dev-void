@@ -123,6 +123,8 @@ export default defineConfig({
       'tinyglobby',
       'estree-walker',
       'es-module-lexer',
+      'magic-string',
+      '@jridgewell/sourcemap-codec',
       '@clack/prompts',
       '@clack/core',
       'fast-string-truncated-width',
