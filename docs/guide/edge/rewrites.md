@@ -281,6 +281,17 @@ To confirm precedence in practice, check the [`X-Void-Routing` dev header](#debu
 
 Static rewrites are evaluated at the edge (zero-cost). Middleware rewrites run inside the worker (adds a re-dispatch but enables dynamic logic).
 
+## Caveat: client navigation skips rewrites
+
+Rewrites run on the server. A full HTTP request to `/docs` resolves through `routing.rewrites` and serves `/en/docs` content. But a client-side `<Link to="/docs">` navigation in Pages mode fetches loader data directly for `/docs` — the client router doesn't know about the server's rewrite table, so there's no lookup against `/en/docs` on that path.
+
+In practice this only matters when the source and destination have **different loader behavior**. If `/docs` has no route handler but `/en/docs` does, clicking a `<Link to="/docs">` will fail where a fresh page load would succeed. The first render (server) and a subsequent client nav (CSR) to the same URL can diverge.
+
+Two mitigations:
+
+- Use a plain `<a href="/docs">` when you need the navigation to round-trip through the server (and therefore through rewrites).
+- If the URL change is meant to be authoritative, use a [redirect](./redirects) instead — the client router follows redirects via HTTP, so behavior is consistent.
+
 ## Caveat: ISR cache keys use the rewritten URL
 
 If you use [`routing.revalidate`](./revalidation) on a rewritten path, the cache key is the **rewritten** pathname, not the original. So a request to `/docs/foo` that rewrites to `/en/docs/foo` is cached under `/en/docs/foo`. Direct requests to `/docs/foo` aren't cached (they re-render every time), and `revalidate({ paths: ['/docs/foo'] })` invalidates nothing — you need to pass the rewritten path (`/en/docs/foo`).
