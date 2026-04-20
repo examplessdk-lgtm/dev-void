@@ -21,7 +21,7 @@ Use this page as a command reference. If you are setting up a project for the fi
 | `void db studio`                  | Open Drizzle Studio for local database              |
 | `void secret put <name=value>`    | Set a production secret                             |
 | `void secret sync .env.local`     | Bulk upload secrets from dotenv file                |
-| `void env check [--remote]`       | Validate env.ts schema (CI-friendly)                |
+| `void env check [--remote]`       | Validate env.ts schema                |
 | `void env types`                  | Regenerate .void/env.d.ts from env.ts               |
 | `void env example`                | Refresh the void-managed block in .env.example      |
 | `void auth login`                 | Authenticate with Void                              |
