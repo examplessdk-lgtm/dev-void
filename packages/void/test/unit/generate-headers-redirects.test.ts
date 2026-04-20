@@ -20,11 +20,14 @@ afterEach(() => {
 describe('parseRedirectsFile', () => {
   it('parses standard _redirects file', () => {
     setup('/old /new 301\n/blog/* /posts/:splat 302\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
-      { source: '/old', destination: '/new', status: 301, origin: '_redirects:1' },
-      { source: '/blog/*', destination: '/posts/:splat', status: 302, origin: '_redirects:2' },
-    ]);
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed).toEqual({
+      rules: [
+        { source: '/old', destination: '/new', status: 301, origin: '_redirects:1' },
+        { source: '/blog/*', destination: '/posts/:splat', status: 302, origin: '_redirects:2' },
+      ],
+      redundantForceOn3xx: 0,
+    });
   });
 
   it('returns undefined when file does not exist', () => {
@@ -34,24 +37,25 @@ describe('parseRedirectsFile', () => {
 
   it('skips comments and blank lines', () => {
     setup('# comment\n\n/old /new 301\n# another comment\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
       { source: '/old', destination: '/new', status: 301, origin: '_redirects:3' },
     ]);
+    expect(parsed?.redundantForceOn3xx).toBe(0);
   });
 
   it('defaults status to 302 when omitted', () => {
     setup('/old /new\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
       { source: '/old', destination: '/new', status: 302, origin: '_redirects:1' },
     ]);
   });
 
   it('includes 200 rewrites alongside 3xx redirects', () => {
     setup('/app/* /index.html 200\n/old /new 301\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
       {
         source: '/app/*',
         destination: '/index.html',
@@ -65,8 +69,8 @@ describe('parseRedirectsFile', () => {
 
   it('parses 200! as force-true rewrite (Netlify-compat)', () => {
     setup('/app/* /index.html 200!\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
       {
         source: '/app/*',
         destination: '/index.html',
@@ -75,12 +79,13 @@ describe('parseRedirectsFile', () => {
         origin: '_redirects:1',
       },
     ]);
+    expect(parsed?.redundantForceOn3xx).toBe(0);
   });
 
   it('distinguishes force (200!) from non-force (200) rules in the same file', () => {
     setup('/fallback /spa.html 200\n/api/* /backend/:splat 200!\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
       {
         source: '/fallback',
         destination: '/spa.html',
@@ -98,18 +103,32 @@ describe('parseRedirectsFile', () => {
     ]);
   });
 
-  it('rejects force suffix on non-200 statuses like 301!', () => {
+  it('silently accepts 301! as a regular 301 and tallies redundant-force count', () => {
     setup('/old /new 301!\n/ok /new 301\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
+      { source: '/old', destination: '/new', status: 301, origin: '_redirects:1' },
       { source: '/ok', destination: '/new', status: 301, origin: '_redirects:2' },
     ]);
+    expect(parsed?.redundantForceOn3xx).toBe(1);
+  });
+
+  it('silently accepts all 3xx force variants (301!, 302!, 307!, 308!)', () => {
+    setup('/a /x 301!\n/b /x 302!\n/c /x 307!\n/d /x 308!\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
+      { source: '/a', destination: '/x', status: 301, origin: '_redirects:1' },
+      { source: '/b', destination: '/x', status: 302, origin: '_redirects:2' },
+      { source: '/c', destination: '/x', status: 307, origin: '_redirects:3' },
+      { source: '/d', destination: '/x', status: 308, origin: '_redirects:4' },
+    ]);
+    expect(parsed?.redundantForceOn3xx).toBe(4);
   });
 
   it('tolerates extra whitespace between fields', () => {
     setup('  /app/*   /index.html    200!  \n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
       {
         source: '/app/*',
         destination: '/index.html',
@@ -122,8 +141,8 @@ describe('parseRedirectsFile', () => {
 
   it('handles :splat destinations (preserved as-is)', () => {
     setup('/blog/* /posts/:splat 301\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
       { source: '/blog/*', destination: '/posts/:splat', status: 301, origin: '_redirects:1' },
     ]);
   });
@@ -135,8 +154,8 @@ describe('parseRedirectsFile', () => {
 
   it('parses file with only 200 rewrites', () => {
     setup('/app/* /index.html 200\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
       {
         source: '/app/*',
         destination: '/index.html',
@@ -149,16 +168,16 @@ describe('parseRedirectsFile', () => {
 
   it('skips non-200 non-3xx status codes', () => {
     setup('/old /new 404\n/ok /new 301\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
       { source: '/ok', destination: '/new', status: 301, origin: '_redirects:2' },
     ]);
   });
 
   it('skips 200 rewrites with external destinations', () => {
     setup('/api/* https://upstream.example/:splat 200\n/app/* /index.html 200\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
       {
         source: '/app/*',
         destination: '/index.html',
@@ -171,8 +190,8 @@ describe('parseRedirectsFile', () => {
 
   it('tags origin with line number when destination is external (skipped)', () => {
     setup('# header\n/fallback /spa.html 200\n');
-    const rules = parseRedirectsFile(tmpDir);
-    expect(rules?.[0].origin).toBe('_redirects:2');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules[0].origin).toBe('_redirects:2');
   });
 });
 

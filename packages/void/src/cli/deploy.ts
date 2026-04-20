@@ -523,6 +523,24 @@ async function runStaticDeploy(
 }
 
 /**
+ * Emit a single aggregated lint warning when a `_redirects` file contains
+ * one or more `!` force suffixes on 3xx entries (e.g. `301!`, `302!`).
+ * The `!` is a no-op on redirects — we parse them as if the `!` weren't
+ * there — but we nudge the user to clean up for clarity. Silenced when
+ * `count === 0`.
+ */
+function warnRedundantForceOn3xx(count: number): void {
+  if (count === 0) {
+    return;
+  }
+  const noun = count === 1 ? 'entry' : 'entries';
+  const suffix = count === 1 ? 'suffix' : 'suffixes';
+  log.warn(
+    `${count} redundant "!" ${suffix} found on 3xx ${noun} in _redirects (these always force by nature). Safe to remove.`,
+  );
+}
+
+/**
  * Class B/C framework deploy: build with framework CLI, package with preset output paths.
  */
 async function runFrameworkDeploy(
@@ -566,9 +584,11 @@ async function runFrameworkDeploy(
   //
   // splitRedirectRulesByForce bucketizes parsed file rules so plain `200` entries
   // become fallbacks while `200!` and 3xx entries stay in the always-apply bucket.
-  const fwRedirectRules = existsSync(assetsDir) ? parseRedirectsFile(assetsDir) : undefined;
-  const { always: fwAlwaysRules, fallbacks: fwFallbackRules } =
-    splitRedirectRulesByForce(fwRedirectRules);
+  const fwParsedRedirects = existsSync(assetsDir) ? parseRedirectsFile(assetsDir) : undefined;
+  warnRedundantForceOn3xx(fwParsedRedirects?.redundantForceOn3xx ?? 0);
+  const { always: fwAlwaysRules, fallbacks: fwFallbackRules } = splitRedirectRulesByForce(
+    fwParsedRedirects?.rules,
+  );
   const cfgRedirectRules = convertRedirectsConfig(voidConfig.routing?.redirects);
   const cfgRewriteRules = convertRewritesConfig(voidConfig.routing?.rewrites);
   const cfgFallbackRules = convertFallbacksConfig(voidConfig.routing?.fallbacks);
@@ -884,9 +904,11 @@ async function runFullDeploy(
 
   // Collect redirect rules: parse user/framework _redirects file + void.json config.
   // See the same-shape block above for Netlify-symmetric 200 vs 200! semantics.
-  const userRedirectRules = existsSync(clientDir) ? parseRedirectsFile(clientDir) : undefined;
-  const { always: userAlwaysRules, fallbacks: userFallbackRules } =
-    splitRedirectRulesByForce(userRedirectRules);
+  const userParsedRedirects = existsSync(clientDir) ? parseRedirectsFile(clientDir) : undefined;
+  warnRedundantForceOn3xx(userParsedRedirects?.redundantForceOn3xx ?? 0);
+  const { always: userAlwaysRules, fallbacks: userFallbackRules } = splitRedirectRulesByForce(
+    userParsedRedirects?.rules,
+  );
   const cfgRedirectRules = convertRedirectsConfig(deployConfig.routing?.redirects);
   const cfgRewriteRules = convertRewritesConfig(deployConfig.routing?.rewrites);
   const cfgFallbackRules = convertFallbacksConfig(deployConfig.routing?.fallbacks);

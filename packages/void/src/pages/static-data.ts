@@ -26,7 +26,10 @@ export function resolveStaticPageDataBuildOptions(
     redirectDirs.push(options.publicDir ?? join(root, 'public'));
   }
 
-  const hasRedirectsFile = redirectDirs.some((dir) => Boolean(parseRedirectsFile(dir)));
+  const hasRedirectsFile = redirectDirs.some((dir) => {
+    const parsed = parseRedirectsFile(dir);
+    return parsed != null && parsed.rules.length > 0;
+  });
 
   return {
     enabled,

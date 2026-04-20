@@ -4,6 +4,19 @@ import { voidWarn } from '../log';
 import type { HeaderRule, RedirectRule } from './types';
 
 /**
+ * Result of parsing a `_redirects` file.
+ *
+ * `redundantForceOn3xx` counts entries that used a `!` force suffix on a 3xx
+ * status (e.g. `301!`, `302!`, `307!`, `308!`). The `!` is a no-op on 3xx
+ * (a redirect always "forces" by nature — it changes the URL), so we silently
+ * strip it and let callers aggregate a single friendly warning at deploy time.
+ */
+export interface ParsedRedirects {
+  rules: RedirectRule[];
+  redundantForceOn3xx: number;
+}
+
+/**
  * Parse a Cloudflare/Netlify `_headers` file into HeaderRule[].
  *
  * Format:
@@ -79,17 +92,25 @@ export function parseHeadersFile(dir: string): Array<HeaderRule> | undefined {
 }
 
 /**
- * Parse a `_redirects` file into RedirectRule[].
+ * Parse a `_redirects` file.
+ *
  * Format: `source destination [status]` per line (status defaults to 302).
  * Lines starting with # are comments. Includes 3xx redirects and 200 rewrites.
  *
- * Status-200 entries accept an optional Netlify-compatible `!` force suffix
- * (`200!`). The plain form fires only when the static asset would 404; the
- * force form fires unconditionally, overriding any matching static asset.
- * The `!` suffix is only valid on status `200`; combinations like `301!` are
- * skipped with a warning.
+ * Force suffix (`!`) semantics:
+ *   - On status 200: toggles `force: true` (Netlify-compat). The plain form
+ *     fires only when the static asset would 404; the force form fires
+ *     unconditionally, overriding any matching static asset.
+ *   - On 3xx (301/302/307/308): silently stripped. A redirect always changes
+ *     the URL, so `!` is redundant. We count these in `redundantForceOn3xx`
+ *     so the deploy command can surface a single aggregated lint warning
+ *     rather than one per line — Netlify users pasting their `_redirects`
+ *     file shouldn't be punished for harmless cruft.
+ *
+ * Returns `undefined` when the file doesn't exist or yields no valid rules.
+ * Otherwise returns `{rules, redundantForceOn3xx}`.
  */
-export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined {
+export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
   const filePath = join(dir, '_redirects');
   if (!existsSync(filePath)) {
     return undefined;
@@ -97,6 +118,7 @@ export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined
 
   const content = readFileSync(filePath, 'utf-8');
   const rules: Array<RedirectRule> = [];
+  let redundantForceOn3xx = 0;
 
   const rawLines = content.split('\n');
   for (let i = 0; i < rawLines.length; i++) {
@@ -118,15 +140,18 @@ export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined
     let force = false;
     if (statusStr) {
       if (statusStr.endsWith('!')) {
-        force = true;
         const numericPart = statusStr.slice(0, -1);
         status = parseInt(numericPart, 10);
-        if (status !== 200) {
-          voidWarn(
-            `Skipping _redirects rule "${source} ${destination} ${statusStr}": the "!" force suffix is only supported on status 200.`,
-          );
-          continue;
+        if (status === 200) {
+          force = true;
+        } else if (status >= 300 && status < 400) {
+          // `!` on a 3xx is a no-op — redirects always change the URL.
+          // Accept silently (stripping the suffix) and tally for the
+          // deploy-time aggregated lint so users can clean up if they want.
+          redundantForceOn3xx++;
         }
+        // Non-200/non-3xx with `!` falls through to the status range check
+        // below, which skips non-200 non-3xx codes entirely.
       } else {
         status = parseInt(statusStr, 10);
       }
@@ -151,7 +176,11 @@ export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined
     }
   }
 
-  return rules.length > 0 ? rules : undefined;
+  if (rules.length === 0 && redundantForceOn3xx === 0) {
+    return undefined;
+  }
+
+  return { rules, redundantForceOn3xx };
 }
 
 /**
