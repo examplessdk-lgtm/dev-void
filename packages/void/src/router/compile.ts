@@ -779,11 +779,31 @@ export function compileRouteTable(
   // Also wrap `c.redirect` so dynamic redirects preserve the incoming query
   // string the same way static `_redirects` entries do.
   lines.push('app.use(async (c, next) => {');
+  // Strip any client-supplied `X-Void-Original-URL` before it can reach user
+  // handlers or propagate via `c.rewrite`. Internal re-dispatches (tracked in
+  // `__rewrittenReqs`) legitimately carry this header — we set it ourselves
+  // on the previous hop — so those pass through untouched. This prevents
+  // spoofing via a forged header on the original client request.
+  lines.push('  if (!__rewrittenReqs.has(c.req.raw)) {');
+  lines.push('    try { c.req.raw.headers.delete("X-Void-Original-URL"); } catch {}');
+  lines.push('  }');
+  lines.push('  const __isInternalRedispatch = __rewrittenReqs.has(c.req.raw);');
   lines.push('  c.rewrite = (path) => {');
   lines.push('    const rewriteUrl = new URL(c.req.url);');
   lines.push('    rewriteUrl.pathname = path;');
   lines.push('    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
   lines.push('    rewriteReq.headers.set("X-Void-Rewritten", "1");');
+  // Defense-in-depth: if the entry-point strip above failed (immutable headers
+  // on some runtimes) AND this is not an internal re-dispatch, the cloned
+  // `rewriteReq` still carries the client-supplied `X-Void-Original-URL`.
+  // Drop it here so we always overwrite with the true pre-rewrite URL below.
+  lines.push('    if (!__isInternalRedispatch) {');
+  lines.push('      rewriteReq.headers.delete("X-Void-Original-URL");');
+  lines.push('    }');
+  // Preserve the earliest original URL across multi-hop rewrites: if this
+  // hop's incoming request already carries `X-Void-Original-URL`, it was set
+  // by a prior internal hop (client-supplied values are stripped), so keep
+  // it. Otherwise record the true pre-rewrite URL.
   lines.push('    if (!rewriteReq.headers.has("X-Void-Original-URL")) {');
   lines.push('      rewriteReq.headers.set("X-Void-Original-URL", c.req.url);');
   lines.push('    }');

@@ -492,6 +492,38 @@ describe('compileRouteTable', () => {
     expect(code).toContain('rewriteReq.headers.set("X-Void-Original-URL", c.req.url)');
   });
 
+  it('strips client-supplied X-Void-Original-URL at entry and before rewrite re-dispatch', () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+    );
+
+    // Entry-point strip: any request that is not an internal re-dispatch has
+    // its X-Void-Original-URL header removed before user code runs.
+    expect(code).toContain('if (!__rewrittenReqs.has(c.req.raw)) {');
+    expect(code).toContain('c.req.raw.headers.delete("X-Void-Original-URL")');
+
+    // Defense-in-depth: c.rewrite snapshots whether the current hop is an
+    // internal re-dispatch, and drops any X-Void-Original-URL on the cloned
+    // rewriteReq when it is not — so an immutable-headers runtime (where the
+    // entry-point delete silently failed) still can't propagate a spoof.
+    expect(code).toContain('const __isInternalRedispatch = __rewrittenReqs.has(c.req.raw);');
+    expect(code).toContain('if (!__isInternalRedispatch) {');
+    expect(code).toContain('rewriteReq.headers.delete("X-Void-Original-URL")');
+  });
+
   it('wraps c.redirect so internal redirects merge the incoming query string', () => {
     const scan: ScanResult = {
       routes: [],
