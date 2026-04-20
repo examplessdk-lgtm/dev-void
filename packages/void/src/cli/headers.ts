@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { voidWarn } from '../log';
 import type { HeaderRule, RedirectRule } from './types';
 
 /**
@@ -105,8 +106,19 @@ export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined
     const [source, destination, statusStr] = parts;
     const status = statusStr ? parseInt(statusStr, 10) : 302;
 
-    // Include redirects (3xx) and rewrites (200)
-    if (status === 200 || (status >= 300 && status < 400)) {
+    // Include redirects (3xx) and rewrites (200). Status-200 entries are
+    // internal rewrites; proxy-style rules pointing at an external URL are
+    // not supported — skip them with a warning to match the "internal paths
+    // only" contract enforced for `routing.rewrites` in void.json.
+    if (status === 200) {
+      if (!destination.startsWith('/')) {
+        voidWarn(
+          `Skipping _redirects rewrite "${source} ${destination} 200": destination must start with "/" (only internal paths are supported).`,
+        );
+        continue;
+      }
+      rules.push({ source, destination, status });
+    } else if (status >= 300 && status < 400) {
       rules.push({ source, destination, status });
     }
   }

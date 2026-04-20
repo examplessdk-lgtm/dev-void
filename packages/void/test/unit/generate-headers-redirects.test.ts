@@ -75,4 +75,10 @@ describe('parseRedirectsFile', () => {
     const rules = parseRedirectsFile(tmpDir);
     expect(rules).toEqual([{ source: '/ok', destination: '/new', status: 301 }]);
   });
+
+  it('skips 200 rewrites with external destinations', () => {
+    setup('/api/* https://upstream.example/:splat 200\n/app/* /index.html 200\n');
+    const rules = parseRedirectsFile(tmpDir);
+    expect(rules).toEqual([{ source: '/app/*', destination: '/index.html', status: 200 }]);
+  });
 });
