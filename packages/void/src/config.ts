@@ -602,7 +602,9 @@ export function convertRedirectsConfig(
  *
  * Each key is a URL pattern (e.g. "/docs") and each value is a destination path.
  * Rewrites serve content from the destination without changing the browser URL.
- * Returns undefined if the input is empty or undefined.
+ * Emits `force: true` so these rules fire unconditionally, overriding any
+ * matching static asset (Netlify-compat `200!` semantics). Returns undefined
+ * if the input is empty or undefined.
  */
 export function convertRewritesConfig(
   rewrites: Record<string, string> | undefined,
@@ -613,7 +615,7 @@ export function convertRewritesConfig(
 
   const rules: RedirectRule[] = [];
   for (const [source, destination] of Object.entries(rewrites)) {
-    rules.push({ source, destination, status: 200 });
+    rules.push({ source, destination, status: 200, force: true });
   }
 
   return rules.length > 0 ? rules : undefined;
@@ -625,7 +627,8 @@ export function convertRewritesConfig(
  * Fallbacks fire only when the static asset resolver would otherwise return
  * 404. They share the rewrite shape (status 200, pathname-only destination)
  * but are evaluated at a different pipeline phase — post-lookup instead of
- * pre-lookup. Returns undefined if the input is empty or undefined.
+ * pre-lookup. Emits `force: false` (Netlify-compat plain `200` semantics).
+ * Returns undefined if the input is empty or undefined.
  */
 export function convertFallbacksConfig(
   fallbacks: Record<string, string> | undefined,
@@ -636,7 +639,7 @@ export function convertFallbacksConfig(
 
   const rules: RedirectRule[] = [];
   for (const [source, destination] of Object.entries(fallbacks)) {
-    rules.push({ source, destination, status: 200 });
+    rules.push({ source, destination, status: 200, force: false });
   }
 
   return rules.length > 0 ? rules : undefined;

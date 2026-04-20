@@ -174,15 +174,24 @@ Use `rewrites` when you want to force a path mapping regardless of what exists; 
 
 ## `_redirects` file
 
-Rewrites can also be defined in a `_redirects` file using status `200`:
+Rewrites can also be defined in a `_redirects` file. Void mirrors Netlify / Cloudflare Pages semantics for the `200` status code:
 
 ```text
-/ /en 200
-/docs/* /en/docs/:splat 200
+# plain 200 = fallback (asset-miss only, equivalent to routing.fallbacks)
+/*         /index.html    200
+
+# 200! with force suffix = always rewrite (equivalent to routing.rewrites)
+/docs/*    /en/docs/:splat 200!
 ```
 
-- File-based rules are applied **before** `void.json` rules. Since the last match wins, `routing.rewrites` in `void.json` takes precedence.
-- The `_redirects` file can contain both redirects (3xx) and rewrites (200). Ordering is preserved.
+| File-based form | `void.json` equivalent | Behavior                                                                 |
+| --------------- | ---------------------- | ------------------------------------------------------------------------ |
+| `... 200`       | `routing.fallbacks`    | Fires only when no static asset and no route matched (would have 404'd). |
+| `... 200!`      | `routing.rewrites`     | Always fires, overriding any static asset that would have served.        |
+
+- File-based rules are applied **before** `void.json` rules. Since the last match wins, `routing.rewrites` / `routing.fallbacks` in `void.json` take precedence.
+- The `_redirects` file can mix 3xx redirects, `200` fallbacks, and `200!` force rewrites. Ordering is preserved within each bucket.
+- The `!` force suffix is only valid on `200`. Entries like `301!` are rejected with a warning — 3xx redirects always "force" by their nature (they change the URL), so the suffix is meaningless.
 
 ## How rewrites work
 

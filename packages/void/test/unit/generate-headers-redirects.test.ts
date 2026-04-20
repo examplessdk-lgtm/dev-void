@@ -48,8 +48,39 @@ describe('parseRedirectsFile', () => {
     setup('/app/* /index.html 200\n/old /new 301\n');
     const rules = parseRedirectsFile(tmpDir);
     expect(rules).toEqual([
-      { source: '/app/*', destination: '/index.html', status: 200 },
+      { source: '/app/*', destination: '/index.html', status: 200, force: false },
       { source: '/old', destination: '/new', status: 301 },
+    ]);
+  });
+
+  it('parses 200! as force-true rewrite (Netlify-compat)', () => {
+    setup('/app/* /index.html 200!\n');
+    const rules = parseRedirectsFile(tmpDir);
+    expect(rules).toEqual([
+      { source: '/app/*', destination: '/index.html', status: 200, force: true },
+    ]);
+  });
+
+  it('distinguishes force (200!) from non-force (200) rules in the same file', () => {
+    setup('/fallback /spa.html 200\n/api/* /backend/:splat 200!\n');
+    const rules = parseRedirectsFile(tmpDir);
+    expect(rules).toEqual([
+      { source: '/fallback', destination: '/spa.html', status: 200, force: false },
+      { source: '/api/*', destination: '/backend/:splat', status: 200, force: true },
+    ]);
+  });
+
+  it('rejects force suffix on non-200 statuses like 301!', () => {
+    setup('/old /new 301!\n/ok /new 301\n');
+    const rules = parseRedirectsFile(tmpDir);
+    expect(rules).toEqual([{ source: '/ok', destination: '/new', status: 301 }]);
+  });
+
+  it('tolerates extra whitespace between fields', () => {
+    setup('  /app/*   /index.html    200!  \n');
+    const rules = parseRedirectsFile(tmpDir);
+    expect(rules).toEqual([
+      { source: '/app/*', destination: '/index.html', status: 200, force: true },
     ]);
   });
 
@@ -67,7 +98,9 @@ describe('parseRedirectsFile', () => {
   it('parses file with only 200 rewrites', () => {
     setup('/app/* /index.html 200\n');
     const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([{ source: '/app/*', destination: '/index.html', status: 200 }]);
+    expect(rules).toEqual([
+      { source: '/app/*', destination: '/index.html', status: 200, force: false },
+    ]);
   });
 
   it('skips non-200 non-3xx status codes', () => {
@@ -79,6 +112,31 @@ describe('parseRedirectsFile', () => {
   it('skips 200 rewrites with external destinations', () => {
     setup('/api/* https://upstream.example/:splat 200\n/app/* /index.html 200\n');
     const rules = parseRedirectsFile(tmpDir);
-    expect(rules).toEqual([{ source: '/app/*', destination: '/index.html', status: 200 }]);
+    expect(rules).toEqual([
+      { source: '/app/*', destination: '/index.html', status: 200, force: false },
+    ]);
+  });
+});
+
+describe('splitRedirectRulesByForce', () => {
+  it('returns empty buckets for undefined input', async () => {
+    const { splitRedirectRulesByForce } = await import('../../src/cli/headers');
+    expect(splitRedirectRulesByForce(undefined)).toEqual({ always: [], fallbacks: [] });
+  });
+
+  it('bucketizes 200 (non-force) into fallbacks and 200! / 3xx into always', async () => {
+    const { splitRedirectRulesByForce } = await import('../../src/cli/headers');
+    const split = splitRedirectRulesByForce([
+      { source: '/a', destination: '/spa.html', status: 200, force: false },
+      { source: '/b', destination: '/api', status: 200, force: true },
+      { source: '/c', destination: '/d', status: 301 },
+    ]);
+    expect(split.fallbacks).toEqual([
+      { source: '/a', destination: '/spa.html', status: 200, force: false },
+    ]);
+    expect(split.always).toEqual([
+      { source: '/b', destination: '/api', status: 200, force: true },
+      { source: '/c', destination: '/d', status: 301 },
+    ]);
   });
 });

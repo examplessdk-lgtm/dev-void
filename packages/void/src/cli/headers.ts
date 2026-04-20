@@ -82,6 +82,12 @@ export function parseHeadersFile(dir: string): Array<HeaderRule> | undefined {
  * Parse a `_redirects` file into RedirectRule[].
  * Format: `source destination [status]` per line (status defaults to 302).
  * Lines starting with # are comments. Includes 3xx redirects and 200 rewrites.
+ *
+ * Status-200 entries accept an optional Netlify-compatible `!` force suffix
+ * (`200!`). The plain form fires only when the static asset would 404; the
+ * force form fires unconditionally, overriding any matching static asset.
+ * The `!` suffix is only valid on status `200`; combinations like `301!` are
+ * skipped with a warning.
  */
 export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined {
   const filePath = join(dir, '_redirects');
@@ -104,7 +110,25 @@ export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined
     }
 
     const [source, destination, statusStr] = parts;
-    const status = statusStr ? parseInt(statusStr, 10) : 302;
+    let status: number;
+    let force = false;
+    if (statusStr) {
+      if (statusStr.endsWith('!')) {
+        force = true;
+        const numericPart = statusStr.slice(0, -1);
+        status = parseInt(numericPart, 10);
+        if (status !== 200) {
+          voidWarn(
+            `Skipping _redirects rule "${source} ${destination} ${statusStr}": the "!" force suffix is only supported on status 200.`,
+          );
+          continue;
+        }
+      } else {
+        status = parseInt(statusStr, 10);
+      }
+    } else {
+      status = 302;
+    }
 
     // Include redirects (3xx) and rewrites (200). Status-200 entries are
     // internal rewrites; proxy-style rules pointing at an external URL are
@@ -113,15 +137,41 @@ export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined
     if (status === 200) {
       if (!destination.startsWith('/')) {
         voidWarn(
-          `Skipping _redirects rewrite "${source} ${destination} 200": destination must start with "/" (only internal paths are supported).`,
+          `Skipping _redirects rewrite "${source} ${destination} ${force ? '200!' : '200'}": destination must start with "/" (only internal paths are supported).`,
         );
         continue;
       }
-      rules.push({ source, destination, status });
+      rules.push({ source, destination, status, force });
     } else if (status >= 300 && status < 400) {
       rules.push({ source, destination, status });
     }
   }
 
   return rules.length > 0 ? rules : undefined;
+}
+
+/**
+ * Split parsed `_redirects` rules into "always-apply" and "asset-miss only"
+ * buckets. Rules with `status: 200` and `force === false` are fallbacks — they
+ * should only fire when the static asset resolver would 404. All other rules
+ * (3xx redirects and forced `200!` rewrites) stay in the "always" bucket and
+ * are merged with `routing.rewrites` / `routing.redirects` from void.json.
+ */
+export function splitRedirectRulesByForce(rules: RedirectRule[] | undefined): {
+  always: RedirectRule[];
+  fallbacks: RedirectRule[];
+} {
+  const always: RedirectRule[] = [];
+  const fallbacks: RedirectRule[] = [];
+  if (!rules) {
+    return { always, fallbacks };
+  }
+  for (const rule of rules) {
+    if (rule.status === 200 && rule.force !== true) {
+      fallbacks.push(rule);
+    } else {
+      always.push(rule);
+    }
+  }
+  return { always, fallbacks };
 }

@@ -711,9 +711,11 @@ describe('convertRewritesConfig', () => {
     expect(convertRewritesConfig({})).toBeUndefined();
   });
 
-  it('converts entries with status 200', () => {
+  it('converts entries with status 200 and force=true (always-rewrite)', () => {
     const result = convertRewritesConfig({ '/docs': '/en/docs' });
-    expect(result).toEqual([{ source: '/docs', destination: '/en/docs', status: 200 }]);
+    expect(result).toEqual([
+      { source: '/docs', destination: '/en/docs', status: 200, force: true },
+    ]);
   });
 
   it('converts multiple entries preserving order', () => {
@@ -722,8 +724,8 @@ describe('convertRewritesConfig', () => {
       '/docs/*': '/en/docs/:splat',
     });
     expect(result).toEqual([
-      { source: '/', destination: '/en', status: 200 },
-      { source: '/docs/*', destination: '/en/docs/:splat', status: 200 },
+      { source: '/', destination: '/en', status: 200, force: true },
+      { source: '/docs/*', destination: '/en/docs/:splat', status: 200, force: true },
     ]);
   });
 });
@@ -737,9 +739,11 @@ describe('convertFallbacksConfig', () => {
     expect(convertFallbacksConfig({})).toBeUndefined();
   });
 
-  it('converts entries with status 200', () => {
+  it('converts entries with status 200 and force=false (asset-miss only)', () => {
     const result = convertFallbacksConfig({ '/*': '/index.html' });
-    expect(result).toEqual([{ source: '/*', destination: '/index.html', status: 200 }]);
+    expect(result).toEqual([
+      { source: '/*', destination: '/index.html', status: 200, force: false },
+    ]);
   });
 
   it('converts multiple entries preserving order', () => {
@@ -748,8 +752,8 @@ describe('convertFallbacksConfig', () => {
       '/*': '/index.html',
     });
     expect(result).toEqual([
-      { source: '/api/*', destination: '/api/fallback', status: 200 },
-      { source: '/*', destination: '/index.html', status: 200 },
+      { source: '/api/*', destination: '/api/fallback', status: 200, force: false },
+      { source: '/*', destination: '/index.html', status: 200, force: false },
     ]);
   });
 });

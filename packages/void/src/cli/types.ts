@@ -24,6 +24,15 @@ export interface RedirectRule {
   source: string;
   destination: string;
   status: number;
+  /**
+   * Netlify-compatible force flag. Only meaningful for `status: 200` rewrites.
+   *
+   * - `true` (from `200!` in `_redirects` or `routing.rewrites` in void.json) —
+   *   fires unconditionally, overriding any matching static asset.
+   * - `false` / omitted (from `200` in `_redirects` or `routing.fallbacks` in
+   *   void.json) — fires only when the static asset resolver would 404.
+   */
+  force?: boolean;
 }
 
 export interface AssetConfig {

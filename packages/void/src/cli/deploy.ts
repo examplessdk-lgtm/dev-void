@@ -63,7 +63,7 @@ import {
   getDeployEnvDefaults,
   validateProdEnv,
 } from './env-validation';
-import { parseHeadersFile, parseRedirectsFile } from './headers';
+import { parseHeadersFile, parseRedirectsFile, splitRedirectRulesByForce } from './headers';
 import { promptForLoginToken } from './login';
 import { cliTitle, createSpinner } from './output';
 import {
@@ -558,16 +558,27 @@ async function runFrameworkDeploy(
   const cfgHeaderRules = convertHeadersConfig(voidConfig.routing?.headers);
   const headerRules: Array<HeaderRule> = [...(fwHeaderRules ?? []), ...(cfgHeaderRules ?? [])];
 
-  // Collect redirect rules: parse framework-generated _redirects file + void.json config
+  // Collect redirect rules: parse framework-generated _redirects file + void.json config.
+  //
+  // Netlify-symmetric semantics:
+  //   - _redirects `200!` + routing.rewrites  → force-rewrite (redirectRules, always fires)
+  //   - _redirects `200`  + routing.fallbacks → asset-miss fallback (fallbackRules)
+  //
+  // splitRedirectRulesByForce bucketizes parsed file rules so plain `200` entries
+  // become fallbacks while `200!` and 3xx entries stay in the always-apply bucket.
   const fwRedirectRules = existsSync(assetsDir) ? parseRedirectsFile(assetsDir) : undefined;
+  const { always: fwAlwaysRules, fallbacks: fwFallbackRules } =
+    splitRedirectRulesByForce(fwRedirectRules);
   const cfgRedirectRules = convertRedirectsConfig(voidConfig.routing?.redirects);
   const cfgRewriteRules = convertRewritesConfig(voidConfig.routing?.rewrites);
+  const cfgFallbackRules = convertFallbacksConfig(voidConfig.routing?.fallbacks);
   const redirectRules: Array<RedirectRule> = [
-    ...(fwRedirectRules ?? []),
+    ...fwAlwaysRules,
     ...(cfgRedirectRules ?? []),
     ...(cfgRewriteRules ?? []),
   ];
-  const fallbackRules = convertFallbacksConfig(voidConfig.routing?.fallbacks);
+  const mergedFallbackRules = [...fwFallbackRules, ...(cfgFallbackRules ?? [])];
+  const fallbackRules = mergedFallbackRules.length > 0 ? mergedFallbackRules : undefined;
 
   if (!existsSync(workerDir)) {
     log.error(`Worker output not found at "${fwPreset.workerDir}". Run "${buildCmd}" first.`);
@@ -871,16 +882,21 @@ async function runFullDeploy(
   const cfgHeaderRules = convertHeadersConfig(deployConfig.routing?.headers);
   const headerRules: Array<HeaderRule> = [...(userHeaderRules ?? []), ...(cfgHeaderRules ?? [])];
 
-  // Collect redirect rules: parse user/framework _redirects file + void.json config
+  // Collect redirect rules: parse user/framework _redirects file + void.json config.
+  // See the same-shape block above for Netlify-symmetric 200 vs 200! semantics.
   const userRedirectRules = existsSync(clientDir) ? parseRedirectsFile(clientDir) : undefined;
+  const { always: userAlwaysRules, fallbacks: userFallbackRules } =
+    splitRedirectRulesByForce(userRedirectRules);
   const cfgRedirectRules = convertRedirectsConfig(deployConfig.routing?.redirects);
   const cfgRewriteRules = convertRewritesConfig(deployConfig.routing?.rewrites);
+  const cfgFallbackRules = convertFallbacksConfig(deployConfig.routing?.fallbacks);
   const redirectRules: Array<RedirectRule> = [
-    ...(userRedirectRules ?? []),
+    ...userAlwaysRules,
     ...(cfgRedirectRules ?? []),
     ...(cfgRewriteRules ?? []),
   ];
-  const fallbackRules = convertFallbacksConfig(deployConfig.routing?.fallbacks);
+  const mergedFallbackRules = [...userFallbackRules, ...(cfgFallbackRules ?? [])];
+  const fallbackRules = mergedFallbackRules.length > 0 ? mergedFallbackRules : undefined;
 
   const migrationsDir = join(root, 'db', 'migrations');
 
