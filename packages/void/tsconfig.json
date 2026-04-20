@@ -11,6 +11,7 @@
       "void/routes": ["./src/routes-stub.ts"]
     },
     "strict": true,
+    "noUnusedLocals": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "declaration": true,

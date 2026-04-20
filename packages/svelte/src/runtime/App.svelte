@@ -1,5 +1,6 @@
 <script>
   import { setContext, onMount, untrack } from "svelte";
+  import { createRouterFacade, idleNavigationState } from "void/pages-client";
 
   let props = $props();
 
@@ -13,6 +14,8 @@
     shared: props.shared,
     errors: props.errors,
     router: props.router,
+    routeUrl: props.routeUrl,
+    navigation: props.navigation,
     stores: props.stores,
   }));
 
@@ -22,6 +25,9 @@
   let currentPageProps = $state(init.pageProps);
   let shared = $state(init.shared);
   let errors = $state(init.errors);
+  let routeUrl = $state(init.routeUrl || "/");
+  let navigation = $state(init.navigation || idleNavigationState());
+  const router = createRouterFacade(init.router, () => routeUrl);
 
   // Capitalized alias for dynamic component rendering
   let Page = $derived(currentPage);
@@ -33,7 +39,10 @@
   setContext("__void_errors", {
     get value() { return errors; },
   });
-  setContext("__void_router", init.router);
+  setContext("__void_router", router);
+  setContext("__void_navigation", {
+    get value() { return navigation; },
+  });
 
   // Client mode: subscribe to stores for live updates after hydration.
   // onMount only runs on the client, not during SSR.
@@ -45,6 +54,8 @@
       init.stores.layouts.subscribe((v) => { currentLayouts = v; }),
       init.stores.shared.subscribe((v) => { shared = v; }),
       init.stores.errors.subscribe((v) => { errors = v; }),
+      init.stores.route.subscribe((v) => { routeUrl = v; }),
+      init.stores.navigation.subscribe((v) => { navigation = v; }),
     ];
     return () => unsubs.forEach((u) => u());
   });

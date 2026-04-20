@@ -1,6 +1,7 @@
 {
   "extends": ["./.svelte-kit/tsconfig.json", "./.void/tsconfig.json"],
   "compilerOptions": {
+    "noUnusedLocals": true,
     "skipLibCheck": true,
     "types": ["void/env"]
   }

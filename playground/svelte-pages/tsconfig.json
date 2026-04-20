@@ -5,6 +5,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
+    "noUnusedLocals": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "types": ["void/env"]

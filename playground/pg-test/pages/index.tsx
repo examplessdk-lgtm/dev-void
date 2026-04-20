@@ -222,3 +222,5 @@ function _typeTests() {
   // @ts-expect-error — wrong field type (id should be number)
   action('/?delete-user', { id: 'not-a-number' });
 }
+
+void _typeTests;

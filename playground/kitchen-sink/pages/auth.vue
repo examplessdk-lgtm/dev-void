@@ -31,7 +31,7 @@ async function handleRegister() {
     regEmail.value = '';
     regPassword.value = '';
     regName.value = '';
-    router.reload();
+    router.refresh();
   } catch (err) {
     showResponse('signUp.email (error)', err);
   }
@@ -46,7 +46,7 @@ async function handleLogin() {
     showResponse('signIn.email (200)', u);
     loginEmail.value = '';
     loginPassword.value = '';
-    router.reload();
+    router.refresh();
   } catch (err) {
     showResponse('signIn.email (error)', err);
   }
@@ -55,7 +55,7 @@ async function handleLogin() {
 async function handleLogout() {
   await auth.signOut();
   response.value = 'Logged out';
-  router.reload();
+  router.refresh();
 }
 
 async function handleProfile() {

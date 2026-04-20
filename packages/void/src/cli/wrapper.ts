@@ -6,7 +6,6 @@ import {
   renameSync,
   copyFileSync,
   readdirSync,
-  readFileSync,
 } from 'node:fs';
 import { join, extname } from 'pathe';
 import { build } from 'vite';

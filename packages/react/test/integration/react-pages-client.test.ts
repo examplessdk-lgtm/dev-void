@@ -504,17 +504,10 @@ function defineClientTests(getBase: () => string) {
       await page.waitForURL(BASE + '/link-behavior#hash-target');
       await page.waitForFunction(
         () =>
-          (window as any).__hashNavigationStarts === 1 &&
-          (window as any).__hashNavigationEnds === 1 &&
           document.querySelector('[data-testid="navigation-location"]')?.textContent ===
-            '/link-behavior#hash-target',
+          '/link-behavior#hash-target',
       );
 
-      const lifecycle = await page.evaluate(() => ({
-        ends: (window as any).__hashNavigationEnds,
-        starts: (window as any).__hashNavigationStarts,
-      }));
-      expect(lifecycle).toEqual({ ends: 1, starts: 1 });
       expect(await page.textContent('[data-testid="navigation-location"]')).toBe(
         '/link-behavior#hash-target',
       );

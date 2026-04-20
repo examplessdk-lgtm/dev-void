@@ -65,7 +65,7 @@ export default function Dashboard({ usage }: Props) {
 
   return (
     <>
-      <button onClick={() => router.refresh()} disabled={navigation.isPending}>
+      <button onClick={() => router.refresh()} disabled={navigation.state !== 'idle'}>
         Refresh
       </button>
       <Suspense fallback={<p>Loading usage...</p>}>

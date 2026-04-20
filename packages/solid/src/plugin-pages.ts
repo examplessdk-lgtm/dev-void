@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import type { Plugin, ResolvedConfig } from 'vite';
 import { resolveStaticPageDataBuildOptions, scanPages } from 'void/pages';
 import type { PageScanResult, StaticPageDataBuildOptions } from 'void/pages';
@@ -127,7 +127,8 @@ function generateRendererModule(scan: PageScanResult, pagesDir: string): string 
   return `
 import { renderToStringAsync, generateHydrationScript } from "solid-js/web";
 import { createComponent } from "solid-js";
-import { SharedContext, ErrorsContext, RouterContext } from "@void/solid";
+import { SharedContext, ErrorsContext, RouterContext, NavigationContext } from "@void/solid";
+import { createSsrRouter, idleNavigationState } from "void/pages-client";
 import { renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from "void/pages-head";
 
 ${generateComponentManifest(scan, pagesDir)}
@@ -156,16 +157,21 @@ export async function renderPage(pageObj, assetTags) {
           value: pageObj.errors || {},
           get children() {
             return createComponent(RouterContext.Provider, {
-              value: null,
+              value: createSsrRouter(pageObj.url || "/"),
               get children() {
-                // Build layout chain inside providers so contexts are available
-                let element = createComponent(PageComponent, pageObj.props);
-                for (let i = layoutComponents.length - 1; i >= 0; i--) {
-                  const Layout = layoutComponents[i];
-                  const child = element;
-                  element = createComponent(Layout, { get children() { return child; } });
-                }
-                return element;
+                return createComponent(NavigationContext.Provider, {
+                  value: () => idleNavigationState(),
+                  get children() {
+                    // Build layout chain inside providers so contexts are available
+                    let element = createComponent(PageComponent, pageObj.props);
+                    for (let i = layoutComponents.length - 1; i >= 0; i--) {
+                      const Layout = layoutComponents[i];
+                      const child = element;
+                      element = createComponent(Layout, { get children() { return child; } });
+                    }
+                    return element;
+                  }
+                });
               }
             });
           }
@@ -205,8 +211,8 @@ function generateClientEntry(
   return `
 import { createSignal, createComponent, batch } from "solid-js";
 import { hydrate } from "solid-js/web";
-import { SharedContext, ErrorsContext, RouterContext, setActionRouter } from "@void/solid";
-import { createPageRouter } from "void/pages-client";
+import { SharedContext, ErrorsContext, RouterContext, NavigationContext, setActionRouter } from "@void/solid";
+import { createPageRouter, createRouterFacade, idleNavigationState } from "void/pages-client";
 import { parseCacheFor } from "void/pages-prefetch";
 
 ${generateComponentManifest(scan, pagesDir)}
@@ -216,6 +222,8 @@ const [pageProps, setPageProps] = createSignal({});
 const [layouts, setLayouts] = createSignal([]);
 const [shared, setShared] = createSignal({});
 const [errors, setErrors] = createSignal({});
+const [routeUrl, setRouteUrl] = createSignal(window.location.pathname + window.location.search + window.location.hash);
+const [navigation, setNavigation] = createSignal(idleNavigationState());
 
 const { router, initialPageData, initialComponent, initialLayouts, start } =
   await createPageRouter({
@@ -243,9 +251,17 @@ const { router, initialPageData, initialComponent, initialLayouts, start } =
     viewTransitions: ${!!viewTransitions},
     prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
     prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? '30s')}),
+    onRouteChange(url) {
+      setRouteUrl(url);
+    },
+    onNavigationChange(next) {
+      setNavigation(next);
+    },
   });
 
-setActionRouter(router);
+const reactiveRouter = createRouterFacade(router, () => routeUrl());
+
+setActionRouter(reactiveRouter);
 
 batch(() => {
   setComponent(() => initialComponent);
@@ -263,18 +279,23 @@ function App() {
         value: errors,
         get children() {
           return createComponent(RouterContext.Provider, {
-            value: router,
+            value: reactiveRouter,
             get children() {
-              const Comp = component();
-              if (!Comp) return null;
-              let element = createComponent(Comp, pageProps());
-              const layoutList = layouts();
-              for (let i = layoutList.length - 1; i >= 0; i--) {
-                const Layout = layoutList[i];
-                const child = element;
-                element = createComponent(Layout, { get children() { return child; } });
-              }
-              return element;
+              return createComponent(NavigationContext.Provider, {
+                value: navigation,
+                get children() {
+                  const Comp = component();
+                  if (!Comp) return null;
+                  let element = createComponent(Comp, pageProps());
+                  const layoutList = layouts();
+                  for (let i = layoutList.length - 1; i >= 0; i--) {
+                    const Layout = layoutList[i];
+                    const child = element;
+                    element = createComponent(Layout, { get children() { return child; } });
+                  }
+                  return element;
+                }
+              });
             }
           });
         }
@@ -286,7 +307,7 @@ function App() {
 const appEl = document.getElementById("app");
 hydrate(() => createComponent(App, {}), appEl);
 appEl.setAttribute("data-hydrated", "true");
-export { router };
+export { reactiveRouter as router };
 start();
 `;
 }

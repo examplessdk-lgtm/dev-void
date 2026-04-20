@@ -1,8 +1,6 @@
 /// <reference lib="dom" />
 
-import { initClientHead, applyClientHead } from './head-client';
 import { createPageNavigationEngine as createNavigationEngine } from './navigation-engine';
-import { PrefetchCache, parseCacheFor } from './prefetch';
 import type { CacheForResult, CacheForInput } from './prefetch';
 
 export { createPageNavigationEngine } from './navigation-engine';
@@ -32,25 +30,25 @@ export interface PrefetchOptions {
   cacheFor?: CacheForInput;
 }
 
+export type NavigationStateType = 'idle' | 'loading' | 'submitting';
+export type NavigationMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+export interface NavigationState {
+  state: NavigationStateType;
+  location: URL | null;
+  method: NavigationMethod | null;
+}
+
 export interface VoidRouter {
   _hoverDelay: number;
-  readonly isPending?: boolean;
-  readonly location?: string;
-  readonly pendingLocation?: string | null;
-  readonly type?: string | null;
-  onNavigation(onStart?: () => void, onEnd?: () => void): () => void;
-  visit(url: string, options?: VisitOptions): Promise<any>;
-  prefetch(url: string, options?: PrefetchOptions): void;
-  flush(url: string, method?: string): void;
+  readonly url: URL;
+  readonly path: string;
+  readonly query: URLSearchParams;
+  visit(url: string | URL, options?: VisitOptions): Promise<any>;
+  refresh(options?: VisitOptions): Promise<any>;
+  prefetch(url: string | URL, options?: PrefetchOptions): void;
+  flush(url: string | URL, method?: string): void;
   flushAll(): void;
-  reload(): Promise<any>;
-  refresh(): Promise<any>;
-  setParams(key: string, value: string): Promise<any>;
-  setParams(params: Record<string, string | null | undefined>): Promise<any>;
-  post(url: string, data?: unknown, options?: VisitOptions): Promise<any>;
-  put(url: string, data?: unknown, options?: VisitOptions): Promise<any>;
-  patch(url: string, data?: unknown, options?: VisitOptions): Promise<any>;
-  delete(url: string, options?: VisitOptions): Promise<any>;
 }
 
 export interface PageRouterAdapter {
@@ -73,10 +71,131 @@ export interface PageRouterConfig {
   viewTransitions: boolean;
   prefetchHoverDelay: number;
   prefetchDefaultCacheFor: CacheForResult;
+  onRouteChange?(url: string): void;
+  onNavigationChange?(navigation: NavigationState): void;
 }
 
-const PAGE_DATA_SCRIPT_ID = '__VOID_PAGE_DATA__';
-const STATIC_PAGE_DATA_PREFIX = '/_void/pages';
+function currentUrl(): string {
+  return window.location.pathname + window.location.search + window.location.hash;
+}
+
+function getUrlOrigin(): string {
+  return typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
+}
+
+function toUrl(value: string | URL): URL {
+  return value instanceof URL ? new URL(value.href) : new URL(value || '/', getUrlOrigin());
+}
+
+function normalizeUrl(value: string | URL): string {
+  if (typeof value === 'string' && value.startsWith('#')) {
+    return value;
+  }
+  const url = toUrl(value);
+  return url.origin === getUrlOrigin() ? url.pathname + url.search + url.hash : url.href;
+}
+
+function navigationMethod(method: string): NavigationMethod {
+  const normalized = method.toUpperCase();
+  if (
+    normalized === 'POST' ||
+    normalized === 'PUT' ||
+    normalized === 'PATCH' ||
+    normalized === 'DELETE'
+  ) {
+    return normalized;
+  }
+  return 'GET';
+}
+
+function navigationStateFor(url: string, method: string): NavigationState {
+  const normalized = navigationMethod(method);
+  return {
+    state: normalized === 'GET' ? 'loading' : 'submitting',
+    location: toUrl(url),
+    method: normalized,
+  };
+}
+
+export function idleNavigationState(): NavigationState {
+  return {
+    state: 'idle',
+    location: null,
+    method: null,
+  };
+}
+
+export function createRouterFacade(router: VoidRouter, getCurrentUrl: () => string): VoidRouter {
+  return {
+    get _hoverDelay() {
+      return router._hoverDelay;
+    },
+
+    get url() {
+      return toUrl(getCurrentUrl());
+    },
+
+    get path() {
+      return this.url.pathname;
+    },
+
+    get query() {
+      return this.url.searchParams;
+    },
+
+    visit(url, options = {}) {
+      return router.visit(url, options);
+    },
+
+    refresh(options = {}) {
+      return router.refresh(options);
+    },
+
+    prefetch(url, options = {}) {
+      router.prefetch(url, options);
+    },
+
+    flush(url, method = 'GET') {
+      router.flush(url, method);
+    },
+
+    flushAll() {
+      router.flushAll();
+    },
+  };
+}
+
+export function createSsrRouter(url = '/'): VoidRouter {
+  const router = {
+    _hoverDelay: 75,
+    get url() {
+      return toUrl(url);
+    },
+    get path() {
+      return this.url.pathname;
+    },
+    get query() {
+      return this.url.searchParams;
+    },
+    visit() {
+      throw new Error('router.visit() is not available during SSR');
+    },
+    refresh() {
+      throw new Error('router.refresh() is not available during SSR');
+    },
+    prefetch() {
+      throw new Error('router.prefetch() is not available during SSR');
+    },
+    flush() {
+      throw new Error('router.flush() is not available during SSR');
+    },
+    flushAll() {
+      throw new Error('router.flushAll() is not available during SSR');
+    },
+  };
+
+  return router as VoidRouter;
+}
 
 // --- Form utilities ---
 
@@ -138,25 +257,7 @@ export function objectToFormData(
 
 // --- SSR proxy ---
 
-export const ssrProxy: VoidRouter = new Proxy({} as VoidRouter, {
-  get(_target, prop) {
-    if (typeof prop === 'symbol') {
-      return undefined;
-    }
-    if (prop === 'isPending') {
-      return false;
-    }
-    if (prop === 'location') {
-      return '';
-    }
-    if (prop === 'pendingLocation' || prop === 'type') {
-      return null;
-    }
-    return () => {
-      throw new Error(`router.${prop}() is not available during SSR`);
-    };
-  },
-});
+export const ssrProxy: VoidRouter = createSsrRouter();
 
 // --- createPageRouter factory ---
 
@@ -169,12 +270,19 @@ export async function createPageRouter(config: PageRouterConfig): Promise<{
 }> {
   {
     const engine = await createNavigationEngine(config);
-    const _navListeners = new Set<{ onStart?: () => void; onEnd?: () => void }>();
+    let routeUrl = currentUrl();
+    let activeNavigationId: number | null = null;
+    const setRouteUrl = (url: string) => {
+      routeUrl = url;
+      config.onRouteChange?.(url);
+    };
+    const setNavigation = (navigation: NavigationState) => {
+      config.onNavigationChange?.(navigation);
+    };
 
     async function applyNavigationResource(resource: ReturnType<typeof engine.prepareVisit>) {
-      for (const listener of _navListeners) {
-        listener.onStart?.();
-      }
+      activeNavigationId = resource.id;
+      setNavigation(navigationStateFor(resource.fetchUrl + resource.hash, resource.method));
       try {
         const result = await resource.shell;
         if (!result) {
@@ -193,92 +301,60 @@ export async function createPageRouter(config: PageRouterConfig): Promise<{
         }
 
         await resource.commit();
+        if (activeNavigationId === resource.id) {
+          setRouteUrl(currentUrl());
+        }
         return result.pageData;
       } finally {
-        for (const listener of _navListeners) {
-          listener.onEnd?.();
+        if (activeNavigationId === resource.id) {
+          activeNavigationId = null;
+          setRouteUrl(currentUrl());
+          setNavigation(idleNavigationState());
         }
       }
     }
 
-    const router: VoidRouter = {
+    const rawRouter: VoidRouter = {
       _hoverDelay: engine._hoverDelay,
 
-      onNavigation(onStart, onEnd) {
-        const entry = { onStart, onEnd };
-        _navListeners.add(entry);
-        return () => {
-          _navListeners.delete(entry);
-        };
+      get url() {
+        return toUrl(routeUrl);
+      },
+
+      get path() {
+        return this.url.pathname;
+      },
+
+      get query() {
+        return this.url.searchParams;
       },
 
       visit(url, options = {}) {
-        const resource = engine.prepareVisit(url, options);
+        const resource = engine.prepareVisit(normalizeUrl(url), options);
         return applyNavigationResource(resource);
       },
 
+      refresh(options = {}) {
+        return rawRouter.visit(window.location.pathname + window.location.search, {
+          preserveState: true,
+          preserveScroll: true,
+          ...options,
+        });
+      },
+
       prefetch(url, options = {}) {
-        engine.prefetch(url, options);
+        engine.prefetch(normalizeUrl(url), options);
       },
 
       flush(url, method = 'GET') {
-        engine.flush(url, method);
+        engine.flush(normalizeUrl(url), method);
       },
 
       flushAll() {
         engine.flushAll();
       },
-
-      reload() {
-        return router.visit(window.location.pathname + window.location.search, {
-          preserveState: true,
-          preserveScroll: true,
-        });
-      },
-
-      refresh() {
-        return router.reload();
-      },
-
-      setParams(keyOrParams: string | Record<string, string | null | undefined>, value?: string) {
-        const params = new URLSearchParams(window.location.search);
-        if (typeof keyOrParams === 'string') {
-          if (value === null || value === undefined || value === '') {
-            params.delete(keyOrParams);
-          } else {
-            params.set(keyOrParams, value);
-          }
-        } else {
-          for (const [key, nextValue] of Object.entries(keyOrParams)) {
-            if (nextValue === null || nextValue === undefined || nextValue === '') {
-              params.delete(key);
-            } else {
-              params.set(key, nextValue);
-            }
-          }
-        }
-        const search = params.toString();
-        return router.visit(window.location.pathname + (search ? `?${search}` : ''), {
-          preserveScroll: true,
-        });
-      },
-
-      post(url, data, options = {}) {
-        return router.visit(url, { ...options, method: 'POST', data });
-      },
-
-      put(url, data, options = {}) {
-        return router.visit(url, { ...options, method: 'PUT', data });
-      },
-
-      patch(url, data, options = {}) {
-        return router.visit(url, { ...options, method: 'PATCH', data });
-      },
-
-      delete(url, options = {}) {
-        return router.visit(url, { ...options, method: 'DELETE' });
-      },
     };
+    const router = createRouterFacade(rawRouter, () => routeUrl);
 
     engine.setPopStateHandler((url, options) => {
       router.visit(url, options);

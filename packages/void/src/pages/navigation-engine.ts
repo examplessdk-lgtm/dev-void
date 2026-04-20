@@ -210,7 +210,6 @@ export async function createPageNavigationEngine(
     matchRoute,
     staticPageData: STATIC_PAGE_DATA_ENABLED = false,
     staticPageDataFastPath: STATIC_PAGE_DATA_FAST_PATH = STATIC_PAGE_DATA_ENABLED,
-    viewTransitions: VIEW_TRANSITIONS_ENABLED,
     prefetchHoverDelay: PREFETCH_HOVER_DELAY,
     prefetchDefaultCacheFor: PREFETCH_DEFAULT_CACHE_FOR,
   } = config;

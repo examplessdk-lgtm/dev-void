@@ -191,8 +191,8 @@ import { useRouter } from '@void/vue'; // or "@void/react", "@void/svelte", "@vo
 
 const router = useRouter();
 router.visit('/users');
-router.reload(); // re-fetch current page props
-router.post('/logout'); // non-GET navigation
+router.refresh(); // re-fetch current page props
+router.visit('/logout', { method: 'POST' }); // non-GET navigation
 ```
 
 ## Scroll Restoration
