@@ -125,7 +125,11 @@ export default defineMiddleware(async (c, next) => {
 
 `c.rewrite(path)` re-dispatches the request through the router with the new pathname. You must `return` the result — same shape as `c.redirect()`.
 
-**Loop prevention:** The re-dispatched request is tracked internally so that static routing rules do not re-evaluate on it. The request also carries an `X-Void-Rewritten` header for observability, but the loop guard does not rely on it (client-supplied headers cannot bypass routing rules). Your middleware is responsible for its own loop prevention — typically by checking whether the path already has the expected prefix before rewriting.
+**Loop prevention:** Single-hop rewrite loops are prevented automatically. When `c.rewrite('/foo')` re-dispatches the request, the runtime tracks that request object internally so static routing rules are skipped on the second pass — even if `/foo` would itself match a rewrite rule, it won't rewrite again. The re-dispatched request also carries an `X-Void-Rewritten: 1` header for observability, but the guard does not rely on it (client-supplied headers cannot bypass routing rules).
+
+What the guard **doesn't** catch are multi-hop user-written loops across separate middleware: middleware A rewrites `/a → /b`, middleware B rewrites `/b → /c`, middleware C rewrites `/c → /a`. Each hop constructs a fresh `Request`, so the per-request guard can't see the cycle. If you chain rewrites across middleware, write each hop so it only rewrites paths that aren't already in its target shape.
+
+Also avoid deep rewrite chains for performance: every hop re-runs all middleware from the top, so `/a → /b → /c → /d` costs four router passes.
 
 ::: tip
 This is the recommended approach for i18n libraries. The library can export a middleware factory that handles locale detection and rewriting, and users just drop it into their `middleware/` directory.
