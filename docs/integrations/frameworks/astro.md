@@ -162,26 +162,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-Full `env.ts` support. Typed `.void/env.d.ts`, the client leak guard, constant folding, and CLI features all work, and `import { env }` reads through the runtime proxy on both client and server thanks to Void's `workerd`/`node` export conditions.
-
-```ts
-// env.ts
-import { defineEnv, string } from 'void/env';
-export default defineEnv({
-  STRIPE_KEY: string(),
-  PUBLIC_SITE_URL: string(),
-});
-
-// src/pages/api/charge.ts
-import type { APIRoute } from 'astro';
-import { env } from 'void/env';
-
-export const POST: APIRoute = async () => {
-  return Response.json(await stripe(env.STRIPE_KEY).charges.create(/* … */));
-};
-```
-
-The guard and fold plugins honour Astro's default `envPrefix` (`PUBLIC_`), so name client-exposed keys `PUBLIC_FOO` rather than `VITE_FOO`. A deliberate `env.STRIPE_KEY` read from an `.astro` client `<script>` block fails `astro build` with a file:line:col error. `PUBLIC_*` reads in client code fold into string literals for DCE. `Astro.locals.runtime.env` and [`astro:env`](https://docs.astro.build/en/guides/environment-variables/) still work for raw bindings or the Astro-native schema. See the [env guide](../../guide/env-vars.md).
+See the [env vars guide](../../guide/env-vars.md) for the full feature set. Astro-specific note: the client prefix is `PUBLIC_*` (Astro's default `envPrefix`), not `VITE_*` — name client-exposed keys accordingly and the leak guard + constant folding honour the prefix automatically. `Astro.locals.runtime.env` and [`astro:env`](https://docs.astro.build/en/guides/environment-variables/) still work for raw bindings or Astro's own schema.
 
 ## Accessing Bindings Directly
 

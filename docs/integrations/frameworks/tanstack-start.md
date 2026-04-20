@@ -127,26 +127,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-Full `env.ts` support — TanStack Start stays in the Vite plugin chain, so Void's typegen, client-leak guard, and build-time constant folding all apply.
-
-```ts
-// env.ts
-import { defineEnv, string } from 'void/env';
-export default defineEnv({
-  STRIPE_KEY: string(),
-  VITE_APP_TITLE: string(),
-});
-
-// inside a server function
-import { createServerFn } from '@tanstack/react-start';
-import { env } from 'void/env';
-
-const charge = createServerFn().handler(async () => {
-  return stripe(env.STRIPE_KEY).charges.create(/* … */);
-});
-```
-
-Reading a server-only key from a client component (e.g. inside a `.tsx` without `'use server'`) fails the build with a file:line:col error from `void:env-client-guard`. See the [env guide](../../guide/env-vars.md) for the full feature set.
+See the [env vars guide](../../guide/env-vars.md) — TanStack Start runs inside the Vite plugin chain, so every feature (typed `env`, client-leak guard, constant folding, CLI validation) works with no extra configuration.
 
 ## Accessing Bindings Directly
 

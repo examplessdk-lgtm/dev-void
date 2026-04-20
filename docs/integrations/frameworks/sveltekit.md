@@ -143,24 +143,10 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-Full `env.ts` support. The CLI features (`void env check`, deploy-time validation, `.env.example` generation) work, typed `env.d.ts` is generated so `env.X` autocompletes, and the build-time client leak guard plus constant folding both run against SvelteKit's compiled client bundle. At runtime, `env.X` works on the server via a hook Void injects into `src/hooks.server.ts`, and `VITE_*` keys reach the client through Vite's native `import.meta.env` path.
+See the [env vars guide](../../guide/env-vars.md) for the full feature set. SvelteKit-specific notes:
 
-```ts
-// env.ts
-import { defineEnv, string } from 'void/env';
-export default defineEnv({
-  STRIPE_KEY: string(),
-  VITE_APP_TITLE: string(),
-});
-
-// +page.server.ts
-import { env } from 'void/env';
-export async function load() {
-  return { charge: await stripe(env.STRIPE_KEY).charges.create(/* … */) };
-}
-```
-
-A deliberate leak — e.g. `const leak = env.STRIPE_KEY` inside a `+page.svelte` script — now fails `vite build` with a file:line:col error from `void:env-client-guard` rather than surviving to runtime. Static reads of `VITE_*` keys get folded into string literals so `if (env.VITE_FEATURE === "on") { … }` branches tree-shake in production. For anything where SvelteKit's own `$env/static/*` or `$env/dynamic/*` APIs are a better fit (e.g. you want separate `private`/`public` namespaces, or type-checked `$env/static/private` at build time), use those — Void's `env` isn't trying to displace them. See the [env guide](../../guide/env-vars.md).
+- Server-side reads work through a hook Void injects into `src/hooks.server.ts` — you get `import { env } from "void/env"` inside `+page.server.ts` / `+server.ts` without any wiring.
+- SvelteKit's `$env/static/*` and `$env/dynamic/*` APIs still work and are a better fit when you want separate `private` / `public` namespaces or `$env/static/private` validated at build time. Void's `env` doesn't displace them — pick per call site.
 
 ## Accessing Bindings Directly
 

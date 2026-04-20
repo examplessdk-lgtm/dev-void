@@ -146,25 +146,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-Full `env.ts` support. Typed `.void/env.d.ts`, the client leak guard, constant folding, and CLI features all work, and `import { env }` reads through the runtime proxy on both client and server — even though Nitro bundles the server side separately from Vite, `void/env` resolves to the runtime module via the `workerd`/`node` export conditions.
-
-```ts
-// env.ts
-import { defineEnv, string } from 'void/env';
-export default defineEnv({
-  STRIPE_KEY: string(),
-  VITE_APP_TITLE: string(),
-});
-
-// server/api/charge.post.ts
-import { env } from 'void/env';
-
-export default defineEventHandler(async () => {
-  return stripe(env.STRIPE_KEY).charges.create(/* … */);
-});
-```
-
-A deliberately-wrong `env.STRIPE_KEY` read from a client component fails `nuxt build` with a file:line:col error from `void:env-client-guard`. Client reads of `VITE_*` keys get folded into string literals for DCE in production. Nuxt's own `useRuntimeConfig()` and `event.context.cloudflare.env` still work fine alongside — use whichever fits the call site. See the [env guide](../../guide/env-vars.md).
+See the [env vars guide](../../guide/env-vars.md) for the full feature set. Nuxt-specific note: Nitro bundles the server side separately from Vite, but `void/env` resolves to the runtime module via the `workerd` / `node` export conditions, so `import { env } from "void/env"` works on both server routes and client code without extra config. Nuxt's own `useRuntimeConfig()` and `event.context.cloudflare.env` still work alongside — use whichever fits the call site.
 
 ## Accessing Bindings Directly
 
