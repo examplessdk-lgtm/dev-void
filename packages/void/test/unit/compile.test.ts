@@ -602,6 +602,14 @@ describe('X-Void-Routing dev trace header', () => {
     expect(code).toContain('c.res.headers.set("X-Void-Routing", "pass-through")');
   });
 
+  it('guards the pass-through header set with try/catch for runtimes with immutable Response headers', () => {
+    const code = compileWith({ dev: true });
+    // Some runtimes produce Responses whose Headers are guarded/immutable —
+    // the dev middleware must silently swallow the resulting TypeError instead
+    // of crashing, matching the existing pattern elsewhere in the file.
+    expect(code).toContain('try { c.res.headers.set("X-Void-Routing", "pass-through"); } catch {}');
+  });
+
   it('emits __VOID_DEV_ROUTING=false and strips origin fields in prod', () => {
     const code = compileWith({ dev: false });
     expect(code).toContain('const __VOID_DEV_ROUTING = false;');

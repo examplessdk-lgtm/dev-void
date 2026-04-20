@@ -2358,7 +2358,9 @@ function compileRoutingRulesMiddleware(
     // set one, e.g. from a middleware `c.rewrite()` hop).
     lines.push('  await next();');
     lines.push('  if (__VOID_DEV_ROUTING && c.res && !c.res.headers.has("X-Void-Routing")) {');
-    lines.push('    c.res.headers.set("X-Void-Routing", "pass-through");');
+    // Some runtimes produce Responses with guarded/immutable Headers; silently
+    // skip the trace annotation rather than crashing the dev middleware.
+    lines.push('    try { c.res.headers.set("X-Void-Routing", "pass-through"); } catch {}');
     lines.push('  }');
   } else {
     lines.push('  return next();');
