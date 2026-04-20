@@ -96,6 +96,15 @@ Vite's `define` option performs build-time literal replacement (e.g. `define: { 
 
 Void honours Vite's `envDir` option for `.env` file loading (both the worker `vars` injection and dev-time validation). Defaults to the project root. The deploy CLI still reads from the project root regardless — keep production `.env` files there.
 
+### Imports inside `env.ts`
+
+`env.ts` is loaded outside Vite's plugin pipeline — the dev plugin and the deploy CLI both read it through Node's native `import()`. That means only **relative imports** (`./shared/env-keys`) and **bare package names** (`zod`, `valibot`) resolve. Known limitations:
+
+- **tsconfig path aliases are not resolved.** Writing `import { X } from "@/shared/env-keys"` or `import { Y } from "~/foo"` inside `env.ts` fails to load; Void detects this and re-throws with a hint pointing at the offending specifier. Use a relative import instead.
+- **Custom Vite plugins don't run.** Anything that needs Vite's transform pipeline (SVG-as-component, GraphQL loaders, virtual modules, etc.) won't apply to `env.ts`. Keep this file to pure TS + schema declarations.
+
+In practice `env.ts` should only import schema helpers from `void/env` and — at most — a shared constants file via a relative path.
+
 ## `.env` files
 
 Void uses Vite's standard `.env` convention to populate the schema:
