@@ -281,6 +281,12 @@ To confirm precedence in practice, check the [`X-Void-Routing` dev header](#debu
 
 Static rewrites are evaluated at the edge (zero-cost). Middleware rewrites run inside the worker (adds a re-dispatch but enables dynamic logic).
 
+## Caveat: ISR cache keys use the rewritten URL
+
+If you use [`routing.revalidate`](./revalidation) on a rewritten path, the cache key is the **rewritten** pathname, not the original. So a request to `/docs/foo` that rewrites to `/en/docs/foo` is cached under `/en/docs/foo`. Direct requests to `/docs/foo` aren't cached (they re-render every time), and `revalidate({ paths: ['/docs/foo'] })` invalidates nothing — you need to pass the rewritten path (`/en/docs/foo`).
+
+This is a known limitation and will likely change in a future release. For now, if you rely on ISR for rewritten routes, invalidate against the destination path.
+
 ## Debugging with `X-Void-Routing`
 
 During `vite dev`, every response carries an `X-Void-Routing` header that traces how the request was resolved. Open the Network tab in devtools and inspect the response headers:

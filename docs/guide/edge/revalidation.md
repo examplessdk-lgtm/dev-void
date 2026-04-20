@@ -102,6 +102,12 @@ Only successful responses (2xx) are cached.
 
 Requests with `Cookie` or `Authorization` headers bypass the ISR cache entirely and always dispatch to the worker. This ensures personalized or authenticated pages are never served from a shared cache.
 
+## Caveat: cache keys follow rewrites
+
+If a request is rewritten (via `routing.rewrites`, `routing.fallbacks`, `_redirects` 200/200!, or `c.rewrite()`), the ISR cache key is the **rewritten** pathname — not the URL the user requested. So `/docs/foo` rewritten to `/en/docs/foo` caches under `/en/docs/foo`, and `revalidate({ paths: ['/docs/foo'] })` won't invalidate it. Pass the destination path instead.
+
+This is a known limitation. See the [rewrites caveat](./rewrites#caveat-isr-cache-keys-use-the-rewritten-url) for details.
+
 ## On-demand revalidation
 
 You can purge ISR cache entries programmatically from a route handler:
