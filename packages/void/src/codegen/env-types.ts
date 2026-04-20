@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { join, relative } from 'pathe';
+import { voidWarn } from '../log';
 
 /** Possible source locations for the user env schema, in priority order.
  *  Root-level files win over `src/`-nested ones. */
@@ -14,15 +15,29 @@ export const ENV_FILE_CANDIDATES = [
   'src/env.mjs',
 ] as const;
 
-/** Find the user's env schema file, if any. */
+/** Roots already warned about duplicate env.ts files — dedupes noisy repeat calls. */
+const warnedRoots = new Set<string>();
+
+/** Find the user's env schema file, if any. Warns once per root when multiple candidates exist. */
 export function findEnvFile(root: string): string | null {
+  const matches: string[] = [];
   for (const candidate of ENV_FILE_CANDIDATES) {
     const abs = join(root, candidate);
     if (existsSync(abs)) {
-      return abs;
+      matches.push(abs);
     }
   }
-  return null;
+  if (matches.length > 1 && !warnedRoots.has(root)) {
+    warnedRoots.add(root);
+    const rel = matches.map((m) => relative(root, m));
+    voidWarn(
+      `Multiple env schema files found — using "${rel[0]}" and ignoring ${rel
+        .slice(1)
+        .map((r) => `"${r}"`)
+        .join(', ')}. Keep just one.`,
+    );
+  }
+  return matches[0] ?? null;
 }
 
 export interface EnvTypesResult {
