@@ -755,16 +755,16 @@ export function compileRouteTable(
   lines.push('const __rewrittenReqs = new WeakSet();');
   lines.push('');
 
-  // Inject rewrite utility into context — closure over `app` for re-dispatch
+  // Inject rewrite utility onto context — closure over `app` for re-dispatch
   lines.push('app.use(async (c, next) => {');
-  lines.push('  c.set("__rewrite", (path) => {');
+  lines.push('  c.rewrite = (path) => {');
   lines.push('    const rewriteUrl = new URL(c.req.url);');
   lines.push('    rewriteUrl.pathname = path;');
   lines.push('    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
   lines.push('    rewriteReq.headers.set("X-Void-Rewritten", "1");');
   lines.push('    __rewrittenReqs.add(rewriteReq);');
   lines.push('    return app.fetch(rewriteReq, c.env, c.executionCtx);');
-  lines.push('  });');
+  lines.push('  };');
   lines.push('  await next();');
   lines.push('});');
   lines.push('');

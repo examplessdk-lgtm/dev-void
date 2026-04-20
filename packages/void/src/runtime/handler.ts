@@ -14,8 +14,6 @@ export interface CloudContextVariables {
   user: AuthUser | null;
   session: AuthSession | null;
   headDefaults?: import('../pages/head').HeadDescriptor;
-  /** @internal Injected by compiled routes — used by `rewrite()`. */
-  __rewrite?: (path: string) => Promise<Response>;
   [key: string]: unknown;
 }
 
@@ -33,6 +31,31 @@ export interface CloudBindings {
   STORAGE: R2Bucket;
   AI: Ai;
   [key: string]: unknown;
+}
+
+declare module 'hono' {
+  interface Context {
+    /**
+     * Rewrite the request to a different internal path without changing the browser URL.
+     *
+     * Must be called inside a `defineMiddleware` handler and the result must be returned:
+     *
+     * ```ts
+     * export default defineMiddleware(async (c, next) => {
+     *   if (!hasLocalePrefix(c.req.path)) {
+     *     return c.rewrite(`/en${c.req.path}`);
+     *   }
+     *   return next();
+     * });
+     * ```
+     *
+     * The request is re-dispatched through the Hono router with the new pathname.
+     * The re-dispatched request is tracked internally so that static routing rules
+     * do not re-evaluate on it. Your middleware is responsible for its own loop
+     * prevention (e.g., checking if the path already has a prefix).
+     */
+    rewrite(path: string): Promise<Response>;
+  }
 }
 
 export interface CloudEnv extends Env {
@@ -207,34 +230,6 @@ export function defineMiddleware(
   handler: MiddlewareHandler<CloudEnv>,
 ): MiddlewareHandler<CloudEnv> {
   return handler;
-}
-
-/**
- * Rewrite the request to a different internal path without changing the browser URL.
- *
- * Must be called inside a `defineMiddleware` handler and the result must be returned:
- *
- * ```ts
- * export default defineMiddleware(async (c, next) => {
- *   if (!hasLocalePrefix(c.req.path)) {
- *     return rewrite(c, `/en${c.req.path}`);
- *   }
- *   return next();
- * });
- * ```
- *
- * The request is re-dispatched through the Hono router with the new pathname.
- * The re-dispatched request is tracked internally so that static routing rules
- * do not re-evaluate on it. It also carries an `X-Void-Rewritten` header for
- * observability. Your middleware is responsible for its own loop prevention
- * (e.g., checking if the path already has a prefix).
- */
-export function rewrite(c: CloudContext, path: string): Promise<Response> {
-  const fn = c.get('__rewrite');
-  if (!fn) {
-    throw new Error('rewrite() requires the Void router. It is not available in this context.');
-  }
-  return fn(path);
 }
 
 /**

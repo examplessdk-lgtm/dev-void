@@ -109,21 +109,21 @@ Unlike a redirect, users on `/blog/hello-world` won't see the URL change — the
 
 ## Programmatic rewrites in middleware
 
-For dynamic rewrite logic — like i18n locale negotiation based on cookies or headers — use the `rewrite()` utility in middleware:
+For dynamic rewrite logic — like i18n locale negotiation based on cookies or headers — use `c.rewrite()` in middleware:
 
 ```ts
-import { defineMiddleware, rewrite } from 'void';
+import { defineMiddleware } from 'void';
 
 export default defineMiddleware(async (c, next) => {
   const locale = detectLocale(c.req);
   if (!c.req.path.match(/^\/(en|zh-CN)\//)) {
-    return rewrite(c, `/${locale}${c.req.path}`);
+    return c.rewrite(`/${locale}${c.req.path}`);
   }
   return next();
 });
 ```
 
-`rewrite(c, path)` re-dispatches the request through the router with the new pathname. You must `return` the result (same pattern as `c.redirect()`).
+`c.rewrite(path)` re-dispatches the request through the router with the new pathname. You must `return` the result — same shape as `c.redirect()`.
 
 **Loop prevention:** The re-dispatched request is tracked internally so that static routing rules do not re-evaluate on it. The request also carries an `X-Void-Rewritten` header for observability, but the loop guard does not rely on it (client-supplied headers cannot bypass routing rules). Your middleware is responsible for its own loop prevention — typically by checking whether the path already has the expected prefix before rewriting.
 
@@ -141,6 +141,32 @@ export default defineHandler((c) => {
   // originalUrl is the full URL the user requested before the rewrite
 });
 ```
+
+## Fallbacks
+
+`routing.fallbacks` shares the same shape as `rewrites` but runs **only when no static asset or route matched** — i.e. the request would otherwise return a 404. This lets you add catch-all rewrites without preempting real routes.
+
+```json
+{
+  "routing": {
+    "fallbacks": {
+      "/*": "/index.html"
+    }
+  }
+}
+```
+
+Common uses:
+
+- **SPA shell** — serve `/index.html` for any unmatched path so client-side routing can take over (for app types that don't already do this automatically).
+- **Default-locale catch-all** — send unmatched paths to `/en/:splat` without stealing requests that already resolve to an existing page under `/zh-CN/…`, `/ja/…`, etc.
+
+Ordering:
+
+- `rewrites` are evaluated **before** the static asset lookup; a matching rule always wins.
+- `fallbacks` are evaluated **after** the static asset lookup, only when it would 404.
+
+Use `rewrites` when you want to force a path mapping regardless of what exists; use `fallbacks` when the rule should only kick in as a safety net.
 
 ## `_redirects` file
 
@@ -162,10 +188,10 @@ Rewrites can also be defined in a `_redirects` file using status `200`:
 2. The platform stores the rules in the KV routing entry for your project.
 3. The dispatch worker evaluates all routing rules (redirects and rewrites) before any worker invocation. If a rewrite matches, the request pathname is updated internally and the request continues through the normal pipeline (static assets, ISR, worker). The original URL is passed as `X-Void-Original-URL`.
 
-**Middleware rewrites** (`rewrite()` function):
+**Middleware rewrites** (`c.rewrite()`):
 
 1. The request reaches the worker with its original (or edge-rewritten) pathname.
-2. Your middleware calls `rewrite(c, newPath)`, which constructs a new request with the rewritten pathname and re-dispatches it through the Hono router.
+2. Your middleware calls `c.rewrite(newPath)`, which constructs a new request with the rewritten pathname and re-dispatches it through the Hono router.
 3. The re-dispatched request runs through all middleware and route handlers as if it were a fresh request to the new path.
 
 Static rewrites are evaluated at the edge (zero-cost). Middleware rewrites run inside the worker (adds a re-dispatch but enables dynamic logic).

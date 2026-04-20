@@ -267,6 +267,20 @@ URL rewrites. Keys are source URL patterns, values are destination paths. Serves
 }
 ```
 
+#### `routing.fallbacks`
+
+Fallback rewrites. Same shape as `rewrites`, but rules only fire when no static asset or route matched the request (i.e. the request would otherwise 404). Useful for SPA shells or default-locale catch-alls that shouldn't pre-empt real routes. See [Rewrites → Fallbacks](../guide/edge/rewrites#fallbacks) for details.
+
+```json
+{
+  "routing": {
+    "fallbacks": {
+      "/*": "/index.html"
+    }
+  }
+}
+```
+
 #### `routing.revalidate`
 
 ISR revalidation TTL in seconds, either globally or per path. See [Revalidation](../guide/edge/revalidation.md) for details.
