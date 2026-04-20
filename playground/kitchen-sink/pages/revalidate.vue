@@ -27,8 +27,8 @@ const form = useForm('/revalidate', {});
       load.
     </p>
     <form @submit.prevent="form.post()">
-      <button type="submit" :disabled="form.processing">
-        {{ form.processing ? 'Revalidating...' : 'Revalidate /revalidate' }}
+      <button type="submit" :disabled="form.pending">
+        {{ form.pending ? 'Revalidating...' : 'Revalidate /revalidate' }}
       </button>
     </form>
   </div>

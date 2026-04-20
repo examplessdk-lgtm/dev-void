@@ -232,7 +232,7 @@ export default function PostForm() {
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        form.post('/blog');
+        return form.post('/blog');
       }}
     >
       <label htmlFor="title">Title:</label>
@@ -251,7 +251,7 @@ export default function PostForm() {
       />
       {form.errors.body && <span>{form.errors.body}</span>}
 
-      <button disabled={form.processing}>{form.processing ? 'Saving...' : 'Add Post'}</button>
+      <button disabled={form.pending}>{form.pending ? 'Saving...' : 'Add Post'}</button>
     </form>
   );
 }
@@ -264,7 +264,7 @@ import { useIslandForm } from '@void/vue';
 const form = useIslandForm({ title: '', body: '' });
 
 function submit() {
-  form.post('/blog');
+  return form.post('/blog');
 }
 </script>
 
@@ -278,8 +278,8 @@ function submit() {
     <textarea id="body" v-model="form.data.body" />
     <span v-if="form.errors.body">{{ form.errors.body }}</span>
 
-    <button :disabled="form.processing">
-      {{ form.processing ? 'Saving...' : 'Add Post' }}
+    <button :disabled="form.pending">
+      {{ form.pending ? 'Saving...' : 'Add Post' }}
     </button>
   </form>
 </template>
@@ -292,7 +292,7 @@ import { useIslandForm } from "@void/svelte";
 const form = useIslandForm({ title: "", body: "" });
 
 function submit() {
-  form.post("/blog");
+  return form.post("/blog");
 }
 </script>
 
@@ -305,8 +305,8 @@ function submit() {
   <textarea id="body" bind:value={form.data.body} />
   {#if form.errors.body}<span>{form.errors.body}</span>{/if}
 
-  <button disabled={form.processing}>
-    {form.processing ? "Saving..." : "Add Post"}
+  <button disabled={form.pending}>
+    {form.pending ? "Saving..." : "Add Post"}
   </button>
 </form>
 ```
@@ -322,7 +322,7 @@ export default function PostForm() {
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        form.post('/blog');
+        return form.post('/blog');
       }}
     >
       <label for="title">Title:</label>
@@ -345,7 +345,7 @@ export default function PostForm() {
         <span>{form.errors.body}</span>
       </Show>
 
-      <button disabled={form.processing}>{form.processing ? 'Saving...' : 'Add Post'}</button>
+      <button disabled={form.pending}>{form.pending ? 'Saving...' : 'Add Post'}</button>
     </form>
   );
 }
@@ -355,23 +355,28 @@ export default function PostForm() {
 
 `useIslandForm` returns the same shape as `useForm`:
 
-| Property                  | Type                     | Description                                |
-| ------------------------- | ------------------------ | ------------------------------------------ |
-| `data`                    | `T`                      | Reactive form state                        |
-| `setData(field, value)`   | Function                 | Update a field                             |
-| `errors`                  | `Record<string, string>` | Validation errors from 422 responses       |
-| `processing`              | `boolean`                | Submission in progress                     |
-| `isDirty`                 | `boolean`                | Form has unsaved changes                   |
-| `wasSuccessful`           | `boolean`                | Last submission succeeded                  |
-| `recentlySuccessful`      | `boolean`                | Success within last 2 seconds              |
-| `reset(...fields?)`       | Function                 | Reset to defaults (all or specific fields) |
-| `clearErrors(...fields?)` | Function                 | Clear errors (all or specific fields)      |
-| `post(url)`               | Function                 | Submit via POST                            |
-| `put(url)`                | Function                 | Submit via PUT                             |
-| `patch(url)`              | Function                 | Submit via PATCH                           |
-| `delete(url)`             | Function                 | Submit via DELETE                          |
+| Property                  | Type                      | Description                                |
+| ------------------------- | ------------------------- | ------------------------------------------ |
+| `data`                    | `T`                       | Reactive form state                        |
+| `setData(field, value)`   | Function                  | Update a field                             |
+| `errors`                  | `Record<string, string>`  | Validation errors from 422 responses       |
+| `error`                   | `VoidActionError \| null` | Non-validation call-site action error      |
+| `pending`                 | `boolean`                 | Submission in progress                     |
+| `hasChanges`              | `boolean`                 | Form has unsaved changes                   |
+| `wasSuccessful`           | `boolean`                 | Last submission succeeded                  |
+| `recentlySuccessful`      | `boolean`                 | Success within last 2 seconds              |
+| `reset(...fields?)`       | Function                  | Reset to defaults (all or specific fields) |
+| `clearErrors(...fields?)` | Function                  | Clear errors (all or specific fields)      |
+| `clearError()`            | Function                  | Clear the non-validation call-site error   |
+| `post(url)`               | Function                  | Submit via POST                            |
+| `put(url)`                | Function                  | Submit via PUT                             |
+| `patch(url)`              | Function                  | Submit via PATCH                           |
+| `delete(url)`             | Function                  | Submit via DELETE                          |
 
-On success (200), the page reloads. On validation error (422), `errors` is populated from the response `{ errors: { field: "message" } }`. On redirect, the browser follows it.
+The submit helpers return `Promise<void>` so callers and framework event
+handlers can observe boundary-class failures. On success (200), the page reloads.
+On validation error (422), `errors` is populated from the response
+`{ errors: { field: "message" } }`. On redirect, the browser follows it.
 
 ## Navigation
 

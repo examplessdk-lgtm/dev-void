@@ -7,7 +7,7 @@ export default function PostForm() {
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        form.post('/blog');
+        return form.post('/blog');
       }}
     >
       <div>
@@ -20,8 +20,8 @@ export default function PostForm() {
         <textarea value={form.data.body} onChange={(e) => form.setData('body', e.target.value)} />
         {form.errors.body && <span style={{ color: 'red' }}>{form.errors.body}</span>}
       </div>
-      <button type="submit" disabled={form.processing}>
-        {form.processing ? 'Saving...' : 'Add Post'}
+      <button type="submit" disabled={form.pending}>
+        {form.pending ? 'Saving...' : 'Add Post'}
       </button>
     </form>
   );

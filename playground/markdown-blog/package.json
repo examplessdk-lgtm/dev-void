@@ -14,9 +14,9 @@
   "devDependencies": {
     "@void/md": "workspace:@void-sdk/md@*",
     "@void/vue": "workspace:@void-sdk/vue@*",
-    "typescript": "~6.0.2",
+    "typescript": "~6.0.3",
     "vite": "catalog:",
     "void": "workspace:@void-sdk/void@*",
-    "vue-tsc": "^3.2.6"
+    "vue-tsc": "^3.2.7"
   }
 }

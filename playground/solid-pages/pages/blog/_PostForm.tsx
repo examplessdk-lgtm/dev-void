@@ -8,7 +8,7 @@ export default function PostForm() {
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        form.post('/blog');
+        return form.post('/blog');
       }}
     >
       <div>
@@ -33,8 +33,8 @@ export default function PostForm() {
           <span style={{ color: 'red' }}>{form.errors.body}</span>
         </Show>
       </div>
-      <button type="submit" disabled={form.processing}>
-        {form.processing ? 'Saving...' : 'Add Post'}
+      <button type="submit" disabled={form.pending}>
+        {form.pending ? 'Saving...' : 'Add Post'}
       </button>
     </form>
   );

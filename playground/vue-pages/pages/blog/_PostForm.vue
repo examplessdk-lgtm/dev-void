@@ -16,8 +16,8 @@ const form = useIslandForm({ title: '', body: '' });
       <textarea v-model="form.data.body" />
       <span v-if="form.errors.body" style="color: red">{{ form.errors.body }}</span>
     </div>
-    <button type="submit" :disabled="form.processing">
-      {{ form.processing ? 'Saving...' : 'Add Post' }}
+    <button type="submit" :disabled="form.pending">
+      {{ form.pending ? 'Saving...' : 'Add Post' }}
     </button>
   </form>
 </template>

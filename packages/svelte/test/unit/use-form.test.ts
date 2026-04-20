@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { isEqualFormValue } from 'void/pages-client';
 
 // Test the core logic of useForm directly (without Svelte rendering context).
 // We re-implement the non-runes logic inline since useForm uses getContext/$state
@@ -21,16 +22,14 @@ describe('useForm core logic', () => {
 
     let data = { ...formDefaults };
     let errors: Record<string, string> = {};
-    const processing = false;
+    const pending = false;
     const wasSuccessful = false;
     const recentlySuccessful = false;
 
     const defaults_ = { ...formDefaults };
 
-    function isDirty() {
-      return Object.keys(defaults_).some(
-        (key) => JSON.stringify(data[key]) !== JSON.stringify(defaults_[key]),
-      );
+    function hasChanges() {
+      return Object.keys(defaults_).some((key) => !isEqualFormValue(data[key], defaults_[key]));
     }
 
     function setData(field: string, value: unknown) {
@@ -69,8 +68,8 @@ describe('useForm core logic', () => {
       set errors(e: Record<string, string>) {
         errors = e;
       },
-      get processing() {
-        return processing;
+      get pending() {
+        return pending;
       },
       get wasSuccessful() {
         return wasSuccessful;
@@ -78,7 +77,7 @@ describe('useForm core logic', () => {
       get recentlySuccessful() {
         return recentlySuccessful;
       },
-      isDirty,
+      hasChanges,
       setData,
       reset,
       clearErrors,
@@ -99,21 +98,55 @@ describe('useForm core logic', () => {
     expect(form.data.email).toBe('');
   });
 
-  it('isDirty returns true when data changes', () => {
+  it('hasChanges returns true when data changes', () => {
     const form = createForm('/test', { name: 'default' });
-    expect(form.isDirty()).toBe(false);
+    expect(form.hasChanges()).toBe(false);
 
     form.setData('name', 'changed');
-    expect(form.isDirty()).toBe(true);
+    expect(form.hasChanges()).toBe(true);
   });
 
-  it('isDirty returns false when data reverts to defaults', () => {
+  it('hasChanges returns false when data reverts to defaults', () => {
     const form = createForm('/test', { name: 'default' });
     form.setData('name', 'changed');
-    expect(form.isDirty()).toBe(true);
+    expect(form.hasChanges()).toBe(true);
 
     form.setData('name', 'default');
-    expect(form.isDirty()).toBe(false);
+    expect(form.hasChanges()).toBe(false);
+  });
+
+  it('hasChanges treats equal arrays and plain objects as clean', () => {
+    const form = createForm('/test', {
+      meta: { enabled: true, nested: { count: 1 } },
+      tags: ['one'],
+    });
+
+    form.setData('tags', ['one', 'two']);
+    form.setData('meta', { enabled: false, nested: { count: 2 } });
+    expect(form.hasChanges()).toBe(true);
+
+    form.setData('tags', ['one']);
+    form.setData('meta', { nested: { count: 1 }, enabled: true });
+    expect(form.hasChanges()).toBe(false);
+  });
+
+  it('hasChanges keeps Object.is semantics for primitive edge cases', () => {
+    const form = createForm('/test', { count: NaN, zero: -0 });
+
+    form.setData('count', NaN);
+    expect(form.hasChanges()).toBe(false);
+
+    form.setData('zero', 0);
+    expect(form.hasChanges()).toBe(true);
+  });
+
+  it('hasChanges compares non-plain objects by reference', () => {
+    const startedAt = new Date(0);
+    const form = createForm('/test', { startedAt });
+
+    form.setData('startedAt', new Date(0));
+
+    expect(form.hasChanges()).toBe(true);
   });
 
   it('reset() reverts all fields to defaults', () => {
@@ -125,7 +158,7 @@ describe('useForm core logic', () => {
 
     expect(form.data.name).toBe('default');
     expect(form.data.email).toBe('default@test.com');
-    expect(form.isDirty()).toBe(false);
+    expect(form.hasChanges()).toBe(false);
   });
 
   it('reset(field) reverts specific fields only', () => {
@@ -158,9 +191,9 @@ describe('useForm core logic', () => {
     expect(form.errors.email).toBe('invalid');
   });
 
-  it('processing is initialized to false', () => {
+  it('pending is initialized to false', () => {
     const form = createForm('/test', { name: '' });
-    expect(form.processing).toBe(false);
+    expect(form.pending).toBe(false);
   });
 
   it('wasSuccessful and recentlySuccessful are initialized to false', () => {

@@ -1,7 +1,23 @@
 import { createSignal, createMemo, useContext } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
+import { VoidActionError, isAbortError, isEqualFormValue, submitAction } from 'void/pages-client';
 import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
 import { RouterContext, ErrorsContext } from './context';
+
+function getValidationErrors(error: VoidActionError): Record<string, string> | null {
+  const body = error.body;
+  if (
+    body &&
+    typeof body === 'object' &&
+    'errors' in body &&
+    body.errors &&
+    typeof body.errors === 'object' &&
+    !Array.isArray(body.errors)
+  ) {
+    return body.errors as Record<string, string>;
+  }
+  return null;
+}
 
 // Typed overload — full inference from PageActionMap (requires codegen)
 export function useForm<U extends ActionUrl & string>(
@@ -15,16 +31,18 @@ export function useForm<U extends ActionUrl & string>(
     value: ResolveActionBody<U>[K],
   ) => void;
   errors: Partial<Record<keyof ResolveActionBody<U> & string, string>>;
-  processing: boolean;
-  isDirty: boolean;
+  error: VoidActionError | null;
+  pending: boolean;
+  hasChanges: boolean;
   wasSuccessful: boolean;
   recentlySuccessful: boolean;
-  post(opts?: any): void;
-  put(opts?: any): void;
-  patch(opts?: any): void;
-  delete(opts?: any): void;
+  post(opts?: any): Promise<void>;
+  put(opts?: any): Promise<void>;
+  patch(opts?: any): Promise<void>;
+  delete(opts?: any): Promise<void>;
   reset(...fields: (keyof ResolveActionBody<U> & string)[]): void;
   clearErrors(...fields: (keyof ResolveActionBody<U> & string)[]): void;
+  clearError(): void;
 };
 
 export function useForm(
@@ -73,17 +91,16 @@ export function useForm(
     }
     return globalErrors as unknown as Record<string, string>;
   });
-  const [processing, setProcessing] = createSignal(false);
+  const [pending, setPending] = createSignal(false);
+  const [error, setError] = createSignal<VoidActionError | null>(null);
   const [wasSuccessful, setWasSuccessful] = createSignal(false);
   const [recentlySuccessful, setRecentlySuccessful] = createSignal(false);
 
   let defaults_ = { ...defaults };
   let successTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  const isDirty = createMemo(() => {
-    return Object.keys(defaults_).some(
-      (key) => JSON.stringify(data[key]) !== JSON.stringify(defaults_[key]),
-    );
+  const hasChanges = createMemo(() => {
+    return Object.keys(defaults_).some((key) => !isEqualFormValue(data[key], defaults_[key]));
   });
 
   function setData(field: string, value: unknown) {
@@ -114,24 +131,38 @@ export function useForm(
     }
   }
 
+  function clearError() {
+    setError(null);
+  }
+
   async function submit(method: string, opts: any = {}) {
-    setProcessing(true);
+    setPending(true);
     setWasSuccessful(false);
     setRecentlySuccessful(false);
     if (successTimeout) {
       clearTimeout(successTimeout);
     }
     setLocalErrors({});
+    clearError();
 
     try {
-      const pageData = await router?.visit(resolvedUrl, {
+      if (!router) {
+        throw new Error('useForm() requires the Void Pages router');
+      }
+
+      const result = await submitAction(router, resolvedUrl, {
         method,
         data: { ...data },
         ...opts,
       });
 
-      if (pageData?.errors) {
-        setLocalErrors(pageData.errors as Record<string, string>);
+      if (!result.ok) {
+        const validationErrors = getValidationErrors(result.error);
+        if (validationErrors) {
+          setLocalErrors(validationErrors);
+        } else {
+          setError(result.error);
+        }
         return;
       }
 
@@ -141,10 +172,13 @@ export function useForm(
       successTimeout = setTimeout(() => {
         setRecentlySuccessful(false);
       }, 2000);
-    } catch {
-      // Request failed
+    } catch (submitError) {
+      if (isAbortError(submitError)) {
+        return;
+      }
+      throw submitError;
     } finally {
-      setProcessing(false);
+      setPending(false);
     }
   }
 
@@ -156,11 +190,14 @@ export function useForm(
     get errors() {
       return errors();
     },
-    get processing() {
-      return processing();
+    get error() {
+      return error();
     },
-    get isDirty() {
-      return isDirty();
+    get pending() {
+      return pending();
+    },
+    get hasChanges() {
+      return hasChanges();
     },
     get wasSuccessful() {
       return wasSuccessful();
@@ -170,6 +207,7 @@ export function useForm(
     },
     reset,
     clearErrors,
+    clearError,
     post: (opts?: any) => submit('POST', opts),
     put: (opts?: any) => submit('PUT', opts),
     patch: (opts?: any) => submit('PATCH', opts),

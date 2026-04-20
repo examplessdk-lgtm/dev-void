@@ -52,8 +52,8 @@ function formatSize(bytes: number): string {
     <h2>Upload File</h2>
     <form @submit.prevent="handleUpload">
       <input type="file" ref="fileInput" required />
-      <button type="submit" :disabled="uploadForm.processing" style="margin-left: 5px">
-        {{ uploadForm.processing ? 'Uploading...' : 'Upload' }}
+      <button type="submit" :disabled="uploadForm.pending" style="margin-left: 5px">
+        {{ uploadForm.pending ? 'Uploading...' : 'Upload' }}
       </button>
     </form>
 
@@ -75,7 +75,7 @@ function formatSize(bytes: number): string {
           <td>{{ formatSize(obj.size) }}</td>
           <td>{{ obj.uploaded }}</td>
           <td>
-            <button @click="deleteObject(obj.key)" :disabled="deleteForm.processing">Delete</button>
+            <button @click="deleteObject(obj.key)" :disabled="deleteForm.pending">Delete</button>
           </td>
         </tr>
       </tbody>

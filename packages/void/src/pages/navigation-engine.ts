@@ -1,5 +1,6 @@
 /// <reference lib="dom" />
 
+import { createActionErrorFromResponse } from './action-result';
 import { initClientHead, applyClientHead } from './head-client';
 import { PrefetchCache, parseCacheFor } from './prefetch';
 import type { CacheForInput, CacheForResult } from './prefetch';
@@ -11,6 +12,8 @@ export interface VisitOptions {
   preserveState?: boolean;
   replace?: boolean;
   viewTransition?: boolean;
+  /** @internal Used by React Actions to avoid waiting for a commit blocked by the action itself. */
+  _resolveOnShell?: boolean;
   /** @internal Used by popstate handler to pass saved scroll position */
   _scrollPosition?: { x: number; y: number } | null;
   /** @internal Used by popstate handler to avoid writing history while traversing */
@@ -193,7 +196,7 @@ async function fetchPageResponse(fetchUrl: string, init: RequestInit): Promise<R
     return await fetch(fetchUrl, init);
   } catch (error) {
     if (init.signal?.aborted || isAbortError(error)) {
-      throw error;
+      throw abortError();
     }
     return null;
   }
@@ -463,7 +466,7 @@ export async function createPageNavigationEngine(
       }
     } catch (error) {
       if (signal?.aborted || isAbortError(error)) {
-        throw error;
+        throw abortError();
       }
     }
 
@@ -680,6 +683,10 @@ export async function createPageNavigationEngine(
           commitTarget,
           deferredRegistry,
         );
+      }
+
+      if (response && method !== 'GET' && !response.ok) {
+        throw await createActionErrorFromResponse(response, fetchUrl);
       }
 
       if (response && !response.headers.get('X-VoidPages')) {
@@ -970,14 +977,14 @@ export async function createPageNavigationEngine(
         immediate: false,
         shell,
         abort() {
-          controller.abort();
+          controller.abort(abortError());
           deferredRegistry.dispose();
         },
         commit() {
           return commitResource();
         },
         dispose() {
-          controller.abort();
+          controller.abort(abortError());
           deferredRegistry.dispose();
         },
       };

@@ -1,4 +1,32 @@
+import { VoidActionError, categorizeActionError, isEqualFormValue } from 'void/pages-client';
 import { reactive, ref, watch } from 'vue';
+
+function getValidationErrors(body: unknown): Record<string, string> | null {
+  if (
+    body &&
+    typeof body === 'object' &&
+    'errors' in body &&
+    body.errors &&
+    typeof body.errors === 'object' &&
+    !Array.isArray(body.errors)
+  ) {
+    return body.errors as Record<string, string>;
+  }
+  return null;
+}
+
+async function readActionErrorBody(response: Response): Promise<unknown> {
+  const contentType = response.headers.get('content-type') || '';
+  try {
+    if (contentType.includes('application/json')) {
+      return await response.json();
+    }
+    const text = await response.text();
+    return text || null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Form composable for island pages. Uses fetch + page reload instead of the
@@ -7,19 +35,20 @@ import { reactive, ref, watch } from 'vue';
 export function useIslandForm(defaults: Record<string, unknown>): any {
   const data = reactive({ ...defaults }) as Record<string, unknown>;
   const errors = reactive<Record<string, string>>({});
-  const processing = ref(false);
+  const error = ref<VoidActionError | null>(null);
+  const pending = ref(false);
   const wasSuccessful = ref(false);
   const recentlySuccessful = ref(false);
 
   let defaults_ = { ...defaults };
   let successTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  const isDirty = ref(false);
+  const hasChanges = ref(false);
   watch(
     () => ({ ...data }),
     (val) => {
-      isDirty.value = Object.keys(defaults_).some(
-        (key) => JSON.stringify(val[key]) !== JSON.stringify(defaults_[key]),
+      hasChanges.value = Object.keys(defaults_).some(
+        (key) => !isEqualFormValue(val[key], defaults_[key]),
       );
     },
     { deep: true },
@@ -47,14 +76,19 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
     }
   }
 
+  function clearError() {
+    error.value = null;
+  }
+
   async function submit(url: string, method: string) {
-    processing.value = true;
+    pending.value = true;
     wasSuccessful.value = false;
     recentlySuccessful.value = false;
     if (successTimeout) {
       clearTimeout(successTimeout);
     }
     clearErrors();
+    clearError();
 
     try {
       const response = await fetch(url, {
@@ -76,28 +110,40 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
           recentlySuccessful.value = false;
         }, 2000);
         window.location.reload();
-      } else if (response.status === 422) {
-        const body = (await response.json()) as { errors?: Record<string, string> };
-        if (body?.errors) {
-          Object.assign(errors, body.errors);
+      } else if (!response.ok) {
+        const body = await readActionErrorBody(response);
+        const actionError = new VoidActionError({
+          body,
+          status: response.status,
+          statusText: response.statusText,
+          url,
+        });
+        const validationErrors = response.status === 422 ? getValidationErrors(body) : null;
+        if (validationErrors) {
+          Object.assign(errors, validationErrors);
+          return;
         }
+        if (categorizeActionError(response.status) === 'boundary') {
+          throw actionError;
+        }
+        error.value = actionError;
       }
-    } catch {
-      // Request failed
     } finally {
-      processing.value = false;
+      pending.value = false;
     }
   }
 
   return reactive({
     data,
     errors,
-    processing,
-    isDirty,
+    error,
+    pending,
+    hasChanges,
     wasSuccessful,
     recentlySuccessful,
     reset,
     clearErrors,
+    clearError,
     post: (url: string) => submit(url, 'POST'),
     put: (url: string) => submit(url, 'PUT'),
     patch: (url: string) => submit(url, 'PATCH'),

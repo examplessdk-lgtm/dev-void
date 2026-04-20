@@ -29,7 +29,7 @@ export default function UsersPage(props: Props) {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          form.post();
+          return form.post();
         }}
       >
         <div>
@@ -52,8 +52,8 @@ export default function UsersPage(props: Props) {
             <span style={{ color: 'red' }}>{form.errors.email}</span>
           </Show>
         </div>
-        <button type="submit" disabled={form.processing}>
-          {form.processing ? 'Saving...' : 'Add User'}
+        <button type="submit" disabled={form.pending}>
+          {form.pending ? 'Saving...' : 'Add User'}
         </button>
       </form>
     </div>

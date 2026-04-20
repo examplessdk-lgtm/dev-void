@@ -16,6 +16,8 @@ import {
   createRouterFacade,
   createPageNavigationEngine,
   idleNavigationState,
+  isAbortError,
+  isCallSiteActionError,
   type PageNavigationResource,
   type PageNavigationResult,
   type NavigationState,
@@ -65,6 +67,7 @@ type VisitSettler = {
 
 interface AppState {
   resource: ReactPageResource;
+  rollbackResource: ReactPageResource | null;
   navigation: NavigationState;
   routeUrl: string;
   pendingId: number | null;
@@ -78,7 +81,8 @@ type AppAction =
     }
   | { type: 'reveal'; resource: ReactPageResource }
   | { type: 'finish'; resource: ReactPageResource; location: string }
-  | { type: 'fail'; resource: ReactPageResource; location: string };
+  | { type: 'fail'; resource: ReactPageResource; location: string }
+  | { type: 'abandon'; resource: ReactPageResource; location: string };
 
 const deferredState = new WeakMap<DeferredResource, DeferredResourceState>();
 const viewTransitionWaiters = new Map<number, () => void>();
@@ -154,6 +158,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
     case 'begin':
       return {
         resource: state.resource,
+        rollbackResource: state.resource,
         pendingId: action.resource.id,
         routeUrl: state.routeUrl,
         navigation: action.navigation,
@@ -172,6 +177,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
       }
       return {
         resource: action.resource.immediate ? state.resource : action.resource,
+        rollbackResource: null,
         pendingId: null,
         routeUrl: action.location,
         navigation: idleNavigationState(),
@@ -182,6 +188,18 @@ function appReducer(state: AppState, action: AppAction): AppState {
       }
       return {
         ...state,
+        rollbackResource: null,
+        pendingId: null,
+        routeUrl: action.location,
+        navigation: idleNavigationState(),
+      };
+    case 'abandon':
+      if (state.pendingId !== action.resource.id) {
+        return state;
+      }
+      return {
+        resource: state.rollbackResource || state.resource,
+        rollbackResource: null,
         pendingId: null,
         routeUrl: action.location,
         navigation: idleNavigationState(),
@@ -310,6 +328,7 @@ function App({
   );
   const [state, dispatch] = useReducer(appReducer, {
     resource: initialResource,
+    rollbackResource: null,
     pendingId: null,
     routeUrl: currentUrl(),
     navigation: idleNavigationState(),
@@ -417,6 +436,9 @@ function App({
               }
               dispatch({ type: 'finish', resource: prepared, location: currentUrl() });
               resolveVisit(undefined);
+            } else if (prepared.options._resolveOnShell) {
+              pendingVisitSettlers.delete(prepared.id);
+              resolveVisit(result.pageData);
             }
             return result;
           },
@@ -430,6 +452,14 @@ function App({
             rejectVisit(error);
             if (activePendingNavigationId === prepared.id) {
               activePendingNavigationId = null;
+            }
+            if (
+              prepared.options._resolveOnShell ||
+              isAbortError(error) ||
+              isCallSiteActionError(error)
+            ) {
+              dispatch({ type: 'abandon', resource: prepared, location: currentUrl() });
+              return undefined;
             }
             dispatch({ type: 'fail', resource: prepared, location: currentUrl() });
             throw error;

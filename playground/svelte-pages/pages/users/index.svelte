@@ -11,7 +11,7 @@
 
   function handleSubmit(e) {
     e.preventDefault();
-    form.post();
+    return form.post();
   }
 </script>
 
@@ -40,8 +40,8 @@
         <span style="color: red">{form.errors.email}</span>
       {/if}
     </div>
-    <button type="submit" disabled={form.processing}>
-      {form.processing ? "Saving..." : "Add User"}
+    <button type="submit" disabled={form.pending}>
+      {form.pending ? "Saving..." : "Add User"}
     </button>
   </form>
 </div>

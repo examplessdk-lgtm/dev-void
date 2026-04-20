@@ -1,5 +1,21 @@
+import { VoidActionError, isAbortError, isEqualFormValue, submitAction } from 'void/pages-client';
 import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
 import { reactive, ref, inject, watch } from 'vue';
+
+function getValidationErrors(error: VoidActionError): Record<string, string> | null {
+  const body = error.body;
+  if (
+    body &&
+    typeof body === 'object' &&
+    'errors' in body &&
+    body.errors &&
+    typeof body.errors === 'object' &&
+    !Array.isArray(body.errors)
+  ) {
+    return body.errors as Record<string, string>;
+  }
+  return null;
+}
 
 export function useForm<U extends ActionUrl & string>(
   url: U,
@@ -8,16 +24,18 @@ export function useForm<U extends ActionUrl & string>(
 ): {
   data: ResolveActionBody<U>;
   errors: Partial<Record<keyof ResolveActionBody<U> & string, string>>;
-  processing: boolean;
-  isDirty: boolean;
+  error: VoidActionError | null;
+  pending: boolean;
+  hasChanges: boolean;
   wasSuccessful: boolean;
   recentlySuccessful: boolean;
-  post(opts?: any): void;
-  put(opts?: any): void;
-  patch(opts?: any): void;
-  delete(opts?: any): void;
+  post(opts?: any): Promise<void>;
+  put(opts?: any): Promise<void>;
+  patch(opts?: any): Promise<void>;
+  delete(opts?: any): Promise<void>;
   reset(...fields: (keyof ResolveActionBody<U> & string)[]): void;
   clearErrors(...fields: (keyof ResolveActionBody<U> & string)[]): void;
+  clearError(): void;
 };
 
 export function useForm(
@@ -47,20 +65,21 @@ export function useForm(
   const router = inject<any>('__void_router', null);
   const data = reactive({ ...formDefaults }) as Record<string, unknown>;
   const errors = reactive<Record<string, string>>({});
-  const processing = ref(false);
+  const error = ref<VoidActionError | null>(null);
+  const pending = ref(false);
   const wasSuccessful = ref(false);
   const recentlySuccessful = ref(false);
 
   let defaults_ = { ...formDefaults };
   let successTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  // isDirty computed via deep watch
-  const isDirty = ref(false);
+  // hasChanges computed via deep watch
+  const hasChanges = ref(false);
   watch(
     () => ({ ...data }),
     (val) => {
-      isDirty.value = Object.keys(defaults_).some(
-        (key) => JSON.stringify(val[key]) !== JSON.stringify(defaults_[key]),
+      hasChanges.value = Object.keys(defaults_).some(
+        (key) => !isEqualFormValue(val[key], defaults_[key]),
       );
     },
     { deep: true },
@@ -88,51 +107,64 @@ export function useForm(
     }
   }
 
+  function clearError() {
+    error.value = null;
+  }
+
   async function submit(method: string, opts: any = {}) {
-    processing.value = true;
+    pending.value = true;
     wasSuccessful.value = false;
     recentlySuccessful.value = false;
     if (successTimeout) {
       clearTimeout(successTimeout);
     }
     clearErrors();
+    clearError();
 
     try {
-      const pageData = await router.visit(resolvedUrl, {
+      const result = await submitAction(router, resolvedUrl, {
         method,
         data: { ...data },
         ...opts,
       });
 
-      // Bridge validation errors from the server response into the form
-      if (pageData?.errors) {
-        Object.assign(errors, pageData.errors);
+      if (!result.ok) {
+        const validationErrors = getValidationErrors(result.error);
+        if (validationErrors) {
+          Object.assign(errors, validationErrors);
+        } else {
+          error.value = result.error;
+        }
+        return;
       }
 
-      if (Object.keys(errors).length === 0) {
-        wasSuccessful.value = true;
-        recentlySuccessful.value = true;
-        defaults_ = { ...data };
-        successTimeout = setTimeout(() => {
-          recentlySuccessful.value = false;
-        }, 2000);
+      wasSuccessful.value = true;
+      recentlySuccessful.value = true;
+      defaults_ = { ...data };
+      successTimeout = setTimeout(() => {
+        recentlySuccessful.value = false;
+      }, 2000);
+    } catch (submitError) {
+      if (isAbortError(submitError)) {
+        return;
       }
-    } catch {
-      // Request failed
+      throw submitError;
     } finally {
-      processing.value = false;
+      pending.value = false;
     }
   }
 
   return reactive({
     data,
     errors,
-    processing,
-    isDirty,
+    error,
+    pending,
+    hasChanges,
     wasSuccessful,
     recentlySuccessful,
     reset,
     clearErrors,
+    clearError,
     post: (opts?: any) => submit('POST', opts),
     put: (opts?: any) => submit('PUT', opts),
     patch: (opts?: any) => submit('PATCH', opts),
