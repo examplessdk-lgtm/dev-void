@@ -1,20 +1,50 @@
 import { createSignal, createMemo } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
+import { VoidActionError, categorizeActionError } from 'void/pages-client';
+
+function getValidationErrors(body: unknown): Record<string, string> | null {
+  if (
+    body &&
+    typeof body === 'object' &&
+    'errors' in body &&
+    body.errors &&
+    typeof body.errors === 'object' &&
+    !Array.isArray(body.errors)
+  ) {
+    return body.errors as Record<string, string>;
+  }
+  return null;
+}
+
+async function readActionErrorBody(response: Response): Promise<unknown> {
+  const contentType = response.headers.get('content-type') || '';
+  try {
+    if (contentType.includes('application/json')) {
+      return await response.json();
+    }
+    const text = await response.text();
+    return text || null;
+  } catch {
+    return null;
+  }
+}
 
 export interface IslandFormReturn<T extends Record<string, unknown>> {
   data: T;
   setData: <K extends keyof T & string>(field: K, value: T[K]) => void;
   errors: Record<string, string>;
-  processing: boolean;
+  error: VoidActionError | null;
+  pending: boolean;
   isDirty: boolean;
   wasSuccessful: boolean;
   recentlySuccessful: boolean;
   reset: (...fields: (keyof T & string)[]) => void;
   clearErrors: (...fields: string[]) => void;
-  post: (url: string) => void;
-  put: (url: string) => void;
-  patch: (url: string) => void;
-  delete: (url: string) => void;
+  clearError: () => void;
+  post: (url: string) => Promise<void>;
+  put: (url: string) => Promise<void>;
+  patch: (url: string) => Promise<void>;
+  delete: (url: string) => Promise<void>;
 }
 
 /**
@@ -24,7 +54,8 @@ export interface IslandFormReturn<T extends Record<string, unknown>> {
 export function useIslandForm<T extends Record<string, unknown>>(defaults: T): IslandFormReturn<T> {
   const [data, setDataStore] = createStore<Record<string, unknown>>({ ...defaults });
   const [errors, setErrors] = createSignal<Record<string, string>>({});
-  const [processing, setProcessing] = createSignal(false);
+  const [error, setError] = createSignal<VoidActionError | null>(null);
+  const [pending, setPending] = createSignal(false);
   const [wasSuccessful, setWasSuccessful] = createSignal(false);
   const [recentlySuccessful, setRecentlySuccessful] = createSignal(false);
 
@@ -65,14 +96,19 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     }
   }
 
+  function clearError() {
+    setError(null);
+  }
+
   async function submit(url: string, method: string) {
-    setProcessing(true);
+    setPending(true);
     setWasSuccessful(false);
     setRecentlySuccessful(false);
     if (successTimeout) {
       clearTimeout(successTimeout);
     }
     setErrors({});
+    clearError();
 
     try {
       const response = await fetch(url, {
@@ -92,16 +128,26 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
         defaults_ = { ...data } as typeof defaults_;
         successTimeout = setTimeout(() => setRecentlySuccessful(false), 2000);
         window.location.reload();
-      } else if (response.status === 422) {
-        const body = (await response.json()) as { errors?: Record<string, string> };
-        if (body?.errors) {
-          setErrors(body.errors);
+      } else if (!response.ok) {
+        const body = await readActionErrorBody(response);
+        const actionError = new VoidActionError({
+          body,
+          status: response.status,
+          statusText: response.statusText,
+          url,
+        });
+        const validationErrors = response.status === 422 ? getValidationErrors(body) : null;
+        if (validationErrors) {
+          setErrors(validationErrors);
+          return;
         }
+        if (categorizeActionError(response.status) === 'boundary') {
+          throw actionError;
+        }
+        setError(actionError);
       }
-    } catch {
-      // Request failed
     } finally {
-      setProcessing(false);
+      setPending(false);
     }
   }
 
@@ -113,8 +159,11 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     get errors() {
       return errors();
     },
-    get processing() {
-      return processing();
+    get error() {
+      return error();
+    },
+    get pending() {
+      return pending();
     },
     get isDirty() {
       return isDirty();
@@ -127,6 +176,7 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     },
     reset,
     clearErrors,
+    clearError,
     post: (url: string) => submit(url, 'POST'),
     put: (url: string) => submit(url, 'PUT'),
     patch: (url: string) => submit(url, 'PATCH'),

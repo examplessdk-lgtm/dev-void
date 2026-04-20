@@ -22,7 +22,7 @@ describe('useForm reactive logic', () => {
 
     const data = reactive({ ...formDefaults }) as Record<string, unknown>;
     const errors = reactive<Record<string, string>>({});
-    const processing = ref(false);
+    const pending = ref(false);
     const wasSuccessful = ref(false);
     const recentlySuccessful = ref(false);
 
@@ -64,7 +64,7 @@ describe('useForm reactive logic', () => {
     return {
       data,
       errors,
-      processing,
+      pending,
       isDirty,
       wasSuccessful,
       recentlySuccessful,
@@ -157,10 +157,10 @@ describe('useForm reactive logic', () => {
     expect(form.errors.email).toBe('invalid');
   });
 
-  it('processing is a ref initialized to false', () => {
+  it('pending is a ref initialized to false', () => {
     const form = createForm('/test', { name: '' });
-    expect(isRef(form.processing)).toBe(true);
-    expect(form.processing.value).toBe(false);
+    expect(isRef(form.pending)).toBe(true);
+    expect(form.pending.value).toBe(false);
   });
 
   it('wasSuccessful and recentlySuccessful are refs initialized to false', () => {

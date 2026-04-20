@@ -248,6 +248,34 @@ function defineClientTests(getBase: () => string) {
     }
   });
 
+  it('form call-site action errors stay in form state', async () => {
+    const page = await newPage();
+    const errors: string[] = [];
+    page.on('console', (msg) => {
+      if (msg.type() === 'error' && !msg.text().includes('Failed to load resource')) {
+        errors.push(msg.text());
+      }
+    });
+    page.on('pageerror', (error) => {
+      errors.push(error.message);
+    });
+
+    try {
+      await page.goto(BASE + '/action-error');
+      await waitForHydration(page);
+
+      await page.click('button:has-text("Trigger conflict")');
+      await page.waitForSelector('[data-testid="conflict-error"]');
+
+      const text = await page.textContent('body');
+      expect(text).toContain('Action failed with 409 Conflict');
+      expect(text).toContain('Action Error');
+      expect(errors).toEqual([]);
+    } finally {
+      await page.context().close();
+    }
+  });
+
   it('form submission adds user', async () => {
     const page = await newPage();
 

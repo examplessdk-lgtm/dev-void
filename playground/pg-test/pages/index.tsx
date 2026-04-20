@@ -14,11 +14,11 @@ export default function DbPage({ users, posts }: Props) {
   });
 
   async function deleteUser(id: number) {
-    await action('/?delete-user', { id });
+    await action('/?delete-user', { data: { id } });
   }
 
   async function deletePost(id: number) {
-    await action('/?delete-post', { id });
+    await action('/?delete-post', { data: { id } });
   }
 
   return (
@@ -29,12 +29,7 @@ export default function DbPage({ users, posts }: Props) {
       </p>
 
       <h2>Add User</h2>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          userForm.post();
-        }}
-      >
+      <form action={userForm.post}>
         <div>
           <label>Name: </label>
           <input
@@ -53,8 +48,8 @@ export default function DbPage({ users, posts }: Props) {
             required
           />
         </div>
-        <button type="submit" disabled={userForm.processing} style={{ marginTop: 5 }}>
-          {userForm.processing ? 'Saving...' : 'Add User'}
+        <button type="submit" disabled={userForm.pending} style={{ marginTop: 5 }}>
+          {userForm.pending ? 'Saving...' : 'Add User'}
         </button>
       </form>
 
@@ -95,12 +90,7 @@ export default function DbPage({ users, posts }: Props) {
       <hr />
 
       <h2>Add Post</h2>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          postForm.post();
-        }}
-      >
+      <form action={postForm.post}>
         <div>
           <label>Title: </label>
           <input
@@ -135,8 +125,8 @@ export default function DbPage({ users, posts }: Props) {
             ))}
           </select>
         </div>
-        <button type="submit" disabled={postForm.processing} style={{ marginTop: 5 }}>
-          {postForm.processing ? 'Saving...' : 'Add Post'}
+        <button type="submit" disabled={postForm.pending} style={{ marginTop: 5 }}>
+          {postForm.pending ? 'Saving...' : 'Add Post'}
         </button>
       </form>
 
@@ -214,13 +204,13 @@ function _typeTests() {
   postForm.setData('authorId', 'not-a-number');
 
   // @ts-expect-error — invalid action name
-  action('/?nonexistent-action', {});
+  action('/?nonexistent-action', { data: {} });
 
   // @ts-expect-error — missing required field "id"
-  action('/?delete-user', {});
+  action('/?delete-user', { data: {} });
 
   // @ts-expect-error — wrong field type (id should be number)
-  action('/?delete-user', { id: 'not-a-number' });
+  action('/?delete-user', { data: { id: 'not-a-number' } });
 }
 
 void _typeTests;

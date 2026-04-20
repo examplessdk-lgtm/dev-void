@@ -37,8 +37,8 @@ function deleteResult(id: number) {
         <label>Value: </label>
         <input v-model="form.data.value" placeholder="my-value" required />
       </div>
-      <button type="submit" :disabled="form.processing" style="margin-top: 5px">
-        {{ form.processing ? 'Sending...' : 'Send to Queue' }}
+      <button type="submit" :disabled="form.pending" style="margin-top: 5px">
+        {{ form.pending ? 'Sending...' : 'Send to Queue' }}
       </button>
     </form>
 
@@ -65,7 +65,7 @@ function deleteResult(id: number) {
           </td>
           <td>{{ r.createdAt }}</td>
           <td>
-            <button @click="deleteResult(r.id)" :disabled="deleteForm.processing">Delete</button>
+            <button @click="deleteResult(r.id)" :disabled="deleteForm.pending">Delete</button>
           </td>
         </tr>
       </tbody>

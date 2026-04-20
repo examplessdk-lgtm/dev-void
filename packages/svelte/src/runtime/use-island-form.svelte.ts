@@ -1,3 +1,32 @@
+import { VoidActionError, categorizeActionError } from 'void/pages-client';
+
+function getValidationErrors(body: unknown): Record<string, string> | null {
+  if (
+    body &&
+    typeof body === 'object' &&
+    'errors' in body &&
+    body.errors &&
+    typeof body.errors === 'object' &&
+    !Array.isArray(body.errors)
+  ) {
+    return body.errors as Record<string, string>;
+  }
+  return null;
+}
+
+async function readActionErrorBody(response: Response): Promise<unknown> {
+  const contentType = response.headers.get('content-type') || '';
+  try {
+    if (contentType.includes('application/json')) {
+      return await response.json();
+    }
+    const text = await response.text();
+    return text || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Form composable for island pages. Uses fetch + page reload instead of the
  * Inertia client-side router (which is not available in island mode).
@@ -5,7 +34,8 @@
 export function useIslandForm(defaults: Record<string, unknown>): any {
   let data: Record<string, unknown> = $state({ ...defaults });
   let errors: Record<string, string> = $state({});
-  let processing = $state(false);
+  let error: VoidActionError | null = $state(null);
+  let pending = $state(false);
   let wasSuccessful = $state(false);
   let recentlySuccessful = $state(false);
 
@@ -38,14 +68,19 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
     }
   }
 
+  function clearError() {
+    error = null;
+  }
+
   async function submit(url: string, method: string) {
-    processing = true;
+    pending = true;
     wasSuccessful = false;
     recentlySuccessful = false;
     if (successTimeout) {
       clearTimeout(successTimeout);
     }
     clearErrors();
+    clearError();
 
     try {
       const response = await fetch(url, {
@@ -67,16 +102,26 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
           recentlySuccessful = false;
         }, 2000);
         window.location.reload();
-      } else if (response.status === 422) {
-        const body = (await response.json()) as { errors?: Record<string, string> };
-        if (body?.errors) {
-          Object.assign(errors, body.errors);
+      } else if (!response.ok) {
+        const body = await readActionErrorBody(response);
+        const actionError = new VoidActionError({
+          body,
+          status: response.status,
+          statusText: response.statusText,
+          url,
+        });
+        const validationErrors = response.status === 422 ? getValidationErrors(body) : null;
+        if (validationErrors) {
+          Object.assign(errors, validationErrors);
+          return;
         }
+        if (categorizeActionError(response.status) === 'boundary') {
+          throw actionError;
+        }
+        error = actionError;
       }
-    } catch {
-      // Request failed
     } finally {
-      processing = false;
+      pending = false;
     }
   }
 
@@ -87,8 +132,11 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
     get errors() {
       return errors;
     },
-    get processing() {
-      return processing;
+    get error() {
+      return error;
+    },
+    get pending() {
+      return pending;
     },
     get isDirty() {
       return isDirty;
@@ -101,6 +149,7 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
     },
     reset,
     clearErrors,
+    clearError,
     post: (url: string) => submit(url, 'POST'),
     put: (url: string) => submit(url, 'PUT'),
     patch: (url: string) => submit(url, 'PATCH'),

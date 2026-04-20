@@ -54,6 +54,44 @@ GET `data` is merged into the rendered `href` query string. Primitive values are
 
 `prefetch` and `reloadDocument` are GET-only and throw for mutation links. `onNavigate` can cancel client-side navigation by calling `event.preventDefault()`.
 
+### Forms
+
+`useForm()` tracks form state for Pages actions. Use `pending` for in-flight
+state, `errors` for field validation, and `error` for non-validation call-site
+failures. The submit helpers return promises so boundary-class failures can
+propagate through Solid async error handling or explicit `catch` handlers.
+
+```tsx
+import { useForm } from '@void/solid';
+
+export default function CreateUser() {
+  const form = useForm('/users', { name: '', email: '' });
+
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        return form.post();
+      }}
+    >
+      <input
+        name="name"
+        value={form.data.name}
+        onInput={(event) => form.setData('name', event.currentTarget.value)}
+      />
+      {form.errors.name && <p>{form.errors.name}</p>}
+      {form.error && <p>{form.error.message}</p>}
+      <button disabled={form.pending}>Save</button>
+    </form>
+  );
+}
+```
+
+Use `action()` for the awaitable imperative escape hatch. It returns
+`{ ok: true, pageData }` or `{ ok: false, error }` for call-site action errors,
+while boundary-class failures are thrown. `action()` uses `POST` by default and
+accepts `{ method: "PUT" | "PATCH" | "DELETE" }`.
+
 ## Pages
 
 Pages are `.tsx` files in `pages/` with companion `.server.ts` files:

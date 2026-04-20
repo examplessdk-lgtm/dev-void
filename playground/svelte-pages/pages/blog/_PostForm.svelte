@@ -4,7 +4,7 @@
   const form = useIslandForm({ title: "", body: "" });
 </script>
 
-<form onsubmit={(e) => { e.preventDefault(); form.post("/blog"); }}>
+<form onsubmit={(e) => { e.preventDefault(); return form.post("/blog"); }}>
   <div>
     <label for="title">Title:</label>
     <input id="title" bind:value={form.data.title} />
@@ -19,7 +19,7 @@
       <span style="color: red">{form.errors.body}</span>
     {/if}
   </div>
-  <button type="submit" disabled={form.processing}>
-    {form.processing ? "Saving..." : "Add Post"}
+  <button type="submit" disabled={form.pending}>
+    {form.pending ? "Saving..." : "Add Post"}
   </button>
 </form>

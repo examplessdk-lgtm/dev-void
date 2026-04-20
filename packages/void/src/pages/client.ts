@@ -1,8 +1,16 @@
 /// <reference lib="dom" />
 
+import { VoidActionError, isCallSiteActionError, type ActionResult } from './action-result';
 import { createPageNavigationEngine as createNavigationEngine } from './navigation-engine';
 import type { CacheForResult, CacheForInput } from './prefetch';
 
+export {
+  VoidActionError,
+  categorizeActionError,
+  isAbortError,
+  isCallSiteActionError,
+} from './action-result';
+export type { ActionErrorHandlingScope, ActionResult } from './action-result';
 export { createPageNavigationEngine } from './navigation-engine';
 export type {
   PageNavigationEngine,
@@ -19,6 +27,8 @@ export interface VisitOptions {
   preserveState?: boolean;
   replace?: boolean;
   viewTransition?: boolean;
+  /** @internal Used by React Actions to avoid waiting for a commit blocked by the action itself. */
+  _resolveOnShell?: boolean;
   /** @internal Used by popstate handler to pass saved scroll position */
   _scrollPosition?: { x: number; y: number } | null;
   /** @internal Used by popstate handler to avoid writing history while traversing */
@@ -258,6 +268,33 @@ export function objectToFormData(
 // --- SSR proxy ---
 
 export const ssrProxy: VoidRouter = createSsrRouter();
+
+export async function submitAction(
+  router: VoidRouter,
+  url: string,
+  options: VisitOptions,
+): Promise<ActionResult> {
+  try {
+    const pageData = await router.visit(url, options);
+    if (pageData?.errors) {
+      return {
+        ok: false,
+        error: new VoidActionError({
+          body: { errors: pageData.errors },
+          status: 422,
+          statusText: 'Unprocessable Content',
+          url,
+        }),
+      };
+    }
+    return { ok: true, pageData };
+  } catch (error) {
+    if (isCallSiteActionError(error)) {
+      return { ok: false, error };
+    }
+    throw error;
+  }
+}
 
 // --- createPageRouter factory ---
 

@@ -101,6 +101,14 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
       // context instances that break useContext (React contexts use object identity).
       if (env.command === 'serve') {
         isDev = true;
+        const reactOptimizeDeps = [
+          'react',
+          'react/jsx-runtime',
+          'react/jsx-dev-runtime',
+          'react-dom',
+          'react-dom/client',
+          'react-dom/server',
+        ];
         return {
           optimizeDeps: {
             // Exclude @void/react so the virtual module and user
@@ -109,7 +117,12 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
             // Pre-include React entries that are discovered late via dynamic
             // imports during SPA navigation, avoiding a full-page reload
             // from Vite's dep optimizer.
-            include: ['react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom/client'],
+            include: reactOptimizeDeps,
+          },
+          ssr: {
+            optimizeDeps: {
+              include: reactOptimizeDeps,
+            },
           },
         };
       }

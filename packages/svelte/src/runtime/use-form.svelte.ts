@@ -1,5 +1,21 @@
 import { getContext } from 'svelte';
+import { VoidActionError, isAbortError, submitAction } from 'void/pages-client';
 import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
+
+function getValidationErrors(error: VoidActionError): Record<string, string> | null {
+  const body = error.body;
+  if (
+    body &&
+    typeof body === 'object' &&
+    'errors' in body &&
+    body.errors &&
+    typeof body.errors === 'object' &&
+    !Array.isArray(body.errors)
+  ) {
+    return body.errors as Record<string, string>;
+  }
+  return null;
+}
 
 // Typed overload — full inference from PageActionMap (requires codegen)
 export function useForm<U extends ActionUrl & string>(
@@ -9,16 +25,18 @@ export function useForm<U extends ActionUrl & string>(
 ): {
   readonly data: ResolveActionBody<U>;
   readonly errors: Partial<Record<keyof ResolveActionBody<U> & string, string>>;
-  readonly processing: boolean;
+  readonly error: VoidActionError | null;
+  readonly pending: boolean;
   readonly isDirty: boolean;
   readonly wasSuccessful: boolean;
   readonly recentlySuccessful: boolean;
-  post(opts?: any): void;
-  put(opts?: any): void;
-  patch(opts?: any): void;
-  delete(opts?: any): void;
+  post(opts?: any): Promise<void>;
+  put(opts?: any): Promise<void>;
+  patch(opts?: any): Promise<void>;
+  delete(opts?: any): Promise<void>;
   reset(...fields: (keyof ResolveActionBody<U> & string)[]): void;
   clearErrors(...fields: (keyof ResolveActionBody<U> & string)[]): void;
+  clearError(): void;
 };
 
 export function useForm(
@@ -48,7 +66,8 @@ export function useForm(
 
   let data = $state({ ...defaults });
   let errors: Record<string, string> = $state({});
-  let processing = $state(false);
+  let error: VoidActionError | null = $state(null);
+  let pending = $state(false);
   let wasSuccessful = $state(false);
   let recentlySuccessful = $state(false);
 
@@ -81,24 +100,34 @@ export function useForm(
     }
   }
 
+  function clearError() {
+    error = null;
+  }
+
   async function submit(method: string, opts: any = {}) {
-    processing = true;
+    pending = true;
     wasSuccessful = false;
     recentlySuccessful = false;
     if (successTimeout) {
       clearTimeout(successTimeout);
     }
     clearErrors();
+    clearError();
 
     try {
-      const pageData = await router.visit(resolvedUrl, {
+      const result = await submitAction(router, resolvedUrl, {
         method,
         data: { ...data },
         ...opts,
       });
 
-      if (pageData?.errors) {
-        Object.assign(errors, pageData.errors);
+      if (!result.ok) {
+        const validationErrors = getValidationErrors(result.error);
+        if (validationErrors) {
+          Object.assign(errors, validationErrors);
+        } else {
+          error = result.error;
+        }
         return;
       }
 
@@ -108,10 +137,13 @@ export function useForm(
       successTimeout = setTimeout(() => {
         recentlySuccessful = false;
       }, 2000);
-    } catch {
-      // Request failed
+    } catch (submitError) {
+      if (isAbortError(submitError)) {
+        return;
+      }
+      throw submitError;
     } finally {
-      processing = false;
+      pending = false;
     }
   }
 
@@ -122,8 +154,11 @@ export function useForm(
     get errors() {
       return errors;
     },
-    get processing() {
-      return processing;
+    get error() {
+      return error;
+    },
+    get pending() {
+      return pending;
     },
     get isDirty() {
       return isDirty;
@@ -136,6 +171,7 @@ export function useForm(
     },
     reset,
     clearErrors,
+    clearError,
     post: (opts?: any) => submit('POST', opts),
     put: (opts?: any) => submit('PUT', opts),
     patch: (opts?: any) => submit('PATCH', opts),

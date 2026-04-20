@@ -1,5 +1,15 @@
 import { Link, useForm } from '@void/react';
+import { useFormStatus } from 'react-dom';
 import type { Props } from './index.server';
+
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return (
+    <button type="submit" disabled={pending}>
+      {pending ? 'Saving...' : 'Add User'}
+    </button>
+  );
+}
 
 export default function UsersPage({ users }: Props) {
   const form = useForm('/users', {
@@ -23,25 +33,26 @@ export default function UsersPage({ users }: Props) {
       </ul>
 
       <h2>Add User</h2>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          form.post();
-        }}
-      >
+      <form action={form.post}>
         <div>
           <label>Name:</label>
-          <input value={form.data.name} onChange={(e) => form.setData('name', e.target.value)} />
+          <input
+            name="name"
+            value={form.data.name}
+            onChange={(e) => form.setData('name', e.target.value)}
+          />
           {form.errors.name && <span style={{ color: 'red' }}>{form.errors.name}</span>}
         </div>
         <div>
           <label>Email:</label>
-          <input value={form.data.email} onChange={(e) => form.setData('email', e.target.value)} />
+          <input
+            name="email"
+            value={form.data.email}
+            onChange={(e) => form.setData('email', e.target.value)}
+          />
           {form.errors.email && <span style={{ color: 'red' }}>{form.errors.email}</span>}
         </div>
-        <button type="submit" disabled={form.processing}>
-          {form.processing ? 'Saving...' : 'Add User'}
-        </button>
+        <SubmitButton />
       </form>
     </div>
   );

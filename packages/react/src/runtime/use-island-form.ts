@@ -1,19 +1,49 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
+import { VoidActionError, categorizeActionError } from 'void/pages-client';
+
+function getValidationErrors(body: unknown): Record<string, string> | null {
+  if (
+    body &&
+    typeof body === 'object' &&
+    'errors' in body &&
+    body.errors &&
+    typeof body.errors === 'object' &&
+    !Array.isArray(body.errors)
+  ) {
+    return body.errors as Record<string, string>;
+  }
+  return null;
+}
+
+async function readActionErrorBody(response: Response): Promise<unknown> {
+  const contentType = response.headers.get('content-type') || '';
+  try {
+    if (contentType.includes('application/json')) {
+      return await response.json();
+    }
+    const text = await response.text();
+    return text || null;
+  } catch {
+    return null;
+  }
+}
 
 export interface IslandFormReturn<T extends Record<string, unknown>> {
   data: T;
   setData: <K extends keyof T & string>(field: K, value: T[K]) => void;
   errors: Record<string, string>;
-  processing: boolean;
+  error: VoidActionError | null;
+  pending: boolean;
   isDirty: boolean;
   wasSuccessful: boolean;
   recentlySuccessful: boolean;
   reset: (...fields: (keyof T & string)[]) => void;
   clearErrors: (...fields: string[]) => void;
-  post: (url: string) => void;
-  put: (url: string) => void;
-  patch: (url: string) => void;
-  delete: (url: string) => void;
+  clearError: () => void;
+  post: (url: string) => Promise<void>;
+  put: (url: string) => Promise<void>;
+  patch: (url: string) => Promise<void>;
+  delete: (url: string) => Promise<void>;
 }
 
 /**
@@ -21,19 +51,21 @@ export interface IslandFormReturn<T extends Record<string, unknown>> {
  * Inertia client-side router (which is not available in island mode).
  */
 export function useIslandForm<T extends Record<string, unknown>>(defaults: T): IslandFormReturn<T> {
-  const [data, setDataState] = useState<T>({ ...defaults });
+  const [data, setDataState] = useState<T>(() => ({ ...defaults }));
+  const [defaultsState, setDefaultsState] = useState<T>(() => ({ ...defaults }));
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState<VoidActionError | null>(null);
+  const [pending, setPending] = useState(false);
   const [wasSuccessful, setWasSuccessful] = useState(false);
   const [recentlySuccessful, setRecentlySuccessful] = useState(false);
-  const defaultsRef = useRef({ ...defaults });
+  const defaultsRef = useRef(defaultsState);
   const successTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isDirty = useMemo(() => {
-    return Object.keys(defaultsRef.current).some(
-      (key) => JSON.stringify(data[key]) !== JSON.stringify(defaultsRef.current[key as keyof T]),
+    return Object.keys(defaultsState).some(
+      (key) => JSON.stringify(data[key]) !== JSON.stringify(defaultsState[key as keyof T]),
     );
-  }, [data]);
+  }, [data, defaultsState]);
 
   const setData = useCallback(<K extends keyof T & string>(field: K, value: T[K]) => {
     setDataState((prev) => ({ ...prev, [field]: value }));
@@ -67,15 +99,20 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     }
   }, []);
 
+  const clearError = useCallback(() => {
+    setError(null);
+  }, []);
+
   const submit = useCallback(
     async (url: string, method: string) => {
-      setProcessing(true);
+      setPending(true);
       setWasSuccessful(false);
       setRecentlySuccessful(false);
       if (successTimeoutRef.current) {
         clearTimeout(successTimeoutRef.current);
       }
       setErrors({});
+      setError(null);
 
       try {
         const response = await fetch(url, {
@@ -92,19 +129,31 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
         if (response.ok) {
           setWasSuccessful(true);
           setRecentlySuccessful(true);
-          defaultsRef.current = { ...data };
+          const nextDefaults = { ...data };
+          defaultsRef.current = nextDefaults;
+          setDefaultsState(nextDefaults);
           successTimeoutRef.current = setTimeout(() => setRecentlySuccessful(false), 2000);
           window.location.reload();
-        } else if (response.status === 422) {
-          const body = (await response.json()) as { errors?: Record<string, string> };
-          if (body?.errors) {
-            setErrors(body.errors);
+        } else if (!response.ok) {
+          const body = await readActionErrorBody(response);
+          const actionError = new VoidActionError({
+            body,
+            status: response.status,
+            statusText: response.statusText,
+            url,
+          });
+          const validationErrors = response.status === 422 ? getValidationErrors(body) : null;
+          if (validationErrors) {
+            setErrors(validationErrors);
+            return;
           }
+          if (categorizeActionError(response.status) === 'boundary') {
+            throw actionError;
+          }
+          setError(actionError);
         }
-      } catch {
-        // Request failed
       } finally {
-        setProcessing(false);
+        setPending(false);
       }
     },
     [data],
@@ -114,12 +163,14 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
     data,
     setData,
     errors,
-    processing,
+    error,
+    pending,
     isDirty,
     wasSuccessful,
     recentlySuccessful,
     reset,
     clearErrors,
+    clearError,
     post: (url: string) => submit(url, 'POST'),
     put: (url: string) => submit(url, 'PUT'),
     patch: (url: string) => submit(url, 'PATCH'),

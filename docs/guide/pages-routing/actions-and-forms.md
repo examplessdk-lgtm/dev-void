@@ -106,25 +106,36 @@ Then, use `useForm` in the page component to submit to this action:
 ```tsx [React]
 // pages/users/create.tsx
 import { useForm } from '@void/react';
+import { useFormStatus } from 'react-dom';
+
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return <button disabled={pending}>Create</button>;
+}
 
 export default function CreateUser() {
   // "/users/create" autocompletes; { name, email } is typed from the action's validator
   const form = useForm('/users/create', { name: '', email: '' });
 
   return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        form.post();
-      }}
-    >
-      <input value={form.data.name} onChange={(e) => form.setData('name', e.target.value)} />
+    <form action={form.post}>
+      <input
+        name="name"
+        value={form.data.name}
+        onChange={(e) => form.setData('name', e.target.value)}
+      />
       {form.errors.name && <span>{form.errors.name}</span>}
 
-      <input value={form.data.email} onChange={(e) => form.setData('email', e.target.value)} />
+      <input
+        name="email"
+        value={form.data.email}
+        onChange={(e) => form.setData('email', e.target.value)}
+      />
       {form.errors.email && <span>{form.errors.email}</span>}
 
-      <button disabled={form.processing}>Create</button>
+      {form.error && <p>{form.error.message}</p>}
+
+      <SubmitButton />
     </form>
   );
 }
@@ -147,7 +158,7 @@ const form = useForm('/users/create', { name: '', email: '' });
     <input v-model="form.data.email" />
     <span v-if="form.errors.email">{{ form.errors.email }}</span>
 
-    <button :disabled="form.processing">Create</button>
+    <button :disabled="form.pending">Create</button>
   </form>
 </template>
 ```
@@ -161,14 +172,14 @@ const form = useForm('/users/create', { name: '', email: '' });
   const form = useForm("/users/create", { name: "", email: "" });
 </script>
 
-<form onsubmit={(e) => { e.preventDefault(); form.post(); }}>
+<form onsubmit={(e) => { e.preventDefault(); return form.post(); }}>
   <input bind:value={form.data.name} />
   {#if form.errors.name}<span>{form.errors.name}</span>{/if}
 
   <input bind:value={form.data.email} />
   {#if form.errors.email}<span>{form.errors.email}</span>{/if}
 
-  <button disabled={form.processing}>Create</button>
+  <button disabled={form.pending}>Create</button>
 </form>
 ```
 
@@ -184,7 +195,7 @@ export default function CreateUser() {
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        form.post();
+        return form.post();
       }}
     >
       <input value={form.data.name} onInput={(e) => form.setData('name', e.target.value)} />
@@ -193,7 +204,7 @@ export default function CreateUser() {
       <input value={form.data.email} onInput={(e) => form.setData('email', e.target.value)} />
       {form.errors.email && <span>{form.errors.email}</span>}
 
-      <button disabled={form.processing}>Create</button>
+      <button disabled={form.pending}>Create</button>
     </form>
   );
 }
@@ -207,24 +218,40 @@ The types are inferred from your action's `withValidator()` schema in the compan
 
 `useForm` returns a reactive object with:
 
-| Property / Method                | Purpose                                                                        |
-| -------------------------------- | ------------------------------------------------------------------------------ |
-| `data` / `setData`               | Current form values, typed to match the action's body schema.                  |
-| `errors`                         | Field-level validation errors, keys typed to body field names.                 |
-| `post`, `put`, `patch`, `delete` | Submit the form (URL is already bound).                                        |
-| `processing`                     | `true` while the submission is in flight.                                      |
-| `isDirty`                        | `true` if form data differs from initial values.                               |
-| `wasSuccessful`                  | `true` after a successful submission. Stays `true` until the next submission.  |
-| `recentlySuccessful`             | `true` for 2 seconds after a successful submission. Useful for flash messages. |
-| `reset(...fields)`               | Reset form data to initial values. Field names autocomplete.                   |
-| `clearErrors(...fields)`         | Clear validation errors. Field names autocomplete.                             |
+| Property / Method                | Purpose                                                                                       |
+| -------------------------------- | --------------------------------------------------------------------------------------------- |
+| Property / Method                | Purpose                                                                                       |
+| -------------------------------- | --------------------------------------------------------------------------------------------- |
+| `data` / `setData`               | Current form values, typed to match the action's body schema.                                 |
+| `errors`                         | Field-level validation errors, keys typed to body field names.                                |
+| `error`                          | Non-validation call-site action error, or `null`.                                             |
+| `post`, `put`, `patch`, `delete` | Submit the form with that method. In React these are native form action callbacks.            |
+| `pending`                        | `true` while the submission is in flight.                                                     |
+| `isDirty`                        | `true` if form data differs from initial values.                                              |
+| `wasSuccessful`                  | `true` after a successful submission. Stays `true` until the next submission.                 |
+| `recentlySuccessful`             | `true` for 2 seconds after a successful submission. Useful for flash messages.                |
+| `reset(...fields)`               | Reset form data to initial values. Field names autocomplete.                                  |
+| `clearErrors(...fields)`         | Clear validation errors. Field names autocomplete.                                            |
+| `clearError()`                   | Clear the non-validation call-site error.                                                     |
+
+In React, prefer the native Action form:
+
+```tsx
+<form action={form.post}>{/* controlled inputs update form.data */}</form>
+```
+
+Use `form.put`, `form.patch`, or `form.delete` as the form action for alternate HTTP methods. Use the `action()` helper when you need an awaitable imperative mutation.
+
+In Vue, Svelte, and Solid, the same helpers return `Promise<void>` so
+boundary-class failures can propagate through framework async error handling or
+explicit `catch` handlers.
 
 For dynamic routes, pass `params` in the options:
 
 ```ts
 // pages/users/[id].server.ts has an action
 const form = useForm('/users/:id', { name: '' }, { params: { id: '42' } });
-form.put(); // submits to /users/42
+<form action={form.put}>{/* submits to /users/42 */}</form>
 ```
 
 ### Named Actions with `useForm`
@@ -233,7 +260,7 @@ When a page exports named actions, append `?actionName` to the URL:
 
 ```ts
 const form = useForm('/users/:id?update', { name: '' }, { params: { id } });
-form.put(); // submits to /users/42?update
+<form action={form.put}>{/* submits to /users/42?update */}</form>
 ```
 
 The URL, body fields, and error keys are typed per action. Each named action gets its own validator schema. See [Type Safety: Action -> useForm](../type-safety#action-useform) for the full typing story.
@@ -249,14 +276,22 @@ import { useForm, action } from '@void/react'; // or "@void/vue", "@void/svelte"
 const form = useForm('/?create-user', { name: '', email: '' });
 
 // Programmatic call + Inertia page update (no form state)
-await action('/?delete-user', { id: 42 });
+const result = await action('/?delete-user', {
+  data: { id: 42 },
+  method: 'DELETE',
+});
+if (!result.ok) {
+  showToast(result.error.message);
+}
 ```
 
-`action()` is useful in event handlers such as button clicks, confirmation dialogs, or any place where you want to call a server action without managing form state.
+`action()` is useful in event handlers such as button clicks, confirmation dialogs, or any place where you want to call a server action without managing form state. It uses `POST` by default and accepts `{ data, method, params }`, where `method` can be `'PUT'`, `'PATCH'`, or `'DELETE'` for alternate HTTP methods. It returns `{ ok: true, pageData }` for successful actions and `{ ok: false, error }` for call-site errors such as validation, conflicts, or missing resources.
 
 ## Validation Errors
 
 When an action throws a `ValidationError`, or validation fails through `withValidator`, the errors are automatically available on `form.errors`. You do not need to wire that up manually.
+
+Void separates action failures into call-site errors and boundary errors. Call-site errors are expected local failures such as `400`, `404`, `409`, `422`, and `429`; `useForm` stores them in `form.errors` or `form.error`, and `action()` returns `{ ok: false, error }`. Boundary errors such as `401`, `403`, `500`, `502`, and unknown network/protocol failures are thrown so React error boundaries, or your framework's error handling, can handle them at a higher level.
 
 Actions can throw `ValidationError` for custom validation logic:
 
@@ -282,26 +317,15 @@ Or use `withValidator()` for automatic schema-based validation. Errors are retur
 
 ```tsx [React]
 import { useForm } from '@void/react';
-import { useRef } from 'react';
 
 export default function Upload() {
   const form = useForm('/photos', { title: '', photo: null as File | null });
-  const inputRef = useRef<HTMLInputElement>(null);
 
   return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        form.post();
-      }}
-    >
+    <form action={form.post}>
       <input value={form.data.title} onChange={(e) => form.setData('title', e.target.value)} />
-      <input
-        type="file"
-        ref={inputRef}
-        onChange={(e) => form.setData('photo', e.target.files?.[0] ?? null)}
-      />
-      <button disabled={form.processing}>Upload</button>
+      <input type="file" onChange={(e) => form.setData('photo', e.target.files?.[0] ?? null)} />
+      <button disabled={form.pending}>Upload</button>
     </form>
   );
 }
@@ -324,7 +348,7 @@ function onFileChange() {
   <form @submit.prevent="form.post()">
     <input v-model="form.data.title" />
     <input type="file" ref="fileInput" @change="onFileChange" />
-    <button :disabled="form.processing">Upload</button>
+    <button :disabled="form.pending">Upload</button>
   </form>
 </template>
 ```
@@ -336,10 +360,10 @@ function onFileChange() {
   const form = useForm("/photos", { title: "", photo: null });
 </script>
 
-<form onsubmit={(e) => { e.preventDefault(); form.post(); }}>
+<form onsubmit={(e) => { e.preventDefault(); return form.post(); }}>
   <input bind:value={form.data.title} />
   <input type="file" onchange={(e) => { form.data.photo = e.target.files?.[0] ?? null; }} />
-  <button disabled={form.processing}>Upload</button>
+  <button disabled={form.pending}>Upload</button>
 </form>
 ```
 
@@ -353,12 +377,12 @@ export default function Upload() {
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        form.post();
+        return form.post();
       }}
     >
       <input value={form.data.title} onInput={(e) => form.setData('title', e.target.value)} />
       <input type="file" onChange={(e) => form.setData('photo', e.target.files?.[0] ?? null)} />
-      <button disabled={form.processing}>Upload</button>
+      <button disabled={form.pending}>Upload</button>
     </form>
   );
 }
@@ -392,4 +416,4 @@ export const action = defineHandler(async (c) => {
 | `action()` | Yes                 | No                         | Yes                |
 | `fetch()`  | No (raw response)   | No                         | No                 |
 
-Use `useForm` when you have a form with inputs. Use `action()` for programmatic mutations (delete buttons, toggles). Use `fetch()` when you need the raw response and don't want Inertia page updates.
+Use `useForm` when you have a form with inputs. Use `action()` for programmatic mutations (delete buttons, toggles), optionally passing `{ method }` for non-POST actions. Use `fetch()` when you need the raw response and don't want Inertia page updates.

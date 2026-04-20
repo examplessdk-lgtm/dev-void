@@ -1,12 +1,14 @@
-import type {
-  ActionUrl,
-  ResolveActionBody,
-  ResolveActionParams,
-  HasActionParams,
-} from 'void/routes';
+import { submitAction, type ActionResult } from 'void/pages-client';
+import type { ActionUrl, ResolveActionBody, ResolveActionParams } from 'void/routes';
 
-type ActionOptions<U extends string> =
-  HasActionParams<U> extends true ? { params: ResolveActionParams<U> } : { params?: never };
+type ActionMethod = 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+type HasParams<U extends string> = [ResolveActionParams<U>] extends [never] ? false : true;
+
+type ActionOptions<U extends string> = {
+  data?: ResolveActionBody<U>;
+  method?: ActionMethod;
+} & (HasParams<U> extends true ? { params: ResolveActionParams<U> } : { params?: never });
 
 let _router: any = null;
 
@@ -18,16 +20,15 @@ export function setActionRouter(router: any): void {
 /** Programmatic one-shot page action call with Inertia page update */
 export async function action<U extends ActionUrl & string>(
   url: U,
-  ...args: HasActionParams<U> extends true
-    ? [data?: ResolveActionBody<U>, options?: ActionOptions<U>]
-    : [data?: ResolveActionBody<U>]
-): Promise<void> {
+  ...args: HasParams<U> extends true ? [options: ActionOptions<U>] : [options?: ActionOptions<U>]
+): Promise<ActionResult> {
   if (!_router) {
     throw new Error('action() called before router initialized');
   }
 
-  const data = args[0];
-  const options = args[1] as ActionOptions<U> | undefined;
+  const options = args[0] as ActionOptions<U> | undefined;
+  const data = options?.data;
+  const method = options?.method || 'POST';
 
   let resolvedUrl: string = url;
   let actionQuery = '';
@@ -45,5 +46,5 @@ export async function action<U extends ActionUrl & string>(
   }
 
   resolvedUrl = resolvedUrl + actionQuery;
-  await _router.visit(resolvedUrl, { method: 'POST', data });
+  return submitAction(_router, resolvedUrl, { method, data });
 }

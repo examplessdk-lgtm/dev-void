@@ -33,8 +33,8 @@ const form = useForm('/users', {
         <input v-model="form.data.email" />
         <span v-if="form.errors.email" style="color: red">{{ form.errors.email }}</span>
       </div>
-      <button type="submit" :disabled="form.processing">
-        {{ form.processing ? 'Saving...' : 'Add User' }}
+      <button type="submit" :disabled="form.pending">
+        {{ form.pending ? 'Saving...' : 'Add User' }}
       </button>
     </form>
   </div>

@@ -9,7 +9,8 @@ export default function HomePage({ title }: Props) {
       <Link href="/users" prefetch="mount">
         Go to Users
       </Link>{' '}
-      <Link href="/link-behavior">Link behavior</Link>
+      <Link href="/link-behavior">Link behavior</Link>{' '}
+      <Link href="/action-error">Form behavior lab</Link>
     </div>
   );
 }

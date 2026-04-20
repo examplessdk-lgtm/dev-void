@@ -35,8 +35,8 @@ function deleteKey(name: string) {
         <label>Value: </label>
         <input v-model="setForm.data.value" placeholder="my-value" required />
       </div>
-      <button type="submit" :disabled="setForm.processing" style="margin-top: 5px">
-        {{ setForm.processing ? 'Saving...' : 'Set' }}
+      <button type="submit" :disabled="setForm.pending" style="margin-top: 5px">
+        {{ setForm.pending ? 'Saving...' : 'Set' }}
       </button>
     </form>
 
@@ -69,7 +69,7 @@ function deleteKey(name: string) {
           </td>
           <td>{{ k.expiration ? new Date(k.expiration * 1000).toISOString() : '\u2014' }}</td>
           <td>
-            <button @click="deleteKey(k.name)" :disabled="deleteForm.processing">Delete</button>
+            <button @click="deleteKey(k.name)" :disabled="deleteForm.pending">Delete</button>
           </td>
         </tr>
       </tbody>

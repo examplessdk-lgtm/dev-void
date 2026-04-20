@@ -33,8 +33,8 @@ function deleteNote(id: number) {
         <label>Body: </label>
         <input v-model="form.data.body" placeholder="Note body" />
       </div>
-      <button type="submit" :disabled="form.processing" style="margin-top: 5px">
-        {{ form.processing ? 'Saving...' : 'Add Note' }}
+      <button type="submit" :disabled="form.pending" style="margin-top: 5px">
+        {{ form.pending ? 'Saving...' : 'Add Note' }}
       </button>
     </form>
 
@@ -56,7 +56,7 @@ function deleteNote(id: number) {
           <td>{{ note.body }}</td>
           <td>{{ note.createdAt }}</td>
           <td>
-            <button @click="deleteNote(note.id)" :disabled="deleteForm.processing">Delete</button>
+            <button @click="deleteNote(note.id)" :disabled="deleteForm.pending">Delete</button>
           </td>
         </tr>
       </tbody>

@@ -21,7 +21,7 @@ describe('useForm core logic', () => {
 
     let data = { ...formDefaults };
     let errors: Record<string, string> = {};
-    const processing = false;
+    const pending = false;
     const wasSuccessful = false;
     const recentlySuccessful = false;
 
@@ -69,8 +69,8 @@ describe('useForm core logic', () => {
       set errors(e: Record<string, string>) {
         errors = e;
       },
-      get processing() {
-        return processing;
+      get pending() {
+        return pending;
       },
       get wasSuccessful() {
         return wasSuccessful;
@@ -158,9 +158,9 @@ describe('useForm core logic', () => {
     expect(form.errors.email).toBe('invalid');
   });
 
-  it('processing is initialized to false', () => {
+  it('pending is initialized to false', () => {
     const form = createForm('/test', { name: '' });
-    expect(form.processing).toBe(false);
+    expect(form.pending).toBe(false);
   });
 
   it('wasSuccessful and recentlySuccessful are initialized to false', () => {

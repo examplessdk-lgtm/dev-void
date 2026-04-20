@@ -30,7 +30,7 @@ migrations/
   - `action()` handles mutations on POST/PUT (form submissions)
 - **SSR + client hydration** — initial load returns SSR HTML; subsequent navigations return JSON via Pages protocol (`X-VoidPages` header)
 - **Layout nesting** — `layout.vue` wraps child pages with shared nav using `<slot />`
-- **`useForm` composable** — form state management with `isDirty`, `processing`, `wasSuccessful`, `recentlySuccessful`, `errors`, `form.post()` / `form.put()`
+- **`useForm` composable** — form state management with `isDirty`, `pending`, `wasSuccessful`, `recentlySuccessful`, `errors`, `form.post()` / `form.put()`
 - **`useShared` composable** — accesses middleware-set shared data (e.g. `appName` set in `01.shared.ts`)
 - **`Link` component** — SPA navigation (renders `<a>` for GET, `<button>` for non-GET methods)
 - **`ValidationError`** — throw from `action()` to surface field-level validation errors to the form

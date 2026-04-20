@@ -55,6 +55,35 @@ GET `data` is merged into the rendered `href` query string. Primitive values are
 
 `prefetch` and `reloadDocument` are GET-only and throw for mutation links. `onNavigate` can cancel client-side navigation by calling `event.preventDefault()`.
 
+### Forms
+
+`useForm()` tracks form state for Pages actions. Use `pending` for in-flight
+state, `errors` for field validation, and `error` for non-validation call-site
+failures. The submit helpers return promises so boundary-class failures can
+propagate through Vue async error handling or explicit `catch` handlers.
+
+```vue
+<script setup lang="ts">
+import { useForm } from '@void/vue';
+
+const form = useForm('/users', { name: '', email: '' });
+</script>
+
+<template>
+  <form @submit.prevent="form.post()">
+    <input v-model="form.data.name" name="name" />
+    <p v-if="form.errors.name">{{ form.errors.name }}</p>
+    <p v-if="form.error">{{ form.error.message }}</p>
+    <button :disabled="form.pending">Save</button>
+  </form>
+</template>
+```
+
+Use `action()` for the awaitable imperative escape hatch. It returns
+`{ ok: true, pageData }` or `{ ok: false, error }` for call-site action errors,
+while boundary-class failures are thrown. `action()` uses `POST` by default and
+accepts `{ method: "PUT" | "PATCH" | "DELETE" }`.
+
 ## Pages
 
 Pages are `.vue` files in `pages/` with companion `.server.ts` files:

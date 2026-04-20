@@ -98,6 +98,45 @@ export interface Props {
 }
 ```
 
+### Forms and Actions
+
+`useForm()` is built on React Actions. Prefer native form submission with
+`form.post`, `form.put`, `form.patch`, or `form.delete`; use `useFormStatus()`
+inside the form for button pending state.
+
+```tsx
+import { useForm } from '@void/react';
+import { useFormStatus } from 'react-dom';
+
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return <button disabled={pending}>Save</button>;
+}
+
+export default function CreateUser() {
+  const form = useForm('/users', { name: '', email: '' });
+
+  return (
+    <form action={form.post}>
+      <input
+        name="name"
+        value={form.data.name}
+        onChange={(e) => form.setData('name', e.target.value)}
+      />
+      {form.errors.name && <span>{form.errors.name}</span>}
+      {form.error && <p>{form.error.message}</p>}
+      <SubmitButton />
+    </form>
+  );
+}
+```
+
+`form.post`, `form.put`, `form.patch`, and `form.delete` are native React form
+actions. Use `action()` for the awaitable imperative escape hatch; it returns
+`{ ok: true, pageData }` or `{ ok: false, error }` for call-site action errors,
+while boundary-class failures are thrown. `action()` uses `POST` by default and
+accepts `{ data, method, params }`.
+
 ### `Link`
 
 `Link` is the React Pages navigation component. GET links render an `<a>` and
