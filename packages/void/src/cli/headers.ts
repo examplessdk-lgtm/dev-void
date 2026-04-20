@@ -170,6 +170,12 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
         );
         continue;
       }
+      if (destination.includes('?')) {
+        voidWarn(
+          `Skipping _redirects rewrite "${source} ${destination} ${force ? '200!' : '200'}": destination must not contain "?" (query strings are not supported in rewrite destinations; the incoming request's query is preserved automatically).`,
+        );
+        continue;
+      }
       rules.push({ source, destination, status, force, origin });
     } else if (status >= 300 && status < 400) {
       rules.push({ source, destination, status, origin });

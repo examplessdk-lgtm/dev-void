@@ -346,6 +346,11 @@ export function readConfig(root: string): VoidConfig {
             `Rewrite destination for "${source}" in ${CONFIG_FILE} must start with "/" (only internal paths are supported)`,
           );
         }
+        if (dest.includes('?')) {
+          throw new Error(
+            `Rewrite destination for "${source}" in ${CONFIG_FILE} must not contain "?" (query strings are not supported in rewrite destinations; the incoming request's query is preserved automatically)`,
+          );
+        }
       }
     }
 
@@ -371,6 +376,11 @@ export function readConfig(root: string): VoidConfig {
         if (!dest.startsWith('/')) {
           throw new Error(
             `Fallback destination for "${source}" in ${CONFIG_FILE} must start with "/" (only internal paths are supported)`,
+          );
+        }
+        if (dest.includes('?')) {
+          throw new Error(
+            `Fallback destination for "${source}" in ${CONFIG_FILE} must not contain "?" (query strings are not supported in fallback destinations; the incoming request's query is preserved automatically)`,
           );
         }
       }

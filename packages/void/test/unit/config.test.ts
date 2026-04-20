@@ -557,6 +557,12 @@ describe('routing.rewrites validation', () => {
     expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
     cleanup();
   });
+
+  it('throws when destination contains a query string', () => {
+    setup(JSON.stringify({ routing: { rewrites: { '/docs': '/en/docs?lang=en' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must not contain "?"');
+    cleanup();
+  });
 });
 
 describe('routing.fallbacks validation', () => {
@@ -588,6 +594,12 @@ describe('routing.fallbacks validation', () => {
   it('throws when destination does not start with /', () => {
     setup(JSON.stringify({ routing: { fallbacks: { '/*': 'index.html' } } }));
     expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
+    cleanup();
+  });
+
+  it('throws when destination contains a query string', () => {
+    setup(JSON.stringify({ routing: { fallbacks: { '/*': '/index.html?foo=1' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must not contain "?"');
     cleanup();
   });
 });

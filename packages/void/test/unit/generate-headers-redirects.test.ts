@@ -188,6 +188,26 @@ describe('parseRedirectsFile', () => {
     ]);
   });
 
+  it('skips 200 rewrites whose destination contains a query string', () => {
+    setup('/docs /en/docs?lang=en 200\n/app/* /index.html 200\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
+      {
+        source: '/app/*',
+        destination: '/index.html',
+        status: 200,
+        force: false,
+        origin: '_redirects:2',
+      },
+    ]);
+  });
+
+  it('skips 200! rewrites whose destination contains a query string', () => {
+    setup('/docs /en/docs?lang=en 200!\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed).toBeUndefined();
+  });
+
   it('tags origin with line number when destination is external (skipped)', () => {
     setup('# header\n/fallback /spa.html 200\n');
     const parsed = parseRedirectsFile(tmpDir);
