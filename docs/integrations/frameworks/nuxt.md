@@ -148,7 +148,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 Void gives you a typed env layer: declare keys in `env.ts`, read them via `import { env } from "void/env"`, and get schema validation at build + deploy time plus a client-leak guard that fails the build if a server-only key reaches the browser. See the [env vars guide](../../guide/env-vars.md) for the full feature set.
 
-Nuxt-specific note: Nitro bundles the server side separately from Vite, but `void/env` resolves to the runtime module via the `workerd` / `node` export conditions, so `import { env } from "void/env"` works in both server routes and client code without extra config. Nuxt's own `useRuntimeConfig()` and `event.context.cloudflare.env` still work alongside — use whichever fits the call site.
+Nuxt-specific note: `useRuntimeConfig()` and `event.context.cloudflare.env` still work alongside `void/env` — use whichever fits the call site.
 
 ## Accessing Bindings Directly
 
