@@ -59,6 +59,8 @@ Meta-frameworks may generate a `_redirects` file during build. Void parses this 
 - Both 3xx redirect rules and status `200` [rewrite rules](./rewrites) are supported in `_redirects` files.
 - The `_redirects` file is not uploaded as a static asset. Its contents are parsed and included in the manifest only.
 
+Precedence when the same source appears in both sources follows the same rules as rewrites — file rules are merged before config rules within each phase, and last match wins, so `void.json` overrides `_redirects`. See [Precedence: `_redirects` vs `void.json`](./rewrites#precedence-redirects-vs-void-json) for the full explanation and a worked example.
+
 ## How redirects work
 
 1. `void deploy` reads redirect rules from the framework `_redirects` file (if present) and `routing.redirects` in `void.json`, then includes them in the deploy manifest.

@@ -232,6 +232,39 @@ Rewrites can also be defined in a `_redirects` file. Void mirrors Netlify / Clou
 - The `_redirects` file can mix 3xx redirects, `200` fallbacks, and `200!` force rewrites. Ordering is preserved within each bucket.
 - The `!` force suffix is only valid on `200`. Entries like `301!` are rejected with a warning — 3xx redirects always "force" by their nature (they change the URL), so the suffix is meaningless.
 
+## Precedence: `_redirects` vs `void.json`
+
+When the same source pattern appears in both a `_redirects` file and `void.json` (`routing.redirects` / `routing.rewrites` / `routing.fallbacks`), the rules don't replace each other — they **merge into a single ordered list per phase**, and the last match wins.
+
+Rules are bucketed by phase before merging:
+
+- **Pre-asset phase** (always fires, runs before static asset lookup): `_redirects` 3xx entries + `_redirects` `200!` entries + `routing.redirects` + `routing.rewrites`.
+- **Post-asset phase** (only fires on an asset miss): `_redirects` plain `200` entries + `routing.fallbacks`. For SPA app types, the synthetic `/* → /index.html` rule is appended **last** in this phase.
+
+Within each phase, the order is always: **`_redirects` file rules first, then `void.json` rules**. Because evaluation is last-match-wins, **`void.json` rules override `_redirects` rules for the same source**. This holds even though `_redirects` is "closer to the build output" — intuitions like "file wins" or "whichever I wrote last in the file wins" are both wrong.
+
+### Concrete example
+
+```text
+# _redirects
+/docs/*    /en/docs/:splat    200!
+```
+
+```json
+// void.json
+{
+  "routing": {
+    "rewrites": {
+      "/docs/*": "/handbook/:splat"
+    }
+  }
+}
+```
+
+A request to `/docs/intro` matches both rules. Merged order is `[_redirects: /docs/* → /en/docs/:splat, void.json: /docs/* → /handbook/:splat]`, so `void.json` wins and the request resolves to `/handbook/intro`.
+
+To confirm precedence in practice, check the [`X-Void-Routing` dev header](#debugging-with-x-void-routing) on any response during `vite dev` — it names the winning rule and its origin (`_redirects:<line>` vs `void.json#routing.rewrites`).
+
 ## How rewrites work
 
 **Static rewrites** (`void.json` and `_redirects` file):
