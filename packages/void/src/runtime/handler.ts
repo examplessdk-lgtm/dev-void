@@ -1,5 +1,35 @@
+import { Hono } from 'hono';
 import type { Context, Env, MiddlewareHandler } from 'hono';
 import type { RewriteDestination } from 'void/routes';
+
+// Install a default `Context.prototype.rewrite` so contexts that bypass Void's
+// router (vanilla Hono apps, mounted sub-apps, third-party middleware) get a
+// clear, actionable error instead of `TypeError: c.rewrite is not a function`.
+// The compiled router overrides this per-instance for managed requests, so the
+// fallback only fires on unmanaged contexts. Hono doesn't expose `Context` as
+// a value, so we capture the prototype via a synchronous probe request.
+{
+  const probe = new Hono();
+  probe.get('/', (c) => {
+    const proto = Object.getPrototypeOf(c) as { rewrite?: unknown };
+    if (!Object.prototype.hasOwnProperty.call(proto, 'rewrite')) {
+      Object.defineProperty(proto, 'rewrite', {
+        configurable: true,
+        writable: true,
+        value: function rewrite(): never {
+          throw new Error(
+            "c.rewrite() requires a Hono Context managed by Void's router. " +
+              'Make sure the request is handled by an app built with voidPlugin().',
+          );
+        },
+      });
+    }
+    return c.text('');
+  });
+  // Hono's request handler runs synchronously up to the first `await`, so the
+  // patch is installed before any caller of this module observes a Context.
+  void probe.request('http://void.local/');
+}
 import type { HeadDescriptor } from '../pages/head';
 import type { AuthSession, AuthUser } from './auth';
 import { convertReturnValue } from './response';
