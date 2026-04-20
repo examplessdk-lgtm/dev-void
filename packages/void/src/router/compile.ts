@@ -755,15 +755,33 @@ export function compileRouteTable(
   lines.push('const __rewrittenReqs = new WeakSet();');
   lines.push('');
 
-  // Inject rewrite utility onto context — closure over `app` for re-dispatch
+  // `__mergeQueryIntoLocation` is used by both the routing-rules middleware
+  // (static redirects) and the `c.redirect` wrapper below — emit it up-front
+  // so it's available regardless of whether routing rules are compiled in.
+  ensureMergeQueryHelperEmitted(lines);
+
+  // Inject rewrite utility onto context — closure over `app` for re-dispatch.
+  // Also wrap `c.redirect` so dynamic redirects preserve the incoming query
+  // string the same way static `_redirects` entries do.
   lines.push('app.use(async (c, next) => {');
   lines.push('  c.rewrite = (path) => {');
   lines.push('    const rewriteUrl = new URL(c.req.url);');
   lines.push('    rewriteUrl.pathname = path;');
   lines.push('    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
   lines.push('    rewriteReq.headers.set("X-Void-Rewritten", "1");');
+  lines.push('    if (!rewriteReq.headers.has("X-Void-Original-URL")) {');
+  lines.push('      rewriteReq.headers.set("X-Void-Original-URL", c.req.url);');
+  lines.push('    }');
   lines.push('    __rewrittenReqs.add(rewriteReq);');
   lines.push('    return app.fetch(rewriteReq, c.env, c.executionCtx);');
+  lines.push('  };');
+  lines.push('  const __origRedirect = c.redirect.bind(c);');
+  lines.push('  c.redirect = (location, status) => {');
+  lines.push('    if (typeof location === "string" && location.startsWith("/")) {');
+  lines.push('      const search = new URL(c.req.raw.url).search;');
+  lines.push('      return __origRedirect(__mergeQueryIntoLocation(location, search), status);');
+  lines.push('    }');
+  lines.push('    return __origRedirect(location, status);');
   lines.push('  };');
   lines.push('  await next();');
   lines.push('});');
@@ -2186,6 +2204,26 @@ function emitCompilePattern(lines: Array<string>): void {
   lines.push('    return params[name] != null ? params[name] : whole;');
   lines.push('  });');
   lines.push('}');
+  lines.push('');
+}
+
+function ensureCompilePatternEmitted(lines: Array<string>): void {
+  if (!lines.some((l) => l.includes('function __compilePattern'))) {
+    emitCompilePattern(lines);
+  }
+}
+
+/**
+ * Emit the `__mergeQueryIntoLocation` helper. Shared between the static
+ * routing-rules middleware (for `_redirects` entries) and the dynamic
+ * `c.redirect` wrapper, so it's emitted unconditionally above the rewrite
+ * middleware. If the destination already carries a param, the destination
+ * wins — matching the static-redirect semantics.
+ */
+function ensureMergeQueryHelperEmitted(lines: Array<string>): void {
+  if (lines.some((l) => l.includes('function __mergeQueryIntoLocation'))) {
+    return;
+  }
   lines.push('function __mergeQueryIntoLocation(destination, search) {');
   lines.push('  if (!search || search === "?") return destination;');
   lines.push('  const q = destination.indexOf("?");');
@@ -2197,12 +2235,6 @@ function emitCompilePattern(lines: Array<string>): void {
   lines.push('  return destination.slice(0, q) + "?" + dp.toString();');
   lines.push('}');
   lines.push('');
-}
-
-function ensureCompilePatternEmitted(lines: Array<string>): void {
-  if (!lines.some((l) => l.includes('function __compilePattern'))) {
-    emitCompilePattern(lines);
-  }
 }
 
 /**

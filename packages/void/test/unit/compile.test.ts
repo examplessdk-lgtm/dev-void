@@ -465,6 +465,61 @@ describe('compileRouteTable', () => {
     expect(code).toContain('app.all("/chat/:room"');
     expect(code).toContain('__forwardWebSocketRequest');
   });
+
+  it('sets X-Void-Original-URL on c.rewrite re-dispatch (without overwriting existing)', () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+    );
+
+    // The c.rewrite wrapper must set X-Void-Original-URL for symmetry with the
+    // platform/edge layer (which sets it on static rewrites), but must not
+    // overwrite an existing value so multi-hop rewrites preserve the true
+    // original URL.
+    expect(code).toContain('if (!rewriteReq.headers.has("X-Void-Original-URL"))');
+    expect(code).toContain('rewriteReq.headers.set("X-Void-Original-URL", c.req.url)');
+  });
+
+  it('wraps c.redirect so internal redirects merge the incoming query string', () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+    );
+
+    // The __mergeQueryIntoLocation helper must be emitted even without
+    // static routing rules, since the c.redirect wrapper now depends on it.
+    expect(code).toContain('function __mergeQueryIntoLocation(destination, search)');
+    // And the c.redirect wrapper must reference it for string paths that
+    // start with "/" (internal), passing through absolute URLs untouched.
+    expect(code).toContain('const __origRedirect = c.redirect.bind(c);');
+    expect(code).toContain('c.redirect = (location, status)');
+    expect(code).toContain('typeof location === "string" && location.startsWith("/")');
+    expect(code).toContain('__origRedirect(__mergeQueryIntoLocation(location, search), status)');
+  });
 });
 
 describe('compileWorkerEntry', () => {
