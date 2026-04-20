@@ -125,11 +125,27 @@ export default defineMiddleware(async (c, next) => {
 
 `c.rewrite(path)` re-dispatches the request through the router with the new pathname. You must `return` the result — same shape as `c.redirect()`.
 
+### Runtime rewrites cannot reach static assets
+
+`c.rewrite()` can only re-dispatch to paths the worker itself handles — routes, SSR entries, API handlers. It **cannot** re-dispatch into the static asset handler, because on Cloudflare assets are served by the platform before the worker runs. A call like `c.rewrite('/hero.png')` re-enters the worker's route table, doesn't match anything, and 404s.
+
+Static rewrites are different: `_redirects` `200!` entries and `routing.rewrites` run at the platform layer **before** the asset handler, so they _can_ rewrite into assets. If you need "rewrite into an asset" behavior dynamically, model it as a static rule (possibly with a broader source pattern) rather than doing it from middleware.
+
 **Loop prevention:** Single-hop rewrite loops are prevented automatically. When `c.rewrite('/foo')` re-dispatches the request, the runtime tracks that request object internally so static routing rules are skipped on the second pass — even if `/foo` would itself match a rewrite rule, it won't rewrite again. The re-dispatched request also carries an `X-Void-Rewritten: 1` header for observability, but the guard does not rely on it (client-supplied headers cannot bypass routing rules).
 
 What the guard **doesn't** catch are multi-hop user-written loops across separate middleware: middleware A rewrites `/a → /b`, middleware B rewrites `/b → /c`, middleware C rewrites `/c → /a`. Each hop constructs a fresh `Request`, so the per-request guard can't see the cycle. If you chain rewrites across middleware, write each hop so it only rewrites paths that aren't already in its target shape.
 
 Also avoid deep rewrite chains for performance: every hop re-runs all middleware from the top, so `/a → /b → /c → /d` costs four router passes.
+
+### Side effects in re-dispatched middleware
+
+Because every hop replays the full middleware stack, any side-effectful middleware fires twice (or N times for deep chains): DB lookups, session/auth checks, rate-limiter increments, and request loggers all double-count. For example, an auth middleware that logs every request will log twice for every rewritten request.
+
+To skip idempotent-unsafe work on the second pass, detect the re-dispatch via the `X-Void-Rewritten: 1` header the runtime attaches:
+
+```ts
+if (c.req.header('X-Void-Rewritten') === '1') return next();
+```
 
 ::: tip
 This is the recommended approach for i18n libraries. The library can export a middleware factory that handles locale detection and rewriting, and users just drop it into their `middleware/` directory.
