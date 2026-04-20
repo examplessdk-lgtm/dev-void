@@ -35,17 +35,18 @@ function stripRuleOrigins(rules: RedirectRule[] | undefined): RedirectRule[] | u
 
 /**
  * Layer user-defined `routing.fallbacks` with the SPA app type's implicit
- * `/index.html` fallback. Decision: user fallbacks are evaluated first; if
- * none matches, the SPA default kicks in.
+ * `/index.html` fallback. Decision: user fallbacks take precedence; if none
+ * matches, the SPA default kicks in.
  *
  * Cloudflare's `not_found_handling: 'single-page-application'` is a global
  * switch — set once per deployment — so we can't have the platform evaluate
  * user fallbacks *before* applying it. Instead, when the user has configured
  * fallbacks on a SPA app, we disable the platform-level SPA setting and
- * append a synthetic catch-all fallback rule (`/*` → `/index.html`) after
- * the user's rules. The dispatch worker evaluates fallback rules in order
- * with last-match-wins semantics, so user rules take precedence and the
- * synthetic rule only fires when none of them matched.
+ * prepend a synthetic catch-all fallback rule (`/*` → `/index.html`) before
+ * the user's rules. The dispatch worker evaluates fallback rules with
+ * last-match-wins semantics, so placing the synthetic rule first means any
+ * user rule that matches a more specific pattern overrides it; the synthetic
+ * rule only fires when no user rule matched.
  *
  * When the user has no fallbacks configured, the platform-level SPA switch
  * is left intact (zero worker-side overhead for the common case).
@@ -79,7 +80,8 @@ export function resolveSpaFallbackChain(
   }
 
   // User fallbacks present on a SPA app — disable the platform-level SPA
-  // switch and append a synthetic catch-all rule as the last fallback.
+  // switch and prepend a synthetic catch-all rule before user rules, so that
+  // under last-match-wins any more specific user rule overrides it.
   const alreadyHasCatchAll = userRules.some(
     (r) => r.source === '/*' && r.destination === '/index.html',
   );
@@ -97,7 +99,7 @@ export function resolveSpaFallbackChain(
   };
   return {
     assetConfig: { not_found_handling: 'none' },
-    fallbackRules: alreadyHasCatchAll ? userRules : [...userRules, syntheticSpaFallback],
+    fallbackRules: alreadyHasCatchAll ? userRules : [syntheticSpaFallback, ...userRules],
     warnings,
   };
 }

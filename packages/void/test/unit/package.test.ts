@@ -84,7 +84,7 @@ describe('packageStaticBuild', () => {
     expect(manifest.fallbackRules).toBeUndefined();
   });
 
-  it('disables platform SPA switch and appends synthetic /* -> /index.html when user fallbacks exist', async () => {
+  it('disables platform SPA switch and prepends synthetic /* -> /index.html when user fallbacks exist', async () => {
     writeFileSync(join(TMP, 'index.html'), 'x');
 
     const userFallbacks = [
@@ -103,8 +103,8 @@ describe('packageStaticBuild', () => {
     const manifest = JSON.parse(form.get('manifest') as string);
     expect(manifest.assetConfig).toEqual({ not_found_handling: 'none' });
     expect(manifest.fallbackRules).toEqual([
-      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
       { source: '/*', destination: '/index.html', status: 200, force: false },
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
     ]);
   });
 
@@ -138,12 +138,11 @@ describe('resolveSpaFallbackChain', () => {
     expect(result.warnings).toEqual([]);
   });
 
-  it('appends synthetic catch-all after user fallbacks (SPA)', () => {
+  it('prepends synthetic catch-all before user fallbacks (SPA)', () => {
     const userRules = [{ source: '/docs/*', destination: '/docs.html', status: 200, force: false }];
     const result = resolveSpaFallbackChain('spa', userRules);
     expect(result.assetConfig).toEqual({ not_found_handling: 'none' });
     expect(result.fallbackRules).toEqual([
-      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
       {
         source: '/*',
         destination: '/index.html',
@@ -151,6 +150,7 @@ describe('resolveSpaFallbackChain', () => {
         force: false,
         origin: 'spa-default',
       },
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
     ]);
     expect(result.warnings).toEqual([]);
   });
@@ -286,8 +286,8 @@ describe('packageBuild', () => {
     const manifest = JSON.parse(form.get('manifest') as string);
     expect(manifest.assetConfig).toEqual({ not_found_handling: 'none' });
     expect(manifest.fallbackRules).toEqual([
-      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
       { source: '/*', destination: '/index.html', status: 200, force: false },
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
     ]);
   });
 
