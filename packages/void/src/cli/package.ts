@@ -20,6 +20,74 @@ const textEncoder = new TextEncoder();
 
 type ProgressCallback = (message: string) => void;
 
+/**
+ * Layer user-defined `routing.fallbacks` with the SPA app type's implicit
+ * `/index.html` fallback. Decision: user fallbacks are evaluated first; if
+ * none matches, the SPA default kicks in.
+ *
+ * Cloudflare's `not_found_handling: 'single-page-application'` is a global
+ * switch — set once per deployment — so we can't have the platform evaluate
+ * user fallbacks *before* applying it. Instead, when the user has configured
+ * fallbacks on a SPA app, we disable the platform-level SPA setting and
+ * append a synthetic catch-all fallback rule (`/*` → `/index.html`) after
+ * the user's rules. The dispatch worker evaluates fallback rules in order
+ * with last-match-wins semantics, so user rules take precedence and the
+ * synthetic rule only fires when none of them matched.
+ *
+ * When the user has no fallbacks configured, the platform-level SPA switch
+ * is left intact (zero worker-side overhead for the common case).
+ */
+export function resolveSpaFallbackChain(
+  appType: 'spa' | 'static' | undefined,
+  fallbackRules: RedirectRule[] | undefined,
+): {
+  assetConfig: AssetConfig;
+  fallbackRules: RedirectRule[] | undefined;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  const userRules = fallbackRules && fallbackRules.length > 0 ? fallbackRules : undefined;
+
+  if (appType !== 'spa') {
+    return {
+      assetConfig: { not_found_handling: appType === 'static' ? '404-page' : 'none' },
+      fallbackRules: userRules,
+      warnings,
+    };
+  }
+
+  if (!userRules) {
+    // No user fallbacks — keep the zero-overhead platform SPA switch.
+    return {
+      assetConfig: { not_found_handling: 'single-page-application' },
+      fallbackRules: undefined,
+      warnings,
+    };
+  }
+
+  // User fallbacks present on a SPA app — disable the platform-level SPA
+  // switch and append a synthetic catch-all rule as the last fallback.
+  const alreadyHasCatchAll = userRules.some(
+    (r) => r.source === '/*' && r.destination === '/index.html',
+  );
+  if (alreadyHasCatchAll) {
+    warnings.push(
+      'routing.fallbacks includes "/*" -> "/index.html" on a SPA app type; this duplicates the default SPA fallback and can be omitted.',
+    );
+  }
+  const syntheticSpaFallback: RedirectRule = {
+    source: '/*',
+    destination: '/index.html',
+    status: 200,
+    force: false,
+  };
+  return {
+    assetConfig: { not_found_handling: 'none' },
+    fallbackRules: alreadyHasCatchAll ? userRules : [...userRules, syntheticSpaFallback],
+    warnings,
+  };
+}
+
 const PROGRESS_CHUNK = 50;
 
 /**
@@ -298,8 +366,26 @@ export async function packageBuild(
     manifest.prerender = prerender;
   }
 
-  if (assetConfig) {
-    manifest.assetConfig = assetConfig;
+  // Layer user fallbacks with the SPA default (if applicable). When the
+  // caller signals SPA mode via `not_found_handling: 'single-page-application'`
+  // and the user has `routing.fallbacks` configured, we disable the
+  // platform-level SPA switch and append a synthetic catch-all rule so user
+  // fallbacks are evaluated first and the SPA default only fires when none
+  // matched.
+  let resolvedAssetConfig = assetConfig;
+  let resolvedFallbackRules = fallbackRules;
+  if (assetConfig?.not_found_handling === 'single-page-application') {
+    const chain = resolveSpaFallbackChain('spa', fallbackRules);
+    resolvedAssetConfig = { ...assetConfig, ...chain.assetConfig };
+    resolvedFallbackRules = chain.fallbackRules;
+    for (const msg of chain.warnings) {
+      onProgress?.(msg);
+      console.warn(`[void] ${msg}`);
+    }
+  }
+
+  if (resolvedAssetConfig) {
+    manifest.assetConfig = resolvedAssetConfig;
   }
 
   if (vars && Object.keys(vars).length > 0) {
@@ -328,8 +414,8 @@ export async function packageBuild(
     manifest.redirectRules = redirectRules;
   }
 
-  if (fallbackRules && fallbackRules.length > 0) {
-    manifest.fallbackRules = fallbackRules;
+  if (resolvedFallbackRules && resolvedFallbackRules.length > 0) {
+    manifest.fallbackRules = resolvedFallbackRules;
   }
 
   const websocketManifest = toWebSocketManifest(webSockets);
@@ -402,13 +488,21 @@ export async function packageStaticBuild(
 ): Promise<FormData> {
   const formData = new FormData();
 
+  const {
+    assetConfig,
+    fallbackRules: resolvedFallbackRules,
+    warnings: fallbackWarnings,
+  } = resolveSpaFallbackChain(appType, fallbackRules);
+  for (const msg of fallbackWarnings) {
+    onProgress?.(msg);
+    console.warn(`[void] ${msg}`);
+  }
+
   const manifest: DeployManifest = {
     version: 3,
     bindings: {},
     type: appType,
-    assetConfig: {
-      not_found_handling: appType === 'spa' ? 'single-page-application' : '404-page',
-    },
+    assetConfig,
   };
 
   if (hashedAssetsPrefix) {
@@ -423,8 +517,8 @@ export async function packageStaticBuild(
     manifest.redirectRules = redirectRules;
   }
 
-  if (fallbackRules && fallbackRules.length > 0) {
-    manifest.fallbackRules = fallbackRules;
+  if (resolvedFallbackRules && resolvedFallbackRules.length > 0) {
+    manifest.fallbackRules = resolvedFallbackRules;
   }
 
   formData.append('manifest', JSON.stringify(manifest));

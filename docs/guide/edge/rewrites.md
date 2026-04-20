@@ -172,6 +172,29 @@ Ordering:
 
 Use `rewrites` when you want to force a path mapping regardless of what exists; use `fallbacks` when the rule should only kick in as a safety net.
 
+### SPA app type + `routing.fallbacks`
+
+For the `spa` app type, the platform already serves `/index.html` for any asset miss by default (`not_found_handling: 'single-page-application'`). Adding `routing.fallbacks` to a SPA app is **additive, not an override**:
+
+1. Your `routing.fallbacks` rules are checked first, in the order they appear (last match wins among user rules).
+2. If none of them match, the implicit `/* → /index.html` SPA fallback still fires.
+
+So a SPA app can carve out specific paths without losing the SPA shell behavior for everything else:
+
+```json
+{
+  "routing": {
+    "fallbacks": {
+      "/docs/*": "/docs.html"
+    }
+  }
+}
+```
+
+With this config, an asset miss under `/docs/getting-started` resolves to `/docs.html`, while an asset miss under `/app/settings` still resolves to `/index.html` (the SPA default).
+
+You don't need to write `"/*": "/index.html"` yourself — the CLI appends it automatically when packaging a SPA deploy that has user fallbacks. If you do write it, the CLI emits a warning on `void deploy` noting that the rule duplicates the default and can be omitted.
+
 ## `_redirects` file
 
 Rewrites can also be defined in a `_redirects` file. Void mirrors Netlify / Cloudflare Pages semantics for the `200` status code:

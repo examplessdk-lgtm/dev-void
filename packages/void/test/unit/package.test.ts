@@ -8,6 +8,7 @@ import {
   packageFrameworkBuild,
   computeAssetHash,
   collectAndHashAssets,
+  resolveSpaFallbackChain,
 } from '../../src/cli/package';
 
 const TMP = join(import.meta.dirname, '.tmp-package-test');
@@ -69,6 +70,106 @@ describe('packageStaticBuild', () => {
     expect(manifest.assetConfig).toEqual({
       not_found_handling: '404-page',
     });
+  });
+
+  it('keeps platform-level SPA fallback when no routing.fallbacks are configured', async () => {
+    writeFileSync(join(TMP, 'index.html'), 'x');
+
+    const form = await packageStaticBuild(TMP, 'spa');
+
+    const manifest = JSON.parse(form.get('manifest') as string);
+    expect(manifest.assetConfig).toEqual({
+      not_found_handling: 'single-page-application',
+    });
+    expect(manifest.fallbackRules).toBeUndefined();
+  });
+
+  it('disables platform SPA switch and appends synthetic /* -> /index.html when user fallbacks exist', async () => {
+    writeFileSync(join(TMP, 'index.html'), 'x');
+
+    const userFallbacks = [
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+    ];
+    const form = await packageStaticBuild(
+      TMP,
+      'spa',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      userFallbacks,
+    );
+
+    const manifest = JSON.parse(form.get('manifest') as string);
+    expect(manifest.assetConfig).toEqual({ not_found_handling: 'none' });
+    expect(manifest.fallbackRules).toEqual([
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+      { source: '/*', destination: '/index.html', status: 200, force: false },
+    ]);
+  });
+
+  it('passes through user fallbacks unchanged for non-SPA static app type', async () => {
+    writeFileSync(join(TMP, 'index.html'), 'x');
+
+    const userFallbacks = [
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+    ];
+    const form = await packageStaticBuild(
+      TMP,
+      'static',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      userFallbacks,
+    );
+
+    const manifest = JSON.parse(form.get('manifest') as string);
+    expect(manifest.assetConfig).toEqual({ not_found_handling: '404-page' });
+    expect(manifest.fallbackRules).toEqual(userFallbacks);
+  });
+});
+
+describe('resolveSpaFallbackChain', () => {
+  it('returns SPA platform switch with no rules when user has no fallbacks (SPA)', () => {
+    const result = resolveSpaFallbackChain('spa', undefined);
+    expect(result.assetConfig).toEqual({ not_found_handling: 'single-page-application' });
+    expect(result.fallbackRules).toBeUndefined();
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('appends synthetic catch-all after user fallbacks (SPA)', () => {
+    const userRules = [{ source: '/docs/*', destination: '/docs.html', status: 200, force: false }];
+    const result = resolveSpaFallbackChain('spa', userRules);
+    expect(result.assetConfig).toEqual({ not_found_handling: 'none' });
+    expect(result.fallbackRules).toEqual([
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+      { source: '/*', destination: '/index.html', status: 200, force: false },
+    ]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('warns but does not duplicate when user rule already matches the default SPA catch-all', () => {
+    const userRules = [{ source: '/*', destination: '/index.html', status: 200, force: false }];
+    const result = resolveSpaFallbackChain('spa', userRules);
+    expect(result.assetConfig).toEqual({ not_found_handling: 'none' });
+    expect(result.fallbackRules).toEqual(userRules);
+    expect(result.warnings.length).toBe(1);
+    expect(result.warnings[0]).toMatch(/duplicates the default SPA fallback/);
+  });
+
+  it('leaves user fallbacks untouched for static app type', () => {
+    const userRules = [{ source: '/docs/*', destination: '/docs.html', status: 200, force: false }];
+    const result = resolveSpaFallbackChain('static', userRules);
+    expect(result.assetConfig).toEqual({ not_found_handling: '404-page' });
+    expect(result.fallbackRules).toEqual(userRules);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('returns none and undefined rules for undefined app type with no user rules', () => {
+    const result = resolveSpaFallbackChain(undefined, undefined);
+    expect(result.assetConfig).toEqual({ not_found_handling: 'none' });
+    expect(result.fallbackRules).toBeUndefined();
   });
 });
 
@@ -138,6 +239,82 @@ describe('packageBuild', () => {
     const manifestRaw = form.get('manifest') as string;
     const manifest = JSON.parse(manifestRaw);
     expect(manifest.auth).toBe(true);
+  });
+
+  it('layers user fallbacks with SPA default when not_found_handling is single-page-application', async () => {
+    const workerDir = join(TMP, 'worker');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, 'index.js'), 'export default {}');
+
+    const userFallbacks = [
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+    ];
+    const form = await packageBuild(
+      TMP,
+      'worker',
+      {
+        needsD1: false,
+        needsKV: false,
+        needsR2: false,
+        needsAuth: false,
+        needsQueues: false,
+        needsAI: false,
+      },
+      undefined, // migrations
+      undefined, // schedules
+      undefined, // ssr
+      undefined, // framework
+      undefined, // revalidate
+      undefined, // vars
+      undefined, // queues
+      undefined, // prerender
+      { not_found_handling: 'single-page-application' },
+      undefined, // options
+      undefined, // neededAssets
+      undefined, // hashedAssetsPrefix
+      undefined, // headerRules
+      undefined, // redirectRules
+      userFallbacks,
+    );
+
+    const manifest = JSON.parse(form.get('manifest') as string);
+    expect(manifest.assetConfig).toEqual({ not_found_handling: 'none' });
+    expect(manifest.fallbackRules).toEqual([
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+      { source: '/*', destination: '/index.html', status: 200, force: false },
+    ]);
+  });
+
+  it('leaves SPA platform switch in place when no user fallbacks exist', async () => {
+    const workerDir = join(TMP, 'worker');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, 'index.js'), 'export default {}');
+
+    const form = await packageBuild(
+      TMP,
+      'worker',
+      {
+        needsD1: false,
+        needsKV: false,
+        needsR2: false,
+        needsAuth: false,
+        needsQueues: false,
+        needsAI: false,
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { not_found_handling: 'single-page-application' },
+    );
+
+    const manifest = JSON.parse(form.get('manifest') as string);
+    expect(manifest.assetConfig).toEqual({ not_found_handling: 'single-page-application' });
+    expect(manifest.fallbackRules).toBeUndefined();
   });
 });
 
