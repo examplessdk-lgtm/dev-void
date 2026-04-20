@@ -93,14 +93,20 @@ export async function validateProdEnv(
   const merged: Record<string, unknown> = mergeAndExpand(parsedFiles, {
     onWarn: (msg) => voidWarn(msg),
   });
-  // Treat remote secrets as present (placeholder string).
-  for (const name of options.remoteSecrets ?? []) {
-    if (merged[name] === undefined) {
-      merged[name] = '<remote-secret>';
+
+  const report = await mod.validateAllEnv(merged);
+  // Remote secrets are present on the deployed worker but not readable here,
+  // so we can't run the user's validator against the real value. Treat any
+  // schema key that is only "missing locally" but "present remotely" as OK —
+  // the boot-time `_validateEnvOnce` will validate the real value per isolate.
+  const remoteSet = new Set(options.remoteSecrets ?? []);
+  if (remoteSet.size > 0 && report.missing.length > 0) {
+    report.missing = report.missing.filter((key) => !remoteSet.has(key));
+    if (report.missing.length === 0 && report.invalid.length === 0) {
+      report.valid = true;
     }
   }
-
-  return { hasSchema: true, report: await mod.validateAllEnv(merged) };
+  return { hasSchema: true, report };
 }
 
 /** Format an EnvValidationReport into a human-readable multi-line string. */

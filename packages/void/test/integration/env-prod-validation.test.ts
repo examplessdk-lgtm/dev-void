@@ -87,6 +87,20 @@ describe('validateProdEnv — deploy-time schema enforcement', () => {
     expect(report.missing).toEqual([]);
   });
 
+  it('accepts remote secrets for non-string schemas (number/boolean/url) without running the validator against a placeholder', async () => {
+    const root = createTempProject();
+    defineEnv({ PORT: number() });
+
+    const { report } = await validateProdEnv(root, {
+      productionOnly: true,
+      remoteSecrets: ['PORT'],
+    });
+
+    expect(report.valid).toBe(true);
+    expect(report.missing).toEqual([]);
+    expect(report.invalid).toEqual([]);
+  });
+
   it('merges .env and .env.production values, with later files winning', async () => {
     const root = createTempProject();
     defineEnv({ STRIPE_KEY: string(), PORT: number() });
