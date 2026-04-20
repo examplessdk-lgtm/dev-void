@@ -143,9 +143,11 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-See the [env vars guide](../../guide/env-vars.md) for the full feature set. SvelteKit-specific notes:
+Void gives you a typed env layer: declare keys in `env.ts`, read them via `import { env } from "void/env"`, and get schema validation at build + deploy time plus a client-leak guard that fails the build if a server-only key reaches the browser. See the [env vars guide](../../guide/env-vars.md) for the full feature set.
 
-- Server-side reads work through a hook Void injects into `src/hooks.server.ts` — you get `import { env } from "void/env"` inside `+page.server.ts` / `+server.ts` without any wiring.
+SvelteKit-specific notes:
+
+- Server-side reads work through a hook Void injects into `src/hooks.server.ts` — `import { env } from "void/env"` inside `+page.server.ts` / `+server.ts` works with no extra wiring.
 - SvelteKit's `$env/static/*` and `$env/dynamic/*` APIs still work and are a better fit when you want separate `private` / `public` namespaces or `$env/static/private` validated at build time. Void's `env` doesn't displace them — pick per call site.
 
 ## Accessing Bindings Directly

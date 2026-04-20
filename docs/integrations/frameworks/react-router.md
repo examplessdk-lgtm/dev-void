@@ -122,7 +122,9 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-See the [env vars guide](../../guide/env-vars.md) for the full feature set. React Router-specific caveat: because `loader()` and the component live in the same route file, the client-leak guard treats the module as client-reachable. Reading `env.SERVER_ONLY_KEY` inside `loader()` is safe at runtime (RR strips loaders from the client bundle), but the guard flags it as a potential leak. Move server-only secrets into a `.server.ts` companion file to silence the guard cleanly.
+Void gives you a typed env layer: declare keys in `env.ts`, read them via `import { env } from "void/env"`, and get schema validation at build + deploy time plus a client-leak guard that fails the build if a server-only key reaches the browser. See the [env vars guide](../../guide/env-vars.md) for the full feature set.
+
+React Router-specific caveat: because `loader()` and the component live in the same route file, the leak guard treats the module as client-reachable. Reading `env.SERVER_ONLY_KEY` inside `loader()` is safe at runtime (RR strips loaders from the client bundle), but the guard flags it as a potential leak. Move server-only secrets into a `.server.ts` companion file to silence the guard cleanly.
 
 ## Accessing Bindings Directly
 

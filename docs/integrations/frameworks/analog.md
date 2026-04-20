@@ -162,7 +162,9 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-See the [env vars guide](../../guide/env-vars.md) for the full feature set. Analog-specific note: Nitro bundles the server separately from Vite, but `void/env` resolves to the runtime module via the `workerd` / `node` export conditions, so `import { env } from "void/env"` works the same inside Angular components and H3 route handlers. The H3 event context and `import { env } from "cloudflare:workers"` still work if you need raw binding access.
+Void gives you a typed env layer: declare keys in `env.ts`, read them via `import { env } from "void/env"`, and get schema validation at build + deploy time plus a client-leak guard that fails the build if a server-only key reaches the browser. See the [env vars guide](../../guide/env-vars.md) for the full feature set.
+
+Analog-specific note: Nitro bundles the server separately from Vite, but `void/env` resolves to the runtime module via the `workerd` / `node` export conditions, so `import { env } from "void/env"` works the same inside Angular components and H3 route handlers. The H3 event context and `import { env } from "cloudflare:workers"` still work if you need raw binding access.
 
 ## Accessing Bindings Directly
 

@@ -127,7 +127,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-See the [env vars guide](../../guide/env-vars.md) — TanStack Start runs inside the Vite plugin chain, so every feature (typed `env`, client-leak guard, constant folding, CLI validation) works with no extra configuration.
+Void gives you a typed env layer: declare keys in `env.ts`, read them via `import { env } from "void/env"`, and get schema validation at build + deploy time plus a client-leak guard that fails the build if a server-only key reaches the browser. See the [env vars guide](../../guide/env-vars.md) for the full feature set. TanStack Start runs inside the Vite plugin chain, so everything works with no extra configuration.
 
 ## Accessing Bindings Directly
 
