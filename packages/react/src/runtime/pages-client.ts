@@ -13,16 +13,18 @@ import React, {
 } from 'react';
 import { hydrateRoot } from 'react-dom/client';
 import {
+  createRouterFacade,
   createPageNavigationEngine,
+  idleNavigationState,
   type PageNavigationResource,
   type PageNavigationResult,
+  type NavigationState,
   type VisitOptions,
   type VoidRouter,
 } from 'void/pages-client';
 import type { CacheForResult } from 'void/pages-prefetch';
 import { setActionRouter } from './action';
 import { ErrorsContext, NavigationContext, RouterContext, SharedContext } from './context';
-import type { NavigationState } from './use-navigation';
 
 type ComponentModule = { default: ComponentType<any> };
 
@@ -64,6 +66,7 @@ type VisitSettler = {
 interface AppState {
   resource: ReactPageResource;
   navigation: NavigationState;
+  routeUrl: string;
   pendingId: number | null;
 }
 
@@ -71,26 +74,17 @@ type AppAction =
   | {
       type: 'begin';
       resource: ReactPageResource;
-      navigationType: string;
-      pendingLocation: string;
+      navigation: NavigationState;
     }
   | { type: 'reveal'; resource: ReactPageResource }
   | { type: 'finish'; resource: ReactPageResource; location: string }
   | { type: 'fail'; resource: ReactPageResource; location: string };
 
 const deferredState = new WeakMap<DeferredResource, DeferredResourceState>();
-const navigationListeners = new Set<{ onStart?: () => void; onEnd?: () => void }>();
 const viewTransitionWaiters = new Map<number, () => void>();
-const pendingNavigationEnds = new Map<number, () => void>();
 const pendingVisitSettlers = new Map<number, VisitSettler>();
 const committedResources = new Set<number>();
 
-let navigationSnapshot: NavigationState = {
-  isPending: false,
-  location: '',
-  pendingLocation: null,
-  type: null,
-};
 let activePendingNavigationId: number | null = null;
 let scheduleVisit:
   | ((url: string, options?: VisitOptions) => Promise<Record<string, unknown> | undefined>)
@@ -134,32 +128,25 @@ function currentUrl(): string {
   return window.location.pathname + window.location.search + window.location.hash;
 }
 
-function transitionTypeFor(resource: PageNavigationResource): string {
-  if (resource.options._scrollPosition) {
-    return 'traverse';
+function normalizeUrl(value: string | URL): string {
+  if (typeof value === 'string' && value.startsWith('#')) {
+    return value;
   }
-  if (resource.method !== 'GET') {
-    return 'submit';
-  }
-  if (resource.options.preserveState) {
-    return 'refresh';
-  }
-  if (resource.options.replace) {
-    return 'replace';
-  }
-  return 'push';
+  const url = value instanceof URL ? value : new URL(value, window.location.origin);
+  return url.origin === window.location.origin ? url.pathname + url.search + url.hash : url.href;
 }
 
-function notifyNavigationStart(): void {
-  for (const listener of navigationListeners) {
-    listener.onStart?.();
-  }
-}
-
-function notifyNavigationEnd(): void {
-  for (const listener of navigationListeners) {
-    listener.onEnd?.();
-  }
+function navigationForResource(resource: PageNavigationResource): NavigationState {
+  const method = resource.method.toUpperCase();
+  const isSubmitting = method !== 'GET';
+  return {
+    state: isSubmitting ? 'submitting' : 'loading',
+    location: new URL(resource.fetchUrl + resource.hash, window.location.origin),
+    method:
+      method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE'
+        ? method
+        : 'GET',
+  };
 }
 
 function appReducer(state: AppState, action: AppAction): AppState {
@@ -168,12 +155,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return {
         resource: state.resource,
         pendingId: action.resource.id,
-        navigation: {
-          isPending: true,
-          location: state.navigation.location,
-          pendingLocation: action.pendingLocation,
-          type: action.navigationType,
-        },
+        routeUrl: state.routeUrl,
+        navigation: action.navigation,
       };
     case 'reveal':
       if (state.pendingId !== action.resource.id) {
@@ -190,12 +173,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return {
         resource: action.resource.immediate ? state.resource : action.resource,
         pendingId: null,
-        navigation: {
-          isPending: false,
-          location: action.location,
-          pendingLocation: null,
-          type: null,
-        },
+        routeUrl: action.location,
+        navigation: idleNavigationState(),
       };
     case 'fail':
       if (state.pendingId !== action.resource.id) {
@@ -204,12 +183,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         pendingId: null,
-        navigation: {
-          isPending: false,
-          location: action.location,
-          pendingLocation: null,
-          type: null,
-        },
+        routeUrl: action.location,
+        navigation: idleNavigationState(),
       };
   }
 }
@@ -217,82 +192,36 @@ function appReducer(state: AppState, action: AppAction): AppState {
 function createRouter(engine: Awaited<ReturnType<typeof createPageNavigationEngine>>): VoidRouter {
   const router: VoidRouter = {
     _hoverDelay: engine._hoverDelay,
-    get isPending() {
-      return navigationSnapshot.isPending;
+    get url() {
+      return new URL(currentUrl(), window.location.origin);
     },
-    get location() {
-      return navigationSnapshot.location;
+    get path() {
+      return this.url.pathname;
     },
-    get pendingLocation() {
-      return navigationSnapshot.pendingLocation;
-    },
-    get type() {
-      return navigationSnapshot.type;
-    },
-    onNavigation(onStart, onEnd) {
-      const entry = { onStart, onEnd };
-      navigationListeners.add(entry);
-      return () => {
-        navigationListeners.delete(entry);
-      };
+    get query() {
+      return this.url.searchParams;
     },
     visit(url, options = {}) {
       if (!scheduleVisit) {
         return Promise.reject(new Error('router.visit() called before router initialized'));
       }
-      return scheduleVisit(url, options);
+      return scheduleVisit(normalizeUrl(url), options);
     },
-    prefetch(url, options = {}) {
-      engine.prefetch(url, options);
-    },
-    flush(url, method = 'GET') {
-      engine.flush(url, method);
-    },
-    flushAll() {
-      engine.flushAll();
-    },
-    reload() {
+    refresh(options = {}) {
       return router.visit(window.location.pathname + window.location.search, {
         preserveState: true,
         preserveScroll: true,
+        ...options,
       });
     },
-    refresh() {
-      return router.reload();
+    prefetch(url, options = {}) {
+      engine.prefetch(normalizeUrl(url), options);
     },
-    setParams(keyOrParams: string | Record<string, string | null | undefined>, value?: string) {
-      const params = new URLSearchParams(window.location.search);
-      if (typeof keyOrParams === 'string') {
-        if (value === null || value === undefined || value === '') {
-          params.delete(keyOrParams);
-        } else {
-          params.set(keyOrParams, value);
-        }
-      } else {
-        for (const [key, nextValue] of Object.entries(keyOrParams)) {
-          if (nextValue === null || nextValue === undefined || nextValue === '') {
-            params.delete(key);
-          } else {
-            params.set(key, nextValue);
-          }
-        }
-      }
-      const search = params.toString();
-      return router.visit(window.location.pathname + (search ? `?${search}` : ''), {
-        preserveScroll: true,
-      });
+    flush(url, method = 'GET') {
+      engine.flush(normalizeUrl(url), method);
     },
-    post(url, data, options = {}) {
-      return router.visit(url, { ...options, method: 'POST', data });
-    },
-    put(url, data, options = {}) {
-      return router.visit(url, { ...options, method: 'PUT', data });
-    },
-    patch(url, data, options = {}) {
-      return router.visit(url, { ...options, method: 'PATCH', data });
-    },
-    delete(url, options = {}) {
-      return router.visit(url, { ...options, method: 'DELETE' });
+    flushAll() {
+      engine.flushAll();
     },
   };
   return router;
@@ -382,12 +311,8 @@ function App({
   const [state, dispatch] = useReducer(appReducer, {
     resource: initialResource,
     pendingId: null,
-    navigation: {
-      isPending: false,
-      location: currentUrl(),
-      pendingLocation: null,
-      type: null,
-    },
+    routeUrl: currentUrl(),
+    navigation: idleNavigationState(),
   });
   const [isTransitionPending, startTransition] = useTransition();
 
@@ -421,11 +346,6 @@ function App({
             viewTransitionWaiters.delete(resource.id);
             resolveViewTransition();
           }
-          const end = pendingNavigationEnds.get(resource.id);
-          if (end) {
-            pendingNavigationEnds.delete(resource.id);
-            end();
-          }
           const visitSettler = pendingVisitSettlers.get(resource.id);
           if (visitSettler) {
             pendingVisitSettlers.delete(resource.id);
@@ -433,12 +353,6 @@ function App({
           }
           if (activePendingNavigationId === resource.id) {
             activePendingNavigationId = null;
-            navigationSnapshot = {
-              isPending: false,
-              location: currentUrl(),
-              pendingLocation: null,
-              type: null,
-            };
           }
           dispatch({ type: 'finish', resource, location: currentUrl() });
         })
@@ -457,44 +371,22 @@ function App({
     (url: string, options: VisitOptions = {}) => {
       const prepared = engine.prepareVisit(url, options) as ReactPageResource;
       if (prepared.immediate) {
-        const pendingLocation = prepared.fetchUrl + prepared.hash;
-        const navigationType = transitionTypeFor(prepared);
+        const navigation = navigationForResource(prepared);
 
-        notifyNavigationStart();
         activePendingNavigationId = prepared.id;
-        navigationSnapshot = {
-          isPending: true,
-          location: navigationSnapshot.location,
-          pendingLocation,
-          type: navigationType,
-        };
-        dispatch({ type: 'begin', resource: prepared, pendingLocation, navigationType });
+        dispatch({ type: 'begin', resource: prepared, navigation });
 
         return prepared.shell.then(
           (result) => {
-            notifyNavigationEnd();
             if (activePendingNavigationId === prepared.id) {
               activePendingNavigationId = null;
-              navigationSnapshot = {
-                isPending: false,
-                location: currentUrl(),
-                pendingLocation: null,
-                type: null,
-              };
             }
             dispatch({ type: 'finish', resource: prepared, location: currentUrl() });
             return result?.pageData;
           },
           (error) => {
-            notifyNavigationEnd();
             if (activePendingNavigationId === prepared.id) {
               activePendingNavigationId = null;
-              navigationSnapshot = {
-                isPending: false,
-                location: currentUrl(),
-                pendingLocation: null,
-                type: null,
-              };
             }
             dispatch({ type: 'fail', resource: prepared, location: currentUrl() });
             throw error;
@@ -514,27 +406,21 @@ function App({
         shell: prepared.shell.then(mergeShared).then(
           (result) => {
             if (!result) {
-              const end = pendingNavigationEnds.get(prepared.id);
-              if (end) {
-                pendingNavigationEnds.delete(prepared.id);
-                end();
-              }
               const resolveViewTransition = viewTransitionWaiters.get(prepared.id);
               if (resolveViewTransition) {
                 viewTransitionWaiters.delete(prepared.id);
                 resolveViewTransition();
               }
               pendingVisitSettlers.delete(prepared.id);
+              if (activePendingNavigationId === prepared.id) {
+                activePendingNavigationId = null;
+              }
+              dispatch({ type: 'finish', resource: prepared, location: currentUrl() });
               resolveVisit(undefined);
             }
             return result;
           },
           (error) => {
-            const end = pendingNavigationEnds.get(prepared.id);
-            if (end) {
-              pendingNavigationEnds.delete(prepared.id);
-              end();
-            }
             const resolveViewTransition = viewTransitionWaiters.get(prepared.id);
             if (resolveViewTransition) {
               viewTransitionWaiters.delete(prepared.id);
@@ -544,32 +430,17 @@ function App({
             rejectVisit(error);
             if (activePendingNavigationId === prepared.id) {
               activePendingNavigationId = null;
-              navigationSnapshot = {
-                isPending: false,
-                location: currentUrl(),
-                pendingLocation: null,
-                type: null,
-              };
             }
             dispatch({ type: 'fail', resource: prepared, location: currentUrl() });
             throw error;
           },
         ),
       };
-      const pendingLocation = next.fetchUrl + next.hash;
-      const navigationType = transitionTypeFor(next);
+      const navigation = navigationForResource(next);
 
-      notifyNavigationStart();
-      pendingNavigationEnds.set(next.id, notifyNavigationEnd);
       pendingVisitSettlers.set(next.id, { resolve: resolveVisit, reject: rejectVisit });
       activePendingNavigationId = next.id;
-      navigationSnapshot = {
-        isPending: true,
-        location: navigationSnapshot.location,
-        pendingLocation,
-        type: navigationType,
-      };
-      dispatch({ type: 'begin', resource: next, pendingLocation, navigationType });
+      dispatch({ type: 'begin', resource: next, navigation });
 
       const reveal = () => {
         startTransition(() => {
@@ -598,21 +469,25 @@ function App({
     });
   }, [engine, router]);
 
-  const navigationValue = useMemo<NavigationState>(
-    () => ({
-      ...state.navigation,
-      isPending: state.navigation.isPending || isTransitionPending,
-    }),
-    [isTransitionPending, state.navigation],
-  );
+  const navigationValue = useMemo<NavigationState>(() => {
+    if (state.navigation.state !== 'idle' || !isTransitionPending) {
+      return state.navigation;
+    }
+    return {
+      state: 'loading',
+      location: null,
+      method: 'GET',
+    };
+  }, [isTransitionPending, state.navigation]);
 
-  useEffect(() => {
-    navigationSnapshot = navigationValue;
-  }, [navigationValue]);
+  const routerValue = useMemo(
+    () => createRouterFacade(router, () => state.routeUrl),
+    [router, state.routeUrl],
+  );
 
   return React.createElement(
     RouterContext.Provider,
-    { value: router },
+    { value: routerValue },
     React.createElement(
       NavigationContext.Provider,
       { value: navigationValue },
@@ -629,13 +504,6 @@ function App({
 }
 
 export async function startReactPages(config: ReactPagesConfig): Promise<ReactPagesClient> {
-  navigationSnapshot = {
-    isPending: false,
-    location: currentUrl(),
-    pendingLocation: null,
-    type: null,
-  };
-  pendingNavigationEnds.clear();
   viewTransitionWaiters.clear();
   pendingVisitSettlers.clear();
   committedResources.clear();

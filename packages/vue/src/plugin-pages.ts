@@ -211,6 +211,7 @@ function generateRendererModule(scan: PageScanResult, pagesDir: string): string 
   return `
 import { createSSRApp, h, reactive, provide } from "vue";
 import { renderToString } from "vue/server-renderer";
+import { createSsrRouter, idleNavigationState } from "void/pages-client";
 import { renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from "void/pages-head";
 
 ${generateComponentManifest(scan, pagesDir)}
@@ -241,7 +242,8 @@ export async function renderPage(pageObj, assetTags) {
     setup() {
       provide("__void_shared", reactive(pageObj.shared || {}));
       provide("__void_errors", reactive(pageObj.errors || {}));
-      provide("__void_router", null);
+      provide("__void_router", createSsrRouter(pageObj.url || "/"));
+      provide("__void_navigation", idleNavigationState());
       return () => {
         patchProps(PageComponent, pageObj.props);
         let vnode = h(PageComponent, pageObj.props);
@@ -281,10 +283,10 @@ function generateClientEntry(
   staticPageData?: StaticPageDataBuildOptions,
 ): string {
   return `
-import { createSSRApp, h, reactive, provide, shallowRef, nextTick } from "vue";
+import { createSSRApp, h, reactive, provide, shallowRef, nextTick, ref } from "vue";
 import { createDeferred, resolveDeferred, rejectDeferred } from "@void/vue/deferred";
 import { setActionRouter } from "@void/vue";
-import { createPageRouter } from "void/pages-client";
+import { createPageRouter, createRouterFacade, idleNavigationState } from "void/pages-client";
 import { parseCacheFor } from "void/pages-prefetch";
 
 ${generateComponentManifest(scan, pagesDir)}
@@ -294,6 +296,8 @@ const errors = reactive({});
 const currentComponent = shallowRef(null);
 const currentLayouts = shallowRef([]);
 const currentProps = shallowRef({});
+const routeUrl = ref(window.location.pathname + window.location.search + window.location.hash);
+const navigation = reactive(idleNavigationState());
 
 function patchProps(comp, props) {
   if (comp.__voidPatched) return;
@@ -324,9 +328,19 @@ const { router, initialPageData, initialComponent, initialLayouts, start } =
     viewTransitions: ${!!viewTransitions},
     prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
     prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? '30s')}),
+    onRouteChange(url) {
+      routeUrl.value = url;
+    },
+    onNavigationChange(next) {
+      navigation.state = next.state;
+      navigation.location = next.location;
+      navigation.method = next.method;
+    },
   });
 
-setActionRouter(router);
+const reactiveRouter = createRouterFacade(router, () => routeUrl.value);
+
+setActionRouter(reactiveRouter);
 
 Object.assign(shared, initialPageData.shared || {});
 Object.assign(errors, initialPageData.errors || {});
@@ -338,7 +352,8 @@ const app = createSSRApp({
   setup() {
     provide("__void_shared", shared);
     provide("__void_errors", errors);
-    provide("__void_router", router);
+    provide("__void_router", reactiveRouter);
+    provide("__void_navigation", navigation);
 
     return () => {
       if (!currentComponent.value) return null;
@@ -355,7 +370,7 @@ const app = createSSRApp({
 
 app.mount("#app");
 document.getElementById("app").setAttribute("data-hydrated", "true");
-export { router };
+export { reactiveRouter as router };
 start();
 `;
 }

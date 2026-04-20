@@ -1,5 +1,5 @@
-import { Link, useNavigation } from '@void/react';
-import { useEffect } from 'react';
+import { Link, useNavigation, useRouter } from '@void/react';
+import { useEffect, useRef } from 'react';
 import type { Props } from './link-behavior.server';
 
 export default function LinkBehaviorPage({ title }: Props) {
@@ -9,14 +9,19 @@ export default function LinkBehaviorPage({ title }: Props) {
     (window as any).__hashNavigationReady = true;
   }, []);
 
-  const navigation = useNavigation(
-    () => {
+  const router = useRouter();
+  const navigation = useNavigation();
+  const previousNavigationState = useRef(navigation.state);
+
+  useEffect(() => {
+    if (previousNavigationState.current === 'idle' && navigation.state !== 'idle') {
       (window as any).__hashNavigationStarts = ((window as any).__hashNavigationStarts ?? 0) + 1;
-    },
-    () => {
+    }
+    if (previousNavigationState.current !== 'idle' && navigation.state === 'idle') {
       (window as any).__hashNavigationEnds = ((window as any).__hashNavigationEnds ?? 0) + 1;
-    },
-  );
+    }
+    previousNavigationState.current = navigation.state;
+  }, [navigation.state]);
 
   return (
     <div>
@@ -112,8 +117,11 @@ export default function LinkBehaviorPage({ title }: Props) {
         </a>
       </p>
 
-      <p data-testid="navigation-location">{navigation.location}</p>
-      <p data-testid="navigation-pending">{navigation.pendingLocation ?? ''}</p>
+      <p data-testid="navigation-location">
+        {router.url.pathname}
+        {router.url.hash}
+      </p>
+      <p data-testid="navigation-state">{navigation.state}</p>
 
       <section id="hash-target">
         <h2>Hash target</h2>

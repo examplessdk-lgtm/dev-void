@@ -1,11 +1,23 @@
-import { useContext, onCleanup } from 'solid-js';
-import { RouterContext } from './context';
+import { useContext } from 'solid-js';
+import { idleNavigationState, type NavigationState } from 'void/pages-client';
+import { NavigationContext } from './context';
 
-export function useNavigation(onStart?: () => void, onEnd?: () => void): void {
-  const router = useContext(RouterContext);
-  if (!router) {
-    return;
+export type { NavigationState } from 'void/pages-client';
+
+export function useNavigation(): NavigationState {
+  const navigation = useContext(NavigationContext);
+  if (!navigation) {
+    return idleNavigationState();
   }
-  const unsub = router.onNavigation(onStart, onEnd);
-  onCleanup(unsub);
+  return {
+    get state() {
+      return navigation().state;
+    },
+    get location() {
+      return navigation().location;
+    },
+    get method() {
+      return navigation().method;
+    },
+  };
 }

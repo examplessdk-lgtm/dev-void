@@ -1,10 +1,22 @@
-import { getContext, onDestroy } from 'svelte';
+import { getContext } from 'svelte';
+import { idleNavigationState, type NavigationState } from 'void/pages-client';
 
-export function useNavigation(onStart?: () => void, onEnd?: () => void): void {
-  const router = getContext<any>('__void_router');
-  if (!router) {
-    return;
+export type { NavigationState } from 'void/pages-client';
+
+export function useNavigation(): NavigationState {
+  const ctx = getContext<{ value: NavigationState }>('__void_navigation');
+  if (!ctx) {
+    return idleNavigationState();
   }
-  const unsub = router.onNavigation(onStart, onEnd);
-  onDestroy(unsub);
+  return {
+    get state() {
+      return ctx.value.state;
+    },
+    get location() {
+      return ctx.value.location;
+    },
+    get method() {
+      return ctx.value.method;
+    },
+  };
 }

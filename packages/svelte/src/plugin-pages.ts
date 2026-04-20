@@ -129,6 +129,7 @@ function generateRendererModule(scan: PageScanResult, pagesDir: string, _isDev: 
   return `
 import { render } from "svelte/server";
 import App from "@void/svelte/App.svelte";
+import { createSsrRouter, idleNavigationState } from "void/pages-client";
 import { renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from "void/pages-head";
 
 ${generateComponentManifest(scan, pagesDir)}
@@ -156,7 +157,9 @@ export async function renderPage(pageObj, assetTags) {
       pageProps: pageObj.props,
       shared: pageObj.shared || {},
       errors: pageObj.errors || {},
-      router: null,
+      router: createSsrRouter(pageObj.url || "/"),
+      routeUrl: pageObj.url || "/",
+      navigation: idleNavigationState(),
       stores: null,
     },
   });
@@ -191,7 +194,7 @@ import { hydrate } from "svelte";
 import { writable } from "svelte/store";
 import App from "@void/svelte/App.svelte";
 import { setActionRouter } from "@void/svelte";
-import { createPageRouter } from "void/pages-client";
+import { createPageRouter, createRouterFacade, idleNavigationState } from "void/pages-client";
 import { parseCacheFor } from "void/pages-prefetch";
 
 ${generateComponentManifest(scan, pagesDir)}
@@ -201,6 +204,9 @@ const propsStore = writable({});
 const layoutsStore = writable([]);
 const sharedStore = writable({});
 const errorsStore = writable({});
+let routeUrl = window.location.pathname + window.location.search + window.location.hash;
+const routeStore = writable(routeUrl);
+const navigationStore = writable(idleNavigationState());
 
 const { router, initialPageData, initialComponent, initialLayouts, start } =
   await createPageRouter({
@@ -226,9 +232,18 @@ const { router, initialPageData, initialComponent, initialLayouts, start } =
     viewTransitions: ${!!viewTransitions},
     prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
     prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? '30s')}),
+    onRouteChange(url) {
+      routeUrl = url;
+      routeStore.set(url);
+    },
+    onNavigationChange(navigation) {
+      navigationStore.set(navigation);
+    },
   });
 
-setActionRouter(router);
+const reactiveRouter = createRouterFacade(router, () => routeUrl);
+
+setActionRouter(reactiveRouter);
 
 pageStore.set(initialComponent);
 propsStore.set(initialPageData.props);
@@ -246,18 +261,22 @@ hydrate(App, {
     shared: initialPageData.shared || {},
     errors: initialPageData.errors || {},
     router,
+    routeUrl,
+    navigation: idleNavigationState(),
     stores: {
       page: pageStore,
       props: propsStore,
       layouts: layoutsStore,
       shared: sharedStore,
       errors: errorsStore,
+      route: routeStore,
+      navigation: navigationStore,
     },
   },
 });
 
 appEl.setAttribute("data-hydrated", "true");
-export { router };
+export { reactiveRouter as router };
 start();
 `;
 }

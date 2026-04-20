@@ -60,11 +60,10 @@ describe('createPageRouter prefetch', () => {
     vi.unstubAllGlobals();
   });
 
-  it('returns stable navigation state values from the SSR proxy', () => {
-    expect(ssrProxy.isPending).toBe(false);
-    expect(ssrProxy.location).toBe('');
-    expect(ssrProxy.pendingLocation).toBeNull();
-    expect(ssrProxy.type).toBeNull();
+  it('returns stable route values from the SSR proxy', () => {
+    expect(ssrProxy.path).toBe('/');
+    expect(ssrProxy.url.pathname).toBe('/');
+    expect(ssrProxy.query.toString()).toBe('');
     expect(() => ssrProxy.visit('/users')).toThrow('router.visit() is not available during SSR');
   });
 
@@ -192,6 +191,7 @@ describe('createPageRouter prefetch', () => {
     const matchRoute = vi.fn(() => 'home');
     vi.stubGlobal('fetch', vi.fn());
 
+    const events: string[] = [];
     const { router } = await createPageRouter({
       adapter: {
         applyUpdate,
@@ -209,22 +209,104 @@ describe('createPageRouter prefetch', () => {
       prefetchHoverDelay: 75,
       routeMeta: {},
       viewTransitions: false,
+      onNavigationChange(navigation) {
+        events.push(navigation.state);
+      },
     });
-    const events: string[] = [];
-    router.onNavigation(
-      () => events.push('start'),
-      () => events.push('end'),
-    );
 
     await router.visit('#section');
 
-    expect(events).toEqual(['start', 'end']);
+    expect(events).toEqual(['loading', 'idle']);
     expect(history.pushState).toHaveBeenCalledWith({}, '', '/docs?tab=api#section');
     expect(window.scrollTo).toHaveBeenCalledWith(0, 0);
     expect(fetch).not.toHaveBeenCalled();
     expect(applyUpdate).not.toHaveBeenCalled();
     expect(matchRoute).not.toHaveBeenCalled();
     expect(documentStub.head.appendChild).not.toHaveBeenCalled();
+  });
+
+  it('keeps pending navigation state when an older visit aborts', async () => {
+    stubClientGlobals();
+    let resolveFast!: (response: Response) => void;
+    const events: string[] = [];
+    const applyUpdate = vi.fn();
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init: RequestInit) => {
+        if (url === '/slow') {
+          return new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => {
+              reject(new DOMException('Navigation aborted', 'AbortError'));
+            });
+          });
+        }
+        if (url === '/fast') {
+          return new Promise<Response>((resolve) => {
+            resolveFast = resolve;
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    const { router } = await createPageRouter({
+      adapter: {
+        applyUpdate,
+        createDeferred: vi.fn(() => ({})),
+        isLoading: vi.fn(() => false),
+        rejectDeferred: vi.fn((_ref, error) => error),
+        resolveDeferred: vi.fn((_ref, value) => value),
+      },
+      components: {
+        fast: vi.fn(async () => ({ default: {} })),
+        home: vi.fn(async () => ({ default: {} })),
+        slow: vi.fn(async () => ({ default: {} })),
+      },
+      layoutTree: {},
+      matchRoute: vi.fn((url) => {
+        if (url === '/slow') {
+          return 'slow';
+        }
+        if (url === '/fast') {
+          return 'fast';
+        }
+        return 'home';
+      }),
+      prefetchDefaultCacheFor: parseCacheFor('30s'),
+      prefetchHoverDelay: 75,
+      routeMeta: {},
+      viewTransitions: false,
+      onNavigationChange(navigation) {
+        events.push(navigation.state);
+      },
+    });
+
+    const slowVisit = router.visit('/slow').catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const fastVisit = router.visit('/fast');
+    await slowVisit;
+
+    expect(events).toEqual(['loading', 'loading']);
+
+    resolveFast(
+      Response.json(
+        {
+          component: 'fast',
+          props: { title: 'Fast' },
+        },
+        { headers: { 'X-VoidPages': 'true' } },
+      ),
+    );
+    await fastVisit;
+
+    expect(events).toEqual(['loading', 'loading', 'idle']);
+    expect(applyUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ component: 'fast' }),
+      {},
+      [],
+    );
   });
 
   it('does not fetch or write history for same-page hash popstate visits', async () => {

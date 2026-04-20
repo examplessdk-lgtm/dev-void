@@ -1,5 +1,6 @@
 import React, { type ComponentType } from 'react';
 import { renderToReadableStream } from 'react-dom/server';
+import { createSsrRouter, idleNavigationState } from 'void/pages-client';
 import { renderBodyAttrs, renderHeadToString, renderHtmlAttrs } from 'void/pages-head';
 import type { PageObject } from 'void/pages-protocol';
 import { ErrorsContext, NavigationContext, RouterContext, SharedContext } from './context';
@@ -136,17 +137,10 @@ export async function renderReactPage({
 
   element = React.createElement(
     RouterContext.Provider,
-    { value: null },
+    { value: createSsrRouter(pageObj.url || '/') },
     React.createElement(
       NavigationContext.Provider,
-      {
-        value: {
-          isPending: false,
-          location: pageObj.url || '',
-          pendingLocation: null,
-          type: null,
-        },
-      },
+      { value: idleNavigationState() },
       React.createElement(
         React.Suspense,
         { fallback: null },
