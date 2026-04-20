@@ -522,6 +522,92 @@ describe('compileRouteTable', () => {
   });
 });
 
+describe('X-Void-Routing dev trace header', () => {
+  const emptyScan: ScanResult = {
+    routes: [],
+    middleware: [],
+    jobs: [],
+    queues: [],
+    pages: { pages: [], layouts: [], namedLayouts: [] },
+  };
+
+  const redirectRules = [
+    {
+      source: '/old',
+      destination: '/new',
+      status: 301,
+      origin: 'void.json#routing.redirects',
+    },
+    {
+      source: '/api/*',
+      destination: '/backend/:splat',
+      status: 200,
+      force: true,
+      origin: 'void.json#routing.rewrites',
+    },
+  ];
+
+  function compileWith(options: Partial<typeof testOptions> & { dev?: boolean }) {
+    return compileRouteTable(emptyScan, '/routes', '/middleware', '/crons', '/queues', null, {
+      ...testOptions,
+      nodeTarget: true,
+      redirectRules,
+      ...options,
+    });
+  }
+
+  it('emits __VOID_DEV_ROUTING=true and preserves origin fields in dev', () => {
+    const code = compileWith({ dev: true });
+    expect(code).toContain('const __VOID_DEV_ROUTING = true;');
+    // Rule table retains origin metadata in dev so the trace can reference it
+    expect(code).toContain('"origin":"void.json#routing.redirects"');
+    expect(code).toContain('"origin":"void.json#routing.rewrites"');
+    // Header-emission branches fire on matches
+    expect(code).toContain('"redirect["');
+    expect(code).toContain('"rewrite"');
+    expect(code).toContain('__voidAnnotateRouting');
+    // Pass-through default after next() runs
+    expect(code).toContain('c.res.headers.set("X-Void-Routing", "pass-through")');
+  });
+
+  it('emits __VOID_DEV_ROUTING=false and strips origin fields in prod', () => {
+    const code = compileWith({ dev: false });
+    expect(code).toContain('const __VOID_DEV_ROUTING = false;');
+    // Prod rule table must not carry the authoring origin metadata
+    expect(code).not.toContain('"origin":"void.json#routing.redirects"');
+    expect(code).not.toContain('"origin":"void.json#routing.rewrites"');
+    // No pass-through header in prod — the middleware just returns next()
+    expect(code).not.toContain('"X-Void-Routing", "pass-through"');
+  });
+
+  it('annotates c.rewrite() downstream response with middleware trace in dev', () => {
+    const code = compileWith({ dev: true });
+    // The c.rewrite wrapper branches on __VOID_DEV_ROUTING and appends a
+    // "c.rewrite → <path> (middleware)" trace to the returned Response.
+    expect(code).toContain('if (!__VOID_DEV_ROUTING) return __rewritePromise;');
+    expect(code).toContain('c.rewrite \\u2192 " + path + " (middleware)');
+  });
+
+  it('keeps c.rewrite passthrough in prod (no annotator call)', () => {
+    const code = compileWith({ dev: false });
+    // Guard stays, but the returned promise is not wrapped — the annotator
+    // dead-branch is eliminated at the `__VOID_DEV_ROUTING` check.
+    expect(code).toContain('if (!__VOID_DEV_ROUTING) return __rewritePromise;');
+  });
+
+  it('tags redirect match with status, destination and origin', () => {
+    const code = compileWith({ dev: true });
+    expect(code).toContain(
+      '"redirect[" + matched.rule.source + "] \\u2192 " + dest + " " + matched.rule.status + " (" + (matched.rule.origin || "unknown") + ")"',
+    );
+  });
+
+  it('distinguishes force-rewrite (rewrite[...]) from fallback (fallback[...]) in trace', () => {
+    const code = compileWith({ dev: true });
+    expect(code).toContain('matched.rule.force === true ? "rewrite" : "fallback"');
+  });
+});
+
 describe('compileWorkerEntry', () => {
   it('generates valid worker entry code without queues', () => {
     const code = compileWorkerEntry();

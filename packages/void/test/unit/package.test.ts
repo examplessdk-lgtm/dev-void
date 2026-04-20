@@ -144,7 +144,13 @@ describe('resolveSpaFallbackChain', () => {
     expect(result.assetConfig).toEqual({ not_found_handling: 'none' });
     expect(result.fallbackRules).toEqual([
       { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
-      { source: '/*', destination: '/index.html', status: 200, force: false },
+      {
+        source: '/*',
+        destination: '/index.html',
+        status: 200,
+        force: false,
+        origin: 'spa-default',
+      },
     ]);
     expect(result.warnings).toEqual([]);
   });

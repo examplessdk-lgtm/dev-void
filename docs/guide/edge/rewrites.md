@@ -231,3 +231,17 @@ Rewrites can also be defined in a `_redirects` file. Void mirrors Netlify / Clou
 3. The re-dispatched request runs through all middleware and route handlers as if it were a fresh request to the new path.
 
 Static rewrites are evaluated at the edge (zero-cost). Middleware rewrites run inside the worker (adds a re-dispatch but enables dynamic logic).
+
+## Debugging with `X-Void-Routing`
+
+During `vite dev`, every response carries an `X-Void-Routing` header that traces how the request was resolved. Open the Network tab in devtools and inspect the response headers:
+
+```
+X-Void-Routing: redirect[/old] → /new 301 (_redirects:12)
+X-Void-Routing: rewrite[/api/*] → /backend/:splat (void.json#routing.rewrites)
+X-Void-Routing: fallback[/docs/*] → /docs.html (void.json#routing.fallbacks)
+X-Void-Routing: c.rewrite → /new-path (middleware)
+X-Void-Routing: pass-through
+```
+
+Phases are separated by `→`. The parenthesised source hint points at the exact declaration — a line number for `_redirects`, a config path for `void.json`, or `spa-default` for the synthetic SPA catch-all. The header is **only emitted in dev** — production builds strip both the trace code and the per-rule `origin` metadata from the bundle and manifest.

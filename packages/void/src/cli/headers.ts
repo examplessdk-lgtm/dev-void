@@ -98,8 +98,10 @@ export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined
   const content = readFileSync(filePath, 'utf-8');
   const rules: Array<RedirectRule> = [];
 
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
+  const rawLines = content.split('\n');
+  for (let i = 0; i < rawLines.length; i++) {
+    const lineNumber = i + 1;
+    const trimmed = rawLines[i].trim();
     if (!trimmed || trimmed.startsWith('#')) {
       continue;
     }
@@ -108,6 +110,8 @@ export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined
     if (parts.length < 2) {
       continue;
     }
+
+    const origin = `_redirects:${lineNumber}`;
 
     const [source, destination, statusStr] = parts;
     let status: number;
@@ -141,9 +145,9 @@ export function parseRedirectsFile(dir: string): Array<RedirectRule> | undefined
         );
         continue;
       }
-      rules.push({ source, destination, status, force });
+      rules.push({ source, destination, status, force, origin });
     } else if (status >= 300 && status < 400) {
-      rules.push({ source, destination, status });
+      rules.push({ source, destination, status, origin });
     }
   }
 

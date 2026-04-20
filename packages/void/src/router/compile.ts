@@ -753,6 +753,21 @@ export function compileRouteTable(
   lines.push(`const app = new Hono();`);
   lines.push(`export const requestContext = new AsyncLocalStorage();`);
   lines.push('const __rewrittenReqs = new WeakSet();');
+  // Dev-only compile-time flag gating the `X-Void-Routing` trace header.
+  // Stays `false` in production builds so the header never ships to users.
+  lines.push(`const __VOID_DEV_ROUTING = ${JSON.stringify(options.dev === true)};`);
+  // Re-wrap a terminal Response with an added `X-Void-Routing` trace header.
+  // Becomes an identity function in production because `__VOID_DEV_ROUTING`
+  // is `false`, so the header never ships — and because the constant is a
+  // literal `false`, minifiers can eliminate the whole branch.
+  lines.push('function __voidAnnotateRouting(response, trace) {');
+  lines.push('  if (!__VOID_DEV_ROUTING || !response) return response;');
+  lines.push('  const headers = new Headers(response.headers);');
+  lines.push('  headers.set("X-Void-Routing", trace);');
+  lines.push(
+    '  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });',
+  );
+  lines.push('}');
   lines.push('');
 
   // `__mergeQueryIntoLocation` is used by both the routing-rules middleware
@@ -773,7 +788,11 @@ export function compileRouteTable(
   lines.push('      rewriteReq.headers.set("X-Void-Original-URL", c.req.url);');
   lines.push('    }');
   lines.push('    __rewrittenReqs.add(rewriteReq);');
-  lines.push('    return app.fetch(rewriteReq, c.env, c.executionCtx);');
+  lines.push('    const __rewritePromise = app.fetch(rewriteReq, c.env, c.executionCtx);');
+  lines.push('    if (!__VOID_DEV_ROUTING) return __rewritePromise;');
+  lines.push(
+    '    return __rewritePromise.then((res) => __voidAnnotateRouting(res, "c.rewrite \\u2192 " + path + " (middleware)"));',
+  );
   lines.push('  };');
   lines.push('  const __origRedirect = c.redirect.bind(c);');
   lines.push('  c.redirect = (location, status) => {');
@@ -801,7 +820,7 @@ export function compileRouteTable(
 
   // Edge routing middleware (node targets only — on CF these are handled by the dispatch worker)
   if (options.nodeTarget && options.redirectRules?.length) {
-    compileRoutingRulesMiddleware(lines, options.redirectRules);
+    compileRoutingRulesMiddleware(lines, options.redirectRules, options.dev === true);
   }
   if (options.nodeTarget && options.headerRules?.length) {
     compileHeaderMiddleware(lines, options.headerRules);
@@ -2260,29 +2279,70 @@ function emitApplyRoutingRules(lines: Array<string>, rulesVar: string, indent: s
   lines.push(`${indent}    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);`);
   lines.push(`${indent}    rewriteReq.headers.set("X-Void-Rewritten", "1");`);
   lines.push(`${indent}    __rewrittenReqs.add(rewriteReq);`);
-  lines.push(`${indent}    return app.fetch(rewriteReq, c.env, c.executionCtx);`);
+  lines.push(`${indent}    const __r = await app.fetch(rewriteReq, c.env, c.executionCtx);`);
+  lines.push(`${indent}    if (!__VOID_DEV_ROUTING) return __r;`);
+  lines.push(`${indent}    const __kind = matched.rule.force === true ? "rewrite" : "fallback";`);
+  lines.push(
+    `${indent}    const __trace = __kind + "[" + matched.rule.source + "] \\u2192 " + dest + " (" + (matched.rule.origin || "unknown") + ")";`,
+  );
+  lines.push(`${indent}    return __voidAnnotateRouting(__r, __trace);`);
   lines.push(`${indent}  }`);
   lines.push(
     `${indent}  const location = __mergeQueryIntoLocation(dest, new URL(c.req.url).search);`,
   );
-  lines.push(`${indent}  return c.redirect(location, matched.rule.status);`);
+  lines.push(`${indent}  const __redir = c.redirect(location, matched.rule.status);`);
+  lines.push(`${indent}  if (!__VOID_DEV_ROUTING) return __redir;`);
+  lines.push(
+    `${indent}  const __rtrace = "redirect[" + matched.rule.source + "] \\u2192 " + dest + " " + matched.rule.status + " (" + (matched.rule.origin || "unknown") + ")";`,
+  );
+  lines.push(`${indent}  return __voidAnnotateRouting(__redir, __rtrace);`);
   lines.push(`${indent}}`);
+}
+
+/**
+ * Strip dev-only `origin` metadata from a rule list before embedding in the
+ * generated worker code. Keeps production bundles free of authoring hints.
+ */
+function stripOriginForProd(rules: RedirectRule[]): RedirectRule[] {
+  return rules.map(({ origin: _origin, ...rest }) => rest);
 }
 
 /**
  * Emit routing rules middleware — handles both redirects (3xx) and rewrites (200).
  * Last match wins. Rewrites re-dispatch with a guard header to prevent loops.
  * Redirects preserve the request's query string in the Location header.
+ *
+ * When `dev === true` the per-rule `origin` metadata is preserved in the
+ * compiled rule table and a matched rule's trace is emitted on the
+ * `X-Void-Routing` response header. In production the origin field is
+ * stripped and no trace header is emitted.
  */
-function compileRoutingRulesMiddleware(lines: Array<string>, rules: Array<RedirectRule>): void {
+function compileRoutingRulesMiddleware(
+  lines: Array<string>,
+  rules: Array<RedirectRule>,
+  dev: boolean,
+): void {
   ensureCompilePatternEmitted(lines);
   lines.push('// Routing rules: redirects + rewrites (applied before route handlers)');
-  lines.push(`const __routingRules = ${JSON.stringify(rules)};`);
+  lines.push(`const __routingRules = ${JSON.stringify(dev ? rules : stripOriginForProd(rules))};`);
   lines.push('app.use("*", async (c, next) => {');
+  // Re-dispatched rewrites short-circuit: the outer caller (either a static
+  // rule or a user `c.rewrite()`) owns annotating the final response, so
+  // we intentionally don't set a trace header here.
   lines.push('  if (__rewrittenReqs.has(c.req.raw)) return next();');
   lines.push('  const pathname = new URL(c.req.url).pathname;');
   emitApplyRoutingRules(lines, '__routingRules', '  ');
-  lines.push('  return next();');
+  if (dev) {
+    // No static rule matched — let the pipeline run, then annotate the final
+    // response with a default pass-through trace (unless downstream already
+    // set one, e.g. from a middleware `c.rewrite()` hop).
+    lines.push('  await next();');
+    lines.push('  if (__VOID_DEV_ROUTING && c.res && !c.res.headers.has("X-Void-Routing")) {');
+    lines.push('    c.res.headers.set("X-Void-Routing", "pass-through");');
+    lines.push('  }');
+  } else {
+    lines.push('  return next();');
+  }
   lines.push('});');
   lines.push('');
 }

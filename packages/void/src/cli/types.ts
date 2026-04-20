@@ -33,6 +33,16 @@ export interface RedirectRule {
    *   void.json) — fires only when the static asset resolver would 404.
    */
   force?: boolean;
+  /**
+   * Dev-only metadata identifying where the rule was declared, used to build
+   * the `X-Void-Routing` trace header. Examples: `_redirects:12`,
+   * `void.json#routing.rewrites`, `spa-default`.
+   *
+   * This field is stripped from compiled-in rule tables when the worker is
+   * built for production (`CompileOptions.dev !== true`), so it never ships
+   * to end users and does not bloat the deployed bundle.
+   */
+  origin?: string;
 }
 
 export interface AssetConfig {

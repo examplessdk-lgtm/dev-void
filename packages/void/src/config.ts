@@ -586,12 +586,13 @@ export function convertRedirectsConfig(
     return undefined;
   }
 
+  const origin = 'void.json#routing.redirects';
   const rules: Array<RedirectRule> = [];
   for (const [source, dest] of Object.entries(redirects)) {
     if (typeof dest === 'string') {
-      rules.push({ source, destination: dest, status: 302 });
+      rules.push({ source, destination: dest, status: 302, origin });
     } else {
-      rules.push({ source, destination: dest.to, status: dest.status ?? 302 });
+      rules.push({ source, destination: dest.to, status: dest.status ?? 302, origin });
     }
   }
 
@@ -614,9 +615,10 @@ export function convertRewritesConfig(
     return undefined;
   }
 
+  const origin = 'void.json#routing.rewrites';
   const rules: RedirectRule[] = [];
   for (const [source, destination] of Object.entries(rewrites)) {
-    rules.push({ source, destination, status: 200, force: true });
+    rules.push({ source, destination, status: 200, force: true, origin });
   }
 
   return rules.length > 0 ? rules : undefined;
@@ -638,9 +640,10 @@ export function convertFallbacksConfig(
     return undefined;
   }
 
+  const origin = 'void.json#routing.fallbacks';
   const rules: RedirectRule[] = [];
   for (const [source, destination] of Object.entries(fallbacks)) {
-    rules.push({ source, destination, status: 200, force: false });
+    rules.push({ source, destination, status: 200, force: false, origin });
   }
 
   return rules.length > 0 ? rules : undefined;

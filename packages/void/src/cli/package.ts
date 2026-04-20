@@ -21,6 +21,19 @@ const textEncoder = new TextEncoder();
 type ProgressCallback = (message: string) => void;
 
 /**
+ * Strip the dev-only `origin` metadata from each rule. `origin` is used to
+ * build the `X-Void-Routing` trace header during local dev; the deployed
+ * platform doesn't consume it and we don't want it leaking into production
+ * manifests.
+ */
+function stripRuleOrigins(rules: RedirectRule[] | undefined): RedirectRule[] | undefined {
+  if (!rules) {
+    return rules;
+  }
+  return rules.map(({ origin: _origin, ...rest }) => rest);
+}
+
+/**
  * Layer user-defined `routing.fallbacks` with the SPA app type's implicit
  * `/index.html` fallback. Decision: user fallbacks are evaluated first; if
  * none matches, the SPA default kicks in.
@@ -80,6 +93,7 @@ export function resolveSpaFallbackChain(
     destination: '/index.html',
     status: 200,
     force: false,
+    origin: 'spa-default',
   };
   return {
     assetConfig: { not_found_handling: 'none' },
@@ -411,11 +425,11 @@ export async function packageBuild(
   }
 
   if (redirectRules && redirectRules.length > 0) {
-    manifest.redirectRules = redirectRules;
+    manifest.redirectRules = stripRuleOrigins(redirectRules);
   }
 
   if (resolvedFallbackRules && resolvedFallbackRules.length > 0) {
-    manifest.fallbackRules = resolvedFallbackRules;
+    manifest.fallbackRules = stripRuleOrigins(resolvedFallbackRules);
   }
 
   const websocketManifest = toWebSocketManifest(webSockets);
@@ -514,11 +528,11 @@ export async function packageStaticBuild(
   }
 
   if (redirectRules && redirectRules.length > 0) {
-    manifest.redirectRules = redirectRules;
+    manifest.redirectRules = stripRuleOrigins(redirectRules);
   }
 
   if (resolvedFallbackRules && resolvedFallbackRules.length > 0) {
-    manifest.fallbackRules = resolvedFallbackRules;
+    manifest.fallbackRules = stripRuleOrigins(resolvedFallbackRules);
   }
 
   formData.append('manifest', JSON.stringify(manifest));

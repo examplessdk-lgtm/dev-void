@@ -682,12 +682,16 @@ describe('convertRedirectsConfig', () => {
 
   it('converts string destinations with default 302', () => {
     const result = convertRedirectsConfig({ '/old': '/new' });
-    expect(result).toEqual([{ source: '/old', destination: '/new', status: 302 }]);
+    expect(result).toEqual([
+      { source: '/old', destination: '/new', status: 302, origin: 'void.json#routing.redirects' },
+    ]);
   });
 
   it('converts object destinations with explicit status', () => {
     const result = convertRedirectsConfig({ '/old': { to: '/new', status: 301 } });
-    expect(result).toEqual([{ source: '/old', destination: '/new', status: 301 }]);
+    expect(result).toEqual([
+      { source: '/old', destination: '/new', status: 301, origin: 'void.json#routing.redirects' },
+    ]);
   });
 
   it('converts mixed entries preserving order', () => {
@@ -696,8 +700,13 @@ describe('convertRedirectsConfig', () => {
       '/c/*': { to: '/d/:splat', status: 308 },
     });
     expect(result).toEqual([
-      { source: '/a', destination: '/b', status: 302 },
-      { source: '/c/*', destination: '/d/:splat', status: 308 },
+      { source: '/a', destination: '/b', status: 302, origin: 'void.json#routing.redirects' },
+      {
+        source: '/c/*',
+        destination: '/d/:splat',
+        status: 308,
+        origin: 'void.json#routing.redirects',
+      },
     ]);
   });
 });
@@ -714,7 +723,13 @@ describe('convertRewritesConfig', () => {
   it('converts entries with status 200 and force=true (always-rewrite)', () => {
     const result = convertRewritesConfig({ '/docs': '/en/docs' });
     expect(result).toEqual([
-      { source: '/docs', destination: '/en/docs', status: 200, force: true },
+      {
+        source: '/docs',
+        destination: '/en/docs',
+        status: 200,
+        force: true,
+        origin: 'void.json#routing.rewrites',
+      },
     ]);
   });
 
@@ -724,8 +739,20 @@ describe('convertRewritesConfig', () => {
       '/docs/*': '/en/docs/:splat',
     });
     expect(result).toEqual([
-      { source: '/', destination: '/en', status: 200, force: true },
-      { source: '/docs/*', destination: '/en/docs/:splat', status: 200, force: true },
+      {
+        source: '/',
+        destination: '/en',
+        status: 200,
+        force: true,
+        origin: 'void.json#routing.rewrites',
+      },
+      {
+        source: '/docs/*',
+        destination: '/en/docs/:splat',
+        status: 200,
+        force: true,
+        origin: 'void.json#routing.rewrites',
+      },
     ]);
   });
 });
@@ -742,7 +769,13 @@ describe('convertFallbacksConfig', () => {
   it('converts entries with status 200 and force=false (asset-miss only)', () => {
     const result = convertFallbacksConfig({ '/*': '/index.html' });
     expect(result).toEqual([
-      { source: '/*', destination: '/index.html', status: 200, force: false },
+      {
+        source: '/*',
+        destination: '/index.html',
+        status: 200,
+        force: false,
+        origin: 'void.json#routing.fallbacks',
+      },
     ]);
   });
 
@@ -752,8 +785,20 @@ describe('convertFallbacksConfig', () => {
       '/*': '/index.html',
     });
     expect(result).toEqual([
-      { source: '/api/*', destination: '/api/fallback', status: 200, force: false },
-      { source: '/*', destination: '/index.html', status: 200, force: false },
+      {
+        source: '/api/*',
+        destination: '/api/fallback',
+        status: 200,
+        force: false,
+        origin: 'void.json#routing.fallbacks',
+      },
+      {
+        source: '/*',
+        destination: '/index.html',
+        status: 200,
+        force: false,
+        origin: 'void.json#routing.fallbacks',
+      },
     ]);
   });
 });
