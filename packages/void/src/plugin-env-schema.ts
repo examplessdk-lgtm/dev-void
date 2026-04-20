@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'pathe';
 import { type Plugin } from 'vite';
 import { findEnvFile, generateEnvTypes } from './codegen/env-types';

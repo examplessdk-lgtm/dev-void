@@ -121,7 +121,7 @@ describe('generateEnvTypes', () => {
   });
 
   it('handles env in a nested location', () => {
-    const { root, cleanup } = withTempProject((r) => {
+    const { root } = withTempProject((r) => {
       mkdirSync(join(r, 'src'), { recursive: true });
       writeFileSync(join(r, 'src', 'env.ts'), '');
     });
@@ -130,7 +130,6 @@ describe('generateEnvTypes', () => {
       const { dts } = generateEnvTypes(join(root, 'src', 'env.ts'), outDir);
       expect(dts).toContain('typeof import("../src/env")');
     } finally {
-      // cleanup
       rmSync(root, { recursive: true, force: true });
     }
   });
