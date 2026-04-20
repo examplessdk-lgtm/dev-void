@@ -89,8 +89,6 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       return;
     }
     try {
-      // Loaded through jiti so tsconfig path aliases (e.g. `@/*`) resolve
-      // and HMR re-imports re-evaluate the file (caches are disabled).
       await loadUserEnvFile(envFile);
     } catch (err) {
       voidWarn((err as Error).message);

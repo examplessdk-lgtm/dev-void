@@ -26,9 +26,9 @@
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { log, outro } from '@clack/prompts';
 import { findEnvFile } from '../codegen/env-types';
+import { loadUserEnvFile } from '../host/load-user-env';
 import type { StandardSchemaV1 } from '../standard-schema';
 
 interface EnvPublicModule {
@@ -39,12 +39,7 @@ interface EnvPublicModule {
 async function loadRegisteredSchema(
   envFile: string,
 ): Promise<Record<string, StandardSchemaV1<unknown, unknown>> | null> {
-  const url = pathToFileURL(envFile).href + `?t=${Date.now()}`;
-  try {
-    await import(/* @vite-ignore */ url);
-  } catch (err) {
-    throw new Error(`Failed to load ${envFile}: ${(err as Error).message}`);
-  }
+  await loadUserEnvFile(envFile);
   const mod = (await import('../runtime/env-public')) as unknown as EnvPublicModule;
   return mod._getRegisteredSchema();
 }
