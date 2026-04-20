@@ -670,11 +670,11 @@ export async function packageFrameworkBuild(opts: {
   }
 
   if (opts.redirectRules && opts.redirectRules.length > 0) {
-    manifest.redirectRules = opts.redirectRules;
+    manifest.redirectRules = stripRuleOrigins(opts.redirectRules);
   }
 
   if (opts.fallbackRules && opts.fallbackRules.length > 0) {
-    manifest.fallbackRules = opts.fallbackRules;
+    manifest.fallbackRules = stripRuleOrigins(opts.fallbackRules);
   }
 
   const websocketManifest = toWebSocketManifest(opts.webSockets);

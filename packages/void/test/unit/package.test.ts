@@ -324,6 +324,85 @@ describe('packageBuild', () => {
   });
 });
 
+describe('packageFrameworkBuild', () => {
+  it('strips dev-only origin metadata from redirectRules and fallbackRules in the manifest', async () => {
+    const workerDir = join(TMP, 'server');
+    const assetsDir = join(TMP, 'public');
+    mkdirSync(workerDir, { recursive: true });
+    mkdirSync(assetsDir, { recursive: true });
+    writeFileSync(join(workerDir, 'index.js'), 'export default {}');
+    writeFileSync(join(assetsDir, 'index.html'), '<html></html>');
+
+    const redirectRules = [
+      {
+        source: '/old',
+        destination: '/new',
+        status: 301,
+        force: false,
+        origin: '_redirects:12',
+      },
+      {
+        source: '/api/old',
+        destination: '/api/new',
+        status: 200,
+        force: true,
+        origin: 'void.json#routing.rewrites',
+      },
+    ];
+    const fallbackRules = [
+      {
+        source: '/*',
+        destination: '/index.html',
+        status: 200,
+        force: false,
+        origin: 'spa-default',
+      },
+      {
+        source: '/docs/*',
+        destination: '/docs.html',
+        status: 200,
+        force: false,
+        origin: 'void.json#routing.fallbacks',
+      },
+    ];
+
+    const form = await packageFrameworkBuild({
+      frameworkName: 'test',
+      workerDir,
+      workerMain: 'index.js',
+      assetsDir,
+      bindings: {
+        needsD1: false,
+        needsKV: false,
+        needsR2: false,
+        needsAuth: false,
+        needsQueues: false,
+        needsAI: false,
+      },
+      redirectRules,
+      fallbackRules,
+    });
+
+    const manifest = JSON.parse(form.get('manifest') as string);
+
+    expect(manifest.redirectRules).toEqual([
+      { source: '/old', destination: '/new', status: 301, force: false },
+      { source: '/api/old', destination: '/api/new', status: 200, force: true },
+    ]);
+    for (const rule of manifest.redirectRules) {
+      expect(rule).not.toHaveProperty('origin');
+    }
+
+    expect(manifest.fallbackRules).toEqual([
+      { source: '/*', destination: '/index.html', status: 200, force: false },
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+    ]);
+    for (const rule of manifest.fallbackRules) {
+      expect(rule).not.toHaveProperty('origin');
+    }
+  });
+});
+
 describe('computeAssetHash', () => {
   it('returns a 32-char hex string', () => {
     const hash = computeAssetHash(Buffer.from('hello world'), 'test.html');
