@@ -4,6 +4,20 @@ export interface RouteMap {}
 /** Stub interface augmented by the generated .void/routes.d.ts */
 export interface WebSocketRouteMap {}
 
+/** Union of known route patterns (keys of the generated RouteMap). */
+export type RouteName = keyof RouteMap;
+
+/**
+ * Destination type for rewrites / fallbacks / c.rewrite().
+ *
+ * The `string & {}` branch keeps IDE autocomplete of known routes while
+ * still accepting arbitrary strings (needed for dynamic paths like
+ * `/users/${id}`). When no routes are generated yet, `RouteName` is
+ * `never` and this degenerates to `string & {}`, which is assignable
+ * from any string.
+ */
+export type RewriteDestination = RouteName | (string & {});
+
 /** Stub interface for page action types — augmented by generated routes.d.ts */
 export interface PageActionMap {}
 

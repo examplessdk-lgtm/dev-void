@@ -1,4 +1,5 @@
 import type { Context, Env, MiddlewareHandler } from 'hono';
+import type { RewriteDestination } from 'void/routes';
 import type { HeadDescriptor } from '../pages/head';
 import type { AuthSession, AuthUser } from './auth';
 import { convertReturnValue } from './response';
@@ -53,8 +54,13 @@ declare module 'hono' {
      * The re-dispatched request is tracked internally so that static routing rules
      * do not re-evaluate on it. Your middleware is responsible for its own loop
      * prevention (e.g., checking if the path already has a prefix).
+     *
+     * The `path` type is `RewriteDestination`, which is `keyof RouteMap | (string & {})`.
+     * Known routes autocomplete, but any string is still accepted so dynamic paths
+     * (e.g. `` `/users/${id}` ``) continue to work. When `.void/routes.d.ts` has not
+     * been generated yet, `RouteMap` is empty and this is equivalent to `string`.
      */
-    rewrite(path: string): Promise<Response>;
+    rewrite(path: RewriteDestination): Promise<Response>;
   }
 }
 

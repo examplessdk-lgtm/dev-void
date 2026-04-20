@@ -76,6 +76,20 @@ export function generateRouteTypes(
   lines.push('  export interface WebSocketRouteMap {}');
   lines.push('  export interface PageActionMap {}');
   lines.push('');
+  lines.push('  /** Union of known route patterns (keys of the generated RouteMap). */');
+  lines.push('  export type RouteName = keyof RouteMap;');
+  lines.push('');
+  lines.push('  /**');
+  lines.push('   * Destination type for rewrites / fallbacks / c.rewrite().');
+  lines.push('   *');
+  lines.push('   * The `string & {}` branch keeps IDE autocomplete of known routes while');
+  lines.push('   * still accepting arbitrary strings (needed for dynamic paths like');
+  lines.push('   * `/users/${id}`). When no routes are generated yet, `RouteName` is');
+  lines.push('   * `never` and this degenerates to `string & {}`, which is assignable');
+  lines.push('   * from any string.');
+  lines.push('   */');
+  lines.push('  export type RewriteDestination = RouteName | (string & {});');
+  lines.push('');
   lines.push(
     '  export type ParseActionUrl<U extends string> = U extends `${infer Base}?${infer Action}` ? {',
   );

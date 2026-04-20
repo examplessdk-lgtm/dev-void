@@ -131,6 +131,38 @@ describe('generateRouteTypes', () => {
     expect(dts).toContain('export {}');
   });
 
+  it('emits RouteName and RewriteDestination aliases on void/routes', () => {
+    const scan: ScanResult = {
+      routes: [
+        {
+          pattern: '/api/hello',
+          methods: ['GET'],
+          params: [],
+          catchAll: false,
+          env: null,
+          filePath: 'api/hello.ts',
+        },
+      ],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+
+    const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
+
+    // Both exports must live inside the `declare module "void/routes"` block so
+    // consumers importing from `void/routes` pick them up after codegen.
+    const moduleBlockStart = dts.indexOf('declare module "void/routes"');
+    expect(moduleBlockStart).toBeGreaterThan(-1);
+    const moduleBlock = dts.slice(moduleBlockStart);
+
+    expect(moduleBlock).toContain('export type RouteName = keyof RouteMap;');
+    // The `(string & {})` trick is load-bearing: it keeps route-name
+    // autocomplete while still accepting dynamic paths like `/users/${id}`.
+    expect(moduleBlock).toContain('export type RewriteDestination = RouteName | (string & {});');
+  });
+
   it('generates correct relative paths', () => {
     const scan: ScanResult = {
       routes: [

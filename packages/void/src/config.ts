@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { RewriteDestination } from 'void/routes';
 import type { HeaderRule, RedirectRule } from './cli/types';
 export type { RedirectRule };
 import { VOID_AUTH_PROVIDERS, isVoidAuthProvider, type VoidAuthProvider } from './auth/providers';
@@ -23,8 +24,8 @@ export interface RoutingConfig {
   prerender?: Array<string>;
   headers?: Record<string, Array<string>>;
   redirects?: Record<string, RedirectDestination>;
-  rewrites?: Record<string, string>;
-  fallbacks?: Record<string, string>;
+  rewrites?: Record<string, RewriteDestination>;
+  fallbacks?: Record<string, RewriteDestination>;
 }
 
 /** Inference configuration — bindings, scanDirs, build, outputDir, appType. */
@@ -607,7 +608,7 @@ export function convertRedirectsConfig(
  * if the input is empty or undefined.
  */
 export function convertRewritesConfig(
-  rewrites: Record<string, string> | undefined,
+  rewrites: Record<string, RewriteDestination> | undefined,
 ): RedirectRule[] | undefined {
   if (!rewrites) {
     return undefined;
@@ -631,7 +632,7 @@ export function convertRewritesConfig(
  * Returns undefined if the input is empty or undefined.
  */
 export function convertFallbacksConfig(
-  fallbacks: Record<string, string> | undefined,
+  fallbacks: Record<string, RewriteDestination> | undefined,
 ): RedirectRule[] | undefined {
   if (!fallbacks) {
     return undefined;
