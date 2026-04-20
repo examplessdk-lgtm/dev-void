@@ -1,5 +1,5 @@
-import { relative } from 'node:path';
 import { walk } from 'estree-walker';
+import { relative } from 'pathe';
 import { parseSync, type Plugin } from 'vite';
 
 interface EnvPublicModule {
