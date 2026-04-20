@@ -208,3 +208,77 @@ export function splitRedirectRulesByForce(rules: RedirectRule[] | undefined): {
   }
   return { always, fallbacks };
 }
+
+/**
+ * Warn when the same `source` pattern appears more than once within a single
+ * merged phase (pre-asset `redirectRules` or post-asset `fallbackRules`).
+ *
+ * Sources are scoped to the phase: a pattern appearing once in redirects and
+ * once in fallbacks is *not* a collision, because those lists run in separate
+ * phases and don't shadow each other. Within a single phase the dispatcher
+ * uses last-match-wins semantics, so a duplicate silently hides the earlier
+ * entry. This lint never fails the deploy; it surfaces the collision so the
+ * user can decide whether to fix it.
+ *
+ * Only exact string duplicates are reported. Subset-shadow cases (e.g. `/*`
+ * overshadowing `/docs`) are out of scope — pattern-aware analysis would be
+ * both harder and noisier.
+ *
+ * Emits a single aggregated warning summarizing every duplicated source, each
+ * annotated with the `origin` of every occurrence (e.g. `_redirects:12` vs
+ * `void.json#routing.rewrites`). Aggregation avoids a wall of per-pair
+ * warnings on configs with many collisions.
+ *
+ * Returns the warning message for test observability; `undefined` when the
+ * input is unique. The `warn` callback defaults to `voidWarn` and is
+ * injectable so tests can capture output without stubbing the module.
+ */
+export function lintDuplicateSources(
+  rules: RedirectRule[] | undefined,
+  phaseName: string,
+  warn: (msg: string) => void = voidWarn,
+): string | undefined {
+  if (!rules || rules.length < 2) {
+    return undefined;
+  }
+
+  const bySource = new Map<string, RedirectRule[]>();
+  for (const rule of rules) {
+    const existing = bySource.get(rule.source);
+    if (existing) {
+      existing.push(rule);
+    } else {
+      bySource.set(rule.source, [rule]);
+    }
+  }
+
+  const duplicates: { source: string; occurrences: RedirectRule[] }[] = [];
+  for (const [source, occurrences] of bySource) {
+    if (occurrences.length > 1) {
+      duplicates.push({ source, occurrences });
+    }
+  }
+
+  if (duplicates.length === 0) {
+    return undefined;
+  }
+
+  const longestSource = duplicates.reduce((n, d) => Math.max(n, d.source.length), 0);
+
+  const lines = duplicates.map(({ source, occurrences }) => {
+    const origins = occurrences.map((rule) => rule.origin ?? '<unknown>');
+    const joined =
+      origins.length === 2
+        ? origins.join(' and ')
+        : `${origins.slice(0, -1).join(', ')}, and ${origins[origins.length - 1]}`;
+    return `  ${source.padEnd(longestSource)}  — ${joined}`;
+  });
+
+  const message = [
+    `Warning: duplicate rule sources detected in ${phaseName} (last match wins — the later entry takes effect):`,
+    ...lines,
+  ].join('\n');
+
+  warn(message);
+  return message;
+}

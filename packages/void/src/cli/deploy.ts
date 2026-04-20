@@ -63,7 +63,12 @@ import {
   getDeployEnvDefaults,
   validateProdEnv,
 } from './env-validation';
-import { parseHeadersFile, parseRedirectsFile, splitRedirectRulesByForce } from './headers';
+import {
+  lintDuplicateSources,
+  parseHeadersFile,
+  parseRedirectsFile,
+  splitRedirectRulesByForce,
+} from './headers';
 import { promptForLoginToken } from './login';
 import { cliTitle, createSpinner } from './output';
 import {
@@ -600,6 +605,11 @@ async function runFrameworkDeploy(
   const mergedFallbackRules = [...fwFallbackRules, ...(cfgFallbackRules ?? [])];
   const fallbackRules = mergedFallbackRules.length > 0 ? mergedFallbackRules : undefined;
 
+  // Lint each phase independently: duplicates across phases (redirects vs
+  // fallbacks) don't shadow each other, only duplicates within a phase do.
+  lintDuplicateSources(redirectRules, 'redirects/rewrites (pre-asset)');
+  lintDuplicateSources(fallbackRules, 'fallbacks (post-asset)');
+
   if (!existsSync(workerDir)) {
     log.error(`Worker output not found at "${fwPreset.workerDir}". Run "${buildCmd}" first.`);
     process.exit(1);
@@ -919,6 +929,10 @@ async function runFullDeploy(
   ];
   const mergedFallbackRules = [...userFallbackRules, ...(cfgFallbackRules ?? [])];
   const fallbackRules = mergedFallbackRules.length > 0 ? mergedFallbackRules : undefined;
+
+  // Lint each phase independently — same rationale as the framework branch.
+  lintDuplicateSources(redirectRules, 'redirects/rewrites (pre-asset)');
+  lintDuplicateSources(fallbackRules, 'fallbacks (post-asset)');
 
   const migrationsDir = join(root, 'db', 'migrations');
 
