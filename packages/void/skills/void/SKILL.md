@@ -46,6 +46,7 @@ Then ask what to do next.
 | AI inference (Workers AI, providers)      | `docs/guide/ai.md`                                                                        |
 | KV / storage / queues / cron jobs         | `docs/guide/kv.md`, `docs/guide/storage.md`, `docs/guide/queues.md`, `docs/guide/jobs.md` |
 | SSR and caching                           | `docs/guide/ssr.md`, `docs/guide/edge/*.md`                                               |
+| Rewrites, redirects, fallbacks            | `docs/guide/edge/rewrites.md`, `docs/guide/edge/redirects.md`, `docs/reference/config.md` |
 | Static site generation                    | `docs/guide/ssg.md`                                                                       |
 | Deployment and CI                         | `docs/guide/deployment.md`, `docs/reference/cli.md`                                       |
 | Project status, deployment history        | `docs/reference/cli.md`                                                                   |
