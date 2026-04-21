@@ -166,6 +166,30 @@ describe('resolveSpaFallbackChain', () => {
     expect(result.warnings[0]).toMatch(/duplicates the default SPA fallback/);
   });
 
+  it('returns the user rules verbatim (no prepend, no duplication) when user already has /* -> /index.html', () => {
+    const userRules = [
+      {
+        source: '/*',
+        destination: '/index.html',
+        status: 200,
+        force: false,
+        origin: 'void.json#routing.fallbacks',
+      },
+    ];
+    const result = resolveSpaFallbackChain('spa', userRules);
+
+    // Platform SPA switch disabled — we're handling the catch-all via rules.
+    expect(result.assetConfig).toEqual({ not_found_handling: 'none' });
+    // No synthetic rule prepended: the returned list is exactly what the user supplied.
+    expect(result.fallbackRules).toBeDefined();
+    expect(result.fallbackRules!.length).toBe(1);
+    expect(result.fallbackRules![0]!.source).toBe('/*');
+    expect(result.fallbackRules).toEqual(userRules);
+    // And the warning still fires so the user knows their rule shadows the default.
+    expect(result.warnings.length).toBe(1);
+    expect(result.warnings[0]).toMatch(/duplicates the default SPA fallback/);
+  });
+
   it('leaves user fallbacks untouched for static app type', () => {
     const userRules = [{ source: '/docs/*', destination: '/docs.html', status: 200, force: false }];
     const result = resolveSpaFallbackChain('static', userRules);

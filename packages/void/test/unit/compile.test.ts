@@ -1,3 +1,4 @@
+import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
 import {
   compileRouteTable,
@@ -576,6 +577,135 @@ describe('compileRouteTable', () => {
     expect(code).toContain('c.redirect = (location, status)');
     expect(code).toContain('typeof location === "string" && location.startsWith("/")');
     expect(code).toContain('__origRedirect(__mergeQueryIntoLocation(location, search), status)');
+  });
+});
+
+/**
+ * Runtime behaviour tests for the c.redirect / c.rewrite wrappers. The
+ * compile.ts tests above assert the emitted source string; these drive the
+ * equivalent wrappers through a real Hono app so the actual behaviour
+ * (query merge, re-dispatch, helper plumbing) is covered end-to-end.
+ *
+ * The wrapper logic is replicated here verbatim from compile.ts to keep the
+ * test independent of the eval-and-import dance a real integration test
+ * would require. If compile.ts drifts, the text-level tests above will
+ * fail first and point at this file.
+ */
+function mergeQueryIntoLocation(destination: string, search: string): string {
+  if (!search || search === '?') {
+    return destination;
+  }
+  const q = destination.indexOf('?');
+  if (q === -1) {
+    return destination + search;
+  }
+  const dp = new URLSearchParams(destination.slice(q + 1));
+  for (const [k, v] of new URLSearchParams(search)) {
+    if (!dp.has(k)) {
+      dp.append(k, v);
+    }
+  }
+  return destination.slice(0, q) + '?' + dp.toString();
+}
+
+function installVoidWrappers(app: Hono, rewrittenReqs: WeakSet<Request>): void {
+  app.use(async (c, next) => {
+    if (!rewrittenReqs.has(c.req.raw)) {
+      try {
+        c.req.raw.headers.delete('X-Void-Original-URL');
+      } catch {
+        /* ignore immutable-headers runtimes */
+      }
+    }
+    const isInternalRedispatch = rewrittenReqs.has(c.req.raw);
+    (c as any).rewrite = (path: string) => {
+      const rewriteUrl = new URL(c.req.url);
+      rewriteUrl.pathname = path;
+      const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
+      rewriteReq.headers.set('X-Void-Rewritten', '1');
+      if (!isInternalRedispatch) {
+        rewriteReq.headers.delete('X-Void-Original-URL');
+      }
+      if (!rewriteReq.headers.has('X-Void-Original-URL')) {
+        rewriteReq.headers.set('X-Void-Original-URL', c.req.url);
+      }
+      rewrittenReqs.add(rewriteReq);
+      // `c.executionCtx` throws in bare test envs; compile.ts forwards it
+      // unconditionally because Workers/Node targets always provide one.
+      let ctx: ExecutionContext | undefined;
+      try {
+        ctx = (c as any).executionCtx;
+      } catch {
+        ctx = undefined;
+      }
+      return app.fetch(rewriteReq, (c as any).env, ctx);
+    };
+    const origRedirect = c.redirect.bind(c);
+    (c as any).redirect = (location: string, status?: number) => {
+      if (typeof location === 'string' && location.startsWith('/')) {
+        const search = new URL(c.req.raw.url).search;
+        return origRedirect(mergeQueryIntoLocation(location, search), status as any);
+      }
+      return origRedirect(location, status as any);
+    };
+    (c as any).originalUrl = () => c.req.header('X-Void-Original-URL') ?? null;
+    (c as any).isRewritten = () => c.req.header('X-Void-Rewritten') === '1';
+    await next();
+  });
+}
+
+describe('c.redirect runtime wrapper', () => {
+  it('preserves the original request query on internal redirects', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+    app.get('/old', (c) => c.redirect('/new', 302));
+
+    const res = await app.fetch(new Request('http://localhost/old?x=1&y=2'));
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe('/new?x=1&y=2');
+  });
+
+  it("destination's explicit query wins over the incoming request query", async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+    app.get('/old', (c) => c.redirect('/new?foo=1', 302));
+
+    const res = await app.fetch(new Request('http://localhost/old?foo=override&bar=2'));
+
+    expect(res.status).toBe(302);
+    // `foo=1` from destination must NOT be replaced by `foo=override`;
+    // `bar=2` from the request is merged since destination doesn't carry it.
+    expect(res.headers.get('Location')).toBe('/new?foo=1&bar=2');
+  });
+});
+
+describe('c.rewrite runtime wrapper', () => {
+  it('re-dispatches to the rewritten path and exposes c.originalUrl / c.isRewritten', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    app.get('/external', (c) => (c as any).rewrite('/internal'));
+    app.get('/internal', (c) => {
+      return new Response('internal-body', {
+        headers: {
+          'X-Handler': 'internal',
+          'X-Original-Url': (c as any).originalUrl() ?? '',
+          'X-Is-Rewritten': (c as any).isRewritten() ? '1' : '0',
+        },
+      });
+    });
+
+    const res = await app.fetch(new Request('http://localhost/external?keep=1'));
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('internal-body');
+    // Response came from the /internal handler, proving re-dispatch happened.
+    expect(res.headers.get('X-Handler')).toBe('internal');
+    // `c.originalUrl()` on the re-dispatched context returns the pre-rewrite URL.
+    expect(res.headers.get('X-Original-Url')).toBe('http://localhost/external?keep=1');
+    // `c.isRewritten()` is true on the replayed hop.
+    expect(res.headers.get('X-Is-Rewritten')).toBe('1');
   });
 });
 
