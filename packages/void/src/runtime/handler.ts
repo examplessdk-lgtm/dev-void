@@ -94,13 +94,14 @@ declare module 'hono' {
     originalUrl: _CloudOnly<E, () => string | null>;
 
     /**
-     * Returns `true` when the current request was re-dispatched by a rewrite
-     * (`X-Void-Rewritten: 1`), `false` otherwise.
+     * Returns `true` when the current request was re-dispatched by a rewrite,
+     * `false` otherwise.
      *
      * Use this to skip side-effectful work that would otherwise double-fire
      * on the second pass of middleware (request logging, rate-limit
-     * increments, auth audit trails). Static rewrites and `c.rewrite()`
-     * both set the flag.
+     * increments, auth audit trails). Static rewrites (edge dispatch,
+     * `routing.rewrites`, `routing.fallbacks`, `_redirects` `200`/`200!`)
+     * and `c.rewrite()` in middleware both set the flag.
      */
     isRewritten: _CloudOnly<E, () => boolean>;
   }

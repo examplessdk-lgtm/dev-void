@@ -139,7 +139,7 @@ export default defineMiddleware(async (c, next) => {
 
 Static rewrites are different: `_redirects` `200!` entries and `routing.rewrites` run at the platform layer **before** the asset handler, so they _can_ rewrite into assets. If you need "rewrite into an asset" behavior dynamically, model it as a static rule (possibly with a broader source pattern) rather than doing it from middleware.
 
-**Loop prevention:** Single-hop rewrite loops are prevented automatically. When `c.rewrite('/foo')` re-dispatches the request, the runtime tracks that request object internally so static routing rules are skipped on the second pass — even if `/foo` would itself match a rewrite rule, it won't rewrite again. The re-dispatched request also carries an `X-Void-Rewritten: 1` header for observability, but the guard does not rely on it (client-supplied headers cannot bypass routing rules).
+**Loop prevention:** Single-hop rewrite loops are prevented automatically. When `c.rewrite('/foo')` re-dispatches the request, the runtime tracks that request object in an internal `WeakSet` so static routing rules are skipped on the second pass — even if `/foo` would itself match a rewrite rule, it won't rewrite again. The guard is identity-based on the in-memory `Request` object, so client-supplied headers cannot spoof or bypass it. The pre-rewrite URL is exposed to re-dispatched handlers via `X-Void-Original-URL` (see [Original URL access](#original-url-access)).
 
 What the guard **doesn't** catch are multi-hop user-written loops across separate middleware: middleware A rewrites `/a → /b`, middleware B rewrites `/b → /c`, middleware C rewrites `/c → /a`. Each hop constructs a fresh `Request`, so the per-request guard can't see the cycle. If you chain rewrites across middleware, write each hop so it only rewrites paths that aren't already in its target shape.
 
@@ -155,7 +155,7 @@ To skip idempotent-unsafe work on the second pass, use `c.isRewritten()`:
 if (c.isRewritten()) return next();
 ```
 
-`c.isRewritten()` returns `true` when the request was re-dispatched by a rewrite (whether from a static rule or `c.rewrite()` in middleware). It reads the `X-Void-Rewritten: 1` header that the runtime attaches; reach for the raw header only if you need to inspect it from outside a Void-managed context.
+`c.isRewritten()` returns `true` when the request was re-dispatched by a rewrite (whether from a static rule at the edge or `c.rewrite()` in middleware). It checks for the presence of the `X-Void-Original-URL` header that the runtime attaches on every rewrite hop; reach for the raw header only if you need to inspect it from outside a Void-managed context.
 
 ::: tip
 This is the recommended approach for i18n libraries. The library can export a middleware factory that handles locale detection and rewriting, and users just drop it into their `middleware/` directory.

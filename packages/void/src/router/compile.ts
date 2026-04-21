@@ -792,7 +792,6 @@ export function compileRouteTable(
   lines.push('    const rewriteUrl = new URL(c.req.url);');
   lines.push('    rewriteUrl.pathname = path;');
   lines.push('    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
-  lines.push('    rewriteReq.headers.set("X-Void-Rewritten", "1");');
   // Defense-in-depth: if the entry-point strip above failed (immutable headers
   // on some runtimes) AND this is not an internal re-dispatch, the cloned
   // `rewriteReq` still carries the client-supplied `X-Void-Original-URL`.
@@ -826,7 +825,7 @@ export function compileRouteTable(
   // exist on Void-managed contexts; vanilla Hono Contexts in the same dep
   // graph won't get them at runtime, matching the env-scoped type.
   lines.push('  c.originalUrl = () => c.req.header("X-Void-Original-URL") ?? null;');
-  lines.push('  c.isRewritten = () => c.req.header("X-Void-Rewritten") === "1";');
+  lines.push('  c.isRewritten = () => c.req.header("X-Void-Original-URL") != null;');
   lines.push('  await next();');
   lines.push('});');
   lines.push('');
@@ -2302,7 +2301,13 @@ function emitApplyRoutingRules(lines: Array<string>, rulesVar: string, indent: s
   lines.push(`${indent}    const rewriteUrl = new URL(c.req.url);`);
   lines.push(`${indent}    rewriteUrl.pathname = dest;`);
   lines.push(`${indent}    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);`);
-  lines.push(`${indent}    rewriteReq.headers.set("X-Void-Rewritten", "1");`);
+  // Set `X-Void-Original-URL` so re-dispatched handlers can observe the
+  // pre-rewrite URL via `c.originalUrl()` / `c.isRewritten()`. Matches what
+  // the dispatch worker does for CF-target static rewrites. The c.rewrite
+  // middleware preserves this header when `__rewrittenReqs.has` is true.
+  lines.push(`${indent}    if (!rewriteReq.headers.has("X-Void-Original-URL")) {`);
+  lines.push(`${indent}      rewriteReq.headers.set("X-Void-Original-URL", c.req.url);`);
+  lines.push(`${indent}    }`);
   lines.push(`${indent}    __rewrittenReqs.add(rewriteReq);`);
   lines.push(`${indent}    const __r = await app.fetch(rewriteReq, c.env, c.executionCtx);`);
   lines.push(`${indent}    if (!__VOID_DEV_ROUTING) return __r;`);

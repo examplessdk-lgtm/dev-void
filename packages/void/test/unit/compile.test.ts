@@ -547,7 +547,13 @@ describe('compileRouteTable', () => {
     // so vanilla Hono Contexts (which never flow through this middleware) do
     // not pick up the helpers at runtime — matching the env-scoped types.
     expect(code).toContain('c.originalUrl = () => c.req.header("X-Void-Original-URL") ?? null;');
-    expect(code).toContain('c.isRewritten = () => c.req.header("X-Void-Rewritten") === "1";');
+    expect(code).toContain('c.isRewritten = () => c.req.header("X-Void-Original-URL") != null;');
+    // Regression anchor for the fix that aligned c.isRewritten with the
+    // dispatch-worker contract: dispatch only sets X-Void-Original-URL, never
+    // X-Void-Rewritten, so reading the latter would falsely report false on
+    // every CF-prod static rewrite. Ensure the old header name is gone from
+    // the generated code entirely.
+    expect(code).not.toContain('X-Void-Rewritten');
   });
 
   it('wraps c.redirect so internal redirects merge the incoming query string', () => {
@@ -622,7 +628,6 @@ function installVoidWrappers(app: Hono, rewrittenReqs: WeakSet<Request>): void {
       const rewriteUrl = new URL(c.req.url);
       rewriteUrl.pathname = path;
       const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
-      rewriteReq.headers.set('X-Void-Rewritten', '1');
       if (!isInternalRedispatch) {
         rewriteReq.headers.delete('X-Void-Original-URL');
       }
@@ -649,7 +654,7 @@ function installVoidWrappers(app: Hono, rewrittenReqs: WeakSet<Request>): void {
       return origRedirect(location, status as any);
     };
     (c as any).originalUrl = () => c.req.header('X-Void-Original-URL') ?? null;
-    (c as any).isRewritten = () => c.req.header('X-Void-Rewritten') === '1';
+    (c as any).isRewritten = () => c.req.header('X-Void-Original-URL') != null;
     await next();
   });
 }
@@ -717,7 +722,9 @@ function installRoutingRulesMiddleware(
       const rewriteUrl = new URL(c.req.url);
       rewriteUrl.pathname = matched.destination;
       const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
-      rewriteReq.headers.set('X-Void-Rewritten', '1');
+      if (!rewriteReq.headers.has('X-Void-Original-URL')) {
+        rewriteReq.headers.set('X-Void-Original-URL', c.req.url);
+      }
       rewrittenReqs.add(rewriteReq);
       let ctx: ExecutionContext | undefined;
       try {
@@ -759,6 +766,55 @@ describe('c.rewrite runtime wrapper', () => {
     expect(res.headers.get('X-Is-Rewritten')).toBe('1');
   });
 
+  it('c.isRewritten() is true when dispatch sets X-Void-Original-URL (CF-prod edge rewrite)', async () => {
+    // Regression anchor: in CF prod, Void's dispatch worker applies static
+    // routing.rewrites / fallbacks by mutating the pathname and setting only
+    // X-Void-Original-URL on the forwarded request — it does NOT set any
+    // rewritten-specific flag header. c.isRewritten() must read presence of
+    // X-Void-Original-URL so it returns true in this scenario too, matching
+    // docs/guide/edge/rewrites.md and docs/reference/api.md.
+    //
+    // On CF, incoming `c.req.raw.headers` are immutable, so the entry-point
+    // anti-spoof strip (`headers.delete("X-Void-Original-URL")`) throws and
+    // is silently swallowed by the try/catch in compile.ts — which is what
+    // lets dispatch-provided headers reach the handler. We simulate that by
+    // making the incoming request's `headers.delete` throw.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    app.get('/en/docs', (c) => {
+      return new Response('docs-body', {
+        headers: {
+          'X-Original-Url': (c as any).originalUrl() ?? '',
+          'X-Is-Rewritten': (c as any).isRewritten() ? '1' : '0',
+        },
+      });
+    });
+
+    // Simulate a dispatch-forwarded request: the pathname has already been
+    // rewritten and X-Void-Original-URL is set. No X-Void-Rewritten header,
+    // no entry in rewrittenReqs (dispatch is out-of-process from the worker).
+    const dispatchForwarded = new Request('http://localhost/en/docs', {
+      headers: { 'X-Void-Original-URL': 'http://localhost/docs' },
+    });
+    // Make incoming headers behave as immutable (matches CF Workers prod
+    // semantics for incoming Requests).
+    const originalDelete = dispatchForwarded.headers.delete.bind(dispatchForwarded.headers);
+    dispatchForwarded.headers.delete = (name: string) => {
+      if (name.toLowerCase() === 'x-void-original-url') {
+        throw new TypeError('immutable headers');
+      }
+      return originalDelete(name);
+    };
+
+    const res = await app.fetch(dispatchForwarded);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('docs-body');
+    expect(res.headers.get('X-Original-Url')).toBe('http://localhost/docs');
+    expect(res.headers.get('X-Is-Rewritten')).toBe('1');
+  });
+
   it('single-hop loop guard: re-dispatched request skips the static rule table', async () => {
     // Regression anchor for the `__rewrittenReqs` WeakSet guard in compile.ts.
     // A middleware calls `c.rewrite('/a')`, and `/a` itself is also a rewrite
@@ -782,7 +838,9 @@ describe('c.rewrite runtime wrapper', () => {
         const rewriteUrl = new URL(c.req.url);
         rewriteUrl.pathname = '/a';
         const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
-        rewriteReq.headers.set('X-Void-Rewritten', '1');
+        if (!rewriteReq.headers.has('X-Void-Original-URL')) {
+          rewriteReq.headers.set('X-Void-Original-URL', c.req.url);
+        }
         rewrittenReqs.add(rewriteReq);
         return app.fetch(rewriteReq, (c as any).env, undefined);
       }
