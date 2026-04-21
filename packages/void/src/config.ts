@@ -334,12 +334,30 @@ export function readConfig(root: string): VoidConfig {
           throw new Error(`Redirect source "${source}" in ${CONFIG_FILE} must start with "/"`);
         }
         assertSingleSplat(source, 'Redirect');
+        // Reject protocol-relative internal destinations ("//host/x"): they
+        // start with "/" so a naive path-absolute check lets them through, but
+        // `new URL("//evil/x", base)` resolves to `https://evil/x`, silently
+        // turning an intended in-worker redirect into a cross-origin proxy.
+        // Mirrors the `c.rewrite()` codegen guard in router/compile.ts (see
+        // commit 3c60d38).
+        const assertNotProtocolRelative = (toStr: string): void => {
+          if (toStr.startsWith('//')) {
+            throw new Error(
+              `Redirect destination for "${source}" in ${CONFIG_FILE} must not start with "//" (protocol-relative URLs parse as cross-origin; use a single-slash path for internal redirects or an explicit "https://..." URL for external)`,
+            );
+          }
+        };
         if (typeof dest === 'string') {
-          // ok
+          if (dest.startsWith('/')) {
+            assertNotProtocolRelative(dest);
+          }
         } else if (typeof dest === 'object' && dest !== null && !Array.isArray(dest)) {
           const d = dest as Record<string, unknown>;
           if (typeof d.to !== 'string') {
             throw new Error(`Redirect for "${source}" in ${CONFIG_FILE} must have a "to" string`);
+          }
+          if ((d.to as string).startsWith('/')) {
+            assertNotProtocolRelative(d.to as string);
           }
           if (d.status !== undefined && !VALID_REDIRECT_STATUSES.has(d.status as number)) {
             throw new Error(
@@ -377,6 +395,15 @@ export function readConfig(root: string): VoidConfig {
             `Rewrite destination for "${source}" in ${CONFIG_FILE} must start with "/" (only internal paths are supported)`,
           );
         }
+        // Protocol-relative ("//host/x") passes the single-slash check but
+        // parses as cross-origin when the manifest is applied at dispatch.
+        // Mirrors the `c.rewrite()` codegen guard in router/compile.ts
+        // (commit 3c60d38).
+        if (dest.startsWith('//')) {
+          throw new Error(
+            `Rewrite destination for "${source}" in ${CONFIG_FILE} must not start with "//" (protocol-relative URLs parse as cross-origin; only internal paths are supported)`,
+          );
+        }
         if (dest.includes('?')) {
           throw new Error(
             `Rewrite destination for "${source}" in ${CONFIG_FILE} must not contain "?" (query strings are not supported in rewrite destinations; the incoming request's query is preserved automatically)`,
@@ -408,6 +435,14 @@ export function readConfig(root: string): VoidConfig {
         if (!dest.startsWith('/')) {
           throw new Error(
             `Fallback destination for "${source}" in ${CONFIG_FILE} must start with "/" (only internal paths are supported)`,
+          );
+        }
+        // Protocol-relative ("//host/x") passes the single-slash check but
+        // parses as cross-origin at dispatch. Mirrors the `c.rewrite()`
+        // codegen guard in router/compile.ts (commit 3c60d38).
+        if (dest.startsWith('//')) {
+          throw new Error(
+            `Fallback destination for "${source}" in ${CONFIG_FILE} must not start with "//" (protocol-relative URLs parse as cross-origin; only internal paths are supported)`,
           );
         }
         if (dest.includes('?')) {

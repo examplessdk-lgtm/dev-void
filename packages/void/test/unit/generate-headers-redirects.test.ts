@@ -262,6 +262,34 @@ describe('parseRedirectsFile', () => {
     const parsed = parseRedirectsFile(tmpDir);
     expect(parsed?.rules[0].origin).toBe('_redirects:2');
   });
+
+  it('skips 200 rewrites whose destination is protocol-relative ("//host/x") and warns', () => {
+    // Symmetric with `c.rewrite()` codegen (compile.ts, commit 3c60d38) and
+    // the `void.json` rewrite/fallback validators. `//evil.com/x` passes the
+    // single-slash check but parses as a cross-origin URL at dispatch,
+    // silently turning an internal rewrite into a proxy.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    setup('/docs //evil.com/docs 200\n/app/* /index.html 200\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
+      {
+        source: '/app/*',
+        destination: '/index.html',
+        status: 200,
+        force: false,
+        origin: '_redirects:2',
+      },
+    ]);
+    const calls = logSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((msg) => msg.includes('must not start with "//"'))).toBe(true);
+    logSpy.mockRestore();
+  });
+
+  it('skips 200! force-rewrites whose destination is protocol-relative', () => {
+    setup('/docs //evil.com/docs 200!\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed).toBeUndefined();
+  });
 });
 
 describe('_redirects + void.json merge precedence (same source)', () => {

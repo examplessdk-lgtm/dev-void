@@ -109,8 +109,8 @@ Unlike a redirect, users on `/blog/hello-world` won't see the URL change — the
 
 ## Programmatic rewrites in middleware
 
-::: warning Default target only
-`c.rewrite()`, `c.originalUrl()`, `c.isRewritten()`, and `routing.fallbacks` only work on the default target. `routing.rewrites` and `routing.redirects` work on every target (`node`, `bun`, `deno`, and the default) via the router.
+::: warning Helpers are typed to CloudEnv
+`routing.rewrites`, `routing.redirects`, and `routing.fallbacks` all work on every target (`node`, `bun`, `deno`, and the default) via the router. `c.rewrite()`, `c.originalUrl()`, and `c.isRewritten()` are typed against `CloudEnv`, so on `node`/`bun`/`deno` the `Env` narrows them away — the runtime still installs them on every target, so cast if you need to call them off-default.
 :::
 
 For dynamic rewrite logic — like i18n locale negotiation based on cookies or headers — use `c.rewrite()` in middleware:

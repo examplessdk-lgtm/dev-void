@@ -579,6 +579,17 @@ describe('routing.rewrites validation', () => {
     expect(() => readConfig(tmpDir)).toThrow('must not contain "?"');
     cleanup();
   });
+
+  it('throws when destination is protocol-relative ("//host/x")', () => {
+    // Mirrors the `c.rewrite()` codegen guard in router/compile.ts (commit
+    // 3c60d38). `"//evil.com/x".startsWith("/")` is true, so a naive
+    // single-slash check lets the value through — but when the manifest is
+    // applied at dispatch, `new URL("//evil.com/x", base)` resolves to
+    // `https://evil.com/x` and turns the rewrite into a cross-origin proxy.
+    setup(JSON.stringify({ routing: { rewrites: { '/docs': '//evil.com/x' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must not start with "//"');
+    cleanup();
+  });
 });
 
 describe('routing.fallbacks validation', () => {
@@ -616,6 +627,45 @@ describe('routing.fallbacks validation', () => {
   it('throws when destination contains a query string', () => {
     setup(JSON.stringify({ routing: { fallbacks: { '/*': '/index.html?foo=1' } } }));
     expect(() => readConfig(tmpDir)).toThrow('must not contain "?"');
+    cleanup();
+  });
+
+  it('throws when destination is protocol-relative ("//host/x")', () => {
+    // Symmetric with the rewrites guard — fallbacks reach the platform via
+    // the same manifest path, so the same cross-origin hazard applies.
+    setup(JSON.stringify({ routing: { fallbacks: { '/*': '//evil.com/index.html' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must not start with "//"');
+    cleanup();
+  });
+});
+
+describe('routing.redirects protocol-relative guard', () => {
+  // Redirects legitimately support external destinations ("https://..."), so
+  // the guard only applies when the destination is an internal path ("/..").
+  it('throws on string destination starting with "//"', () => {
+    setup(JSON.stringify({ routing: { redirects: { '/old': '//evil.com/new' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must not start with "//"');
+    cleanup();
+  });
+
+  it('throws on object destination with `to` starting with "//"', () => {
+    setup(
+      JSON.stringify({
+        routing: { redirects: { '/old': { to: '//evil.com/new', status: 301 } } },
+      }),
+    );
+    expect(() => readConfig(tmpDir)).toThrow('must not start with "//"');
+    cleanup();
+  });
+
+  it('still accepts explicit "https://" external destinations', () => {
+    setup(
+      JSON.stringify({
+        routing: { redirects: { '/old': 'https://example.com/new' } },
+      }),
+    );
+    const config = readConfig(tmpDir);
+    expect(config.routing?.redirects).toEqual({ '/old': 'https://example.com/new' });
     cleanup();
   });
 });

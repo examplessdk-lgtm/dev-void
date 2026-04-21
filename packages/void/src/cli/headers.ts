@@ -211,6 +211,17 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
         );
         continue;
       }
+      // Protocol-relative ("//host/x") passes the single-slash check but
+      // parses as a cross-origin URL when dispatch applies the manifest,
+      // silently turning an internal rewrite into a proxy. Mirrors the
+      // `c.rewrite()` codegen guard in router/compile.ts (commit 3c60d38)
+      // and the `void.json` rewrite/fallback validators in config.ts.
+      if (destination.startsWith('//')) {
+        voidWarn(
+          `Skipping _redirects rewrite "${source} ${destination} ${force ? '200!' : '200'}": destination must not start with "//" (protocol-relative URLs parse as cross-origin; only internal paths are supported).`,
+        );
+        continue;
+      }
       if (destination.includes('?')) {
         voidWarn(
           `Skipping _redirects rewrite "${source} ${destination} ${force ? '200!' : '200'}": destination must not contain "?" (query strings are not supported in rewrite destinations; the incoming request's query is preserved automatically).`,

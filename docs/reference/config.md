@@ -267,6 +267,8 @@ URL rewrites. Keys are source URL patterns, values are destination paths. Serves
 }
 ```
 
+Destinations use the `RewriteDestination` shape — typed route patterns plus `string`, so literal paths get typo-checked against the known route tree while interpolated strings widen to `string` by design. See [Programmatic rewrites in middleware](../guide/edge/rewrites#programmatic-rewrites-in-middleware) for the narrowing trade-off and performance notes.
+
 #### `routing.fallbacks`
 
 Fallback rewrites. Same shape as `rewrites`, but rules only fire when no static asset or route matched the request (i.e. the request would otherwise 404). Useful for SPA shells or default-locale catch-alls that shouldn't pre-empt real routes. See [Rewrites → Fallbacks](../guide/edge/rewrites#fallbacks) for details.
