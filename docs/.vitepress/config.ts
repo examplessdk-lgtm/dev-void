@@ -48,6 +48,7 @@ const referenceItems = [
     items: [
       { text: 'Plugin', link: '/reference/api#plugin' },
       { text: 'Handlers', link: '/reference/api#handlers' },
+      { text: 'Rewrites', link: '/reference/api#rewrites' },
       { text: 'Auth', link: '/reference/api#auth' },
       { text: 'Fetch Client', link: '/reference/api#fetch-client' },
       { text: 'Database', link: '/reference/api#database' },
