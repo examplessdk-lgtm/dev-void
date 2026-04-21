@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
@@ -10,6 +10,7 @@ import {
   resolveBindingNames,
   isNodeTarget,
   getDatabaseDialect,
+  VALID_REDIRECT_STATUSES,
 } from '../../src/config';
 
 const tmpDir = join(import.meta.dirname, '.tmp-config-test');
@@ -521,8 +522,23 @@ describe('readConfig redirects', () => {
 
   it('throws on invalid status code', () => {
     setup(JSON.stringify({ routing: { redirects: { '/old': { to: '/new', status: 200 } } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must be 301, 302, 307, or 308');
+    expect(() => readConfig(tmpDir)).toThrow('must be 301, 302, 303, 307, or 308');
     cleanup();
+  });
+
+  it('accepts status 303', () => {
+    setup(JSON.stringify({ routing: { redirects: { '/old': { to: '/new', status: 303 } } } }));
+    const config = readConfig(tmpDir);
+    expect(config.routing?.redirects).toEqual({ '/old': { to: '/new', status: 303 } });
+    cleanup();
+  });
+
+  it('schema.json redirect status enum matches VALID_REDIRECT_STATUSES', () => {
+    const schema = JSON.parse(readFileSync(join(import.meta.dirname, '../../schema.json'), 'utf8'));
+    const schemaEnum: number[] =
+      schema.properties.routing.properties.redirects.patternProperties['^/'].oneOf[1].properties
+        .status.enum;
+    expect(new Set(schemaEnum)).toEqual(VALID_REDIRECT_STATUSES);
   });
 });
 

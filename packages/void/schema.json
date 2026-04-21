@@ -186,7 +186,7 @@
                   "type": "object",
                   "properties": {
                     "to": { "type": "string" },
-                    "status": { "type": "integer", "enum": [301, 302, 307, 308] }
+                    "status": { "type": "integer", "enum": [301, 302, 303, 307, 308] }
                   },
                   "required": ["to"],
                   "additionalProperties": false

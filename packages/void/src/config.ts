@@ -66,7 +66,13 @@ const CONFIG_FILE = 'void.json';
 const VALID_TARGETS = new Set(['cloudflare', 'node', 'bun', 'deno']);
 const VALID_APP_TYPES = new Set(['spa', 'static', 'void', 'framework']);
 const VALID_OUTPUTS = new Set(['server', 'static']);
-const VALID_REDIRECT_STATUSES = new Set([301, 302, 307, 308]);
+/**
+ * Allowed 3xx redirect statuses. Source of truth for the framework, the
+ * `_redirects` parser (`cli/headers.ts`), and the schema.json enum. 303 is
+ * included for POST→GET after-submit patterns; 304/305/306 aren't
+ * cacheable-safe / are deprecated.
+ */
+export const VALID_REDIRECT_STATUSES: Set<number> = new Set([301, 302, 303, 307, 308]);
 const VALID_DATABASE_VALUES = new Set(['pg']);
 
 /** Old flat keys that have moved into namespaces. */
@@ -313,7 +319,7 @@ export function readConfig(root: string): VoidConfig {
           }
           if (d.status !== undefined && !VALID_REDIRECT_STATUSES.has(d.status as number)) {
             throw new Error(
-              `Redirect status for "${source}" in ${CONFIG_FILE} must be 301, 302, 307, or 308`,
+              `Redirect status for "${source}" in ${CONFIG_FILE} must be 301, 302, 303, 307, or 308`,
             );
           }
         } else {

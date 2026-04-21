@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { VALID_REDIRECT_STATUSES } from '../config';
 import { voidWarn } from '../log';
 import type { HeaderRule, RedirectRule } from './types';
 
@@ -178,6 +179,12 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
       }
       rules.push({ source, destination, status, force, origin });
     } else if (status >= 300 && status < 400) {
+      if (!VALID_REDIRECT_STATUSES.has(status)) {
+        voidWarn(
+          `Skipping _redirects entry "${source} ${destination} ${statusStr}" (line ${lineNumber}): redirect status must be 301, 302, 303, 307, or 308.`,
+        );
+        continue;
+      }
       rules.push({ source, destination, status, origin });
     }
   }
