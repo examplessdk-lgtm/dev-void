@@ -222,7 +222,7 @@ So a SPA app can carve out specific paths without losing the SPA shell behavior 
 
 With this config, an asset miss under `/docs/getting-started` resolves to `/docs.html`, while an asset miss under `/app/settings` still resolves to `/index.html` (the SPA default).
 
-You don't need to write `"/*": "/index.html"` yourself — the CLI appends it automatically when packaging a SPA deploy that has user fallbacks. If you do write it, the CLI emits a warning on `void deploy` noting that the rule duplicates the default and can be omitted.
+You don't need to write `"/*": "/index.html"` yourself — the CLI **prepends** a synthetic `{ source: '/*', destination: '/index.html' }` rule to the fallback list when packaging a SPA deploy that has user fallbacks. Because evaluation is last-match-wins, user rules come after the synthetic entry and take precedence; the synthetic rule only fires when no user rule matched. This is why the shipped manifest may contain more fallback rules than you wrote in `void.json`. If you do write `"/*": "/index.html"` yourself, the CLI emits a warning on `void deploy` noting that the rule duplicates the default and can be omitted.
 
 ## `_redirects` file
 

@@ -108,7 +108,7 @@ If a request is rewritten (via `routing.rewrites`, `routing.fallbacks`, `_redire
 
 `revalidate({ paths })` operates on the rewritten pathname (the slot's primary key). Purging `/en/docs/foo` removes **all variants** (direct + every rewrite source) under that path. Purging the source path (`/docs/foo`) invalidates nothing, because no slot was ever written under it.
 
-**Migration note:** if you introduce a new rewrite on an existing project that was already serving ISR traffic, expect a one-time cache-miss wave on the first deploy. Cache entries written under the original pathname become unreachable — the cache key now follows the rewritten path — so early requests re-render until the new key warms up. The miss window is proportional to your traffic and TTL; no manual purge is required.
+**Migration note:** if you introduce a new rewrite on an existing project that was already serving ISR traffic, expect a one-time cache-miss wave on the first deploy. Cache entries written under the original pathname become unreachable — the cache key now follows the rewritten path — so early requests re-render until the new key warms up. The miss window is proportional to your traffic and TTL; no manual purge is required. Entries written before this feature have no `originalUrl` marker and use the legacy rewriteless cache key; they remain readable but are variant-keyed as a "direct hit," while new entries written after the deploy will be keyed by rewrite variant.
 
 ## On-demand revalidation
 
