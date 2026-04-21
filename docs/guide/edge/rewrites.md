@@ -129,6 +129,8 @@ export default defineMiddleware(async (c, next) => {
 
 `c.rewrite(path)` re-dispatches the request through the router with the new pathname. You must `return` the result — same shape as `c.redirect()`.
 
+The `path` argument is typed as [`RewriteDestination`](../../reference/api#rewritedestination), a union of your generated route patterns plus `string`. Literal paths are checked against the known route tree at compile time — `c.rewrite('/en/dcos')` is flagged as a typo — while interpolated strings like ``c.rewrite(`/${locale}${c.req.path}`)`` widen to `string` and pass the check by design. Treat it as autocomplete + typo-guard, not a proof of reachability.
+
 ### Runtime caveat: unmanaged Hono contexts
 
 `c.rewrite`, `c.originalUrl`, and `c.isRewritten` are only installed on Contexts created by Void's generated router — i.e. the Context that reaches a `defineHandler` or `defineMiddleware` export. TypeScript catches most misuse here: outside a Context whose `Env` extends `CloudEnv`, the helpers resolve to `never` and the call won't compile. If you manage to call them anyway — typically from inside a vanilla `new Hono()` sub-app whose env has been widened by third-party middleware — you'll get `TypeError: c.rewrite is not a function` at runtime, because the dispatcher that attaches the helpers never ran for that Context. Keep rewrite logic in top-level `defineMiddleware` handlers rather than inside mounted vanilla Hono apps.
@@ -144,6 +146,12 @@ Static rewrites are different: `_redirects` `200!` entries and `routing.rewrites
 What the guard **doesn't** catch are multi-hop user-written loops across separate middleware: middleware A rewrites `/a → /b`, middleware B rewrites `/b → /c`, middleware C rewrites `/c → /a`. Each hop constructs a fresh `Request`, so the per-request guard can't see the cycle. If you chain rewrites across middleware, write each hop so it only rewrites paths that aren't already in its target shape.
 
 Also avoid deep rewrite chains for performance: every hop re-runs all middleware from the top, so `/a → /b → /c → /d` costs four router passes.
+
+### Performance notes
+
+- Static `routing.rewrites` and `routing.fallbacks` rules are evaluated in order, last-match-wins, at O(rules) per request. The list is small in practice, but keep it bounded — don't programmatically generate thousands of entries.
+- Each `c.rewrite()` hop replays the full middleware stack against a fresh `Request`. A chain of three middleware rewrites with four middleware in the stack is roughly twelve middleware invocations, not four.
+- The WeakSet loop guard is keyed on the `Request` identity and only suppresses the _static rules_ middleware on re-dispatched requests. User middleware is not guarded: if `c.rewrite('/a')` lands on `/a`, and middleware on `/a` calls `c.rewrite('/b')`, that second hop runs — each hop allocates a new `Request`, so the guard never matches. Chain depth is your responsibility.
 
 ### Side effects in re-dispatched middleware
 
