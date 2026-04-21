@@ -1194,6 +1194,101 @@ describe('c.rewrite runtime wrapper', () => {
     expect(caught).toBeInstanceOf(TypeError);
     expect(String(caught)).toContain('is not a function');
   });
+
+  it('c.rewrite external-URL rejection pins the exact error message', async () => {
+    // Pin the message text verbatim so a copy tweak in compile.ts surfaces
+    // as a failing test. The impl throws a plain `Error` (not `TypeError`) —
+    // matches the wrapper in this file and the codegen at
+    // packages/void/src/router/compile.ts:806-809.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    let caught: unknown;
+    app.get('/from', (c) => {
+      try {
+        (c as any).rewrite('http://evil.com');
+      } catch (err) {
+        caught = err;
+      }
+      return c.text('handled', 200);
+    });
+
+    const res = await app.fetch(new Request('http://localhost/from'));
+    expect(res.status).toBe(200);
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      'c.rewrite() only accepts internal, path-absolute destinations (starting with "/"); use fetch() for external URLs or c.redirect() for cross-origin redirects',
+    );
+  });
+
+  it('c.rewrite protocol-relative rejection pins the exact error message', async () => {
+    // Companion to the external-URL pin: `//host/x` passes the naive
+    // `startsWith("/")` check but parses as a protocol-relative URL, so the
+    // wrapper raises a targeted second error. Pin the text so the `//` vs
+    // `/` distinction doesn't get rephrased away. Matches compile.ts:815-818.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    let caught: unknown;
+    app.get('/from', (c) => {
+      try {
+        (c as any).rewrite('//evil.com/path');
+      } catch (err) {
+        caught = err;
+      }
+      return c.text('handled', 200);
+    });
+
+    const res = await app.fetch(new Request('http://localhost/from'));
+    expect(res.status).toBe(200);
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      'c.rewrite() destination cannot begin with "//" — that parses as a protocol-relative URL; use a single-slash path-absolute destination or fetch() for cross-origin requests',
+    );
+  });
+
+  it('multi-middleware rewrite cycles are NOT caught by the single-hop guard (documented gap)', async () => {
+    // Documents the caveat in docs/guide/edge/rewrites.md:146 — the WeakSet
+    // loop guard is identity-keyed on the `Request` object, so each hop that
+    // constructs a fresh Request (every c.rewrite(), and every replay through
+    // a sibling middleware) creates a new identity. A cycle of /a → /b → /c
+    // → /a therefore has no runtime guard: each hop re-runs all middleware,
+    // forming infinite recursion bounded only by the host runtime's stack.
+    //
+    // We bound the test by bailing after a fixed hop count so CI doesn't
+    // hang. The assertion captures the observed behaviour (hop counter
+    // blows past any reasonable depth), pinning the gap. If a max-depth
+    // guard is ever added upstream, this test is the signal to revisit it.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    const MAX_HOPS = 50;
+    let hops = 0;
+
+    const nextPath: Record<string, string> = { '/a': '/b', '/b': '/c', '/c': '/a' };
+
+    app.use('*', async (c, next) => {
+      const pathname = new URL(c.req.url).pathname;
+      const target = nextPath[pathname];
+      if (target) {
+        hops++;
+        if (hops > MAX_HOPS) {
+          // Bail rather than recurse: this is the documented infinite loop.
+          return c.text('bailed', 508);
+        }
+        return (c as any).rewrite(target);
+      }
+      return next();
+    });
+
+    // No handler ever resolves — the cycle consumes every hop. The test
+    // relies on our explicit bail at MAX_HOPS.
+    const res = await app.fetch(new Request('http://localhost/a'));
+    expect(res.status).toBe(508);
+    expect(await res.text()).toBe('bailed');
+    // Exceeded MAX_HOPS, confirming no built-in guard intervened.
+    expect(hops).toBeGreaterThan(MAX_HOPS);
+  });
 });
 
 describe('X-Void-Routing dev trace header', () => {

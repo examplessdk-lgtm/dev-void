@@ -1,6 +1,18 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('@clack/prompts', () => ({
+  intro: vi.fn(),
+  outro: vi.fn(),
+  log: { success: vi.fn(), warn: vi.fn(), error: vi.fn(), info: vi.fn(), step: vi.fn() },
+  note: vi.fn(),
+  confirm: vi.fn(),
+  isCancel: () => false,
+  cancel: vi.fn(),
+  spinner: () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }),
+}));
+
 import { parseRedirectsFile } from '../../src/cli/headers';
 
 const tmpDir = join(import.meta.dirname, '.tmp-parse-redirects-test');
@@ -298,6 +310,52 @@ describe('_redirects + void.json merge precedence (same source)', () => {
     // No _redirects-file fallback entries in this fixture — sanity check
     // that the fallback bucket doesn't accidentally pick up the 3xx entry.
     expect(fileFallbacks).toEqual([]);
+  });
+});
+
+describe('warnRedundantForceOn3xx', () => {
+  // `parseRedirectsFile` tallies `!` suffixes on 3xx entries into
+  // `redundantForceOn3xx` and strips them silently. The deploy pipeline
+  // surfaces a single aggregated `log.warn` via `warnRedundantForceOn3xx`
+  // (not a per-line warning). Pin the exact text here so a copy tweak
+  // in deploy.ts shows up as a failing test rather than drifting silently.
+  it('skips emitting when the count is zero', async () => {
+    const { warnRedundantForceOn3xx } = await import('../../src/cli/deploy');
+    const { log } = await import('@clack/prompts');
+    const warnSpy = log.warn as ReturnType<typeof vi.fn>;
+    warnSpy.mockClear();
+
+    warnRedundantForceOn3xx(0);
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('emits singular "entry"/"suffix" wording for a count of 1', async () => {
+    const { warnRedundantForceOn3xx } = await import('../../src/cli/deploy');
+    const { log } = await import('@clack/prompts');
+    const warnSpy = log.warn as ReturnType<typeof vi.fn>;
+    warnSpy.mockClear();
+
+    warnRedundantForceOn3xx(1);
+
+    expect(warnSpy).toHaveBeenCalledOnce();
+    expect(warnSpy.mock.calls[0][0]).toBe(
+      '1 redundant "!" suffix found on 3xx entry in _redirects (these always force by nature). Safe to remove.',
+    );
+  });
+
+  it('emits plural "entries"/"suffixes" wording for counts > 1', async () => {
+    const { warnRedundantForceOn3xx } = await import('../../src/cli/deploy');
+    const { log } = await import('@clack/prompts');
+    const warnSpy = log.warn as ReturnType<typeof vi.fn>;
+    warnSpy.mockClear();
+
+    warnRedundantForceOn3xx(3);
+
+    expect(warnSpy).toHaveBeenCalledOnce();
+    expect(warnSpy.mock.calls[0][0]).toBe(
+      '3 redundant "!" suffixes found on 3xx entries in _redirects (these always force by nature). Safe to remove.',
+    );
   });
 });
 

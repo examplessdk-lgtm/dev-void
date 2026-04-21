@@ -529,7 +529,7 @@ async function runStaticDeploy(
  * there — but we nudge the user to clean up for clarity. Silenced when
  * `count === 0`.
  */
-function warnRedundantForceOn3xx(count: number): void {
+export function warnRedundantForceOn3xx(count: number): void {
   if (count === 0) {
     return;
   }
