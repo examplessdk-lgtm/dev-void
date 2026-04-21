@@ -759,6 +759,8 @@ export function compileRouteTable(
 
   lines.push(`const app = new Hono();`);
   lines.push(`export const requestContext = new AsyncLocalStorage();`);
+  // WeakSet so entries are collected once the Request is GC'd — and Request
+  // objects are short-lived per invocation, so the set can't accumulate.
   lines.push('const __rewrittenReqs = new WeakSet();');
   // Dev-only compile-time flag gating the `X-Void-Routing` trace header.
   // Stays `false` in production builds so the header never ships to users.

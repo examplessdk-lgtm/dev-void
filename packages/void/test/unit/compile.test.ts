@@ -994,6 +994,59 @@ describe('c.rewrite runtime wrapper', () => {
     expect(observed).toEqual([false, true]);
   });
 
+  it('middleware runs twice when a post-asset fallback rewrite re-dispatches', async () => {
+    // Same replay semantics as a force-phase rewrite, but driven by a
+    // fallback-phase rule (status=200, force=false) that fires from
+    // `app.notFound` — mirroring how compile.ts wires `fallbackRules` into
+    // the notFound hook after the asset lookup misses. The middleware must
+    // still run twice (once per dispatch) and both URLs — the original and
+    // the rewritten — must be observable from the appropriate context APIs.
+    const app = new Hono();
+    const rewrittenReqs = new WeakSet<Request>();
+    installVoidWrappers(app, rewrittenReqs);
+
+    let invocations = 0;
+    const observedReqUrls: string[] = [];
+    const observedOriginalUrls: Array<string | null> = [];
+    app.use('*', async (c, next) => {
+      invocations++;
+      observedReqUrls.push(c.req.url);
+      observedOriginalUrls.push((c as any).originalUrl());
+      await next();
+    });
+
+    // Fallback rule: /missing/* rewrites to /spa-shell on asset-miss.
+    const fallbackRules = [{ source: '/missing/*', destination: '/spa-shell', status: 200 }];
+    app.notFound((c) => {
+      if (rewrittenReqs.has(c.req.raw)) {
+        return c.text('not-found', 404);
+      }
+      const pathname = new URL(c.req.url).pathname;
+      for (const rule of fallbackRules) {
+        if (rule.source.endsWith('/*') && pathname.startsWith(rule.source.slice(0, -2))) {
+          return (c as any).rewrite(rule.destination);
+        }
+      }
+      return c.text('not-found', 404);
+    });
+
+    app.get('/spa-shell', (c) => c.text('shell-body', 200));
+
+    const res = await app.fetch(new Request('http://localhost/missing/deep'));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('shell-body');
+
+    // Middleware fired once per dispatch — twice total.
+    expect(invocations).toBe(2);
+    // First hop: original request URL, no X-Void-Original-URL yet.
+    expect(observedReqUrls[0]).toBe('http://localhost/missing/deep');
+    expect(observedOriginalUrls[0]).toBeNull();
+    // Second hop: rewritten URL on c.req.url, and c.originalUrl() surfaces
+    // the pre-rewrite URL — both observable from the replayed context.
+    expect(observedReqUrls[1]).toBe('http://localhost/spa-shell');
+    expect(observedOriginalUrls[1]).toBe('http://localhost/missing/deep');
+  });
+
   it('c.rewrite preserves a "?query" in the destination path (does not URL-encode "?")', async () => {
     // Regression anchor: setting `URL.pathname = "/page?x=1"` percent-encodes
     // the `?` into `%3F`, so the re-dispatched request lands at `/page%3Fx=1`
