@@ -109,6 +109,10 @@ Unlike a redirect, users on `/blog/hello-world` won't see the URL change — the
 
 ## Programmatic rewrites in middleware
 
+::: warning Cloudflare target only
+`c.rewrite()`, `c.originalUrl()`, `c.isRewritten()`, and `routing.fallbacks` only work on the default Cloudflare target. `routing.rewrites` and `routing.redirects` work on every target (`node`, `bun`, `deno`, Cloudflare) via the router.
+:::
+
 For dynamic rewrite logic — like i18n locale negotiation based on cookies or headers — use `c.rewrite()` in middleware:
 
 ```ts
@@ -124,6 +128,10 @@ export default defineMiddleware(async (c, next) => {
 ```
 
 `c.rewrite(path)` re-dispatches the request through the router with the new pathname. You must `return` the result — same shape as `c.redirect()`.
+
+### Runtime caveat: unmanaged Hono contexts
+
+`c.rewrite`, `c.originalUrl`, and `c.isRewritten` are only installed on Contexts created by Void's generated router — i.e. the Context that reaches a `defineHandler` or `defineMiddleware` export. TypeScript catches most misuse here: outside a Context whose `Env` extends `CloudEnv`, the helpers resolve to `never` and the call won't compile. If you manage to call them anyway — typically from inside a vanilla `new Hono()` sub-app whose env has been widened by third-party middleware — you'll get `TypeError: c.rewrite is not a function` at runtime, because the dispatcher that attaches the helpers never ran for that Context. Keep rewrite logic in top-level `defineMiddleware` handlers rather than inside mounted vanilla Hono apps.
 
 ### Runtime rewrites cannot reach static assets
 

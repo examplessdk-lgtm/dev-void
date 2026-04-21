@@ -259,7 +259,7 @@ interface CloudContext {
 
 **Caveats:**
 
-- Only available on contexts where `Env` extends [`CloudEnv`](#cloudenv). Calling `c.rewrite()` on an unmanaged Hono sub-app (one mounted outside the Void router) type-checks but throws at runtime — see the [guide](../guide/edge/rewrites.md#programmatic-rewrites-in-middleware) for details.
+- Only available on contexts where `Env` extends [`CloudEnv`](#cloudenv). Calling `c.rewrite()` on an unmanaged Hono sub-app (one mounted outside the Void router) type-checks but throws `TypeError: c.rewrite is not a function` at runtime — see the [guide](../guide/edge/rewrites.md#runtime-caveat-unmanaged-hono-contexts) for details.
 - Middleware re-runs on every rewrite hop. Guard side-effects with [`c.isRewritten()`](#c-originalurl-c-isrewritten).
 - Client-side SPA navigation via `Link` does not trigger server rewrites; only full HTTP requests do.
 - [ISR](../guide/edge/revalidation.md) cache keys follow the rewritten path, not the original URL.
