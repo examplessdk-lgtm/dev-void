@@ -575,7 +575,11 @@ describe('compileRouteTable', () => {
     );
 
     // Guard: external / non-path-absolute destinations must fail loudly.
-    expect(code).toContain('c.rewrite destination must be path-absolute');
+    expect(code).toContain('c.rewrite() only accepts internal, path-absolute destinations');
+    // Protocol-relative (`//host/path`) would slip past a naive `startsWith("/")`
+    // check and silently proxy to another origin — the codegen rejects it.
+    expect(code).toContain('path.startsWith("//")');
+    expect(code).toContain('destination cannot begin with \\"//\\"');
     // Split on first `?` to avoid `URL.pathname`'s percent-encoding of `?`.
     expect(code).toContain('const __qIdx = path.indexOf("?");');
     expect(code).toContain('rewriteUrl.pathname = __pathOnly;');
@@ -655,7 +659,14 @@ function installVoidWrappers(app: Hono, rewrittenReqs: WeakSet<Request>): void {
     const isInternalRedispatch = rewrittenReqs.has(c.req.raw);
     (c as any).rewrite = (path: string) => {
       if (typeof path !== 'string' || !path.startsWith('/')) {
-        throw new Error('c.rewrite destination must be path-absolute (start with "/")');
+        throw new Error(
+          'c.rewrite() only accepts internal, path-absolute destinations (starting with "/"); use fetch() for external URLs or c.redirect() for cross-origin redirects',
+        );
+      }
+      if (path.startsWith('//')) {
+        throw new Error(
+          'c.rewrite() destination cannot begin with "//" — that parses as a protocol-relative URL; use a single-slash path-absolute destination or fetch() for cross-origin requests',
+        );
       }
       // Split on the first `?` so queries aren't URL-encoded by the
       // `URL.pathname` setter (which would produce `%3F`). Mirrors the
@@ -1071,7 +1082,7 @@ describe('c.rewrite runtime wrapper', () => {
     expect(res.headers.get('X-Req-Search')).toBe('?x=1');
   });
 
-  it('c.rewrite rejects external / protocol-absolute destinations', async () => {
+  it('c.rewrite rejects absolute-URL destinations with an internal-only error', async () => {
     // `c.rewrite` is strictly in-worker re-dispatch. An absolute URL would
     // silently turn into a proxy — fail at the call site so users reach for
     // `fetch()` instead.
@@ -1091,7 +1102,47 @@ describe('c.rewrite runtime wrapper', () => {
     const res = await app.fetch(new Request('http://localhost/from'));
     expect(res.status).toBe(200);
     expect(caught).toBeInstanceOf(Error);
-    expect(String(caught)).toContain('must be path-absolute');
+    expect(String(caught)).toContain('only accepts internal, path-absolute destinations');
+  });
+
+  it('c.rewrite rejects protocol-relative ("//host/x") destinations', async () => {
+    // `"//evil.com/x".startsWith("/")` is true — a naive path-absolute check
+    // lets it through, and `new URL("//evil.com/x", base)` then resolves to
+    // `https://evil.com/x`, silently proxying the request off-origin. Must
+    // fail distinct from the generic path-absolute error so users get a
+    // targeted message pointing at the `//` mistake.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    let caught: unknown;
+    app.get('/from', (c) => {
+      try {
+        (c as any).rewrite('//evil.com/x');
+      } catch (err) {
+        caught = err;
+      }
+      return c.text('handled', 200);
+    });
+
+    const res = await app.fetch(new Request('http://localhost/from'));
+    expect(res.status).toBe(200);
+    expect(caught).toBeInstanceOf(Error);
+    expect(String(caught)).toContain('protocol-relative');
+    expect(String(caught)).toContain('//');
+  });
+
+  it('c.rewrite still accepts ordinary path-absolute destinations', async () => {
+    // Regression companion to the `//` rejection — the guard is a prefix
+    // check, so a `/internal` path must keep dispatching through the router.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    app.get('/from', (c) => (c as any).rewrite('/internal'));
+    app.get('/internal', (c) => c.text('internal-handler', 200));
+
+    const res = await app.fetch(new Request('http://localhost/from'));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('internal-handler');
   });
 
   it('c.rewrite works on a node-target context without c.executionCtx', async () => {
@@ -1385,6 +1436,24 @@ describe('default-target dev parity', () => {
     // notFound hook runs fallbacks first without a platform asset lookup.
     expect(code).not.toContain('assets.fetch(c.req.raw)');
     expect(code).toContain('const __fallbackRules =');
+  });
+
+  // Regression: prior to feat/rewrites the void.json validator warned that
+  // `routing.fallbacks` was default-target-only and the codegen skipped the
+  // notFound fallback hook on non-default targets. Fallbacks now apply on
+  // every target — this test locks in that contract so reintroducing a
+  // `nodeTarget` → "strip fallbackRules" branch fails loudly in both dev and
+  // prod builds.
+  it('emits __fallbackRules on node targets in both dev and prod when fallbackRules is non-empty', () => {
+    const devCode = compile({ nodeTarget: true, dev: true });
+    const prodCode = compile({ nodeTarget: true, dev: false });
+    expect(devCode).toContain('const __fallbackRules =');
+    expect(prodCode).toContain('const __fallbackRules =');
+    // Rule source must be inlined so the generated code actually checks it at
+    // runtime — a regression that silently serialized an empty array would
+    // still emit the identifier.
+    expect(devCode).toContain('"source":"/docs/*"');
+    expect(prodCode).toContain('"source":"/docs/*"');
   });
 
   it('wraps SSR notFound with assets-first-then-fallback on default target dev', () => {

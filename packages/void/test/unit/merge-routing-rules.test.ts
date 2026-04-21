@@ -121,6 +121,36 @@ describe('mergeRoutingRules', () => {
     expect(result.redirectRules).toHaveLength(2);
   });
 
+  // Documented at docs/guide/edge/rewrites.md §"Precedence: _redirects vs
+  // void.json" — within the pre-asset phase the order is always
+  //   _redirects → routing.redirects → routing.rewrites
+  // so when the same source appears in both `routing.redirects` and
+  // `routing.rewrites`, the rewrite wins under last-match-wins. Pin the
+  // ordering here so a refactor of `mergeRoutingRules` can't silently flip
+  // which entry takes precedence.
+  it('orders routing.redirects before routing.rewrites so same-source rewrites override redirects', () => {
+    setup();
+    const result = mergeRoutingRules({
+      dir: tmpDir,
+      routing: {
+        redirects: { '/x': '/from-redirect' },
+        rewrites: { '/x': '/from-rewrite' },
+      },
+    });
+
+    expect(result.redirectRules).toHaveLength(2);
+    expect(result.redirectRules[0]).toMatchObject({
+      source: '/x',
+      destination: '/from-redirect',
+      origin: 'void.json#routing.redirects',
+    });
+    expect(result.redirectRules[1]).toMatchObject({
+      source: '/x',
+      destination: '/from-rewrite',
+      origin: 'void.json#routing.rewrites',
+    });
+  });
+
   it('leaves fallbackRules undefined when no fallbacks exist in either source', () => {
     setup({
       redirects: '/old   /new   301',

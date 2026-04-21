@@ -805,7 +805,16 @@ export function compileRouteTable(
   // caller reaches for `fetch()` or `c.redirect()` instead.
   lines.push('    if (typeof path !== "string" || !path.startsWith("/")) {');
   lines.push(
-    '      throw new Error("c.rewrite destination must be path-absolute (start with \\"/\\")");',
+    '      throw new Error("c.rewrite() only accepts internal, path-absolute destinations (starting with \\"/\\"); use fetch() for external URLs or c.redirect() for cross-origin redirects");',
+  );
+  lines.push('    }');
+  // A leading `//` is path-absolute by the naive `startsWith("/")` check but
+  // parses as a protocol-relative URL (`//host/path`) — `new URL("//evil/x",
+  // base)` resolves to `https://evil/x`, silently turning an in-worker rewrite
+  // into a cross-origin proxy. Reject at the call site.
+  lines.push('    if (path.startsWith("//")) {');
+  lines.push(
+    '      throw new Error("c.rewrite() destination cannot begin with \\"//\\" — that parses as a protocol-relative URL; use a single-slash path-absolute destination or fetch() for cross-origin requests");',
   );
   lines.push('    }');
   // `URL.pathname` setter percent-encodes `?`, so splitting path into

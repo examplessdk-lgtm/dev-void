@@ -909,18 +909,6 @@ export function voidPlugin(options?: {
           '" (edge caching is CF-only)',
       );
     }
-    const fallbackCount = config.routing?.fallbacks
-      ? Object.keys(config.routing.fallbacks).length
-      : 0;
-    if (fallbackCount > 0) {
-      voidWarn(
-        '"routing.fallbacks" is only supported on the default target; ignoring ' +
-          fallbackCount +
-          ' rule(s) on target="' +
-          config.target +
-          '"',
-      );
-    }
 
     return [
       restartPlugin(),
