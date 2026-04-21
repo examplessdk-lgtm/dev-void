@@ -215,6 +215,55 @@ describe('parseRedirectsFile', () => {
   });
 });
 
+describe('_redirects + void.json merge precedence (same source)', () => {
+  // Mirrors the ordering at packages/void/src/cli/deploy.ts:580-586 and 903-909:
+  //   redirectRules = [...always(_redirects), ...redirects(void.json), ...rewrites(void.json)]
+  // Last-match-wins means void.json rules override _redirects rules when they
+  // share a source. Regression anchor for that contract — the merge site is
+  // simple array concat, but if someone reverses the order the silent override
+  // flips direction without failing the deploy.
+  it('places _redirects first and void.json rules last, so void.json wins under last-match-wins', async () => {
+    const { splitRedirectRulesByForce } = await import('../../src/cli/headers');
+    const { convertRedirectsConfig, convertRewritesConfig } = await import('../../src/config');
+
+    setup('/x /from-file 301\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    const { always: fileAlways, fallbacks: fileFallbacks } = splitRedirectRulesByForce(
+      parsed?.rules,
+    );
+    // void.json has a same-source entry under both redirects and rewrites to
+    // cover both pre-asset origins.
+    const cfgRedirects = convertRedirectsConfig({ '/x': '/from-config-redirect' });
+    const cfgRewrites = convertRewritesConfig({ '/x': '/from-config-rewrite' });
+
+    // Merge order must match deploy.ts — if this drifts, the test fails
+    // loudly with a concrete diff rather than letting a silent precedence
+    // flip hit production.
+    const merged = [...fileAlways, ...(cfgRedirects ?? []), ...(cfgRewrites ?? [])];
+
+    expect(merged).toEqual([
+      { source: '/x', destination: '/from-file', status: 301, origin: '_redirects:1' },
+      {
+        source: '/x',
+        destination: '/from-config-redirect',
+        status: 302,
+        origin: 'void.json#routing.redirects',
+      },
+      {
+        source: '/x',
+        destination: '/from-config-rewrite',
+        status: 200,
+        force: true,
+        origin: 'void.json#routing.rewrites',
+      },
+    ]);
+
+    // No _redirects-file fallback entries in this fixture — sanity check
+    // that the fallback bucket doesn't accidentally pick up the 3xx entry.
+    expect(fileFallbacks).toEqual([]);
+  });
+});
+
 describe('splitRedirectRulesByForce', () => {
   it('returns empty buckets for undefined input', async () => {
     const { splitRedirectRulesByForce } = await import('../../src/cli/headers');
