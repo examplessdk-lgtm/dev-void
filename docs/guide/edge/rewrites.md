@@ -324,3 +324,11 @@ X-Void-Routing: pass-through
 ```
 
 Phases are separated by `→`. The parenthesised source hint points at the exact declaration — a line number for `_redirects`, a config path for `void.json`, or `spa-default` for the synthetic SPA catch-all. The header is **only emitted in dev** — production builds strip both the trace code and the per-rule `origin` metadata from the bundle and manifest.
+
+::: warning Cloudflare target: static rules don't fire in `vite dev`
+On the Cloudflare target, static `routing.rewrites` / `routing.redirects` / `routing.fallbacks` (and `_redirects` file entries) are applied by Void's edge dispatch layer in production — dispatch sits in front of your worker and evaluates rules before handing the request off. But `vite dev` runs your worker in miniflare **without dispatch in front of it**, so static rules don't fire locally on the CF target.
+
+`c.rewrite()` calls in middleware still work in CF dev because they live inside the worker itself. The `X-Void-Routing` dev header only reports decisions made inside the worker (middleware `c.rewrite()` calls), and on the node/bun/deno targets it also covers static rules since those are compiled into the Hono middleware for those targets.
+
+To exercise static rules against a realistic edge pipeline during development, either deploy to a staging project (`void deploy`) or switch the target to `node` / `bun` / `deno` locally — static rule evaluation is at parity on those targets.
+:::
