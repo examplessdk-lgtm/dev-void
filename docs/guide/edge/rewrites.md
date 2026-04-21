@@ -252,7 +252,7 @@ When the same source pattern appears in both a `_redirects` file and `void.json`
 Rules are bucketed by phase before merging:
 
 - **Pre-asset phase** (always fires, runs before static asset lookup): `_redirects` 3xx entries + `_redirects` `200!` entries + `routing.redirects` + `routing.rewrites`.
-- **Post-asset phase** (only fires on an asset miss): `_redirects` plain `200` entries + `routing.fallbacks`. For SPA app types, the synthetic `/* → /index.html` rule is appended **last** in this phase.
+- **Post-asset phase** (only fires on an asset miss): `_redirects` plain `200` entries + `routing.fallbacks`. For SPA app types, the synthetic `/* → /index.html` rule is **prepended first** in this phase, so user fallbacks evaluated later override it under last-match-wins.
 
 Within each phase, the order is always: **`_redirects` file rules first, then `void.json` rules**. Because evaluation is last-match-wins, **`void.json` rules override `_redirects` rules for the same source**. This holds even though `_redirects` is "closer to the build output" — intuitions like "file wins" or "whichever I wrote last in the file wins" are both wrong.
 
