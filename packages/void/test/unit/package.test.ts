@@ -103,8 +103,8 @@ describe('packageStaticBuild', () => {
     const manifest = JSON.parse(form.get('manifest') as string);
     expect(manifest.assetConfig).toEqual({ not_found_handling: 'none' });
     expect(manifest.fallbackRules).toEqual([
-      { source: '/*', destination: '/index.html', status: 200, force: false },
-      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+      { source: '/*', destination: '/index.html', status: 200 },
+      { source: '/docs/*', destination: '/docs.html', status: 200 },
     ]);
   });
 
@@ -126,7 +126,9 @@ describe('packageStaticBuild', () => {
 
     const manifest = JSON.parse(form.get('manifest') as string);
     expect(manifest.assetConfig).toEqual({ not_found_handling: '404-page' });
-    expect(manifest.fallbackRules).toEqual(userFallbacks);
+    expect(manifest.fallbackRules).toEqual([
+      { source: '/docs/*', destination: '/docs.html', status: 200 },
+    ]);
   });
 });
 
@@ -286,8 +288,8 @@ describe('packageBuild', () => {
     const manifest = JSON.parse(form.get('manifest') as string);
     expect(manifest.assetConfig).toEqual({ not_found_handling: 'none' });
     expect(manifest.fallbackRules).toEqual([
-      { source: '/*', destination: '/index.html', status: 200, force: false },
-      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+      { source: '/*', destination: '/index.html', status: 200 },
+      { source: '/docs/*', destination: '/docs.html', status: 200 },
     ]);
   });
 
@@ -325,7 +327,7 @@ describe('packageBuild', () => {
 });
 
 describe('packageFrameworkBuild', () => {
-  it('strips dev-only origin metadata from redirectRules and fallbackRules in the manifest', async () => {
+  it('strips dev-only origin and force metadata from redirectRules and fallbackRules in the manifest', async () => {
     const workerDir = join(TMP, 'server');
     const assetsDir = join(TMP, 'public');
     mkdirSync(workerDir, { recursive: true });
@@ -386,19 +388,21 @@ describe('packageFrameworkBuild', () => {
     const manifest = JSON.parse(form.get('manifest') as string);
 
     expect(manifest.redirectRules).toEqual([
-      { source: '/old', destination: '/new', status: 301, force: false },
-      { source: '/api/old', destination: '/api/new', status: 200, force: true },
+      { source: '/old', destination: '/new', status: 301 },
+      { source: '/api/old', destination: '/api/new', status: 200 },
     ]);
     for (const rule of manifest.redirectRules) {
       expect(rule).not.toHaveProperty('origin');
+      expect(rule).not.toHaveProperty('force');
     }
 
     expect(manifest.fallbackRules).toEqual([
-      { source: '/*', destination: '/index.html', status: 200, force: false },
-      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+      { source: '/*', destination: '/index.html', status: 200 },
+      { source: '/docs/*', destination: '/docs.html', status: 200 },
     ]);
     for (const rule of manifest.fallbackRules) {
       expect(rule).not.toHaveProperty('origin');
+      expect(rule).not.toHaveProperty('force');
     }
   });
 });

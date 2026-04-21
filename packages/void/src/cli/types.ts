@@ -31,6 +31,14 @@ export interface RedirectRule {
    *   fires unconditionally, overriding any matching static asset.
    * - `false` / omitted (from `200` in `_redirects` or `routing.fallbacks` in
    *   void.json) — fires only when the static asset resolver would 404.
+   *
+   * Dev-only / internal flag. The CLI uses `force` to split rules into the
+   * `redirectRules` (always) and `fallbackRules` (post-asset) buckets, and
+   * the router uses it to label the `X-Void-Routing` trace header on
+   * Node/Bun/Deno targets. The deployed platform decides phase purely from
+   * which array the rule lives in, so `force` is stripped from each rule
+   * before shipping (see `stripDevOnlyRuleFields` in cli/package.ts),
+   * mirroring `origin` below.
    */
   force?: boolean;
   /**

@@ -21,16 +21,22 @@ const textEncoder = new TextEncoder();
 type ProgressCallback = (message: string) => void;
 
 /**
- * Strip the dev-only `origin` metadata from each rule. `origin` is used to
- * build the `X-Void-Routing` trace header during local dev; the deployed
- * platform doesn't consume it and we don't want it leaking into production
- * manifests.
+ * Strip dev-only / internal-only fields from each rule before shipping the
+ * manifest. The resulting entries contain only `{ source, destination, status }`.
+ *
+ * - `origin` is used to build the `X-Void-Routing` trace header during local
+ *   dev; the deployed platform doesn't consume it.
+ * - `force` is used internally by the CLI/router to split rules into the
+ *   `redirectRules` (pre-asset, always-fires) and `fallbackRules` (post-asset,
+ *   only when the asset resolver 404s) buckets and to label the trace header
+ *   on non-CF targets. The platform dispatch worker decides phase purely from
+ *   which array the rule lives in, so shipping `force` is dead weight.
  */
-function stripRuleOrigins(rules: RedirectRule[] | undefined): RedirectRule[] | undefined {
+function stripDevOnlyRuleFields(rules: RedirectRule[] | undefined): RedirectRule[] | undefined {
   if (!rules) {
     return rules;
   }
-  return rules.map(({ origin: _origin, ...rest }) => rest);
+  return rules.map(({ origin: _origin, force: _force, ...rest }) => rest);
 }
 
 /**
@@ -427,11 +433,11 @@ export async function packageBuild(
   }
 
   if (redirectRules && redirectRules.length > 0) {
-    manifest.redirectRules = stripRuleOrigins(redirectRules);
+    manifest.redirectRules = stripDevOnlyRuleFields(redirectRules);
   }
 
   if (resolvedFallbackRules && resolvedFallbackRules.length > 0) {
-    manifest.fallbackRules = stripRuleOrigins(resolvedFallbackRules);
+    manifest.fallbackRules = stripDevOnlyRuleFields(resolvedFallbackRules);
   }
 
   const websocketManifest = toWebSocketManifest(webSockets);
@@ -530,11 +536,11 @@ export async function packageStaticBuild(
   }
 
   if (redirectRules && redirectRules.length > 0) {
-    manifest.redirectRules = stripRuleOrigins(redirectRules);
+    manifest.redirectRules = stripDevOnlyRuleFields(redirectRules);
   }
 
   if (resolvedFallbackRules && resolvedFallbackRules.length > 0) {
-    manifest.fallbackRules = stripRuleOrigins(resolvedFallbackRules);
+    manifest.fallbackRules = stripDevOnlyRuleFields(resolvedFallbackRules);
   }
 
   formData.append('manifest', JSON.stringify(manifest));
@@ -670,11 +676,11 @@ export async function packageFrameworkBuild(opts: {
   }
 
   if (opts.redirectRules && opts.redirectRules.length > 0) {
-    manifest.redirectRules = stripRuleOrigins(opts.redirectRules);
+    manifest.redirectRules = stripDevOnlyRuleFields(opts.redirectRules);
   }
 
   if (opts.fallbackRules && opts.fallbackRules.length > 0) {
-    manifest.fallbackRules = stripRuleOrigins(opts.fallbackRules);
+    manifest.fallbackRules = stripDevOnlyRuleFields(opts.fallbackRules);
   }
 
   const websocketManifest = toWebSocketManifest(opts.webSockets);
