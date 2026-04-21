@@ -1,5 +1,6 @@
 import matter from 'gray-matter';
 import MarkdownExit from 'markdown-exit';
+import type { Token } from 'markdown-exit';
 import anchor from 'markdown-it-anchor';
 import type { Heading } from './compile';
 
@@ -18,7 +19,7 @@ function getMetadataCompiler(): MarkdownExit {
   return md;
 }
 
-function extractHeadings(tokens: any[]): Heading[] {
+function extractHeadings(tokens: Token[]): Heading[] {
   const headings: Heading[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -28,8 +29,8 @@ function extractHeadings(tokens: any[]): Heading[] {
       const inline = tokens[i + 1];
       const text = (
         inline?.children
-          ?.filter((t: any) => t.type === 'text' || t.type === 'code_inline')
-          .map((t: any) => t.content)
+          ?.filter((t) => t.type === 'text' || t.type === 'code_inline')
+          .map((t) => t.content)
           .join('') ?? ''
       ).trim();
       headings.push({ depth, slug, text });

@@ -1,18 +1,31 @@
 import { Hono } from 'hono';
 import type { MiddlewareHandler } from 'hono';
 import { describe, expect, it } from 'vitest';
-import { defineHandler, defineMiddleware } from '../../src/runtime/handler';
+import {
+  defineHandler,
+  defineMiddleware,
+  type CloudContext,
+  type TypedHandler,
+} from '../../src/runtime/handler';
 import { convertReturnValue } from '../../src/runtime/response';
 import type { StandardSchemaV1 } from '../../src/standard-schema';
+
+type ValidationIssueBody = {
+  error: string;
+  issues: Array<{
+    slot: string;
+    issues: Array<{ message: string }>;
+  }>;
+};
 
 /**
  * Helper that mimics the generated code pattern in compile.ts:
  *   return convertReturnValue(await mod.default(c))
  */
-function createApp(handler: (c: any) => unknown) {
+function createApp(handler: (c: CloudContext) => unknown) {
   const app = new Hono();
   app.get('/test', async (c) => {
-    return convertReturnValue(await handler(c));
+    return convertReturnValue(await handler(c as unknown as CloudContext));
   });
   return app;
 }
@@ -218,6 +231,18 @@ describe('defineHandler', () => {
 });
 
 describe('defineHandler.withValidator', () => {
+  function createValidatedApp(
+    method: 'get' | 'post',
+    path: string,
+    handler: TypedHandler,
+  ) {
+    const app = new Hono();
+    app[method](path, async (c) => {
+      return convertReturnValue(await handler(c as unknown as CloudContext));
+    });
+    return app;
+  }
+
   it('validates body and passes input to handler', async () => {
     const handler = defineHandler.withValidator({
       body: passSchema(),
@@ -225,10 +250,7 @@ describe('defineHandler.withValidator', () => {
       return { received: body };
     });
 
-    const app = new Hono();
-    app.post('/test', async (c) => {
-      return convertReturnValue(await (handler as any)(c));
-    });
+    const app = createValidatedApp('post', '/test', handler);
 
     const res = await app.request(
       new Request('http://localhost/test', {
@@ -249,10 +271,7 @@ describe('defineHandler.withValidator', () => {
       return { received: body };
     });
 
-    const app = new Hono();
-    app.post('/test', async (c) => {
-      return convertReturnValue(await (handler as any)(c));
-    });
+    const app = createValidatedApp('post', '/test', handler);
 
     const res = await app.request(
       new Request('http://localhost/test', {
@@ -263,7 +282,7 @@ describe('defineHandler.withValidator', () => {
     );
 
     expect(res.status).toBe(400);
-    const json: any = await res.json();
+    const json = (await res.json()) as ValidationIssueBody;
     expect(json.error).toBe('Validation failed');
     expect(json.issues[0].slot).toBe('body');
     expect(json.issues[0].issues[0].message).toBe('name is required');
@@ -276,10 +295,7 @@ describe('defineHandler.withValidator', () => {
       return { received: body };
     });
 
-    const app = new Hono();
-    app.post('/test', async (c) => {
-      return convertReturnValue(await (handler as any)(c));
-    });
+    const app = createValidatedApp('post', '/test', handler);
 
     const res = await app.request(
       new Request('http://localhost/test', {
@@ -290,7 +306,7 @@ describe('defineHandler.withValidator', () => {
     );
 
     expect(res.status).toBe(400);
-    const json: any = await res.json();
+    const json = (await res.json()) as { error: string };
     expect(json.error).toBe('Invalid JSON body');
   });
 
@@ -301,10 +317,7 @@ describe('defineHandler.withValidator', () => {
       return { query };
     });
 
-    const app = new Hono();
-    app.get('/test', async (c) => {
-      return convertReturnValue(await (handler as any)(c));
-    });
+    const app = createValidatedApp('get', '/test', handler);
 
     const res = await app.request(new Request('http://localhost/test?page=2&limit=10'));
 
@@ -319,10 +332,7 @@ describe('defineHandler.withValidator', () => {
       return { params };
     });
 
-    const app = new Hono();
-    app.get('/users/:id', async (c) => {
-      return convertReturnValue(await (handler as any)(c));
-    });
+    const app = createValidatedApp('get', '/users/:id', handler);
 
     const res = await app.request(new Request('http://localhost/users/42'));
 
@@ -338,10 +348,7 @@ describe('defineHandler.withValidator', () => {
       return { params, body };
     });
 
-    const app = new Hono();
-    app.post('/users/:id', async (c) => {
-      return convertReturnValue(await (handler as any)(c));
-    });
+    const app = createValidatedApp('post', '/users/:id', handler);
 
     const res = await app.request(
       new Request('http://localhost/users/42', {
@@ -365,10 +372,7 @@ describe('defineHandler.withValidator', () => {
       return new Response('created', { status: 201 });
     });
 
-    const app = new Hono();
-    app.post('/test', async (c) => {
-      return convertReturnValue(await (handler as any)(c));
-    });
+    const app = createValidatedApp('post', '/test', handler);
 
     const res = await app.request(
       new Request('http://localhost/test', {
@@ -389,10 +393,7 @@ describe('defineHandler.withValidator', () => {
       return null;
     });
 
-    const app = new Hono();
-    app.post('/test', async (c) => {
-      return convertReturnValue(await (handler as any)(c));
-    });
+    const app = createValidatedApp('post', '/test', handler);
 
     const res = await app.request(
       new Request('http://localhost/test', {

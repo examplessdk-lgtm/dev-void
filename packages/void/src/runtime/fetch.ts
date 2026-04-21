@@ -18,7 +18,7 @@ type InputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteEntry<P, M
 
 type BodyOption<I> = 'body' extends keyof I
   ? { body: I['body' & keyof I] }
-  : { body?: Record<string, any> | BodyInit | null };
+  : { body?: Record<string, unknown> | BodyInit | null };
 type QueryOption<I> = 'query' extends keyof I
   ? { query: I['query' & keyof I] }
   : { query?: Record<string, string> };
@@ -48,6 +48,18 @@ type FetchOptions<P extends keyof RouteMap, M extends MethodsOf<P>> = BodyOption
     timeout?: number;
   };
 
+type UntypedFetchOptions = {
+  method?: string;
+  params?: Record<string, string>;
+  body?: unknown;
+  query?: Record<string, string>;
+  headers?: HeadersInit;
+  signal?: AbortSignal;
+  baseURL?: string;
+  retry?: number;
+  timeout?: number;
+};
+
 /**
  * Typed fetch client for Void API routes.
  *
@@ -68,7 +80,7 @@ export function fetch<P extends keyof RouteMap & string, M extends MethodsOf<P> 
   path: P,
   options: FetchOptions<P, M>,
 ): Promise<OutputOf<P, M>>;
-export async function fetch(path: string, options?: Record<string, any>): Promise<unknown> {
+export async function fetch(path: string, options?: UntypedFetchOptions): Promise<unknown> {
   // Interpolate :param segments
   let url = path;
   if (options?.params) {
@@ -79,7 +91,7 @@ export async function fetch(path: string, options?: Record<string, any>): Promis
 
   return ofetch(url, {
     method: (options?.method ?? 'GET') as string,
-    body: options?.body,
+    body: options?.body as Record<string, unknown> | BodyInit | null | undefined,
     query: options?.query,
     headers: options?.headers,
     signal: options?.signal,

@@ -2,6 +2,18 @@ import { defineConfig } from 'tsdown';
 
 const WORKERS_TYPES_REFERENCE = '/// <reference types="@cloudflare/workers-types" />';
 
+type BundleOutput =
+  | {
+      fileName: string;
+      type: 'asset';
+      source?: string | Uint8Array;
+    }
+  | {
+      fileName: string;
+      type: 'chunk';
+      code?: string;
+    };
+
 function stripUseAsmPlugin() {
   return {
     name: 'void:strip-use-asm',
@@ -21,7 +33,7 @@ function injectWorkersTypesReferencePlugin() {
     // tsdown's declaration emit currently drops source-level triple-slash references.
     // Our public handler types use Cloudflare global types (D1Database, KVNamespace, etc.),
     // so we inject the reference into the emitted .d.mts to keep consumer DX zero-config.
-    generateBundle(_options: unknown, bundle: Record<string, any>) {
+    generateBundle(_options: unknown, bundle: Record<string, BundleOutput>) {
       for (const output of Object.values(bundle)) {
         // Patch declaration entrypoints whose source uses Cloudflare globals.
         const targets = new Set(['runtime/handler.d.mts', 'runtime/env-public.d.mts']);

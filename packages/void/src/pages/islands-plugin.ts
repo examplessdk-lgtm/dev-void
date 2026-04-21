@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { normalizePath, type ViteDevServer } from 'vite';
+import { normalizePath, type ResolvedConfig, type ViteDevServer } from 'vite';
 import { resolveEffectiveLayoutChain, scanPages } from './scan';
 import type { PageScanResult } from './types';
 
@@ -11,6 +11,15 @@ export interface IslandEntry {
   componentPath: string;
   islandId: string;
   hydrate: string;
+}
+
+interface VoidMdPluginApi {
+  getClientScripts?(): Map<string, unknown>;
+}
+
+interface VoidMdPlugin {
+  name: string;
+  api?: VoidMdPluginApi;
 }
 
 /** Resolve a relative import specifier to an absolute path by checking extensions. */
@@ -152,9 +161,11 @@ export function rebuildIslandCssMap(
 export function computePagesNeedingClientJS(
   pageScan: PageScanResult,
   pagesDir: string,
-  resolvedConfig: any,
+  resolvedConfig: ResolvedConfig | null,
 ): Set<string> {
-  const mdPlugin = resolvedConfig?.plugins?.find((p: any) => p.name === 'void-md');
+  const mdPlugin = resolvedConfig?.plugins?.find(
+    (plugin): plugin is VoidMdPlugin => plugin.name === 'void-md',
+  );
   const mdScriptIds: Set<string> = new Set(mdPlugin?.api?.getClientScripts?.()?.keys() ?? []);
 
   const importAttrRe =

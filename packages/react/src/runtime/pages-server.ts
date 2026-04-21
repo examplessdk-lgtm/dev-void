@@ -5,6 +5,7 @@ import { renderBodyAttrs, renderHeadToString, renderHtmlAttrs } from 'void/pages
 import type { PageObject } from 'void/pages-protocol';
 import { ErrorsContext, NavigationContext, RouterContext, SharedContext } from './context';
 
+// oxlint-disable-next-line no-explicit-any -- component props are narrowed by generated route types
 type ComponentModule = { default: ComponentType<any> };
 const DEFERRED_SHELL_CANCEL_REASON = 'Void deferred shell complete';
 const DEFERRED_SHELL_END_ID = '__VOID_DEFERRED_SHELL_END__';

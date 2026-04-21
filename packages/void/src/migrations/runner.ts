@@ -3,6 +3,24 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { collectMigrations } from './collect';
 
+interface SqliteStatement<T = unknown> {
+  get(...params: unknown[]): T | undefined;
+  all(...params: unknown[]): T[];
+  run(...params: unknown[]): unknown;
+}
+
+interface SqliteTransaction<T = unknown> {
+  (): T;
+  immediate(): T;
+}
+
+type SqliteDatabase = {
+  prepare<T = unknown>(sql: string): SqliteStatement<T>;
+  exec(sql: string): void;
+  close(): void;
+  transaction<T>(fn: () => T): SqliteTransaction<T>;
+};
+
 export interface AppliedMigration {
   name: string;
   applied_at: string;
@@ -23,10 +41,10 @@ function toBetterSqlite3Error(error: unknown): Error {
 export async function openSqliteDatabase(
   dbPath: string,
   options?: Record<string, unknown>,
-): Promise<any> {
+): Promise<SqliteDatabase> {
   try {
     const Database = (await import('better-sqlite3')).default;
-    return new Database(dbPath, options);
+    return new Database(dbPath, options) as unknown as SqliteDatabase;
   } catch (error) {
     throw toBetterSqlite3Error(error);
   }
@@ -102,7 +120,7 @@ export function getMiniflareDatabasePath(persistRoot: string, databaseId: string
  * exists, both enter the body, and the loser crashes on `SELECT … FROM
  * _migrations` after the winner already dropped it.
  */
-function upgradeTrackingTable(db: any): void {
+function upgradeTrackingTable(db: SqliteDatabase): void {
   const tx = db.transaction(() => {
     const legacy = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")

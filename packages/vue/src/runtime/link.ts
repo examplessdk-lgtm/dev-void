@@ -1,3 +1,4 @@
+import type { VoidRouter } from 'void/pages-client';
 import {
   computed,
   defineComponent,
@@ -13,6 +14,7 @@ import {
 type PrefetchStrategy = 'hover' | 'click' | 'mount' | 'visible';
 type LinkMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 type NavigateEvent = { preventDefault(): void };
+type PrefetchOptions = { cacheFor?: number | string | [string, string]; method?: LinkMethod };
 
 function appendQueryValue(params: URLSearchParams, key: string, value: unknown): boolean {
   if (value === null || value === undefined) {
@@ -114,7 +116,7 @@ export const Link: Component = defineComponent({
     },
   },
   setup(props, { slots, attrs }) {
-    const router = inject<any>('__void_router', null);
+    const router = inject<VoidRouter | null>('__void_router', null);
     const elRef = ref<HTMLElement | null>(null);
     const normalizedMethod = computed(() => props.method.toUpperCase() as LinkMethod);
     const isGet = computed(() => normalizedMethod.value === 'GET');
@@ -142,7 +144,7 @@ export const Link: Component = defineComponent({
       if (hrefWithData.value === current) {
         return;
       }
-      const options: any = {};
+      const options: PrefetchOptions = {};
       if (props.cacheFor !== undefined) {
         options.cacheFor = props.cacheFor;
       }
@@ -268,7 +270,7 @@ export const Link: Component = defineComponent({
 
       const tag = isGet.value ? 'a' : 'button';
 
-      const eventHandlers: Record<string, any> = { onClick };
+      const eventHandlers: Record<string, unknown> = { onClick };
 
       if (strategies.value.includes('hover')) {
         eventHandlers.onMouseenter = onMouseEnter;
@@ -288,7 +290,7 @@ export const Link: Component = defineComponent({
           ...attrs,
           ref: elRef,
           ...(isGet.value ? { href: hrefWithData.value } : { type: 'button' }),
-          style: [{ touchAction: 'manipulation' }, (attrs as any).style],
+          style: [{ touchAction: 'manipulation' }, (attrs as { style?: unknown }).style],
           ...eventHandlers,
         },
         slots.default?.(),

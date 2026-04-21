@@ -8,6 +8,7 @@ import {
 } from '@shikijs/transformers';
 import matter from 'gray-matter';
 import MarkdownExit from 'markdown-exit';
+import type { Token } from 'markdown-exit';
 import anchor from 'markdown-it-anchor';
 import attrs from 'markdown-it-attrs';
 import { full as emoji } from 'markdown-it-emoji';
@@ -70,7 +71,7 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
     transformerNotationFocus(),
     transformerNotationErrorLevel(),
   ];
-  md.renderer.rules.fence = async (tokens: any[], idx: number) => {
+  md.renderer.rules.fence = async (tokens: Token[], idx: number) => {
     const token = tokens[idx];
     const code = token.content;
     let lang = token.info ? token.info.split(/\s+/g)[0] : 'text';
@@ -126,7 +127,7 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
   return md;
 }
 
-function extractHeadings(tokens: any[]): Heading[] {
+function extractHeadings(tokens: Token[]): Heading[] {
   const headings: Heading[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -136,8 +137,8 @@ function extractHeadings(tokens: any[]): Heading[] {
       const inline = tokens[i + 1];
       const text = (
         inline?.children
-          ?.filter((t: any) => t.type === 'text' || t.type === 'code_inline')
-          .map((t: any) => t.content)
+          ?.filter((child) => child.type === 'text' || child.type === 'code_inline')
+          .map((child) => child.content)
           .join('') ?? ''
       ).trim();
       headings.push({ depth, slug, text });

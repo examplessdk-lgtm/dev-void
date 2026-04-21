@@ -1,4 +1,4 @@
-import { submitAction, type ActionResult } from 'void/pages-client';
+import { submitAction, type ActionResult, type VoidRouter } from 'void/pages-client';
 import type { ActionUrl, ResolveActionBody, ResolveActionParams } from 'void/routes';
 
 type ActionMethod = 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -10,10 +10,10 @@ type ActionOptions<U extends string> = {
   method?: ActionMethod;
 } & (HasParams<U> extends true ? { params: ResolveActionParams<U> } : { params?: never });
 
-let _router: any = null;
+let _router: VoidRouter | null = null;
 
 /** Called during app initialization to store the router instance */
-export function setActionRouter(router: any): void {
+export function setActionRouter(router: VoidRouter): void {
   _router = router;
 }
 
@@ -39,8 +39,8 @@ export async function action<U extends ActionUrl & string>(
     resolvedUrl = resolvedUrl.slice(0, qIdx);
   }
 
-  if ((options as any)?.params) {
-    for (const [key, value] of Object.entries((options as any).params)) {
+  if (options?.params) {
+    for (const [key, value] of Object.entries(options.params)) {
       resolvedUrl = resolvedUrl.replace(`:${key}`, encodeURIComponent(value as string));
     }
   }

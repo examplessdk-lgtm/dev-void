@@ -59,6 +59,12 @@ function serializeValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function getListCursor<M>(
+  result: KVNamespaceListResult<M> & Partial<{ cursor: string }>,
+): string | undefined {
+  return typeof result.cursor === 'string' ? result.cursor : undefined;
+}
+
 function createKVMap<T>(getNS: () => KVNamespace, prefix: string): KVMap<T> {
   const prefixed = (key: string) => `${prefix}:${key}`;
 
@@ -99,16 +105,17 @@ function createKVMap<T>(getNS: () => KVNamespace, prefix: string): KVMap<T> {
           name: k.name.slice(stripLen),
         })) as ListKey<M>[],
         list_complete: result.list_complete,
-        cursor: (result as any).cursor,
+        cursor: getListCursor(result),
       };
     },
 
-    async getWithMetadata(key) {
+    async getWithMetadata<M = unknown>(key: string) {
       const result = await getNS().getWithMetadata(prefixed(key));
+      const metadata = result.metadata as M | null;
       return {
         value: parseValue<T>(result.value),
-        metadata: result.metadata,
-      } as any;
+        metadata,
+      };
     },
   };
 }
@@ -147,7 +154,7 @@ function createKVClient(getNS: () => KVNamespace): KVClient {
       return {
         keys: result.keys as ListKey<M>[],
         list_complete: result.list_complete,
-        cursor: (result as any).cursor,
+        cursor: getListCursor(result),
       };
     },
 

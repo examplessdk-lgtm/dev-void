@@ -12,6 +12,23 @@ import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/route
 import { RouterContext } from './context';
 
 type SubmitPayload = FormData | { method: string };
+type UntypedForm = {
+  data: Record<string, unknown>;
+  setData(field: string, value: unknown): void;
+  errors: Record<string, string>;
+  error: VoidActionError | null;
+  pending: boolean;
+  hasChanges: boolean;
+  wasSuccessful: boolean;
+  recentlySuccessful: boolean;
+  post(formData: FormData): void;
+  put(formData: FormData): void;
+  patch(formData: FormData): void;
+  delete(formData: FormData): void;
+  reset(...fields: string[]): void;
+  clearErrors(...fields: string[]): void;
+  clearError(): void;
+};
 
 function getValidationErrors(error: VoidActionError): Record<string, string> | null {
   const body = error.body;
@@ -58,7 +75,7 @@ export function useForm(
   url: string,
   defaults: Record<string, unknown>,
   options?: { params?: Record<string, string> },
-): any {
+): UntypedForm {
   let resolvedUrl = url;
 
   // Strip ?action query before param resolution, then re-append

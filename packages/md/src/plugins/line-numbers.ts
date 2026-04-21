@@ -1,4 +1,14 @@
 import type MarkdownExit from 'markdown-exit';
+import type { RenderOptions, Renderer, Token } from 'markdown-exit';
+
+type MarkdownEnv = { [key: string]: unknown };
+type FenceRender = (
+  tokens: Token[],
+  idx: number,
+  options: RenderOptions,
+  env: MarkdownEnv,
+  self: Renderer,
+) => string | Promise<string>;
 
 /**
  * Adds line number gutter to code blocks.
@@ -6,9 +16,9 @@ import type MarkdownExit from 'markdown-exit';
  * Ported from VitePress.
  */
 export function lineNumberPlugin(md: MarkdownExit, enable = false): void {
-  const fence = md.renderer.rules.fence!;
-  md.renderer.rules.fence = async (...args: any[]) => {
-    const rawCode = await (fence as Function)(...args);
+  const fence = md.renderer.rules.fence as FenceRender;
+  md.renderer.rules.fence = async (...args: Parameters<FenceRender>) => {
+    const rawCode = await fence(...args);
     const [tokens, idx] = args;
     const info = tokens[idx].info;
 

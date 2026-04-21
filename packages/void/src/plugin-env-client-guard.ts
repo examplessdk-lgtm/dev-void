@@ -1,11 +1,21 @@
 import { walk } from 'estree-walker';
 import { relative } from 'pathe';
 import { parseSync, type Plugin } from 'vite';
+import {
+  isIdentifier,
+  isMemberExpression,
+  type AstImportDeclaration,
+  type AstImportNamespaceSpecifier,
+  type AstImportSpecifier,
+  type AstMemberExpression,
+  type AstNode,
+  type AstProgram,
+} from './shared/ast';
 
-interface EnvPublicModule {
+type EnvPublicModule = {
   _getRegisteredSchema(): Record<string, unknown> | null;
   _hasRegisteredSchema(): boolean;
-}
+};
 
 let cachedModule: EnvPublicModule | null = null;
 
@@ -36,36 +46,40 @@ function mentionsVoidEnv(code: string): boolean {
   return code.includes('void/env');
 }
 
-interface ImportBindings {
+type ImportBindings = {
   /** Identifiers that are the `env` proxy directly (e.g. `import { env }` or `import { env as e }`). */
   directNames: Set<string>;
   /** Identifiers that are the namespace import (e.g. `import * as voidEnv`); reads look like `<name>.env.X`. */
   namespaceNames: Set<string>;
-}
+};
 
-function extractEnvBindings(program: any): ImportBindings | null {
+function extractEnvBindings(program: AstProgram): ImportBindings | null {
   const direct = new Set<string>();
   const namespace = new Set<string>();
   let found = false;
 
-  for (const node of program.body as any[]) {
+  for (const node of program.body ?? []) {
     if (node.type !== 'ImportDeclaration') {
       continue;
     }
-    if (node.source?.value !== 'void/env') {
+    const source = (node as AstImportDeclaration).source;
+    if (source.value !== 'void/env') {
       continue;
     }
     found = true;
-    for (const spec of node.specifiers ?? []) {
+    for (const spec of (node as AstImportDeclaration).specifiers ?? []) {
       if (spec.type === 'ImportSpecifier') {
         // import { env } or import { env as e }
-        const importedName = spec.imported?.name;
-        if (importedName === 'env') {
-          direct.add(spec.local.name);
+        const importedName = (spec as AstImportSpecifier).imported;
+        if (!isIdentifier(importedName)) {
+          continue;
+        }
+        if (importedName.name === 'env') {
+          direct.add((spec as AstImportSpecifier).local.name);
         }
       } else if (spec.type === 'ImportNamespaceSpecifier') {
         // import * as voidEnv
-        namespace.add(spec.local.name);
+        namespace.add((spec as AstImportNamespaceSpecifier).local.name);
       } else if (spec.type === 'ImportDefaultSpecifier') {
         // void/env has no default export — ignore.
       }
@@ -78,10 +92,10 @@ function extractEnvBindings(program: any): ImportBindings | null {
   return { directNames: direct, namespaceNames: namespace };
 }
 
-interface OffsetIndex {
+type OffsetIndex = {
   /** Sorted array of byte offsets at which a new line starts (line N starts at lineStarts[N-1]). */
   lineStarts: number[];
-}
+};
 
 function buildOffsetIndex(code: string): OffsetIndex {
   const lineStarts: number[] = [0];
@@ -109,44 +123,45 @@ function offsetToLineCol(index: OffsetIndex, offset: number): { line: number; co
   return { line: lo + 1, column: offset - arr[lo]! + 1 };
 }
 
-interface Hit {
+type Hit = {
   kind: 'error' | 'warn';
   property: string | null;
   start: number;
-}
+};
 
 /**
  * Walk the AST collecting every `env.X` (or `<ns>.env.X`) read where `env`
  * is bound to the `void/env` proxy. Computed access produces a warning hit
  * with `property === null`; everything else carries the property name.
  */
-function findHits(program: any, bindings: ImportBindings): Hit[] {
+function findHits(program: AstProgram, bindings: ImportBindings): Hit[] {
   const hits: Hit[] = [];
 
-  walk(program as any, {
-    enter(node: any) {
-      if (node.type !== 'MemberExpression') {
+  walk(program as unknown as Parameters<typeof walk>[0], {
+    enter(node) {
+      const current = node as AstNode;
+      if (!isMemberExpression(current)) {
         return;
       }
 
       // Case 1: direct env.X — node.object is an Identifier in directNames.
-      if (node.object?.type === 'Identifier' && bindings.directNames.has(node.object.name)) {
-        recordHit(node, hits);
+      if (isIdentifier(current.object) && bindings.directNames.has(current.object.name)) {
+        recordHit(current, hits);
         return;
       }
 
       // Case 2: namespace.env.X — node.object is itself a MemberExpression
       // matching <namespaceName>.env.
-      const obj = node.object;
+      const obj = current.object;
       if (
-        obj?.type === 'MemberExpression' &&
+        isMemberExpression(obj) &&
         !obj.computed &&
-        obj.object?.type === 'Identifier' &&
+        isIdentifier(obj.object) &&
         bindings.namespaceNames.has(obj.object.name) &&
-        obj.property?.type === 'Identifier' &&
+        isIdentifier(obj.property) &&
         obj.property.name === 'env'
       ) {
-        recordHit(node, hits);
+        recordHit(current, hits);
       }
     },
   });
@@ -154,15 +169,15 @@ function findHits(program: any, bindings: ImportBindings): Hit[] {
   return hits;
 }
 
-function recordHit(node: any, hits: Hit[]): void {
+function recordHit(node: AstMemberExpression, hits: Hit[]): void {
   if (node.computed) {
-    hits.push({ kind: 'warn', property: null, start: node.start });
+    hits.push({ kind: 'warn', property: null, start: node.start! });
     return;
   }
-  if (node.property?.type !== 'Identifier') {
+  if (!isIdentifier(node.property)) {
     return;
   }
-  hits.push({ kind: 'error', property: node.property.name, start: node.start });
+  hits.push({ kind: 'error', property: node.property.name, start: node.start! });
 }
 
 /**
@@ -260,12 +275,13 @@ export function envClientGuardPlugin(root: string): Plugin {
         return;
       }
 
-      const bindings = extractEnvBindings(parsed.program);
+      const program = parsed.program as unknown as AstProgram;
+      const bindings = extractEnvBindings(program);
       if (!bindings) {
         return;
       }
 
-      const hits = findHits(parsed.program, bindings);
+      const hits = findHits(program, bindings);
       if (hits.length === 0) {
         return;
       }

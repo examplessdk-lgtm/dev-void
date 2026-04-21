@@ -1,6 +1,7 @@
 import { parse } from 'es-module-lexer/js';
 import { walk } from 'estree-walker';
 import { parseSync } from 'vite';
+import { isIdentifier, isMemberExpression, type AstNode, type AstProgram } from '../shared/ast';
 
 export interface InferredBindings {
   needsD1: boolean;
@@ -112,27 +113,28 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
     return result;
   }
 
-  walk(parsed.program as any, {
-    enter(node: any) {
-      if (node.type !== 'MemberExpression') {
+  const program = parsed.program as unknown as AstProgram;
+
+  walk(program as unknown as Parameters<typeof walk>[0], {
+    enter(node) {
+      const current = node as AstNode;
+      if (!isMemberExpression(current)) {
         return;
       }
-      if (node.computed) {
+      if (current.computed) {
         return;
       }
 
-      const property = node.property;
-      if (property?.type !== 'Identifier') {
+      const property = current.property;
+      if (!isIdentifier(property)) {
         return;
       }
 
       // Check if the object is *.env (i.e., a MemberExpression with .env)
-      const obj = node.object;
+      const obj = current.object;
       const isViaContextEnv =
-        obj?.type === 'MemberExpression' &&
-        obj.property?.type === 'Identifier' &&
-        obj.property.name === 'env';
-      const isDirectEnv = obj?.type === 'Identifier' && obj.name === 'env';
+        isMemberExpression(obj) && isIdentifier(obj.property) && obj.property.name === 'env';
+      const isDirectEnv = isIdentifier(obj) && obj.name === 'env';
       if (!isViaContextEnv && !isDirectEnv) {
         return;
       }

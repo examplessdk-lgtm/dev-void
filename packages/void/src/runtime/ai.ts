@@ -15,6 +15,10 @@ interface AiBackend {
   toMarkdown(items: unknown, options?: unknown): Promise<unknown>;
 }
 
+function hasStreamFlag(value: unknown): value is { stream?: boolean } {
+  return typeof value === 'object' && value !== null && 'stream' in value;
+}
+
 function isThirdPartyModel(model: string): boolean {
   const provider = model.split('/')[0];
   return provider in PROVIDER_KEY_MAP;
@@ -104,14 +108,14 @@ function makeServiceBindingBackend(proxy: Fetcher, runtimeEnv: RuntimeEnv): AiBa
       if (isThirdPartyModel(model as string)) {
         const providerKey = resolveProviderKey(model as string, runtimeEnv);
         const res = await proxyFetch('gateway', { model, inputs, providerKey, projectId, aiToken });
-        if ((inputs as any)?.stream) {
+        if (hasStreamFlag(inputs) && inputs.stream) {
           return res.body;
         }
         return res.json();
       }
 
       const res = await proxyFetch('run', { model, inputs, options, projectId, aiToken });
-      if ((inputs as any)?.stream) {
+      if (hasStreamFlag(inputs) && inputs.stream) {
         return res.body;
       }
       return res.json();
@@ -153,14 +157,14 @@ function makeHttpBackend(token: string, projectId: string, runtimeEnv: RuntimeEn
       if (isThirdPartyModel(model as string)) {
         const providerKey = resolveProviderKey(model as string, runtimeEnv);
         const res = await proxyFetch('gateway', { model, inputs, providerKey });
-        if ((inputs as any)?.stream) {
+        if (hasStreamFlag(inputs) && inputs.stream) {
           return res.body;
         }
         return res.json();
       }
 
       const res = await proxyFetch('run', { model, inputs, options });
-      if ((inputs as any)?.stream) {
+      if (hasStreamFlag(inputs) && inputs.stream) {
         return res.body;
       }
       return res.json();

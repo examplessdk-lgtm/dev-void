@@ -2,14 +2,23 @@ import { Link } from '@void/solid';
 import { ErrorBoundary, createSignal } from 'solid-js';
 import type { Props } from './link-behavior.server';
 
+type LinkBehaviorWindow = Window & {
+  __boundClickData?: string;
+  __boundClickEventType?: string;
+  __linkOnClick?: boolean;
+  __preventedClick?: boolean;
+  __preventedNavigate?: boolean;
+};
+
 export default function LinkBehaviorPage(props: Props) {
   const [prefetchMethod, setPrefetchMethod] = createSignal<'GET' | 'POST'>('GET');
   const [reloadMethod, setReloadMethod] = createSignal<'GET' | 'POST'>('GET');
 
   function setBoundClicked(label: string, event: MouseEvent) {
     event.preventDefault();
-    (window as any).__boundClickData = label;
-    (window as any).__boundClickEventType = event.type;
+    const linkWindow = window as LinkBehaviorWindow;
+    linkWindow.__boundClickData = label;
+    linkWindow.__boundClickEventType = event.type;
   }
 
   return (
@@ -21,7 +30,7 @@ export default function LinkBehaviorPage(props: Props) {
           href="/users"
           data-testid="onclick-link"
           onClick={() => {
-            (window as any).__linkOnClick = true;
+            (window as LinkBehaviorWindow).__linkOnClick = true;
           }}
         >
           User handler then SPA
@@ -44,7 +53,7 @@ export default function LinkBehaviorPage(props: Props) {
           data-testid="prevented-click-link"
           onClick={(event: MouseEvent) => {
             event.preventDefault();
-            (window as any).__preventedClick = true;
+            (window as LinkBehaviorWindow).__preventedClick = true;
           }}
         >
           Prevented click
@@ -57,7 +66,7 @@ export default function LinkBehaviorPage(props: Props) {
           data-testid="prevented-navigate-link"
           onNavigate={(event) => {
             event.preventDefault();
-            (window as any).__preventedNavigate = true;
+            (window as LinkBehaviorWindow).__preventedNavigate = true;
           }}
         >
           Prevented navigate

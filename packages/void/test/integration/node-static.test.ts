@@ -6,6 +6,14 @@ import { chromium } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { collectPrerenderPathsNode } from '../../src/prerender';
 
+declare global {
+  interface Window {
+    __SPA_MARKER?: boolean;
+  }
+}
+
+type NavElement = HTMLElement & { __STAMP?: number };
+
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/node-static';
 const DIST = join(ROOT, PLAYGROUND, 'dist');
@@ -181,16 +189,16 @@ describe('playground/node-static build (target: node, output: static)', () => {
       await page.waitForSelector('#app[data-hydrated="true"]');
 
       await page.evaluate(() => {
-        (window as any).__SPA_MARKER = true;
-        (document.querySelector('nav') as any).__STAMP = 1;
+        window.__SPA_MARKER = true;
+        (document.querySelector('nav') as NavElement | null)!.__STAMP = 1;
       });
 
       await page.click('a[href="/about"]');
       await page.waitForSelector('[data-testid="about-title"]');
 
       expect(page.url()).toBe(`${staticBase}/about`);
-      expect(await page.evaluate(() => (window as any).__SPA_MARKER)).toBe(true);
-      expect(await page.evaluate(() => (document.querySelector('nav') as any).__STAMP)).toBe(1);
+      expect(await page.evaluate(() => window.__SPA_MARKER)).toBe(true);
+      expect(await page.evaluate(() => (document.querySelector('nav') as NavElement | null)?.__STAMP)).toBe(1);
     } finally {
       await page.close();
       await browser.close();

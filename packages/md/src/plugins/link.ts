@@ -1,3 +1,4 @@
+import type { RenderOptions, Renderer, Token } from 'markdown-exit';
 import type MarkdownExit from 'markdown-exit';
 
 const EXTERNAL_URL_RE = /^[a-z]+:/i;
@@ -18,11 +19,11 @@ export function linkPlugin(md: MarkdownExit, options?: LinkOptions): void {
   };
 
   md.renderer.rules.link_open = (
-    tokens: any[],
+    tokens: Token[],
     idx: number,
-    mdOptions: any,
-    _env: any,
-    self: any,
+    mdOptions: RenderOptions,
+    _env: unknown,
+    self: Renderer,
   ) => {
     const token = tokens[idx];
     const hrefIndex = token.attrIndex('href');
@@ -30,7 +31,7 @@ export function linkPlugin(md: MarkdownExit, options?: LinkOptions): void {
       return self.renderToken(tokens, idx, mdOptions);
     }
 
-    const url = token.attrs[hrefIndex][1] as string;
+    const url = token.attrs?.[hrefIndex]?.[1] ?? '';
 
     // Skip anchor-only links and header-anchor links
     if (url.startsWith('#') || token.attrGet('class') === 'header-anchor') {
@@ -51,7 +52,7 @@ export function linkPlugin(md: MarkdownExit, options?: LinkOptions): void {
         normalized = normalized.replace('.md#', '#');
       }
       if (normalized !== url) {
-        token.attrs[hrefIndex][1] = normalized;
+        token.attrs![hrefIndex]![1] = normalized;
       }
     }
 

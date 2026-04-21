@@ -5,6 +5,12 @@ const PROXY_URL = 'https://proxy.void.cloud';
 const TOKEN = 'test-jwt-token';
 const PROJECT_ID = 'proj_1';
 
+function setFetchMock(factory: () => Response | Promise<Response>) {
+  const fetchMock = vi.fn(factory);
+  globalThis.fetch = fetchMock as typeof fetch;
+  return fetchMock;
+}
+
 describe('ProxyClient', () => {
   const originalFetch = globalThis.fetch;
 
@@ -15,7 +21,7 @@ describe('ProxyClient', () => {
 
   describe('fetch()', () => {
     it('sends correct headers and injects projectId into body', async () => {
-      globalThis.fetch = vi.fn(async () => Response.json({ results: [] })) as any;
+      const fetchMock = setFetchMock(async () => Response.json({ results: [] }));
 
       const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
       await client.fetch('/d1/query', { binding: 'DB', sql: 'SELECT 1' });
@@ -32,17 +38,22 @@ describe('ProxyClient', () => {
       );
 
       // Verify projectId was injected into body
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = fetchMock.mock.calls[0];
+      expect(call).toBeDefined();
+      if (!call) {
+        throw new Error('Expected fetch to be called');
+      }
+      const [, init] = call as unknown as [RequestInfo | URL, RequestInit];
+      const body = JSON.parse(String(init.body));
       expect(body.projectId).toBe(PROJECT_ID);
       expect(body.binding).toBe('DB');
       expect(body.sql).toBe('SELECT 1');
     });
 
     it('throws on non-OK responses with error message from body', async () => {
-      globalThis.fetch = vi.fn(
+      setFetchMock(
         async () => new Response(JSON.stringify({ error: 'not found' }), { status: 404 }),
-      ) as any;
+      );
 
       const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
       await expect(client.fetch('/d1/query', { binding: 'MISSING' })).rejects.toThrow(
@@ -51,9 +62,9 @@ describe('ProxyClient', () => {
     });
 
     it('returns response for successful requests', async () => {
-      globalThis.fetch = vi.fn(async () =>
+      setFetchMock(async () =>
         Response.json({ results: [{ id: 1 }], success: true }),
-      ) as any;
+      );
 
       const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
       const res = await client.fetch('/d1/query', { binding: 'DB', sql: 'SELECT 1' });
@@ -72,10 +83,10 @@ describe('ProxyClient', () => {
           controller.close();
         },
       });
-      globalThis.fetch = vi.fn(
+      setFetchMock(
         async () =>
           new Response(stream, { headers: { 'content-type': 'application/octet-stream' } }),
-      ) as any;
+      );
 
       const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
       const res = await client.stream('/r2/get', {
@@ -90,7 +101,7 @@ describe('ProxyClient', () => {
     });
 
     it('injects Authorization header and projectId into body', async () => {
-      globalThis.fetch = vi.fn(async () => Response.json({ ok: true })) as any;
+      const fetchMock = setFetchMock(async () => Response.json({ ok: true }));
 
       const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
       await client.stream('/r2/get', {
@@ -99,15 +110,21 @@ describe('ProxyClient', () => {
         body: JSON.stringify({ binding: 'STORAGE', key: 'file.txt' }),
       });
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      expect(call[1].headers.Authorization).toBe(`Bearer ${TOKEN}`);
+      const call = fetchMock.mock.calls[0];
+      expect(call).toBeDefined();
+      if (!call) {
+        throw new Error('Expected fetch to be called');
+      }
+      const [, init] = call as unknown as [RequestInfo | URL, RequestInit];
+      const headers = new Headers(init.headers);
+      expect(headers.get('Authorization')).toBe(`Bearer ${TOKEN}`);
       // Verify projectId was injected into body
-      const body = JSON.parse(call[1].body);
+      const body = JSON.parse(String(init.body));
       expect(body.projectId).toBe(PROJECT_ID);
     });
 
     it('throws on non-OK responses', async () => {
-      globalThis.fetch = vi.fn(async () => new Response('server error', { status: 502 })) as any;
+      setFetchMock(async () => new Response('server error', { status: 502 }));
 
       const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
       await expect(

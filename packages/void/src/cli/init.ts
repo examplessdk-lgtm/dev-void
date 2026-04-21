@@ -134,12 +134,13 @@ const VITE_CONFIG_FILES = [
 ];
 const VOID_CONFIG_FILE = 'void.json';
 type DatabaseSetupChoice = DatabaseDialect | 'none';
+type JsonObject = Record<string, unknown>;
 
-function asRecord(value: unknown): Record<string, unknown> | null {
+function asRecord(value: unknown): JsonObject | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
   }
-  return value as Record<string, unknown>;
+  return value as JsonObject;
 }
 
 export function isScaffoldableEmptyProject(root: string): boolean {
@@ -266,7 +267,7 @@ function parsePackageManagerField(pkg: unknown): ProjectState['packageManager'] 
  * `workspace:*` specs to `workspace:@void-sdk/void@*` — which bun and
  * yarn then reject.
  */
-function isPnpmProject(root: string, pkg: Record<string, any>): boolean {
+function isPnpmProject(root: string, pkg: JsonObject): boolean {
   // 1. Strong local pnpm signals — immediate true.
   if (existsSync(join(root, 'pnpm-lock.yaml'))) {
     return true;
@@ -838,7 +839,7 @@ function isInsideWorkspaceSubpackage(root: string): boolean {
  */
 function resolveWorkspaceDeferral(
   root: string,
-  pkg: Record<string, any> | undefined,
+  pkg: JsonObject | undefined,
 ): { workspaceRoot: string } | undefined {
   const workspaceRoot = findWorkspaceRoot(root);
   if (workspaceRoot === undefined) {
@@ -948,7 +949,7 @@ function detectPagesFramework(root: string): ScaffoldFramework | undefined {
   }
 }
 
-function readPackageJson(root: string): Record<string, any> | undefined {
+function readPackageJson(root: string): JsonObject | undefined {
   try {
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
     return asRecord(pkg) ?? undefined;
@@ -1101,9 +1102,9 @@ function resolveScaffoldDependencySpec(
   // `workspace:<alias>@<range>` form or the portable `npm:<alias>@<range>`
   // fallback for bare workspace specs. Read `package.json` once so
   // `isPnpmProject` can honor both the lockfile and Corepack signals.
-  let pkg: Record<string, any> = {};
+  let pkg: JsonObject = {};
   try {
-    pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+    pkg = asRecord(JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'))) ?? {};
   } catch {
     // no package.json yet — `isPnpmProject` only needs the lockfile signal
   }
@@ -1155,11 +1156,11 @@ function setupTsconfig(
 
   if (state.hasTsconfig) {
     // Case C: existing tsconfig — check and offer fixes
-    let tsconfig: any;
+    let tsconfig: JsonObject;
     try {
       const raw = readFileSync(tsconfigPath, 'utf-8');
       const errors: ParseError[] = [];
-      tsconfig = parse(raw, errors);
+      tsconfig = asRecord(parse(raw, errors)) ?? {};
       if (errors.length > 0) {
         throw new SyntaxError('Failed to parse tsconfig.json');
       }
@@ -1189,10 +1190,11 @@ function setupTsconfig(
     }
 
     // Check types
-    if (!tsconfig.compilerOptions) {
-      tsconfig.compilerOptions = {};
-    }
-    const types: string[] = tsconfig.compilerOptions.types ?? [];
+    const compilerOptions = asRecord(tsconfig.compilerOptions) ?? {};
+    tsconfig.compilerOptions = compilerOptions;
+    const types = Array.isArray(compilerOptions.types)
+      ? compilerOptions.types.filter((value): value is string => typeof value === 'string')
+      : [];
     if (!types.includes('void/env')) {
       types.push('void/env');
       updated = true;
@@ -1207,7 +1209,7 @@ function setupTsconfig(
       log.success('Removed @cloudflare/workers-types from tsconfig types (included in void/env)');
     }
 
-    tsconfig.compilerOptions.types = types;
+    compilerOptions.types = types;
 
     if (updated) {
       // Rebuild with extends first so it appears at the top of the file
@@ -1699,13 +1701,12 @@ function ensureGitignore(root: string): void {
   log.success('Updated .gitignore with Void defaults');
 }
 
-function ensurePnpmBuiltDependencies(pkg: Record<string, any>): void {
-  if (!pkg.pnpm || typeof pkg.pnpm !== 'object' || Array.isArray(pkg.pnpm)) {
-    pkg.pnpm = {};
-  }
+function ensurePnpmBuiltDependencies(pkg: JsonObject): void {
+  const pnpm = asRecord(pkg.pnpm) ?? {};
+  pkg.pnpm = pnpm;
 
-  const onlyBuiltDependencies = Array.isArray(pkg.pnpm.onlyBuiltDependencies)
-    ? pkg.pnpm.onlyBuiltDependencies.filter(
+  const onlyBuiltDependencies = Array.isArray(pnpm.onlyBuiltDependencies)
+    ? pnpm.onlyBuiltDependencies.filter(
         (value: unknown): value is string => typeof value === 'string',
       )
     : [];
@@ -1716,7 +1717,7 @@ function ensurePnpmBuiltDependencies(pkg: Record<string, any>): void {
     }
   }
 
-  pkg.pnpm.onlyBuiltDependencies = onlyBuiltDependencies;
+  pnpm.onlyBuiltDependencies = onlyBuiltDependencies;
 }
 
 function installProjectDependencies(
@@ -1900,11 +1901,11 @@ function scaffoldPagesApp(
       getOwnVersion(),
     ),
   });
-  let pkg: Record<string, any> = {};
+  let pkg: JsonObject = {};
 
   if (existsSync(packageJsonPath)) {
     try {
-      pkg = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
+      pkg = asRecord(JSON.parse(readFileSync(packageJsonPath, 'utf-8'))) ?? {};
     } catch {
       throw new Error('Could not parse package.json in empty project');
     }
@@ -1924,29 +1925,18 @@ function scaffoldPagesApp(
     pkg.type = 'module';
   }
 
-  if (!pkg.scripts || typeof pkg.scripts !== 'object' || Array.isArray(pkg.scripts)) {
-    pkg.scripts = {};
-  }
+  const scripts = asRecord(pkg.scripts) ?? {};
+  pkg.scripts = scripts;
   for (const [name, command] of Object.entries(template.scripts)) {
-    if (!pkg.scripts[name]) {
-      pkg.scripts[name] = command;
+    if (!scripts[name]) {
+      scripts[name] = command;
     }
   }
 
-  if (
-    !pkg.dependencies ||
-    typeof pkg.dependencies !== 'object' ||
-    Array.isArray(pkg.dependencies)
-  ) {
-    pkg.dependencies = {};
-  }
-  if (
-    !pkg.devDependencies ||
-    typeof pkg.devDependencies !== 'object' ||
-    Array.isArray(pkg.devDependencies)
-  ) {
-    pkg.devDependencies = {};
-  }
+  const dependencies = asRecord(pkg.dependencies) ?? {};
+  const devDependencies = asRecord(pkg.devDependencies) ?? {};
+  pkg.dependencies = dependencies;
+  pkg.devDependencies = devDependencies;
 
   let dependencyAdded = false;
   const ensureDependency = (
@@ -1955,13 +1945,15 @@ function scaffoldPagesApp(
     fallbackVersion: string,
   ) => {
     const otherGroup = group === 'dependencies' ? 'devDependencies' : 'dependencies';
-    const existing = pkg[group][name] ?? pkg[otherGroup][name];
-    if (!pkg[group][name]) {
-      pkg[group][name] = existing ?? fallbackVersion;
+    const targetGroup = group === 'dependencies' ? dependencies : devDependencies;
+    const sourceGroup = otherGroup === 'dependencies' ? dependencies : devDependencies;
+    const existing = targetGroup[name] ?? sourceGroup[name];
+    if (!targetGroup[name]) {
+      targetGroup[name] = existing ?? fallbackVersion;
       dependencyAdded = true;
     }
-    if (pkg[otherGroup][name]) {
-      delete pkg[otherGroup][name];
+    if (sourceGroup[name]) {
+      delete sourceGroup[name];
       dependencyAdded = true;
     }
   };
@@ -2110,12 +2102,12 @@ export function ensureVoidDependency(root: string): boolean {
   const packageJsonPath = join(root, 'package.json');
   const voidSpec = resolveScaffoldDependencySpec(root, 'void', getOwnVersion());
 
-  let pkg: Record<string, any> = {};
+  let pkg: JsonObject = {};
   let existedBefore = false;
   if (existsSync(packageJsonPath)) {
     existedBefore = true;
     try {
-      pkg = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
+      pkg = asRecord(JSON.parse(readFileSync(packageJsonPath, 'utf-8'))) ?? {};
     } catch {
       throw new Error('Could not parse package.json while scaffolding demo');
     }
@@ -2164,6 +2156,8 @@ export function ensureVoidDependency(root: string): boolean {
   ) {
     pkg.dependencies = {};
   }
+  const devDependencies = asRecord(pkg.devDependencies) ?? {};
+  pkg.devDependencies = devDependencies;
 
   // Only touch `void` if it's not already declared as the public name in
   // ANY dependency group (deps, devDeps, peerDeps, optionalDeps). We
@@ -2176,7 +2170,7 @@ export function ensureVoidDependency(root: string): boolean {
     return typeof group?.void === 'string';
   });
   if (!voidAlreadyDeclared) {
-    pkg.devDependencies.void = voidSpec;
+    devDependencies.void = voidSpec;
     changed = true;
   }
 
@@ -2192,9 +2186,9 @@ export function ensureVoidDependency(root: string): boolean {
   // demo would then run `pnpm install` against the project but skip the
   // allowlist, leaving the local DB / dev setup broken on first run.
   if (isPnpmProject(root, pkg)) {
-    const before = JSON.stringify(pkg.pnpm?.onlyBuiltDependencies ?? null);
+    const before = JSON.stringify(asRecord(pkg.pnpm)?.onlyBuiltDependencies ?? null);
     ensurePnpmBuiltDependencies(pkg);
-    const after = JSON.stringify(pkg.pnpm?.onlyBuiltDependencies ?? null);
+    const after = JSON.stringify(asRecord(pkg.pnpm)?.onlyBuiltDependencies ?? null);
     if (before !== after) {
       changed = true;
     }
@@ -2324,25 +2318,24 @@ function injectAgentBlock(root: string, filePath: string): void {
 
 function writeMcpConfigForTarget(root: string, target: McpConfigTarget): void {
   const fullPath = join(root, target.filePath);
-  let existing: Record<string, any> = {};
+  let existing: JsonObject = {};
   if (existsSync(fullPath)) {
     try {
-      existing = JSON.parse(readFileSync(fullPath, 'utf-8'));
+      existing = asRecord(JSON.parse(readFileSync(fullPath, 'utf-8'))) ?? {};
     } catch {
       // unparseable — start fresh
     }
   }
 
-  if (!existing[target.rootKey]) {
-    existing[target.rootKey] = {};
-  }
+  const rootConfig = asRecord(existing[target.rootKey]) ?? {};
+  existing[target.rootKey] = rootConfig;
 
-  if (existing[target.rootKey]['void']) {
+  if (rootConfig['void']) {
     log.info(`${target.filePath} already has void MCP config`);
     return;
   }
 
-  existing[target.rootKey]['void'] = {
+  rootConfig['void'] = {
     command: 'npx',
     args: ['void', 'mcp'],
     ...target.extraFields,

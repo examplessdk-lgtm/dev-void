@@ -95,6 +95,26 @@ export interface RunDeployOptions {
 type DeployDoneEvent = Extract<DeployEvent, { event: 'done' }>;
 type StreamDeployResult = DeployDoneEvent;
 
+interface ResourceSummary {
+  type?: string;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function getExitCode(error: unknown): number {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'status' in error &&
+    typeof (error as { status: unknown }).status === 'number'
+  ) {
+    return (error as { status: number }).status;
+  }
+  return 1;
+}
+
 export function resolveDeployWranglerCompat(
   root: string,
   config: VoidConfig,
@@ -562,16 +582,16 @@ async function runFrameworkDeploy(
   let validatedMigrations;
   try {
     assertJournalCoherence(migrationsDir, rawMigrations);
-  } catch (err: any) {
-    log.error(err.message);
+  } catch (err: unknown) {
+    log.error(getErrorMessage(err));
     process.exit(1);
   }
   if (rawMigrations.length > 0) {
     try {
       validatedMigrations = validateMigrations(rawMigrations);
       log.info(`Found ${validatedMigrations.length} migration(s)`);
-    } catch (err: any) {
-      log.error(err.message);
+    } catch (err: unknown) {
+      log.error(getErrorMessage(err));
       process.exit(1);
     }
   }
@@ -580,7 +600,9 @@ async function runFrameworkDeploy(
   if (dialect === 'postgresql' && (bindings.needsD1 || rawMigrations.length > 0)) {
     try {
       const resources = await client.getResources(config.projectId);
-      const hasHyperdrive = resources.some((r: any) => r.type === 'hyperdrive');
+      const hasHyperdrive = resources.some(
+        (resource: ResourceSummary) => resource.type === 'hyperdrive',
+      );
       if (!hasHyperdrive) {
         const { text: promptText, isCancel: isCancelPrompt } = await import('@clack/prompts');
         const connectionString = await promptText({
@@ -774,8 +796,8 @@ async function runFullDeploy(
         stdio: 'inherit',
         env: { ...process.env, VOID_DEPLOY_PROJECT_ID: config.projectId },
       });
-    } catch (err: any) {
-      process.exit(err.status ?? 1);
+    } catch (err: unknown) {
+      process.exit(getExitCode(err));
     }
   }
 
@@ -845,16 +867,16 @@ async function runFullDeploy(
   let validatedMigrations;
   try {
     assertJournalCoherence(migrationsDir, rawMigrations);
-  } catch (err: any) {
-    log.error(err.message);
+  } catch (err: unknown) {
+    log.error(getErrorMessage(err));
     process.exit(1);
   }
   if (rawMigrations.length > 0) {
     try {
       validatedMigrations = validateMigrations(rawMigrations);
       log.info(`Found ${validatedMigrations.length} migration(s)`);
-    } catch (err: any) {
-      log.error(err.message);
+    } catch (err: unknown) {
+      log.error(getErrorMessage(err));
       process.exit(1);
     }
   }
@@ -865,7 +887,9 @@ async function runFullDeploy(
   if (dialect === 'postgresql' && (effectiveBindings.needsD1 || rawMigrations.length > 0)) {
     try {
       const resources = await client.getResources(config.projectId);
-      const hasHyperdrive = resources.some((r: any) => r.type === 'hyperdrive');
+      const hasHyperdrive = resources.some(
+        (resource: ResourceSummary) => resource.type === 'hyperdrive',
+      );
       if (!hasHyperdrive) {
         const { text: promptText, isCancel: isCancelPrompt } = await import('@clack/prompts');
         const connectionString = await promptText({
@@ -1133,8 +1157,8 @@ function assertDeploySchemaDriftFree(root: string, dialect: DatabaseDialect): vo
     if (!hasDeploySchemaDrift(root, dialect)) {
       return;
     }
-  } catch (error: any) {
-    log.error(error.message);
+  } catch (error: unknown) {
+    log.error(getErrorMessage(error));
     process.exit(1);
   }
 

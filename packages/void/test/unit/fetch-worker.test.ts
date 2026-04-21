@@ -70,7 +70,7 @@ describe('worker fetch runtime behavior', () => {
 
   const requestContext = new AsyncLocalStorage<{
     request: Request;
-    executionCtx: { waitUntil: (...args: any[]) => void; passThroughOnException: () => void };
+    executionCtx: { waitUntil: (...args: unknown[]) => void; passThroughOnException: () => void };
   }>();
 
   // Mock app.fetch — records calls and returns configurable responses
@@ -78,7 +78,7 @@ describe('worker fetch runtime behavior', () => {
   let mockEnv: Record<string, unknown>;
 
   // Replicate the generated fetch function
-  async function workerFetch(path: string, options?: Record<string, any>): Promise<unknown> {
+  async function workerFetch(path: string, options?: Record<string, unknown>): Promise<unknown> {
     let url = path;
     if (options?.params) {
       for (const [key, value] of Object.entries(options.params as Record<string, string>)) {

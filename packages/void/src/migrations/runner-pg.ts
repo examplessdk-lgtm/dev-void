@@ -4,7 +4,10 @@ import { collectMigrations } from './collect';
  * Minimal client interface satisfied by both pg.Client and PGlite.
  */
 export interface PgClient {
-  query(text: string, params?: unknown[]): Promise<{ rows: any[] }>;
+  query<T extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }>;
 }
 
 /**
@@ -20,7 +23,7 @@ export async function getPgAppliedMigrations(url: string): Promise<string[]> {
       `CREATE TABLE IF NOT EXISTS _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
     );
     const result = await client.query('SELECT name FROM _void_migrations');
-    return result.rows.map((r: any) => r.name);
+    return result.rows.map((row) => String(row.name));
   } catch {
     return [];
   } finally {
@@ -41,7 +44,7 @@ export async function applyPgMigrations(
   );
 
   const existing = await client.query('SELECT name FROM _void_migrations');
-  const appliedSet = new Set(existing.rows.map((r: any) => r.name));
+  const appliedSet = new Set(existing.rows.map((row) => String(row.name)));
 
   const pending = migrations.filter((m) => !appliedSet.has(m.name));
   if (pending.length === 0) {

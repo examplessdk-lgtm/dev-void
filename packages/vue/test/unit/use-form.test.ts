@@ -7,6 +7,8 @@ import { reactive, ref, isReactive, isRef, nextTick, watch } from 'vue';
 // requires a Vue app. The actual integration is tested in the playground.
 
 describe('useForm reactive logic', () => {
+  type FormData = Record<string, unknown>;
+
   function createForm(
     url: string,
     defaults: Record<string, unknown>,
@@ -21,7 +23,7 @@ describe('useForm reactive logic', () => {
       }
     }
 
-    const data = reactive({ ...formDefaults }) as Record<string, unknown>;
+    const data = reactive({ ...formDefaults }) as FormData;
     const errors = reactive<Record<string, string>>({});
     const pending = ref(false);
     const wasSuccessful = ref(false);
@@ -45,7 +47,7 @@ describe('useForm reactive logic', () => {
         Object.assign(data, { ...defaults_ });
       } else {
         for (const field of fields) {
-          (data as any)[field] = (defaults_ as any)[field];
+          data[field] = defaults_[field];
         }
       }
     }
@@ -88,7 +90,7 @@ describe('useForm reactive logic', () => {
 
   it('updating data changes value', () => {
     const form = createForm('/test', { name: '' });
-    (form.data as any).name = 'John';
+    form.data.name = 'John';
     expect(form.data.name).toBe('John');
   });
 
@@ -96,7 +98,7 @@ describe('useForm reactive logic', () => {
     const form = createForm('/test', { name: 'default' });
     expect(form.hasChanges.value).toBe(false);
 
-    (form.data as any).name = 'changed';
+    form.data.name = 'changed';
     await nextTick();
 
     expect(form.hasChanges.value).toBe(true);
@@ -104,11 +106,11 @@ describe('useForm reactive logic', () => {
 
   it('hasChanges becomes false when data reverts to defaults', async () => {
     const form = createForm('/test', { name: 'default' });
-    (form.data as any).name = 'changed';
+    form.data.name = 'changed';
     await nextTick();
     expect(form.hasChanges.value).toBe(true);
 
-    (form.data as any).name = 'default';
+    form.data.name = 'default';
     await nextTick();
     expect(form.hasChanges.value).toBe(false);
   });
@@ -119,13 +121,13 @@ describe('useForm reactive logic', () => {
       tags: ['one'],
     });
 
-    (form.data as any).tags = ['one', 'two'];
-    (form.data as any).meta = { enabled: false, nested: { count: 2 } };
+    form.data.tags = ['one', 'two'];
+    form.data.meta = { enabled: false, nested: { count: 2 } };
     await nextTick();
     expect(form.hasChanges.value).toBe(true);
 
-    (form.data as any).tags = ['one'];
-    (form.data as any).meta = { nested: { count: 1 }, enabled: true };
+    form.data.tags = ['one'];
+    form.data.meta = { nested: { count: 1 }, enabled: true };
     await nextTick();
     expect(form.hasChanges.value).toBe(false);
   });
@@ -133,11 +135,11 @@ describe('useForm reactive logic', () => {
   it('hasChanges keeps Object.is semantics for primitive edge cases', async () => {
     const form = createForm('/test', { count: NaN, zero: -0 });
 
-    (form.data as any).count = NaN;
+    form.data.count = NaN;
     await nextTick();
     expect(form.hasChanges.value).toBe(false);
 
-    (form.data as any).zero = 0;
+    form.data.zero = 0;
     await nextTick();
     expect(form.hasChanges.value).toBe(true);
   });
@@ -146,7 +148,7 @@ describe('useForm reactive logic', () => {
     const startedAt = new Date(0);
     const form = createForm('/test', { startedAt });
 
-    (form.data as any).startedAt = new Date(0);
+    form.data.startedAt = new Date(0);
     await nextTick();
 
     expect(form.hasChanges.value).toBe(true);
@@ -154,8 +156,8 @@ describe('useForm reactive logic', () => {
 
   it('reset() reverts all fields to defaults', async () => {
     const form = createForm('/test', { name: 'default', email: 'default@test.com' });
-    (form.data as any).name = 'changed';
-    (form.data as any).email = 'changed@test.com';
+    form.data.name = 'changed';
+    form.data.email = 'changed@test.com';
 
     form.reset();
 
@@ -167,8 +169,8 @@ describe('useForm reactive logic', () => {
 
   it('reset(field) reverts specific fields only', () => {
     const form = createForm('/test', { name: 'default', email: 'default@test.com' });
-    (form.data as any).name = 'changed';
-    (form.data as any).email = 'changed@test.com';
+    form.data.name = 'changed';
+    form.data.email = 'changed@test.com';
 
     form.reset('name');
 

@@ -6,6 +6,25 @@ import { islandsPlugin } from '../../src/plugin-islands';
 
 const TMP = join(import.meta.dirname, '__tmp_islands_plugin__');
 const PAGES_DIR = join(TMP, 'pages');
+type HookWithHandler<T> = { handler: T };
+type IslandsPluginHooks = {
+  configResolved?: (config: { root: string; command: 'serve' | 'build'; plugins: unknown[] }) => void;
+  buildStart?: (() => Promise<void>) | HookWithHandler<() => Promise<void>>;
+  configureServer?:
+    | ((server: {
+        watcher: EventEmitter;
+        environments: { client: { moduleGraph: { getModuleById(): null; invalidateModule(): void } } };
+        middlewares: { use(): void };
+      }) => void)
+    | HookWithHandler<
+        (server: {
+          watcher: EventEmitter;
+          environments: { client: { moduleGraph: { getModuleById(): null; invalidateModule(): void } } };
+          middlewares: { use(): void };
+        }) => void
+      >;
+  load?: ((id: string) => string | undefined) | HookWithHandler<(id: string) => string | undefined>;
+};
 
 function writeFile(relativePath: string, content: string): void {
   const full = join(PAGES_DIR, relativePath);
@@ -16,11 +35,11 @@ function writeFile(relativePath: string, content: string): void {
 /** Extract the plugin's buildStart and load hooks, simulating a minimal Vite lifecycle. */
 function setupPlugin(options?: { dev?: boolean }) {
   const plugins = islandsPlugin(PAGES_DIR);
-  const plugin = plugins[0];
+  const plugin = plugins[0] as IslandsPluginHooks;
 
   const command = options?.dev ? 'serve' : 'build';
   const config = { root: TMP, command: command as 'serve' | 'build', plugins: [] };
-  (plugin as any).configResolved(config);
+  plugin.configResolved?.(config);
 
   // Mock watcher and server for dev mode
   const watcher = new EventEmitter();
@@ -36,16 +55,30 @@ function setupPlugin(options?: { dev?: boolean }) {
 
   return {
     async buildStart() {
-      await (plugin as any).buildStart.call({});
+      if (typeof plugin.buildStart === 'function') {
+        await plugin.buildStart.call({});
+      } else {
+        await plugin.buildStart?.handler.call({});
+      }
     },
     configureServer() {
-      (plugin as any).configureServer(mockServer);
+      if (typeof plugin.configureServer === 'function') {
+        plugin.configureServer(mockServer);
+      } else {
+        plugin.configureServer?.handler(mockServer);
+      }
     },
     loadClientEntry(): string | undefined {
-      return (plugin as any).load.handler('\0virtual:void-islands-client');
+      if (typeof plugin.load === 'function') {
+        return plugin.load('\0virtual:void-islands-client');
+      }
+      return plugin.load?.handler('\0virtual:void-islands-client');
     },
     loadRenderer(): string | undefined {
-      return (plugin as any).load.handler('\0virtual:void-islands-renderer');
+      if (typeof plugin.load === 'function') {
+        return plugin.load('\0virtual:void-islands-renderer');
+      }
+      return plugin.load?.handler('\0virtual:void-islands-renderer');
     },
     watcher,
   };

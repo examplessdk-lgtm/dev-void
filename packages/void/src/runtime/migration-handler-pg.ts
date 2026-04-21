@@ -40,7 +40,7 @@ async function runPgMigrations(
   env: Record<string, unknown>,
   migrations: MigrationEntry[],
 ): Promise<MigrationResponse> {
-  const hyperdrive = (env as any).HYPERDRIVE;
+  const hyperdrive = env.HYPERDRIVE as { connectionString?: string } | undefined;
   if (!hyperdrive?.connectionString) {
     return { ok: false, error: 'no HYPERDRIVE binding found', migrations: [] };
   }
@@ -57,8 +57,8 @@ async function runPgMigrations(
       )`,
     );
 
-    const { rows } = await client.query('SELECT name FROM _void_migrations');
-    const applied = new Set(rows.map((r: any) => r.name as string));
+    const { rows } = await client.query<{ name: string }>('SELECT name FROM _void_migrations');
+    const applied = new Set(rows.map((r) => r.name));
 
     const migrationResults: MigrationResult[] = [];
 

@@ -645,7 +645,7 @@ describe('resolveEffectiveLayoutChain', () => {
     );
     expect(chain).toHaveLength(2);
     expect(chain[0].directory).toBe('');
-    expect((chain[1] as any).name).toBe('api');
+    expect((chain[1] as { name: string }).name).toBe('api');
   });
 
   it('replaces entire chain for exclusive layout', () => {
@@ -655,7 +655,7 @@ describe('resolveEffectiveLayoutChain', () => {
       namedLayouts,
     );
     expect(chain).toHaveLength(1);
-    expect((chain[0] as any).name).toBe('home');
+    expect((chain[0] as { name: string }).name).toBe('home');
   });
 
   it('returns named layout as sole entry when no default chain', () => {
@@ -665,7 +665,7 @@ describe('resolveEffectiveLayoutChain', () => {
       namedLayouts,
     );
     expect(chain).toHaveLength(1);
-    expect((chain[0] as any).name).toBe('home');
+    expect((chain[0] as { name: string }).name).toBe('home');
   });
 
   it('falls back to default chain for unresolvable named layout', () => {

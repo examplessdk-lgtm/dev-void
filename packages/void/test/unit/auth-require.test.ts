@@ -2,7 +2,7 @@ import { HTTPException } from 'hono/http-exception';
 import { describe, expect, it } from 'vitest';
 import { requireAuth, type AuthUser } from '../../src/runtime/auth';
 
-function mockContext(user: AuthUser | null) {
+function mockContext(user: AuthUser | null): Parameters<typeof requireAuth>[0] {
   return {
     get(key: string) {
       if (key === 'user') {
@@ -10,7 +10,7 @@ function mockContext(user: AuthUser | null) {
       }
       return undefined;
     },
-  } as any;
+  } as unknown as Parameters<typeof requireAuth>[0];
 }
 
 describe('requireAuth', () => {

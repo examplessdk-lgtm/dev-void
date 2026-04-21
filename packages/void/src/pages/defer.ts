@@ -1,9 +1,11 @@
+import type { CloudContext } from '../runtime/handler';
+
 export const DEFERRED: unique symbol = Symbol('deferred');
 
 export interface DeferredSentinel {
   [DEFERRED]: true;
   group: string | null;
-  resolver: (c: any) => Promise<unknown>;
+  resolver: (c: CloudContext) => Promise<unknown>;
 }
 
 /** Reactive wrapper for a deferred prop on non-React clients. */
@@ -23,21 +25,21 @@ export type Deferred<T> = DeferredState<T> & Promise<T>;
 export type InferProps<T> = T extends { __output: infer R } ? R : never;
 
 // Overloads
-export function defer<T>(resolver: (c: any) => Promise<T>): Deferred<T>;
-export function defer<T>(group: string, resolver: (c: any) => Promise<T>): Deferred<T>;
+export function defer<T>(resolver: (c: CloudContext) => Promise<T>): Deferred<T>;
+export function defer<T>(group: string, resolver: (c: CloudContext) => Promise<T>): Deferred<T>;
 export function defer(
-  groupOrResolver: string | ((c: any) => Promise<unknown>),
-  maybeResolver?: (c: any) => Promise<unknown>,
-): any {
+  groupOrResolver: string | ((c: CloudContext) => Promise<unknown>),
+  maybeResolver?: (c: CloudContext) => Promise<unknown>,
+): Deferred<unknown> {
   const [group, resolver] =
     typeof groupOrResolver === 'string'
       ? [groupOrResolver, maybeResolver!]
       : [null, groupOrResolver];
-  return { [DEFERRED]: true, group, resolver };
+  return { [DEFERRED]: true, group, resolver } as unknown as Deferred<unknown>;
 }
 
 export interface ResolvedDeferredGroup {
-  resolver: (c: any) => Promise<unknown>;
+  resolver: (c: CloudContext) => Promise<unknown>;
   keys: string[];
 }
 

@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { describe, expect, it, vi } from 'vitest';
 import { defer } from '../../src/pages/defer';
 import {
@@ -8,6 +8,22 @@ import {
   ValidationError,
 } from '../../src/pages/protocol';
 
+type TestContext = Context & { set(key: string, value: unknown): void };
+type RenderPage = { component: string };
+type PageResponse = {
+  component: string;
+  props: Record<string, unknown>;
+  url: string;
+  errors: Record<string, string> | null;
+  shared?: Record<string, unknown>;
+  deferred?: string[];
+  deferredKeys?: Record<string, string>;
+};
+
+async function json<T>(response: Response): Promise<T> {
+  return (await response.json()) as T;
+}
+
 /** Create a minimal Hono context for testing */
 function createTestContext(
   method: string,
@@ -16,16 +32,16 @@ function createTestContext(
     headers?: Record<string, string>;
     shared?: Record<string, unknown>;
   } = {},
-): Promise<any> {
+): Promise<Context> {
   const app = new Hono();
-  let resolveContext: (c: any) => void;
-  const contextPromise = new Promise<any>((resolve) => {
+  let resolveContext!: (c: Context) => void;
+  const contextPromise = new Promise<Context>((resolve) => {
     resolveContext = resolve;
   });
 
   app.use(async (c, next) => {
     if (options.shared) {
-      (c as any).set('shared', options.shared);
+      (c as TestContext).set('shared', options.shared);
     }
     await next();
   });
@@ -42,7 +58,7 @@ function createTestContext(
   return contextPromise;
 }
 
-const mockRenderFn = vi.fn(async (pageObj: any) => `<html>${pageObj.component}</html>`);
+const mockRenderFn = vi.fn(async (pageObj: RenderPage) => `<html>${pageObj.component}</html>`);
 const mockGetAssetTags = vi.fn(async () => ({ css: '', preloads: '', body: '' }));
 
 describe('handlePageGet', () => {
@@ -63,7 +79,7 @@ describe('handlePageGet', () => {
 
     expect(response.headers.get('X-VoidPages')).toBe('true');
     expect(response.headers.get('Vary')).toBe('X-VoidPages');
-    const body = (await response.json()) as any;
+    const body = await json<PageResponse>(response);
     expect(body.component).toBe('users');
     expect(body.props).toEqual({ users: [1, 2, 3] });
     expect(body.url).toBe('/users');
@@ -84,7 +100,7 @@ describe('handlePageGet', () => {
       mockGetAssetTags,
     );
 
-    const body = (await response.json()) as any;
+    const body = await json<PageResponse>(response);
     expect(body.url).toBe('/users?page=2');
   });
 
@@ -120,7 +136,7 @@ describe('handlePageGet', () => {
       mockGetAssetTags,
     );
 
-    const body = (await response.json()) as any;
+    const body = await json<PageResponse>(response);
     expect(body.props).toEqual({});
     expect(body.component).toBe('index');
   });
@@ -133,7 +149,7 @@ describe('handlePageGet', () => {
       headers: { Location: '/' },
     });
     const handler = vi.fn(() => redirect);
-    const renderFn = vi.fn(async (pageObj: any) => `<html>${pageObj.component}</html>`);
+    const renderFn = vi.fn(async (pageObj: RenderPage) => `<html>${pageObj.component}</html>`);
     const response = await handlePageGet(
       handler,
       undefined,
@@ -205,7 +221,7 @@ describe('handlePageGet', () => {
       mockGetAssetTags,
     );
 
-    const body = (await response.json()) as any;
+    const body = await json<PageResponse>(response);
     expect(body.shared).toEqual({ auth: { user: { name: 'Test' } } });
   });
 
@@ -231,7 +247,7 @@ describe('handlePageGet', () => {
     expect(response.headers.get('content-type')).not.toContain('ndjson');
     expect(response.headers.get('X-VoidPages')).toBe('true');
 
-    const body = (await response.json()) as any;
+    const body = (await json<PageResponse & { props: { usage: { requests: number } } }>(response));
     expect(body.props.usage).toEqual({ requests: 1200 });
     expect(body.deferred).toBeUndefined();
     // deferredKeys is preserved so clients can wrap resolved values
@@ -258,7 +274,7 @@ describe('handlePageMutation', () => {
       mockGetAssetTags,
     );
 
-    const body = (await response.json()) as any;
+    const body = await json<PageResponse>(response);
     expect(body.props).toEqual({ users: ['new'] });
     expect(body.errors).toBeNull();
   });
@@ -278,7 +294,7 @@ describe('handlePageMutation', () => {
       mockGetAssetTags,
     );
 
-    const body = (await response.json()) as any;
+    const body = await json<PageResponse>(response);
     expect(body.url).toBe('/users?page=2');
   });
 
@@ -327,7 +343,7 @@ describe('handlePageMutation', () => {
       mockGetAssetTags,
     );
 
-    const body = (await response.json()) as any;
+    const body = await json<PageResponse>(response);
     expect(body.errors).toEqual({ name: 'required' });
     expect(body.props).toEqual({ users: [] });
   });
@@ -361,7 +377,7 @@ describe('handlePageMutation', () => {
       mockGetAssetTags,
     );
 
-    const body = (await response.json()) as any;
+    const body = await json<PageResponse>(response);
     expect(body.errors).toEqual({ name: 'required' });
   });
 
@@ -384,7 +400,7 @@ describe('handlePageMutation', () => {
       mockGetAssetTags,
     );
 
-    const body = (await response.json()) as any;
+    const body = await json<PageResponse>(response);
     expect(body.props).toEqual({ users: ['created'] });
     expect(body.errors).toBeNull();
   });
@@ -431,7 +447,7 @@ describe('handlePageMutation', () => {
     );
 
     expect(response.status).toBe(422);
-    const body = (await response.json()) as any;
+    const body = await json<{ errors: Record<string, string> }>(response);
     expect(body.errors).toEqual({ email: 'required' });
   });
 
@@ -464,7 +480,7 @@ describe('handlePageMutation', () => {
     );
 
     expect(response.status).toBe(422);
-    const body = (await response.json()) as any;
+    const body = await json<{ errors: Record<string, string> }>(response);
     expect(body.errors).toEqual({ email: 'required' });
   });
 
@@ -486,7 +502,7 @@ describe('handlePageMutation', () => {
     );
 
     expect(response.status).toBe(200);
-    const body = (await response.json()) as any;
+    const body = await json<{ success: boolean }>(response);
     expect(body.success).toBe(true);
   });
 
@@ -597,7 +613,7 @@ describe('handlePageGet with deferred props', () => {
       mockGetAssetTags,
     );
 
-    const body = (await response.json()) as any;
+    const body = await json<PageResponse>(response);
     expect(body.props).toEqual({ users: [1] });
     expect(body.deferred).toBeUndefined();
   });
@@ -611,7 +627,7 @@ describe('handlePageGet with deferred props', () => {
     }));
 
     const renderFn = vi.fn(
-      async (pageObj: any) =>
+      async (pageObj: RenderPage) =>
         `<script id="__VOID_PAGE_DATA__" type="application/json">${JSON.stringify(pageObj)}</script><div id="app"></div>`,
     );
 

@@ -1,12 +1,23 @@
 import { walk } from 'estree-walker';
 import MagicString from 'magic-string';
 import { parseSync, type Plugin, type ResolvedConfig } from 'vite';
+import {
+  isIdentifier,
+  isLiteral,
+  isMemberExpression,
+  type AstImportDeclaration,
+  type AstImportNamespaceSpecifier,
+  type AstImportSpecifier,
+  type AstMemberExpression,
+  type AstNode,
+  type AstProgram,
+} from './shared/ast';
 
-interface EnvPublicModule {
+type EnvPublicModule = {
   _getRegisteredSchema(): Record<string, unknown> | null;
   _hasRegisteredSchema(): boolean;
   _getSchemaDefaults(): Record<string, string>;
-}
+};
 
 let cachedModule: EnvPublicModule | null = null;
 
@@ -29,32 +40,36 @@ function mentionsVoidEnv(code: string): boolean {
   return code.includes('void/env');
 }
 
-interface ImportBindings {
+type ImportBindings = {
   directNames: Set<string>;
   namespaceNames: Set<string>;
-}
+};
 
-function extractEnvBindings(program: any): ImportBindings | null {
+function extractEnvBindings(program: AstProgram): ImportBindings | null {
   const direct = new Set<string>();
   const namespace = new Set<string>();
   let found = false;
 
-  for (const node of program.body as any[]) {
+  for (const node of program.body ?? []) {
     if (node.type !== 'ImportDeclaration') {
       continue;
     }
-    if (node.source?.value !== 'void/env') {
+    const source = (node as AstImportDeclaration).source;
+    if (source.value !== 'void/env') {
       continue;
     }
     found = true;
-    for (const spec of node.specifiers ?? []) {
+    for (const spec of (node as AstImportDeclaration).specifiers ?? []) {
       if (spec.type === 'ImportSpecifier') {
-        const importedName = spec.imported?.name;
-        if (importedName === 'env') {
-          direct.add(spec.local.name);
+        const importedName = (spec as AstImportSpecifier).imported;
+        if (!isIdentifier(importedName)) {
+          continue;
+        }
+        if (importedName.name === 'env') {
+          direct.add((spec as AstImportSpecifier).local.name);
         }
       } else if (spec.type === 'ImportNamespaceSpecifier') {
-        namespace.add(spec.local.name);
+        namespace.add((spec as AstImportNamespaceSpecifier).local.name);
       }
     }
   }
@@ -65,11 +80,11 @@ function extractEnvBindings(program: any): ImportBindings | null {
   return { directNames: direct, namespaceNames: namespace };
 }
 
-interface FoldHit {
+type FoldHit = {
   start: number;
   end: number;
   property: string;
-}
+};
 
 /**
  * Walk the AST and collect every static `env.FOO` / `env["FOO"]` (or
@@ -77,33 +92,34 @@ interface FoldHit {
  * ignored — the Proxy still serves them at runtime, and we can't prove
  * they'd be folded the same way Vite folds `import.meta.env.FOO`.
  */
-function findFoldHits(program: any, bindings: ImportBindings): FoldHit[] {
+function findFoldHits(program: AstProgram, bindings: ImportBindings): FoldHit[] {
   const hits: FoldHit[] = [];
 
-  walk(program as any, {
-    enter(node: any) {
-      if (node.type !== 'MemberExpression') {
+  walk(program as unknown as Parameters<typeof walk>[0], {
+    enter(node) {
+      const current = node as AstNode;
+      if (!isMemberExpression(current)) {
         return;
       }
 
       // Direct `env.FOO` / `env["FOO"]`
-      if (node.object?.type === 'Identifier' && bindings.directNames.has(node.object.name)) {
-        pushHit(node, hits);
+      if (isIdentifier(current.object) && bindings.directNames.has(current.object.name)) {
+        pushHit(current, hits);
         return;
       }
 
       // Namespace: `voidEnv.env.FOO`. The outer MemberExpression is the read,
       // and `node.object` is itself the `voidEnv.env` MemberExpression.
-      const obj = node.object;
+      const obj = current.object;
       if (
-        obj?.type === 'MemberExpression' &&
+        isMemberExpression(obj) &&
         !obj.computed &&
-        obj.object?.type === 'Identifier' &&
+        isIdentifier(obj.object) &&
         bindings.namespaceNames.has(obj.object.name) &&
-        obj.property?.type === 'Identifier' &&
+        isIdentifier(obj.property) &&
         obj.property.name === 'env'
       ) {
-        pushHit(node, hits);
+        pushHit(current, hits);
       }
     },
   });
@@ -111,19 +127,15 @@ function findFoldHits(program: any, bindings: ImportBindings): FoldHit[] {
   return hits;
 }
 
-function pushHit(node: any, hits: FoldHit[]): void {
+function pushHit(node: AstMemberExpression, hits: FoldHit[]): void {
   // Static dot access: `env.FOO`
-  if (!node.computed && node.property?.type === 'Identifier') {
-    hits.push({ start: node.start, end: node.end, property: node.property.name });
+  if (!node.computed && isIdentifier(node.property)) {
+    hits.push({ start: node.start!, end: node.end!, property: node.property.name });
     return;
   }
   // Static bracket access with a string literal: `env["FOO"]`
-  if (
-    node.computed &&
-    node.property?.type === 'Literal' &&
-    typeof node.property.value === 'string'
-  ) {
-    hits.push({ start: node.start, end: node.end, property: node.property.value });
+  if (node.computed && isLiteral(node.property) && typeof node.property.value === 'string') {
+    hits.push({ start: node.start!, end: node.end!, property: node.property.value });
     return;
   }
   // Everything else (identifiers, template literals, etc.) falls through
@@ -257,12 +269,13 @@ export function envClientFoldPlugin(): Plugin {
         return;
       }
 
-      const bindings = extractEnvBindings(parsed.program);
+      const program = parsed.program as unknown as AstProgram;
+      const bindings = extractEnvBindings(program);
       if (!bindings) {
         return;
       }
 
-      const hits = findFoldHits(parsed.program, bindings);
+      const hits = findFoldHits(program, bindings);
       if (hits.length === 0) {
         return;
       }

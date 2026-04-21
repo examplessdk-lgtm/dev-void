@@ -228,8 +228,8 @@ describe('Remote bindings integration', () => {
     it('batches multiple statements', async () => {
       const db = new ProxyD1Database(makeClient(), 'DB');
       const results = await db.batch([
-        db.prepare('INSERT INTO a VALUES (1)') as any,
-        db.prepare('INSERT INTO b VALUES (2)') as any,
+        db.prepare('INSERT INTO a VALUES (1)') as unknown as D1PreparedStatement,
+        db.prepare('INSERT INTO b VALUES (2)') as unknown as D1PreparedStatement,
       ]);
       expect(results).toHaveLength(2);
       expect(results[0].success).toBe(true);

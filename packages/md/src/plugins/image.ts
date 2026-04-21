@@ -6,13 +6,32 @@ export interface ImageOptions {
   lazyLoading?: boolean;
 }
 
+interface MarkdownToken {
+  attrGet(name: string): string | null;
+  attrSet(name: string, value: string): void;
+}
+
+type ImageRenderRule = (
+  tokens: MarkdownToken[],
+  idx: number,
+  mdOptions: unknown,
+  env: unknown,
+  self: unknown,
+) => string;
+
 /**
  * Normalizes relative image paths and optionally adds loading="lazy".
  * Ported from VitePress.
  */
 export function imagePlugin(md: MarkdownExit, options?: ImageOptions): void {
-  const imageRule = md.renderer.rules.image!;
-  md.renderer.rules.image = (tokens: any[], idx: number, mdOptions: any, env: any, self: any) => {
+  const imageRule = md.renderer.rules.image as ImageRenderRule;
+  md.renderer.rules.image = (
+    tokens: MarkdownToken[],
+    idx: number,
+    mdOptions: unknown,
+    env: unknown,
+    self: unknown,
+  ) => {
     const token = tokens[idx];
     let url = token.attrGet('src');
     if (url && !EXTERNAL_URL_RE.test(url)) {
@@ -24,6 +43,6 @@ export function imagePlugin(md: MarkdownExit, options?: ImageOptions): void {
     if (options?.lazyLoading) {
       token.attrSet('loading', 'lazy');
     }
-    return (imageRule as Function)(tokens, idx, mdOptions, env, self);
+    return imageRule(tokens, idx, mdOptions, env, self);
   };
 }

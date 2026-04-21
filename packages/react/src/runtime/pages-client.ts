@@ -25,10 +25,15 @@ import {
   type VoidRouter,
 } from 'void/pages-client';
 import type { CacheForResult } from 'void/pages-prefetch';
+import type { PageObject } from 'void/pages-protocol';
 import { setActionRouter } from './action';
 import { ErrorsContext, NavigationContext, RouterContext, SharedContext } from './context';
 
+// oxlint-disable-next-line no-explicit-any -- component props are narrowed by generated route types
 type ComponentModule = { default: ComponentType<any> };
+type ReactPageData = PageObject;
+type ReactPageComponent = ComponentType<Record<string, unknown>>;
+type ReactLayoutComponent = ComponentType<{ children?: React.ReactNode }>;
 
 export interface ReactPagesConfig {
   components: Record<string, () => Promise<ComponentModule>>;
@@ -61,7 +66,7 @@ type ReactPageResource = PageNavigationResource & {
 };
 
 type VisitSettler = {
-  resolve(pageData: Record<string, unknown> | undefined): void;
+  resolve(pageData: ReactPageData | undefined): void;
   reject(error: unknown): void;
 };
 
@@ -91,7 +96,7 @@ const committedResources = new Set<number>();
 
 let activePendingNavigationId: number | null = null;
 let scheduleVisit:
-  | ((url: string, options?: VisitOptions) => Promise<Record<string, unknown> | undefined>)
+  | ((url: string, options?: VisitOptions) => Promise<ReactPageData | undefined>)
   | null = null;
 
 function createDeferredResource(): DeferredResource {
@@ -263,15 +268,18 @@ function RouteResource({
     return null;
   }
 
-  let element = React.createElement(result.component, result.pageData.props);
+  const pageData = result.pageData as ReactPageData;
+  const PageComponent = result.component as ReactPageComponent;
+  let element = React.createElement(PageComponent, pageData.props);
   for (let i = result.layouts.length - 1; i >= 0; i--) {
-    element = React.createElement(result.layouts[i], null, element);
+    const Layout = result.layouts[i] as ReactLayoutComponent;
+    element = React.createElement(Layout, null, element);
   }
 
   return React.createElement(
     SharedContext.Provider,
-    { value: result.pageData.shared || {} },
-    React.createElement(ErrorsContext.Provider, { value: result.pageData.errors || {} }, element),
+    { value: pageData.shared },
+    React.createElement(ErrorsContext.Provider, { value: pageData.errors ?? {} }, element),
   );
 }
 
@@ -305,18 +313,19 @@ function App({
   router: VoidRouter;
   viewTransitions: boolean;
 }): React.ReactNode {
-  const sharedStateRef = useRef<Record<string, unknown>>(engine.initialPageData.shared || {});
+  const initialPageData = engine.initialPageData as ReactPageData;
+  const sharedStateRef = useRef<Record<string, unknown>>(initialPageData.shared);
   const initialResource = useMemo<ReactPageResource>(
     () => ({
       id: 0,
-      url: engine.initialPageData.url || currentUrl(),
-      fetchUrl: engine.initialPageData.url || currentUrl(),
+      url: initialPageData.url || currentUrl(),
+      fetchUrl: initialPageData.url || currentUrl(),
       hash: window.location.hash,
       method: 'GET',
       options: {},
       immediate: false,
       shell: Promise.resolve({
-        pageData: { ...engine.initialPageData, shared: engine.initialPageData.shared || {} },
+        pageData: { ...initialPageData, shared: initialPageData.shared },
         component: engine.initialComponent,
         layouts: engine.initialLayouts,
       }),
@@ -324,7 +333,7 @@ function App({
       async commit() {},
       dispose() {},
     }),
-    [engine],
+    [engine, initialPageData],
   );
   const [state, dispatch] = useReducer(appReducer, {
     resource: initialResource,
@@ -413,9 +422,9 @@ function App({
         );
       }
 
-      let resolveVisit!: (pageData: Record<string, unknown> | undefined) => void;
+      let resolveVisit!: (pageData: ReactPageData | undefined) => void;
       let rejectVisit!: (error: unknown) => void;
-      const pagePromise = new Promise<Record<string, unknown> | undefined>((resolve, reject) => {
+      const pagePromise = new Promise<ReactPageData | undefined>((resolve, reject) => {
         resolveVisit = resolve;
         rejectVisit = reject;
       });

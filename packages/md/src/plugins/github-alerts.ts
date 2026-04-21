@@ -1,4 +1,5 @@
 import type MarkdownExit from 'markdown-exit';
+import type { RuleCore, Token } from 'markdown-exit';
 
 const markerRE = /^\[!(TIP|NOTE|INFO|IMPORTANT|WARNING|CAUTION|DANGER)\]([^\n\r]*)/i;
 
@@ -11,6 +12,10 @@ export interface GitHubAlertsOptions {
   cautionLabel?: string;
   dangerLabel?: string;
 }
+
+type AlertToken = Token & {
+  meta?: { title: string; type: string };
+};
 
 function capitalize(str: string): string {
   return str.charAt(0).toUpperCase() + str.slice(1);
@@ -31,8 +36,8 @@ export function gitHubAlertsPlugin(md: MarkdownExit, options?: GitHubAlertsOptio
     danger: options?.dangerLabel ?? 'DANGER',
   };
 
-  md.core.ruler.after('block', 'github-alerts', (state: any) => {
-    const tokens = state.tokens;
+  const rule: RuleCore = (state) => {
+    const tokens = state.tokens as AlertToken[];
     for (let i = 0; i < tokens.length; i++) {
       if (tokens[i].type === 'blockquote_open') {
         const startIndex = i;
@@ -50,7 +55,7 @@ export function gitHubAlertsPlugin(md: MarkdownExit, options?: GitHubAlertsOptio
         const close = tokens[endIndex];
         const firstContent = tokens
           .slice(startIndex, endIndex + 1)
-          .find((token: any) => token.type === 'inline');
+          .find((token) => token.type === 'inline');
         if (!firstContent) {
           continue;
         }
@@ -68,10 +73,12 @@ export function gitHubAlertsPlugin(md: MarkdownExit, options?: GitHubAlertsOptio
         close.tag = 'div';
       }
     }
-  });
+  };
 
-  md.renderer.rules.github_alert_open = function (tokens: any[], idx: number) {
-    const { title, type } = tokens[idx].meta;
+  md.core.ruler.after('block', 'github-alerts', rule);
+
+  md.renderer.rules.github_alert_open = function (tokens: AlertToken[], idx: number) {
+    const { title, type } = tokens[idx].meta!;
     return `<div class="${type} custom-block github-alert"><p class="custom-block-title">${title}</p>\n`;
   };
 }

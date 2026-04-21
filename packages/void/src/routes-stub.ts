@@ -47,7 +47,7 @@ export type ActionFormOptions<U extends string> =
 /** Valid useForm URLs — single-action pages + "page?name" combos + default actions */
 export type ActionUrl =
   | {
-      [K in keyof PageActionMap]: PageActionMap[K] extends { body: any } ? K : never;
+      [K in keyof PageActionMap]: PageActionMap[K] extends { body: unknown } ? K : never;
     }[keyof PageActionMap]
   | {
       [K in keyof PageActionMap]: PageActionMap[K] extends { actions: infer A }

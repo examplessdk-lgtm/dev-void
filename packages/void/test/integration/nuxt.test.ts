@@ -118,7 +118,7 @@ describe(
 
         // Mark the document to detect full page reloads
         await page.evaluate(() => {
-          (window as any).__spa_marker = true;
+          (window as Window & { __spa_marker?: boolean }).__spa_marker = true;
         });
 
         await page.click('a[href="/smoke"]');
@@ -126,7 +126,9 @@ describe(
         await page.waitForSelector('[data-testid="d1-user"]');
 
         // Assert SPA navigation (no full reload)
-        const spaMarker = await page.evaluate(() => (window as any).__spa_marker);
+        const spaMarker = await page.evaluate(
+          () => (window as Window & { __spa_marker?: boolean }).__spa_marker,
+        );
         expect(spaMarker).toBe(true);
 
         const d1User = await page.textContent('[data-testid="d1-user"]');

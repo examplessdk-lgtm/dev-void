@@ -35,7 +35,7 @@ export function parseCacheFor(value: CacheForInput): CacheForResult {
 export interface CacheEntry {
   url: string;
   method: string;
-  response: Promise<any>;
+  response: Promise<unknown>;
   staleAt: number;
   expiresAt: number;
   singleUse: boolean;
@@ -73,7 +73,7 @@ export class PrefetchCache {
     return Date.now() < entry.expiresAt || entry.singleUse;
   }
 
-  set(url: string, method: string, response: Promise<any>, ttl: CacheForResult): void {
+  set(url: string, method: string, response: Promise<unknown>, ttl: CacheForResult): void {
     const k = this.key(url, method);
     // Don't overwrite existing entry that is still usable
     const existing = this.entries.get(k);

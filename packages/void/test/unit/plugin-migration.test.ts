@@ -6,6 +6,8 @@ import { getMiniflareDatabasePath } from '../../src/migrations/runner';
 import { migrationPlugin } from '../../src/plugin-migration';
 
 const roots: string[] = [];
+type HookWithHandler<T> = { handler: T };
+type ConfigureServerHook = ((server: unknown) => Promise<void> | void) | HookWithHandler<(server: unknown) => Promise<void> | void>;
 
 function createProjectRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'void-migrations-'));
@@ -26,15 +28,15 @@ afterEach(() => {
 });
 
 async function runConfigureServer(plugin: ReturnType<typeof migrationPlugin>) {
-  const hook = plugin.configureServer as any;
+  const hook = plugin.configureServer as ConfigureServerHook | undefined;
   if (!hook) {
     return;
   }
   if (typeof hook === 'function') {
-    await hook.call({} as any, {} as any);
+    await hook.call({}, {});
     return;
   }
-  await hook.handler.call({} as any, {} as any);
+  await hook.handler.call({}, {});
 }
 
 describe('migrationPlugin persistence roots', () => {

@@ -2,11 +2,21 @@ import { Link, useNavigation, useRouter } from '@void/react';
 import { useEffect, useRef } from 'react';
 import type { Props } from './link-behavior.server';
 
+type LinkBehaviorWindow = Window & {
+  __hashNavigationStarts?: number;
+  __hashNavigationEnds?: number;
+  __hashNavigationReady?: boolean;
+  __linkOnClick?: boolean;
+  __preventedClick?: boolean;
+  __preventedNavigate?: boolean;
+};
+
 export default function LinkBehaviorPage({ title }: Props) {
   useEffect(() => {
-    (window as any).__hashNavigationStarts = 0;
-    (window as any).__hashNavigationEnds = 0;
-    (window as any).__hashNavigationReady = true;
+    const linkWindow = window as LinkBehaviorWindow;
+    linkWindow.__hashNavigationStarts = 0;
+    linkWindow.__hashNavigationEnds = 0;
+    linkWindow.__hashNavigationReady = true;
   }, []);
 
   const router = useRouter();
@@ -14,11 +24,12 @@ export default function LinkBehaviorPage({ title }: Props) {
   const previousNavigationState = useRef(navigation.state);
 
   useEffect(() => {
+    const linkWindow = window as LinkBehaviorWindow;
     if (previousNavigationState.current === 'idle' && navigation.state !== 'idle') {
-      (window as any).__hashNavigationStarts = ((window as any).__hashNavigationStarts ?? 0) + 1;
+      linkWindow.__hashNavigationStarts = (linkWindow.__hashNavigationStarts ?? 0) + 1;
     }
     if (previousNavigationState.current !== 'idle' && navigation.state === 'idle') {
-      (window as any).__hashNavigationEnds = ((window as any).__hashNavigationEnds ?? 0) + 1;
+      linkWindow.__hashNavigationEnds = (linkWindow.__hashNavigationEnds ?? 0) + 1;
     }
     previousNavigationState.current = navigation.state;
   }, [navigation.state]);
@@ -32,7 +43,7 @@ export default function LinkBehaviorPage({ title }: Props) {
           href="/users"
           data-testid="onclick-link"
           onClick={() => {
-            (window as any).__linkOnClick = true;
+            (window as LinkBehaviorWindow).__linkOnClick = true;
           }}
         >
           User handler then SPA
@@ -45,7 +56,7 @@ export default function LinkBehaviorPage({ title }: Props) {
           data-testid="prevented-click-link"
           onClick={(event) => {
             event.preventDefault();
-            (window as any).__preventedClick = true;
+            (window as LinkBehaviorWindow).__preventedClick = true;
           }}
         >
           Prevented click
@@ -58,7 +69,7 @@ export default function LinkBehaviorPage({ title }: Props) {
           data-testid="prevented-navigate-link"
           onNavigate={(event) => {
             event.preventDefault();
-            (window as any).__preventedNavigate = true;
+            (window as LinkBehaviorWindow).__preventedNavigate = true;
           }}
         >
           Prevented navigate

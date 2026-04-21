@@ -7,12 +7,14 @@ function createClient() {
 }
 
 function mockFetch(response: unknown, contentType = 'application/json') {
-  globalThis.fetch = vi.fn(
+  const fetchMock = vi.fn(
     async () =>
       new Response(JSON.stringify(response), {
         headers: { 'content-type': contentType },
       }),
-  ) as any;
+  );
+  globalThis.fetch = fetchMock as typeof fetch;
+  return fetchMock;
 }
 
 describe('ProxyR2Bucket', () => {
@@ -55,7 +57,7 @@ describe('ProxyR2Bucket', () => {
   describe('get()', () => {
     it('returns R2ObjectBody with stream for existing object', async () => {
       const body = 'file contents here';
-      globalThis.fetch = vi.fn(
+      const fetchMock = vi.fn(
         async () =>
           new Response(body, {
             headers: {
@@ -64,7 +66,8 @@ describe('ProxyR2Bucket', () => {
               etag: 'abc123',
             },
           }),
-      ) as any;
+      );
+      globalThis.fetch = fetchMock as typeof fetch;
 
       const r2 = new ProxyR2Bucket(createClient(), 'STORAGE');
       const obj = await r2.get('file.txt');
@@ -95,8 +98,8 @@ describe('ProxyR2Bucket', () => {
       expect(result).not.toBeNull();
       expect(result!.key).toBe('file.txt');
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.key).toBe('file.txt');
       expect(body.value).toBe('hello world');
       expect(body.binding).toBe('STORAGE');
@@ -109,8 +112,8 @@ describe('ProxyR2Bucket', () => {
       const r2 = new ProxyR2Bucket(createClient(), 'STORAGE');
       await r2.put('binary.bin', data.buffer as ArrayBuffer);
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.base64).toBe(btoa('Hello'));
     });
 
@@ -122,8 +125,8 @@ describe('ProxyR2Bucket', () => {
         httpMetadata: { contentType: 'application/json' },
       });
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.contentType).toBe('application/json');
     });
   });
@@ -135,8 +138,8 @@ describe('ProxyR2Bucket', () => {
       const r2 = new ProxyR2Bucket(createClient(), 'STORAGE');
       await r2.delete('file.txt');
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.key).toBe('file.txt');
     });
 
@@ -146,8 +149,8 @@ describe('ProxyR2Bucket', () => {
       const r2 = new ProxyR2Bucket(createClient(), 'STORAGE');
       await r2.delete(['a.txt', 'b.txt']);
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.keys).toEqual(['a.txt', 'b.txt']);
     });
   });
@@ -183,21 +186,31 @@ describe('ProxyR2Bucket', () => {
       const result = await r2.list({ limit: 1 });
 
       expect(result.truncated).toBe(true);
-      expect((result as any).cursor).toBe('next-page');
+      expect((result as typeof result & { cursor: string | null }).cursor).toBe('next-page');
     });
   });
 
   describe('unsupported methods', () => {
     it('createMultipartUpload throws', () => {
       const r2 = new ProxyR2Bucket(createClient(), 'STORAGE');
-      expect(() => (r2 as any).createMultipartUpload('key')).toThrow(
+      expect(() =>
+        (r2 as ProxyR2Bucket & { createMultipartUpload(key: string): unknown }).createMultipartUpload(
+          'key',
+        ),
+      ).toThrow(
         'not supported with remote bindings',
       );
     });
 
     it('resumeMultipartUpload throws', () => {
       const r2 = new ProxyR2Bucket(createClient(), 'STORAGE');
-      expect(() => (r2 as any).resumeMultipartUpload('key', 'id')).toThrow(
+      expect(() =>
+        (
+          r2 as ProxyR2Bucket & {
+            resumeMultipartUpload(key: string, uploadId: string): unknown;
+          }
+        ).resumeMultipartUpload('key', 'id'),
+      ).toThrow(
         'not supported with remote bindings',
       );
     });

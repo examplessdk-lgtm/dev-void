@@ -1,10 +1,15 @@
 <script lang="ts">
-  import { getContext, onDestroy, onMount } from "svelte";
+  import { getContext, onDestroy, onMount, type Snippet } from "svelte";
+  import type { VoidRouter } from "void/pages-client";
 
   type PrefetchStrategy = "hover" | "click" | "mount" | "visible";
   type LinkMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   type NavigateEvent = { preventDefault(): void };
   type EventHandler<T extends Event> = (event: T) => void;
+  type PrefetchOptions = {
+    cacheFor?: number | string | [string, string];
+    method?: LinkMethod;
+  };
 
   let {
     href,
@@ -39,7 +44,7 @@
     prefetch?: boolean | PrefetchStrategy | PrefetchStrategy[];
     cacheFor?: number | string | [string, string];
     onNavigate?: (event: NavigateEvent) => void;
-    children?: any;
+    children?: Snippet;
     onclick?: EventHandler<MouseEvent>;
     onmouseenter?: EventHandler<MouseEvent>;
     onmouseleave?: EventHandler<MouseEvent>;
@@ -47,10 +52,10 @@
     onmousedown?: EventHandler<MouseEvent>;
     ontouchstart?: EventHandler<TouchEvent>;
     style?: string;
-    [key: string]: any;
+    [key: string]: unknown;
   } = $props();
 
-  const router: any = getContext("__void_router");
+  const router = getContext<VoidRouter>("__void_router");
 
   function appendQueryValue(params: URLSearchParams, key: string, value: unknown): boolean {
     if (value === null || value === undefined) {
@@ -147,7 +152,7 @@
     if (hrefWithData === current) {
       return;
     }
-    const options: any = {};
+    const options: PrefetchOptions = {};
     if (cacheFor !== undefined) {
       options.cacheFor = cacheFor;
     }

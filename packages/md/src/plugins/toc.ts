@@ -1,3 +1,10 @@
+import type {
+  RenderOptions,
+  Renderer,
+  RuleBlock,
+  StateBlock,
+  Token,
+} from 'markdown-exit';
 import type MarkdownExit from 'markdown-exit';
 
 export interface TocOptions {
@@ -41,7 +48,7 @@ export function tocPlugin(md: MarkdownExit, options?: TocOptions): void {
   md.block.ruler.before(
     'heading',
     'toc',
-    (state: any, startLine: number, _endLine: number, silent: boolean) => {
+    ((state: StateBlock, startLine: number, _endLine: number, silent: boolean) => {
       const pos = state.bMarks[startLine] + state.tShift[startLine];
       const max = state.eMarks[startLine];
       const content = state.src.slice(pos, max).trim();
@@ -65,15 +72,21 @@ export function tocPlugin(md: MarkdownExit, options?: TocOptions): void {
       closeToken.markup = content;
 
       return true;
-    },
+    }) satisfies RuleBlock,
     { alt: ['paragraph', 'reference', 'blockquote'] },
   );
 
-  md.renderer.rules.toc_open = (tokens: any[], idx: number, options: any, _env: any, self: any) => {
+  md.renderer.rules.toc_open = (
+    tokens: Token[],
+    idx: number,
+    options: RenderOptions,
+    _env: unknown,
+    self: Renderer,
+  ) => {
     return self.renderToken(tokens, idx, options);
   };
 
-  md.renderer.rules.toc_body = (tokens: any[]) => {
+  md.renderer.rules.toc_body = (tokens: Token[]) => {
     // Walk all tokens to find headings at the specified levels
     const headers: Header[] = [];
     for (let i = 0; i < tokens.length; i++) {
@@ -85,8 +98,8 @@ export function tocPlugin(md: MarkdownExit, options?: TocOptions): void {
           const inline = tokens[i + 1];
           const text = (
             inline?.children
-              ?.filter((t: any) => t.type === 'text' || t.type === 'code_inline')
-              .map((t: any) => t.content)
+              ?.filter((child) => child.type === 'text' || child.type === 'code_inline')
+              .map((child) => child.content)
               .join('') ?? ''
           ).trim();
           headers.push({ depth, slug, text });
@@ -97,11 +110,11 @@ export function tocPlugin(md: MarkdownExit, options?: TocOptions): void {
   };
 
   md.renderer.rules.toc_close = (
-    tokens: any[],
+    tokens: Token[],
     idx: number,
-    options: any,
-    _env: any,
-    self: any,
+    options: RenderOptions,
+    _env: unknown,
+    self: Renderer,
   ) => {
     return self.renderToken(tokens, idx, options);
   };

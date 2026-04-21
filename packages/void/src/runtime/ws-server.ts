@@ -309,7 +309,7 @@ export function createWebSocketDurableObject(
         setStoredConnection(server, stored);
 
         if (definition.__kind === 'room') {
-          const ctx = createRoomContext<any>(
+          const ctx = createRoomContext<unknown>(
             this.state,
             this.env,
             request,
@@ -324,7 +324,7 @@ export function createWebSocketDurableObject(
             return decision;
           }
         } else {
-          const ctx = createSocketContext<any>(
+          const ctx = createSocketContext<unknown>(
             this.state,
             this.env,
             request,
@@ -343,7 +343,7 @@ export function createWebSocketDurableObject(
         this.state.acceptWebSocket(server);
 
         if (definition.__kind === 'room') {
-          const ctx = createRoomContext<any>(
+          const ctx = createRoomContext<unknown>(
             this.state,
             this.env,
             request,
@@ -353,7 +353,7 @@ export function createWebSocketDurableObject(
           );
           await withAuthState(authState, () => (definition as RoomDefinition).onConnect?.(ctx));
         } else {
-          const ctx = createSocketContext<any>(
+          const ctx = createSocketContext<unknown>(
             this.state,
             this.env,
             request,
@@ -381,7 +381,7 @@ export function createWebSocketDurableObject(
 
       if (definition.__kind === 'room') {
         const fakeSocket = new WebSocketPair()[1];
-        const ctx = createRoomContext<any>(
+        const ctx = createRoomContext<unknown>(
           this.state,
           this.env,
           request,
@@ -393,7 +393,7 @@ export function createWebSocketDurableObject(
       }
 
       const fakeSocket = new WebSocketPair()[1];
-      const ctx = createSocketContext<any>(
+      const ctx = createSocketContext<unknown>(
         this.state,
         this.env,
         request,
@@ -428,7 +428,7 @@ export function createWebSocketDurableObject(
       const request = new Request(`https://void.local${route.pattern}`);
 
       if (definition.__kind === 'room') {
-        const ctx = createRoomContext<any>(
+        const ctx = createRoomContext<unknown>(
           this.state,
           this.env,
           request,
@@ -440,7 +440,7 @@ export function createWebSocketDurableObject(
           (definition as RoomDefinition).onMessage?.(ctx, result.value as never),
         );
       } else {
-        const ctx = createSocketContext<any>(
+        const ctx = createSocketContext<unknown>(
           this.state,
           this.env,
           request,
@@ -464,7 +464,7 @@ export function createWebSocketDurableObject(
       const request = new Request(`https://void.local${route.pattern}`);
 
       if (definition.__kind === 'room') {
-        const ctx = createRoomContext<any>(
+        const ctx = createRoomContext<unknown>(
           this.state,
           this.env,
           request,
@@ -476,7 +476,7 @@ export function createWebSocketDurableObject(
           (definition as RoomDefinition).onClose?.(ctx, { code, reason, wasClean }),
         );
       } else {
-        const ctx = createSocketContext<any>(
+        const ctx = createSocketContext<unknown>(
           this.state,
           this.env,
           request,

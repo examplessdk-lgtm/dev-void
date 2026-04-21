@@ -1,6 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { parseSync } from 'vite';
+import {
+  isIdentifier,
+  type AstExportNamedDeclaration,
+  type AstFunctionDeclaration,
+  type AstProgram,
+  type AstVariableDeclaration,
+} from '../shared/ast';
 
 const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']);
 
@@ -19,27 +26,35 @@ export function detectHttpExports(absPath: string): string[] {
   }
 
   const methods: string[] = [];
-  for (const node of parsed.program.body as any[]) {
+  const program = parsed.program as unknown as AstProgram;
+
+  for (const node of program.body ?? []) {
     if (node.type === 'ExportNamedDeclaration') {
+      const declarationNode = node as AstExportNamedDeclaration;
       // export const GET = ...; export function POST() { ... }
-      const decl = node.declaration;
+      const decl = declarationNode.declaration;
       if (decl) {
         if (decl.type === 'VariableDeclaration') {
-          for (const declarator of decl.declarations) {
-            if (declarator.id?.type === 'Identifier' && HTTP_METHODS.has(declarator.id.name)) {
+          for (const declarator of (decl as AstVariableDeclaration).declarations ?? []) {
+            if (isIdentifier(declarator.id) && HTTP_METHODS.has(declarator.id.name)) {
               methods.push(declarator.id.name);
             }
           }
-        } else if (decl.type === 'FunctionDeclaration' && decl.id?.type === 'Identifier') {
-          if (HTTP_METHODS.has(decl.id.name)) {
-            methods.push(decl.id.name);
+        } else if (decl.type === 'FunctionDeclaration') {
+          const fn = decl as AstFunctionDeclaration;
+          if (isIdentifier(fn.id) && HTTP_METHODS.has(fn.id.name)) {
+            methods.push(fn.id.name);
           }
         }
       }
       // export { GET, POST } (specifiers)
-      if (node.specifiers) {
-        for (const spec of node.specifiers) {
-          const exported = spec.exported?.name ?? spec.local?.name;
+      if (declarationNode.specifiers) {
+        for (const spec of declarationNode.specifiers) {
+          const exported = isIdentifier(spec.exported)
+            ? spec.exported.name
+            : isIdentifier(spec.local)
+              ? spec.local.name
+              : undefined;
           if (exported && HTTP_METHODS.has(exported)) {
             methods.push(exported);
           }

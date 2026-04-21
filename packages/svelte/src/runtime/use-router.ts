@@ -5,5 +5,5 @@ import type { VoidRouter } from 'void/pages-client';
 export type { VoidRouter } from 'void/pages-client';
 
 export function useRouter(): VoidRouter {
-  return getContext<any>('__void_router') ?? ssrProxy;
+  return getContext<VoidRouter>('__void_router') ?? ssrProxy;
 }

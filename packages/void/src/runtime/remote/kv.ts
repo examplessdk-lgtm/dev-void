@@ -5,12 +5,41 @@ import type { ProxyClient } from './client';
  * Used during local development when `remote: true` is set in void.json.
  */
 export class ProxyKVNamespace {
+  private normalizeGetOptions(
+    options?: { type?: string } | string,
+  ): string | { type: 'json' | 'text' | 'arrayBuffer' | 'stream' } | undefined {
+    if (typeof options === 'string') {
+      return options;
+    }
+    if (
+      options?.type === 'json' ||
+      options?.type === 'text' ||
+      options?.type === 'arrayBuffer' ||
+      options?.type === 'stream'
+    ) {
+      return { type: options.type };
+    }
+    return undefined;
+  }
+
   constructor(
     private client: ProxyClient,
     private binding: string,
   ) {}
 
-  async get(key: string, options?: { type?: string } | string): Promise<any> {
+  async get(key: string): Promise<string | null>;
+  async get<T = unknown>(key: string, type: 'json'): Promise<T | null>;
+  async get(key: string, type: 'text'): Promise<string | null>;
+  async get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>;
+  async get(key: string, type: 'stream'): Promise<ReadableStream | null>;
+  async get<T = unknown>(key: string, options: { type: 'json' }): Promise<T | null>;
+  async get(key: string, options: { type: 'text' }): Promise<string | null>;
+  async get(key: string, options: { type: 'arrayBuffer' }): Promise<ArrayBuffer | null>;
+  async get(key: string, options: { type: 'stream' }): Promise<ReadableStream | null>;
+  async get(
+    key: string,
+    options?: { type?: string } | string,
+  ): Promise<string | ArrayBuffer | ReadableStream | unknown | null> {
     const type = typeof options === 'string' ? options : (options?.type ?? 'text');
     const res = await this.client.fetch('/kv/get', {
       binding: this.binding,
@@ -50,11 +79,29 @@ export class ProxyKVNamespace {
     return res.json();
   }
 
-  async getWithMetadata<M = unknown>(
+  async getWithMetadata<T = string, M = unknown>(
     key: string,
     options?: { type?: string } | string,
-  ): Promise<{ value: any; metadata: M | null; cacheStatus: null }> {
-    const value = await this.get(key, options);
+  ): Promise<{ value: T | null; metadata: M | null; cacheStatus: null }> {
+    const normalized = this.normalizeGetOptions(options);
+    let value: T | null;
+    switch (typeof normalized === 'string' ? normalized : normalized?.type) {
+      case 'json':
+        value = (await this.get(key, 'json')) as T | null;
+        break;
+      case 'text':
+        value = (await this.get(key, 'text')) as T | null;
+        break;
+      case 'arrayBuffer':
+        value = (await this.get(key, 'arrayBuffer')) as T | null;
+        break;
+      case 'stream':
+        value = (await this.get(key, 'stream')) as T | null;
+        break;
+      default:
+        value = (await this.get(key)) as T | null;
+        break;
+    }
     // The proxy doesn't support metadata retrieval via REST API in V1
     return { value, metadata: null, cacheStatus: null };
   }

@@ -1,9 +1,25 @@
 /// <reference lib="dom" />
 
 import { createActionErrorFromResponse } from './action-result';
+import type { HeadDescriptor } from './head';
 import { initClientHead, applyClientHead } from './head-client';
 import { PrefetchCache, parseCacheFor } from './prefetch';
 import type { CacheForInput, CacheForResult } from './prefetch';
+import type { PageObject } from './protocol';
+
+export interface PageComponentModule {
+  default: unknown;
+}
+
+export type PageData = PageObject;
+
+interface DeferredWindow extends Window {
+  __resolveDeferred?: (group: string, data: unknown) => void;
+  __rejectDeferred?: (group: string, error: unknown) => void;
+  __deferredQueue?: Array<[string, unknown] | [string, 0, unknown]>;
+}
+
+type PageFetchOptions = RequestInit & { headers: Record<string, string> };
 
 export interface VisitOptions {
   method?: string;
@@ -35,7 +51,7 @@ export interface PageRouterAdapter {
 
 export interface PageNavigationEngineConfig {
   adapter: PageRouterAdapter;
-  components: Record<string, () => Promise<{ default: any }>>;
+  components: Record<string, () => Promise<PageComponentModule>>;
   layoutTree: Record<string, string[]>;
   routeMeta: Record<string, { island?: boolean }>;
   matchRoute(url: string): string | null;
@@ -47,9 +63,9 @@ export interface PageNavigationEngineConfig {
 }
 
 export interface PageNavigationResult {
-  pageData: any;
-  component: any;
-  layouts: any[];
+  pageData: PageData;
+  component: unknown;
+  layouts: unknown[];
 }
 
 export interface PageNavigationResource {
@@ -68,9 +84,9 @@ export interface PageNavigationResource {
 
 export interface PageNavigationEngine {
   _hoverDelay: number;
-  initialPageData: any;
-  initialComponent: any;
-  initialLayouts: any[];
+  initialPageData: PageData;
+  initialComponent: unknown;
+  initialLayouts: unknown[];
   prepareVisit(url: string, options?: VisitOptions): PageNavigationResource;
   prefetch(url: string, options?: PrefetchOptions): Promise<unknown>;
   flush(url: string, method?: string): void;
@@ -108,7 +124,7 @@ export function objectToFormData(
       continue;
     }
     const composed = parentKey ? parentKey + '[' + key + ']' : key;
-    const value = source[key] as any;
+    const value = source[key];
     if (value instanceof File) {
       form.append(composed, value, value.name);
     } else if (value instanceof Blob) {
@@ -132,38 +148,38 @@ export function objectToFormData(
     } else if (value === null || value === undefined) {
       form.append(composed, '');
     } else {
-      objectToFormData(value, form, composed);
+      objectToFormData(value as Record<string, unknown>, form, composed);
     }
   }
   return form;
 }
 
-function clonePageData(pageData: any): any {
-  return JSON.parse(JSON.stringify(pageData));
+function clonePageData(pageData: PageData): PageData {
+  return JSON.parse(JSON.stringify(pageData)) as PageData;
 }
 
-function readInitialPageData(appEl: HTMLElement): any {
+function readInitialPageData(appEl: HTMLElement): PageData {
   const scriptEl = document.getElementById(PAGE_DATA_SCRIPT_ID);
   if (scriptEl?.textContent) {
-    return JSON.parse(scriptEl.textContent);
+    return JSON.parse(scriptEl.textContent) as PageData;
   }
 
   const legacyData = appEl.getAttribute('data-page');
   if (legacyData) {
-    return JSON.parse(legacyData);
+    return JSON.parse(legacyData) as PageData;
   }
 
   throw new Error('Missing initial page payload');
 }
 
-function parsePageDataFromHtml(html: string): any | null {
+function parsePageDataFromHtml(html: string): PageData | null {
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const scriptEl = doc.getElementById(PAGE_DATA_SCRIPT_ID);
   if (!scriptEl?.textContent) {
     return null;
   }
   try {
-    return JSON.parse(scriptEl.textContent);
+    return JSON.parse(scriptEl.textContent) as PageData;
   } catch {
     return null;
   }
@@ -231,7 +247,7 @@ export async function createPageNavigationEngine(
     return `${method}:${url}`;
   }
 
-  async function resolveComponent(id: string) {
+  async function resolveComponent(id: string): Promise<unknown> {
     const loader = components[id];
     if (!loader) {
       throw new Error('Unknown page component: ' + id);
@@ -239,7 +255,7 @@ export async function createPageNavigationEngine(
     return (await loader()).default;
   }
 
-  async function resolveLayouts(componentId: string) {
+  async function resolveLayouts(componentId: string): Promise<unknown[]> {
     const ids = layoutTree[componentId] || [];
     return Promise.all(ids.map(async (id: string) => (await components[id]()).default));
   }
@@ -250,9 +266,15 @@ export async function createPageNavigationEngine(
     return `${STATIC_PAGE_DATA_PREFIX}/${filePath}.json`;
   }
 
-  function isUsablePageData(pageData: any, matchedId: string): boolean {
+  function isUsablePageData(pageData: unknown, matchedId: string): pageData is PageData {
     return (
-      pageData &&
+      typeof pageData === 'object' &&
+      pageData !== null &&
+      'component' in pageData &&
+      typeof pageData.component === 'string' &&
+      'props' in pageData &&
+      typeof pageData.props === 'object' &&
+      pageData.props !== null &&
       typeof pageData.component === 'string' &&
       pageData.component === matchedId &&
       !routeMeta[pageData.component]?.island &&
@@ -268,7 +290,7 @@ export async function createPageNavigationEngine(
     private preservedSource: DeferredRegistry | null = null;
     private preservedKeys: Set<string> | null = null;
 
-    setupPending(pageData: any): void {
+    setupPending(pageData: PageData): void {
       this.props = pageData.props;
       this.keyRefs = {};
       this.groups = {};
@@ -285,7 +307,7 @@ export async function createPageNavigationEngine(
       }
     }
 
-    setupResolved(pageData: any): void {
+    setupResolved(pageData: PageData): void {
       this.props = pageData.props;
       this.keyRefs = {};
       this.groups = {};
@@ -303,7 +325,7 @@ export async function createPageNavigationEngine(
       }
     }
 
-    preserveValuesFrom(source: DeferredRegistry | null, pageData: any): void {
+    preserveValuesFrom(source: DeferredRegistry | null, pageData: PageData): void {
       if (!source) {
         return;
       }
@@ -314,7 +336,10 @@ export async function createPageNavigationEngine(
       }
     }
 
-    commitPreservedValues(source: DeferredRegistry | null, pageData: any): DeferredRegistry | null {
+    commitPreservedValues(
+      source: DeferredRegistry | null,
+      pageData: PageData,
+    ): DeferredRegistry | null {
       if (!this.preservedSource || this.preservedSource !== source || !this.preservedKeys) {
         return null;
       }
@@ -322,7 +347,7 @@ export async function createPageNavigationEngine(
       return this.preservedSource;
     }
 
-    private applyPreservedValues(pageData: any): Set<string> | null {
+    private applyPreservedValues(pageData: PageData): Set<string> | null {
       let keys: Set<string> | null = null;
       for (const key of Object.keys(this.keyRefs)) {
         if (pageData.props[key] === null && this.props[key] !== undefined) {
@@ -445,7 +470,7 @@ export async function createPageNavigationEngine(
     fetchUrl: string,
     signal?: AbortSignal,
   ): Promise<{
-    pageData: any;
+    pageData: PageData;
     resolvedDeferred: boolean;
   } | null> {
     const matchedId = matchRoute(fetchUrl || window.location.pathname + window.location.search);
@@ -479,7 +504,7 @@ export async function createPageNavigationEngine(
     signal?: AbortSignal,
     verifyPageResponse = false,
   ): Promise<{
-    pageData: any;
+    pageData: PageData;
     resolvedDeferred: boolean;
   } | null> {
     if (!response.ok) {
@@ -519,9 +544,10 @@ export async function createPageNavigationEngine(
     return { pageData, resolvedDeferred: false };
   }
 
-  (window as any).__resolveDeferred = (group: string, data: unknown) =>
+  const deferredWindow = window as DeferredWindow;
+  deferredWindow.__resolveDeferred = (group: string, data: unknown) =>
     _htmlDeferredRegistry?.resolve(group, data, undefined);
-  (window as any).__rejectDeferred = (group: string, error: unknown) =>
+  deferredWindow.__rejectDeferred = (group: string, error: unknown) =>
     _htmlDeferredRegistry?.resolve(group, undefined, error);
 
   function commitHashNavigation(
@@ -573,7 +599,7 @@ export async function createPageNavigationEngine(
       'X-VoidPages': 'true',
       Accept: 'application/json',
     };
-    const fetchOptions: any = { method, headers, signal };
+    const fetchOptions: PageFetchOptions = { method, headers, signal };
 
     if (options.data && method !== 'GET') {
       if (hasFiles(options.data)) {
@@ -584,19 +610,19 @@ export async function createPageNavigationEngine(
       }
     }
 
-    let pageData: any;
+    let pageData: PageData | undefined;
     const cacheEntry = method === 'GET' ? _prefetchCache.get(fetchUrl, method) : null;
 
     if (cacheEntry) {
       const cachedPageData = await cacheEntry.response;
-      pageData = _staticPageDataCacheKeys.has(getPageDataCacheKey(fetchUrl, method))
-        ? clonePageData(cachedPageData)
-        : cachedPageData;
       _prefetchCache.consume(fetchUrl, method);
-      if (pageData === null) {
+      if (cachedPageData === null) {
         window.location.href = url;
         return undefined;
       }
+      pageData = _staticPageDataCacheKeys.has(getPageDataCacheKey(fetchUrl, method))
+        ? clonePageData(cachedPageData as PageData)
+        : (cachedPageData as PageData);
       deferredRegistry.setupResolved(pageData);
       if (!_prefetchCache.isFresh(cacheEntry)) {
         const bgHeaders = {
@@ -734,7 +760,7 @@ export async function createPageNavigationEngine(
             }
 
             if (firstLine) {
-              pageData = JSON.parse(line);
+              pageData = JSON.parse(line) as PageData;
               deferredRegistry.setupPending(pageData);
               firstLine = false;
             } else {
@@ -768,16 +794,20 @@ export async function createPageNavigationEngine(
             if (buffer.trim()) {
               processLines();
             }
-          } catch (e: any) {
-            if (e.name !== 'AbortError') {
+          } catch (e: unknown) {
+            if (!(e instanceof Error) || e.name !== 'AbortError') {
               deferredRegistry.rejectPending('Stream closed before resolution');
             }
           }
         })();
       } else {
-        pageData = await response!.json();
+        pageData = (await response!.json()) as PageData;
         deferredRegistry.setupPending(pageData);
       }
+    }
+
+    if (!pageData) {
+      throw new Error('Missing page payload');
     }
 
     if (method !== 'GET') {
@@ -857,7 +887,7 @@ export async function createPageNavigationEngine(
       if (preservedDeferredRegistry && preservedDeferredRegistry !== deferredRegistry) {
         deferredRegistry.dispose();
       }
-      applyClientHead(result.pageData.head);
+      applyClientHead(result.pageData.head as HeadDescriptor | undefined);
       _currentFetchUrl = commitTarget.fetchUrl;
 
       if (!options.preserveState) {
@@ -1090,17 +1120,17 @@ export async function createPageNavigationEngine(
       history.scrollRestoration = 'manual';
       history.replaceState({ scrollX: window.scrollX, scrollY: window.scrollY }, '');
 
-      initClientHead(initialPageData.head);
+      initClientHead(initialPageData.head as HeadDescriptor | undefined);
 
-      if ((window as any).__deferredQueue) {
-        for (const entry of (window as any).__deferredQueue) {
+      if (deferredWindow.__deferredQueue) {
+        for (const entry of deferredWindow.__deferredQueue) {
           if (entry.length === 3) {
             _htmlDeferredRegistry?.resolve(entry[0], undefined, entry[2]);
           } else {
             _htmlDeferredRegistry?.resolve(entry[0], entry[1], undefined);
           }
         }
-        delete (window as any).__deferredQueue;
+        delete deferredWindow.__deferredQueue;
       }
 
       window.addEventListener('popstate', (e) => {

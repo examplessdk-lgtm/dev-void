@@ -4,6 +4,18 @@ import { number, string } from '../../src/runtime/env-helpers';
 import { defineEnv } from '../../src/runtime/env-public';
 
 const ROOT = '/project';
+type MessagePayload = string | { message: string };
+type FoldContext = ReturnType<typeof makeContext>;
+type TransformHandler = (
+  this: FoldContext,
+  code: string,
+  id: string,
+) => unknown | Promise<unknown>;
+type ConfigResolvedHandler = (
+  this: FoldContext,
+  config: { envPrefix?: string | string[]; env?: Record<string, string> },
+) => unknown | Promise<unknown>;
+type HookWithHandler<T> = { handler: T };
 
 interface TransformResult {
   code?: string;
@@ -15,11 +27,11 @@ function makeContext(environmentName = 'client') {
     environment: { name: environmentName },
     errors: [] as { message: string }[],
     warnings: [] as { message: string }[],
-    error(payload: any) {
+    error(payload: MessagePayload) {
       this.errors.push(typeof payload === 'string' ? { message: payload } : payload);
       throw new Error(typeof payload === 'string' ? payload : payload.message);
     },
-    warn(payload: any) {
+    warn(payload: MessagePayload) {
       this.warnings.push(typeof payload === 'string' ? { message: payload } : payload);
     },
   };
@@ -28,10 +40,10 @@ function makeContext(environmentName = 'client') {
 function getTransformHandler(plugin: ReturnType<typeof envClientFoldPlugin>) {
   const t = plugin.transform;
   if (typeof t === 'function') {
-    return t as any;
+    return t as unknown as TransformHandler;
   }
   if (t && typeof t === 'object' && 'handler' in t) {
-    return (t as any).handler;
+    return (t as unknown as HookWithHandler<TransformHandler>).handler;
   }
   throw new Error('plugin.transform missing handler');
 }
@@ -39,10 +51,10 @@ function getTransformHandler(plugin: ReturnType<typeof envClientFoldPlugin>) {
 function getConfigResolvedHandler(plugin: ReturnType<typeof envClientFoldPlugin>) {
   const c = plugin.configResolved;
   if (typeof c === 'function') {
-    return c as any;
+    return c as unknown as ConfigResolvedHandler;
   }
   if (c && typeof c === 'object' && 'handler' in c) {
-    return (c as any).handler;
+    return (c as unknown as HookWithHandler<ConfigResolvedHandler>).handler;
   }
   return null;
 }

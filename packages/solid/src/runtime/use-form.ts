@@ -1,8 +1,35 @@
 import { createSignal, createMemo, useContext } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
-import { VoidActionError, isAbortError, isEqualFormValue, submitAction } from 'void/pages-client';
+import {
+  VoidActionError,
+  isAbortError,
+  isEqualFormValue,
+  submitAction,
+  type VisitOptions,
+} from 'void/pages-client';
 import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
 import { RouterContext, ErrorsContext } from './context';
+
+type FormSubmitOptions = Omit<VisitOptions, 'method' | 'data'> & {
+  data?: Record<string, unknown>;
+};
+type UntypedForm = {
+  data: Record<string, unknown>;
+  setData(field: string, value: unknown): void;
+  errors: Record<string, string>;
+  error: VoidActionError | null;
+  pending: boolean;
+  hasChanges: boolean;
+  wasSuccessful: boolean;
+  recentlySuccessful: boolean;
+  post(opts?: FormSubmitOptions): Promise<void>;
+  put(opts?: FormSubmitOptions): Promise<void>;
+  patch(opts?: FormSubmitOptions): Promise<void>;
+  delete(opts?: FormSubmitOptions): Promise<void>;
+  reset(...fields: string[]): void;
+  clearErrors(...fields: string[]): void;
+  clearError(): void;
+};
 
 function getValidationErrors(error: VoidActionError): Record<string, string> | null {
   const body = error.body;
@@ -36,10 +63,10 @@ export function useForm<U extends ActionUrl & string>(
   hasChanges: boolean;
   wasSuccessful: boolean;
   recentlySuccessful: boolean;
-  post(opts?: any): Promise<void>;
-  put(opts?: any): Promise<void>;
-  patch(opts?: any): Promise<void>;
-  delete(opts?: any): Promise<void>;
+  post(opts?: FormSubmitOptions): Promise<void>;
+  put(opts?: FormSubmitOptions): Promise<void>;
+  patch(opts?: FormSubmitOptions): Promise<void>;
+  delete(opts?: FormSubmitOptions): Promise<void>;
   reset(...fields: (keyof ResolveActionBody<U> & string)[]): void;
   clearErrors(...fields: (keyof ResolveActionBody<U> & string)[]): void;
   clearError(): void;
@@ -49,7 +76,7 @@ export function useForm(
   url: string,
   defaults: Record<string, unknown>,
   options?: { params?: Record<string, string> },
-): any {
+): UntypedForm {
   let resolvedUrl = url;
 
   // Strip ?action query before param resolution, then re-append
@@ -73,7 +100,8 @@ export function useForm(
   // that returns the current global errors object. This allows useForm to
   // derive errors from the global state, surviving component re-creation
   // during Solid's reactive tree rebuild after router.visit().
-  const globalErrors: (() => Record<string, string>) | null = useContext(ErrorsContext);
+  const globalErrors: Record<string, string> | (() => Record<string, string>) | null =
+    useContext(ErrorsContext);
   const [data, setDataStore] = createStore<Record<string, unknown>>({ ...defaults });
   const [localErrors, setLocalErrors] = createSignal<Record<string, string>>({});
   const errors = createMemo(() => {
@@ -135,7 +163,7 @@ export function useForm(
     setError(null);
   }
 
-  async function submit(method: string, opts: any = {}) {
+  async function submit(method: string, opts: FormSubmitOptions = {}) {
     setPending(true);
     setWasSuccessful(false);
     setRecentlySuccessful(false);
@@ -208,9 +236,9 @@ export function useForm(
     reset,
     clearErrors,
     clearError,
-    post: (opts?: any) => submit('POST', opts),
-    put: (opts?: any) => submit('PUT', opts),
-    patch: (opts?: any) => submit('PATCH', opts),
-    delete: (opts?: any) => submit('DELETE', opts),
+    post: (opts?: FormSubmitOptions) => submit('POST', opts),
+    put: (opts?: FormSubmitOptions) => submit('PUT', opts),
+    patch: (opts?: FormSubmitOptions) => submit('PATCH', opts),
+    delete: (opts?: FormSubmitOptions) => submit('DELETE', opts),
   };
 }

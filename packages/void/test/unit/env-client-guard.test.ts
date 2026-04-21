@@ -4,6 +4,17 @@ import { string } from '../../src/runtime/env-helpers';
 import { defineEnv } from '../../src/runtime/env-public';
 
 const ROOT = '/project';
+type MessagePayload = string | { message: string; loc?: { line: number; column: number; file: string } };
+type TransformHandler = (
+  this: ReturnType<typeof makeContext>,
+  code: string,
+  id: string,
+) => unknown | Promise<unknown>;
+type ConfigResolvedHandler = (
+  this: ReturnType<typeof makeContext>,
+  config: { envPrefix?: string | string[] },
+) => unknown | Promise<unknown>;
+type HookWithHandler<T> = { handler: T };
 
 interface ContextHooks {
   errors: { message: string; loc?: { line: number; column: number; file: string } }[];
@@ -12,22 +23,26 @@ interface ContextHooks {
 }
 
 function makeContext(environmentName = 'client'): ContextHooks & {
-  error: (e: any) => never;
-  warn: (w: any) => void;
+  error: (e: MessagePayload) => never;
+  warn: (w: MessagePayload) => void;
   environment: { name: string };
 } {
-  const ctx: any = {
+  const ctx: ContextHooks & {
+    error: (e: MessagePayload) => never;
+    warn: (w: MessagePayload) => void;
+    environment: { name: string };
+  } = {
     errors: [],
     warnings: [],
     environmentName,
     environment: { name: environmentName },
-    error(payload: any) {
+    error(payload: MessagePayload) {
       const e = typeof payload === 'string' ? { message: payload } : payload;
       ctx.errors.push(e);
       const err = new Error(e.message);
       throw err;
     },
-    warn(payload: any) {
+    warn(payload: MessagePayload) {
       const w = typeof payload === 'string' ? { message: payload } : payload;
       ctx.warnings.push(w);
     },
@@ -37,26 +52,26 @@ function makeContext(environmentName = 'client'): ContextHooks & {
 
 function getTransformHandler(
   plugin: ReturnType<typeof envClientGuardPlugin>,
-): (this: any, code: string, id: string) => unknown | Promise<unknown> {
+): TransformHandler {
   const t = plugin.transform;
   if (typeof t === 'function') {
-    return t as any;
+    return t as unknown as TransformHandler;
   }
   if (t && typeof t === 'object' && 'handler' in t) {
-    return (t as any).handler;
+    return (t as unknown as HookWithHandler<TransformHandler>).handler;
   }
   throw new Error('plugin.transform missing handler');
 }
 
 function getConfigResolvedHandler(
   plugin: ReturnType<typeof envClientGuardPlugin>,
-): ((this: any, config: any) => unknown | Promise<unknown>) | null {
+): ConfigResolvedHandler | null {
   const c = plugin.configResolved;
   if (typeof c === 'function') {
-    return c as any;
+    return c as unknown as ConfigResolvedHandler;
   }
   if (c && typeof c === 'object' && 'handler' in c) {
-    return (c as any).handler;
+    return (c as unknown as HookWithHandler<ConfigResolvedHandler>).handler;
   }
   return null;
 }

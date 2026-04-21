@@ -12,7 +12,7 @@ type InputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteMap[P][M] 
 
 type BodyOption<I> = 'body' extends keyof I
   ? { body: I['body' & keyof I] }
-  : { body?: Record<string, any> | BodyInit | null };
+  : { body?: Record<string, unknown> | BodyInit | null };
 type QueryOption<I> = 'query' extends keyof I
   ? { query: I['query' & keyof I] }
   : { query?: Record<string, string> };
@@ -62,8 +62,8 @@ export async function* fetchStream<
 
   const response = await ofetch.raw(url, {
     method: (options?.method ?? 'POST') as string,
-    body: options?.body as any,
-    query: options?.query as any,
+    body: options?.body as never,
+    query: options?.query as never,
     headers: options?.headers,
     signal: options?.signal,
     baseURL: options?.baseURL,

@@ -57,7 +57,7 @@ describe('fetchStream', () => {
       _data: stream,
       status: 200,
       headers: new Headers(),
-    } as any);
+    } as unknown as Awaited<ReturnType<typeof ofetch.raw>>);
 
     const chunks: string[] = [];
     for await (const chunk of fetchStream('/api/chat', {
@@ -77,7 +77,7 @@ describe('fetchStream', () => {
       _data: stream,
       status: 200,
       headers: new Headers(),
-    } as any);
+    } as unknown as Awaited<ReturnType<typeof ofetch.raw>>);
 
     const chunks: string[] = [];
     for await (const chunk of fetchStream('/api/stream', { method: 'POST' })) {
@@ -98,7 +98,7 @@ describe('fetchStream', () => {
       _data: stream,
       status: 200,
       headers: new Headers(),
-    } as any);
+    } as unknown as Awaited<ReturnType<typeof ofetch.raw>>);
 
     const chunks: string[] = [];
     for await (const chunk of fetchStream('/api/stream', { method: 'POST' })) {
@@ -119,7 +119,7 @@ describe('fetchStream', () => {
       _data: stream,
       status: 200,
       headers: new Headers(),
-    } as any);
+    } as unknown as Awaited<ReturnType<typeof ofetch.raw>>);
 
     const chunks: string[] = [];
     for await (const chunk of fetchStream('/api/stream', { method: 'POST' })) {
@@ -134,7 +134,7 @@ describe('fetchStream', () => {
       _data: null,
       status: 200,
       headers: new Headers(),
-    } as any);
+    } as unknown as Awaited<ReturnType<typeof ofetch.raw>>);
 
     const chunks: string[] = [];
     for await (const chunk of fetchStream('/api/stream', { method: 'POST' })) {
@@ -151,7 +151,7 @@ describe('fetchStream', () => {
       _data: stream,
       status: 200,
       headers: new Headers(),
-    } as any);
+    } as unknown as Awaited<ReturnType<typeof ofetch.raw>>);
 
     for await (const _ of fetchStream('/api/chat', {
       method: 'POST',

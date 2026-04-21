@@ -1,5 +1,5 @@
 import { defineHandler } from 'void';
-import { ai } from 'void/ai';
+import { ai, type ThirdPartyModel } from 'void/ai';
 
 export const POST = defineHandler(async (c) => {
   const { prompt, model } = await c.req.json<{
@@ -8,7 +8,7 @@ export const POST = defineHandler(async (c) => {
   }>();
 
   try {
-    return ai.stream(model as any, {
+    return ai.stream(model as ThirdPartyModel, {
       messages: [{ role: 'user', content: prompt }],
       max_tokens: 512,
     });

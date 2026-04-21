@@ -22,7 +22,7 @@ class MockWebSocket {
 
   readyState = 0;
   sent: string[] = [];
-  listeners = new Map<string, Set<(event: any) => void>>();
+  listeners = new Map<string, Set<(event: MockSocketEvent) => void>>();
 
   constructor(
     readonly url: string,
@@ -31,13 +31,13 @@ class MockWebSocket {
     MockWebSocket.instances.push(this);
   }
 
-  addEventListener(type: string, listener: (event: any) => void) {
+  addEventListener(type: string, listener: (event: MockSocketEvent) => void) {
     const handlers = this.listeners.get(type) ?? new Set();
     handlers.add(listener);
     this.listeners.set(type, handlers);
   }
 
-  emit(type: string, event: any = {}) {
+  emit(type: string, event: MockSocketEvent = {}) {
     for (const listener of this.listeners.get(type) ?? []) {
       listener(event);
     }
@@ -51,6 +51,13 @@ class MockWebSocket {
     this.emit('close', { code, reason, wasClean: true });
   }
 }
+
+type MockSocketEvent = {
+  data?: string;
+  code?: number;
+  reason?: string;
+  wasClean?: boolean;
+};
 
 const originalWebSocket = (globalThis as { WebSocket?: unknown }).WebSocket;
 const originalLocation = (globalThis as { location?: unknown }).location;

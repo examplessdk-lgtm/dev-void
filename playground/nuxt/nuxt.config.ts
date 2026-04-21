@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import type { PluginOption } from 'vite';
 import { voidPlugin } from 'void';
 
 export default defineNuxtConfig({
@@ -12,6 +13,6 @@ export default defineNuxtConfig({
     },
   },
   vite: {
-    plugins: [voidPlugin() as any],
+    plugins: [voidPlugin() as unknown as PluginOption],
   },
 });

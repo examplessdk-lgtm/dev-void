@@ -1,6 +1,8 @@
+import type { PageObject } from './protocol';
+
 export type ActionErrorHandlingScope = 'callSite' | 'boundary';
 
-export type ActionResult<T = Record<string, unknown> | undefined> =
+export type ActionResult<T = PageObject | undefined> =
   | { ok: true; pageData: T }
   | { ok: false; error: VoidActionError };
 

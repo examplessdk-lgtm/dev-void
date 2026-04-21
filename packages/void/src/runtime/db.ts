@@ -57,7 +57,7 @@ let _instance: DrizzleD1Database | undefined;
  * environment. When the Void plugin is active, this is replaced with a
  * schema-aware instance via virtual module.
  */
-export const db: DrizzleD1Database = new Proxy({} as any, {
+export const db: DrizzleD1Database = new Proxy({} as DrizzleD1Database, {
   get(_, prop) {
     _instance ??= _drizzle(requireRuntimeBinding<D1Database>('DB'));
     return Reflect.get(_instance, prop);

@@ -1,5 +1,23 @@
 import { VoidActionError, categorizeActionError, isEqualFormValue } from 'void/pages-client';
 
+type UntypedIslandForm = {
+  readonly data: Record<string, unknown>;
+  readonly errors: Record<string, string>;
+  readonly error: VoidActionError | null;
+  readonly pending: boolean;
+  readonly hasChanges: boolean;
+  readonly wasSuccessful: boolean;
+  readonly recentlySuccessful: boolean;
+  submit(url: string, method: string): Promise<void>;
+  post(url: string): Promise<void>;
+  put(url: string): Promise<void>;
+  patch(url: string): Promise<void>;
+  delete(url: string): Promise<void>;
+  reset(...fields: string[]): void;
+  clearErrors(...fields: string[]): void;
+  clearError(): void;
+};
+
 function getValidationErrors(body: unknown): Record<string, string> | null {
   if (
     body &&
@@ -31,7 +49,7 @@ async function readActionErrorBody(response: Response): Promise<unknown> {
  * Form composable for island pages. Uses fetch + page reload instead of the
  * Inertia client-side router (which is not available in island mode).
  */
-export function useIslandForm(defaults: Record<string, unknown>): any {
+export function useIslandForm(defaults: Record<string, unknown>): UntypedIslandForm {
   let data: Record<string, unknown> = $state({ ...defaults });
   let errors: Record<string, string> = $state({});
   let error: VoidActionError | null = $state(null);
@@ -145,6 +163,7 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
     get recentlySuccessful() {
       return recentlySuccessful;
     },
+    submit,
     reset,
     clearErrors,
     clearError,

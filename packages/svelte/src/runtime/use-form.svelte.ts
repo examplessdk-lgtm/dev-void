@@ -1,6 +1,33 @@
 import { getContext } from 'svelte';
-import { VoidActionError, isAbortError, isEqualFormValue, submitAction } from 'void/pages-client';
+import {
+  VoidActionError,
+  isAbortError,
+  isEqualFormValue,
+  submitAction,
+  type VisitOptions,
+  type VoidRouter,
+} from 'void/pages-client';
 import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
+
+type FormSubmitOptions = Omit<VisitOptions, 'method' | 'data'> & {
+  data?: Record<string, unknown>;
+};
+type UntypedForm = {
+  readonly data: Record<string, unknown>;
+  readonly errors: Record<string, string>;
+  readonly error: VoidActionError | null;
+  readonly pending: boolean;
+  readonly hasChanges: boolean;
+  readonly wasSuccessful: boolean;
+  readonly recentlySuccessful: boolean;
+  post(opts?: FormSubmitOptions): Promise<void>;
+  put(opts?: FormSubmitOptions): Promise<void>;
+  patch(opts?: FormSubmitOptions): Promise<void>;
+  delete(opts?: FormSubmitOptions): Promise<void>;
+  reset(...fields: string[]): void;
+  clearErrors(...fields: string[]): void;
+  clearError(): void;
+};
 
 function getValidationErrors(error: VoidActionError): Record<string, string> | null {
   const body = error.body;
@@ -30,10 +57,10 @@ export function useForm<U extends ActionUrl & string>(
   readonly hasChanges: boolean;
   readonly wasSuccessful: boolean;
   readonly recentlySuccessful: boolean;
-  post(opts?: any): Promise<void>;
-  put(opts?: any): Promise<void>;
-  patch(opts?: any): Promise<void>;
-  delete(opts?: any): Promise<void>;
+  post(opts?: FormSubmitOptions): Promise<void>;
+  put(opts?: FormSubmitOptions): Promise<void>;
+  patch(opts?: FormSubmitOptions): Promise<void>;
+  delete(opts?: FormSubmitOptions): Promise<void>;
   reset(...fields: (keyof ResolveActionBody<U> & string)[]): void;
   clearErrors(...fields: (keyof ResolveActionBody<U> & string)[]): void;
   clearError(): void;
@@ -43,7 +70,7 @@ export function useForm(
   url: string,
   defaults: Record<string, unknown>,
   options?: { params?: Record<string, string> },
-): any {
+): UntypedForm {
   let resolvedUrl = url;
 
   // Strip ?action query before param resolution, then re-append
@@ -62,7 +89,7 @@ export function useForm(
 
   resolvedUrl = resolvedUrl + actionQuery;
 
-  const router = getContext<any>('__void_router');
+  const router = getContext<VoidRouter>('__void_router');
 
   let data = $state({ ...defaults });
   let errors: Record<string, string> = $state({});
@@ -102,7 +129,7 @@ export function useForm(
     error = null;
   }
 
-  async function submit(method: string, opts: any = {}) {
+  async function submit(method: string, opts: FormSubmitOptions = {}) {
     pending = true;
     wasSuccessful = false;
     recentlySuccessful = false;
@@ -170,9 +197,9 @@ export function useForm(
     reset,
     clearErrors,
     clearError,
-    post: (opts?: any) => submit('POST', opts),
-    put: (opts?: any) => submit('PUT', opts),
-    patch: (opts?: any) => submit('PATCH', opts),
-    delete: (opts?: any) => submit('DELETE', opts),
+    post: (opts?: FormSubmitOptions) => submit('POST', opts),
+    put: (opts?: FormSubmitOptions) => submit('PUT', opts),
+    patch: (opts?: FormSubmitOptions) => submit('PATCH', opts),
+    delete: (opts?: FormSubmitOptions) => submit('DELETE', opts),
   };
 }

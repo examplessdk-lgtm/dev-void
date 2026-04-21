@@ -9,6 +9,14 @@ import { getPort, waitForServer, killChild } from '../../../../test/integration-
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const ENV_LOCAL_PATH = join(ROOT, 'playground/pg-test/.env.local');
+type User = { id: number; name: string; email: string };
+type Post = { id: number; title: string; author: string };
+type PageData = {
+  props: {
+    users: User[];
+    posts: Post[];
+  };
+};
 
 describe('playground/pg-test', () => {
   let pglite: PGlite;
@@ -122,7 +130,7 @@ describe('playground/pg-test', () => {
     const propsRes = await fetch(BASE + '/', {
       headers: { 'X-VoidPages': 'true' },
     });
-    const data = (await propsRes.json()) as any;
+    const data = (await propsRes.json()) as PageData;
     expect(data.props.users).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'Alice', email: 'alice@test.com' })]),
     );
@@ -131,11 +139,16 @@ describe('playground/pg-test', () => {
   it('creates a post via action', async () => {
     // Get the user id first
     const propsRes = await fetch(BASE + '/', { headers: { 'X-VoidPages': 'true' } });
-    const data = (await propsRes.json()) as any;
-    const alice = data.props.users.find((u: any) => u.name === 'Alice');
+    const data = (await propsRes.json()) as PageData;
+    const alice = data.props.users.find((u) => u.name === 'Alice');
     expect(alice).toBeTruthy();
 
     // Create post via named action
+    expect(alice).toBeTruthy();
+    if (!alice) {
+      throw new Error('Expected Alice to exist before creating a post');
+    }
+
     const createRes = await fetch(BASE + '/?create-post', {
       method: 'POST',
       headers: {
@@ -153,7 +166,7 @@ describe('playground/pg-test', () => {
 
     // Verify post appears
     const postsRes = await fetch(BASE + '/', { headers: { 'X-VoidPages': 'true' } });
-    const postsData = (await postsRes.json()) as any;
+    const postsData = (await postsRes.json()) as PageData;
     expect(postsData.props.posts).toEqual(
       expect.arrayContaining([expect.objectContaining({ title: 'Hello World', author: 'Alice' })]),
     );
@@ -161,9 +174,14 @@ describe('playground/pg-test', () => {
 
   it('deletes a post via action', async () => {
     const propsRes = await fetch(BASE + '/', { headers: { 'X-VoidPages': 'true' } });
-    const data = (await propsRes.json()) as any;
-    const post = data.props.posts.find((p: any) => p.title === 'Hello World');
+    const data = (await propsRes.json()) as PageData;
+    const post = data.props.posts.find((p) => p.title === 'Hello World');
     expect(post).toBeTruthy();
+
+    expect(post).toBeTruthy();
+    if (!post) {
+      throw new Error('Expected Hello World post to exist before deleting it');
+    }
 
     const deleteRes = await fetch(BASE + '/?delete-post', {
       method: 'POST',
@@ -177,15 +195,20 @@ describe('playground/pg-test', () => {
     expect(deleteRes.status).toBeLessThan(400);
 
     const afterRes = await fetch(BASE + '/', { headers: { 'X-VoidPages': 'true' } });
-    const afterData = (await afterRes.json()) as any;
-    expect(afterData.props.posts.find((p: any) => p.title === 'Hello World')).toBeUndefined();
+    const afterData = (await afterRes.json()) as PageData;
+    expect(afterData.props.posts.find((p) => p.title === 'Hello World')).toBeUndefined();
   });
 
   it('deletes a user and cascade-deletes their posts', async () => {
     // Create a post for Alice first
     const propsRes = await fetch(BASE + '/', { headers: { 'X-VoidPages': 'true' } });
-    const data = (await propsRes.json()) as any;
-    const alice = data.props.users.find((u: any) => u.name === 'Alice');
+    const data = (await propsRes.json()) as PageData;
+    const alice = data.props.users.find((u) => u.name === 'Alice');
+
+    expect(alice).toBeTruthy();
+    if (!alice) {
+      throw new Error('Expected Alice to exist before creating a post');
+    }
 
     await fetch(BASE + '/?create-post', {
       method: 'POST',
@@ -208,9 +231,9 @@ describe('playground/pg-test', () => {
     expect(deleteRes.status).toBeLessThan(400);
 
     const afterRes = await fetch(BASE + '/', { headers: { 'X-VoidPages': 'true' } });
-    const afterData = (await afterRes.json()) as any;
-    expect(afterData.props.users.find((u: any) => u.name === 'Alice')).toBeUndefined();
-    expect(afterData.props.posts.find((p: any) => p.author === 'Alice')).toBeUndefined();
+    const afterData = (await afterRes.json()) as PageData;
+    expect(afterData.props.users.find((u) => u.name === 'Alice')).toBeUndefined();
+    expect(afterData.props.posts.find((p) => p.author === 'Alice')).toBeUndefined();
   });
 
   it('API routes: create and list users', async () => {
@@ -221,13 +244,13 @@ describe('playground/pg-test', () => {
       body: JSON.stringify({ name: 'Bob', email: 'bob@test.com' }),
     });
     expect(createRes.status).toBe(201);
-    const created = (await createRes.json()) as any;
+    const created = (await createRes.json()) as User;
     expect(created.name).toBe('Bob');
 
     // List users via API
     const listRes = await fetch(BASE + '/api/users');
     expect(listRes.status).toBe(200);
-    const users = (await listRes.json()) as any;
+    const users = (await listRes.json()) as User[];
     expect(users).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'Bob', email: 'bob@test.com' })]),
     );
@@ -235,7 +258,7 @@ describe('playground/pg-test', () => {
     // Get single user
     const getRes = await fetch(BASE + `/api/users/${created.id}`);
     expect(getRes.status).toBe(200);
-    const user = (await getRes.json()) as any;
+    const user = (await getRes.json()) as User;
     expect(user.name).toBe('Bob');
   });
 });

@@ -14,17 +14,21 @@ function writeFile(relativePath: string, content: string): void {
 
 function setupPlugin() {
   const plugins = islandsPlugin(PAGES_DIR);
-  const plugin = plugins[0];
+  const plugin = plugins[0] as unknown as {
+    configResolved(config: { root: string; command: 'build'; plugins: unknown[] }): void;
+    buildStart: { call(thisArg: unknown): Promise<void> | void };
+    load: { handler(id: string): string | undefined };
+  };
 
   const config = { root: TMP, command: 'build' as const, plugins: [] };
-  (plugin as any).configResolved(config);
+  plugin.configResolved(config);
 
   return {
     async buildStart() {
-      await (plugin as any).buildStart.call({});
+      await plugin.buildStart.call({});
     },
     loadClientEntry(): string | undefined {
-      return (plugin as any).load.handler('\0virtual:void-islands-client');
+      return plugin.load.handler('\0virtual:void-islands-client');
     },
   };
 }

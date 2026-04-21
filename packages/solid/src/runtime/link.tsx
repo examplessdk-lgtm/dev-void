@@ -5,6 +5,7 @@ import { RouterContext } from './context';
 type PrefetchStrategy = 'hover' | 'click' | 'mount' | 'visible';
 type LinkMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 type NavigateEvent = { preventDefault(): void };
+type PrefetchOptions = { cacheFor?: LinkProps['cacheFor']; method?: LinkMethod };
 
 type CommonProps = {
   href: string;
@@ -180,7 +181,7 @@ export function Link(props: LinkProps): JSX.Element {
     if (hrefWithData() === current) {
       return;
     }
-    const options: any = {};
+    const options: PrefetchOptions = {};
     if (local.cacheFor !== undefined) {
       options.cacheFor = local.cacheFor;
     }
@@ -308,7 +309,7 @@ export function Link(props: LinkProps): JSX.Element {
   });
 
   const eventHandlers = createMemo(() => {
-    const handlers: Record<string, any> = {
+    const handlers: Record<string, unknown> = {
       onClick,
       onFocus: local.onFocus,
       onMouseDown: local.onMouseDown,

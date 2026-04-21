@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
+import type { CloudContext } from '../../src/runtime/handler';
 import { runValidation, type ValidatorSlots } from '../../src/runtime/validator';
 import type { StandardSchemaV1 } from '../../src/standard-schema';
+
+type ValidationIssueBody = {
+  error: string;
+  issues: Array<{
+    slot: string;
+    issues: Array<{ message: string; path?: string }>;
+  }>;
+};
 
 /** Create a mock Standard Schema that always succeeds with the given value. */
 function mockSchema<T>(output: T): StandardSchemaV1<unknown, T> {
@@ -33,7 +42,7 @@ function mockContext(options: {
   params?: Record<string, string>;
   query?: Record<string, string>;
   body?: unknown;
-}): any {
+}): CloudContext {
   const url = new URL('http://localhost/test');
   if (options.query) {
     for (const [key, value] of Object.entries(options.query)) {
@@ -51,54 +60,62 @@ function mockContext(options: {
         return options.body;
       },
     },
-  };
+  } as unknown as CloudContext;
 }
 
 describe('runValidation', () => {
   it('validates body successfully', async () => {
-    const validators: ValidatorSlots = {
+    const validators = {
       body: mockSchema({ name: 'Alice' }),
-    };
+    } satisfies ValidatorSlots;
     const c = mockContext({ body: { name: 'Alice' } });
     const result = await runValidation(validators, c);
 
     expect(result.ok).toBe(true);
-    expect((result as any).input.body).toEqual({ name: 'Alice' });
+    if (result.ok) {
+      expect(result.input.body).toEqual({ name: 'Alice' });
+    }
   });
 
   it('validates query successfully', async () => {
-    const validators: ValidatorSlots = {
+    const validators = {
       query: mockSchema({ page: '1' }),
-    };
+    } satisfies ValidatorSlots;
     const c = mockContext({ query: { page: '1' } });
     const result = await runValidation(validators, c);
 
     expect(result.ok).toBe(true);
-    expect((result as any).input.query).toEqual({ page: '1' });
+    if (result.ok) {
+      expect(result.input.query).toEqual({ page: '1' });
+    }
   });
 
   it('validates params successfully', async () => {
-    const validators: ValidatorSlots = {
+    const validators = {
       params: mockSchema({ id: '42' }),
-    };
+    } satisfies ValidatorSlots;
     const c = mockContext({ params: { id: '42' } });
     const result = await runValidation(validators, c);
 
     expect(result.ok).toBe(true);
-    expect((result as any).input.params).toEqual({ id: '42' });
+    if (result.ok) {
+      expect(result.input.params).toEqual({ id: '42' });
+    }
   });
 
   it('validates multiple slots', async () => {
-    const validators: ValidatorSlots = {
+    const validators = {
       params: mockSchema({ id: '1' }),
       body: mockSchema({ name: 'Bob' }),
-    };
+    } satisfies ValidatorSlots;
     const c = mockContext({ params: { id: '1' }, body: { name: 'Bob' } });
     const result = await runValidation(validators, c);
 
     expect(result.ok).toBe(true);
-    expect((result as any).input.params).toEqual({ id: '1' });
-    expect((result as any).input.body).toEqual({ name: 'Bob' });
+    if (result.ok) {
+      expect(result.input.params).toEqual({ id: '1' });
+      expect(result.input.body).toEqual({ name: 'Bob' });
+    }
   });
 
   it('returns 400 on body validation failure', async () => {
@@ -109,11 +126,12 @@ describe('runValidation', () => {
     const result = await runValidation(validators, c);
 
     expect(result.ok).toBe(false);
-    const response = (result as any).response as Response;
-    expect(response.status).toBe(400);
-    const json: any = await response.json();
-    expect(json.error).toBe('Validation failed');
-    expect(json.issues[0].slot).toBe('body');
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      const json = (await result.response.json()) as ValidationIssueBody;
+      expect(json.error).toBe('Validation failed');
+      expect(json.issues[0].slot).toBe('body');
+    }
   });
 
   it('returns 400 on invalid JSON body', async () => {
@@ -124,10 +142,11 @@ describe('runValidation', () => {
     const result = await runValidation(validators, c);
 
     expect(result.ok).toBe(false);
-    const response = (result as any).response as Response;
-    expect(response.status).toBe(400);
-    const json: any = await response.json();
-    expect(json.error).toBe('Invalid JSON body');
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      const json = (await result.response.json()) as { error: string };
+      expect(json.error).toBe('Invalid JSON body');
+    }
   });
 
   it('passes with empty validators', async () => {
@@ -144,8 +163,9 @@ describe('runValidation', () => {
     const result = await runValidation(validators, c);
 
     expect(result.ok).toBe(false);
-    const response = (result as any).response as Response;
-    const json: any = await response.json();
-    expect(json.issues[0].issues[0].path).toBe('name');
+    if (!result.ok) {
+      const json = (await result.response.json()) as ValidationIssueBody;
+      expect(json.issues[0].issues[0].path).toBe('name');
+    }
   });
 });

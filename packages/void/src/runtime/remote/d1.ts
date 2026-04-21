@@ -1,5 +1,10 @@
 import type { ProxyClient } from './client';
 
+type ProxyPreparedStatement = D1PreparedStatement & {
+  _sql: string;
+  _params: unknown[];
+};
+
 /**
  * D1Database implementation backed by the remote proxy.
  * Used during local development when `remote: true` is set in void.json.
@@ -16,8 +21,8 @@ export class ProxyD1Database {
 
   async batch<T = unknown>(stmts: D1PreparedStatement[]): Promise<D1Result<T>[]> {
     const statements = stmts.map((s) => ({
-      sql: (s as any)._sql as string,
-      params: (s as any)._params as unknown[],
+      sql: (s as ProxyPreparedStatement)._sql,
+      params: (s as ProxyPreparedStatement)._params,
     }));
     const res = await this.client.fetch('/d1/batch', {
       binding: this.binding,

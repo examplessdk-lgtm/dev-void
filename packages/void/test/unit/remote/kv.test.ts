@@ -7,12 +7,14 @@ function createClient() {
 }
 
 function mockFetch(response: unknown, contentType = 'application/json') {
-  globalThis.fetch = vi.fn(
+  const fetchMock = vi.fn(
     async () =>
       new Response(JSON.stringify(response), {
         headers: { 'content-type': contentType },
       }),
-  ) as any;
+  );
+  globalThis.fetch = fetchMock as typeof fetch;
+  return fetchMock;
 }
 
 describe('ProxyKVNamespace', () => {
@@ -32,8 +34,8 @@ describe('ProxyKVNamespace', () => {
 
       expect(value).toBe('hello world');
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.key).toBe('my-key');
       expect(body.type).toBe('text');
       expect(body.binding).toBe('KV');
@@ -51,12 +53,13 @@ describe('ProxyKVNamespace', () => {
     it('returns ArrayBuffer with type=arrayBuffer', async () => {
       // For arrayBuffer type, the proxy returns binary data
       const binaryData = new Uint8Array([1, 2, 3, 4]);
-      globalThis.fetch = vi.fn(
+      const fetchMock = vi.fn(
         async () =>
           new Response(binaryData, {
             headers: { 'content-type': 'application/octet-stream' },
           }),
-      ) as any;
+      );
+      globalThis.fetch = fetchMock as typeof fetch;
 
       const kv = new ProxyKVNamespace(createClient(), 'KV');
       const value = await kv.get('binary-key', 'arrayBuffer');
@@ -80,8 +83,8 @@ describe('ProxyKVNamespace', () => {
       const kv = new ProxyKVNamespace(createClient(), 'KV');
       await kv.get('key', { type: 'json' });
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.type).toBe('json');
     });
   });
@@ -106,8 +109,8 @@ describe('ProxyKVNamespace', () => {
       const kv = new ProxyKVNamespace(createClient(), 'KV');
       await kv.put('my-key', 'my-value');
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.key).toBe('my-key');
       expect(body.value).toBe('my-value');
       expect(body.binding).toBe('KV');
@@ -119,8 +122,8 @@ describe('ProxyKVNamespace', () => {
       const kv = new ProxyKVNamespace(createClient(), 'KV');
       await kv.put('key', 'val', { expiration: 1700000000, expirationTtl: 3600 });
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.expiration).toBe(1700000000);
       expect(body.expiration_ttl).toBe(3600);
     });
@@ -133,7 +136,8 @@ describe('ProxyKVNamespace', () => {
       const kv = new ProxyKVNamespace(createClient(), 'KV');
       await kv.delete('my-key');
 
-      const call = (globalThis.fetch as any).mock.calls[0];
+      const call = (globalThis.fetch as typeof globalThis.fetch & { mock: { calls: unknown[][] } })
+        .mock.calls[0] as [string, { body: string }];
       const body = JSON.parse(call[1].body);
       expect(body.key).toBe('my-key');
       expect(body.binding).toBe('KV');
@@ -154,10 +158,10 @@ describe('ProxyKVNamespace', () => {
 
       expect(result.keys).toEqual([{ name: 'key1' }, { name: 'key2' }]);
       expect(result.list_complete).toBe(false);
-      expect((result as any).cursor).toBe('next-cursor');
+      expect((result as typeof result & { cursor: string | null }).cursor).toBe('next-cursor');
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.prefix).toBe('user:');
       expect(body.limit).toBe(2);
     });

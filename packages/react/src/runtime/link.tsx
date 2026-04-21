@@ -12,6 +12,7 @@ import { RouterContext } from './context';
 
 type PrefetchStrategy = 'hover' | 'click' | 'mount' | 'visible';
 type LinkMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+type PrefetchOptions = { cacheFor?: LinkProps['cacheFor']; method?: LinkMethod };
 
 type CommonProps = {
   href: string;
@@ -159,7 +160,7 @@ export function Link({
     if (hrefWithData === current) {
       return;
     }
-    const options: any = {};
+    const options: PrefetchOptions = {};
     if (cacheFor !== undefined) {
       options.cacheFor = cacheFor;
     }
@@ -190,6 +191,7 @@ export function Link({
 
   const onClick = useCallback(
     (event: MouseEvent) => {
+      // oxlint-disable-next-line no-explicit-any -- React merges anchor/button handler types awkwardly here
       onClickProp?.(event as any);
       if (!shouldHandleClick(event)) {
         return;
@@ -234,6 +236,7 @@ export function Link({
 
   const onMouseEnter = useCallback(
     (event: MouseEvent) => {
+      // oxlint-disable-next-line no-explicit-any -- React merges anchor/button handler types awkwardly here
       onMouseEnterProp?.(event as any);
       if (event.defaultPrevented) {
         return;
@@ -248,6 +251,7 @@ export function Link({
 
   const onMouseLeave = useCallback(
     (event: MouseEvent) => {
+      // oxlint-disable-next-line no-explicit-any -- React merges anchor/button handler types awkwardly here
       onMouseLeaveProp?.(event as any);
       if (hoverTimerRef.current) {
         clearTimeout(hoverTimerRef.current);
@@ -259,6 +263,7 @@ export function Link({
 
   const onFocus = useCallback(
     (event: FocusEvent) => {
+      // oxlint-disable-next-line no-explicit-any -- React merges anchor/button handler types awkwardly here
       onFocusProp?.(event as any);
       if (!event.defaultPrevented) {
         doPrefetch();
@@ -269,6 +274,7 @@ export function Link({
 
   const onMouseDown = useCallback(
     (event: MouseEvent) => {
+      // oxlint-disable-next-line no-explicit-any -- React merges anchor/button handler types awkwardly here
       onMouseDownProp?.(event as any);
       if (!event.defaultPrevented) {
         doPrefetch();
@@ -279,6 +285,7 @@ export function Link({
 
   const onTouchStart = useCallback(
     (event: TouchEvent) => {
+      // oxlint-disable-next-line no-explicit-any -- React merges anchor/button handler types awkwardly here
       onTouchStartProp?.(event as any);
       if (!event.defaultPrevented) {
         doPrefetch();
@@ -322,7 +329,9 @@ export function Link({
     };
   }, [doPrefetch, strategies]);
 
+  // oxlint-disable-next-line no-explicit-any -- spread props need a loose cross-element event map
   const eventHandlers = useMemo<Record<string, any>>(() => {
+    // oxlint-disable-next-line no-explicit-any -- spread props need a loose cross-element event map
     const handlers: Record<string, any> = {
       onClick,
       onFocus: onFocusProp,

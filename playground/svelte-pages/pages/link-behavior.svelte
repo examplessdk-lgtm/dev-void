@@ -2,20 +2,26 @@
   import { Link } from "@void/svelte";
   import type { Props } from "./link-behavior.server";
 
+  type LinkBehaviorWindow = Window & {
+    __linkOnClick?: boolean;
+    __preventedClick?: boolean;
+    __preventedNavigate?: boolean;
+  };
+
   let { title }: Props = $props();
 
   function setClicked() {
-    (window as any).__linkOnClick = true;
+    (window as LinkBehaviorWindow).__linkOnClick = true;
   }
 
   function preventClick(event: Event) {
     event.preventDefault();
-    (window as any).__preventedClick = true;
+    (window as LinkBehaviorWindow).__preventedClick = true;
   }
 
   function preventNavigate(event: { preventDefault(): void }) {
     event.preventDefault();
-    (window as any).__preventedNavigate = true;
+    (window as LinkBehaviorWindow).__preventedNavigate = true;
   }
 </script>
 

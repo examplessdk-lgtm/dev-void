@@ -7,12 +7,14 @@ function createClient() {
 }
 
 function mockFetch(response: unknown, contentType = 'application/json') {
-  globalThis.fetch = vi.fn(
+  const fetchMock = vi.fn(
     async () =>
       new Response(JSON.stringify(response), {
         headers: { 'content-type': contentType },
       }),
-  ) as any;
+  );
+  globalThis.fetch = fetchMock as typeof fetch;
+  return fetchMock;
 }
 
 describe('ProxyD1Database', () => {
@@ -34,8 +36,8 @@ describe('ProxyD1Database', () => {
       expect(result.results).toEqual(rows);
       expect(result.success).toBe(true);
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.sql).toBe('SELECT * FROM users');
       expect(body.method).toBe('all');
       expect(body.binding).toBe('DB');
@@ -51,8 +53,8 @@ describe('ProxyD1Database', () => {
 
       expect(row).toEqual({ id: 1, name: 'Alice' });
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.method).toBe('first');
       expect(body.params).toEqual([1]);
     });
@@ -87,8 +89,8 @@ describe('ProxyD1Database', () => {
         .run();
 
       expect(result.success).toBe(true);
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.method).toBe('run');
       expect(body.params).toEqual(['Bob', 1]);
     });
@@ -137,12 +139,15 @@ describe('ProxyD1Database', () => {
       const db = new ProxyD1Database(createClient(), 'DB');
       const stmt1 = db.prepare('INSERT INTO users (name) VALUES (?)').bind('Alice');
       const stmt2 = db.prepare('INSERT INTO users (name) VALUES (?)').bind('Bob');
-      const results = await db.batch([stmt1 as any, stmt2 as any]);
+      const results = await db.batch([
+        stmt1 as unknown as D1PreparedStatement,
+        stmt2 as unknown as D1PreparedStatement,
+      ]);
 
       expect(results).toHaveLength(2);
 
-      const call = (globalThis.fetch as any).mock.calls[0];
-      const body = JSON.parse(call[1].body);
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
       expect(body.statements).toEqual([
         { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Alice'] },
         { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Bob'] },

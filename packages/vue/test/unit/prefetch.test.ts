@@ -35,7 +35,9 @@ describe('parseCacheFor', () => {
   });
 
   it('throws on invalid string', () => {
-    expect(() => parseCacheFor('invalid' as any)).toThrow('Invalid');
+    expect(() =>
+      parseCacheFor('invalid' as unknown as Parameters<typeof parseCacheFor>[0]),
+    ).toThrow('Invalid');
   });
 });
 
@@ -150,7 +152,7 @@ describe('PrefetchCache', () => {
     });
     const entry = cache.get('http://example.com/api/data')!;
     // Manually set expiresAt to the past
-    (entry as any).expiresAt = Date.now() - 1;
+    (entry as { expiresAt: number }).expiresAt = Date.now() - 1;
     // Non-singleUse entry past expiresAt should be removed on next get
     expect(cache.get('http://example.com/api/data')).toBeNull();
   });

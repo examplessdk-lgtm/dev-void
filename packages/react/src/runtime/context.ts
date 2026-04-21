@@ -1,7 +1,13 @@
 import { createContext, type Context } from 'react';
-import { idleNavigationState } from 'void/pages-client';
+import { idleNavigationState, type NavigationState, type VoidRouter } from 'void/pages-client';
 
-export const SharedContext: Context<any> = createContext<any>(null);
-export const ErrorsContext: Context<any> = createContext<any>(null);
-export const RouterContext: Context<any> = createContext<any>(null);
-export const NavigationContext: Context<any> = createContext<any>(idleNavigationState());
+export const SharedContext: Context<Record<string, unknown> | null> = createContext<
+  Record<string, unknown> | null
+>(null);
+export const ErrorsContext: Context<Record<string, string> | null> = createContext<
+  Record<string, string> | null
+>(null);
+export const RouterContext: Context<VoidRouter | null> = createContext<VoidRouter | null>(null);
+export const NavigationContext: Context<NavigationState> = createContext<NavigationState>(
+  idleNavigationState(),
+);

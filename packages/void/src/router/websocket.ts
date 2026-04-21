@@ -2,6 +2,17 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { glob, globSync } from 'tinyglobby';
 import { parseSync } from 'vite';
+import {
+  isCallExpression,
+  isIdentifier,
+  isLiteral,
+  isObjectExpression,
+  type AstExportDefaultDeclaration,
+  type AstNode,
+  type AstProgram,
+  type AstProperty,
+  type AstVariableDeclaration,
+} from '../shared/ast';
 import { parseWebSocketFilename, type RouteDefinition } from './parse-filename';
 
 const HANDLER_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
@@ -14,10 +25,10 @@ export interface WebSocketRouteDefinition extends RouteDefinition {
   hasAuthGate: boolean;
 }
 
-interface WebSocketSourceInfo {
+type WebSocketSourceInfo = {
   mode: 'room' | 'socket';
   hasAuthGate: boolean;
-}
+};
 
 function isWebSocketRouteFile(filePath: string): boolean {
   return WEBSOCKET_ROUTE_RE.test(filePath.replace(/\\/g, '/'));
@@ -50,24 +61,24 @@ export function deriveWebSocketClassName(filePath: string): string {
   return (parts.length > 0 ? parts.join('') : 'WebSocket') + 'Ws';
 }
 
-function getPropertyName(node: any): string | null {
+function getPropertyName(node: AstNode | undefined): string | null {
   if (!node) {
     return null;
   }
-  if (node.type === 'Identifier') {
+  if (isIdentifier(node)) {
     return node.name;
   }
-  if (node.type === 'Literal' && typeof node.value === 'string') {
+  if (isLiteral(node) && typeof node.value === 'string') {
     return node.value;
   }
   return null;
 }
 
-function extractDefinition(call: any): WebSocketSourceInfo | null {
-  if (!call || call.type !== 'CallExpression') {
+function extractDefinition(call: AstNode | undefined): WebSocketSourceInfo | null {
+  if (!isCallExpression(call)) {
     return null;
   }
-  if (call.callee?.type !== 'Identifier') {
+  if (!isIdentifier(call.callee)) {
     return null;
   }
 
@@ -78,12 +89,12 @@ function extractDefinition(call: any): WebSocketSourceInfo | null {
 
   let hasAuthGate = false;
   const options = call.arguments?.[0];
-  if (options?.type === 'ObjectExpression') {
+  if (isObjectExpression(options)) {
     for (const property of options.properties ?? []) {
       if (property.type !== 'Property') {
         continue;
       }
-      if (getPropertyName(property.key) === 'onBeforeConnect') {
+      if (getPropertyName((property as AstProperty).key) === 'onBeforeConnect') {
         hasAuthGate = true;
         break;
       }
@@ -106,24 +117,25 @@ export function detectWebSocketDefinition(absPath: string): WebSocketSourceInfo 
     return null;
   }
 
-  const variableInitializers = new Map<string, any>();
+  const program = parsed.program as unknown as AstProgram;
+  const variableInitializers = new Map<string, AstNode>();
 
-  for (const node of parsed.program.body as any[]) {
+  for (const node of program.body ?? []) {
     if (node.type === 'VariableDeclaration') {
-      for (const declarator of node.declarations ?? []) {
-        if (declarator.id?.type === 'Identifier' && declarator.init) {
+      for (const declarator of (node as AstVariableDeclaration).declarations ?? []) {
+        if (isIdentifier(declarator.id) && declarator.init) {
           variableInitializers.set(declarator.id.name, declarator.init);
         }
       }
     }
   }
 
-  for (const node of parsed.program.body as any[]) {
+  for (const node of program.body ?? []) {
     if (node.type !== 'ExportDefaultDeclaration') {
       continue;
     }
-    const declaration = node.declaration;
-    if (declaration?.type === 'Identifier') {
+    const declaration = (node as AstExportDefaultDeclaration).declaration;
+    if (isIdentifier(declaration)) {
       return extractDefinition(variableInitializers.get(declaration.name));
     }
     return extractDefinition(declaration);

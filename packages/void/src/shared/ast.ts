@@ -1,0 +1,111 @@
+export type AstNode = {
+  type: string;
+  start?: number;
+  end?: number;
+  [key: string]: unknown;
+};
+
+export type AstProgram = AstNode & {
+  body?: AstNode[];
+};
+
+export type AstIdentifier = AstNode & {
+  type: 'Identifier';
+  name: string;
+};
+
+export type AstLiteral = AstNode & {
+  type: 'Literal';
+  value: unknown;
+};
+
+export type AstMemberExpression = AstNode & {
+  type: 'MemberExpression';
+  computed: boolean;
+  object?: AstNode;
+  property?: AstNode;
+};
+
+export type AstImportSpecifier = AstNode & {
+  type: 'ImportSpecifier';
+  imported: AstNode;
+  local: AstIdentifier;
+};
+
+export type AstImportNamespaceSpecifier = AstNode & {
+  type: 'ImportNamespaceSpecifier';
+  local: AstIdentifier;
+};
+
+export type AstImportDeclaration = AstNode & {
+  type: 'ImportDeclaration';
+  source: AstLiteral;
+  specifiers?: AstNode[];
+};
+
+export type AstVariableDeclarator = AstNode & {
+  id?: AstNode;
+  init?: AstNode;
+};
+
+export type AstVariableDeclaration = AstNode & {
+  type: 'VariableDeclaration';
+  declarations?: AstVariableDeclarator[];
+};
+
+export type AstFunctionDeclaration = AstNode & {
+  type: 'FunctionDeclaration';
+  id?: AstNode;
+};
+
+export type AstExportSpecifier = AstNode & {
+  exported?: AstNode;
+  local?: AstNode;
+};
+
+export type AstExportNamedDeclaration = AstNode & {
+  type: 'ExportNamedDeclaration';
+  declaration?: AstNode;
+  specifiers?: AstExportSpecifier[];
+};
+
+export type AstExportDefaultDeclaration = AstNode & {
+  type: 'ExportDefaultDeclaration';
+  declaration?: AstNode;
+};
+
+export type AstCallExpression = AstNode & {
+  type: 'CallExpression';
+  callee?: AstNode;
+  arguments?: AstNode[];
+};
+
+export type AstObjectExpression = AstNode & {
+  type: 'ObjectExpression';
+  properties?: AstNode[];
+};
+
+export type AstProperty = AstNode & {
+  type: 'Property';
+  key?: AstNode;
+};
+
+export function isIdentifier(node: AstNode | null | undefined): node is AstIdentifier {
+  return node?.type === 'Identifier' && typeof node.name === 'string';
+}
+
+export function isLiteral(node: AstNode | null | undefined): node is AstLiteral {
+  return node?.type === 'Literal';
+}
+
+export function isMemberExpression(node: AstNode | null | undefined): node is AstMemberExpression {
+  return node?.type === 'MemberExpression';
+}
+
+export function isCallExpression(node: AstNode | null | undefined): node is AstCallExpression {
+  return node?.type === 'CallExpression';
+}
+
+export function isObjectExpression(node: AstNode | null | undefined): node is AstObjectExpression {
+  return node?.type === 'ObjectExpression';
+}

@@ -41,6 +41,19 @@ type SeedTarget = {
   path: string;
 };
 
+type PgClient = {
+  connect(): Promise<unknown>;
+  end(): Promise<void>;
+  query<T extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }>;
+};
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function readEnvLocal(root: string): Record<string, string> {
   const envPath = join(root, '.env.local');
   if (!existsSync(envPath)) {
@@ -81,10 +94,10 @@ function getPgUrl(root: string): string {
   return url;
 }
 
-async function withPgClient<T>(root: string, fn: (client: any) => Promise<T>): Promise<T> {
+async function withPgClient<T>(root: string, fn: (client: PgClient) => Promise<T>): Promise<T> {
   const url = getPgUrl(root);
   const { Client } = await import('pg');
-  const client = new Client({ connectionString: url });
+  const client: PgClient = new Client({ connectionString: url });
   await client.connect();
   try {
     return await fn(client);
@@ -182,8 +195,8 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
 
   try {
     assertJournalCoherence(migrationsDir, allMigrations);
-  } catch (err: any) {
-    log.error(err.message);
+  } catch (err: unknown) {
+    log.error(getErrorMessage(err));
     process.exit(1);
   }
 
@@ -198,7 +211,9 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
     try {
       localApplied = await withPgClient(root, async (client) => {
         try {
-          const result = await client.query('SELECT name FROM _void_migrations ORDER BY name');
+          const result = await client.query<{ name: string }>(
+            'SELECT name FROM _void_migrations ORDER BY name',
+          );
           return result.rows;
         } catch {
           return [];
@@ -272,8 +287,8 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
   const migrations = collectMigrations(migrationsDir);
   try {
     assertJournalCoherence(migrationsDir, migrations);
-  } catch (err: any) {
-    log.error(err.message);
+  } catch (err: unknown) {
+    log.error(getErrorMessage(err));
     process.exit(1);
   }
 
@@ -451,8 +466,8 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
 
   try {
     assertJournalCoherence(migrationsDir, rawMigrations);
-  } catch (err: any) {
-    log.error(err.message);
+  } catch (err: unknown) {
+    log.error(getErrorMessage(err));
     process.exit(1);
   }
 
@@ -500,8 +515,8 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
 
     try {
       validateMigrations(pendingMigrations);
-    } catch (err: any) {
-      log.error(err.message);
+    } catch (err: unknown) {
+      log.error(getErrorMessage(err));
       process.exit(1);
     }
 
@@ -529,7 +544,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
     const applied = await withPgClient(root, async (client) => {
       let existingRows: { name: string }[] = [];
       try {
-        const result = await client.query('SELECT name FROM _void_migrations');
+        const result = await client.query<{ name: string }>('SELECT name FROM _void_migrations');
         existingRows = result.rows;
       } catch {
         existingRows = [];
@@ -537,8 +552,8 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
 
       try {
         validatePendingMigrations(rawMigrations, new Set(existingRows.map((row) => row.name)));
-      } catch (err: any) {
-        log.error(err.message);
+      } catch (err: unknown) {
+        log.error(getErrorMessage(err));
         process.exit(1);
       }
 
@@ -565,8 +580,8 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
   try {
     const existingRows = await getAppliedMigrations(dbPath);
     validatePendingMigrations(rawMigrations, new Set(existingRows.map((row) => row.name)));
-  } catch (err: any) {
-    log.error(err.message);
+  } catch (err: unknown) {
+    log.error(getErrorMessage(err));
     process.exit(1);
   }
 
@@ -640,8 +655,8 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
   const currentMigrations = collectMigrations(migrationsDir);
   try {
     assertJournalCoherence(migrationsDir, currentMigrations);
-  } catch (err: any) {
-    log.error(err.message);
+  } catch (err: unknown) {
+    log.error(getErrorMessage(err));
     process.exit(1);
   }
 
@@ -1090,7 +1105,7 @@ async function runExport(
         const result = await client.query(
           "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename NOT LIKE '\\_%' ORDER BY tablename",
         );
-        tables = result.rows.map((r: any) => r.tablename);
+        tables = result.rows.map((row) => String(row.tablename));
       }
 
       for (const table of tables) {
@@ -1100,13 +1115,13 @@ async function runExport(
             `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = $1 AND table_schema = 'public' ORDER BY ordinal_position`,
             [table],
           );
-          const colDefs = cols.rows.map((c: any) => {
-            let def = `  "${c.column_name}" ${c.data_type}`;
-            if (c.is_nullable === 'NO') {
+          const colDefs = cols.rows.map((column) => {
+            let def = `  "${String(column.column_name)}" ${String(column.data_type)}`;
+            if (column.is_nullable === 'NO') {
               def += ' NOT NULL';
             }
-            if (c.column_default) {
-              def += ` DEFAULT ${c.column_default}`;
+            if (column.column_default) {
+              def += ` DEFAULT ${String(column.column_default)}`;
             }
             return def;
           });
@@ -1168,11 +1183,11 @@ async function runExport(
       tables = [args.table];
     } else {
       tables = db
-        .prepare(
+        .prepare<{ name: unknown }>(
           "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\' ORDER BY name",
         )
         .all()
-        .map((row: any) => row.name);
+        .map((row) => String(row.name));
     }
 
     const parts: string[] = [];
@@ -1321,7 +1336,8 @@ async function runSeedModule(
     const { drizzle } = await import('drizzle-orm/node-postgres');
     await withPgClient(root, async (client) => {
       const options = getDrizzleSchemaOptions(schema);
-      const db = options ? drizzle(client, options) : drizzle(client);
+      const drizzleClient = client as never;
+      const db = options ? drizzle(drizzleClient, options) : drizzle(drizzleClient);
       await seed({ dialect, db, schema });
     });
     return;
@@ -1334,7 +1350,7 @@ async function runSeedModule(
   const sqlite = await openSqliteDatabase(dbPath);
   try {
     const options = getDrizzleSchemaOptions(schema);
-    const db = options ? drizzle(sqlite, options) : drizzle(sqlite);
+    const db = options ? drizzle(sqlite as never, options) : drizzle(sqlite as never);
     await seed({ dialect, db, schema });
   } finally {
     sqlite.close();

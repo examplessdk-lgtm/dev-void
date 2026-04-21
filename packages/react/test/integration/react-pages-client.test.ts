@@ -6,6 +6,28 @@ import { chromium, type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers';
 
+declare global {
+  interface Window {
+    __SPA_MARKER?: boolean;
+    __visitAwaitObserved?: string | null;
+    __linkOnClick?: boolean;
+    __preventedClick?: boolean;
+    __preventedNavigate?: boolean;
+    __hashNavigationReady?: boolean;
+    __headRefs?: {
+      font: Element | null;
+      stylesheet: Element | null;
+    };
+    __hmr_marker?: boolean;
+  }
+}
+
+type NavElement = HTMLElement & { __stamp?: number };
+type PageHead = {
+  title: string;
+  meta: Array<Record<string, unknown>>;
+};
+
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 let DEV_PORT: number;
 let DEV_BASE: string;
@@ -75,7 +97,7 @@ function defineClientTests(getBase: () => string) {
 
       // Set a marker to detect if a full page reload happens
       await page.evaluate(() => {
-        (window as any).__SPA_MARKER = true;
+        window.__SPA_MARKER = true;
       });
 
       await page.click('a[href="/users"]');
@@ -85,7 +107,7 @@ function defineClientTests(getBase: () => string) {
 
       expect(page.url()).toBe(BASE + '/users');
 
-      const marker = await page.evaluate(() => (window as any).__SPA_MARKER);
+      const marker = await page.evaluate(() => window.__SPA_MARKER);
       expect(marker).toBe(true);
 
       const text = await page.textContent('body');
@@ -107,9 +129,9 @@ function defineClientTests(getBase: () => string) {
       await page.waitForFunction(() =>
         document.querySelector('h1')?.textContent?.includes('Users'),
       );
-      await page.waitForFunction(() => (window as any).__visitAwaitObserved != null);
+      await page.waitForFunction(() => window.__visitAwaitObserved != null);
 
-      const observedHeading = await page.evaluate(() => (window as any).__visitAwaitObserved);
+      const observedHeading = await page.evaluate(() => window.__visitAwaitObserved);
       expect(observedHeading).toBe('Users');
       expect(page.url()).toBe(BASE + '/users');
     } finally {
@@ -168,7 +190,7 @@ function defineClientTests(getBase: () => string) {
 
       // Stamp the nav element
       await page.evaluate(() => {
-        (document.querySelector('nav') as any).__stamp = 1;
+        (document.querySelector('nav') as NavElement | null)!.__stamp = 1;
       });
 
       await page.click('a[href="/users"]');
@@ -176,7 +198,7 @@ function defineClientTests(getBase: () => string) {
         document.querySelector('h1')?.textContent?.includes('Users'),
       );
 
-      const stamp = await page.evaluate(() => (document.querySelector('nav') as any).__stamp);
+      const stamp = await page.evaluate(() => (document.querySelector('nav') as NavElement | null)?.__stamp);
       expect(stamp).toBe(1);
 
       const navText = await page.textContent('nav');
@@ -385,15 +407,15 @@ function defineClientTests(getBase: () => string) {
       await waitForHydration(page);
 
       await page.evaluate(() => {
-        (window as any).__SPA_MARKER = true;
+        window.__SPA_MARKER = true;
       });
       await page.click('[data-testid="onclick-link"]');
       await page.waitForFunction(() =>
         document.querySelector('h1')?.textContent?.includes('Users'),
       );
 
-      expect(await page.evaluate(() => (window as any).__linkOnClick)).toBe(true);
-      expect(await page.evaluate(() => (window as any).__SPA_MARKER)).toBe(true);
+      expect(await page.evaluate(() => window.__linkOnClick)).toBe(true);
+      expect(await page.evaluate(() => window.__SPA_MARKER)).toBe(true);
       expect(page.url()).toBe(BASE + '/users');
     } finally {
       await page.context().close();
@@ -407,7 +429,7 @@ function defineClientTests(getBase: () => string) {
       await waitForHydration(page);
 
       await page.click('[data-testid="prevented-click-link"]');
-      await page.waitForFunction(() => (window as any).__preventedClick === true);
+      await page.waitForFunction(() => window.__preventedClick === true);
 
       expect(page.url()).toBe(BASE + '/link-behavior');
     } finally {
@@ -422,7 +444,7 @@ function defineClientTests(getBase: () => string) {
       await waitForHydration(page);
 
       await page.click('[data-testid="prevented-navigate-link"]');
-      await page.waitForFunction(() => (window as any).__preventedNavigate === true);
+      await page.waitForFunction(() => window.__preventedNavigate === true);
 
       expect(page.url()).toBe(BASE + '/link-behavior');
     } finally {
@@ -465,7 +487,7 @@ function defineClientTests(getBase: () => string) {
       await waitForHydration(page);
 
       await page.evaluate(() => {
-        (window as any).__SPA_MARKER = true;
+        window.__SPA_MARKER = true;
       });
       await page.click('[data-testid="reload-link"]');
       await page.waitForFunction(() =>
@@ -473,7 +495,7 @@ function defineClientTests(getBase: () => string) {
       );
 
       expect(page.url()).toBe(BASE + '/users');
-      expect(await page.evaluate(() => (window as any).__SPA_MARKER)).toBeUndefined();
+      expect(await page.evaluate(() => window.__SPA_MARKER)).toBeUndefined();
     } finally {
       await page.context().close();
     }
@@ -526,7 +548,7 @@ function defineClientTests(getBase: () => string) {
     try {
       await page.goto(BASE + '/link-behavior');
       await waitForHydration(page);
-      await page.waitForFunction(() => (window as any).__hashNavigationReady === true);
+      await page.waitForFunction(() => window.__hashNavigationReady === true);
 
       await page.click('[data-testid="hash-link"]');
       await page.waitForURL(BASE + '/link-behavior#hash-target');
@@ -554,7 +576,7 @@ function defineClientTests(getBase: () => string) {
       await page.waitForLoadState('networkidle');
 
       await page.evaluate(() => {
-        (window as any).__headRefs = {
+        window.__headRefs = {
           font: document.querySelector('link[rel="preload"][href="/hash-navigation-test.woff2"]'),
           stylesheet: document.querySelector(
             'link[rel="stylesheet"][href="/hash-navigation-test.css"]',
@@ -571,7 +593,7 @@ function defineClientTests(getBase: () => string) {
       await page.waitForTimeout(100);
 
       const headRefs = await page.evaluate(() => {
-        const refs = (window as any).__headRefs;
+        const refs = window.__headRefs!;
         return {
           fontPreserved:
             refs.font ===
@@ -691,7 +713,7 @@ function defineIslandTests(getBase: () => string) {
 
       // Set SPA marker to detect full page reload
       await page.evaluate(() => {
-        (window as any).__SPA_MARKER = true;
+        window.__SPA_MARKER = true;
       });
 
       // Click Blog link (goes through Inertia router.visit)
@@ -701,7 +723,7 @@ function defineIslandTests(getBase: () => string) {
       expect(page.url()).toBe(BASE + '/blog');
 
       // SPA marker should be gone — full page navigation happened
-      const marker = await page.evaluate(() => (window as any).__SPA_MARKER);
+      const marker = await page.evaluate(() => window.__SPA_MARKER);
       expect(marker).toBeUndefined();
 
       // Islands should be hydrated
@@ -811,15 +833,16 @@ describe('react-pages client (dev)', () => {
       props: Record<string, unknown>;
       shared: Record<string, unknown>;
       url: string;
+      head: PageHead;
     };
     expect(rootPage.component).toBe('index');
     expect(rootPage.props).toHaveProperty('title', 'Home');
     expect(rootPage.shared).toHaveProperty('appName', 'React Pages Demo');
     expect(rootPage.url).toBe('/');
     // Head in Inertia JSON
-    expect((rootPage as any).head).toBeDefined();
-    expect((rootPage as any).head.title).toBe('Home | React Pages Demo');
-    expect((rootPage as any).head.meta).toEqual(
+    expect(rootPage.head).toBeDefined();
+    expect(rootPage.head.title).toBe('Home | React Pages Demo');
+    expect(rootPage.head.meta).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ name: 'description', content: 'React Pages playground home' }),
       ]),
@@ -886,11 +909,12 @@ describe('react-pages client (dev)', () => {
     const userPage = (await inertiaUser.json()) as {
       component: string;
       props: { user: { id: number; name: string; email: string } };
+      head: PageHead;
     };
     expect(userPage.component).toBe('users/[id]');
     expect(userPage.props.user.name).toBe('Alice');
     // Head in user detail Inertia JSON
-    expect((userPage as any).head.title).toBe('Alice | React Pages Demo');
+    expect(userPage.head.title).toBe('Alice | React Pages Demo');
 
     // 11. Newly added user is accessible via detail page
     const inertiaCharlie = await fetch(`${DEV_BASE}/users/3`, {
@@ -1010,7 +1034,7 @@ describe('react-pages client (dev)', () => {
 
       // Set a window marker to detect full page reload
       await page.evaluate(() => {
-        (window as any).__hmr_marker = true;
+        window.__hmr_marker = true;
       });
 
       // Edit the island component — change the label
@@ -1024,7 +1048,7 @@ describe('react-pages client (dev)', () => {
       );
 
       // No full page reload — window marker should still be set
-      const markerSurvived = await page.evaluate(() => (window as any).__hmr_marker === true);
+      const markerSurvived = await page.evaluate(() => window.__hmr_marker === true);
       expect(markerSurvived).toBe(true);
 
       // React Fast Refresh preserves state — count should still be 1

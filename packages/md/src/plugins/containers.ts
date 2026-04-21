@@ -1,4 +1,5 @@
 import type MarkdownExit from 'markdown-exit';
+import type { Token } from 'markdown-exit';
 import container from 'markdown-it-container';
 
 export interface ContainerOptions {
@@ -9,6 +10,11 @@ export interface ContainerOptions {
   detailsLabel?: string;
 }
 
+type MarkdownEnv = {
+  references?: Record<string, { title: string; href: string }>;
+  [key: string]: unknown;
+};
+
 function createContainer(
   md: MarkdownExit,
   klass: string,
@@ -18,7 +24,7 @@ function createContainer(
     container,
     klass,
     {
-      render(tokens: any[], idx: number, _options: unknown, env: any) {
+      render(tokens: Token[], idx: number, _options: unknown, env: MarkdownEnv) {
         const token = tokens[idx];
         if (token.nesting === 1) {
           token.attrJoin('class', `${klass} custom-block`);

@@ -1,6 +1,24 @@
 import { VoidActionError, categorizeActionError, isEqualFormValue } from 'void/pages-client';
 import { reactive, ref, watch } from 'vue';
 
+export interface IslandFormReturn<T extends Record<string, unknown>> {
+  data: T;
+  errors: Record<string, string>;
+  error: VoidActionError | null;
+  pending: boolean;
+  hasChanges: boolean;
+  wasSuccessful: boolean;
+  recentlySuccessful: boolean;
+  submit(url: string, method: string): Promise<void>;
+  post(url: string): Promise<void>;
+  put(url: string): Promise<void>;
+  patch(url: string): Promise<void>;
+  delete(url: string): Promise<void>;
+  reset(...fields: (keyof T & string)[]): void;
+  clearErrors(...fields: string[]): void;
+  clearError(): void;
+}
+
 function getValidationErrors(body: unknown): Record<string, string> | null {
   if (
     body &&
@@ -32,8 +50,8 @@ async function readActionErrorBody(response: Response): Promise<unknown> {
  * Form composable for island pages. Uses fetch + page reload instead of the
  * Inertia client-side router (which is not available in island mode).
  */
-export function useIslandForm(defaults: Record<string, unknown>): any {
-  const data = reactive({ ...defaults }) as Record<string, unknown>;
+export function useIslandForm<T extends Record<string, unknown>>(defaults: T): IslandFormReturn<T> {
+  const data = reactive({ ...defaults }) as T;
   const errors = reactive<Record<string, string>>({});
   const error = ref<VoidActionError | null>(null);
   const pending = ref(false);
@@ -54,12 +72,12 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
     { deep: true },
   );
 
-  function reset(...fields: string[]) {
+  function reset(...fields: (keyof T & string)[]) {
     if (fields.length === 0) {
       Object.assign(data, { ...defaults_ });
     } else {
       for (const field of fields) {
-        (data as any)[field] = (defaults_ as any)[field];
+        data[field] = defaults_[field];
       }
     }
   }
@@ -141,6 +159,7 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
     hasChanges,
     wasSuccessful,
     recentlySuccessful,
+    submit,
     reset,
     clearErrors,
     clearError,
@@ -148,5 +167,5 @@ export function useIslandForm(defaults: Record<string, unknown>): any {
     put: (url: string) => submit(url, 'PUT'),
     patch: (url: string) => submit(url, 'PATCH'),
     delete: (url: string) => submit(url, 'DELETE'),
-  });
+  }) as IslandFormReturn<T>;
 }

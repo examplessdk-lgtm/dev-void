@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve, relative } from 'node:path';
-import { normalizePath, type Plugin } from 'vite';
+import { normalizePath, type Plugin, type ResolvedConfig } from 'vite';
 import { scanPages, resolveEffectiveLayoutChain } from 'void/pages';
 import type { PageScanResult } from 'void/pages';
 import {
@@ -34,6 +34,12 @@ interface WrapperMeta {
   islandId: string;
   hydrate: string;
 }
+type MdPluginWithApi = Plugin & {
+  api?: {
+    getClientScripts?: () => Map<string, unknown>;
+  };
+};
+type ScannableEntry = { filePath: string; island: boolean | undefined };
 
 export function islandsPlugin(pagesDir: string): Plugin[] {
   let pageScan: PageScanResult | null = null;
@@ -46,7 +52,7 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
   let wrapperId = 0;
   let viteRoot = '';
   const islandCssMap = new Map<string, string[]>();
-  let resolvedConfig: any;
+  let resolvedConfig: ResolvedConfig | null = null;
 
   /** Rebuild islandCssMap from current file contents (re-runs fileHasCssImports). */
   function rebuildIslandCssMap(): void {
@@ -94,10 +100,10 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
           const importAttrRe =
             /import\s+\w+\s+from\s+("[^"]+"|'[^']+')\s+with\s*\{\s*island\s*:\s*("[^"]+"|'[^']+')\s*\}/g;
           // Scan both pages AND layouts for island imports
-          const filesToScan: { filePath: string; island: boolean }[] = [
-            ...pageScan.pages.map((p: any) => ({ filePath: p.componentPath, island: p.island })),
-            ...pageScan.layouts.map((l: any) => ({ filePath: l.filePath, island: l.island })),
-            ...pageScan.namedLayouts.map((nl: any) => ({
+          const filesToScan: ScannableEntry[] = [
+            ...pageScan.pages.map((p) => ({ filePath: p.componentPath, island: p.island })),
+            ...pageScan.layouts.map((l) => ({ filePath: l.filePath, island: l.island })),
+            ...pageScan.namedLayouts.map((nl) => ({
               filePath: nl.filePath,
               island: nl.island,
             })),
@@ -189,7 +195,9 @@ export function islandsPlugin(pagesDir: string): Plugin[] {
             if (!pageScan) {
               return "export function renderIslandPage() { throw new Error('No pages found'); }";
             }
-            const mdPlugin = resolvedConfig?.plugins?.find((p: any) => p.name === 'void-md');
+            const mdPlugin = resolvedConfig?.plugins?.find(
+              (p): p is MdPluginWithApi => p.name === 'void-md',
+            );
             const mdScriptIds: Set<string> = new Set(
               mdPlugin?.api?.getClientScripts?.()?.keys() ?? [],
             );

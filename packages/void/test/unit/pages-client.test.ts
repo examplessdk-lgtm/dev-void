@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPageRouter, ssrProxy } from '../../src/pages/client';
 import { parseCacheFor } from '../../src/pages/prefetch';
 
+type DeferredTestWindow = Window & {
+  __resolveDeferred(group: string, data: unknown): void;
+};
+
 function stubClientGlobals() {
   const documentStub = {
     createElement: vi.fn(() => ({})),
@@ -218,7 +222,7 @@ describe('createPageRouter prefetch', () => {
     );
     expect(rejectDeferred).toHaveBeenCalledTimes(1);
 
-    (window as any).__resolveDeferred('stats', { count: 42 });
+    (window as unknown as DeferredTestWindow).__resolveDeferred('stats', { count: 42 });
 
     expect(resolveDeferred).not.toHaveBeenCalled();
   });
@@ -725,7 +729,7 @@ describe('createPageRouter prefetch', () => {
     );
     expect(rejectDeferred).not.toHaveBeenCalled();
 
-    (window as any).__resolveDeferred('stats', { count: 42 });
+    (window as unknown as DeferredTestWindow).__resolveDeferred('stats', { count: 42 });
 
     expect(resolveDeferred).toHaveBeenCalledWith(initialRef, { count: 42 });
     expect(initialRef).toMatchObject({
@@ -805,7 +809,7 @@ describe('createPageRouter prefetch', () => {
     const slowVisit = router.visit('/slow').catch(() => undefined);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    (window as any).__resolveDeferred('stats', { count: 42 });
+    (window as unknown as DeferredTestWindow).__resolveDeferred('stats', { count: 42 });
     expect(resolveDeferred).toHaveBeenCalledWith(expect.anything(), { count: 42 });
 
     await router.visit('/fast');
@@ -819,7 +823,7 @@ describe('createPageRouter prefetch', () => {
     let slowStreamController!: ReadableStreamDefaultController<Uint8Array>;
     const encoder = new TextEncoder();
     const resolveDeferred = vi.fn((_ref, value) => ({ loading: false, value, error: null }));
-    const slowComponent = new Promise<{ default: any }>(() => {});
+    const slowComponent = new Promise<{ default: unknown }>(() => {});
 
     vi.stubGlobal(
       'fetch',

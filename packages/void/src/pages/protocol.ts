@@ -1,3 +1,4 @@
+import type { CloudBindings, CloudContext } from '../runtime/handler';
 import { isConvertedResponse } from '../runtime/response';
 import { DEFERRED, separateDeferred, type ResolvedDeferredGroup } from './defer';
 import { resolveHead, type HeadDescriptor, type HeadConfig } from './head';
@@ -31,7 +32,29 @@ export interface PageObject {
 
 export type PageRenderResult = string | ReadableStream<Uint8Array>;
 
-function isPagesRequest(c: any): boolean {
+interface ValidationIssue {
+  message?: string;
+  path?: string;
+}
+
+interface ValidationSlotIssue {
+  slot?: string;
+  issues?: ValidationIssue[];
+}
+
+interface ValidationErrorBody {
+  issues?: ValidationSlotIssue[];
+}
+
+type PageHandler = ((c: CloudContext) => unknown | Promise<unknown>) | undefined;
+type PageHeadHandler =
+  | ((c: CloudContext, props: Record<string, unknown>) => HeadDescriptor | undefined)
+  | undefined;
+type AssetTags = { css: string; preloads: string; body: string };
+type RenderPage = (pageObj: PageObject, assetTags: AssetTags) => Promise<PageRenderResult>;
+type GetAssetTags = (req: Request, env: CloudBindings, componentId: string) => Promise<AssetTags>;
+
+function isPagesRequest(c: CloudContext): boolean {
   return c.req.header('x-voidpages') === 'true';
 }
 
@@ -41,7 +64,7 @@ function pageJsonResponse(pageObj: PageObject): Response {
   });
 }
 
-function requestPathWithSearch(c: any): string {
+function requestPathWithSearch(c: CloudContext): string {
   return c.req.path + new URL(c.req.url).search;
 }
 
@@ -58,15 +81,16 @@ async function extractProps(result: unknown): Promise<Record<string, unknown>> {
 }
 
 /** Flatten withValidator's { issues: [{ slot, issues: [{ message, path }] }] } into { field: message } */
-export function flattenValidationErrors(body: any): Record<string, string> {
+export function flattenValidationErrors(body: unknown): Record<string, string> {
   const errors: Record<string, string> = {};
-  if (body?.issues) {
-    for (const slotIssue of body.issues) {
-      for (const issue of slotIssue.issues) {
+  const issues = (body as ValidationErrorBody | null)?.issues;
+  if (issues) {
+    for (const slotIssue of issues) {
+      for (const issue of slotIssue.issues ?? []) {
         // path is a dot-joined string from flattenIssues (e.g. "name", "address.city")
         const key = typeof issue.path === 'string' ? issue.path : slotIssue.slot;
         if (typeof key === 'string') {
-          errors[key] = issue.message;
+          errors[key] = issue.message ?? 'Invalid value';
         }
       }
     }
@@ -120,7 +144,7 @@ function renderedResponse(result: PageRenderResult, contentType: string): Respon
 function streamDeferredResponse(
   initialChunk: PageRenderResult,
   deferredMap: Record<string, ResolvedDeferredGroup>,
-  c: any,
+  c: CloudContext,
   contentType: string,
   formatResolved: (group: string, data: unknown) => string,
   formatRejected: (group: string, error: string) => string,
@@ -155,23 +179,16 @@ function streamDeferredResponse(
 
 /** Handle GET page request — run handler, return page object or SSR HTML */
 export async function handlePageGet(
-  handler: Function | undefined,
-  headFn: ((c: any, props: Record<string, unknown>) => HeadDescriptor | undefined) | undefined,
-  c: any,
+  handler: PageHandler,
+  headFn: PageHeadHandler,
+  c: CloudContext,
   componentId: string,
-  renderFn: (
-    pageObj: PageObject,
-    assetTags: { css: string; preloads: string; body: string },
-  ) => Promise<PageRenderResult>,
-  getAssetTags: (
-    req: Request,
-    env: any,
-    componentId: string,
-  ) => Promise<{ css: string; preloads: string; body: string }>,
+  renderFn: RenderPage,
+  getAssetTags: GetAssetTags,
   configHead?: HeadConfig,
   island?: boolean,
 ): Promise<Response> {
-  const shared = c.get('shared') || {};
+  const shared = (c.get('shared') as Record<string, unknown> | undefined) ?? {};
 
   // Run loader and check for redirect/error responses before extracting props
   let props: Record<string, unknown> = {};
@@ -294,24 +311,17 @@ export async function handlePageGet(
 
 /** Handle POST/PUT/DELETE page request — run mutation, then re-run GET or redirect */
 export async function handlePageMutation(
-  mutationHandler: Function | undefined,
-  getHandler: Function | undefined,
-  headFn: ((c: any, props: Record<string, unknown>) => HeadDescriptor | undefined) | undefined,
-  c: any,
+  mutationHandler: PageHandler,
+  getHandler: PageHandler,
+  headFn: PageHeadHandler,
+  c: CloudContext,
   componentId: string,
-  renderFn: (
-    pageObj: PageObject,
-    assetTags: { css: string; preloads: string; body: string },
-  ) => Promise<PageRenderResult>,
-  getAssetTags: (
-    req: Request,
-    env: any,
-    componentId: string,
-  ) => Promise<{ css: string; preloads: string; body: string }>,
+  renderFn: RenderPage,
+  getAssetTags: GetAssetTags,
   configHead?: HeadConfig,
   island?: boolean,
 ): Promise<Response> {
-  const shared = c.get('shared') || {};
+  const shared = (c.get('shared') as Record<string, unknown> | undefined) ?? {};
   const middlewareHead = c.get('headDefaults') as HeadDescriptor | undefined;
 
   function buildMutationPageObj(

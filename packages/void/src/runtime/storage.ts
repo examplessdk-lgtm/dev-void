@@ -9,7 +9,7 @@ import { requireRuntimeBinding } from './env';
 export const storage: R2Bucket = new Proxy({} as R2Bucket, {
   get(_target, prop) {
     const bucket = requireRuntimeBinding<R2Bucket>('STORAGE');
-    const value = (bucket as any)[prop];
+    const value = Reflect.get(bucket as object, prop, bucket);
     return typeof value === 'function' ? value.bind(bucket) : value;
   },
 });

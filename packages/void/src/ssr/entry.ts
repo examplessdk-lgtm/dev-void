@@ -1,6 +1,18 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseSync } from 'vite';
+import {
+  isIdentifier,
+  type AstCallExpression,
+  type AstExportDefaultDeclaration,
+  type AstExportNamedDeclaration,
+  type AstExportSpecifier,
+  type AstFunctionDeclaration,
+  type AstNode,
+  type AstProgram,
+  type AstVariableDeclaration,
+  type AstVariableDeclarator,
+} from '../shared/ast';
 
 export const SSR_SERVER_ENTRY_RELATIVE_PATHS = ['src/main.ssr.ts', 'src/main.ssr.tsx'] as const;
 export const SSR_CLIENT_ENTRY_RELATIVE_PATHS = [
@@ -8,15 +20,15 @@ export const SSR_CLIENT_ENTRY_RELATIVE_PATHS = [
   'src/main.client.tsx',
 ] as const;
 
-interface ResolvedEntry {
+type ResolvedEntry = {
   absolutePath: string;
   relativePath: string;
-}
+};
 
-export interface SsrEntries {
+export type SsrEntries = {
   server: ResolvedEntry;
   client: ResolvedEntry;
-}
+};
 
 function resolveSingleEntry(
   root: string,
@@ -70,12 +82,12 @@ function validateServerRenderExport(entry: ResolvedEntry): void {
     );
   }
 
-  const program = parsed.program as { body?: any[] };
+  const program = parsed.program as unknown as AstProgram;
   const body = program.body ?? [];
 
-  const hasRenderExport = body.some((node) => {
+  const hasRenderExport = body.some((node: AstNode) => {
     if (node.type === 'ExportDefaultDeclaration') {
-      const declaration = node.declaration;
+      const declaration = (node as AstExportDefaultDeclaration).declaration;
       if (
         declaration?.type === 'FunctionDeclaration' ||
         declaration?.type === 'FunctionExpression' ||
@@ -84,9 +96,8 @@ function validateServerRenderExport(entry: ResolvedEntry): void {
         return true;
       }
       if (declaration?.type === 'CallExpression') {
-        return (
-          declaration.callee?.type === 'Identifier' && declaration.callee.name === 'defineRender'
-        );
+        const call = declaration as AstCallExpression;
+        return isIdentifier(call.callee) && call.callee.name === 'defineRender';
       }
       return false;
     }
@@ -94,16 +105,22 @@ function validateServerRenderExport(entry: ResolvedEntry): void {
       return false;
     }
 
-    const declaration = node.declaration;
+    const declaration = (node as AstExportNamedDeclaration).declaration;
     if (declaration?.type === 'FunctionDeclaration') {
-      return declaration.id?.name === 'render';
+      const fn = declaration as AstFunctionDeclaration;
+      return isIdentifier(fn.id) && fn.id.name === 'render';
     }
     if (declaration?.type === 'VariableDeclaration') {
-      return declaration.declarations.some((decl: any) => decl.id?.name === 'render');
+      return ((declaration as AstVariableDeclaration).declarations ?? []).some(
+        (decl: AstVariableDeclarator) => isIdentifier(decl.id) && decl.id.name === 'render',
+      );
     }
 
-    const specifiers = node.specifiers ?? [];
-    return specifiers.some((specifier: any) => specifier.exported?.name === 'render');
+    const specifiers = (node as AstExportNamedDeclaration).specifiers ?? [];
+    return specifiers.some((specifier: AstExportSpecifier) => {
+      const exported = specifier.exported;
+      return isIdentifier(exported) && exported.name === 'render';
+    });
   });
 
   if (!hasRenderExport) {

@@ -240,8 +240,8 @@ async function runAiSetupPrompt(
       const created = await client.createProject(slugResult.trim());
       projectId = created.id;
       slug = created.slug;
-    } catch (err: any) {
-      voidError(`Failed to create project: ${err.message}`);
+    } catch (err: unknown) {
+      voidError(`Failed to create project: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
     log.success(`Project created: ${slug}`);
@@ -536,8 +536,13 @@ export function voidPlugin(options?: {
     }
 
     if (websocketRoutes.length > 0) {
+      type DurableObjectBindingsConfig = {
+        durable_objects?: {
+          bindings?: { name: string; class_name: string }[];
+        };
+      };
       const existingDurableObjectBindings =
-        ((resolved as Record<string, any>).durable_objects?.bindings as
+        ((resolved as DurableObjectBindingsConfig).durable_objects?.bindings as
           | { name: string; class_name: string }[]
           | undefined) ?? [];
       const missingDurableObjectBindings = websocketRoutes
@@ -840,11 +845,19 @@ export function voidPlugin(options?: {
               // Neuter vite-tsconfig-paths before Vite wires up hooks.
               // Must happen in `config` — by `configResolved` hooks are
               // already cached and can't be removed.
-              for (const p of (userConfig.plugins as any[])?.flat(Infinity) ?? []) {
-                if (p && typeof p === 'object' && p.name === 'vite-tsconfig-paths') {
-                  for (const key of Object.keys(p)) {
-                    if (key !== 'name' && typeof p[key] === 'function') {
-                      p[key] = () => {};
+              const plugins = Array.isArray(userConfig.plugins) ? userConfig.plugins : [];
+              for (const p of plugins) {
+                if (
+                  p &&
+                  typeof p === 'object' &&
+                  !Array.isArray(p) &&
+                  'name' in p &&
+                  (p as { name?: unknown }).name === 'vite-tsconfig-paths'
+                ) {
+                  const plugin = p as Record<string, unknown>;
+                  for (const key of Object.keys(plugin)) {
+                    if (key !== 'name' && typeof plugin[key] === 'function') {
+                      plugin[key] = () => {};
                     }
                   }
                 }

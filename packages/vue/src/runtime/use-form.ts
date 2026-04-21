@@ -1,6 +1,33 @@
-import { VoidActionError, isAbortError, isEqualFormValue, submitAction } from 'void/pages-client';
+import {
+  VoidActionError,
+  isAbortError,
+  isEqualFormValue,
+  submitAction,
+  type VisitOptions,
+  type VoidRouter,
+} from 'void/pages-client';
 import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
 import { reactive, ref, inject, watch } from 'vue';
+
+type FormSubmitOptions = Omit<VisitOptions, 'method' | 'data'> & {
+  data?: Record<string, unknown>;
+};
+type UntypedForm = {
+  data: Record<string, unknown>;
+  errors: Record<string, string>;
+  error: VoidActionError | null;
+  pending: boolean;
+  hasChanges: boolean;
+  wasSuccessful: boolean;
+  recentlySuccessful: boolean;
+  post(opts?: FormSubmitOptions): Promise<void>;
+  put(opts?: FormSubmitOptions): Promise<void>;
+  patch(opts?: FormSubmitOptions): Promise<void>;
+  delete(opts?: FormSubmitOptions): Promise<void>;
+  reset(...fields: string[]): void;
+  clearErrors(...fields: string[]): void;
+  clearError(): void;
+};
 
 function getValidationErrors(error: VoidActionError): Record<string, string> | null {
   const body = error.body;
@@ -29,10 +56,10 @@ export function useForm<U extends ActionUrl & string>(
   hasChanges: boolean;
   wasSuccessful: boolean;
   recentlySuccessful: boolean;
-  post(opts?: any): Promise<void>;
-  put(opts?: any): Promise<void>;
-  patch(opts?: any): Promise<void>;
-  delete(opts?: any): Promise<void>;
+  post(opts?: FormSubmitOptions): Promise<void>;
+  put(opts?: FormSubmitOptions): Promise<void>;
+  patch(opts?: FormSubmitOptions): Promise<void>;
+  delete(opts?: FormSubmitOptions): Promise<void>;
   reset(...fields: (keyof ResolveActionBody<U> & string)[]): void;
   clearErrors(...fields: (keyof ResolveActionBody<U> & string)[]): void;
   clearError(): void;
@@ -42,7 +69,7 @@ export function useForm(
   url: string,
   defaults: Record<string, unknown>,
   options?: { params?: Record<string, string> },
-): any {
+): UntypedForm {
   let resolvedUrl = url;
   const formDefaults = defaults;
 
@@ -62,7 +89,7 @@ export function useForm(
 
   resolvedUrl = resolvedUrl + actionQuery;
 
-  const router = inject<any>('__void_router', null);
+  const router = inject<VoidRouter | null>('__void_router', null);
   const data = reactive({ ...formDefaults }) as Record<string, unknown>;
   const errors = reactive<Record<string, string>>({});
   const error = ref<VoidActionError | null>(null);
@@ -90,7 +117,7 @@ export function useForm(
       Object.assign(data, { ...defaults_ });
     } else {
       for (const field of fields) {
-        (data as any)[field] = (defaults_ as any)[field];
+        data[field] = defaults_[field];
       }
     }
   }
@@ -111,7 +138,7 @@ export function useForm(
     error.value = null;
   }
 
-  async function submit(method: string, opts: any = {}) {
+  async function submit(method: string, opts: FormSubmitOptions = {}) {
     pending.value = true;
     wasSuccessful.value = false;
     recentlySuccessful.value = false;
@@ -122,6 +149,10 @@ export function useForm(
     clearError();
 
     try {
+      if (!router) {
+        throw new Error('useForm() requires the Void Pages router');
+      }
+
       const result = await submitAction(router, resolvedUrl, {
         method,
         data: { ...data },
@@ -165,9 +196,9 @@ export function useForm(
     reset,
     clearErrors,
     clearError,
-    post: (opts?: any) => submit('POST', opts),
-    put: (opts?: any) => submit('PUT', opts),
-    patch: (opts?: any) => submit('PATCH', opts),
-    delete: (opts?: any) => submit('DELETE', opts),
+    post: (opts?: FormSubmitOptions) => submit('POST', opts),
+    put: (opts?: FormSubmitOptions) => submit('PUT', opts),
+    patch: (opts?: FormSubmitOptions) => submit('PATCH', opts),
+    delete: (opts?: FormSubmitOptions) => submit('DELETE', opts),
   });
 }

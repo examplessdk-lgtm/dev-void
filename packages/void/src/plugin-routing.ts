@@ -229,7 +229,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     }
     const hasIslandPages = scan.pages.pages.some((p) => p.island);
     // Detect md plugin and read its client entry ID for island pages
-    const mdPlugin = resolvedConfig?.plugins?.find((p: any) => p.name === 'void-md');
+    const mdPlugin = resolvedConfig?.plugins?.find((p) => p.name === 'void-md');
     const mdClientEntryId =
       hasIslandPages && mdPlugin?.api?.clientEntryId
         ? (mdPlugin.api.clientEntryId as string)

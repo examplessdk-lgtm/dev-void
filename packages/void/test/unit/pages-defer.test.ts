@@ -4,7 +4,11 @@ import { defer, separateDeferred, DEFERRED } from '../../src/pages/defer';
 describe('defer', () => {
   it('single prop — returns sentinel with null group', () => {
     const resolver = vi.fn();
-    const result = defer(resolver) as any;
+    const result = defer(resolver) as unknown as {
+      [DEFERRED]: true;
+      group: null;
+      resolver: typeof resolver;
+    };
     expect(result[DEFERRED]).toBe(true);
     expect(result.group).toBeNull();
     expect(result.resolver).toBe(resolver);
@@ -12,7 +16,11 @@ describe('defer', () => {
 
   it('named group — returns sentinel with group name', () => {
     const resolver = vi.fn();
-    const result = defer('analytics', resolver) as any;
+    const result = defer('analytics', resolver) as unknown as {
+      [DEFERRED]: true;
+      group: string;
+      resolver: typeof resolver;
+    };
     expect(result[DEFERRED]).toBe(true);
     expect(result.group).toBe('analytics');
     expect(result.resolver).toBe(resolver);

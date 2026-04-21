@@ -581,8 +581,8 @@ function runMigration(root: string, name: string): void {
   const currentMigrations = collectMigrations(migrationsDir);
   try {
     assertJournalCoherence(migrationsDir, currentMigrations);
-  } catch (err: any) {
-    log.error(err.message);
+  } catch (err: unknown) {
+    log.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 

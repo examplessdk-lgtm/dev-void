@@ -3,8 +3,16 @@ import { Hono } from 'hono';
 import * as v from 'valibot';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { defineHandler } from '../../src/runtime/handler';
+import { defineHandler, type CloudContext, type TypedHandler } from '../../src/runtime/handler';
 import { convertReturnValue } from '../../src/runtime/response';
+
+type ValidationIssueBody = {
+  error: string;
+  issues: Array<{
+    slot: string;
+    issues: Array<{ message: string; path?: string }>;
+  }>;
+};
 
 function postJson(path: string, body: unknown) {
   return new Request(`http://localhost${path}`, {
@@ -14,18 +22,26 @@ function postJson(path: string, body: unknown) {
   });
 }
 
-function createPostApp(handler: (c: any) => unknown, path = '/test') {
+function createPostApp(handler: (c: CloudContext) => unknown, path = '/test') {
   const app = new Hono();
   app.post(path, async (c) => {
-    return convertReturnValue(await handler(c));
+    return convertReturnValue(await handler(c as unknown as CloudContext));
   });
   return app;
 }
 
-function createGetApp(handler: (c: any) => unknown, path = '/test') {
+function createGetApp(handler: (c: CloudContext) => unknown, path = '/test') {
   const app = new Hono();
   app.get(path, async (c) => {
-    return convertReturnValue(await handler(c));
+    return convertReturnValue(await handler(c as unknown as CloudContext));
+  });
+  return app;
+}
+
+function createValidatedApp(method: 'get' | 'post', path: string, handler: TypedHandler) {
+  const app = new Hono();
+  app[method](path, async (c) => {
+    return convertReturnValue(await handler(c as unknown as CloudContext));
   });
   return app;
 }
@@ -84,7 +100,7 @@ describe('withValidator + zod', () => {
     const res = await app.request(postJson('/test', { name: '', email: 'not-an-email' }));
 
     expect(res.status).toBe(400);
-    const json: any = await res.json();
+    const json = (await res.json()) as ValidationIssueBody;
     expect(json.error).toBe('Validation failed');
     expect(json.issues[0].slot).toBe('body');
     expect(json.issues[0].issues.length).toBeGreaterThanOrEqual(1);
@@ -133,10 +149,7 @@ describe('withValidator + zod', () => {
       return { userId: params.id, role: body.role };
     });
 
-    const app = new Hono();
-    app.post('/users/:id/role', async (c) => {
-      return convertReturnValue(await (handler as any)(c));
-    });
+    const app = createValidatedApp('post', '/users/:id/role', handler);
 
     const res = await app.request(postJson('/users/42/role', { role: 'admin' }));
 
@@ -200,7 +213,7 @@ describe('withValidator + valibot', () => {
     const res = await app.request(postJson('/test', { name: '', email: 'bad' }));
 
     expect(res.status).toBe(400);
-    const json: any = await res.json();
+    const json = (await res.json()) as ValidationIssueBody;
     expect(json.error).toBe('Validation failed');
     expect(json.issues[0].slot).toBe('body');
     expect(json.issues[0].issues.length).toBeGreaterThanOrEqual(1);
@@ -235,10 +248,7 @@ describe('withValidator + valibot', () => {
       return { id: params.id, title: body.title };
     });
 
-    const app = new Hono();
-    app.post('/items/:id', async (c) => {
-      return convertReturnValue(await (handler as any)(c));
-    });
+    const app = createValidatedApp('post', '/items/:id', handler);
 
     const res = await app.request(postJson('/items/7', { title: 'Updated' }));
 
@@ -304,7 +314,7 @@ describe('withValidator + arktype', () => {
     const res = await app.request(postJson('/test', { name: '', email: 'not-email' }));
 
     expect(res.status).toBe(400);
-    const json: any = await res.json();
+    const json = (await res.json()) as ValidationIssueBody;
     expect(json.error).toBe('Validation failed');
     expect(json.issues[0].slot).toBe('body');
     expect(json.issues[0].issues.length).toBeGreaterThanOrEqual(1);
@@ -337,10 +347,7 @@ describe('withValidator + arktype', () => {
       return { slug: params.slug, published: body.published };
     });
 
-    const app = new Hono();
-    app.post('/posts/:slug', async (c) => {
-      return convertReturnValue(await (handler as any)(c));
-    });
+    const app = createValidatedApp('post', '/posts/:slug', handler);
 
     const res = await app.request(postJson('/posts/my-post', { published: true }));
 

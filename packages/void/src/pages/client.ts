@@ -1,7 +1,11 @@
 /// <reference lib="dom" />
 
 import { VoidActionError, isCallSiteActionError, type ActionResult } from './action-result';
-import { createPageNavigationEngine as createNavigationEngine } from './navigation-engine';
+import {
+  createPageNavigationEngine as createNavigationEngine,
+  type PageComponentModule,
+  type PageData,
+} from './navigation-engine';
 import type { CacheForResult, CacheForInput } from './prefetch';
 
 export {
@@ -55,8 +59,8 @@ export interface VoidRouter {
   readonly url: URL;
   readonly path: string;
   readonly query: URLSearchParams;
-  visit(url: string | URL, options?: VisitOptions): Promise<any>;
-  refresh(options?: VisitOptions): Promise<any>;
+  visit(url: string | URL, options?: VisitOptions): Promise<unknown>;
+  refresh(options?: VisitOptions): Promise<unknown>;
   prefetch(url: string | URL, options?: PrefetchOptions): Promise<unknown>;
   flush(url: string | URL, method?: string): void;
   flushAll(): void;
@@ -67,13 +71,13 @@ export interface PageRouterAdapter {
   resolveDeferred(ref: unknown, value: unknown): unknown;
   rejectDeferred(ref: unknown, error: string): unknown;
   isLoading(ref: unknown): boolean;
-  applyUpdate(pageData: any, component: any, layouts: any[]): void | Promise<void>;
+  applyUpdate(pageData: PageData, component: unknown, layouts: unknown[]): void | Promise<void>;
   onDeferredUpdate?(props: Record<string, unknown>): void;
 }
 
 export interface PageRouterConfig {
   adapter: PageRouterAdapter;
-  components: Record<string, () => Promise<{ default: any }>>;
+  components: Record<string, () => Promise<PageComponentModule>>;
   layoutTree: Record<string, string[]>;
   routeMeta: Record<string, { island?: boolean }>;
   matchRoute(url: string): string | null;
@@ -236,7 +240,7 @@ export function objectToFormData(
       continue;
     }
     const composed = parentKey ? parentKey + '[' + key + ']' : key;
-    const value = source[key] as any;
+    const value = source[key];
     if (value instanceof File) {
       form.append(composed, value, value.name);
     } else if (value instanceof Blob) {
@@ -260,7 +264,7 @@ export function objectToFormData(
     } else if (value === null || value === undefined) {
       form.append(composed, '');
     } else {
-      objectToFormData(value, form, composed);
+      objectToFormData(value as Record<string, unknown>, form, composed);
     }
   }
   return form;
@@ -277,18 +281,23 @@ export async function submitAction(
 ): Promise<ActionResult> {
   try {
     const pageData = await router.visit(url, options);
-    if (pageData?.errors) {
+    if (
+      typeof pageData === 'object' &&
+      pageData !== null &&
+      'errors' in pageData &&
+      pageData.errors
+    ) {
       return {
         ok: false,
         error: new VoidActionError({
-          body: { errors: pageData.errors },
+          body: { errors: pageData.errors as Record<string, string> },
           status: 422,
           statusText: 'Unprocessable Content',
           url,
         }),
       };
     }
-    return { ok: true, pageData };
+    return { ok: true, pageData: pageData as PageData };
   } catch (error) {
     if (isCallSiteActionError(error)) {
       return { ok: false, error };
@@ -301,9 +310,9 @@ export async function submitAction(
 
 export async function createPageRouter(config: PageRouterConfig): Promise<{
   router: VoidRouter;
-  initialPageData: any;
-  initialComponent: any;
-  initialLayouts: any[];
+  initialPageData: PageData;
+  initialComponent: unknown;
+  initialLayouts: unknown[];
   start(): void;
 }> {
   {
@@ -430,7 +439,8 @@ export function scheduleHydration(
     });
     observer.observe(el);
   } else if (strategy === 'idle') {
-    const schedule = (window as any).requestIdleCallback || ((cb: () => void) => setTimeout(cb, 1));
+    const schedule =
+      window.requestIdleCallback?.bind(window) ?? ((cb: () => void) => setTimeout(cb, 1));
     schedule(() => hydrate());
   } else if (strategy.startsWith('media:')) {
     const query = strategy.slice(6);

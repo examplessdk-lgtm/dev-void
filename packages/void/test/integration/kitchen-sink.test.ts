@@ -6,6 +6,14 @@ import { chromium, type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers';
 
+declare global {
+  interface Window {
+    __SPA_MARKER?: boolean;
+  }
+}
+
+type NavElement = HTMLElement & { __stamp?: number };
+
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 
 let PORT: number;
@@ -115,7 +123,7 @@ describe('playground/kitchen-sink', () => {
 
       // Set a marker to detect full reload
       await page.evaluate(() => {
-        (window as any).__SPA_MARKER = true;
+        window.__SPA_MARKER = true;
       });
 
       await page.click('a[href="/db"]');
@@ -123,7 +131,7 @@ describe('playground/kitchen-sink', () => {
       expect(page.url()).toBe(`${BASE}/db`);
 
       // Marker survives = SPA navigation (no reload)
-      const marker = await page.evaluate(() => (window as any).__SPA_MARKER);
+      const marker = await page.evaluate(() => window.__SPA_MARKER);
       expect(marker).toBe(true);
 
       // Navigate to another page
@@ -142,13 +150,13 @@ describe('playground/kitchen-sink', () => {
       await waitForHydration(page);
 
       await page.evaluate(() => {
-        (document.querySelector('nav') as any).__stamp = 1;
+        (document.querySelector('nav') as NavElement | null)!.__stamp = 1;
       });
 
       await page.click('a[href="/env"]');
       await page.waitForFunction(() => document.querySelector('h1')?.textContent?.includes('Env'));
 
-      const stamp = await page.evaluate(() => (document.querySelector('nav') as any).__stamp);
+      const stamp = await page.evaluate(() => (document.querySelector('nav') as NavElement | null)?.__stamp);
       expect(stamp).toBe(1);
     } finally {
       await page.context().close();

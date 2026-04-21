@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import type MarkdownExit from 'markdown-exit';
+import type { RuleBlock, Token } from 'markdown-exit';
 
 const rawPathRegexp =
   /^(.+?(?:(?:\.([a-z0-9]+))?))(?:(#[\w-]+))?(?: ?(?:\{(\d+(?:[,-]\d+)*)? ?(\S+)? ?(\S+)?}))? ?(?:\[(.+)\])?$/;
@@ -14,6 +15,8 @@ interface SnippetToken {
   attrs: string;
   title: string;
 }
+
+type FenceRender = (...args: unknown[]) => string;
 
 function rawPathToToken(rawPath: string): SnippetToken {
   const [
@@ -85,7 +88,7 @@ function findRegion(
 export function snippetPlugin(md: MarkdownExit, srcDir?: string): void {
   const CH = '<'.charCodeAt(0);
 
-  const parser = (state: any, startLine: number, _endLine: number, silent: boolean): boolean => {
+  const parser: RuleBlock = (state, startLine, _endLine, silent): boolean => {
     const pos = state.bMarks[startLine] + state.tShift[startLine];
     const max = state.eMarks[startLine];
     if (state.sCount[startLine] - state.blkIndent >= 4) {
@@ -111,7 +114,7 @@ export function snippetPlugin(md: MarkdownExit, srcDir?: string): void {
     const { filepath, extension, region, lines, lang, attrs, title } = rawPathToToken(rawPath);
 
     state.line = startLine + 1;
-    const token = state.push('fence', 'code', 0);
+    const token = state.push('fence', 'code', 0) as Token & { src?: [string, string] };
     token.info = `${lang || extension}${lines ? `{${lines}}` : ''}${title ? `[${title}]` : ''} ${attrs ?? ''}`;
 
     const resolvedPath = resolve(
@@ -124,19 +127,19 @@ export function snippetPlugin(md: MarkdownExit, srcDir?: string): void {
     return true;
   };
 
-  const fence = md.renderer.rules.fence!;
-  md.renderer.rules.fence = (...args: any[]) => {
-    const [tokens, idx] = args;
-    const token = tokens[idx];
+  const fence = md.renderer.rules.fence as FenceRender;
+  md.renderer.rules.fence = (...args: unknown[]) => {
+    const [tokens, idx] = args as [Token[], number];
+    const token = tokens[idx] as Token & { src?: [string, string] };
     const [src, regionName] = token.src ?? [];
     if (!src) {
-      return (fence as Function)(...args);
+      return fence(...args);
     }
 
     if (!existsSync(src) || !statSync(src).isFile()) {
       token.content = `Code snippet path not found: ${src}`;
       token.info = '';
-      return (fence as Function)(...args);
+      return fence(...args);
     }
 
     let content = readFileSync(src, 'utf8').replace(/\r\n/g, '\n');
@@ -153,7 +156,7 @@ export function snippetPlugin(md: MarkdownExit, srcDir?: string): void {
       }
     }
     token.content = content;
-    return (fence as Function)(...args);
+    return fence(...args);
   };
 
   md.block.ruler.before('fence', 'snippet', parser);
