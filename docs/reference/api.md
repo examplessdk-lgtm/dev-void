@@ -255,7 +255,7 @@ export const GET = defineHandler((c) => {
 
 ```ts
 interface CloudContext {
-  rewrite(destination: RewriteDestination): Response | Promise<Response>;
+  rewrite(destination: RewriteDestination): Promise<Response>;
 }
 ```
 

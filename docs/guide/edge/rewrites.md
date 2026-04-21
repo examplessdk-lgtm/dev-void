@@ -37,7 +37,7 @@ If you **do** want the user to see the new URL (e.g., for SEO canonical signals 
 - **Destinations** are strings starting with `/` (only internal paths are supported).
 - `:splat` in the destination is replaced with the portion of the path matched by `*` in the source pattern.
 - When multiple rules match, the **last match wins**.
-- Rewrites are evaluated at the edge **before** the request reaches the worker. The rewritten path is then used for static asset serving, ISR, and SSR.
+- On the default target, rewrites are evaluated at the edge **before** the request reaches the worker. On `node` / `bun` / `deno` targets they run in-process as Hono middleware, still before route dispatch. Either way, the rewritten path is then used for static asset serving, ISR, and SSR.
 - Unlike redirects, rewrites do **not** change the URL in the browser or send a `Location` header.
 
 ## Example: i18n routing
@@ -243,7 +243,7 @@ Rewrites can also be defined in a `_redirects` file placed in Vite's `publicDir`
 
 - File-based rules are applied **before** `void.json` rules. Since the last match wins, `routing.rewrites` / `routing.fallbacks` in `void.json` take precedence.
 - The `_redirects` file can mix 3xx redirects, `200` fallbacks, and `200!` force rewrites. Ordering is preserved within each bucket.
-- The `!` force suffix is only valid on `200`. Entries like `301!` are rejected with a warning — 3xx redirects always "force" by their nature (they change the URL), so the suffix is meaningless.
+- The `!` force suffix is only meaningful on `200`. On a 3xx entry like `301!`, the `!` is silently stripped — 3xx redirects always "force" by their nature (they change the URL), so the suffix is meaningless. `void deploy` prints a single aggregated warning tallying all `301!` / `302!` / `307!` / `308!` entries so you can clean them up.
 
 ## Precedence: `_redirects` vs `void.json`
 
