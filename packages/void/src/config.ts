@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RewriteDestination } from 'void/routes';
-import type { HeaderRule, RedirectRule } from './cli/types';
+import type { DevRedirectRule, HeaderRule, RedirectRule } from './cli/types';
 export type { RedirectRule };
 import { VOID_AUTH_PROVIDERS, isVoidAuthProvider, type VoidAuthProvider } from './auth/providers';
 import type { HeadConfig } from './pages/head';
@@ -615,7 +615,7 @@ export function convertHeadersConfig(
 }
 
 /**
- * Convert the `redirects` config field into `RedirectRule[]` for the deploy manifest.
+ * Convert the `redirects` config field into `DevRedirectRule[]` for the deploy manifest.
  *
  * Each key is a URL pattern (e.g. "/old") and each value is either a string
  * destination (defaults to 302) or an object with `to` and optional `status`.
@@ -623,13 +623,13 @@ export function convertHeadersConfig(
  */
 export function convertRedirectsConfig(
   redirects: Record<string, RedirectDestination> | undefined,
-): Array<RedirectRule> | undefined {
+): Array<DevRedirectRule> | undefined {
   if (!redirects) {
     return undefined;
   }
 
   const origin = 'void.json#routing.redirects';
-  const rules: Array<RedirectRule> = [];
+  const rules: Array<DevRedirectRule> = [];
   for (const [source, dest] of Object.entries(redirects)) {
     if (typeof dest === 'string') {
       rules.push({ source, destination: dest, status: 302, origin });
@@ -642,7 +642,7 @@ export function convertRedirectsConfig(
 }
 
 /**
- * Convert the `rewrites` config field into `RedirectRule[]` with status 200.
+ * Convert the `rewrites` config field into `DevRedirectRule[]` with status 200.
  *
  * Each key is a URL pattern (e.g. "/docs") and each value is a destination path.
  * Rewrites serve content from the destination without changing the browser URL.
@@ -652,13 +652,13 @@ export function convertRedirectsConfig(
  */
 export function convertRewritesConfig(
   rewrites: Record<string, RewriteDestination> | undefined,
-): RedirectRule[] | undefined {
+): DevRedirectRule[] | undefined {
   if (!rewrites) {
     return undefined;
   }
 
   const origin = 'void.json#routing.rewrites';
-  const rules: RedirectRule[] = [];
+  const rules: DevRedirectRule[] = [];
   for (const [source, destination] of Object.entries(rewrites)) {
     rules.push({ source, destination, status: 200, force: true, origin });
   }
@@ -667,7 +667,7 @@ export function convertRewritesConfig(
 }
 
 /**
- * Convert the `fallbacks` config field into `RedirectRule[]` with status 200.
+ * Convert the `fallbacks` config field into `DevRedirectRule[]` with status 200.
  *
  * Fallbacks fire only when the static asset resolver would otherwise return
  * 404. They share the rewrite shape (status 200, pathname-only destination)
@@ -677,13 +677,13 @@ export function convertRewritesConfig(
  */
 export function convertFallbacksConfig(
   fallbacks: Record<string, RewriteDestination> | undefined,
-): RedirectRule[] | undefined {
+): DevRedirectRule[] | undefined {
   if (!fallbacks) {
     return undefined;
   }
 
   const origin = 'void.json#routing.fallbacks';
-  const rules: RedirectRule[] = [];
+  const rules: DevRedirectRule[] = [];
   for (const [source, destination] of Object.entries(fallbacks)) {
     rules.push({ source, destination, status: 200, force: false, origin });
   }

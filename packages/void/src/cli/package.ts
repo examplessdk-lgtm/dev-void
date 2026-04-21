@@ -9,6 +9,7 @@ import { toSlash } from '../shared/utils';
 import type {
   AssetConfig,
   DeployManifest,
+  DevRedirectRule,
   HeaderRule,
   QueueMeta,
   RedirectRule,
@@ -36,7 +37,7 @@ type ProgressCallback = (message: string) => void;
  * only `origin` because the Node/Bun/Deno-target generated code still reads
  * `force` at runtime to label the dev trace header.
  */
-function stripDevOnlyRuleFields(rules: RedirectRule[] | undefined): RedirectRule[] | undefined {
+function stripDevOnlyRuleFields(rules: DevRedirectRule[] | undefined): RedirectRule[] | undefined {
   if (!rules) {
     return rules;
   }
@@ -63,10 +64,10 @@ function stripDevOnlyRuleFields(rules: RedirectRule[] | undefined): RedirectRule
  */
 export function resolveSpaFallbackChain(
   appType: 'spa' | 'static' | undefined,
-  fallbackRules: RedirectRule[] | undefined,
+  fallbackRules: DevRedirectRule[] | undefined,
 ): {
   assetConfig: AssetConfig;
-  fallbackRules: RedirectRule[] | undefined;
+  fallbackRules: DevRedirectRule[] | undefined;
   warnings: string[];
 } {
   const warnings: string[] = [];
@@ -100,7 +101,7 @@ export function resolveSpaFallbackChain(
       'routing.fallbacks includes "/*" -> "/index.html" on a SPA app type; this duplicates the default SPA fallback and can be omitted.',
     );
   }
-  const syntheticSpaFallback: RedirectRule = {
+  const syntheticSpaFallback: DevRedirectRule = {
     source: '/*',
     destination: '/index.html',
     status: 200,
@@ -321,8 +322,8 @@ export async function packageBuild(
   neededAssets?: Set<string> | null,
   hashedAssetsPrefix?: string,
   headerRules?: Array<HeaderRule>,
-  redirectRules?: Array<RedirectRule>,
-  fallbackRules?: Array<RedirectRule>,
+  redirectRules?: Array<DevRedirectRule>,
+  fallbackRules?: Array<DevRedirectRule>,
   dialect?: 'sqlite' | 'postgresql',
   webSockets?: Array<WebSocketRouteDefinition>,
   onProgress?: ProgressCallback,
@@ -521,8 +522,8 @@ export async function packageStaticBuild(
   neededAssets?: Set<string> | null,
   hashedAssetsPrefix?: string,
   headerRules?: Array<HeaderRule>,
-  redirectRules?: Array<RedirectRule>,
-  fallbackRules?: Array<RedirectRule>,
+  redirectRules?: Array<DevRedirectRule>,
+  fallbackRules?: Array<DevRedirectRule>,
   onProgress?: ProgressCallback,
 ): Promise<FormData> {
   const formData = new FormData();
@@ -612,8 +613,8 @@ export async function packageFrameworkBuild(opts: {
   neededAssets?: Set<string> | null;
   hashedAssetsPrefix?: string;
   headerRules?: Array<HeaderRule>;
-  redirectRules?: Array<RedirectRule>;
-  fallbackRules?: Array<RedirectRule>;
+  redirectRules?: Array<DevRedirectRule>;
+  fallbackRules?: Array<DevRedirectRule>;
   dialect?: 'sqlite' | 'postgresql';
   webSockets?: Array<WebSocketRouteDefinition>;
   onProgress?: ProgressCallback;

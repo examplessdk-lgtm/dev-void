@@ -1,5 +1,5 @@
 import type { VoidAuthProvider } from '../auth/providers';
-import type { HeaderRule, RedirectRule } from '../cli/types';
+import type { DevRedirectRule, HeaderRule } from '../cli/types';
 import { resolveLayoutIds } from '../pages/layout-resolution';
 import { INTERNAL_BINDING_PREFIXES } from '../runtime/env-raw';
 import type { ScanResult } from './scan';
@@ -638,14 +638,14 @@ export interface CompileOptions {
   /** Header rules from routing.headers config (node/bun/deno targets only) */
   headerRules?: Array<HeaderRule>;
   /** Redirect rules from routing.redirects config (node/bun/deno targets only) */
-  redirectRules?: Array<RedirectRule>;
+  redirectRules?: Array<DevRedirectRule>;
   /**
    * Post-asset fallback rules (plain `_redirects` 200 + `routing.fallbacks`).
    * Only fire when no route/SSR handler matched — emitted inside Hono's
    * `notFound` hook on `node`/`bun`/`deno` targets. Empty/undefined skips
    * the fallback middleware entirely.
    */
-  fallbackRules?: Array<RedirectRule>;
+  fallbackRules?: Array<DevRedirectRule>;
   /** Explicit prerender paths from void.json routing.prerender */
   explicitPrerenderPaths?: Array<string>;
   /** Absolute path to the internal WebSocket runtime module */
@@ -2448,7 +2448,7 @@ function emitApplyRoutingRules(lines: Array<string>, rulesVar: string, indent: s
  * fields because the deploy manifest never transmits either to the dispatch
  * worker (phase is implied by which bucket the rule ships in).
  */
-function stripOriginForProd(rules: RedirectRule[]): RedirectRule[] {
+function stripOriginForProd(rules: DevRedirectRule[]): DevRedirectRule[] {
   return rules.map(({ origin: _origin, ...rest }) => rest);
 }
 
@@ -2464,7 +2464,7 @@ function stripOriginForProd(rules: RedirectRule[]): RedirectRule[] {
  */
 function compileRoutingRulesMiddleware(
   lines: Array<string>,
-  rules: Array<RedirectRule>,
+  rules: Array<DevRedirectRule>,
   dev: boolean,
 ): void {
   ensureCompilePatternEmitted(lines);
@@ -2510,7 +2510,7 @@ function compileRoutingRulesMiddleware(
  */
 function emitFallbackRulesCheck(
   lines: string[],
-  rules: RedirectRule[],
+  rules: DevRedirectRule[],
   dev: boolean,
   indent: string,
 ): void {

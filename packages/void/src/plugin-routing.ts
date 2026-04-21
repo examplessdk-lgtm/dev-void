@@ -5,7 +5,7 @@ import { dirname, join, relative } from 'pathe';
 import { loadEnv, type Plugin } from 'vite';
 import { findVoidAuthConfig, loadVoidAuthConfig } from './auth/config';
 import { generateVoidAuthDatabaseModule, generateVoidAuthDrizzleSchema } from './auth/drizzle';
-import { lintDuplicateSources, mergeRoutingRules } from './cli/headers';
+import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './cli/headers';
 import { findEnvFile } from './codegen/env-types';
 import { generateQueueTypes } from './codegen/queue-types';
 import { generateRouteTypes } from './codegen/route-types';
@@ -179,6 +179,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     const merged = mergeRoutingRules({ dir: publicDir, routing: options.routing });
     lintDuplicateSources(merged.redirectRules, 'redirects/rewrites (pre-asset)');
     lintDuplicateSources(merged.fallbackRules, 'fallbacks (post-asset)');
+    lintDestinationSplats(merged.redirectRules, 'redirects/rewrites (pre-asset)');
+    lintDestinationSplats(merged.fallbackRules, 'fallbacks (post-asset)');
     compileOptions.headerRules = merged.headerRules.length > 0 ? merged.headerRules : undefined;
     compileOptions.redirectRules =
       merged.redirectRules.length > 0 ? merged.redirectRules : undefined;

@@ -876,6 +876,68 @@ describe('convertFallbacksConfig', () => {
   });
 });
 
+describe('lintDestinationSplats', () => {
+  // Platform `substituteParams` only replaces `:name` tokens — a literal `*`
+  // in a destination passes through unchanged, which is almost never what the
+  // author meant. Warn (not fail) so misuse surfaces at deploy-time without
+  // blocking otherwise-valid configs.
+  it('emits no warning when destinations only contain :splat / :name', async () => {
+    const { lintDestinationSplats } = await import('../../src/cli/headers');
+    const rules = convertRewritesConfig({
+      '/docs/*': '/en/docs/:splat',
+      '/posts/:id': '/archive/:id',
+    });
+    const warnings: string[] = [];
+    const result = lintDestinationSplats(rules, 'rewrites', (msg) => warnings.push(msg));
+    expect(result).toBeUndefined();
+    expect(warnings).toEqual([]);
+  });
+
+  it('emits a single aggregated warning for a redirect destination with *', async () => {
+    const { lintDestinationSplats } = await import('../../src/cli/headers');
+    const rules = convertRedirectsConfig({ '/old/*': '/new/*' });
+    const warnings: string[] = [];
+    const result = lintDestinationSplats(rules, 'redirects/rewrites (pre-asset)', (msg) =>
+      warnings.push(msg),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(result).toContain('literal "*"');
+    expect(result).toContain('/old/*');
+    expect(result).toContain('/new/*');
+    expect(result).toContain('void.json#routing.redirects');
+  });
+
+  it('emits a single aggregated warning covering all affected rules', async () => {
+    const { lintDestinationSplats } = await import('../../src/cli/headers');
+    const rules = [
+      ...(convertRewritesConfig({ '/a/*': '/x/*' }) ?? []),
+      ...(convertRewritesConfig({ '/b/*': '/y/:splat' }) ?? []),
+      ...(convertRewritesConfig({ '/c': '/z/*' }) ?? []),
+    ];
+    const warnings: string[] = [];
+    lintDestinationSplats(rules, 'rewrites', (msg) => warnings.push(msg));
+    expect(warnings).toHaveLength(1);
+    const msg = warnings[0];
+    expect(msg).toContain('/a/*');
+    expect(msg).toContain('/x/*');
+    expect(msg).toContain('/c');
+    expect(msg).toContain('/z/*');
+    // The rule with a clean `:splat` destination must not appear.
+    expect(msg).not.toContain('/y/:splat');
+  });
+
+  it('works with fallbacks output shape as well', async () => {
+    const { lintDestinationSplats } = await import('../../src/cli/headers');
+    const rules = convertFallbacksConfig({ '/docs/*': '/docs/*' });
+    const warnings: string[] = [];
+    const result = lintDestinationSplats(rules, 'fallbacks (post-asset)', (msg) =>
+      warnings.push(msg),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(result).toContain('void.json#routing.fallbacks');
+  });
+});
+
 describe('database config', () => {
   it('defaults to sqlite when omitted', () => {
     setup('{}');

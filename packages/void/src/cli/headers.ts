@@ -9,7 +9,7 @@ import {
   type RoutingConfig,
 } from '../config';
 import { voidWarn } from '../log';
-import type { HeaderRule, RedirectRule } from './types';
+import type { DevRedirectRule, HeaderRule } from './types';
 
 /** Count `*` occurrences without allocating a split. */
 function countSplats(source: string): number {
@@ -31,7 +31,7 @@ function countSplats(source: string): number {
  * strip it and let callers aggregate a single friendly warning at deploy time.
  */
 export interface ParsedRedirects {
-  rules: RedirectRule[];
+  rules: DevRedirectRule[];
   redundantForceOn3xx: number;
 }
 
@@ -146,7 +146,7 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
   }
 
   const content = readFileSync(filePath, 'utf-8');
-  const rules: Array<RedirectRule> = [];
+  const rules: Array<DevRedirectRule> = [];
   let redundantForceOn3xx = 0;
 
   const rawLines = content.split('\n');
@@ -243,12 +243,12 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
  * (3xx redirects and forced `200!` rewrites) stay in the "always" bucket and
  * are merged with `routing.rewrites` / `routing.redirects` from void.json.
  */
-export function splitRedirectRulesByForce(rules: RedirectRule[] | undefined): {
-  always: RedirectRule[];
-  fallbacks: RedirectRule[];
+export function splitRedirectRulesByForce(rules: DevRedirectRule[] | undefined): {
+  always: DevRedirectRule[];
+  fallbacks: DevRedirectRule[];
 } {
-  const always: RedirectRule[] = [];
-  const fallbacks: RedirectRule[] = [];
+  const always: DevRedirectRule[] = [];
+  const fallbacks: DevRedirectRule[] = [];
   if (!rules) {
     return { always, fallbacks };
   }
@@ -288,8 +288,8 @@ export function splitRedirectRulesByForce(rules: RedirectRule[] | undefined): {
  */
 export function mergeRoutingRules(opts: { dir: string; routing: RoutingConfig | undefined }): {
   headerRules: HeaderRule[];
-  redirectRules: RedirectRule[];
-  fallbackRules: RedirectRule[] | undefined;
+  redirectRules: DevRedirectRule[];
+  fallbackRules: DevRedirectRule[] | undefined;
   redundantForceOn3xx: number;
 } {
   const { dir, routing } = opts;
@@ -307,7 +307,7 @@ export function mergeRoutingRules(opts: { dir: string; routing: RoutingConfig | 
   const cfgFallbacks = convertFallbacksConfig(routing?.fallbacks);
 
   const headerRules: HeaderRule[] = [...(fileHeaders ?? []), ...(cfgHeaders ?? [])];
-  const redirectRules: RedirectRule[] = [
+  const redirectRules: DevRedirectRule[] = [
     ...fileAlways,
     ...(cfgRedirects ?? []),
     ...(cfgRewrites ?? []),
@@ -321,6 +321,60 @@ export function mergeRoutingRules(opts: { dir: string; routing: RoutingConfig | 
     fallbackRules,
     redundantForceOn3xx: fileParsed?.redundantForceOn3xx ?? 0,
   };
+}
+
+/**
+ * Warn when a rule's `destination` contains a literal `*`. The platform's
+ * `substituteParams` only replaces `:name` tokens (e.g. `:splat`, `:id`) —
+ * bare `*` in destinations is a literal character, not a capture reference,
+ * and will silently pass through to the rewritten/redirected URL.
+ *
+ * Users who write `/old/*` → `/new/*` almost always intended `:splat` to
+ * reflect the captured portion of the source wildcard. Surface the mistake
+ * with a single aggregated warning at the same surface as
+ * `lintDuplicateSources` — per-phase, near the merge site — rather than
+ * failing the deploy: a `*` in a destination is well-formed output, just
+ * probably not what was meant.
+ *
+ * Only reported once per rule (the count of `*` in the destination is
+ * irrelevant — a single occurrence is already suspicious). Returns the
+ * warning message for test observability; `undefined` when no destinations
+ * contain `*`. The `warn` callback defaults to `voidWarn` and is injectable
+ * so tests can capture output without stubbing the module.
+ */
+export function lintDestinationSplats(
+  rules: DevRedirectRule[] | undefined,
+  phaseName: string,
+  warn: (msg: string) => void = voidWarn,
+): string | undefined {
+  if (!rules || rules.length === 0) {
+    return undefined;
+  }
+
+  const affected: DevRedirectRule[] = [];
+  for (const rule of rules) {
+    if (rule.destination.includes('*')) {
+      affected.push(rule);
+    }
+  }
+
+  if (affected.length === 0) {
+    return undefined;
+  }
+
+  const longestSource = affected.reduce((n, r) => Math.max(n, r.source.length), 0);
+  const lines = affected.map((rule) => {
+    const origin = rule.origin ?? '<unknown>';
+    return `  ${rule.source.padEnd(longestSource)}  → ${rule.destination}  (${origin})`;
+  });
+
+  const message = [
+    `Warning: destinations in ${phaseName} contain a literal "*" — splat tokens are not substituted in destinations; use ":splat" (or other named params) or rewrite the destination:`,
+    ...lines,
+  ].join('\n');
+
+  warn(message);
+  return message;
 }
 
 /**
@@ -348,7 +402,7 @@ export function mergeRoutingRules(opts: { dir: string; routing: RoutingConfig | 
  * injectable so tests can capture output without stubbing the module.
  */
 export function lintDuplicateSources(
-  rules: RedirectRule[] | undefined,
+  rules: DevRedirectRule[] | undefined,
   phaseName: string,
   warn: (msg: string) => void = voidWarn,
 ): string | undefined {
@@ -356,7 +410,7 @@ export function lintDuplicateSources(
     return undefined;
   }
 
-  const bySource = new Map<string, RedirectRule[]>();
+  const bySource = new Map<string, DevRedirectRule[]>();
   for (const rule of rules) {
     const existing = bySource.get(rule.source);
     if (existing) {
@@ -366,7 +420,7 @@ export function lintDuplicateSources(
     }
   }
 
-  const duplicates: { source: string; occurrences: RedirectRule[] }[] = [];
+  const duplicates: { source: string; occurrences: DevRedirectRule[] }[] = [];
   for (const [source, occurrences] of bySource) {
     if (occurrences.length > 1) {
       duplicates.push({ source, occurrences });

@@ -63,7 +63,7 @@ import {
   getDeployEnvDefaults,
   validateProdEnv,
 } from './env-validation';
-import { lintDuplicateSources, mergeRoutingRules } from './headers';
+import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers';
 import { promptForLoginToken } from './login';
 import { cliTitle, createSpinner } from './output';
 import {
@@ -83,7 +83,7 @@ import {
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project';
 import { promptProjectSelection } from './prompt';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project';
-import type { AssetConfig, DeployEvent, HeaderRule, RedirectRule } from './types';
+import type { AssetConfig, DeployEvent, DevRedirectRule, HeaderRule } from './types';
 import { readWranglerCompat, type WranglerCompat } from './wrangler';
 import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper';
 
@@ -466,8 +466,8 @@ async function runStaticDeploy(
   commit?: string | null,
   hashedAssetsPrefix?: string,
   headerRules?: Array<HeaderRule>,
-  redirectRules?: Array<RedirectRule>,
-  fallbackRules?: Array<RedirectRule>,
+  redirectRules?: Array<DevRedirectRule>,
+  fallbackRules?: Array<DevRedirectRule>,
 ): Promise<void> {
   const typeLabel = preset.appType === 'spa' ? 'Static SPA' : 'Static Site';
   log.info(`${typeLabel} deploy`);
@@ -585,6 +585,11 @@ async function runFrameworkDeploy(
   // fallbacks) don't shadow each other, only duplicates within a phase do.
   lintDuplicateSources(redirectRules, 'redirects/rewrites (pre-asset)');
   lintDuplicateSources(fallbackRules, 'fallbacks (post-asset)');
+
+  // Warn on destinations containing a literal `*` — only `:name` tokens are
+  // substituted at dispatch time, so `*` is almost always a user mistake.
+  lintDestinationSplats(redirectRules, 'redirects/rewrites (pre-asset)');
+  lintDestinationSplats(fallbackRules, 'fallbacks (post-asset)');
 
   if (!existsSync(workerDir)) {
     log.error(`Worker output not found at "${fwPreset.workerDir}". Run "${buildCmd}" first.`);
@@ -894,6 +899,11 @@ async function runFullDeploy(
   // Lint each phase independently — same rationale as the framework branch.
   lintDuplicateSources(redirectRules, 'redirects/rewrites (pre-asset)');
   lintDuplicateSources(fallbackRules, 'fallbacks (post-asset)');
+
+  // Warn on destinations containing a literal `*` — splat tokens in
+  // destinations aren't substituted (`:splat` is the correct token).
+  lintDestinationSplats(redirectRules, 'redirects/rewrites (pre-asset)');
+  lintDestinationSplats(fallbackRules, 'fallbacks (post-asset)');
 
   const migrationsDir = join(root, 'db', 'migrations');
 

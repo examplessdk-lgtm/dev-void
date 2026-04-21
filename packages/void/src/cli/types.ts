@@ -20,10 +20,29 @@ export interface HeaderRule {
   headers: Array<[string, string]>;
 }
 
+/**
+ * Public wire-shape of a redirect / rewrite / fallback rule as shipped in the
+ * deploy manifest. Consumers of the public API (e.g. programmatic deploy
+ * callers) should use this type.
+ *
+ * Dev-only / internal fields (`force`, `origin`) live on `DevRedirectRule` so
+ * they don't leak into consumer autocomplete. `stripDevOnlyRuleFields` in
+ * `cli/package.ts` narrows `DevRedirectRule[]` to `RedirectRule[]` before the
+ * manifest is serialised.
+ */
 export interface RedirectRule {
   source: string;
   destination: string;
   status: number;
+}
+
+/**
+ * Internal rule shape — `RedirectRule` plus dev-only metadata used during
+ * local development and by the CLI before shipping. This type is not
+ * re-exported publicly; consumers should never see `force` or `origin` in
+ * their autocomplete.
+ */
+export interface DevRedirectRule extends RedirectRule {
   /**
    * Netlify-compatible force flag. Only meaningful for `status: 200` rewrites.
    *
