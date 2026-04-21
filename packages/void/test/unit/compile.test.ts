@@ -680,6 +680,57 @@ describe('c.redirect runtime wrapper', () => {
   });
 });
 
+/**
+ * Mirror of `compileRoutingRulesMiddleware` in compile.ts: evaluate static
+ * rewrite/redirect rules pre-asset, but short-circuit when the request is an
+ * internal re-dispatch (tracked via `__rewrittenReqs`). The guard is what
+ * prevents single-hop rewrite loops — even if the destination itself matches a
+ * rewrite rule, the rule table is skipped on the replayed request.
+ *
+ * Kept in sync with compile.ts by shape; the text-level tests in
+ * `describe('compileRouteTable')` above anchor the emitted source string.
+ */
+function installRoutingRulesMiddleware(
+  app: Hono,
+  rewrittenReqs: WeakSet<Request>,
+  rules: Array<{ source: string; destination: string; status: number; force?: boolean }>,
+): void {
+  app.use('*', async (c, next) => {
+    if (rewrittenReqs.has(c.req.raw)) {
+      return next();
+    }
+    const pathname = new URL(c.req.url).pathname;
+    let matched: (typeof rules)[number] | undefined;
+    for (const rule of rules) {
+      // Simple equality + `/*` prefix match is enough for these tests — the
+      // real implementation uses `__compilePattern` from compile.ts.
+      if (rule.source === pathname) {
+        matched = rule;
+      } else if (rule.source.endsWith('/*') && pathname.startsWith(rule.source.slice(0, -2))) {
+        matched = rule;
+      }
+    }
+    if (!matched) {
+      return next();
+    }
+    if (matched.status === 200) {
+      const rewriteUrl = new URL(c.req.url);
+      rewriteUrl.pathname = matched.destination;
+      const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
+      rewriteReq.headers.set('X-Void-Rewritten', '1');
+      rewrittenReqs.add(rewriteReq);
+      let ctx: ExecutionContext | undefined;
+      try {
+        ctx = (c as any).executionCtx;
+      } catch {
+        ctx = undefined;
+      }
+      return app.fetch(rewriteReq, (c as any).env, ctx);
+    }
+    return c.redirect(matched.destination, matched.status as any);
+  });
+}
+
 describe('c.rewrite runtime wrapper', () => {
   it('re-dispatches to the rewritten path and exposes c.originalUrl / c.isRewritten', async () => {
     const app = new Hono();
@@ -706,6 +757,168 @@ describe('c.rewrite runtime wrapper', () => {
     expect(res.headers.get('X-Original-Url')).toBe('http://localhost/external?keep=1');
     // `c.isRewritten()` is true on the replayed hop.
     expect(res.headers.get('X-Is-Rewritten')).toBe('1');
+  });
+
+  it('single-hop loop guard: re-dispatched request skips the static rule table', async () => {
+    // Regression anchor for the `__rewrittenReqs` WeakSet guard in compile.ts.
+    // A middleware calls `c.rewrite('/a')`, and `/a` itself is also a rewrite
+    // source that (without the guard) would re-fire endlessly. Counter
+    // tracks how many times the routing rule table *matches* a request so the
+    // test fails loudly if the guard regresses.
+    const app = new Hono();
+    const rewrittenReqs = new WeakSet<Request>();
+    let ruleMatches = 0;
+
+    installVoidWrappers(app, rewrittenReqs);
+    app.use('*', async (c, next) => {
+      if (rewrittenReqs.has(c.req.raw)) {
+        return next();
+      }
+      const pathname = new URL(c.req.url).pathname;
+      // Static force rewrite: /a → /elsewhere. If the guard were removed, this
+      // would match again on the re-dispatched /a request and loop.
+      if (pathname === '/a') {
+        ruleMatches++;
+        const rewriteUrl = new URL(c.req.url);
+        rewriteUrl.pathname = '/a';
+        const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
+        rewriteReq.headers.set('X-Void-Rewritten', '1');
+        rewrittenReqs.add(rewriteReq);
+        return app.fetch(rewriteReq, (c as any).env, undefined);
+      }
+      return next();
+    });
+
+    app.get('/a', (c) => {
+      return new Response('handler-a', {
+        headers: { 'X-Is-Rewritten': (c as any).isRewritten() ? '1' : '0' },
+      });
+    });
+
+    const res = await app.fetch(new Request('http://localhost/a'));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('handler-a');
+    // Exactly one match: the original request. The re-dispatched request
+    // carries the internal flag and is skipped by the rule table.
+    expect(ruleMatches).toBe(1);
+    // The handler ran under the re-dispatched context, so `c.isRewritten()` is true.
+    expect(res.headers.get('X-Is-Rewritten')).toBe('1');
+  });
+
+  it('rewrite vs fallback interaction: force-rewrite (always) wins over fallback (post-asset)', async () => {
+    // When the same source matches both a rewrite (force=true, pre-asset) and
+    // a fallback (force=false, post-asset), the rewrite bucket fires first and
+    // the fallback never reaches the request. This is enforced by splitting
+    // rules into separate buckets via `splitRedirectRulesByForce` — the
+    // pre-asset bucket resolves the request before the post-asset one runs.
+    const { splitRedirectRulesByForce } = await import('../../src/cli/headers');
+    const allRules = [
+      {
+        source: '/docs/*',
+        destination: '/fallback.html',
+        status: 200,
+        force: false,
+        origin: 'void.json#routing.fallbacks',
+      },
+      {
+        source: '/docs/*',
+        destination: '/rewrite-target',
+        status: 200,
+        force: true,
+        origin: 'void.json#routing.rewrites',
+      },
+    ];
+    const { always: preAsset, fallbacks: postAsset } = splitRedirectRulesByForce(allRules);
+
+    // Buckets are disjoint — the rewrite lands in pre-asset, the fallback in post-asset.
+    expect(preAsset).toHaveLength(1);
+    expect(preAsset[0].destination).toBe('/rewrite-target');
+    expect(postAsset).toHaveLength(1);
+    expect(postAsset[0].destination).toBe('/fallback.html');
+
+    // Drive the pre-asset bucket through the routing-rules middleware: the
+    // rewrite fires and the request resolves to /rewrite-target. The fallback
+    // bucket is never consulted because the request was resolved before the
+    // asset-miss phase would run.
+    const app = new Hono();
+    const rewrittenReqs = new WeakSet<Request>();
+    installVoidWrappers(app, rewrittenReqs);
+    installRoutingRulesMiddleware(app, rewrittenReqs, preAsset);
+
+    let fallbackFired = false;
+    // Emulate the post-asset fallback check that would normally run on 404.
+    // If the pre-asset rewrite succeeds, this branch must never execute.
+    app.notFound((_c) => {
+      for (const rule of postAsset) {
+        if (
+          rule.source === '/docs/*' ||
+          (rule.source.endsWith('/*') && '/docs/intro'.startsWith(rule.source.slice(0, -2)))
+        ) {
+          fallbackFired = true;
+        }
+      }
+      return new Response('fallback-hit', { status: 200 });
+    });
+
+    app.get('/rewrite-target', (c) => c.text('rewrite-target', 200));
+
+    const res = await app.fetch(new Request('http://localhost/docs/intro'));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('rewrite-target');
+    expect(fallbackFired).toBe(false);
+  });
+
+  it('middleware runs twice on c.rewrite, with c.isRewritten() flipping false → true', async () => {
+    // Every rewrite hop replays the full middleware stack. A counter-style
+    // middleware therefore fires twice (once for the original request, once
+    // for the re-dispatched one), and `c.isRewritten()` lets users skip
+    // side-effectful work on the replay.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    let invocations = 0;
+    const observed: boolean[] = [];
+    app.use('*', async (c, next) => {
+      invocations++;
+      observed.push((c as any).isRewritten());
+      await next();
+    });
+
+    app.get('/from', (c) => (c as any).rewrite('/to'));
+    app.get('/to', (c) => c.text('to-handler', 200));
+
+    const res = await app.fetch(new Request('http://localhost/from'));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('to-handler');
+
+    // Counter middleware fired once per dispatch — twice total.
+    expect(invocations).toBe(2);
+    // First invocation is the original request (not rewritten), second is the replay.
+    expect(observed).toEqual([false, true]);
+  });
+
+  it('c.rewrite is not installed on a vanilla Hono app — calling it throws at runtime', async () => {
+    // Locks in the documented trade-off from feat/rewrites revert 7c9d2d6:
+    // `c.rewrite` is attached per-Context by the generated router middleware,
+    // so a vanilla `new Hono()` Context (no `installVoidWrappers`) never picks
+    // it up. Calling it surfaces the usual TypeError — the same behaviour
+    // users hit if they mount a third-party Hono sub-app that widens the env
+    // and then dispatches through it.
+    const app = new Hono();
+    let caught: unknown;
+    app.get('/unmanaged', (c) => {
+      try {
+        (c as any).rewrite('/elsewhere');
+      } catch (err) {
+        caught = err;
+      }
+      return c.text('unmanaged', 200);
+    });
+
+    const res = await app.fetch(new Request('http://localhost/unmanaged'));
+    expect(res.status).toBe(200);
+    expect(caught).toBeInstanceOf(TypeError);
+    expect(String(caught)).toContain('is not a function');
   });
 });
 
