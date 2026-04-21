@@ -5,6 +5,7 @@ import { dirname, join, relative } from 'pathe';
 import { loadEnv, type Plugin } from 'vite';
 import { findVoidAuthConfig, loadVoidAuthConfig } from './auth/config';
 import { generateVoidAuthDatabaseModule, generateVoidAuthDrizzleSchema } from './auth/drizzle';
+import { lintDuplicateSources, mergeRoutingRules } from './cli/headers';
 import { findEnvFile } from './codegen/env-types';
 import { generateQueueTypes } from './codegen/queue-types';
 import { generateRouteTypes } from './codegen/route-types';
@@ -50,8 +51,21 @@ interface RoutingPluginOptions {
   prerenderPaths?: Array<string>;
   remoteMode?: boolean;
   target?: 'node' | 'bun' | 'deno';
-  headerRules?: Array<import('./cli/types').HeaderRule>;
-  redirectRules?: Array<import('./cli/types').RedirectRule>;
+  /**
+   * Full `routing` section from `void.json`. The plugin merges
+   * `_redirects` / `_headers` under Vite's `publicDir` with the config
+   * rules on every compile, matching the deploy-time merge order (file
+   * rules first, `void.json` last — last match wins).
+   *
+   * The watcher also watches those two files during `vite dev` and
+   * re-runs the merge + invalidates the route module when either changes.
+   *
+   * On `node`/`bun`/`deno` targets the merged rules are emitted into the
+   * Hono app in both dev and prod. On the default target they are emitted
+   * only in dev so `vite dev` matches the deployed runtime — in production
+   * the platform dispatch worker owns the pipeline instead.
+   */
+  routing?: import('./config').RoutingConfig;
 }
 
 export function routingPlugin(root: string, options: RoutingPluginOptions): Plugin {
@@ -142,11 +156,35 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     dev: false,
     auth: null,
     nodeTarget: !!options.target,
-    headerRules: options.headerRules,
-    redirectRules: options.redirectRules,
     explicitPrerenderPaths: options.prerenderPaths,
     bindingHandlerPath: options.target ? undefined : resolveFile('#self/remote/binding-handler'),
   };
+
+  // Static `_redirects` / `_headers` are always merged on every target so
+  // `vite dev` mirrors the deployed routing pipeline. On `node`/`bun`/`deno`
+  // targets the compiled Hono app emits the middleware in both dev and
+  // prod. On the default target the middleware is only emitted in dev —
+  // in production the platform dispatch worker owns the pipeline and the
+  // rules are stripped out of the worker bundle (see `compile.ts`).
+  //
+  // `publicDir` starts at `<root>/public` (Vite's default) and is
+  // re-resolved from the resolved config in `configResolved`. For
+  // framework-configured publicDir overrides, the re-resolve picks
+  // them up before the first route module load.
+  let publicDir: string | null = join(root, 'public');
+  function reloadFileRules(): void {
+    if (publicDir === null) {
+      return;
+    }
+    const merged = mergeRoutingRules({ dir: publicDir, routing: options.routing });
+    lintDuplicateSources(merged.redirectRules, 'redirects/rewrites (pre-asset)');
+    lintDuplicateSources(merged.fallbackRules, 'fallbacks (post-asset)');
+    compileOptions.headerRules = merged.headerRules.length > 0 ? merged.headerRules : undefined;
+    compileOptions.redirectRules =
+      merged.redirectRules.length > 0 ? merged.redirectRules : undefined;
+    compileOptions.fallbackRules = merged.fallbackRules;
+  }
+  reloadFileRules();
 
   // Auth compile options are set up lazily in buildStart (after env plugin
   // has run its config hook and the auth config file path is known).
@@ -287,6 +325,15 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           plugin.name === 'vite:react-refresh' ||
           plugin.name === 'vite:react-swc',
       );
+      // Vite sets `publicDir` to an empty string when the user passes
+      // `publicDir: false` in their config (public serving disabled).
+      // Fall through to `null` in that case so we skip file-based rules.
+      const resolvedPublicDir =
+        config.publicDir && config.publicDir.length > 0 ? config.publicDir : null;
+      if (resolvedPublicDir !== publicDir) {
+        publicDir = resolvedPublicDir;
+        reloadFileRules();
+      }
     },
     config(_, env) {
       if (env.command === 'serve' && options.isAuthEnabled()) {
@@ -508,6 +555,31 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       watcher.on('add', (path) => handleFileChange(path, 'add'));
       watcher.on('change', (path) => handleFileChange(path, 'change'));
       watcher.on('unlink', (path) => handleFileChange(path, 'unlink'));
+
+      // File-based routing rule HMR: `public/_redirects` / `public/_headers`
+      // changes re-merge + invalidate the route module so rules take effect
+      // without restarting the dev server. Runs on every target because
+      // `vite dev` bakes rules into the compiled Hono app on all of them.
+      if (publicDir) {
+        const redirectsPath = join(publicDir, '_redirects');
+        const headersPath = join(publicDir, '_headers');
+        const handleRulesFileChange = (path: string) => {
+          if (path !== redirectsPath && path !== headersPath) {
+            return;
+          }
+          reloadFileRules();
+          for (const env of Object.values(devServer.environments)) {
+            const mod = env.moduleGraph.getModuleById(VIRTUAL_ROUTES_ID);
+            if (mod) {
+              env.moduleGraph.invalidateModule(mod);
+              env.hot.send({ type: 'full-reload' });
+            }
+          }
+        };
+        watcher.on('add', handleRulesFileChange);
+        watcher.on('change', handleRulesFileChange);
+        watcher.on('unlink', handleRulesFileChange);
+      }
     },
   };
 }

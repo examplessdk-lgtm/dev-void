@@ -11,15 +11,7 @@ import {
   readWranglerCompat,
   syncWranglerBindings,
 } from './cli/wrangler';
-import {
-  readConfig,
-  resolveBindingNames,
-  isNodeTarget,
-  convertHeadersConfig,
-  convertRedirectsConfig,
-  convertRewritesConfig,
-  getDatabaseDialect,
-} from './config';
+import { readConfig, resolveBindingNames, isNodeTarget, getDatabaseDialect } from './config';
 import { scanJobsSync } from './crons/scan';
 import { inferBindingsFromSource } from './inference/walk';
 import { voidLog, voidWarn, voidError } from './log';
@@ -922,7 +914,7 @@ export function voidPlugin(options?: {
       : 0;
     if (fallbackCount > 0) {
       voidWarn(
-        '"routing.fallbacks" is only supported on the Cloudflare target; ignoring ' +
+        '"routing.fallbacks" is only supported on the default target; ignoring ' +
           fallbackCount +
           ' rule(s) on target="' +
           config.target +
@@ -940,11 +932,10 @@ export function voidPlugin(options?: {
         output: config.output,
         prerenderPaths: config.routing?.prerender,
         target: config.target as 'node' | 'bun' | 'deno',
-        headerRules: convertHeadersConfig(config.routing?.headers),
-        redirectRules: [
-          ...(convertRedirectsConfig(config.routing?.redirects) ?? []),
-          ...(convertRewritesConfig(config.routing?.rewrites) ?? []),
-        ],
+        // Pass the full routing section so the plugin can merge
+        // `public/_redirects` / `public/_headers` with `void.json` rules at
+        // `configResolved` time and again on HMR (parity with deploy).
+        routing: config.routing,
       }),
       prerenderPlugin(root, config),
       ...nodeTargetPlugin(config.target as 'node' | 'bun' | 'deno'),
@@ -1004,6 +995,12 @@ export function voidPlugin(options?: {
       output: config.output,
       prerenderPaths: config.routing?.prerender,
       remoteMode,
+      // Pass the full routing section so the plugin can merge
+      // `public/_redirects` / `public/_headers` with `void.json` rules for
+      // dev-time parity with the deployment runtime. In production the
+      // platform dispatch worker owns the pipeline and the plugin compiles
+      // these rules out of the worker bundle.
+      routing: config.routing,
     }),
     drizzlePlugin(root, true, dialect, { forceVirtualDb: authEnabled }),
     migrationPlugin(root, dialect, 'local', join(root, '.void'), {

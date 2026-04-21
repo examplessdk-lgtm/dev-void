@@ -1,8 +1,26 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { VALID_REDIRECT_STATUSES } from '../config';
+import {
+  convertFallbacksConfig,
+  convertHeadersConfig,
+  convertRedirectsConfig,
+  convertRewritesConfig,
+  VALID_REDIRECT_STATUSES,
+  type RoutingConfig,
+} from '../config';
 import { voidWarn } from '../log';
 import type { HeaderRule, RedirectRule } from './types';
+
+/** Count `*` occurrences without allocating a split. */
+function countSplats(source: string): number {
+  let n = 0;
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] === '*') {
+      n++;
+    }
+  }
+  return n;
+}
 
 /**
  * Result of parsing a `_redirects` file.
@@ -72,7 +90,17 @@ export function parseHeadersFile(dir: string): Array<HeaderRule> | undefined {
       if (current && current.headers.length > 0) {
         rules.push(current);
       }
-      current = { pattern: trimmed, headers: [] };
+      // Drop blocks whose pattern would crash pattern compilation at runtime
+      // (two `*` → duplicate `splat` capture group). Warn so the author can
+      // fix the file, but keep the rest of the manifest valid.
+      if (countSplats(trimmed) > 1) {
+        voidWarn(
+          `Skipping _headers block for "${trimmed}": pattern must contain at most one "*" wildcard (captured as :splat).`,
+        );
+        current = null;
+      } else {
+        current = { pattern: trimmed, headers: [] };
+      }
     }
   }
 
@@ -137,6 +165,18 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
     const origin = `_redirects:${lineNumber}`;
 
     const [source, destination, statusStr] = parts;
+
+    // The dispatch worker compiles each `*` into a `(?<splat>...)` capture
+    // group; two of them in one pattern yield a duplicate-group-name RegExp
+    // error at startup. Skip with a clear warning so other rules in the file
+    // still deploy, matching the "skip + warn" pattern used for invalid
+    // destinations below.
+    if (countSplats(source) > 1) {
+      voidWarn(
+        `Skipping _redirects entry "${source} ${destination}${statusStr ? ` ${statusStr}` : ''}" (line ${lineNumber}): source must contain at most one "*" wildcard (captured as :splat).`,
+      );
+      continue;
+    }
     let status: number;
     let force = false;
     if (statusStr) {
@@ -220,6 +260,67 @@ export function splitRedirectRulesByForce(rules: RedirectRule[] | undefined): {
     }
   }
   return { always, fallbacks };
+}
+
+/**
+ * Merge file-based rules (`_redirects`, `_headers`) in `dir` with routing
+ * rules from `void.json`. Shared between the deploy pipeline and the dev
+ * plugin so both surfaces produce identical rule tables.
+ *
+ * Ordering: file rules first, then `void.json` rules. Because the router
+ * evaluates rules with last-match-wins semantics, `void.json` entries
+ * override `_redirects` entries for the same source — matching the
+ * documented precedence (`docs/guide/edge/rewrites.md`). This holds even
+ * though `_redirects` is conceptually "closer to the build output".
+ *
+ * Phase split:
+ *   - `_redirects` `200!` (force) + 3xx entries → `redirectRules` (always-fire)
+ *   - `_redirects` plain `200`           entries → `fallbackRules` (asset-miss)
+ *   - `routing.redirects` + `routing.rewrites`    → `redirectRules`
+ *   - `routing.fallbacks`                         → `fallbackRules`
+ *
+ * Returns `fallbackRules === undefined` when empty so callers that default to
+ * "no post-asset phase" behave identically to the old deploy code.
+ *
+ * Duplicate linting is NOT called here (callers decide which warning surface
+ * to use — CLI vs. Vite logger). `redundantForceOn3xx` is returned raw for
+ * the same reason.
+ */
+export function mergeRoutingRules(opts: { dir: string; routing: RoutingConfig | undefined }): {
+  headerRules: HeaderRule[];
+  redirectRules: RedirectRule[];
+  fallbackRules: RedirectRule[] | undefined;
+  redundantForceOn3xx: number;
+} {
+  const { dir, routing } = opts;
+  const dirExists = existsSync(dir);
+
+  const fileHeaders = dirExists ? parseHeadersFile(dir) : undefined;
+  const fileParsed = dirExists ? parseRedirectsFile(dir) : undefined;
+  const { always: fileAlways, fallbacks: fileFallbacks } = splitRedirectRulesByForce(
+    fileParsed?.rules,
+  );
+
+  const cfgHeaders = convertHeadersConfig(routing?.headers);
+  const cfgRedirects = convertRedirectsConfig(routing?.redirects);
+  const cfgRewrites = convertRewritesConfig(routing?.rewrites);
+  const cfgFallbacks = convertFallbacksConfig(routing?.fallbacks);
+
+  const headerRules: HeaderRule[] = [...(fileHeaders ?? []), ...(cfgHeaders ?? [])];
+  const redirectRules: RedirectRule[] = [
+    ...fileAlways,
+    ...(cfgRedirects ?? []),
+    ...(cfgRewrites ?? []),
+  ];
+  const mergedFallbacks = [...fileFallbacks, ...(cfgFallbacks ?? [])];
+  const fallbackRules = mergedFallbacks.length > 0 ? mergedFallbacks : undefined;
+
+  return {
+    headerRules,
+    redirectRules,
+    fallbackRules,
+    redundantForceOn3xx: fileParsed?.redundantForceOn3xx ?? 0,
+  };
 }
 
 /**

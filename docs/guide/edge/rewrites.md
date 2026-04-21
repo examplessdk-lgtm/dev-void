@@ -109,8 +109,8 @@ Unlike a redirect, users on `/blog/hello-world` won't see the URL change — the
 
 ## Programmatic rewrites in middleware
 
-::: warning Cloudflare target only
-`c.rewrite()`, `c.originalUrl()`, `c.isRewritten()`, and `routing.fallbacks` only work on the default Cloudflare target. `routing.rewrites` and `routing.redirects` work on every target (`node`, `bun`, `deno`, Cloudflare) via the router.
+::: warning Default target only
+`c.rewrite()`, `c.originalUrl()`, `c.isRewritten()`, and `routing.fallbacks` only work on the default target. `routing.rewrites` and `routing.redirects` work on every target (`node`, `bun`, `deno`, and the default) via the router.
 :::
 
 For dynamic rewrite logic — like i18n locale negotiation based on cookies or headers — use `c.rewrite()` in middleware:
@@ -135,7 +135,7 @@ export default defineMiddleware(async (c, next) => {
 
 ### Runtime rewrites cannot reach static assets
 
-`c.rewrite()` can only re-dispatch to paths the worker itself handles — routes, SSR entries, API handlers. It **cannot** re-dispatch into the static asset handler, because on Cloudflare assets are served by the platform before the worker runs. A call like `c.rewrite('/hero.png')` re-enters the worker's route table, doesn't match anything, and 404s.
+`c.rewrite()` can only re-dispatch to paths the worker itself handles — routes, SSR entries, API handlers. It **cannot** re-dispatch into the static asset handler, because the Void platform serves assets in front of your worker. A call like `c.rewrite('/hero.png')` re-enters the worker's route table, doesn't match anything, and 404s.
 
 Static rewrites are different: `_redirects` `200!` entries and `routing.rewrites` run at the platform layer **before** the asset handler, so they _can_ rewrite into assets. If you need "rewrite into an asset" behavior dynamically, model it as a static rule (possibly with a broader source pattern) rather than doing it from middleware.
 
@@ -226,7 +226,7 @@ You don't need to write `"/*": "/index.html"` yourself — the CLI appends it au
 
 ## `_redirects` file
 
-Rewrites can also be defined in a `_redirects` file. Void mirrors Netlify / Cloudflare Pages semantics for the `200` status code:
+Rewrites can also be defined in a `_redirects` file placed in Vite's `publicDir` (defaults to `public/`). Void mirrors Netlify-compat semantics for the `200` status code:
 
 ```text
 # plain 200 = fallback (asset-miss only, equivalent to routing.fallbacks)
@@ -305,11 +305,11 @@ Two mitigations:
 - Use a plain `<a href="/docs">` when you need the navigation to round-trip through the server (and therefore through rewrites).
 - If the URL change is meant to be authoritative, use a [redirect](./redirects) instead — the client router follows redirects via HTTP, so behavior is consistent.
 
-## Caveat: ISR cache keys use the rewritten URL
+## ISR cache keys with rewrites
 
-If you use [`routing.revalidate`](./revalidation) on a rewritten path, the cache key is the **rewritten** pathname, not the original. So a request to `/docs/foo` that rewrites to `/en/docs/foo` is cached under `/en/docs/foo`. Direct requests to `/docs/foo` aren't cached (they re-render every time), and `revalidate({ paths: ['/docs/foo'] })` invalidates nothing — you need to pass the rewritten path (`/en/docs/foo`).
+If you use [`routing.revalidate`](./revalidation) on a rewritten path, the cache slot is keyed on the **rewritten** pathname plus the original request URL. So a direct request to `/en/docs/foo` and a rewrite from `/docs/foo → /en/docs/foo` cache independently — useful when your worker reads `c.isRewritten()` or `c.originalUrl()`.
 
-This is a known limitation and will likely change in a future release. For now, if you rely on ISR for rewritten routes, invalidate against the destination path.
+`revalidate({ paths })` operates on the rewritten pathname (the slot's primary key). Purging `/en/docs/foo` removes all variants — direct + every rewrite source — under that path. Purging the source path (`/docs/foo`) invalidates nothing, because no slot is written under the source.
 
 ## Debugging with `X-Void-Routing`
 
@@ -325,10 +325,14 @@ X-Void-Routing: pass-through
 
 Phases are separated by `→`. The parenthesised source hint points at the exact declaration — a line number for `_redirects`, a config path for `void.json`, or `spa-default` for the synthetic SPA catch-all. The header is **only emitted in dev** — production builds strip both the trace code and the per-rule `origin` metadata from the bundle and manifest.
 
-::: warning Cloudflare target: static rules don't fire in `vite dev`
-On the Cloudflare target, static `routing.rewrites` / `routing.redirects` / `routing.fallbacks` (and `_redirects` file entries) are applied by Void's edge dispatch layer in production — dispatch sits in front of your worker and evaluates rules before handing the request off. But `vite dev` runs your worker in miniflare **without dispatch in front of it**, so static rules don't fire locally on the CF target.
+::: info What fires in `vite dev`
+`vite dev` applies the full static routing pipeline on every target — `node`, `bun`, `deno`, and the default target alike. `void.json` rules (`routing.redirects` / `routing.rewrites` / `routing.fallbacks` / `routing.headers`) and file-based rules (`public/_redirects`, `public/_headers`) are merged at plugin load and compiled into the Hono middleware your worker runs behind. Editing `_redirects` or `_headers` during a dev session re-runs the merge and reloads the page — no restart needed. `c.rewrite()` calls in middleware work everywhere because they live inside the worker itself, and the `X-Void-Routing` dev header reports every decision on every target.
 
-`c.rewrite()` calls in middleware still work in CF dev because they live inside the worker itself. The `X-Void-Routing` dev header only reports decisions made inside the worker (middleware `c.rewrite()` calls), and on the node/bun/deno targets it also covers static rules since those are compiled into the Hono middleware for those targets.
+A few things still only run in the deployed runtime, not `vite dev`:
 
-To exercise static rules against a realistic edge pipeline during development, either deploy to a staging project (`void deploy`) or switch the target to `node` / `bun` / `deno` locally — static rule evaluation is at parity on those targets.
+- [ISR caching](./revalidation) (`routing.revalidate`) — served cold in dev, no cached slot warm-ups.
+- Custom-domain rewriting and per-project asset prefixes — dev always runs against the root.
+- AI Gateway metering for `void/ai` calls — dev hits the provider directly.
+
+For everything else, the rule that fires in `vite dev` is the rule that will fire after `void deploy`.
 :::

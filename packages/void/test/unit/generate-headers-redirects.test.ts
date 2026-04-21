@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, it, expect, afterEach } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseRedirectsFile } from '../../src/cli/headers';
 
 const tmpDir = join(import.meta.dirname, '.tmp-parse-redirects-test');
@@ -206,6 +206,43 @@ describe('parseRedirectsFile', () => {
     setup('/docs /en/docs?lang=en 200!\n');
     const parsed = parseRedirectsFile(tmpDir);
     expect(parsed).toBeUndefined();
+  });
+
+  it('warns via voidWarn when a 200 rewrite destination contains "?" (skip path)', () => {
+    // voidWarn writes through console.log — observe both that the entry was
+    // dropped AND that a yellow-tagged warning surfaced for the author.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    setup('/docs /en/docs?lang=en 200\n/app/* /index.html 200\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
+      {
+        source: '/app/*',
+        destination: '/index.html',
+        status: 200,
+        force: false,
+        origin: '_redirects:2',
+      },
+    ]);
+    const calls = logSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((msg) => msg.includes('must not contain "?"'))).toBe(true);
+    logSpy.mockRestore();
+  });
+
+  it('skips _redirects entries whose source has more than one "*" and warns', () => {
+    // Dispatch compiles `*` → `(?<splat>...)`; two of them yield duplicate
+    // group names and crash the regex at startup. Drop the entry with a
+    // friendly warning so the rest of the file still deploys.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    setup('/a/*/b/* /dest 301\n/ok /new 301\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
+      { source: '/ok', destination: '/new', status: 301, origin: '_redirects:2' },
+    ]);
+    const calls = logSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      calls.some((msg) => msg.includes('at most one "*" wildcard') && msg.includes('line 1')),
+    ).toBe(true);
+    logSpy.mockRestore();
   });
 
   it('tags origin with line number when destination is external (skipped)', () => {

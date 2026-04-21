@@ -620,6 +620,51 @@ describe('routing.fallbacks validation', () => {
   });
 });
 
+describe('duplicate "*" wildcards in rule sources', () => {
+  // Dispatch compiles each `*` into a `(?<splat>...)` capture group, so two
+  // in one source makes `new RegExp()` throw on duplicate group name at
+  // startup. Catch these at config-read time with a clear message.
+  it('rejects a redirect source with two "*"', () => {
+    setup(JSON.stringify({ routing: { redirects: { '/a/*/b/*': '/dest' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
+    cleanup();
+  });
+
+  it('rejects a rewrite source with two "*"', () => {
+    setup(JSON.stringify({ routing: { rewrites: { '/*/docs/*': '/dest' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
+    cleanup();
+  });
+
+  it('rejects a fallback source with two "*"', () => {
+    setup(JSON.stringify({ routing: { fallbacks: { '/*/*': '/index.html' } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
+    cleanup();
+  });
+
+  it('rejects a header pattern with two "*"', () => {
+    setup(
+      JSON.stringify({ routing: { headers: { '/assets/*/img/*': ['Cache-Control: no-cache'] } } }),
+    );
+    expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
+    cleanup();
+  });
+
+  it('accepts a source with exactly one "*"', () => {
+    setup(JSON.stringify({ routing: { rewrites: { '/docs/*': '/en/docs/:splat' } } }));
+    const config = readConfig(tmpDir);
+    expect(config.routing?.rewrites).toEqual({ '/docs/*': '/en/docs/:splat' });
+    cleanup();
+  });
+
+  it('accepts a source with zero "*"', () => {
+    setup(JSON.stringify({ routing: { rewrites: { '/docs': '/en/docs' } } }));
+    const config = readConfig(tmpDir);
+    expect(config.routing?.rewrites).toEqual({ '/docs': '/en/docs' });
+    cleanup();
+  });
+});
+
 describe('convertHeadersConfig', () => {
   it('returns undefined for undefined input', () => {
     expect(convertHeadersConfig(undefined)).toBeUndefined();

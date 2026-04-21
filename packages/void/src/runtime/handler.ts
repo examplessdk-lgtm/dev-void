@@ -82,8 +82,10 @@ declare module 'hono' {
     rewrite: _CloudOnly<E, (path: RewriteDestination) => Promise<Response>>;
 
     /**
-     * Returns the original request URL before any rewrite was applied
-     * (`X-Void-Original-URL`), or `null` when the request was not rewritten.
+     * Method that returns the URL the client
+     * actually requested — the pre-rewrite URL recorded from the
+     * `X-Void-Original-URL` header — or `null` when the current request was
+     * not rewritten.
      *
      * Set on every Void-managed request, whether the rewrite came from a
      * static rule (`routing.rewrites`, `routing.fallbacks`, `_redirects`
@@ -94,8 +96,9 @@ declare module 'hono' {
     originalUrl: _CloudOnly<E, () => string | null>;
 
     /**
-     * Returns `true` when the current request was re-dispatched by a rewrite,
-     * `false` otherwise.
+     * Method that returns `true` when the current
+     * request was re-dispatched by a rewrite, `false` otherwise. Equivalent
+     * to `c.originalUrl() !== null`.
      *
      * Use this to skip side-effectful work that would otherwise double-fire
      * on the second pass of middleware (request logging, rate-limit

@@ -7,7 +7,7 @@ import { VOID_AUTH_PROVIDERS, isVoidAuthProvider, type VoidAuthProvider } from '
 import type { HeadConfig } from './pages/head';
 
 /** Redirect destination — string (302) or object with explicit status. */
-export type RedirectDestination = string | { to: string; status?: 301 | 302 | 307 | 308 };
+export type RedirectDestination = string | { to: string; status?: 301 | 302 | 303 | 307 | 308 };
 
 /** Supported database dialects (internal representation). */
 export type DatabaseDialect = 'sqlite' | 'postgresql';
@@ -74,6 +74,28 @@ const VALID_OUTPUTS = new Set(['server', 'static']);
  */
 export const VALID_REDIRECT_STATUSES: Set<number> = new Set([301, 302, 303, 307, 308]);
 const VALID_DATABASE_VALUES = new Set(['pg']);
+
+/**
+ * Reject a rule source containing more than one `*` wildcard. The dispatch
+ * worker compiles each `*` into a `(?<splat>...)` named capture group; having
+ * two of them in one pattern means `new RegExp()` throws at startup with a
+ * cryptic "duplicate group name" error. Fail at config-read time with a
+ * clear message instead. `kind` is a capitalised noun (e.g. "Redirect",
+ * "Rewrite") used in the error text.
+ */
+export function assertSingleSplat(source: string, kind: string): void {
+  let count = 0;
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] === '*') {
+      count++;
+    }
+  }
+  if (count > 1) {
+    throw new Error(
+      `${kind} source "${source}" in ${CONFIG_FILE} must contain at most one "*" wildcard (got ${count}); the matched portion is captured once as :splat`,
+    );
+  }
+}
 
 /** Old flat keys that have moved into namespaces. */
 const MIGRATION_ERRORS: Record<string, string> = {
@@ -290,6 +312,7 @@ export function readConfig(root: string): VoidConfig {
         if (!pattern.startsWith('/')) {
           throw new Error(`Header pattern "${pattern}" in ${CONFIG_FILE} must start with "/"`);
         }
+        assertSingleSplat(pattern, 'Header');
         if (!Array.isArray(values) || !values.every((v) => typeof v === 'string')) {
           throw new Error(`Headers for "${pattern}" in ${CONFIG_FILE} must be an array of strings`);
         }
@@ -310,6 +333,7 @@ export function readConfig(root: string): VoidConfig {
         if (!source.startsWith('/')) {
           throw new Error(`Redirect source "${source}" in ${CONFIG_FILE} must start with "/"`);
         }
+        assertSingleSplat(source, 'Redirect');
         if (typeof dest === 'string') {
           // ok
         } else if (typeof dest === 'object' && dest !== null && !Array.isArray(dest)) {
@@ -344,6 +368,7 @@ export function readConfig(root: string): VoidConfig {
         if (!source.startsWith('/')) {
           throw new Error(`Rewrite source "${source}" in ${CONFIG_FILE} must start with "/"`);
         }
+        assertSingleSplat(source, 'Rewrite');
         if (typeof dest !== 'string') {
           throw new Error(`Rewrite destination for "${source}" in ${CONFIG_FILE} must be a string`);
         }
@@ -374,6 +399,7 @@ export function readConfig(root: string): VoidConfig {
         if (!source.startsWith('/')) {
           throw new Error(`Fallback source "${source}" in ${CONFIG_FILE} must start with "/"`);
         }
+        assertSingleSplat(source, 'Fallback');
         if (typeof dest !== 'string') {
           throw new Error(
             `Fallback destination for "${source}" in ${CONFIG_FILE} must be a string`,

@@ -63,12 +63,7 @@ import {
   getDeployEnvDefaults,
   validateProdEnv,
 } from './env-validation';
-import {
-  lintDuplicateSources,
-  parseHeadersFile,
-  parseRedirectsFile,
-  splitRedirectRulesByForce,
-} from './headers';
+import { lintDuplicateSources, mergeRoutingRules } from './headers';
 import { promptForLoginToken } from './login';
 import { cliTitle, createSpinner } from './output';
 import {
@@ -576,34 +571,15 @@ async function runFrameworkDeploy(
   const workerDir = join(root, fwPreset.workerDir);
   const assetsDir = join(root, fwPreset.assetsDir);
 
-  // Collect header rules: parse framework-generated _headers file + void.json config
-  const fwHeaderRules = existsSync(assetsDir) ? parseHeadersFile(assetsDir) : undefined;
-  const cfgHeaderRules = convertHeadersConfig(voidConfig.routing?.headers);
-  const headerRules: Array<HeaderRule> = [...(fwHeaderRules ?? []), ...(cfgHeaderRules ?? [])];
-
-  // Collect redirect rules: parse framework-generated _redirects file + void.json config.
-  //
-  // Netlify-symmetric semantics:
-  //   - _redirects `200!` + routing.rewrites  → force-rewrite (redirectRules, always fires)
-  //   - _redirects `200`  + routing.fallbacks → asset-miss fallback (fallbackRules)
-  //
-  // splitRedirectRulesByForce bucketizes parsed file rules so plain `200` entries
-  // become fallbacks while `200!` and 3xx entries stay in the always-apply bucket.
-  const fwParsedRedirects = existsSync(assetsDir) ? parseRedirectsFile(assetsDir) : undefined;
-  warnRedundantForceOn3xx(fwParsedRedirects?.redundantForceOn3xx ?? 0);
-  const { always: fwAlwaysRules, fallbacks: fwFallbackRules } = splitRedirectRulesByForce(
-    fwParsedRedirects?.rules,
-  );
-  const cfgRedirectRules = convertRedirectsConfig(voidConfig.routing?.redirects);
-  const cfgRewriteRules = convertRewritesConfig(voidConfig.routing?.rewrites);
-  const cfgFallbackRules = convertFallbacksConfig(voidConfig.routing?.fallbacks);
-  const redirectRules: Array<RedirectRule> = [
-    ...fwAlwaysRules,
-    ...(cfgRedirectRules ?? []),
-    ...(cfgRewriteRules ?? []),
-  ];
-  const mergedFallbackRules = [...fwFallbackRules, ...(cfgFallbackRules ?? [])];
-  const fallbackRules = mergedFallbackRules.length > 0 ? mergedFallbackRules : undefined;
+  // Merge framework-generated `_headers` / `_redirects` + void.json routing rules.
+  // Netlify-symmetric phases:
+  //   - `_redirects` `200!` + routing.rewrites  → redirectRules (always-fires)
+  //   - `_redirects` `200`  + routing.fallbacks → fallbackRules (asset-miss only)
+  const { headerRules, redirectRules, fallbackRules, redundantForceOn3xx } = mergeRoutingRules({
+    dir: assetsDir,
+    routing: voidConfig.routing,
+  });
+  warnRedundantForceOn3xx(redundantForceOn3xx);
 
   // Lint each phase independently: duplicates across phases (redirects vs
   // fallbacks) don't shadow each other, only duplicates within a phase do.
@@ -906,29 +882,14 @@ async function runFullDeploy(
     process.exit(1);
   }
 
-  // Collect header rules: parse user/framework _headers file + void.json config
+  // Merge user/framework `_headers` / `_redirects` in the built client dir with
+  // `void.json` routing rules. See the framework branch above for phase splitting.
   const clientDir = join(distDir, 'client');
-  const userHeaderRules = existsSync(clientDir) ? parseHeadersFile(clientDir) : undefined;
-  const cfgHeaderRules = convertHeadersConfig(deployConfig.routing?.headers);
-  const headerRules: Array<HeaderRule> = [...(userHeaderRules ?? []), ...(cfgHeaderRules ?? [])];
-
-  // Collect redirect rules: parse user/framework _redirects file + void.json config.
-  // See the same-shape block above for Netlify-symmetric 200 vs 200! semantics.
-  const userParsedRedirects = existsSync(clientDir) ? parseRedirectsFile(clientDir) : undefined;
-  warnRedundantForceOn3xx(userParsedRedirects?.redundantForceOn3xx ?? 0);
-  const { always: userAlwaysRules, fallbacks: userFallbackRules } = splitRedirectRulesByForce(
-    userParsedRedirects?.rules,
-  );
-  const cfgRedirectRules = convertRedirectsConfig(deployConfig.routing?.redirects);
-  const cfgRewriteRules = convertRewritesConfig(deployConfig.routing?.rewrites);
-  const cfgFallbackRules = convertFallbacksConfig(deployConfig.routing?.fallbacks);
-  const redirectRules: Array<RedirectRule> = [
-    ...userAlwaysRules,
-    ...(cfgRedirectRules ?? []),
-    ...(cfgRewriteRules ?? []),
-  ];
-  const mergedFallbackRules = [...userFallbackRules, ...(cfgFallbackRules ?? [])];
-  const fallbackRules = mergedFallbackRules.length > 0 ? mergedFallbackRules : undefined;
+  const { headerRules, redirectRules, fallbackRules, redundantForceOn3xx } = mergeRoutingRules({
+    dir: clientDir,
+    routing: deployConfig.routing,
+  });
+  warnRedundantForceOn3xx(redundantForceOn3xx);
 
   // Lint each phase independently — same rationale as the framework branch.
   lintDuplicateSources(redirectRules, 'redirects/rewrites (pre-asset)');

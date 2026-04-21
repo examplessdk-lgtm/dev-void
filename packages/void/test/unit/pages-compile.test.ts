@@ -460,4 +460,102 @@ describe('compileRouteTable with pages', () => {
     expect(code).toContain('collectRouteCss');
     expect(code).toContain('PAGE_CSS_KEYS');
   });
+
+  it('injects fallback rules into the pages notFound body on default target dev', () => {
+    const scan = makeScan({
+      pages: [
+        {
+          pattern: '/',
+          params: [],
+          catchAll: false,
+          componentPath: 'index.vue',
+          serverPath: null,
+          methods: [],
+          componentId: 'index',
+        },
+      ],
+      layouts: [],
+      namedLayouts: [],
+    });
+
+    const fallbackRules = [
+      {
+        source: '/docs/*',
+        destination: '/docs.html',
+        status: 200,
+        force: false,
+        origin: 'void.json#routing.fallbacks',
+      },
+    ];
+
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      {
+        ...testOptions,
+        nodeTarget: false,
+        dev: true,
+        fallbackRules,
+      },
+      pagesOptions,
+    );
+
+    // Fallback rules live inside the pages notFound body between the
+    // asset-miss check and the SPA fallback, not in a standalone notFound.
+    expect(code).toContain('const __fallbackRules =');
+    expect(code).toContain('if (assetRes.status !== 404) return assetRes;');
+    // Pages mode owns the notFound — no duplicate standalone hook that
+    // would override it.
+    expect(code.match(/app\.notFound\(async \(c\) => \{/g)?.length).toBe(1);
+  });
+
+  it('omits fallback rules on default target prod (pages notFound stays pure)', () => {
+    const scan = makeScan({
+      pages: [
+        {
+          pattern: '/',
+          params: [],
+          catchAll: false,
+          componentPath: 'index.vue',
+          serverPath: null,
+          methods: [],
+          componentId: 'index',
+        },
+      ],
+      layouts: [],
+      namedLayouts: [],
+    });
+
+    const fallbackRules = [
+      {
+        source: '/docs/*',
+        destination: '/docs.html',
+        status: 200,
+        force: false,
+        origin: 'void.json#routing.fallbacks',
+      },
+    ];
+
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      {
+        ...testOptions,
+        nodeTarget: false,
+        dev: false,
+        fallbackRules,
+      },
+      pagesOptions,
+    );
+
+    expect(code).not.toContain('const __fallbackRules =');
+  });
 });

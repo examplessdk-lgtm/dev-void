@@ -366,7 +366,7 @@ describe('detectFramework', () => {
     }
   });
 
-  it('warns when routing.fallbacks is configured on a non-Cloudflare target', () => {
+  it('warns when routing.fallbacks is configured on a non-default target', () => {
     const root = createTempRoot();
     writeFileSync(
       join(root, 'void.json'),
@@ -390,7 +390,7 @@ describe('detectFramework', () => {
       const calls = logSpy.mock.calls.map((c) => String(c[0] ?? ''));
       const joined = calls.join('\n');
       expect(joined).toContain('"routing.fallbacks"');
-      expect(joined).toContain('Cloudflare target');
+      expect(joined).toContain('default target');
       expect(joined).toContain('2 rule(s)');
       expect(joined).toContain('target="node"');
     } finally {
@@ -399,10 +399,10 @@ describe('detectFramework', () => {
     }
   });
 
-  it('does not warn about fallbacks when target is Cloudflare (default)', () => {
+  it('does not warn about fallbacks when target is the default', () => {
     const root = createTempRoot();
     writeCompatConfig(root);
-    // Overwrite with a config that includes fallbacks but leaves target unset (CF default).
+    // Overwrite with a config that includes fallbacks but leaves target unset (default target).
     writeFileSync(
       join(root, 'void.json'),
       JSON.stringify({
@@ -424,7 +424,7 @@ describe('detectFramework', () => {
     }
   });
 
-  it('does not warn when fallbacks is absent on a non-Cloudflare target', () => {
+  it('does not warn when fallbacks is absent on a non-default target', () => {
     const root = createTempRoot();
     writeFileSync(join(root, 'void.json'), JSON.stringify({ target: 'node' }));
 

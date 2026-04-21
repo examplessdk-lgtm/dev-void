@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { hash as blake3hash } from 'blake3-jit';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   packageBuild,
   packageStaticBuild,
@@ -315,6 +315,105 @@ describe('packageBuild', () => {
       { source: '/*', destination: '/index.html', status: 200 },
       { source: '/docs/*', destination: '/docs.html', status: 200 },
     ]);
+  });
+
+  it('warns when routing.fallbacks is set on a non-SPA (SSR) packageBuild', async () => {
+    // On SSR / Void / framework apps, user fallbacks still fire post-lookup,
+    // but no `/* -> /index.html` SPA shell is synthesised. Surface the
+    // mismatch at build time so users don't silently ship fallbacks that
+    // won't save them from the platform 404.
+    const workerDir = join(TMP, 'worker');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, 'index.js'), 'export default {}');
+
+    const userFallbacks = [
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+    ];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await packageBuild(
+      TMP,
+      'worker',
+      {
+        needsD1: false,
+        needsKV: false,
+        needsR2: false,
+        needsAuth: false,
+        needsQueues: false,
+        needsAI: false,
+      },
+      undefined, // migrations
+      undefined, // schedules
+      true, // ssr
+      undefined, // framework
+      undefined, // revalidate
+      undefined, // vars
+      undefined, // queues
+      undefined, // prerender
+      undefined, // assetConfig — no SPA signal, so the SSR branch fires
+      undefined, // options
+      undefined, // neededAssets
+      undefined, // hashedAssetsPrefix
+      undefined, // headerRules
+      undefined, // redirectRules
+      userFallbacks,
+    );
+
+    const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      messages.some(
+        (m) =>
+          m.includes('routing.fallbacks is set but appType is not "spa"') &&
+          m.includes('no "/* -> /index.html" SPA shell fallback is synthesised'),
+      ),
+    ).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it('does not warn about the SPA shell when fallbacks are paired with the SPA asset config', async () => {
+    // Regression anchor: the SSR warning must only fire when
+    // `not_found_handling !== 'single-page-application'`. On SPA the
+    // resolveSpaFallbackChain path runs instead (and has its own warnings).
+    const workerDir = join(TMP, 'worker');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, 'index.js'), 'export default {}');
+
+    const userFallbacks = [
+      { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
+    ];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await packageBuild(
+      TMP,
+      'worker',
+      {
+        needsD1: false,
+        needsKV: false,
+        needsR2: false,
+        needsAuth: false,
+        needsQueues: false,
+        needsAI: false,
+      },
+      undefined, // migrations
+      undefined, // schedules
+      undefined, // ssr
+      undefined, // framework
+      undefined, // revalidate
+      undefined, // vars
+      undefined, // queues
+      undefined, // prerender
+      { not_found_handling: 'single-page-application' },
+      undefined, // options
+      undefined, // neededAssets
+      undefined, // hashedAssetsPrefix
+      undefined, // headerRules
+      undefined, // redirectRules
+      userFallbacks,
+    );
+
+    const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+    expect(messages.some((m) => m.includes('appType is not "spa"'))).toBe(false);
+    warnSpy.mockRestore();
   });
 
   it('leaves SPA platform switch in place when no user fallbacks exist', async () => {

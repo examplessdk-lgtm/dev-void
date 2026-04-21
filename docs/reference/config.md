@@ -239,7 +239,7 @@ Custom response headers for static assets. Keys are URL patterns, values are arr
 
 #### `routing.redirects`
 
-URL redirects. Keys are source URL patterns, values are destination strings (302 default) or objects with `to` and optional `status`. See [Redirects](../guide/edge/redirects) for details.
+URL redirects. Keys are source URL patterns, values are destination strings (302 default) or objects with `to` and optional `status` (`301`, `302`, `303`, `307`, `308`). See [Redirects](../guide/edge/redirects) for details.
 
 ```json
 {

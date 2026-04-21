@@ -102,11 +102,11 @@ Only successful responses (2xx) are cached.
 
 Requests with `Cookie` or `Authorization` headers bypass the ISR cache entirely and always dispatch to the worker. This ensures personalized or authenticated pages are never served from a shared cache.
 
-## Caveat: cache keys follow rewrites
+## Cache keys and rewrites
 
-If a request is rewritten (via `routing.rewrites`, `routing.fallbacks`, `_redirects` 200/200!, or `c.rewrite()`), the ISR cache key is the **rewritten** pathname — not the URL the user requested. So `/docs/foo` rewritten to `/en/docs/foo` caches under `/en/docs/foo`, and `revalidate({ paths: ['/docs/foo'] })` won't invalidate it. Pass the destination path instead.
+If a request is rewritten (via `routing.rewrites`, `routing.fallbacks`, `_redirects` 200/200!, or `c.rewrite()`), the ISR cache slot is keyed on the **rewritten** pathname **plus** the original request URL. So a direct request to `/en/docs/foo` and a rewrite from `/docs/foo → /en/docs/foo` no longer share a slot — each renders and caches independently. This matters when your worker branches on `c.isRewritten()` or `c.originalUrl()`.
 
-This is a known limitation. See the [rewrites caveat](./rewrites#caveat-isr-cache-keys-use-the-rewritten-url) for details.
+`revalidate({ paths })` operates on the rewritten pathname (the slot's primary key). Purging `/en/docs/foo` removes **all variants** (direct + every rewrite source) under that path. Purging the source path (`/docs/foo`) invalidates nothing, because no slot was ever written under it.
 
 **Migration note:** if you introduce a new rewrite on an existing project that was already serving ISR traffic, expect a one-time cache-miss wave on the first deploy. Cache entries written under the original pathname become unreachable — the cache key now follows the rewritten path — so early requests re-render until the new key warms up. The miss window is proportional to your traffic and TTL; no manual purge is required.
 

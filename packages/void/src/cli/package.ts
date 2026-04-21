@@ -29,8 +29,12 @@ type ProgressCallback = (message: string) => void;
  * - `force` is used internally by the CLI/router to split rules into the
  *   `redirectRules` (pre-asset, always-fires) and `fallbackRules` (post-asset,
  *   only when the asset resolver 404s) buckets and to label the trace header
- *   on non-CF targets. The platform dispatch worker decides phase purely from
- *   which array the rule lives in, so shipping `force` is dead weight.
+ *   on `node`/`bun`/`deno` targets. The platform dispatch worker decides phase
+ *   purely from which array the rule lives in, so shipping `force` is dead weight.
+ *
+ * Keep in sync with `stripOriginForProd` in `router/compile.ts`, which strips
+ * only `origin` because the Node/Bun/Deno-target generated code still reads
+ * `force` at runtime to label the dev trace header.
  */
 function stripDevOnlyRuleFields(rules: RedirectRule[] | undefined): RedirectRule[] | undefined {
   if (!rules) {
@@ -44,7 +48,7 @@ function stripDevOnlyRuleFields(rules: RedirectRule[] | undefined): RedirectRule
  * `/index.html` fallback. Decision: user fallbacks take precedence; if none
  * matches, the SPA default kicks in.
  *
- * Cloudflare's `not_found_handling: 'single-page-application'` is a global
+ * The platform's `not_found_handling: 'single-page-application'` is a global
  * switch — set once per deployment — so we can't have the platform evaluate
  * user fallbacks *before* applying it. Instead, when the user has configured
  * fallbacks on a SPA app, we disable the platform-level SPA setting and
@@ -404,6 +408,19 @@ export async function packageBuild(
       onProgress?.(msg);
       console.warn(`[void] ${msg}`);
     }
+  } else if (fallbackRules && fallbackRules.length > 0) {
+    // Fallbacks ship for any app type, but the SPA-shell chain (prepending
+    // `/* -> /index.html`) only runs when `not_found_handling` is
+    // `single-page-application`. On SSR / Void / framework apps, user
+    // fallbacks still fire post-lookup, but no SPA shell is synthesised —
+    // callers relying on the rules to provide an `/index.html` safety net
+    // will hit the platform's default 404 on unmatched paths. Warn so the
+    // expectation mismatch surfaces at build time.
+    const msg =
+      `routing.fallbacks is set but appType is not "spa"; fallbacks will be applied, ` +
+      `but no "/* -> /index.html" SPA shell fallback is synthesised — unmatched paths fall through to the platform 404.`;
+    onProgress?.(msg);
+    console.warn(`[void] ${msg}`);
   }
 
   if (resolvedAssetConfig) {

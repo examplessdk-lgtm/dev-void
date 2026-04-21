@@ -198,17 +198,17 @@
         },
         "rewrites": {
           "type": "object",
-          "description": "URL rewrites. Keys are source URL patterns; values are destination paths. Serves content from the destination without changing the browser URL.",
+          "description": "URL rewrites. Keys are source URL patterns; values are destination paths. Serves content from the destination without changing the browser URL. Destinations must start with \"/\" and must not contain \"?\" — the incoming request's query string is preserved automatically.",
           "patternProperties": {
-            "^/": { "type": "string" }
+            "^/": { "type": "string", "pattern": "^/[^?]*$" }
           },
           "additionalProperties": false
         },
         "fallbacks": {
           "type": "object",
-          "description": "Fallback rewrites. Same shape as `rewrites`, but only fire when no static asset matched the request. Useful for SPA shells or default-locale catch-alls without pre-empting real routes.",
+          "description": "Fallback rewrites. Same shape as `rewrites`, but only fire when no static asset matched the request. Useful for SPA shells or default-locale catch-alls without pre-empting real routes. Destinations must start with \"/\" and must not contain \"?\".",
           "patternProperties": {
-            "^/": { "type": "string" }
+            "^/": { "type": "string", "pattern": "^/[^?]*$" }
           },
           "additionalProperties": false
         }

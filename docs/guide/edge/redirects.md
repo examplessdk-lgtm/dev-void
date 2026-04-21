@@ -20,7 +20,7 @@ Define URL redirects in [`void.json`](../../reference/config) using the `routing
 ## Rules
 
 - **Source patterns** start with `/`. `*` matches any characters including `/`.
-- **Destinations** can be strings (defaults to `302` temporary redirect) or objects with `to` and optional `status` (`301`, `302`, `307`, `308`).
+- **Destinations** can be strings (defaults to `302` temporary redirect) or objects with `to` and optional `status` (`301`, `302`, `303`, `307`, `308`).
 - `:splat` in the destination is replaced with the portion of the path matched by `*` in the source pattern.
 - When multiple rules match, the **last match wins**.
 - Redirects are evaluated **before** the request reaches the worker, so they short-circuit static asset serving, ISR, and SSR.
