@@ -108,6 +108,8 @@ If a request is rewritten (via `routing.rewrites`, `routing.fallbacks`, `_redire
 
 This is a known limitation. See the [rewrites caveat](./rewrites#caveat-isr-cache-keys-use-the-rewritten-url) for details.
 
+**Migration note:** if you introduce a new rewrite on an existing project that was already serving ISR traffic, expect a one-time cache-miss wave on the first deploy. Cache entries written under the original pathname become unreachable — the cache key now follows the rewritten path — so early requests re-render until the new key warms up. The miss window is proportional to your traffic and TTL; no manual purge is required.
+
 ## On-demand revalidation
 
 You can purge ISR cache entries programmatically from a route handler:
