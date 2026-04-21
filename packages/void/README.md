@@ -8,6 +8,7 @@ Vite plugin and CLI for building and deploying apps on Void.
 - Pages mode from `pages/`
 - typed Drizzle access via `void/db`
 - `crons/` and `queues/`
+- URL redirects, rewrites, and fallbacks (`void.json` / `public/_redirects`, plus `c.rewrite()` from middleware)
 - binding inference for D1, KV, R2, AI, auth, and queues
 - remote bindings for local development
 - deploy packaging for Void-hosted apps, static sites, and supported meta-frameworks
