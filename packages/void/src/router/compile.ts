@@ -822,6 +822,11 @@ export function compileRouteTable(
   lines.push('    }');
   lines.push('    return __origRedirect(location, status);');
   lines.push('  };');
+  // Read helpers for rewrite metadata. Defined per-instance so they only
+  // exist on Void-managed contexts; vanilla Hono Contexts in the same dep
+  // graph won't get them at runtime, matching the env-scoped type.
+  lines.push('  c.originalUrl = () => c.req.header("X-Void-Original-URL") ?? null;');
+  lines.push('  c.isRewritten = () => c.req.header("X-Void-Rewritten") === "1";');
   lines.push('  await next();');
   lines.push('});');
   lines.push('');

@@ -524,6 +524,31 @@ describe('compileRouteTable', () => {
     expect(code).toContain('rewriteReq.headers.delete("X-Void-Original-URL")');
   });
 
+  it('attaches c.originalUrl and c.isRewritten as per-request helpers', () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+    );
+
+    // Per-instance assignment in the same middleware that attaches c.rewrite,
+    // so vanilla Hono Contexts (which never flow through this middleware) do
+    // not pick up the helpers at runtime — matching the env-scoped types.
+    expect(code).toContain('c.originalUrl = () => c.req.header("X-Void-Original-URL") ?? null;');
+    expect(code).toContain('c.isRewritten = () => c.req.header("X-Void-Rewritten") === "1";');
+  });
+
   it('wraps c.redirect so internal redirects merge the incoming query string', () => {
     const scan: ScanResult = {
       routes: [],

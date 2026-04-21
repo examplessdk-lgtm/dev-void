@@ -141,11 +141,13 @@ Also avoid deep rewrite chains for performance: every hop re-runs all middleware
 
 Because every hop replays the full middleware stack, any side-effectful middleware fires twice (or N times for deep chains): DB lookups, session/auth checks, rate-limiter increments, and request loggers all double-count. For example, an auth middleware that logs every request will log twice for every rewritten request.
 
-To skip idempotent-unsafe work on the second pass, detect the re-dispatch via the `X-Void-Rewritten: 1` header the runtime attaches:
+To skip idempotent-unsafe work on the second pass, use `c.isRewritten()`:
 
 ```ts
-if (c.req.header('X-Void-Rewritten') === '1') return next();
+if (c.isRewritten()) return next();
 ```
+
+`c.isRewritten()` returns `true` when the request was re-dispatched by a rewrite (whether from a static rule or `c.rewrite()` in middleware). It reads the `X-Void-Rewritten: 1` header that the runtime attaches; reach for the raw header only if you need to inspect it from outside a Void-managed context.
 
 ::: tip
 This is the recommended approach for i18n libraries. The library can export a middleware factory that handles locale detection and rewriting, and users just drop it into their `middleware/` directory.
@@ -153,14 +155,17 @@ This is the recommended approach for i18n libraries. The library can export a mi
 
 ## Original URL access
 
-When a static rewrite rule matches at the edge, the platform sets an `X-Void-Original-URL` header on the request forwarded to the worker. This lets your app access the original URL for canonical links, locale detection, or building correct hrefs:
+When a request has been rewritten — either by a static rule at the edge or by `c.rewrite()` in middleware — `c.originalUrl()` returns the URL the user originally requested. This is useful for canonical links, locale detection, and building correct hrefs:
 
 ```ts
 export default defineHandler((c) => {
-  const originalUrl = c.req.header('X-Void-Original-URL');
-  // originalUrl is the full URL the user requested before the rewrite
+  const original = c.originalUrl();
+  // original is the full URL the user requested before the rewrite,
+  // or null if the request was not rewritten.
 });
 ```
+
+Internally this reads the `X-Void-Original-URL` header that Void sets on every rewrite hop. Use the helper in handler code; reach for the raw header only when you need to inspect it from outside a Void-managed context.
 
 ## Fallbacks
 
