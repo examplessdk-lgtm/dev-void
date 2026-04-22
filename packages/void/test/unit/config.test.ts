@@ -535,7 +535,7 @@ describe('readConfig redirects', () => {
 
   it('schema.json redirect status enum matches VALID_REDIRECT_STATUSES', () => {
     const schema = JSON.parse(readFileSync(join(import.meta.dirname, '../../schema.json'), 'utf8'));
-    const schemaEnum: number[] =
+    const schemaEnum: Array<number> =
       schema.properties.routing.properties.redirects.patternProperties['^/'].oneOf[1].properties
         .status.enum;
     expect(new Set(schemaEnum)).toEqual(VALID_REDIRECT_STATUSES);
@@ -937,7 +937,7 @@ describe('lintDestinationSplats', () => {
       '/docs/*': '/en/docs/:splat',
       '/posts/:id': '/archive/:id',
     });
-    const warnings: string[] = [];
+    const warnings: Array<string> = [];
     const result = lintDestinationSplats(rules, 'rewrites', (msg) => warnings.push(msg));
     expect(result).toBeUndefined();
     expect(warnings).toEqual([]);
@@ -946,7 +946,7 @@ describe('lintDestinationSplats', () => {
   it('emits a single aggregated warning for a redirect destination with *', async () => {
     const { lintDestinationSplats } = await import('../../src/cli/headers');
     const rules = convertRedirectsConfig({ '/old/*': '/new/*' });
-    const warnings: string[] = [];
+    const warnings: Array<string> = [];
     const result = lintDestinationSplats(rules, 'redirects/rewrites (pre-asset)', (msg) =>
       warnings.push(msg),
     );
@@ -964,7 +964,7 @@ describe('lintDestinationSplats', () => {
       ...(convertRewritesConfig({ '/b/*': '/y/:splat' }) ?? []),
       ...(convertRewritesConfig({ '/c': '/z/*' }) ?? []),
     ];
-    const warnings: string[] = [];
+    const warnings: Array<string> = [];
     lintDestinationSplats(rules, 'rewrites', (msg) => warnings.push(msg));
     expect(warnings).toHaveLength(1);
     const msg = warnings[0];
@@ -979,7 +979,7 @@ describe('lintDestinationSplats', () => {
   it('works with fallbacks output shape as well', async () => {
     const { lintDestinationSplats } = await import('../../src/cli/headers');
     const rules = convertFallbacksConfig({ '/docs/*': '/docs/*' });
-    const warnings: string[] = [];
+    const warnings: Array<string> = [];
     const result = lintDestinationSplats(rules, 'fallbacks (post-asset)', (msg) =>
       warnings.push(msg),
     );

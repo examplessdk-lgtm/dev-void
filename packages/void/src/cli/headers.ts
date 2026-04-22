@@ -21,7 +21,7 @@ import type { DevRedirectRule, HeaderRule } from './types';
  * strip it and let callers aggregate a single friendly warning at deploy time.
  */
 export interface ParsedRedirects {
-  rules: DevRedirectRule[];
+  rules: Array<DevRedirectRule>;
   redundantForceOn3xx: number;
 }
 
@@ -244,12 +244,12 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
  * (3xx redirects and forced `200!` rewrites) stay in the "always" bucket and
  * are merged with `routing.rewrites` / `routing.redirects` from void.json.
  */
-export function splitRedirectRulesByForce(rules: DevRedirectRule[] | undefined): {
-  always: DevRedirectRule[];
-  fallbacks: DevRedirectRule[];
+export function splitRedirectRulesByForce(rules: Array<DevRedirectRule> | undefined): {
+  always: Array<DevRedirectRule>;
+  fallbacks: Array<DevRedirectRule>;
 } {
-  const always: DevRedirectRule[] = [];
-  const fallbacks: DevRedirectRule[] = [];
+  const always: Array<DevRedirectRule> = [];
+  const fallbacks: Array<DevRedirectRule> = [];
   if (!rules) {
     return { always, fallbacks };
   }
@@ -288,9 +288,9 @@ export function splitRedirectRulesByForce(rules: DevRedirectRule[] | undefined):
  * the same reason.
  */
 export function mergeRoutingRules(opts: { dir: string; routing: RoutingConfig | undefined }): {
-  headerRules: HeaderRule[];
-  redirectRules: DevRedirectRule[];
-  fallbackRules: DevRedirectRule[] | undefined;
+  headerRules: Array<HeaderRule>;
+  redirectRules: Array<DevRedirectRule>;
+  fallbackRules: Array<DevRedirectRule> | undefined;
   redundantForceOn3xx: number;
 } {
   const { dir, routing } = opts;
@@ -307,8 +307,8 @@ export function mergeRoutingRules(opts: { dir: string; routing: RoutingConfig | 
   const cfgRewrites = convertRewritesConfig(routing?.rewrites);
   const cfgFallbacks = convertFallbacksConfig(routing?.fallbacks);
 
-  const headerRules: HeaderRule[] = [...(fileHeaders ?? []), ...(cfgHeaders ?? [])];
-  const redirectRules: DevRedirectRule[] = [
+  const headerRules: Array<HeaderRule> = [...(fileHeaders ?? []), ...(cfgHeaders ?? [])];
+  const redirectRules: Array<DevRedirectRule> = [
     ...fileAlways,
     ...(cfgRedirects ?? []),
     ...(cfgRewrites ?? []),
@@ -344,7 +344,7 @@ export function mergeRoutingRules(opts: { dir: string; routing: RoutingConfig | 
  * so tests can capture output without stubbing the module.
  */
 export function lintDestinationSplats(
-  rules: DevRedirectRule[] | undefined,
+  rules: Array<DevRedirectRule> | undefined,
   phaseName: string,
   warn: (msg: string) => void = voidWarn,
 ): string | undefined {
@@ -352,7 +352,7 @@ export function lintDestinationSplats(
     return undefined;
   }
 
-  const affected: DevRedirectRule[] = [];
+  const affected: Array<DevRedirectRule> = [];
   for (const rule of rules) {
     if (rule.destination.includes('*')) {
       affected.push(rule);
@@ -403,7 +403,7 @@ export function lintDestinationSplats(
  * injectable so tests can capture output without stubbing the module.
  */
 export function lintDuplicateSources(
-  rules: DevRedirectRule[] | undefined,
+  rules: Array<DevRedirectRule> | undefined,
   phaseName: string,
   warn: (msg: string) => void = voidWarn,
 ): string | undefined {
@@ -411,7 +411,7 @@ export function lintDuplicateSources(
     return undefined;
   }
 
-  const bySource = new Map<string, DevRedirectRule[]>();
+  const bySource = new Map<string, Array<DevRedirectRule>>();
   for (const rule of rules) {
     const existing = bySource.get(rule.source);
     if (existing) {
@@ -421,7 +421,7 @@ export function lintDuplicateSources(
     }
   }
 
-  const duplicates: { source: string; occurrences: DevRedirectRule[] }[] = [];
+  const duplicates: Array<{ source: string; occurrences: Array<DevRedirectRule> }> = [];
   for (const [source, occurrences] of bySource) {
     if (occurrences.length > 1) {
       duplicates.push({ source, occurrences });

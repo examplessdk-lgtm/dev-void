@@ -37,7 +37,9 @@ type ProgressCallback = (message: string) => void;
  * only `origin` because the Node/Bun/Deno-target generated code still reads
  * `force` at runtime to label the dev trace header.
  */
-function stripDevOnlyRuleFields(rules: DevRedirectRule[] | undefined): RedirectRule[] | undefined {
+function stripDevOnlyRuleFields(
+  rules: Array<DevRedirectRule> | undefined,
+): Array<RedirectRule> | undefined {
   if (!rules) {
     return rules;
   }
@@ -64,13 +66,13 @@ function stripDevOnlyRuleFields(rules: DevRedirectRule[] | undefined): RedirectR
  */
 export function resolveSpaFallbackChain(
   appType: 'spa' | 'static' | undefined,
-  fallbackRules: DevRedirectRule[] | undefined,
+  fallbackRules: Array<DevRedirectRule> | undefined,
 ): {
   assetConfig: AssetConfig;
-  fallbackRules: DevRedirectRule[] | undefined;
-  warnings: string[];
+  fallbackRules: Array<DevRedirectRule> | undefined;
+  warnings: Array<string>;
 } {
-  const warnings: string[] = [];
+  const warnings: Array<string> = [];
   const userRules = fallbackRules && fallbackRules.length > 0 ? fallbackRules : undefined;
 
   if (appType !== 'spa') {

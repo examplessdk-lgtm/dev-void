@@ -1,3 +1,4 @@
+/* oxlint-disable typescript-eslint/no-explicit-any -- these tests wire the void context augmentations by hand (`c.rewrite`, `c.originalUrl`, `c.isRewritten`) to exercise generated code paths directly; `as any` is the least noisy way to assign/read those members without re-declaring the full Hono context shape per test. */
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
 import {
@@ -866,7 +867,7 @@ describe('c.rewrite runtime wrapper', () => {
     installVoidWrappers(app, new WeakMap<Request, URL>());
 
     let invocations = 0;
-    const observed: boolean[] = [];
+    const observed: Array<boolean> = [];
     app.use('*', async (c, next) => {
       invocations++;
       observed.push((c as any).isRewritten());
@@ -898,7 +899,7 @@ describe('c.rewrite runtime wrapper', () => {
     installVoidWrappers(app, voidOriginalUrls);
 
     let invocations = 0;
-    const observedReqUrls: string[] = [];
+    const observedReqUrls: Array<string> = [];
     const observedOriginalUrls: Array<URL | null> = [];
     app.use('*', async (c, next) => {
       invocations++;
@@ -1413,7 +1414,7 @@ describe('default-target dev parity', () => {
       origin: 'void.json#routing.redirects',
     },
   ];
-  const headerRules = [{ pattern: '/*', headers: [['x-test', '1']] as [string, string][] }];
+  const headerRules = [{ pattern: '/*', headers: [['x-test', '1']] as Array<[string, string]> }];
   const fallbackRules = [
     {
       source: '/docs/*',

@@ -18,8 +18,8 @@ function rule(
 
 describe('lintDuplicateSources', () => {
   it('emits no warning when all sources are unique', () => {
-    const warnings: string[] = [];
-    const rules: DevRedirectRule[] = [
+    const warnings: Array<string> = [];
+    const rules: Array<DevRedirectRule> = [
       rule('/docs/*', '_redirects:1'),
       rule('/api/*', 'void.json#routing.rewrites'),
       rule('/blog/*', 'void.json#routing.redirects', { status: 302 }),
@@ -32,15 +32,15 @@ describe('lintDuplicateSources', () => {
   });
 
   it('emits no warning for an empty or undefined list', () => {
-    const warnings: string[] = [];
+    const warnings: Array<string> = [];
     expect(lintDuplicateSources(undefined, 'x', (m) => warnings.push(m))).toBeUndefined();
     expect(lintDuplicateSources([], 'x', (m) => warnings.push(m))).toBeUndefined();
     expect(warnings).toEqual([]);
   });
 
   it('emits a single aggregated warning when _redirects and routing.rewrites share a source', () => {
-    const warnings: string[] = [];
-    const rules: DevRedirectRule[] = [
+    const warnings: Array<string> = [];
+    const rules: Array<DevRedirectRule> = [
       rule('/docs/*', '_redirects:12'),
       rule('/api/*', 'void.json#routing.redirects', { status: 302 }),
       rule('/docs/*', 'void.json#routing.rewrites'),
@@ -75,11 +75,11 @@ describe('lintDuplicateSources', () => {
     // one phase and a same-string source in the other phase will never both
     // land in the same list passed to lintDuplicateSources. Simulate that by
     // linting only the rewrites list; the fallbacks entry is absent.
-    const warnings: string[] = [];
-    const rewrites: DevRedirectRule[] = [
+    const warnings: Array<string> = [];
+    const rewrites: Array<DevRedirectRule> = [
       rule('/docs/*', 'void.json#routing.rewrites', { force: true }),
     ];
-    const fallbacks: DevRedirectRule[] = [
+    const fallbacks: Array<DevRedirectRule> = [
       rule('/docs/*', 'void.json#routing.fallbacks', { force: false }),
     ];
 
@@ -94,8 +94,8 @@ describe('lintDuplicateSources', () => {
   });
 
   it('aggregates multiple duplicate sources into one message', () => {
-    const warnings: string[] = [];
-    const rules: DevRedirectRule[] = [
+    const warnings: Array<string> = [];
+    const rules: Array<DevRedirectRule> = [
       rule('/docs/*', '_redirects:12'),
       rule('/docs/*', 'void.json#routing.rewrites'),
       rule('/api/*', 'void.json#routing.rewrites'),
@@ -115,8 +115,8 @@ describe('lintDuplicateSources', () => {
   });
 
   it('handles three+ occurrences of the same source with an Oxford-joined origin list', () => {
-    const warnings: string[] = [];
-    const rules: DevRedirectRule[] = [
+    const warnings: Array<string> = [];
+    const rules: Array<DevRedirectRule> = [
       rule('/docs/*', '_redirects:12'),
       rule('/docs/*', 'void.json#routing.redirects', { status: 302 }),
       rule('/docs/*', 'void.json#routing.rewrites'),
@@ -134,8 +134,8 @@ describe('lintDuplicateSources', () => {
   });
 
   it('falls back to <unknown> when a rule is missing an origin', () => {
-    const warnings: string[] = [];
-    const rules: DevRedirectRule[] = [
+    const warnings: Array<string> = [];
+    const rules: Array<DevRedirectRule> = [
       rule('/docs/*', '_redirects:12'),
       { source: '/docs/*', destination: '/en/docs/:splat', status: 200, force: true },
     ];

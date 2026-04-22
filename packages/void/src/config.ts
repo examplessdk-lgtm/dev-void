@@ -697,13 +697,13 @@ export function convertRedirectsConfig(
  */
 export function convertRewritesConfig(
   rewrites: Record<string, RewriteDestination> | undefined,
-): DevRedirectRule[] | undefined {
+): Array<DevRedirectRule> | undefined {
   if (!rewrites) {
     return undefined;
   }
 
   const origin = 'void.json#routing.rewrites';
-  const rules: DevRedirectRule[] = [];
+  const rules: Array<DevRedirectRule> = [];
   for (const [source, destination] of Object.entries(rewrites)) {
     rules.push({ source, destination, status: 200, force: true, origin });
   }
@@ -722,13 +722,13 @@ export function convertRewritesConfig(
  */
 export function convertFallbacksConfig(
   fallbacks: Record<string, RewriteDestination> | undefined,
-): DevRedirectRule[] | undefined {
+): Array<DevRedirectRule> | undefined {
   if (!fallbacks) {
     return undefined;
   }
 
   const origin = 'void.json#routing.fallbacks';
-  const rules: DevRedirectRule[] = [];
+  const rules: Array<DevRedirectRule> = [];
   for (const [source, destination] of Object.entries(fallbacks)) {
     rules.push({ source, destination, status: 200, force: false, origin });
   }

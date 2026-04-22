@@ -2499,7 +2499,7 @@ function emitApplyRoutingRules(
  * fields because the deploy manifest never transmits either to the dispatch
  * worker (phase is implied by which bucket the rule ships in).
  */
-function stripOriginForProd(rules: DevRedirectRule[]): DevRedirectRule[] {
+function stripOriginForProd(rules: Array<DevRedirectRule>): Array<DevRedirectRule> {
   return rules.map(({ origin: _origin, ...rest }) => rest);
 }
 
@@ -2561,8 +2561,8 @@ function compileRoutingRulesMiddleware(
  * compile order and emits every one of them.
  */
 function emitFallbackRulesCheck(
-  lines: string[],
-  rules: DevRedirectRule[],
+  lines: Array<string>,
+  rules: Array<DevRedirectRule>,
   dev: boolean,
   indent: string,
   nodeTarget: boolean,
