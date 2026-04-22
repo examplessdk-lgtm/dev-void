@@ -20,12 +20,7 @@ Define URL redirects in [`void.json`](../../reference/config) using the `routing
 ## Rules
 
 - **Source patterns** start with `/`. `*` matches any characters including `/`.
-- **Destinations** can be strings (defaults to `302` temporary redirect) or objects with `to` and optional `status`. Supported statuses:
-  - `301` — permanent, cacheable; browsers and search engines remember the new URL.
-  - `302` — default; temporary, method-preserving on modern clients (but historically rewritten to GET).
-  - `303` — "see other"; used after a `POST` to redirect the browser to a GET confirmation page (the post-redirect-get pattern). Always converts to GET.
-  - `307` — temporary, method-preserving by spec (the unambiguous counterpart to `302`).
-  - `308` — permanent, method-preserving (the unambiguous counterpart to `301`).
+- **Destinations** can be strings (default `302`) or objects with `to` and optional `status`. Supported statuses: `301`, `302`, `303`, `307`, `308`.
 - `:splat` in the destination is replaced with the portion of the path matched by `*` in the source pattern.
 - Destination query strings are merged into the `Location` header (the destination's parameters take precedence on per-key conflict). To drop the incoming query, write an explicit reset like `?`.
 - When multiple rules match, the **last match wins**.
