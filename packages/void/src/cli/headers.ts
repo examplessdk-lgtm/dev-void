@@ -5,22 +5,12 @@ import {
   convertHeadersConfig,
   convertRedirectsConfig,
   convertRewritesConfig,
+  countSplats,
   VALID_REDIRECT_STATUSES,
   type RoutingConfig,
 } from '../config';
 import { voidWarn } from '../log';
 import type { DevRedirectRule, HeaderRule } from './types';
-
-/** Count `*` occurrences without allocating a split. */
-function countSplats(source: string): number {
-  let n = 0;
-  for (let i = 0; i < source.length; i++) {
-    if (source[i] === '*') {
-      n++;
-    }
-  }
-  return n;
-}
 
 /**
  * Result of parsing a `_redirects` file.
