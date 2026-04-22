@@ -469,7 +469,10 @@ describe('compileRouteTable', () => {
     expect(code).toContain('__forwardWebSocketRequest');
   });
 
-  it('sets X-Void-Original-URL on c.rewrite re-dispatch (without overwriting existing)', () => {
+  it('wires c.rewrite, c.originalUrl, and c.isRewritten to a shared WeakMap', () => {
+    // Lightweight anchor that the rewrite middleware is emitted at all —
+    // behavioral coverage for the wrapper lives in `c.rewrite runtime wrapper`
+    // below (and in the `installVoidWrappers` mirror that drives those tests).
     const scan: ScanResult = {
       routes: [],
       middleware: [],
@@ -487,110 +490,12 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    // The c.rewrite wrapper must set X-Void-Original-URL for symmetry with the
-    // platform/edge layer (which sets it on static rewrites), but must not
-    // overwrite an existing value so multi-hop rewrites preserve the true
-    // original URL.
-    expect(code).toContain('if (!rewriteReq.headers.has("X-Void-Original-URL"))');
-    expect(code).toContain('rewriteReq.headers.set("X-Void-Original-URL", c.req.url)');
-  });
-
-  it('strips client-supplied X-Void-Original-URL at entry and before rewrite re-dispatch', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
-    const code = compileRouteTable(
-      scan,
-      '/routes',
-      '/middleware',
-      '/crons',
-      '/queues',
-      null,
-      testOptions,
-    );
-
-    // Entry-point strip: any request that is not an internal re-dispatch has
-    // its X-Void-Original-URL header removed before user code runs.
-    expect(code).toContain('if (!__rewrittenReqs.has(c.req.raw)) {');
-    expect(code).toContain('c.req.raw.headers.delete("X-Void-Original-URL")');
-
-    // Defense-in-depth: c.rewrite snapshots whether the current hop is an
-    // internal re-dispatch, and drops any X-Void-Original-URL on the cloned
-    // rewriteReq when it is not — so an immutable-headers runtime (where the
-    // entry-point delete silently failed) still can't propagate a spoof.
-    expect(code).toContain('const __isInternalRedispatch = __rewrittenReqs.has(c.req.raw);');
-    expect(code).toContain('if (!__isInternalRedispatch) {');
-    expect(code).toContain('rewriteReq.headers.delete("X-Void-Original-URL")');
-  });
-
-  it('attaches c.originalUrl and c.isRewritten as per-request helpers', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
-    const code = compileRouteTable(
-      scan,
-      '/routes',
-      '/middleware',
-      '/crons',
-      '/queues',
-      null,
-      testOptions,
-    );
-
-    // Per-instance assignment in the same middleware that attaches c.rewrite,
-    // so vanilla Hono Contexts (which never flow through this middleware) do
-    // not pick up the helpers at runtime — matching the env-scoped types.
-    expect(code).toContain(
-      'c.originalUrl = () => { const h = c.req.header("X-Void-Original-URL"); return h == null ? null : new URL(h); };',
-    );
-    expect(code).toContain('c.isRewritten = () => c.req.header("X-Void-Original-URL") != null;');
-    // Regression anchor for the fix that aligned c.isRewritten with the
-    // dispatch-worker contract: dispatch only sets X-Void-Original-URL, never
-    // X-Void-Rewritten, so reading the latter would falsely report false on
-    // every default-target static rewrite in production. Ensure the old header name is gone from
-    // the generated code entirely.
+    expect(code).toContain('const __voidOriginalUrls = new WeakMap();');
+    expect(code).toContain('c.rewrite = (path)');
+    expect(code).toContain('c.originalUrl = () =>');
+    expect(code).toContain('c.isRewritten = () =>');
+    // Dispatch only sets `X-Void-Original-URL`, never a legacy flag header.
     expect(code).not.toContain('X-Void-Rewritten');
-  });
-
-  it('c.rewrite splits path at "?" so queries do not get percent-encoded, and guards external destinations and missing executionCtx', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
-    const code = compileRouteTable(
-      scan,
-      '/routes',
-      '/middleware',
-      '/crons',
-      '/queues',
-      null,
-      testOptions,
-    );
-
-    // Guard: external / non-path-absolute destinations must fail loudly.
-    expect(code).toContain('c.rewrite() only accepts internal, path-absolute destinations');
-    // Protocol-relative (`//host/path`) would slip past a naive `startsWith("/")`
-    // check and silently proxy to another origin — the codegen rejects it.
-    expect(code).toContain('path.startsWith("//")');
-    expect(code).toContain('destination cannot begin with \\"//\\"');
-    // Split on first `?` to avoid `URL.pathname`'s percent-encoding of `?`.
-    expect(code).toContain('const __qIdx = path.indexOf("?");');
-    expect(code).toContain('rewriteUrl.pathname = __pathOnly;');
-    expect(code).toContain('rewriteUrl.search = __searchOnly;');
-    // `c.executionCtx` getter throws on node/bun/deno — guarded with try/catch.
-    expect(code).toContain('try { __execCtx = c.executionCtx; } catch {}');
-    expect(code).toContain('app.fetch(rewriteReq, c.env, __execCtx)');
   });
 
   it('wraps c.redirect so internal redirects merge the incoming query string', () => {
@@ -651,33 +556,33 @@ function mergeQueryIntoLocation(destination: string, search: string): string {
   return destination.slice(0, q) + '?' + dp.toString();
 }
 
-function installVoidWrappers(app: Hono, rewrittenReqs: WeakSet<Request>): void {
+/**
+ * Mirror of the `app.use` block emitted by `compileRouteTable` that attaches
+ * `c.rewrite` / `c.originalUrl` / `c.isRewritten`. Keyed on the
+ * `__voidOriginalUrls` WeakMap — identical shape to the codegen, so behavioral
+ * tests exercise the real contract (map entry ⇒ rewritten request).
+ */
+function installVoidWrappers(app: Hono, voidOriginalUrls: WeakMap<Request, URL>): void {
   app.use(async (c, next) => {
-    if (!rewrittenReqs.has(c.req.raw)) {
-      try {
-        c.req.raw.headers.delete('X-Void-Original-URL');
-      } catch {
-        /* ignore immutable-headers runtimes */
+    // Edge-dispatch case: migrate a `X-Void-Original-URL` header set by an
+    // outer dispatcher into the map exactly once per request.
+    if (!voidOriginalUrls.has(c.req.raw)) {
+      const h = c.req.raw.headers.get('X-Void-Original-URL');
+      if (h != null) {
+        try {
+          voidOriginalUrls.set(c.req.raw, new URL(h));
+        } catch {
+          /* malformed header → treat as non-rewritten */
+        }
       }
     }
-    const isInternalRedispatch = rewrittenReqs.has(c.req.raw);
     (c as any).rewrite = (path: string) => {
-      if (typeof path !== 'string' || !path.startsWith('/')) {
+      if (!path.startsWith('/') || path.startsWith('//')) {
         throw new Error(
-          'c.rewrite() only accepts internal, path-absolute destinations (starting with "/"); use fetch() for external URLs or c.redirect() for cross-origin redirects',
+          'c.rewrite() only accepts internal, path-absolute destinations — they must start with a single "/" (a leading "//" parses as protocol-relative and would proxy cross-origin); use fetch() for external URLs',
         );
       }
-      if (path.startsWith('//')) {
-        throw new Error(
-          'c.rewrite() destination cannot begin with "//" — that parses as a protocol-relative URL; use a single-slash path-absolute destination or fetch() for cross-origin requests',
-        );
-      }
-      // Split on the first `?` so queries aren't URL-encoded by the
-      // `URL.pathname` setter (which would produce `%3F`). Mirrors the
-      // codegen in compile.ts.
       const qIdx = path.indexOf('?');
-      // Mirror of the asset-extension guard emitted by compile.ts — strips
-      // query/fragment before matching so `/hero.png?v=2` still trips it.
       const hIdx = path.indexOf('#');
       const firstDelim = qIdx === -1 ? hIdx : hIdx === -1 ? qIdx : Math.min(qIdx, hIdx);
       const assetCheckPath = firstDelim === -1 ? path : path.slice(0, firstDelim);
@@ -694,22 +599,11 @@ function installVoidWrappers(app: Hono, rewrittenReqs: WeakSet<Request>): void {
       rewriteUrl.pathname = pathOnly;
       rewriteUrl.search = searchOnly;
       const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
-      if (!isInternalRedispatch) {
-        rewriteReq.headers.delete('X-Void-Original-URL');
-      }
-      if (!rewriteReq.headers.has('X-Void-Original-URL')) {
-        rewriteReq.headers.set('X-Void-Original-URL', c.req.url);
-      }
-      rewrittenReqs.add(rewriteReq);
-      // `c.executionCtx` throws in bare test envs; compile.ts forwards it
-      // unconditionally because Workers/Node targets always provide one.
-      let ctx: ExecutionContext | undefined;
-      try {
-        ctx = (c as any).executionCtx;
-      } catch {
-        ctx = undefined;
-      }
-      return app.fetch(rewriteReq, (c as any).env, ctx);
+      const prior = voidOriginalUrls.get(c.req.raw);
+      voidOriginalUrls.set(rewriteReq, prior ?? new URL(c.req.url));
+      // In bare test envs `c.executionCtx` throws; compile.ts now branches at
+      // compile time on target. The node-target branch omits the arg entirely.
+      return app.fetch(rewriteReq, (c as any).env);
     };
     const origRedirect = c.redirect.bind(c);
     (c as any).redirect = (location: string, status?: number) => {
@@ -719,11 +613,8 @@ function installVoidWrappers(app: Hono, rewrittenReqs: WeakSet<Request>): void {
       }
       return origRedirect(location, status as any);
     };
-    (c as any).originalUrl = () => {
-      const h = c.req.header('X-Void-Original-URL');
-      return h == null ? null : new URL(h);
-    };
-    (c as any).isRewritten = () => c.req.header('X-Void-Original-URL') != null;
+    (c as any).originalUrl = () => voidOriginalUrls.get(c.req.raw) ?? null;
+    (c as any).isRewritten = () => voidOriginalUrls.has(c.req.raw);
     await next();
   });
 }
@@ -731,7 +622,7 @@ function installVoidWrappers(app: Hono, rewrittenReqs: WeakSet<Request>): void {
 describe('c.redirect runtime wrapper', () => {
   it('preserves the original request query on internal redirects', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
     app.get('/old', (c) => c.redirect('/new', 302));
 
     const res = await app.fetch(new Request('http://localhost/old?x=1&y=2'));
@@ -742,7 +633,7 @@ describe('c.redirect runtime wrapper', () => {
 
   it("destination's explicit query wins over the incoming request query", async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
     app.get('/old', (c) => c.redirect('/new?foo=1', 302));
 
     const res = await app.fetch(new Request('http://localhost/old?foo=override&bar=2'));
@@ -757,7 +648,7 @@ describe('c.redirect runtime wrapper', () => {
 /**
  * Mirror of `compileRoutingRulesMiddleware` in compile.ts: evaluate static
  * rewrite/redirect rules pre-asset, but short-circuit when the request is an
- * internal re-dispatch (tracked via `__rewrittenReqs`). The guard is what
+ * internal re-dispatch (tracked via `__voidOriginalUrls`). The guard is what
  * prevents single-hop rewrite loops — even if the destination itself matches a
  * rewrite rule, the rule table is skipped on the replayed request.
  *
@@ -766,11 +657,11 @@ describe('c.redirect runtime wrapper', () => {
  */
 function installRoutingRulesMiddleware(
   app: Hono,
-  rewrittenReqs: WeakSet<Request>,
+  voidOriginalUrls: WeakMap<Request, URL>,
   rules: Array<{ source: string; destination: string; status: number; force?: boolean }>,
 ): void {
   app.use('*', async (c, next) => {
-    if (rewrittenReqs.has(c.req.raw)) {
+    if (voidOriginalUrls.has(c.req.raw)) {
       return next();
     }
     const pathname = new URL(c.req.url).pathname;
@@ -791,17 +682,9 @@ function installRoutingRulesMiddleware(
       const rewriteUrl = new URL(c.req.url);
       rewriteUrl.pathname = matched.destination;
       const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
-      if (!rewriteReq.headers.has('X-Void-Original-URL')) {
-        rewriteReq.headers.set('X-Void-Original-URL', c.req.url);
-      }
-      rewrittenReqs.add(rewriteReq);
-      let ctx: ExecutionContext | undefined;
-      try {
-        ctx = (c as any).executionCtx;
-      } catch {
-        ctx = undefined;
-      }
-      return app.fetch(rewriteReq, (c as any).env, ctx);
+      const prior = voidOriginalUrls.get(c.req.raw);
+      voidOriginalUrls.set(rewriteReq, prior ?? new URL(c.req.url));
+      return app.fetch(rewriteReq, (c as any).env);
     }
     return c.redirect(matched.destination, matched.status as any);
   });
@@ -810,7 +693,7 @@ function installRoutingRulesMiddleware(
 describe('c.rewrite runtime wrapper', () => {
   it('re-dispatches to the rewritten path and exposes c.originalUrl / c.isRewritten', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     app.get('/external', (c) => (c as any).rewrite('/internal'));
     app.get('/internal', (c) => {
@@ -836,20 +719,15 @@ describe('c.rewrite runtime wrapper', () => {
   });
 
   it('c.isRewritten() is true when dispatch sets X-Void-Original-URL (platform edge rewrite)', async () => {
-    // Regression anchor: in production on the default target, Void's dispatch worker applies static
-    // routing.rewrites / fallbacks by mutating the pathname and setting only
-    // X-Void-Original-URL on the forwarded request — it does NOT set any
-    // rewritten-specific flag header. c.isRewritten() must read presence of
-    // X-Void-Original-URL so it returns true in this scenario too, matching
-    // docs/guide/edge/rewrites.md and docs/reference/api.md.
-    //
-    // On the default target, incoming `c.req.raw.headers` are immutable, so the entry-point
-    // anti-spoof strip (`headers.delete("X-Void-Original-URL")`) throws and
-    // is silently swallowed by the try/catch in compile.ts — which is what
-    // lets dispatch-provided headers reach the handler. We simulate that by
-    // making the incoming request's `headers.delete` throw.
+    // Regression anchor: in production on the default target, Void's dispatch
+    // worker applies static routing.rewrites / fallbacks by mutating the
+    // pathname and setting `X-Void-Original-URL` on the forwarded request.
+    // The worker's entry middleware migrates that header into the
+    // `__voidOriginalUrls` WeakMap once per request, so both `c.originalUrl()`
+    // and `c.isRewritten()` report the pre-rewrite URL without reading the
+    // header every call.
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     app.get('/en/docs', (c) => {
       return new Response('docs-body', {
@@ -860,22 +738,9 @@ describe('c.rewrite runtime wrapper', () => {
       });
     });
 
-    // Simulate a dispatch-forwarded request: the pathname has already been
-    // rewritten and X-Void-Original-URL is set. No X-Void-Rewritten header,
-    // no entry in rewrittenReqs (dispatch is out-of-process from the worker).
     const dispatchForwarded = new Request('http://localhost/en/docs', {
       headers: { 'X-Void-Original-URL': 'http://localhost/docs' },
     });
-    // Make incoming headers behave as immutable (matches the default target's
-    // production semantics for incoming Requests).
-    const originalDelete = dispatchForwarded.headers.delete.bind(dispatchForwarded.headers);
-    dispatchForwarded.headers.delete = (name: string) => {
-      if (name.toLowerCase() === 'x-void-original-url') {
-        throw new TypeError('immutable headers');
-      }
-      return originalDelete(name);
-    };
-
     const res = await app.fetch(dispatchForwarded);
 
     expect(res.status).toBe(200);
@@ -885,18 +750,18 @@ describe('c.rewrite runtime wrapper', () => {
   });
 
   it('single-hop loop guard: re-dispatched request skips the static rule table', async () => {
-    // Regression anchor for the `__rewrittenReqs` WeakSet guard in compile.ts.
-    // A middleware calls `c.rewrite('/a')`, and `/a` itself is also a rewrite
-    // source that (without the guard) would re-fire endlessly. Counter
-    // tracks how many times the routing rule table *matches* a request so the
-    // test fails loudly if the guard regresses.
+    // Regression anchor for the `__voidOriginalUrls` WeakMap guard in
+    // compile.ts. A middleware calls `c.rewrite('/a')`, and `/a` itself is
+    // also a rewrite source that (without the guard) would re-fire endlessly.
+    // Counter tracks how many times the routing rule table *matches* a request
+    // so the test fails loudly if the guard regresses.
     const app = new Hono();
-    const rewrittenReqs = new WeakSet<Request>();
+    const voidOriginalUrls = new WeakMap<Request, URL>();
     let ruleMatches = 0;
 
-    installVoidWrappers(app, rewrittenReqs);
+    installVoidWrappers(app, voidOriginalUrls);
     app.use('*', async (c, next) => {
-      if (rewrittenReqs.has(c.req.raw)) {
+      if (voidOriginalUrls.has(c.req.raw)) {
         return next();
       }
       const pathname = new URL(c.req.url).pathname;
@@ -907,11 +772,8 @@ describe('c.rewrite runtime wrapper', () => {
         const rewriteUrl = new URL(c.req.url);
         rewriteUrl.pathname = '/a';
         const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
-        if (!rewriteReq.headers.has('X-Void-Original-URL')) {
-          rewriteReq.headers.set('X-Void-Original-URL', c.req.url);
-        }
-        rewrittenReqs.add(rewriteReq);
-        return app.fetch(rewriteReq, (c as any).env, undefined);
+        voidOriginalUrls.set(rewriteReq, new URL(c.req.url));
+        return app.fetch(rewriteReq, (c as any).env);
       }
       return next();
     });
@@ -968,9 +830,9 @@ describe('c.rewrite runtime wrapper', () => {
     // bucket is never consulted because the request was resolved before the
     // asset-miss phase would run.
     const app = new Hono();
-    const rewrittenReqs = new WeakSet<Request>();
-    installVoidWrappers(app, rewrittenReqs);
-    installRoutingRulesMiddleware(app, rewrittenReqs, preAsset);
+    const voidOriginalUrls = new WeakMap<Request, URL>();
+    installVoidWrappers(app, voidOriginalUrls);
+    installRoutingRulesMiddleware(app, voidOriginalUrls, preAsset);
 
     let fallbackFired = false;
     // Emulate the post-asset fallback check that would normally run on 404.
@@ -1001,7 +863,7 @@ describe('c.rewrite runtime wrapper', () => {
     // for the re-dispatched one), and `c.isRewritten()` lets users skip
     // side-effectful work on the replay.
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     let invocations = 0;
     const observed: boolean[] = [];
@@ -1032,8 +894,8 @@ describe('c.rewrite runtime wrapper', () => {
     // still run twice (once per dispatch) and both URLs — the original and
     // the rewritten — must be observable from the appropriate context APIs.
     const app = new Hono();
-    const rewrittenReqs = new WeakSet<Request>();
-    installVoidWrappers(app, rewrittenReqs);
+    const voidOriginalUrls = new WeakMap<Request, URL>();
+    installVoidWrappers(app, voidOriginalUrls);
 
     let invocations = 0;
     const observedReqUrls: string[] = [];
@@ -1048,7 +910,7 @@ describe('c.rewrite runtime wrapper', () => {
     // Fallback rule: /missing/* rewrites to /spa-shell on asset-miss.
     const fallbackRules = [{ source: '/missing/*', destination: '/spa-shell', status: 200 }];
     app.notFound((c) => {
-      if (rewrittenReqs.has(c.req.raw)) {
+      if (voidOriginalUrls.has(c.req.raw)) {
         return c.text('not-found', 404);
       }
       const pathname = new URL(c.req.url).pathname;
@@ -1083,7 +945,7 @@ describe('c.rewrite runtime wrapper', () => {
     // and the query is lost. The wrapper must split on the first `?` and set
     // `pathname` + `search` separately.
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     app.get('/from', (c) => (c as any).rewrite('/page?x=1'));
     app.get('/page', (c) => {
@@ -1106,7 +968,7 @@ describe('c.rewrite runtime wrapper', () => {
     // silently turn into a proxy — fail at the call site so users reach for
     // `fetch()` instead.
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1131,7 +993,7 @@ describe('c.rewrite runtime wrapper', () => {
     // fail distinct from the generic path-absolute error so users get a
     // targeted message pointing at the `//` mistake.
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1154,7 +1016,7 @@ describe('c.rewrite runtime wrapper', () => {
     // Regression companion to the `//` rejection — the guard is a prefix
     // check, so a `/internal` path must keep dispatching through the router.
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     app.get('/from', (c) => (c as any).rewrite('/internal'));
     app.get('/internal', (c) => c.text('internal-handler', 200));
@@ -1170,7 +1032,7 @@ describe('c.rewrite runtime wrapper', () => {
     // The test wrapper replays the same try/catch; this test drives the path
     // end-to-end by making `executionCtx` throw on access.
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     app.use('*', async (c, next) => {
       Object.defineProperty(c, 'executionCtx', {
@@ -1190,18 +1052,20 @@ describe('c.rewrite runtime wrapper', () => {
     expect(await res.text()).toBe('to-handler');
   });
 
-  it('c.rewrite external-URL rejection pins the exact error message', async () => {
-    // Pin the message text verbatim so a copy tweak in compile.ts surfaces
-    // as a failing test. The impl throws a plain `Error` (not `TypeError`) —
-    // matches the wrapper in this file and the codegen at
-    // packages/void/src/router/compile.ts:806-809.
+  it.each([
+    ['external URL', 'http://evil.com'],
+    ['protocol-relative', '//evil.com/path'],
+  ])('c.rewrite rejects %s destinations with a clear error', async (_label, destination) => {
+    // Both external (`http://…`) and protocol-relative (`//host/x`) are caught
+    // by the single combined guard in compile.ts. Assert the key phrase rather
+    // than the verbatim sentence so small copy tweaks don't break the test.
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     let caught: unknown;
     app.get('/from', (c) => {
       try {
-        (c as any).rewrite('http://evil.com');
+        (c as any).rewrite(destination);
       } catch (err) {
         caught = err;
       }
@@ -1211,40 +1075,13 @@ describe('c.rewrite runtime wrapper', () => {
     const res = await app.fetch(new Request('http://localhost/from'));
     expect(res.status).toBe(200);
     expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).message).toBe(
-      'c.rewrite() only accepts internal, path-absolute destinations (starting with "/"); use fetch() for external URLs or c.redirect() for cross-origin redirects',
-    );
-  });
-
-  it('c.rewrite protocol-relative rejection pins the exact error message', async () => {
-    // Companion to the external-URL pin: `//host/x` passes the naive
-    // `startsWith("/")` check but parses as a protocol-relative URL, so the
-    // wrapper raises a targeted second error. Pin the text so the `//` vs
-    // `/` distinction doesn't get rephrased away. Matches compile.ts:815-818.
-    const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
-
-    let caught: unknown;
-    app.get('/from', (c) => {
-      try {
-        (c as any).rewrite('//evil.com/path');
-      } catch (err) {
-        caught = err;
-      }
-      return c.text('handled', 200);
-    });
-
-    const res = await app.fetch(new Request('http://localhost/from'));
-    expect(res.status).toBe(200);
-    expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).message).toBe(
-      'c.rewrite() destination cannot begin with "//" — that parses as a protocol-relative URL; use a single-slash path-absolute destination or fetch() for cross-origin requests',
-    );
+    expect((caught as Error).message).toContain('path-absolute');
+    expect((caught as Error).message).toContain('use fetch()');
   });
 
   it('c.rewrite to a static asset path throws VoidAssetRewriteError', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1269,7 +1106,7 @@ describe('c.rewrite runtime wrapper', () => {
 
   it('c.rewrite to an API .json path throws (routes should be returned, not literal .json)', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1288,7 +1125,7 @@ describe('c.rewrite runtime wrapper', () => {
 
   it('c.rewrite asset check is case-insensitive', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1306,7 +1143,7 @@ describe('c.rewrite runtime wrapper', () => {
 
   it('c.rewrite to a .html path does NOT throw (ambiguous — may be a real route)', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
     app.get('/from', (c) => (c as any).rewrite('/about.html'));
     app.get('/about.html', (c) => c.text('about-html', 200));
 
@@ -1317,7 +1154,7 @@ describe('c.rewrite runtime wrapper', () => {
 
   it('c.rewrite to a path without an extension does NOT throw', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
     app.get('/from', (c) => (c as any).rewrite('/users/123'));
     app.get('/users/:id', (c) => c.text(`user ${c.req.param('id')}`, 200));
 
@@ -1328,7 +1165,7 @@ describe('c.rewrite runtime wrapper', () => {
 
   it('c.rewrite to an asset path with a query string still throws', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1358,7 +1195,7 @@ describe('c.rewrite runtime wrapper', () => {
     // blows past any reasonable depth), pinning the gap. If a max-depth
     // guard is ever added upstream, this test is the signal to revisit it.
     const app = new Hono();
-    installVoidWrappers(app, new WeakSet<Request>());
+    installVoidWrappers(app, new WeakMap<Request, URL>());
 
     const MAX_HOPS = 50;
     let hops = 0;
@@ -1504,7 +1341,7 @@ describe('X-Void-Routing dev trace header', () => {
     expect(code).toContain('"origin":"void.json#routing.fallbacks"');
     expect(code).toContain('app.notFound(async (c) => {');
     // Guard against re-dispatched loops (same invariant as the pre-asset phase).
-    expect(code).toContain('if (!__rewrittenReqs.has(c.req.raw))');
+    expect(code).toContain('if (!__voidOriginalUrls.has(c.req.raw))');
   });
 
   it('strips fallback origin metadata in production builds', () => {

@@ -764,9 +764,15 @@ export function compileRouteTable(
 
   lines.push(`const app = new Hono();`);
   lines.push(`export const requestContext = new AsyncLocalStorage();`);
-  // WeakSet so entries are collected once the Request is GC'd — and Request
-  // objects are short-lived per invocation, so the set can't accumulate.
-  lines.push('const __rewrittenReqs = new WeakSet();');
+  // WeakMap<Request, URL> — keyed on the Request the user handler sees
+  // (`c.req.raw`), value is the pre-rewrite URL. Single source of truth for
+  // `c.originalUrl` / `c.isRewritten` and the "already re-dispatched, skip
+  // routing rules" short-circuit. Populated by (a) in-worker `c.rewrite` on
+  // the new `rewriteReq`, (b) the static-rewrite middleware on re-dispatch,
+  // and (c) the entry middleware below, which migrates `X-Void-Original-URL`
+  // set by an outer edge dispatcher into the map once per request. WeakMap
+  // so entries collect when the Request is GC'd.
+  lines.push('const __voidOriginalUrls = new WeakMap();');
   // Known static-asset extensions — `c.rewrite()` into one of these re-enters
   // the Hono router and 404s (static asset handlers run in front of the
   // worker, not inside it). `.html` is deliberately excluded: it's ambiguous
@@ -800,39 +806,30 @@ export function compileRouteTable(
   // Also wrap `c.redirect` so dynamic redirects preserve the incoming query
   // string the same way static `_redirects` entries do.
   lines.push('app.use(async (c, next) => {');
-  // Strip any client-supplied `X-Void-Original-URL` before it can reach user
-  // handlers or propagate via `c.rewrite`. Internal re-dispatches (tracked in
-  // `__rewrittenReqs`) legitimately carry this header — we set it ourselves
-  // on the previous hop — so those pass through untouched. This prevents
-  // spoofing via a forged header on the original client request.
-  lines.push('  if (!__rewrittenReqs.has(c.req.raw)) {');
-  lines.push('    try { c.req.raw.headers.delete("X-Void-Original-URL"); } catch {}');
+  // Migrate `X-Void-Original-URL` set by an outer edge dispatcher into the
+  // WeakMap exactly once per request. In-worker `c.rewrite` / static-rewrite
+  // re-dispatches populate the map directly on the `rewriteReq`, so they
+  // bypass this block — only first-hop requests with an edge-set header fall
+  // through here. A malformed header just skips the migration; treating the
+  // request as non-rewritten is the safe fallback.
+  lines.push('  if (!__voidOriginalUrls.has(c.req.raw)) {');
+  lines.push('    const __h = c.req.raw.headers.get("X-Void-Original-URL");');
+  lines.push('    if (__h != null) {');
+  lines.push('      try { __voidOriginalUrls.set(c.req.raw, new URL(__h)); } catch {}');
+  lines.push('    }');
   lines.push('  }');
-  lines.push('  const __isInternalRedispatch = __rewrittenReqs.has(c.req.raw);');
   lines.push('  c.rewrite = (path) => {');
-  // Guard against external / protocol-absolute destinations. `c.rewrite` is
-  // strictly an in-worker re-dispatch — allowing an absolute URL here would
-  // silently turn into a proxy (or, worse, exfiltrate the user's request to
-  // whatever host is on the other side). Fail loudly at the call site so the
-  // caller reaches for `fetch()` or `c.redirect()` instead.
-  lines.push('    if (typeof path !== "string" || !path.startsWith("/")) {');
+  // `path: RewriteDestination` is typed to path-absolute strings, but a
+  // leading `//` parses as a protocol-relative URL (`//host/path` →
+  // `https://host/path`) and would silently turn the re-dispatch into a
+  // cross-origin proxy. Combine both checks in one condition.
+  lines.push('    if (!path.startsWith("/") || path.startsWith("//")) {');
   lines.push(
-    '      throw new Error("c.rewrite() only accepts internal, path-absolute destinations (starting with \\"/\\"); use fetch() for external URLs or c.redirect() for cross-origin redirects");',
+    '      throw new Error("c.rewrite() only accepts internal, path-absolute destinations — they must start with a single \\"/\\" (a leading \\"//\\" parses as protocol-relative and would proxy cross-origin); use fetch() for external URLs");',
   );
   lines.push('    }');
-  // A leading `//` is path-absolute by the naive `startsWith("/")` check but
-  // parses as a protocol-relative URL (`//host/path`) — `new URL("//evil/x",
-  // base)` resolves to `https://evil/x`, silently turning an in-worker rewrite
-  // into a cross-origin proxy. Reject at the call site.
-  lines.push('    if (path.startsWith("//")) {');
-  lines.push(
-    '      throw new Error("c.rewrite() destination cannot begin with \\"//\\" — that parses as a protocol-relative URL; use a single-slash path-absolute destination or fetch() for cross-origin requests");',
-  );
-  lines.push('    }');
-  // `URL.pathname` setter percent-encodes `?`, so splitting path into
-  // pathname + search keeps query strings intact when callers pass e.g.
-  // `"/page?x=1"`. The resulting URL is always same-origin because the guard
-  // above rejects anything that doesn't start with `/`.
+  // `URL.pathname` setter percent-encodes `?`, so split path into pathname +
+  // search to keep query strings intact when callers pass `"/page?x=1"`.
   lines.push('    const __qIdx = path.indexOf("?");');
   // Reject re-dispatches into static asset paths — those handlers live in
   // front of the worker, so `app.fetch(rewriteReq)` would match nothing and
@@ -854,27 +851,19 @@ export function compileRouteTable(
   lines.push('    rewriteUrl.pathname = __pathOnly;');
   lines.push('    rewriteUrl.search = __searchOnly;');
   lines.push('    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
-  // Defense-in-depth: if the entry-point strip above failed (immutable headers
-  // on some runtimes) AND this is not an internal re-dispatch, the cloned
-  // `rewriteReq` still carries the client-supplied `X-Void-Original-URL`.
-  // Drop it here so we always overwrite with the true pre-rewrite URL below.
-  lines.push('    if (!__isInternalRedispatch) {');
-  lines.push('      rewriteReq.headers.delete("X-Void-Original-URL");');
-  lines.push('    }');
-  // Preserve the earliest original URL across multi-hop rewrites: if this
-  // hop's incoming request already carries `X-Void-Original-URL`, it was set
-  // by a prior internal hop (client-supplied values are stripped), so keep
-  // it. Otherwise record the true pre-rewrite URL.
-  lines.push('    if (!rewriteReq.headers.has("X-Void-Original-URL")) {');
-  lines.push('      rewriteReq.headers.set("X-Void-Original-URL", c.req.url);');
-  lines.push('    }');
-  lines.push('    __rewrittenReqs.add(rewriteReq);');
-  // Node/Bun/Deno targets don't populate `c.executionCtx` — Hono's getter
-  // throws when accessed. Swallow the throw so `c.rewrite` works on every
-  // target; on the default target the real ExecutionContext flows through.
-  lines.push('    let __execCtx;');
-  lines.push('    try { __execCtx = c.executionCtx; } catch {}');
-  lines.push('    const __rewritePromise = app.fetch(rewriteReq, c.env, __execCtx);');
+  // Preserve the earliest original URL across multi-hop rewrites: inherit
+  // whatever the current hop was rewritten from (or record this hop's URL
+  // if it's the first rewrite).
+  lines.push('    const __prior = __voidOriginalUrls.get(c.req.raw);');
+  lines.push('    __voidOriginalUrls.set(rewriteReq, __prior ?? new URL(c.req.url));');
+  // `c.executionCtx` is only populated on the default Cloudflare target;
+  // Hono's getter throws on node/bun/deno. Branch at compile time so we
+  // don't need a runtime try/catch that could swallow unrelated errors.
+  if (options.nodeTarget) {
+    lines.push('    const __rewritePromise = app.fetch(rewriteReq, c.env);');
+  } else {
+    lines.push('    const __rewritePromise = app.fetch(rewriteReq, c.env, c.executionCtx);');
+  }
   lines.push('    if (!__VOID_DEV_ROUTING) return __rewritePromise;');
   lines.push(
     '    return __rewritePromise.then((res) => __voidAnnotateRouting(res, "c.rewrite \\u2192 " + path + " (middleware)"));',
@@ -888,13 +877,9 @@ export function compileRouteTable(
   lines.push('    }');
   lines.push('    return __origRedirect(location, status);');
   lines.push('  };');
-  // Read helpers for rewrite metadata. Defined per-instance so they only
-  // exist on Void-managed contexts; vanilla Hono Contexts in the same dep
-  // graph won't get them at runtime, matching the env-scoped type.
-  lines.push(
-    '  c.originalUrl = () => { const h = c.req.header("X-Void-Original-URL"); return h == null ? null : new URL(h); };',
-  );
-  lines.push('  c.isRewritten = () => c.req.header("X-Void-Original-URL") != null;');
+  // Read helpers for rewrite metadata — single source is the WeakMap.
+  lines.push('  c.originalUrl = () => __voidOriginalUrls.get(c.req.raw) ?? null;');
+  lines.push('  c.isRewritten = () => __voidOriginalUrls.has(c.req.raw);');
   lines.push('  await next();');
   lines.push('});');
   lines.push('');
@@ -918,7 +903,12 @@ export function compileRouteTable(
   // so `vite dev` mirrors deployed behavior locally.
   const emitEdgeRules = options.nodeTarget || options.dev === true;
   if (emitEdgeRules && options.redirectRules?.length) {
-    compileRoutingRulesMiddleware(lines, options.redirectRules, options.dev === true);
+    compileRoutingRulesMiddleware(
+      lines,
+      options.redirectRules,
+      options.dev === true,
+      options.nodeTarget === true,
+    );
   }
   if (emitEdgeRules && options.headerRules?.length) {
     compileHeaderMiddleware(lines, options.headerRules);
@@ -1181,7 +1171,13 @@ window.__vite_plugin_react_preamble_installed__ = true;
       // the flow below tries assets first, see the non-SSR branch for the
       // standalone hook and the `else` arm of this `shouldHandleSsrRequest`
       // for the SSR-path assets-then-fallback check.)
-      emitFallbackRulesCheck(lines, options.fallbackRules, options.dev === true, '  ');
+      emitFallbackRulesCheck(
+        lines,
+        options.fallbackRules,
+        options.dev === true,
+        '  ',
+        options.nodeTarget === true,
+      );
     }
     lines.push(`  if (!shouldHandleSsrRequest(c)) {`);
     if (!options.nodeTarget && options.dev === true && options.fallbackRules?.length) {
@@ -1192,7 +1188,8 @@ window.__vite_plugin_react_preamble_installed__ = true;
       // the platform dispatch worker own the fallback phase.
       lines.push(`    const __assetRes = await fetchFromAssets(c);`);
       lines.push(`    if (__assetRes.status !== 404) return __assetRes;`);
-      emitFallbackRulesCheck(lines, options.fallbackRules, options.dev === true, '    ');
+      // This branch is gated on `!options.nodeTarget`, so pass `false`.
+      emitFallbackRulesCheck(lines, options.fallbackRules, options.dev === true, '    ', false);
       lines.push(`    return __assetRes;`);
     } else {
       lines.push(`    return fetchFromAssets(c);`);
@@ -1228,7 +1225,13 @@ window.__vite_plugin_react_preamble_installed__ = true;
       lines.push(`    if (__assetRes.status !== 404) return __assetRes;`);
       lines.push(`  }`);
     }
-    emitFallbackRulesCheck(lines, options.fallbackRules, options.dev === true, '  ');
+    emitFallbackRulesCheck(
+      lines,
+      options.fallbackRules,
+      options.dev === true,
+      '  ',
+      options.nodeTarget === true,
+    );
     lines.push(`  return new Response("Not Found", { status: 404 });`);
     lines.push(`});`);
     lines.push('');
@@ -1945,7 +1948,13 @@ function compilePageRoutes(
   // emits it in dev, since production relies on the platform dispatch
   // worker to apply fallbacks before assets are even served.
   if ((options.nodeTarget || options.dev === true) && options.fallbackRules?.length) {
-    emitFallbackRulesCheck(lines, options.fallbackRules, options.dev === true, '  ');
+    emitFallbackRulesCheck(
+      lines,
+      options.fallbackRules,
+      options.dev === true,
+      '  ',
+      options.nodeTarget === true,
+    );
   }
   // Dot-prefixed path segments (/.well-known/, /.env, /.git/) are never pages — 404
   lines.push(`  if (path.includes("/.")) {`);
@@ -2420,7 +2429,12 @@ function ensureMergeQueryHelperEmitted(lines: Array<string>): void {
  * Used by both the pre-pipeline routing middleware and the post-pipeline
  * fallback (notFound) middleware.
  */
-function emitApplyRoutingRules(lines: Array<string>, rulesVar: string, indent: string): void {
+function emitApplyRoutingRules(
+  lines: Array<string>,
+  rulesVar: string,
+  indent: string,
+  nodeTarget: boolean,
+): void {
   lines.push(`${indent}let matched;`);
   lines.push(`${indent}for (const rule of ${rulesVar}) {`);
   lines.push(`${indent}  const { regex } = __compilePattern(rule.source);`);
@@ -2442,19 +2456,19 @@ function emitApplyRoutingRules(lines: Array<string>, rulesVar: string, indent: s
   lines.push(`${indent}    rewriteUrl.pathname = __pathOnly;`);
   lines.push(`${indent}    if (__searchOnly) rewriteUrl.search = __searchOnly;`);
   lines.push(`${indent}    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);`);
-  // Set `X-Void-Original-URL` so re-dispatched handlers can observe the
-  // pre-rewrite URL via `c.originalUrl()` / `c.isRewritten()`. Matches what
-  // the dispatch worker does for default-target static rewrites. The c.rewrite
-  // middleware preserves this header when `__rewrittenReqs.has` is true.
-  lines.push(`${indent}    if (!rewriteReq.headers.has("X-Void-Original-URL")) {`);
-  lines.push(`${indent}      rewriteReq.headers.set("X-Void-Original-URL", c.req.url);`);
-  lines.push(`${indent}    }`);
-  lines.push(`${indent}    __rewrittenReqs.add(rewriteReq);`);
-  // See the `c.rewrite` helper for the executionCtx rationale — Hono's
-  // getter throws on `node`/`bun`/`deno` targets, so guard access.
-  lines.push(`${indent}    let __execCtx;`);
-  lines.push(`${indent}    try { __execCtx = c.executionCtx; } catch {}`);
-  lines.push(`${indent}    const __r = await app.fetch(rewriteReq, c.env, __execCtx);`);
+  // Seed the WeakMap so re-dispatched handlers see the pre-rewrite URL via
+  // `c.originalUrl()` / `c.isRewritten()`. Inherit a prior hop's value if
+  // one exists (multi-hop via `c.rewrite` from user middleware that wraps
+  // a static rewrite).
+  lines.push(`${indent}    const __prior = __voidOriginalUrls.get(c.req.raw);`);
+  lines.push(`${indent}    __voidOriginalUrls.set(rewriteReq, __prior ?? new URL(c.req.url));`);
+  // Branch at compile time on target — Hono's `c.executionCtx` getter throws
+  // on node/bun/deno targets where the ExecutionContext is absent.
+  if (nodeTarget) {
+    lines.push(`${indent}    const __r = await app.fetch(rewriteReq, c.env);`);
+  } else {
+    lines.push(`${indent}    const __r = await app.fetch(rewriteReq, c.env, c.executionCtx);`);
+  }
   lines.push(`${indent}    if (!__VOID_DEV_ROUTING) return __r;`);
   lines.push(`${indent}    const __kind = matched.rule.force === true ? "rewrite" : "fallback";`);
   lines.push(
@@ -2503,6 +2517,7 @@ function compileRoutingRulesMiddleware(
   lines: Array<string>,
   rules: Array<DevRedirectRule>,
   dev: boolean,
+  nodeTarget: boolean,
 ): void {
   ensureCompilePatternEmitted(lines);
   lines.push('// Routing rules: redirects + rewrites (applied before route handlers)');
@@ -2511,9 +2526,9 @@ function compileRoutingRulesMiddleware(
   // Re-dispatched rewrites short-circuit: the outer caller (either a static
   // rule or a user `c.rewrite()`) owns annotating the final response, so
   // we intentionally don't set a trace header here.
-  lines.push('  if (__rewrittenReqs.has(c.req.raw)) return next();');
+  lines.push('  if (__voidOriginalUrls.has(c.req.raw)) return next();');
   lines.push('  const pathname = new URL(c.req.url).pathname;');
-  emitApplyRoutingRules(lines, '__routingRules', '  ');
+  emitApplyRoutingRules(lines, '__routingRules', '  ', nodeTarget);
   if (dev) {
     // No static rule matched — let the pipeline run, then annotate the final
     // response with a default pass-through trace (unless downstream already
@@ -2540,7 +2555,7 @@ function compileRoutingRulesMiddleware(
  * body when no rule matches.
  *
  * Indent `indent` so the emitted statements nest cleanly within the caller's
- * block. Expects `__matchPattern`, `__rewrittenReqs`, `__mergeQueryIntoLocation`,
+ * block. Expects `__matchPattern`, `__voidOriginalUrls`, `__mergeQueryIntoLocation`,
  * `__substituteParams`, and `__voidAnnotateRouting` to already be in scope —
  * which they are, because `compileRoutingRulesMiddleware` runs earlier in
  * compile order and emits every one of them.
@@ -2550,6 +2565,7 @@ function emitFallbackRulesCheck(
   rules: DevRedirectRule[],
   dev: boolean,
   indent: string,
+  nodeTarget: boolean,
 ): void {
   ensureCompilePatternEmitted(lines);
   // Emit the rule table once; reference from the notFound body. The table is
@@ -2563,9 +2579,9 @@ function emitFallbackRulesCheck(
     );
     lines.push('');
   }
-  lines.push(`${indent}if (!__rewrittenReqs.has(c.req.raw)) {`);
+  lines.push(`${indent}if (!__voidOriginalUrls.has(c.req.raw)) {`);
   lines.push(`${indent}  const pathname = new URL(c.req.url).pathname;`);
-  emitApplyRoutingRules(lines, '__fallbackRules', `${indent}  `);
+  emitApplyRoutingRules(lines, '__fallbackRules', `${indent}  `, nodeTarget);
   lines.push(`${indent}}`);
 }
 

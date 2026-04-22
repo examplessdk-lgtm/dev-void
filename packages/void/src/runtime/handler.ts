@@ -1,4 +1,4 @@
-import type { Context, Env, Input, MiddlewareHandler } from 'hono';
+import type { Context, Env, MiddlewareHandler } from 'hono';
 import type { RewriteDestination } from 'void/routes';
 import type { HeadDescriptor } from '../pages/head';
 import type { AuthSession, AuthUser } from './auth';
@@ -57,22 +57,8 @@ export interface CloudEnv extends Env {
   Variables: CloudContextVariables;
 }
 
-/**
- * Env-scoped helper: resolves to `T` only when the Context's `E` is exactly
- * `CloudEnv` (the env produced by `defineHandler`/`defineMiddleware`). For
- * vanilla Hono contexts in the same compilation unit (sub-apps, third-party
- * middleware) `E` is something else and these properties resolve to `never`,
- * so calling them is a type error rather than a runtime `TypeError`.
- *
- * The `0 extends 1 & E` check guards the `E = any` default case, which would
- * otherwise distribute through the conditional and resolve to the function
- * type — meaning vanilla Hono code with no explicit env annotation would
- * still see Void's helpers as available.
- */
-type _CloudOnly<E, T> = 0 extends 1 & E ? never : E extends CloudEnv ? T : never;
-
 declare module 'hono' {
-  interface Context<E extends Env = any, P extends string = any, I extends Input = {}> {
+  interface Context {
     /**
      * Rewrite the request to a different internal path without changing the browser URL.
      *
@@ -97,13 +83,11 @@ declare module 'hono' {
      * (e.g. `` `/users/${id}` ``) continue to work. When `.void/routes.d.ts` has not
      * been generated yet, `RouteMap` is empty and this is equivalent to `string`.
      */
-    rewrite: _CloudOnly<E, (path: RewriteDestination) => Promise<Response>>;
+    rewrite: (path: RewriteDestination) => Promise<Response>;
 
     /**
-     * Method that returns the URL the client
-     * actually requested — the pre-rewrite URL as a `URL` object, recorded
-     * from the `X-Void-Original-URL` header — or `null` when the current
-     * request was not rewritten.
+     * Returns the URL the client actually requested — the pre-rewrite URL as
+     * a `URL` object — or `null` when the current request was not rewritten.
      *
      * Set on every Void-managed request, whether the rewrite came from a
      * static rule (`routing.rewrites`, `routing.fallbacks`, `_redirects`
@@ -111,12 +95,11 @@ declare module 'hono' {
      * link generation and locale negotiation that must reference the URL
      * the user actually requested.
      */
-    originalUrl: _CloudOnly<E, () => URL | null>;
+    originalUrl: () => URL | null;
 
     /**
-     * Method that returns `true` when the current
-     * request was re-dispatched by a rewrite, `false` otherwise. Equivalent
-     * to `c.originalUrl() !== null`.
+     * Returns `true` when the current request was re-dispatched by a rewrite,
+     * `false` otherwise. Equivalent to `c.originalUrl() !== null`.
      *
      * Use this to skip side-effectful work that would otherwise double-fire
      * on the second pass of middleware (request logging, rate-limit
@@ -124,7 +107,7 @@ declare module 'hono' {
      * `routing.rewrites`, `routing.fallbacks`, `_redirects` `200`/`200!`)
      * and `c.rewrite()` in middleware both set the flag.
      */
-    isRewritten: _CloudOnly<E, () => boolean>;
+    isRewritten: () => boolean;
   }
 }
 
