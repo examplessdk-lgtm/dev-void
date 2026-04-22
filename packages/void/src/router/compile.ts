@@ -613,6 +613,8 @@ export interface CompileOptions {
   honoPath: string;
   /** Absolute path to the void/response module */
   responsePath: string;
+  /** Absolute path to the void/handler module (for runtime error classes) */
+  handlerPath: string;
   /** Absolute path to the void/_env module */
   runtimeEnvPath: string;
   /** Absolute path to the project root */
@@ -701,6 +703,9 @@ export function compileRouteTable(
   lines.push(`import { AsyncLocalStorage } from "node:async_hooks";`);
   lines.push(`import { Hono } from ${JSON.stringify(options.honoPath)};`);
   lines.push(`import { convertReturnValue } from ${JSON.stringify(options.responsePath)};`);
+  lines.push(
+    `import { VoidAssetRewriteError as __VoidAssetRewriteError } from ${JSON.stringify(options.handlerPath)};`,
+  );
   if (options.nodeTarget) {
     lines.push(`const withRuntimeEnv = (_env, fn) => fn();`);
   } else {
@@ -762,6 +767,13 @@ export function compileRouteTable(
   // WeakSet so entries are collected once the Request is GC'd — and Request
   // objects are short-lived per invocation, so the set can't accumulate.
   lines.push('const __rewrittenReqs = new WeakSet();');
+  // Known static-asset extensions — `c.rewrite()` into one of these re-enters
+  // the Hono router and 404s (static asset handlers run in front of the
+  // worker, not inside it). `.html` is deliberately excluded: it's ambiguous
+  // with legit route handlers at `.html` paths.
+  lines.push(
+    'const __voidAssetRewriteExtRE = /\\.(png|jpg|jpeg|gif|webp|avif|svg|ico|css|js|mjs|cjs|woff|woff2|ttf|otf|eot|mp4|webm|mp3|wav|pdf|txt|xml|json|wasm|map)$/i;',
+  );
   // Dev-only compile-time flag gating the `X-Void-Routing` trace header.
   // Stays `false` in production builds so the header never ships to users.
   lines.push(`const __VOID_DEV_ROUTING = ${JSON.stringify(options.dev === true)};`);
@@ -822,6 +834,20 @@ export function compileRouteTable(
   // `"/page?x=1"`. The resulting URL is always same-origin because the guard
   // above rejects anything that doesn't start with `/`.
   lines.push('    const __qIdx = path.indexOf("?");');
+  // Reject re-dispatches into static asset paths — those handlers live in
+  // front of the worker, so `app.fetch(rewriteReq)` would match nothing and
+  // return a confusing 404. Strip query/fragment before matching so callers
+  // passing cache-busters (e.g. `/hero.png?v=2`) still trip the guard.
+  lines.push('    const __hIdx = path.indexOf("#");');
+  lines.push(
+    '    const __firstDelim = __qIdx === -1 ? __hIdx : __hIdx === -1 ? __qIdx : Math.min(__qIdx, __hIdx);',
+  );
+  lines.push(
+    '    const __assetCheckPath = __firstDelim === -1 ? path : path.slice(0, __firstDelim);',
+  );
+  lines.push('    if (__voidAssetRewriteExtRE.test(__assetCheckPath)) {');
+  lines.push('      throw new __VoidAssetRewriteError(path);');
+  lines.push('    }');
   lines.push('    const __pathOnly = __qIdx === -1 ? path : path.slice(0, __qIdx);');
   lines.push('    const __searchOnly = __qIdx === -1 ? "" : path.slice(__qIdx);');
   lines.push('    const rewriteUrl = new URL(c.req.url);');
@@ -865,7 +891,9 @@ export function compileRouteTable(
   // Read helpers for rewrite metadata. Defined per-instance so they only
   // exist on Void-managed contexts; vanilla Hono Contexts in the same dep
   // graph won't get them at runtime, matching the env-scoped type.
-  lines.push('  c.originalUrl = () => c.req.header("X-Void-Original-URL") ?? null;');
+  lines.push(
+    '  c.originalUrl = () => { const h = c.req.header("X-Void-Original-URL"); return h == null ? null : new URL(h); };',
+  );
   lines.push('  c.isRewritten = () => c.req.header("X-Void-Original-URL") != null;');
   lines.push('  await next();');
   lines.push('});');

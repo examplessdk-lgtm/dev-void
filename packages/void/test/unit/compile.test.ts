@@ -7,10 +7,12 @@ import {
   compileNodeServer,
 } from '../../src/router/compile';
 import type { ScanResult } from '../../src/router/scan';
+import { VoidAssetRewriteError } from '../../src/runtime/handler';
 
 const testOptions = {
   honoPath: '/resolved/hono/index.mjs',
   responsePath: '/resolved/void/runtime/response.mjs',
+  handlerPath: '/resolved/void/runtime/handler.mjs',
   runtimeEnvPath: '/resolved/void/runtime/env.mjs',
   projectRoot: '/project',
   homeDir: '/Users/test',
@@ -546,7 +548,9 @@ describe('compileRouteTable', () => {
     // Per-instance assignment in the same middleware that attaches c.rewrite,
     // so vanilla Hono Contexts (which never flow through this middleware) do
     // not pick up the helpers at runtime — matching the env-scoped types.
-    expect(code).toContain('c.originalUrl = () => c.req.header("X-Void-Original-URL") ?? null;');
+    expect(code).toContain(
+      'c.originalUrl = () => { const h = c.req.header("X-Void-Original-URL"); return h == null ? null : new URL(h); };',
+    );
     expect(code).toContain('c.isRewritten = () => c.req.header("X-Void-Original-URL") != null;');
     // Regression anchor for the fix that aligned c.isRewritten with the
     // dispatch-worker contract: dispatch only sets X-Void-Original-URL, never
@@ -672,6 +676,18 @@ function installVoidWrappers(app: Hono, rewrittenReqs: WeakSet<Request>): void {
       // `URL.pathname` setter (which would produce `%3F`). Mirrors the
       // codegen in compile.ts.
       const qIdx = path.indexOf('?');
+      // Mirror of the asset-extension guard emitted by compile.ts — strips
+      // query/fragment before matching so `/hero.png?v=2` still trips it.
+      const hIdx = path.indexOf('#');
+      const firstDelim = qIdx === -1 ? hIdx : hIdx === -1 ? qIdx : Math.min(qIdx, hIdx);
+      const assetCheckPath = firstDelim === -1 ? path : path.slice(0, firstDelim);
+      if (
+        /\.(png|jpg|jpeg|gif|webp|avif|svg|ico|css|js|mjs|cjs|woff|woff2|ttf|otf|eot|mp4|webm|mp3|wav|pdf|txt|xml|json|wasm|map)$/i.test(
+          assetCheckPath,
+        )
+      ) {
+        throw new VoidAssetRewriteError(path);
+      }
       const pathOnly = qIdx === -1 ? path : path.slice(0, qIdx);
       const searchOnly = qIdx === -1 ? '' : path.slice(qIdx);
       const rewriteUrl = new URL(c.req.url);
@@ -703,7 +719,10 @@ function installVoidWrappers(app: Hono, rewrittenReqs: WeakSet<Request>): void {
       }
       return origRedirect(location, status as any);
     };
-    (c as any).originalUrl = () => c.req.header('X-Void-Original-URL') ?? null;
+    (c as any).originalUrl = () => {
+      const h = c.req.header('X-Void-Original-URL');
+      return h == null ? null : new URL(h);
+    };
     (c as any).isRewritten = () => c.req.header('X-Void-Original-URL') != null;
     await next();
   });
@@ -798,7 +817,7 @@ describe('c.rewrite runtime wrapper', () => {
       return new Response('internal-body', {
         headers: {
           'X-Handler': 'internal',
-          'X-Original-Url': (c as any).originalUrl() ?? '',
+          'X-Original-Url': (c as any).originalUrl()?.href ?? '',
           'X-Is-Rewritten': (c as any).isRewritten() ? '1' : '0',
         },
       });
@@ -835,7 +854,7 @@ describe('c.rewrite runtime wrapper', () => {
     app.get('/en/docs', (c) => {
       return new Response('docs-body', {
         headers: {
-          'X-Original-Url': (c as any).originalUrl() ?? '',
+          'X-Original-Url': (c as any).originalUrl()?.href ?? '',
           'X-Is-Rewritten': (c as any).isRewritten() ? '1' : '0',
         },
       });
@@ -1018,7 +1037,7 @@ describe('c.rewrite runtime wrapper', () => {
 
     let invocations = 0;
     const observedReqUrls: string[] = [];
-    const observedOriginalUrls: Array<string | null> = [];
+    const observedOriginalUrls: Array<URL | null> = [];
     app.use('*', async (c, next) => {
       invocations++;
       observedReqUrls.push(c.req.url);
@@ -1055,7 +1074,7 @@ describe('c.rewrite runtime wrapper', () => {
     // Second hop: rewritten URL on c.req.url, and c.originalUrl() surfaces
     // the pre-rewrite URL — both observable from the replayed context.
     expect(observedReqUrls[1]).toBe('http://localhost/spa-shell');
-    expect(observedOriginalUrls[1]).toBe('http://localhost/missing/deep');
+    expect(observedOriginalUrls[1]?.href).toBe('http://localhost/missing/deep');
   });
 
   it('c.rewrite preserves a "?query" in the destination path (does not URL-encode "?")', async () => {
@@ -1171,30 +1190,6 @@ describe('c.rewrite runtime wrapper', () => {
     expect(await res.text()).toBe('to-handler');
   });
 
-  it('c.rewrite is not installed on a vanilla Hono app — calling it throws at runtime', async () => {
-    // Locks in the documented trade-off from feat/rewrites revert 7c9d2d6:
-    // `c.rewrite` is attached per-Context by the generated router middleware,
-    // so a vanilla `new Hono()` Context (no `installVoidWrappers`) never picks
-    // it up. Calling it surfaces the usual TypeError — the same behaviour
-    // users hit if they mount a third-party Hono sub-app that widens the env
-    // and then dispatches through it.
-    const app = new Hono();
-    let caught: unknown;
-    app.get('/unmanaged', (c) => {
-      try {
-        (c as any).rewrite('/elsewhere');
-      } catch (err) {
-        caught = err;
-      }
-      return c.text('unmanaged', 200);
-    });
-
-    const res = await app.fetch(new Request('http://localhost/unmanaged'));
-    expect(res.status).toBe(200);
-    expect(caught).toBeInstanceOf(TypeError);
-    expect(String(caught)).toContain('is not a function');
-  });
-
   it('c.rewrite external-URL rejection pins the exact error message', async () => {
     // Pin the message text verbatim so a copy tweak in compile.ts surfaces
     // as a failing test. The impl throws a plain `Error` (not `TypeError`) —
@@ -1245,6 +1240,109 @@ describe('c.rewrite runtime wrapper', () => {
     expect((caught as Error).message).toBe(
       'c.rewrite() destination cannot begin with "//" — that parses as a protocol-relative URL; use a single-slash path-absolute destination or fetch() for cross-origin requests',
     );
+  });
+
+  it('c.rewrite to a static asset path throws VoidAssetRewriteError', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    let caught: unknown;
+    app.get('/from', (c) => {
+      try {
+        (c as any).rewrite('/hero.png');
+      } catch (err) {
+        caught = err;
+      }
+      return c.text('handled', 200);
+    });
+
+    const res = await app.fetch(new Request('http://localhost/from'));
+    expect(res.status).toBe(200);
+    expect(caught).toBeInstanceOf(VoidAssetRewriteError);
+    expect((caught as Error).name).toBe('VoidAssetRewriteError');
+    expect((caught as Error).message).toContain('/hero.png');
+    expect((caught as Error).message).toContain('routing.rewrites');
+    expect((caught as Error).message).toContain(
+      'https://void.dev/guide/edge/rewrites#runtime-rewrites-cannot-reach-static-assets',
+    );
+  });
+
+  it('c.rewrite to an API .json path throws (routes should be returned, not literal .json)', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    let caught: unknown;
+    app.get('/from', (c) => {
+      try {
+        (c as any).rewrite('/api/users.json');
+      } catch (err) {
+        caught = err;
+      }
+      return c.text('handled', 200);
+    });
+
+    await app.fetch(new Request('http://localhost/from'));
+    expect(caught).toBeInstanceOf(VoidAssetRewriteError);
+    expect((caught as Error).message).toContain('/api/users.json');
+  });
+
+  it('c.rewrite asset check is case-insensitive', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    let caught: unknown;
+    app.get('/from', (c) => {
+      try {
+        (c as any).rewrite('/hero.PNG');
+      } catch (err) {
+        caught = err;
+      }
+      return c.text('handled', 200);
+    });
+
+    await app.fetch(new Request('http://localhost/from'));
+    expect(caught).toBeInstanceOf(VoidAssetRewriteError);
+  });
+
+  it('c.rewrite to a .html path does NOT throw (ambiguous — may be a real route)', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+    app.get('/from', (c) => (c as any).rewrite('/about.html'));
+    app.get('/about.html', (c) => c.text('about-html', 200));
+
+    const res = await app.fetch(new Request('http://localhost/from'));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('about-html');
+  });
+
+  it('c.rewrite to a path without an extension does NOT throw', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+    app.get('/from', (c) => (c as any).rewrite('/users/123'));
+    app.get('/users/:id', (c) => c.text(`user ${c.req.param('id')}`, 200));
+
+    const res = await app.fetch(new Request('http://localhost/from'));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('user 123');
+  });
+
+  it('c.rewrite to an asset path with a query string still throws', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakSet<Request>());
+
+    let caught: unknown;
+    app.get('/from', (c) => {
+      try {
+        (c as any).rewrite('/hero.png?v=2');
+      } catch (err) {
+        caught = err;
+      }
+      return c.text('handled', 200);
+    });
+
+    await app.fetch(new Request('http://localhost/from'));
+    expect(caught).toBeInstanceOf(VoidAssetRewriteError);
+    expect((caught as Error).message).toContain('/hero.png?v=2');
   });
 
   it('multi-middleware rewrite cycles are NOT caught by the single-hop guard (documented gap)', async () => {

@@ -148,6 +148,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   const compileOptions: CompileOptions = {
     honoPath: resolveFile('hono'),
     responsePath: resolveFile('#self/response'),
+    handlerPath: resolveFile('#self/handler'),
     runtimeEnvPath: resolveFile('#self/_env'),
     projectRoot: root,
     homeDir: homedir(),

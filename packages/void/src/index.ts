@@ -1014,6 +1014,7 @@ export {
   defineRender,
   defineHead,
   defineQueue,
+  VoidAssetRewriteError,
 } from './runtime/handler';
 export type {
   CloudContext,

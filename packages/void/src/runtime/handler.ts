@@ -6,6 +6,24 @@ import { convertReturnValue } from './response';
 import { runValidation, type ValidatorSlots, type HandlerInput } from './validator';
 
 /**
+ * Thrown when `c.rewrite()` is called with a destination whose final path
+ * segment ends in a known static-asset extension (e.g. `/hero.png`,
+ * `/app.css`). Runtime rewrites only reach routes and SSR entries inside
+ * the worker — static asset handlers run in front of the worker, so a
+ * `c.rewrite()` into an asset path re-enters the Hono router, matches
+ * nothing, and returns a 404. Fail at the call site so users reach for
+ * static `routing.rewrites` instead of debugging a mystery 404.
+ */
+export class VoidAssetRewriteError extends Error {
+  override name = 'VoidAssetRewriteError';
+  constructor(destination: string) {
+    super(
+      `c.rewrite() cannot re-dispatch to a static asset path (${JSON.stringify(destination)}). Runtime rewrites only reach routes and SSR entries inside the worker — static asset handlers run in front of the worker. To rewrite into an asset, use a static \`routing.rewrites\` rule in void.json or a \`200!\` entry in _redirects. See https://void.dev/guide/edge/rewrites#runtime-rewrites-cannot-reach-static-assets`,
+    );
+  }
+}
+
+/**
  * Hono environment type for Void workers.
  *
  * Includes standard Cloudflare bindings plus request-scoped auth
@@ -83,9 +101,9 @@ declare module 'hono' {
 
     /**
      * Method that returns the URL the client
-     * actually requested — the pre-rewrite URL recorded from the
-     * `X-Void-Original-URL` header — or `null` when the current request was
-     * not rewritten.
+     * actually requested — the pre-rewrite URL as a `URL` object, recorded
+     * from the `X-Void-Original-URL` header — or `null` when the current
+     * request was not rewritten.
      *
      * Set on every Void-managed request, whether the rewrite came from a
      * static rule (`routing.rewrites`, `routing.fallbacks`, `_redirects`
@@ -93,7 +111,7 @@ declare module 'hono' {
      * link generation and locale negotiation that must reference the URL
      * the user actually requested.
      */
-    originalUrl: _CloudOnly<E, () => string | null>;
+    originalUrl: _CloudOnly<E, () => URL | null>;
 
     /**
      * Method that returns `true` when the current

@@ -139,6 +139,10 @@ The `path` argument is typed as [`RewriteDestination`](../../reference/api#rewri
 
 `c.rewrite()` can only re-dispatch to paths the worker itself handles — routes, SSR entries, API handlers. It **cannot** re-dispatch into the static asset handler, because the Void platform serves assets in front of your worker. A call like `c.rewrite('/hero.png')` re-enters the worker's route table, doesn't match anything, and 404s.
 
+This is enforced at the call site: if the destination's final path segment ends in a known static-asset extension (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.avif`, `.svg`, `.ico`, `.css`, `.js`, `.mjs`, `.cjs`, `.woff`, `.woff2`, `.ttf`, `.otf`, `.eot`, `.mp4`, `.webm`, `.mp3`, `.wav`, `.pdf`, `.txt`, `.xml`, `.json`, `.wasm`, `.map`), `c.rewrite()` throws `VoidAssetRewriteError` (exported from `"void"`, catchable by name) before the re-dispatch, with the attempted destination in the message. Query strings and fragments are stripped before matching, so `c.rewrite('/hero.png?v=2')` also throws.
+
+`.html` is deliberately **not** on the list — `.html` paths are ambiguous (they may be legit route handlers), so banning them would produce false positives. If a `.html` rewrite 404s, the existing behavior stands and the dev `X-Void-Routing` trace header is your debug hook.
+
 Static rewrites are different: `_redirects` `200!` entries and `routing.rewrites` run at the platform layer **before** the asset handler, so they _can_ rewrite into assets. If you need "rewrite into an asset" behavior dynamically, model it as a static rule (possibly with a broader source pattern) rather than doing it from middleware.
 
 **Loop prevention:** Single-hop rewrite loops are prevented automatically. When `c.rewrite('/foo')` re-dispatches the request, the runtime tracks that request object in an internal `WeakSet` so static routing rules are skipped on the second pass — even if `/foo` would itself match a rewrite rule, it won't rewrite again. The guard is identity-based on the in-memory `Request` object, so client-supplied headers cannot spoof or bypass it. The pre-rewrite URL is exposed to re-dispatched handlers via `X-Void-Original-URL` (see [Original URL access](#original-url-access)).
@@ -176,8 +180,8 @@ When a request has been rewritten — either by a static rule at the edge or by 
 ```ts
 export default defineHandler((c) => {
   const original = c.originalUrl();
-  // original is the full URL the user requested before the rewrite,
-  // or null if the request was not rewritten.
+  // original is a `URL` instance for the full URL the user requested
+  // before the rewrite, or null if the request was not rewritten.
 });
 ```
 
