@@ -234,7 +234,7 @@ function defineHead<P = Record<string, unknown>>(
 
 ## Rewrites
 
-URL rewrites re-dispatch a request at a different internal path without changing the browser's URL. Available on any route handler or middleware whose env extends [`CloudEnv`](#cloudenv) (i.e. the Void-managed router). See the [Rewrites guide](../guide/edge/rewrites.md) for the full overview, including static `routing.rewrites` / `routing.fallbacks` in [`void.json`](./config.md#routing).
+URL rewrites re-dispatch a request at a different internal path without changing the browser's URL. `c.rewrite()`, `c.originalUrl()`, and `c.isRewritten()` are available on every Hono `Context` the Void runtime hands you. See the [Rewrites guide](../guide/edge/rewrites.md) for the full overview, including static `routing.rewrites` / `routing.fallbacks` in [`void.json`](./config.md#routing).
 
 ### `c.rewrite(destination)`
 
@@ -261,15 +261,15 @@ interface CloudContext {
 
 **Caveats:**
 
-- Only available on contexts where `Env` extends [`CloudEnv`](#cloudenv). Calling `c.rewrite()` on an unmanaged Hono sub-app (one mounted outside the Void router) type-checks but throws `TypeError: c.rewrite is not a function` at runtime — see the [guide](../guide/edge/rewrites.md#runtime-caveat-unmanaged-hono-contexts) for details.
-- Destinations whose final path segment ends in a known static-asset extension (e.g. `/hero.png`, `/app.css`, `/data.json`) throw `VoidAssetRewriteError` (exported from `"void"`) before the re-dispatch. Runtime rewrites cannot reach assets — use a static `routing.rewrites` rule or a `_redirects` `200!` entry. See the [guide](../guide/edge/rewrites.md#runtime-rewrites-cannot-reach-static-assets) for the full extension list and rationale.
+- `destination` must start with a single `/` and point at an internal path. External URLs, protocol-relative destinations (`//host/...`), and anything non-path-absolute throw immediately — use `fetch()` for cross-origin calls.
+- Destinations whose final path segment ends in a known static-asset extension (e.g. `/hero.png`, `/app.css`, `/data.json`) throw `VoidAssetRewriteError` (exported from `"void"`) before the re-dispatch. Runtime rewrites cannot reach assets — use a static `routing.rewrites` rule or a `_redirects` `200!` entry. `.html` is deliberately excluded from this guard because `.html` paths may be legitimate route handlers. See the [guide](../guide/edge/rewrites.md#runtime-rewrites-cannot-reach-static-assets) for the full extension list and rationale.
 - Middleware re-runs on every rewrite hop. Guard side-effects with [`c.isRewritten()`](#c-originalurl-c-isrewritten).
 - Client-side SPA navigation via `Link` does not trigger server rewrites; only full HTTP requests do.
 - [ISR](../guide/edge/revalidation.md) cache keys follow the rewritten path, not the original URL.
 
 ### `c.originalUrl()` / `c.isRewritten()`
 
-Context methods for inspecting rewrite state. `c.originalUrl()` returns the pre-rewrite URL as a `URL` object (parsed from the `X-Void-Original-URL` header), or `null` on the first, non-rewritten hop. `c.isRewritten()` returns `true` on any re-dispatched context and `false` on the original.
+Context methods for inspecting rewrite state. `c.originalUrl()` returns the pre-rewrite URL as a `URL` object, or `null` on the first, non-rewritten hop. `c.isRewritten()` returns `true` on any re-dispatched context and `false` on the original. Both helpers read from an in-worker `WeakMap<Request, URL>` keyed on `c.req.raw`; the `X-Void-Original-URL` header is only how edge dispatch forwards the pre-rewrite URL to the worker, and entry middleware migrates it into the map once per request.
 
 ```ts
 import { defineMiddleware } from 'void';

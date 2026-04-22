@@ -109,10 +109,6 @@ Unlike a redirect, users on `/blog/hello-world` won't see the URL change — the
 
 ## Programmatic rewrites in middleware
 
-::: warning Helpers are typed to CloudEnv
-`routing.rewrites`, `routing.redirects`, and `routing.fallbacks` all work on every target (`node`, `bun`, `deno`, and the default) via the router. `c.rewrite()`, `c.originalUrl()`, and `c.isRewritten()` are typed against `CloudEnv`, so on `node`/`bun`/`deno` the `Env` narrows them away — the runtime still installs them on every target, so cast if you need to call them off-default.
-:::
-
 For dynamic rewrite logic — like i18n locale negotiation based on cookies or headers — use `c.rewrite()` in middleware:
 
 ```ts
@@ -129,23 +125,29 @@ export default defineMiddleware(async (c, next) => {
 
 `c.rewrite(path)` re-dispatches the request through the router with the new pathname. You must `return` the result — same shape as `c.redirect()`.
 
-The `path` argument is typed as [`RewriteDestination`](../../reference/api#rewritedestination), a union of your generated route patterns plus `string`. Literal paths are checked against the known route tree at compile time — `c.rewrite('/en/dcos')` is flagged as a typo — while interpolated strings like ``c.rewrite(`/${locale}${c.req.path}`)`` widen to `string` and pass the check by design. Treat it as autocomplete + typo-guard, not a proof of reachability.
-
-### Runtime caveat: unmanaged Hono contexts
-
-`c.rewrite`, `c.originalUrl`, and `c.isRewritten` are only installed on Contexts created by Void's generated router — i.e. the Context that reaches a `defineHandler` or `defineMiddleware` export. TypeScript catches most misuse here: outside a Context whose `Env` extends `CloudEnv`, the helpers resolve to `never` and the call won't compile. If you manage to call them anyway — typically from inside a vanilla `new Hono()` sub-app whose env has been widened by third-party middleware — you'll get `TypeError: c.rewrite is not a function` at runtime, because the dispatcher that attaches the helpers never ran for that Context. Keep rewrite logic in top-level `defineMiddleware` handlers rather than inside mounted vanilla Hono apps.
+The `path` argument is typed as [`RewriteDestination`](../../reference/api#rewritedestination), a union of your generated route patterns plus `string`. Known route patterns (e.g. `/posts/[id]`, `/en/docs`) surface as autocomplete entries in your editor, and literal paths are checked against the tree at compile time — `c.rewrite('/en/dcos')` is flagged as a typo — while interpolated strings like ``c.rewrite(`/${locale}${c.req.path}`)`` widen to `string` and pass the check by design. Treat it as autocomplete + typo-guard, not a proof of reachability.
 
 ### Runtime rewrites cannot reach static assets
 
 `c.rewrite()` can only re-dispatch to paths the worker itself handles — routes, SSR entries, API handlers. It **cannot** re-dispatch into the static asset handler, because the Void platform serves assets in front of your worker. A call like `c.rewrite('/hero.png')` re-enters the worker's route table, doesn't match anything, and 404s.
 
-This is enforced at the call site: if the destination's final path segment ends in a known static-asset extension (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.avif`, `.svg`, `.ico`, `.css`, `.js`, `.mjs`, `.cjs`, `.woff`, `.woff2`, `.ttf`, `.otf`, `.eot`, `.mp4`, `.webm`, `.mp3`, `.wav`, `.pdf`, `.txt`, `.xml`, `.json`, `.wasm`, `.map`), `c.rewrite()` throws `VoidAssetRewriteError` (exported from `"void"`, catchable by name) before the re-dispatch, with the attempted destination in the message. Query strings and fragments are stripped before matching, so `c.rewrite('/hero.png?v=2')` also throws.
+This is enforced at the call site: if the destination's final path segment ends in a known static-asset extension, `c.rewrite()` throws `VoidAssetRewriteError` (exported from `"void"`, catchable by name) before the re-dispatch, with the attempted destination in the message. Query strings and fragments are stripped before matching, so `c.rewrite('/hero.png?v=2')` also throws.
 
-`.html` is deliberately **not** on the list — `.html` paths are ambiguous (they may be legit route handlers), so banning them would produce false positives. If a `.html` rewrite 404s, the existing behavior stands and the dev `X-Void-Routing` trace header is your debug hook.
+The guarded extensions are:
+
+```
+.png .jpg .jpeg .gif .webp .avif .svg .ico
+.css .js .mjs .cjs
+.woff .woff2 .ttf .otf .eot
+.mp4 .webm .mp3 .wav
+.pdf .txt .xml .json .wasm .map
+```
+
+`.html` is deliberately **excluded** from this list. A path like `/about.html` is ambiguous — it may be a real SSR/SPA route handler rather than a static file — so banning `.html` would produce false positives for apps that route on explicit `.html` URLs. `c.rewrite('/about.html')` is allowed; if it 404s, the existing behavior stands and the dev `X-Void-Routing` trace header is your debug hook.
 
 Static rewrites are different: `_redirects` `200!` entries and `routing.rewrites` run at the platform layer **before** the asset handler, so they _can_ rewrite into assets. If you need "rewrite into an asset" behavior dynamically, model it as a static rule (possibly with a broader source pattern) rather than doing it from middleware.
 
-**Loop prevention:** Single-hop rewrite loops are prevented automatically. When `c.rewrite('/foo')` re-dispatches the request, the runtime tracks that request object in an internal `WeakSet` so static routing rules are skipped on the second pass — even if `/foo` would itself match a rewrite rule, it won't rewrite again. The guard is identity-based on the in-memory `Request` object, so client-supplied headers cannot spoof or bypass it. The pre-rewrite URL is exposed to re-dispatched handlers via `X-Void-Original-URL` (see [Original URL access](#original-url-access)).
+**Loop prevention:** Single-hop rewrite loops are prevented automatically. When `c.rewrite('/foo')` re-dispatches the request, the runtime records the new `Request` in an internal `WeakMap<Request, URL>` (keyed on the `Request` identity, value = pre-rewrite URL) so static routing rules are skipped on the second pass — even if `/foo` would itself match a rewrite rule, it won't rewrite again. The guard is identity-based on the in-memory `Request` object, so client-supplied headers cannot spoof or bypass it. The pre-rewrite URL is exposed to re-dispatched handlers via [`c.originalUrl()`](#original-url-access).
 
 What the guard **doesn't** catch are multi-hop user-written loops across separate middleware: middleware A rewrites `/a → /b`, middleware B rewrites `/b → /c`, middleware C rewrites `/c → /a`. Each hop constructs a fresh `Request`, so the per-request guard can't see the cycle. If you chain rewrites across middleware, write each hop so it only rewrites paths that aren't already in its target shape.
 
@@ -155,7 +157,7 @@ Also avoid deep rewrite chains for performance: every hop re-runs all middleware
 
 - Static `routing.rewrites` and `routing.fallbacks` rules are evaluated in order, last-match-wins, at O(rules) per request. The list is small in practice, but keep it bounded — don't programmatically generate thousands of entries.
 - Each `c.rewrite()` hop replays the full middleware stack against a fresh `Request`. A chain of three middleware rewrites with four middleware in the stack is roughly twelve middleware invocations, not four.
-- The WeakSet loop guard is keyed on the `Request` identity and only suppresses the _static rules_ middleware on re-dispatched requests. User middleware is not guarded: if `c.rewrite('/a')` lands on `/a`, and middleware on `/a` calls `c.rewrite('/b')`, that second hop runs — each hop allocates a new `Request`, so the guard never matches. Chain depth is your responsibility.
+- The WeakMap loop guard is keyed on the `Request` identity and only suppresses the _static rules_ middleware on re-dispatched requests. User middleware is not guarded: if `c.rewrite('/a')` lands on `/a`, and middleware on `/a` calls `c.rewrite('/b')`, that second hop runs — each hop allocates a new `Request`, so the guard never matches. Chain depth is your responsibility.
 
 ### Side effects in re-dispatched middleware
 
@@ -167,7 +169,7 @@ To skip idempotent-unsafe work on the second pass, use `c.isRewritten()`:
 if (c.isRewritten()) return next();
 ```
 
-`c.isRewritten()` returns `true` when the request was re-dispatched by a rewrite (whether from a static rule at the edge or `c.rewrite()` in middleware). It checks for the presence of the `X-Void-Original-URL` header that the runtime attaches on every rewrite hop; reach for the raw header only if you need to inspect it from outside a Void-managed context.
+`c.isRewritten()` returns `true` when the request was re-dispatched by a rewrite (whether from a static rule at the edge or `c.rewrite()` in middleware). Internally the framework tracks rewrites in an in-worker `WeakMap<Request, URL>` keyed on `c.req.raw` — the helper just checks whether the current `Request` has an entry. The `X-Void-Original-URL` header is only the wire format between the edge dispatcher and the worker; entry middleware migrates it into the WeakMap once per request, and from that point on the map is the single source of truth.
 
 ::: tip
 This is the recommended approach for i18n libraries. The library can export a middleware factory that handles locale detection and rewriting, and users just drop it into their `middleware/` directory.
@@ -185,7 +187,7 @@ export default defineHandler((c) => {
 });
 ```
 
-Internally this reads the `X-Void-Original-URL` header that Void sets on every rewrite hop. Use the helper in handler code; reach for the raw header only when you need to inspect it from outside a Void-managed context.
+Internally this reads the pre-rewrite URL from an in-worker `WeakMap<Request, URL>` keyed on `c.req.raw`. When a request crosses the edge, Void's dispatcher sets `X-Void-Original-URL` on the forwarded request; entry middleware migrates that header into the WeakMap once, and every subsequent `c.rewrite()` hop writes straight into the map. The header on the wire is only the hand-off format — in-worker, the WeakMap is the single source of truth, so there's no per-call header parse.
 
 ## Fallbacks
 
