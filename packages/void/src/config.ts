@@ -104,20 +104,25 @@ export function assertSingleSplat(source: string, kind: string): void {
 }
 
 /**
- * Shared guard for internal destinations: a leading `//` parses as a
- * protocol-relative URL (`//host/path` → `https://host/path`), silently
- * turning an intended in-worker rewrite/redirect into a cross-origin proxy.
+ * Predicate for the "protocol-relative" shape: a leading `//` parses as
+ * `//host/path` → `https://host/path`, which silently turns an intended
+ * in-worker rewrite/redirect into a cross-origin proxy.
  *
- * The build-time validators in this file, the `_redirects` parser, and the
- * `c.rewrite()` codegen in `router/compile.ts` all reject this same shape;
- * keep the message in sync so users see identical guidance everywhere.
+ * Shared by the `void.json` validators below and the `_redirects` parser
+ * (`cli/headers.ts`). The `c.rewrite()` codegen in `router/compile.ts`
+ * inlines an equivalent check in emitted worker code — it validates
+ * runtime user input rather than config, so it can't call through here.
  */
+export function isProtocolRelative(dest: string): boolean {
+  return dest.startsWith('//');
+}
+
 function assertNotProtocolRelative(
   dest: string,
   source: string,
   kind: 'Redirect' | 'Rewrite' | 'Fallback',
 ): void {
-  if (!dest.startsWith('//')) {
+  if (!isProtocolRelative(dest)) {
     return;
   }
   const suffix =

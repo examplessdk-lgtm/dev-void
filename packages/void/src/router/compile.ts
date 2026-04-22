@@ -807,17 +807,22 @@ export function compileRouteTable(
   // string the same way static `_redirects` entries do.
   lines.push('app.use(async (c, next) => {');
   // Migrate `X-Void-Original-URL` set by an outer edge dispatcher into the
-  // WeakMap exactly once per request. In-worker `c.rewrite` / static-rewrite
-  // re-dispatches populate the map directly on the `rewriteReq`, so they
-  // bypass this block — only first-hop requests with an edge-set header fall
-  // through here. A malformed header just skips the migration; treating the
-  // request as non-rewritten is the safe fallback.
-  lines.push('  if (!__voidOriginalUrls.has(c.req.raw)) {');
-  lines.push('    const __h = c.req.raw.headers.get("X-Void-Original-URL");');
-  lines.push('    if (__h != null) {');
-  lines.push('      try { __voidOriginalUrls.set(c.req.raw, new URL(__h)); } catch {}');
-  lines.push('    }');
-  lines.push('  }');
+  // WeakMap exactly once per request. Only emitted for the CF-prod target,
+  // where dispatch runs in front of the worker and strips any client-supplied
+  // value on ingress — making the header a trusted, dispatch-authored
+  // handoff. On CF-dev (no dispatch) and on node/bun/deno self-hosted
+  // targets (user owns ingress) the header is client-controlled and not
+  // trustworthy, so the read is skipped. In-worker `c.rewrite` / static-
+  // rewrite re-dispatches populate the WeakMap directly on the `rewriteReq`
+  // and never depend on this header-read path.
+  if (!options.nodeTarget && options.dev !== true) {
+    lines.push('  if (!__voidOriginalUrls.has(c.req.raw)) {');
+    lines.push('    const __h = c.req.raw.headers.get("X-Void-Original-URL");');
+    lines.push('    if (__h != null) {');
+    lines.push('      try { __voidOriginalUrls.set(c.req.raw, new URL(__h)); } catch {}');
+    lines.push('    }');
+    lines.push('  }');
+  }
   lines.push('  c.rewrite = (path) => {');
   // `path: RewriteDestination` is typed to path-absolute strings, but a
   // leading `//` parses as a protocol-relative URL (`//host/path` →

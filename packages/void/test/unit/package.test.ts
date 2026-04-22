@@ -137,7 +137,6 @@ describe('resolveSpaFallbackChain', () => {
     const result = resolveSpaFallbackChain('spa', undefined);
     expect(result.assetConfig).toEqual({ not_found_handling: 'single-page-application' });
     expect(result.fallbackRules).toBeUndefined();
-    expect(result.warnings).toEqual([]);
   });
 
   it('prepends synthetic catch-all before user fallbacks (SPA)', () => {
@@ -154,16 +153,6 @@ describe('resolveSpaFallbackChain', () => {
       },
       { source: '/docs/*', destination: '/docs.html', status: 200, force: false },
     ]);
-    expect(result.warnings).toEqual([]);
-  });
-
-  it('warns but does not duplicate when user rule already matches the default SPA catch-all', () => {
-    const userRules = [{ source: '/*', destination: '/index.html', status: 200, force: false }];
-    const result = resolveSpaFallbackChain('spa', userRules);
-    expect(result.assetConfig).toEqual({ not_found_handling: 'none' });
-    expect(result.fallbackRules).toEqual(userRules);
-    expect(result.warnings.length).toBe(1);
-    expect(result.warnings[0]).toMatch(/duplicates the default SPA fallback/);
   });
 
   it('returns the user rules verbatim (no prepend, no duplication) when user already has /* -> /index.html', () => {
@@ -181,13 +170,7 @@ describe('resolveSpaFallbackChain', () => {
     // Platform SPA switch disabled — we're handling the catch-all via rules.
     expect(result.assetConfig).toEqual({ not_found_handling: 'none' });
     // No synthetic rule prepended: the returned list is exactly what the user supplied.
-    expect(result.fallbackRules).toBeDefined();
-    expect(result.fallbackRules!.length).toBe(1);
-    expect(result.fallbackRules![0]!.source).toBe('/*');
     expect(result.fallbackRules).toEqual(userRules);
-    // And the warning still fires so the user knows their rule shadows the default.
-    expect(result.warnings.length).toBe(1);
-    expect(result.warnings[0]).toMatch(/duplicates the default SPA fallback/);
   });
 
   it('leaves user fallbacks untouched for static app type', () => {
@@ -195,7 +178,6 @@ describe('resolveSpaFallbackChain', () => {
     const result = resolveSpaFallbackChain('static', userRules);
     expect(result.assetConfig).toEqual({ not_found_handling: '404-page' });
     expect(result.fallbackRules).toEqual(userRules);
-    expect(result.warnings).toEqual([]);
   });
 
   it('returns none and undefined rules for undefined app type with no user rules', () => {

@@ -20,8 +20,14 @@ Define URL redirects in [`void.json`](../../reference/config) using the `routing
 ## Rules
 
 - **Source patterns** start with `/`. `*` matches any characters including `/`.
-- **Destinations** can be strings (defaults to `302` temporary redirect) or objects with `to` and optional `status` (`301`, `302`, `303`, `307`, `308`).
+- **Destinations** can be strings (defaults to `302` temporary redirect) or objects with `to` and optional `status`. Supported statuses:
+  - `301` — permanent, cacheable; browsers and search engines remember the new URL.
+  - `302` — default; temporary, method-preserving on modern clients (but historically rewritten to GET).
+  - `303` — "see other"; used after a `POST` to redirect the browser to a GET confirmation page (the post-redirect-get pattern). Always converts to GET.
+  - `307` — temporary, method-preserving by spec (the unambiguous counterpart to `302`).
+  - `308` — permanent, method-preserving (the unambiguous counterpart to `301`).
 - `:splat` in the destination is replaced with the portion of the path matched by `*` in the source pattern.
+- Destination query strings are merged into the `Location` header (the destination's parameters take precedence on per-key conflict). To drop the incoming query, write an explicit reset like `?`.
 - When multiple rules match, the **last match wins**.
 - Redirects are evaluated **before** the request reaches the worker, so they short-circuit static asset serving, ISR, and SSR.
 
@@ -57,6 +63,7 @@ Meta-frameworks may generate a `_redirects` file during build. Void parses this 
 
 - Framework-generated rules are applied **before** `void.json` rules. Since the last match wins, `routing.redirects` in `void.json` takes precedence.
 - Both 3xx redirect rules and status `200` [rewrite rules](./rewrites) are supported in `_redirects` files.
+- The `!` force suffix is only meaningful on `200` entries (see [rewrites — `_redirects` file](./rewrites#redirects-file)). On 3xx entries (`301!`, `302!`, `307!`, `308!`) it's silently stripped — a redirect always "forces" by nature, so the suffix is redundant. `void deploy` prints a single aggregated warning tallying every such entry so you can clean them up.
 - The `_redirects` file is not uploaded as a static asset. Its contents are parsed and included in the manifest only.
 
 Precedence when the same source appears in both sources follows the same rules as rewrites — file rules are merged before config rules within each phase, and last match wins, so `void.json` overrides `_redirects`. See [Precedence: `_redirects` vs `void.json`](./rewrites#precedence-redirects-vs-void-json) for the full explanation and a worked example.

@@ -70,16 +70,13 @@ export function resolveSpaFallbackChain(
 ): {
   assetConfig: AssetConfig;
   fallbackRules: Array<DevRedirectRule> | undefined;
-  warnings: Array<string>;
 } {
-  const warnings: Array<string> = [];
   const userRules = fallbackRules && fallbackRules.length > 0 ? fallbackRules : undefined;
 
   if (appType !== 'spa') {
     return {
       assetConfig: { not_found_handling: appType === 'static' ? '404-page' : 'none' },
       fallbackRules: userRules,
-      warnings,
     };
   }
 
@@ -88,20 +85,19 @@ export function resolveSpaFallbackChain(
     return {
       assetConfig: { not_found_handling: 'single-page-application' },
       fallbackRules: undefined,
-      warnings,
     };
   }
 
   // User fallbacks present on a SPA app — disable the platform-level SPA
   // switch and prepend a synthetic catch-all rule before user rules, so that
-  // under last-match-wins any more specific user rule overrides it.
+  // under last-match-wins any more specific user rule overrides it. If the
+  // user already has `/*` → `/index.html`, skip the prepend so we don't ship
+  // two identical rules (which would trip the duplicate-source lint).
   const alreadyHasCatchAll = userRules.some(
     (r) => r.source === '/*' && r.destination === '/index.html',
   );
   if (alreadyHasCatchAll) {
-    warnings.push(
-      'routing.fallbacks includes "/*" -> "/index.html" on a SPA app type; this duplicates the default SPA fallback and can be omitted.',
-    );
+    return { assetConfig: { not_found_handling: 'none' }, fallbackRules: userRules };
   }
   const syntheticSpaFallback: DevRedirectRule = {
     source: '/*',
@@ -112,8 +108,7 @@ export function resolveSpaFallbackChain(
   };
   return {
     assetConfig: { not_found_handling: 'none' },
-    fallbackRules: alreadyHasCatchAll ? userRules : [syntheticSpaFallback, ...userRules],
-    warnings,
+    fallbackRules: [syntheticSpaFallback, ...userRules],
   };
 }
 
@@ -407,10 +402,6 @@ export async function packageBuild(
     const chain = resolveSpaFallbackChain('spa', fallbackRules);
     resolvedAssetConfig = { ...assetConfig, ...chain.assetConfig };
     resolvedFallbackRules = chain.fallbackRules;
-    for (const msg of chain.warnings) {
-      onProgress?.(msg);
-      console.warn(`[void] ${msg}`);
-    }
   } else if (fallbackRules && fallbackRules.length > 0) {
     // Fallbacks ship for any app type, but the SPA-shell chain (prepending
     // `/* -> /index.html`) only runs when `not_found_handling` is
@@ -530,15 +521,10 @@ export async function packageStaticBuild(
 ): Promise<FormData> {
   const formData = new FormData();
 
-  const {
-    assetConfig,
-    fallbackRules: resolvedFallbackRules,
-    warnings: fallbackWarnings,
-  } = resolveSpaFallbackChain(appType, fallbackRules);
-  for (const msg of fallbackWarnings) {
-    onProgress?.(msg);
-    console.warn(`[void] ${msg}`);
-  }
+  const { assetConfig, fallbackRules: resolvedFallbackRules } = resolveSpaFallbackChain(
+    appType,
+    fallbackRules,
+  );
 
   const manifest: DeployManifest = {
     version: 3,

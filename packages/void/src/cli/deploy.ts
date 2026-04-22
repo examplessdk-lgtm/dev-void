@@ -533,10 +533,8 @@ export function warnRedundantForceOn3xx(count: number): void {
   if (count === 0) {
     return;
   }
-  const noun = count === 1 ? 'entry' : 'entries';
-  const suffix = count === 1 ? 'suffix' : 'suffixes';
   log.warn(
-    `${count} redundant "!" ${suffix} found on 3xx ${noun} in _redirects (these always force by nature). Safe to remove.`,
+    `Found ${count} redundant "!" on 3xx entries in _redirects (these always force by nature; safe to remove).`,
   );
 }
 

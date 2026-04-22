@@ -1,6 +1,13 @@
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../../src/log', () => ({
+  voidLog: vi.fn(),
+  voidWarn: vi.fn(),
+  voidError: vi.fn(),
+}));
+
 import {
   readConfig,
   convertHeadersConfig,
@@ -12,6 +19,9 @@ import {
   getDatabaseDialect,
   VALID_REDIRECT_STATUSES,
 } from '../../src/config';
+import { voidWarn } from '../../src/log';
+
+const warnMock = vi.mocked(voidWarn);
 
 const tmpDir = join(import.meta.dirname, '.tmp-config-test');
 
@@ -927,6 +937,10 @@ describe('convertFallbacksConfig', () => {
 });
 
 describe('lintDestinationSplats', () => {
+  beforeEach(() => {
+    warnMock.mockClear();
+  });
+
   // Platform `substituteParams` only replaces `:name` tokens — a literal `*`
   // in a destination passes through unchanged, which is almost never what the
   // author meant. Warn (not fail) so misuse surfaces at deploy-time without
@@ -937,24 +951,19 @@ describe('lintDestinationSplats', () => {
       '/docs/*': '/en/docs/:splat',
       '/posts/:id': '/archive/:id',
     });
-    const warnings: Array<string> = [];
-    const result = lintDestinationSplats(rules, 'rewrites', (msg) => warnings.push(msg));
-    expect(result).toBeUndefined();
-    expect(warnings).toEqual([]);
+    lintDestinationSplats(rules, 'rewrites');
+    expect(warnMock).not.toHaveBeenCalled();
   });
 
   it('emits a single aggregated warning for a redirect destination with *', async () => {
     const { lintDestinationSplats } = await import('../../src/cli/headers');
     const rules = convertRedirectsConfig({ '/old/*': '/new/*' });
-    const warnings: Array<string> = [];
-    const result = lintDestinationSplats(rules, 'redirects/rewrites (pre-asset)', (msg) =>
-      warnings.push(msg),
-    );
-    expect(warnings).toHaveLength(1);
-    expect(result).toContain('literal "*"');
-    expect(result).toContain('/old/*');
-    expect(result).toContain('/new/*');
-    expect(result).toContain('void.json#routing.redirects');
+    lintDestinationSplats(rules, 'redirects/rewrites (pre-asset)');
+    expect(warnMock).toHaveBeenCalledOnce();
+    const msg = warnMock.mock.calls[0][0];
+    expect(msg).toContain('/old/*');
+    expect(msg).toContain('/new/*');
+    expect(msg).toContain('void.json#routing.redirects');
   });
 
   it('emits a single aggregated warning covering all affected rules', async () => {
@@ -964,10 +973,9 @@ describe('lintDestinationSplats', () => {
       ...(convertRewritesConfig({ '/b/*': '/y/:splat' }) ?? []),
       ...(convertRewritesConfig({ '/c': '/z/*' }) ?? []),
     ];
-    const warnings: Array<string> = [];
-    lintDestinationSplats(rules, 'rewrites', (msg) => warnings.push(msg));
-    expect(warnings).toHaveLength(1);
-    const msg = warnings[0];
+    lintDestinationSplats(rules, 'rewrites');
+    expect(warnMock).toHaveBeenCalledOnce();
+    const msg = warnMock.mock.calls[0][0];
     expect(msg).toContain('/a/*');
     expect(msg).toContain('/x/*');
     expect(msg).toContain('/c');
@@ -979,12 +987,9 @@ describe('lintDestinationSplats', () => {
   it('works with fallbacks output shape as well', async () => {
     const { lintDestinationSplats } = await import('../../src/cli/headers');
     const rules = convertFallbacksConfig({ '/docs/*': '/docs/*' });
-    const warnings: Array<string> = [];
-    const result = lintDestinationSplats(rules, 'fallbacks (post-asset)', (msg) =>
-      warnings.push(msg),
-    );
-    expect(warnings).toHaveLength(1);
-    expect(result).toContain('void.json#routing.fallbacks');
+    lintDestinationSplats(rules, 'fallbacks (post-asset)');
+    expect(warnMock).toHaveBeenCalledOnce();
+    expect(warnMock.mock.calls[0][0]).toContain('void.json#routing.fallbacks');
   });
 });
 

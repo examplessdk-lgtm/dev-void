@@ -1487,6 +1487,27 @@ describe('default-target dev parity', () => {
     expect(prodCode).toContain('"source":"/docs/*"');
   });
 
+  // Only the CF-prod build trusts an inbound `X-Void-Original-URL` header:
+  // dispatch strips client-supplied values on ingress, so any header the
+  // worker sees there is dispatch-authored. CF-dev (no dispatch in front)
+  // and node/bun/deno self-hosted (user owns ingress) must NOT trust the
+  // header — clients could spoof `c.originalUrl()` / `c.isRewritten()` for
+  // user code that branches on them.
+  it('reads inbound X-Void-Original-URL only on CF-prod (CF with dev=false)', () => {
+    const cfProd = compile({ nodeTarget: false, dev: false });
+    const cfDev = compile({ nodeTarget: false, dev: true });
+    const nodeDev = compile({ nodeTarget: true, dev: true });
+    const nodeProd = compile({ nodeTarget: true, dev: false });
+
+    const readsHeader = (code: string) =>
+      code.includes('c.req.raw.headers.get("X-Void-Original-URL")');
+
+    expect(readsHeader(cfProd)).toBe(true);
+    expect(readsHeader(cfDev)).toBe(false);
+    expect(readsHeader(nodeDev)).toBe(false);
+    expect(readsHeader(nodeProd)).toBe(false);
+  });
+
   it('wraps SSR notFound with assets-first-then-fallback on default target dev', () => {
     const ssrOptions = {
       serverEntryPath: '/project/src/main.ssr.ts',

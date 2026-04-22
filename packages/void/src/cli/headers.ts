@@ -6,6 +6,7 @@ import {
   convertRedirectsConfig,
   convertRewritesConfig,
   countSplats,
+  isProtocolRelative,
   VALID_REDIRECT_STATUSES,
   type RoutingConfig,
 } from '../config';
@@ -201,12 +202,7 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
         );
         continue;
       }
-      // Protocol-relative ("//host/x") passes the single-slash check but
-      // parses as a cross-origin URL when dispatch applies the manifest,
-      // silently turning an internal rewrite into a proxy. Mirrors the
-      // `c.rewrite()` codegen guard in router/compile.ts (commit 3c60d38)
-      // and the `void.json` rewrite/fallback validators in config.ts.
-      if (destination.startsWith('//')) {
+      if (isProtocolRelative(destination)) {
         voidWarn(
           `Skipping _redirects rewrite "${source} ${destination} ${force ? '200!' : '200'}": destination must not start with "//" (protocol-relative URLs parse as cross-origin; only internal paths are supported).`,
         );
@@ -337,45 +333,28 @@ export function mergeRoutingRules(opts: { dir: string; routing: RoutingConfig | 
  * failing the deploy: a `*` in a destination is well-formed output, just
  * probably not what was meant.
  *
- * Only reported once per rule (the count of `*` in the destination is
- * irrelevant — a single occurrence is already suspicious). Returns the
- * warning message for test observability; `undefined` when no destinations
- * contain `*`. The `warn` callback defaults to `voidWarn` and is injectable
- * so tests can capture output without stubbing the module.
+ * Only reported once per rule — the count of `*` in the destination is
+ * irrelevant, a single occurrence is already suspicious.
  */
 export function lintDestinationSplats(
   rules: Array<DevRedirectRule> | undefined,
   phaseName: string,
-  warn: (msg: string) => void = voidWarn,
-): string | undefined {
+): void {
   if (!rules || rules.length === 0) {
-    return undefined;
+    return;
   }
 
-  const affected: Array<DevRedirectRule> = [];
-  for (const rule of rules) {
-    if (rule.destination.includes('*')) {
-      affected.push(rule);
-    }
-  }
-
+  const affected = rules.filter((r) => r.destination.includes('*'));
   if (affected.length === 0) {
-    return undefined;
+    return;
   }
 
-  const longestSource = affected.reduce((n, r) => Math.max(n, r.source.length), 0);
-  const lines = affected.map((rule) => {
-    const origin = rule.origin ?? '<unknown>';
-    return `  ${rule.source.padEnd(longestSource)}  → ${rule.destination}  (${origin})`;
-  });
-
-  const message = [
-    `Warning: destinations in ${phaseName} contain a literal "*" — splat tokens are not substituted in destinations; use ":splat" (or other named params) or rewrite the destination:`,
-    ...lines,
-  ].join('\n');
-
-  warn(message);
-  return message;
+  const lines = affected.map(
+    (r) => `  ${r.source} → ${r.destination}  (${r.origin ?? '<unknown>'})`,
+  );
+  voidWarn(
+    `destinations in ${phaseName} contain a literal "*" — splat tokens are not substituted in destinations; use ":splat" (or other named params) or rewrite the destination:\n${lines.join('\n')}`,
+  );
 }
 
 /**
@@ -397,18 +376,13 @@ export function lintDestinationSplats(
  * annotated with the `origin` of every occurrence (e.g. `_redirects:12` vs
  * `void.json#routing.rewrites`). Aggregation avoids a wall of per-pair
  * warnings on configs with many collisions.
- *
- * Returns the warning message for test observability; `undefined` when the
- * input is unique. The `warn` callback defaults to `voidWarn` and is
- * injectable so tests can capture output without stubbing the module.
  */
 export function lintDuplicateSources(
   rules: Array<DevRedirectRule> | undefined,
   phaseName: string,
-  warn: (msg: string) => void = voidWarn,
-): string | undefined {
+): void {
   if (!rules || rules.length < 2) {
-    return undefined;
+    return;
   }
 
   const bySource = new Map<string, Array<DevRedirectRule>>();
@@ -421,33 +395,20 @@ export function lintDuplicateSources(
     }
   }
 
-  const duplicates: Array<{ source: string; occurrences: Array<DevRedirectRule> }> = [];
+  const lines: Array<string> = [];
   for (const [source, occurrences] of bySource) {
-    if (occurrences.length > 1) {
-      duplicates.push({ source, occurrences });
+    if (occurrences.length < 2) {
+      continue;
     }
+    const origins = occurrences.map((r) => r.origin ?? '<unknown>').join(', ');
+    lines.push(`  ${source}  — ${origins}`);
   }
 
-  if (duplicates.length === 0) {
-    return undefined;
+  if (lines.length === 0) {
+    return;
   }
 
-  const longestSource = duplicates.reduce((n, d) => Math.max(n, d.source.length), 0);
-
-  const lines = duplicates.map(({ source, occurrences }) => {
-    const origins = occurrences.map((rule) => rule.origin ?? '<unknown>');
-    const joined =
-      origins.length === 2
-        ? origins.join(' and ')
-        : `${origins.slice(0, -1).join(', ')}, and ${origins[origins.length - 1]}`;
-    return `  ${source.padEnd(longestSource)}  — ${joined}`;
-  });
-
-  const message = [
-    `Warning: duplicate rule sources detected in ${phaseName} (last match wins — the later entry takes effect):`,
-    ...lines,
-  ].join('\n');
-
-  warn(message);
-  return message;
+  voidWarn(
+    `duplicate rule sources detected in ${phaseName} (last match wins — the later entry takes effect):\n${lines.join('\n')}`,
+  );
 }
