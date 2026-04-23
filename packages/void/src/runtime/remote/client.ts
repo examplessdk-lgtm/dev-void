@@ -1,3 +1,5 @@
+import { cfAccessHeaders } from '../../shared/cf-access';
+
 /**
  * HTTP client for the remote bindings proxy (proxy.void.cloud).
  *
@@ -5,11 +7,19 @@
  * binding operations to the platform proxy during local development.
  */
 export class ProxyClient {
+  private authHeaders: Record<string, string>;
+
   constructor(
     private proxyUrl: string,
-    private token: string,
+    token: string,
     private projectId: string,
-  ) {}
+    cfAccess?: { id?: unknown; secret?: unknown },
+  ) {
+    this.authHeaders = {
+      Authorization: `Bearer ${token}`,
+      ...cfAccessHeaders(cfAccess?.id, cfAccess?.secret),
+    };
+  }
 
   /**
    * Send a JSON POST request to the proxy and return the response.
@@ -20,7 +30,7 @@ export class ProxyClient {
     const res = await globalThis.fetch(`${this.proxyUrl}${path}`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ ...body, projectId: this.projectId }),
@@ -53,7 +63,7 @@ export class ProxyClient {
       ...init,
       headers: {
         ...(init.headers as Record<string, string>),
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
       body,
     });

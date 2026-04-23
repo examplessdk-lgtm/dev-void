@@ -1,3 +1,4 @@
+import { cfAccessHeaders } from '../shared/cf-access';
 import { getApiUrl } from './auth';
 import type { DeployEvent } from './types';
 
@@ -119,10 +120,13 @@ export interface DomainStatusResponse extends DomainResponse {
  */
 export class PlatformClient {
   private baseUrl: string;
-  private token: string;
+  private authHeaders: Record<string, string>;
 
   constructor(token: string, options?: string | { apiUrl?: string; root?: string }) {
-    this.token = token;
+    this.authHeaders = {
+      Authorization: `Bearer ${token}`,
+      ...cfAccessHeaders(process.env.CF_ACCESS_CLIENT_ID, process.env.CF_ACCESS_CLIENT_SECRET),
+    };
     if (typeof options === 'string') {
       this.baseUrl = options;
     } else {
@@ -133,7 +137,7 @@ export class PlatformClient {
   async whoami(): Promise<{ login: string; plan: string }> {
     const res = await fetch(`${this.baseUrl}/me`, {
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
     });
 
@@ -147,7 +151,7 @@ export class PlatformClient {
   async listProjects(): Promise<ProjectResponse[]> {
     const res = await fetch(`${this.baseUrl}/projects`, {
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
     });
 
@@ -161,7 +165,7 @@ export class PlatformClient {
   async listDeployments(projectId: string): Promise<DeploymentListResponse> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/deployments`, {
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
     });
 
@@ -185,7 +189,7 @@ export class PlatformClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
       body: JSON.stringify(body),
     });
@@ -206,7 +210,7 @@ export class PlatformClient {
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${this.token}`,
+          ...this.authHeaders,
         },
       },
     );
@@ -223,7 +227,7 @@ export class PlatformClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
       body: JSON.stringify({ slug }),
     });
@@ -246,7 +250,7 @@ export class PlatformClient {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.token}`,
+          ...this.authHeaders,
         },
         body: JSON.stringify({ assetManifest, ...(hasWorker && { hasWorker }) }),
       });
@@ -274,7 +278,7 @@ export class PlatformClient {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/deploy`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
       body: formData,
     });
@@ -308,7 +312,7 @@ export class PlatformClient {
   async listSecrets(projectId: string): Promise<{ name: string }[]> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/secrets`, {
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
     });
 
@@ -326,7 +330,7 @@ export class PlatformClient {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.token}`,
+          ...this.authHeaders,
         },
         body: JSON.stringify({ value }),
       },
@@ -343,7 +347,7 @@ export class PlatformClient {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}`, {
       method: 'DELETE',
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
     });
 
@@ -359,7 +363,7 @@ export class PlatformClient {
   ): Promise<{ applied: { name: string; applied_at: string }[] }> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/migrations`, {
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
     });
 
@@ -378,7 +382,7 @@ export class PlatformClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
       body: JSON.stringify({ migrations }),
     });
@@ -398,7 +402,7 @@ export class PlatformClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
       body: JSON.stringify({ renames }),
     });
@@ -415,7 +419,7 @@ export class PlatformClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
       body: JSON.stringify({ hostname }),
     });
@@ -430,7 +434,7 @@ export class PlatformClient {
   async listDomains(projectId: string): Promise<DomainResponse[]> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/domains`, {
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
     });
 
@@ -444,7 +448,7 @@ export class PlatformClient {
   async getDomainStatus(projectId: string, domainId: string): Promise<DomainStatusResponse> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/domains/${domainId}`, {
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
     });
 
@@ -459,7 +463,7 @@ export class PlatformClient {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/domains/${domainId}`, {
       method: 'DELETE',
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
     });
 
@@ -476,7 +480,7 @@ export class PlatformClient {
       {
         method: 'DELETE',
         headers: {
-          Authorization: `Bearer ${this.token}`,
+          ...this.authHeaders,
         },
       },
     );
@@ -491,7 +495,7 @@ export class PlatformClient {
   async getResources(projectId: string): Promise<{ type: string; binding_name: string }[]> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/resources`, {
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
     });
 
@@ -507,7 +511,7 @@ export class PlatformClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
       body: JSON.stringify({ connectionString }),
     });
@@ -524,7 +528,7 @@ export class PlatformClient {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
       body: JSON.stringify({ connectionString }),
     });
@@ -541,7 +545,7 @@ export class PlatformClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
       body: JSON.stringify({ all: true }),
     });
@@ -569,7 +573,7 @@ export class PlatformClient {
 
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/logs?${params}`, {
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...this.authHeaders,
       },
     });
 
