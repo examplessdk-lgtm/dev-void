@@ -535,7 +535,7 @@ function pushDefaultErrorPageHelpers(lines: Array<string>, options: CompileOptio
   lines.push(`    <title>\${__voidEscapeHtml(heading)}</title>`);
   lines.push(`    <style>`);
   lines.push(`      :root {`);
-  lines.push(`        color-scheme: light;`);
+  lines.push(`        color-scheme: light dark;`);
   lines.push(`        font-family: \${__VOID_ERROR_PAGE_FONT_STACK};`);
   lines.push(`        background: #f5f5f5;`);
   lines.push(`        color: #171717;`);
@@ -571,6 +571,21 @@ function pushDefaultErrorPageHelpers(lines: Array<string>, options: CompileOptio
   lines.push(`      }`);
   lines.push(`      strong {`);
   lines.push(`        font-weight: 600;`);
+  lines.push(`      }`);
+  lines.push(`      @media (prefers-color-scheme: dark) {`);
+  lines.push(`        :root {`);
+  lines.push(`          background: #0a0a0a;`);
+  lines.push(`          color: #f5f5f5;`);
+  lines.push(`        }`);
+  lines.push(`        body {`);
+  lines.push(
+    `          background: radial-gradient(circle at top, rgba(38, 38, 38, 0.96), rgba(10, 10, 10, 0.96) 52%), linear-gradient(180deg, #171717 0%, #0a0a0a 100%);`,
+  );
+  lines.push(`        }`);
+  lines.push(`        main {`);
+  lines.push(`          border-color: #27272a;`);
+  lines.push(`          background: rgba(23, 23, 23, 0.88);`);
+  lines.push(`        }`);
   lines.push(`      }`);
   lines.push(`    </style>`);
   lines.push(`  </head>`);
