@@ -39,6 +39,24 @@ describe('mergeRoutingRules', () => {
     expect(result.redirectRules[0]).toMatchObject({ source: '/a', destination: '/b', status: 200 });
   });
 
+  it('skips file reads when dir is null but still merges config rules', () => {
+    // `dir: null` corresponds to Vite `publicDir: false` — file-based
+    // `_redirects`/`_headers` must not be read even if they exist at the
+    // default `<root>/public`, but config-based rules still apply.
+    setup({
+      redirects: '/from-file /to-file 301',
+      headers: '/file-scope\n  X-File: 1',
+    });
+    const result = mergeRoutingRules({
+      dir: null,
+      routing: { rewrites: { '/a': '/b' }, headers: { '/cfg-scope': ['X-Cfg: 1'] } },
+    });
+    expect(result.redirectRules).toHaveLength(1);
+    expect(result.redirectRules[0]).toMatchObject({ source: '/a', destination: '/b', status: 200 });
+    expect(result.headerRules).toHaveLength(1);
+    expect(result.headerRules[0]).toMatchObject({ pattern: '/cfg-scope' });
+  });
+
   it('buckets _redirects entries by phase: 3xx + 200! → redirects, plain 200 → fallbacks', () => {
     setup({
       redirects: [

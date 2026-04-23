@@ -174,9 +174,11 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   // them up before the first route module load.
   let publicDir: string | null = join(root, 'public');
   function reloadFileRules(): void {
-    if (publicDir === null) {
-      return;
-    }
+    // Always run through the merge — when `publicDir === null` (user set
+    // `publicDir: false` in Vite config) file rules are skipped, but
+    // config-based `routing.redirects`/`rewrites`/`headers`/`fallbacks` still
+    // apply. Re-running also clears stale file rules picked up from the
+    // default `<root>/public` preload before `configResolved`.
     const merged = mergeRoutingRules({ dir: publicDir, routing: options.routing });
     lintDuplicateSources(merged.redirectRules, 'redirects/rewrites (pre-asset)');
     lintDuplicateSources(merged.fallbackRules, 'fallbacks (post-asset)');

@@ -283,17 +283,22 @@ export function splitRedirectRulesByForce(rules: Array<DevRedirectRule> | undefi
  * to use — CLI vs. Vite logger). `redundantForceOn3xx` is returned raw for
  * the same reason.
  */
-export function mergeRoutingRules(opts: { dir: string; routing: RoutingConfig | undefined }): {
+export function mergeRoutingRules(opts: {
+  dir: string | null;
+  routing: RoutingConfig | undefined;
+}): {
   headerRules: Array<HeaderRule>;
   redirectRules: Array<DevRedirectRule>;
   fallbackRules: Array<DevRedirectRule> | undefined;
   redundantForceOn3xx: number;
 } {
   const { dir, routing } = opts;
-  const dirExists = existsSync(dir);
+  // `dir === null` when the user set `publicDir: false` in Vite config. Skip
+  // file-based rule reads but still merge config-based rules below.
+  const fileDir = dir !== null && existsSync(dir) ? dir : null;
 
-  const fileHeaders = dirExists ? parseHeadersFile(dir) : undefined;
-  const fileParsed = dirExists ? parseRedirectsFile(dir) : undefined;
+  const fileHeaders = fileDir !== null ? parseHeadersFile(fileDir) : undefined;
+  const fileParsed = fileDir !== null ? parseRedirectsFile(fileDir) : undefined;
   const { always: fileAlways, fallbacks: fileFallbacks } = splitRedirectRulesByForce(
     fileParsed?.rules,
   );
