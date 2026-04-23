@@ -1850,6 +1850,13 @@ function __filterInternalBindings(env) {
   // for static files and set cache headers. Edge caching of hashed assets
   // happens at the dispatch layer (see design doc 0042).
   // Safe for workers without ASSETS binding (env.ASSETS check short-circuits).
+  //
+  // Hashed assets under assetsDir get long immutable caching (content-addressed).
+  // The non-hashed fallback branch — the SPA shell served on any unmatched
+  // 404 — is stamped no-store: a stale entry there would shadow routes that
+  // are added or fixed in subsequent deploys across the edge cache boundary,
+  // which the platform's deploy-scoped cache keys (dispatch layer) can't
+  // reach once CF's managed edge has cached the response.
   const assetHelper = `
 async function serveWithAssets(request, env, response) {
   if (response.status !== 404 || !env.ASSETS || (request.method !== "GET" && request.method !== "HEAD")) return response;
@@ -1859,7 +1866,7 @@ async function serveWithAssets(request, env, response) {
   if (new URL(request.url).pathname.startsWith(${JSON.stringify('/' + assetsDir + '/')})) {
     res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
   } else {
-    res.headers.set("Cache-Control", "public, s-maxage=60, max-age=0, must-revalidate");
+    res.headers.set("Cache-Control", "no-store");
   }
   return res;
 }
