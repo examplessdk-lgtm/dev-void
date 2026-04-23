@@ -598,7 +598,9 @@ function installVoidWrappers(app: Hono, voidOriginalUrls: WeakMap<Request, URL>)
       const searchOnly = qIdx === -1 ? '' : path.slice(qIdx);
       const rewriteUrl = new URL(c.req.url);
       rewriteUrl.pathname = pathOnly;
-      rewriteUrl.search = searchOnly;
+      if (searchOnly) {
+        rewriteUrl.search = searchOnly;
+      }
       const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
       const prior = voidOriginalUrls.get(c.req.raw);
       voidOriginalUrls.set(rewriteReq, prior ?? new URL(c.req.url));
@@ -962,6 +964,43 @@ describe('c.rewrite runtime wrapper', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('X-Req-Path')).toBe('/page');
     expect(res.headers.get('X-Req-Search')).toBe('?x=1');
+  });
+
+  it('c.rewrite preserves the incoming query when the destination has none', async () => {
+    // `c.rewrite('/en/page')` on a request to `/page?x=1` must forward `?x=1`
+    // to the rewritten handler — matches static _redirects 200 rewrites (which
+    // forbid `?` in destinations and always preserve the incoming query) and
+    // avoids dropping caller-provided state like pagination or OAuth params.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakMap<Request, URL>());
+
+    app.get('/from', (c) => (c as any).rewrite('/page'));
+    app.get('/page', (c) => {
+      return new Response('ok', {
+        headers: { 'X-Req-Search': new URL(c.req.url).search },
+      });
+    });
+
+    const res = await app.fetch(new Request('http://localhost/from?x=1&y=2'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Req-Search')).toBe('?x=1&y=2');
+  });
+
+  it('c.rewrite destination query wins over the incoming query', async () => {
+    // When the destination has its own `?`, it replaces the incoming query
+    // wholesale (it does not merge) — documents the precedence rule.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakMap<Request, URL>());
+
+    app.get('/from', (c) => (c as any).rewrite('/page?b=2'));
+    app.get('/page', (c) => {
+      return new Response('ok', {
+        headers: { 'X-Req-Search': new URL(c.req.url).search },
+      });
+    });
+
+    const res = await app.fetch(new Request('http://localhost/from?a=1'));
+    expect(res.headers.get('X-Req-Search')).toBe('?b=2');
   });
 
   it('c.rewrite rejects absolute-URL destinations with an internal-only error', async () => {

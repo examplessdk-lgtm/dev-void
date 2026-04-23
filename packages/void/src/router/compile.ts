@@ -854,7 +854,11 @@ export function compileRouteTable(
   lines.push('    const __searchOnly = __qIdx === -1 ? "" : path.slice(__qIdx);');
   lines.push('    const rewriteUrl = new URL(c.req.url);');
   lines.push('    rewriteUrl.pathname = __pathOnly;');
-  lines.push('    rewriteUrl.search = __searchOnly;');
+  // Only override the search when the destination carries its own query.
+  // A queryless destination (`c.rewrite("/en" + c.req.path)`) preserves the
+  // incoming query — mirrors the static-rewrite codegen below and keeps
+  // callers from having to re-append `?page=2`, OAuth callbacks, etc.
+  lines.push('    if (__searchOnly) rewriteUrl.search = __searchOnly;');
   lines.push('    const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);');
   // Preserve the earliest original URL across multi-hop rewrites: inherit
   // whatever the current hop was rewritten from (or record this hop's URL
