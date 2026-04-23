@@ -1937,7 +1937,7 @@ function compilePageRoutes(
   lines.push('');
 
   // Page fallback — for unmatched non-API paths, try static assets first,
-  // then attempt to render the index page as an SPA fallback.
+  // then serve the app's custom/default 404 page.
   // Uses notFound (not get("*")) so Vite's module pipeline can serve .vue/.ts files in dev.
   lines.push(`app.notFound(async (c) => {`);
   lines.push(`  const path = c.req.path;`);
@@ -1983,18 +1983,9 @@ function compilePageRoutes(
   lines.push(`    return Response.redirect(url.href, 301);`);
   lines.push(`  }`);
   // All page routes are registered as explicit Hono handlers above.
-  // Any path reaching here is genuinely unknown — try rendering the index
-  // page (for a nice client-side 404 UI) but always return 404 status.
-  // The try/catch hides server errors from handlePageGet (e.g. index
-  // component crashing on missing loader props).
-  lines.push(`  try {`);
-  lines.push(
-    `    const res = await handlePageGet(undefined, undefined, c, "index", renderPage, getPagesAssetTags, __voidHeadConfig);`,
-  );
-  lines.push(`    return new Response(res.body, { status: 404, headers: res.headers });`);
-  lines.push(`  } catch {`);
-  lines.push(`    return serveCustomErrorPage(c, 404, "Not Found");`);
-  lines.push(`  }`);
+  // Any path reaching here is genuinely unknown — serve the app's custom
+  // 404 page when available, otherwise fall back to Void's default one.
+  lines.push(`  return serveCustomErrorPage(c, 404, "Not Found");`);
   lines.push(`});`);
   lines.push('');
 }

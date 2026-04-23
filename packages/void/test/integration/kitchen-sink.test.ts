@@ -156,7 +156,9 @@ describe('playground/kitchen-sink', () => {
       await page.click('a[href="/env"]');
       await page.waitForFunction(() => document.querySelector('h1')?.textContent?.includes('Env'));
 
-      const stamp = await page.evaluate(() => (document.querySelector('nav') as NavElement | null)?.__stamp);
+      const stamp = await page.evaluate(
+        () => (document.querySelector('nav') as NavElement | null)?.__stamp,
+      );
       expect(stamp).toBe(1);
     } finally {
       await page.context().close();
@@ -489,22 +491,27 @@ describe('playground/kitchen-sink', () => {
   it('returns 404 for /wp-admin', async () => {
     const res = await fetch(`${BASE}/wp-admin`);
     expect(res.status).toBe(404);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    expect(await res.text()).toContain('Not Found');
   });
 
   it('returns 404 for /phpmyadmin', async () => {
     const res = await fetch(`${BASE}/phpmyadmin`);
     expect(res.status).toBe(404);
+    expect(await res.text()).toContain('Not Found');
   });
 
   // Multi-segment unknown paths
   it('returns 404 for /foo/bar/baz', async () => {
     const res = await fetch(`${BASE}/foo/bar/baz`);
     expect(res.status).toBe(404);
+    expect(await res.text()).toContain('Not Found');
   });
 
   it('returns 404 for /wp-content/plugins/exploit', async () => {
     const res = await fetch(`${BASE}/wp-content/plugins/exploit`);
     expect(res.status).toBe(404);
+    expect(await res.text()).toContain('Not Found');
   });
 
   // API prefix returns 404 text (not HTML)

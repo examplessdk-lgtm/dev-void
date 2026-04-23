@@ -1,3 +1,4 @@
+import { cfAccessHeaders } from '../shared/cf-access';
 import {
   PROVIDER_KEY_MAP,
   type ThirdPartyModel,
@@ -137,7 +138,11 @@ function makeServiceBindingBackend(proxy: Fetcher, runtimeEnv: RuntimeEnv): AiBa
 
 function makeHttpBackend(token: string, projectId: string, runtimeEnv: RuntimeEnv): AiBackend {
   const base = getProxyUrl(runtimeEnv);
-  const headers = { 'content-type': 'application/json', authorization: `Bearer ${token}` };
+  const headers = {
+    'content-type': 'application/json',
+    authorization: `Bearer ${token}`,
+    ...cfAccessHeaders(runtimeEnv.CF_ACCESS_CLIENT_ID, runtimeEnv.CF_ACCESS_CLIENT_SECRET),
+  };
 
   async function proxyFetch(action: string, body: Record<string, unknown>): Promise<Response> {
     const res = await fetch(`${base}/${action}`, {

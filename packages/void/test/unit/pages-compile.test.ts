@@ -211,10 +211,10 @@ describe('compileRouteTable with pages', () => {
     expect(code).toContain('lastSeg.includes(".")');
     // Trailing slash redirect
     expect(code).toContain('path.endsWith("/")');
-    // notFound fallback: try render index as 404, catch errors
-    expect(code).toContain('try {');
-    expect(code).toContain('{ status: 404, headers: res.headers }');
-    expect(code).toContain('} catch {');
+    // notFound fallback: serve custom/default 404 page
+    expect(code).not.toContain(
+      'return new Response(res.body, { status: 404, headers: res.headers })',
+    );
     expect(code).toContain('serveCustomErrorPage(c, 404, "Not Found")');
   });
 
