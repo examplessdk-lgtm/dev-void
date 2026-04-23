@@ -202,6 +202,14 @@
     },
     "./env": {
       "types": "./dist/runtime/env-public.d.mts",
+      "workerd": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
+      },
+      "worker": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
+      },
       "browser": {
         "import": "./dist/runtime/env-public-client.mjs",
         "require": "./dist/runtime/env-public-client.mjs"
