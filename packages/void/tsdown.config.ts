@@ -36,7 +36,11 @@ function injectWorkersTypesReferencePlugin() {
     generateBundle(_options: unknown, bundle: Record<string, BundleOutput>) {
       for (const output of Object.values(bundle)) {
         // Patch declaration entrypoints whose source uses Cloudflare globals.
-        const targets = new Set(['runtime/handler.d.mts', 'runtime/env-public.d.mts']);
+        const targets = new Set([
+          'runtime/handler.d.mts',
+          'runtime/env-public.d.mts',
+          'runtime/sandbox.d.mts',
+        ]);
         if (!targets.has(output.fileName)) {
           continue;
         }
@@ -96,6 +100,7 @@ export default defineConfig({
     'src/runtime/storage.ts',
     'src/runtime/isr.ts',
     'src/runtime/ai.ts',
+    'src/runtime/sandbox.ts',
     'src/runtime/remote/index.ts',
     'src/runtime/remote/binding-handler.ts',
     'src/runtime/migration-handler.ts',
@@ -127,6 +132,8 @@ export default defineConfig({
       '@void/svelte',
       '@void/solid',
       '@napi-rs/keyring',
+      '@cloudflare/sandbox',
+      '@cloudflare/containers',
       'undici', // ofetch imports this in types
     ],
     onlyBundle: [

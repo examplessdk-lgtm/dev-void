@@ -22,6 +22,7 @@ const referenceItems = [
       { text: 'inference', link: '/reference/config#inference' },
       { text: 'output', link: '/reference/config#output' },
       { text: 'remote', link: '/reference/config#remote' },
+      { text: 'sandbox', link: '/reference/config#sandbox' },
       { text: 'worker', link: '/reference/config#worker' },
     ],
   },
@@ -219,6 +220,7 @@ export default extendConfig(
             collapsed: false,
             items: [
               { text: 'AI', link: '/guide/ai' },
+              { text: 'Sandboxes', link: '/guide/sandboxes' },
               { text: 'Authentication', link: '/guide/auth' },
               { text: 'WebSockets', link: '/guide/websockets' },
               { text: 'Cron Jobs', link: '/guide/jobs' },

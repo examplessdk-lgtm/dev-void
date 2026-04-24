@@ -111,10 +111,7 @@ describe('applyPgMigrations', () => {
     const tracking = await pglite.query<{ name: string }>(
       'SELECT name FROM _void_migrations ORDER BY name',
     );
-    expect(tracking.rows.map((r) => r.name)).toEqual([
-      '001_create_users.sql',
-      '002_add_email.sql',
-    ]);
+    expect(tracking.rows.map((r) => r.name)).toEqual(['001_create_users.sql', '002_add_email.sql']);
   });
 
   it('rolls back failed migration and does not record it', async () => {

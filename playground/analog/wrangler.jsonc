@@ -1,20 +1,17 @@
 {
-  "compatibility_flags": [
-    "nodejs_compat",
-    "nodejs_als"
-  ],
+  "compatibility_flags": ["nodejs_compat", "nodejs_als"],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "default",
-      "database_id": "local"
-    }
+      "database_id": "local",
+    },
   ],
   "kv_namespaces": [
     {
       "binding": "KV",
-      "id": "local"
-    }
+      "id": "local",
+    },
   ],
-  "compatibility_date": "2026-02-24"
+  "compatibility_date": "2026-02-24",
 }

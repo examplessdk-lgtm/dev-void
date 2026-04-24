@@ -4,6 +4,7 @@ import type { HeaderRule, RedirectRule } from './cli/types';
 export type { RedirectRule };
 import { VOID_AUTH_PROVIDERS, isVoidAuthProvider, type VoidAuthProvider } from './auth/providers';
 import type { HeadConfig } from './pages/head';
+import type { SandboxConfig, SandboxInstanceType } from './sandbox/config';
 
 /** Redirect destination — string (302) or object with explicit status. */
 export type RedirectDestination = string | { to: string; status?: 301 | 302 | 307 | 308 };
@@ -53,6 +54,7 @@ export interface VoidConfig {
   head?: HeadConfig;
   routing?: RoutingConfig;
   inference?: InferenceConfig;
+  sandbox?: boolean | SandboxConfig;
   remote?: boolean;
   worker?: WranglerConfig;
   database?: 'pg';
@@ -65,6 +67,16 @@ const VALID_APP_TYPES = new Set(['spa', 'static', 'void', 'framework']);
 const VALID_OUTPUTS = new Set(['server', 'static']);
 const VALID_REDIRECT_STATUSES = new Set([301, 302, 307, 308]);
 const VALID_DATABASE_VALUES = new Set(['pg']);
+const VALID_SANDBOX_INSTANCE_TYPES = new Set<SandboxInstanceType>([
+  'dev',
+  'lite',
+  'basic',
+  'standard',
+  'standard-1',
+  'standard-2',
+  'standard-3',
+  'standard-4',
+]);
 
 /** Old flat keys that have moved into namespaces. */
 const MIGRATION_ERRORS: Record<string, string> = {
@@ -428,6 +440,70 @@ export function readConfig(root: string): VoidConfig {
   // Validate remote
   if (obj.remote !== undefined && typeof obj.remote !== 'boolean') {
     throw new Error(`config: "remote" in ${CONFIG_FILE} must be a boolean.`);
+  }
+
+  // Validate sandbox
+  if (obj.sandbox !== undefined) {
+    if (typeof obj.sandbox === 'boolean') {
+      // ok
+    } else if (
+      typeof obj.sandbox === 'object' &&
+      obj.sandbox !== null &&
+      !Array.isArray(obj.sandbox)
+    ) {
+      const sandbox = obj.sandbox as Record<string, unknown>;
+      for (const key of Object.keys(sandbox)) {
+        if (
+          ![
+            'binding',
+            'className',
+            'containerName',
+            'image',
+            'imageBuildContext',
+            'platformImage',
+            'instanceType',
+            'maxInstances',
+          ].includes(key)
+        ) {
+          throw new Error(
+            `config: Unknown key 'sandbox.${key}' in ${CONFIG_FILE}. Valid: binding, className, containerName, image, imageBuildContext, platformImage, instanceType, maxInstances.`,
+          );
+        }
+      }
+      for (const key of [
+        'binding',
+        'className',
+        'containerName',
+        'image',
+        'imageBuildContext',
+        'platformImage',
+      ]) {
+        if (sandbox[key] !== undefined && typeof sandbox[key] !== 'string') {
+          throw new Error(`config: "sandbox.${key}" in ${CONFIG_FILE} must be a string.`);
+        }
+      }
+      if (
+        sandbox.instanceType !== undefined &&
+        (typeof sandbox.instanceType !== 'string' ||
+          !VALID_SANDBOX_INSTANCE_TYPES.has(sandbox.instanceType as SandboxInstanceType))
+      ) {
+        throw new Error(
+          `config: "sandbox.instanceType" in ${CONFIG_FILE} must be one of: ${[...VALID_SANDBOX_INSTANCE_TYPES].join(', ')}.`,
+        );
+      }
+      if (
+        sandbox.maxInstances !== undefined &&
+        (typeof sandbox.maxInstances !== 'number' ||
+          !Number.isInteger(sandbox.maxInstances) ||
+          sandbox.maxInstances < 1)
+      ) {
+        throw new Error(
+          `config: "sandbox.maxInstances" in ${CONFIG_FILE} must be a positive integer.`,
+        );
+      }
+    } else {
+      throw new Error(`config: "sandbox" in ${CONFIG_FILE} must be a boolean or an object.`);
+    }
   }
 
   // Validate worker

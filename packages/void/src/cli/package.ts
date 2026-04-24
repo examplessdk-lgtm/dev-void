@@ -5,6 +5,7 @@ import ignore from 'ignore';
 import type { InferredBindings } from '../inference/walk';
 import type { MigrationFile } from '../migrations/validate';
 import type { WebSocketRouteDefinition } from '../router/websocket';
+import type { ResolvedSandboxConfig } from '../sandbox/config';
 import { toSlash } from '../shared/utils';
 import type {
   AssetConfig,
@@ -12,6 +13,7 @@ import type {
   HeaderRule,
   QueueMeta,
   RedirectRule,
+  SandboxManifestMeta,
   ScheduleMeta,
   WebSocketManifestMeta,
 } from './types';
@@ -183,13 +185,15 @@ export function appendAssets(
 /** Optional overrides for binding names and worker metadata. */
 export interface PackageOptions {
   /** Custom binding names (e.g. { d1: "MY_DB" }). Defaults: DB, KV, STORAGE. */
-  bindingNames?: { d1?: string; kv?: string; r2?: string };
+  bindingNames?: { d1?: string; kv?: string; r2?: string; sandbox?: string };
   /** Worker entry module filename (e.g. "index.mjs"). */
   workerMain?: string;
   /** Cloudflare compatibility_date from framework's wrangler config. */
   compatibilityDate?: string;
   /** Cloudflare compatibility_flags from framework's wrangler config. */
   compatibilityFlags?: Array<string>;
+  /** Cloudflare Sandbox container metadata for platform deploys. */
+  sandbox?: ResolvedSandboxConfig;
 }
 
 function toWebSocketManifest(
@@ -207,6 +211,17 @@ function toWebSocketManifest(
       hasAuthGate: route.hasAuthGate,
     })),
     classes: routes.map((route) => route.className),
+  };
+}
+
+function toSandboxManifest(sandbox: ResolvedSandboxConfig): SandboxManifestMeta {
+  return {
+    bindingName: sandbox.binding,
+    className: sandbox.className,
+    containerName: sandbox.containerName,
+    image: sandbox.platformImage,
+    ...(sandbox.instanceType && { instanceType: sandbox.instanceType }),
+    ...(sandbox.maxInstances != null && { maxInstances: sandbox.maxInstances }),
   };
 }
 
@@ -255,6 +270,15 @@ export async function packageBuild(
   }
   if (bindings.needsAI) {
     manifest.bindings.ai = true;
+  }
+  if (bindings.needsSandbox) {
+    if (!options?.sandbox) {
+      throw new Error('deploy: Sandbox bindings require sandbox package options.');
+    }
+    manifest.sandbox = toSandboxManifest({
+      ...options.sandbox,
+      binding: options.bindingNames?.sandbox ?? options.sandbox.binding,
+    });
   }
 
   // Add migration metadata to manifest + SQL content as FormData entries

@@ -549,6 +549,8 @@ interface CloudEnv extends Env {
     DB: D1Database;
     KV: KVNamespace;
     STORAGE: R2Bucket;
+    AI: Ai;
+    SANDBOX: DurableObjectNamespace<import('@cloudflare/sandbox').Sandbox>;
     [key: string]: unknown;
   };
   Variables: CloudContextVariables;
@@ -624,7 +626,7 @@ Importing `"void/env"` provides global Cloudflare environment types:
 /// <reference types="void/env" />
 ```
 
-Declares the `Cloudflare.Env` namespace with `DB: D1Database`, `KV: KVNamespace`, and `STORAGE: R2Bucket`.
+Declares the `Cloudflare.Env` namespace with `DB`, `KV`, `STORAGE`, `AI`, and `SANDBOX` binding types.
 
 For handler context variables such as `c.set()` and `c.get()`, augment [`CloudContextVariables`](#cloudcontextvariables). This is separate from `Cloudflare.Env`, which types worker bindings. Framework adapters such as `@void/vue`, `@void/react`, and `@void/svelte` also augment `CloudContextVariables` to add the `shared` key used by `useShared()`.
 
@@ -838,4 +840,5 @@ Solid `Link` GET `data` is merged into the rendered `href` query string. Primiti
 | `void/seed`            | `defineSeed`, `SeedContext`, `SeedFn` for programmatic `void db seed` modules                                                                                    |
 | `void/routes`          | `RouteMap` and `WebSocketRouteMap` stubs (types only)                                                                                                            |
 | `void/queues`          | `queues` proxy for sending messages to typed queues                                                                                                              |
+| `void/sandbox`         | `getSandbox`, `sandbox`, `Sandbox`, and sandbox option types from the Cloudflare Sandbox SDK                                                                     |
 | `void/env`             | Global Cloudflare env types (types only)                                                                                                                         |

@@ -9,6 +9,7 @@ import {
   isNodeTarget,
   getDatabaseDialect,
 } from '../../src/config';
+import { resolveSandboxConfig } from '../../src/sandbox/config';
 
 const tmpDir = join(import.meta.dirname, '.tmp-config-test');
 
@@ -50,6 +51,12 @@ describe('readConfig', () => {
           compatibility_date: '2025-12-01',
           compatibility_flags: ['nodejs_compat'],
         },
+        sandbox: {
+          binding: 'CODE',
+          image: './Dockerfile.sandbox',
+          instanceType: 'lite',
+          maxInstances: 2,
+        },
       }),
     );
     const config = readConfig(tmpDir);
@@ -63,6 +70,12 @@ describe('readConfig', () => {
     expect(config.worker).toEqual({
       compatibility_date: '2025-12-01',
       compatibility_flags: ['nodejs_compat'],
+    });
+    expect(config.sandbox).toEqual({
+      binding: 'CODE',
+      image: './Dockerfile.sandbox',
+      instanceType: 'lite',
+      maxInstances: 2,
     });
     cleanup();
   });
@@ -171,6 +184,62 @@ describe('readConfig', () => {
   it('throws on invalid binding value type', () => {
     setup(JSON.stringify({ inference: { bindings: { db: 42 } } }));
     expect(() => readConfig(tmpDir)).toThrow('must be a boolean or a string');
+    cleanup();
+  });
+
+  it('accepts sandbox boolean and object config', () => {
+    setup(JSON.stringify({ sandbox: true }));
+    expect(readConfig(tmpDir).sandbox).toBe(true);
+    cleanup();
+
+    setup(
+      JSON.stringify({
+        sandbox: {
+          binding: 'CODE',
+          className: 'CodeSandbox',
+          containerName: 'code-sandbox',
+          image: './Dockerfile.sandbox',
+          imageBuildContext: '.',
+          platformImage: 'registry.example.com/code-sandbox:latest',
+          instanceType: 'basic',
+          maxInstances: 3,
+        },
+      }),
+    );
+    expect(readConfig(tmpDir).sandbox).toEqual({
+      binding: 'CODE',
+      className: 'CodeSandbox',
+      containerName: 'code-sandbox',
+      image: './Dockerfile.sandbox',
+      imageBuildContext: '.',
+      platformImage: 'registry.example.com/code-sandbox:latest',
+      instanceType: 'basic',
+      maxInstances: 3,
+    });
+    cleanup();
+  });
+
+  it('preserves registry sandbox images when resolving config', () => {
+    const config = resolveSandboxConfig(
+      {
+        sandbox: {
+          image: 'docker.io/cloudflare/sandbox:0.8.11',
+        },
+      },
+      tmpDir,
+    );
+
+    expect(config.image).toBe('docker.io/cloudflare/sandbox:0.8.11');
+    expect(config.platformImage).toBe('docker.io/cloudflare/sandbox:0.8.11');
+  });
+
+  it('throws on invalid sandbox config', () => {
+    setup(JSON.stringify({ sandbox: { instanceType: 'huge' } }));
+    expect(() => readConfig(tmpDir)).toThrow('"sandbox.instanceType"');
+    cleanup();
+
+    setup(JSON.stringify({ sandbox: { maxInstances: 0 } }));
+    expect(() => readConfig(tmpDir)).toThrow('"sandbox.maxInstances"');
     cleanup();
   });
 

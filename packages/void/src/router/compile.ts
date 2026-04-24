@@ -1797,8 +1797,24 @@ export function compileWorkerEntry(
   webSocketClasses: Array<string> = [],
   runtimeEnvPath = 'void/_env',
   envSchemaModule?: { importPath: string; helperPath: string },
+  sandbox?: boolean | { bindingName?: string; className?: string; runtimePath?: string },
 ): string {
   const remotePath = remote?.remotePath;
+  const hasSandbox = sandbox === true || typeof sandbox === 'object';
+  const sandboxClassName =
+    typeof sandbox === 'object' ? (sandbox.className ?? 'Sandbox') : 'Sandbox';
+  const sandboxBindingName =
+    typeof sandbox === 'object' ? (sandbox.bindingName ?? 'SANDBOX') : 'SANDBOX';
+  const sandboxRuntimePath =
+    typeof sandbox === 'object' ? (sandbox.runtimePath ?? 'void/sandbox') : 'void/sandbox';
+  const sandboxImport = hasSandbox
+    ? `import { Sandbox as __VoidSandbox } from "@cloudflare/sandbox";\nimport { __setSandboxBindingName } from ${JSON.stringify(sandboxRuntimePath)};\n`
+    : '';
+  const sandboxExport = hasSandbox
+    ? sandboxClassName === 'Sandbox'
+      ? `export { __VoidSandbox as Sandbox };\n__setSandboxBindingName(${JSON.stringify(sandboxBindingName)});\n`
+      : `export class ${sandboxClassName} extends __VoidSandbox {}\n__setSandboxBindingName(${JSON.stringify(sandboxBindingName)});\n`
+    : '';
   const runtimeEnvImport = `import { withRuntimeEnv } from ${JSON.stringify(runtimeEnvPath)};\n`;
   const remoteImport = remote
     ? `import { createRemoteEnv } from ${JSON.stringify(remote.remotePath)};\n`
@@ -1928,7 +1944,7 @@ ${envValidateCall}  const userEnv = __filterInternalBindings(env);
 }`;
 
   if (hasQueues) {
-    return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv, __processQueue${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
+    return `${sandboxImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv, __processQueue${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
 ${runtimeEnvImport}${envSchemaImport}${remoteImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${scheduledHandler}
@@ -1954,13 +1970,15 @@ ${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = createR
 }
 
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
+${sandboxExport}
 export default { fetch: ${fetchHandler}, scheduled: handleScheduled, queue };`;
   }
-  return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
+  return `${sandboxImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
 ${runtimeEnvImport}${envSchemaImport}${remoteImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${scheduledHandler}
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
+${sandboxExport}
 export default { fetch: ${fetchHandler}, scheduled: handleScheduled };`;
 }
 

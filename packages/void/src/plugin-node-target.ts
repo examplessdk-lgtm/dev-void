@@ -11,6 +11,7 @@ export const CF_ONLY_IMPORTS: Array<string> = [
   'void/auth',
   'void/storage',
   'void/ai',
+  'void/sandbox',
   'void/env',
 ];
 

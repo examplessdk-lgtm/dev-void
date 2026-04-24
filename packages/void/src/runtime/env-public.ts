@@ -398,6 +398,7 @@ declare global {
       KV: KVNamespace;
       STORAGE: R2Bucket;
       AI: Ai;
+      SANDBOX: DurableObjectNamespace<import('@cloudflare/sandbox').Sandbox>;
       /** @internal Service binding to proxy worker (AI, revalidation, future features) */
       __VOID_PROXY?: Fetcher;
       /** @internal Custom proxy URL override */

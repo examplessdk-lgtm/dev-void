@@ -52,6 +52,9 @@ interface RoutingPluginOptions {
   target?: 'node' | 'bun' | 'deno';
   headerRules?: Array<import('./cli/types').HeaderRule>;
   redirectRules?: Array<import('./cli/types').RedirectRule>;
+  hasSandbox?: boolean;
+  sandboxBindingName?: string;
+  sandboxClassName?: string;
 }
 
 export function routingPlugin(root: string, options: RoutingPluginOptions): Plugin {
@@ -110,6 +113,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   const runtimeDir = dirname(resolveFile('#self/client'));
   const fetchPath = resolveFile('#self/runtime/fetch');
   const fetchStreamPath = resolveFile('#self/runtime/fetch-stream');
+  const sandboxRuntimePath = resolveFile('#self/sandbox');
   const drizzleAdapterPath = resolveFile('better-auth/adapters/drizzle');
   let authClientPath = join(runtimeDir, 'auth-client.mjs');
   const remote = options.remoteMode
@@ -270,6 +274,13 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         undefined,
         compileOptions.runtimeEnvPath,
         getEnvSchemaModule(),
+        options.hasSandbox
+          ? {
+              bindingName: options.sandboxBindingName,
+              className: options.sandboxClassName,
+              runtimePath: sandboxRuntimePath,
+            }
+          : false,
       ),
     );
   }
@@ -365,6 +376,13 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
             (scan!.websockets ?? []).map((route) => route.className),
             compileOptions.runtimeEnvPath,
             getEnvSchemaModule(),
+            options.hasSandbox
+              ? {
+                  bindingName: options.sandboxBindingName,
+                  className: options.sandboxClassName,
+                  runtimePath: sandboxRuntimePath,
+                }
+              : false,
           ),
         );
       }
@@ -475,6 +493,13 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
               (scan!.websockets ?? []).map((route) => route.className),
               compileOptions.runtimeEnvPath,
               getEnvSchemaModule(),
+              options.hasSandbox
+                ? {
+                    bindingName: options.sandboxBindingName,
+                    className: options.sandboxClassName,
+                    runtimePath: sandboxRuntimePath,
+                  }
+                : false,
             ),
           );
         }

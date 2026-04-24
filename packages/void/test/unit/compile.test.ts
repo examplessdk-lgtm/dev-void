@@ -490,6 +490,26 @@ describe('compileWorkerEntry', () => {
     expect(code).toContain('const ws = await __voidHandleWebSocket(request, env);');
   });
 
+  it('re-exports the Cloudflare Sandbox Durable Object class when enabled', () => {
+    const code = compileWorkerEntry(false, undefined, 'assets', [], 'void/_env', undefined, true);
+
+    expect(code).toContain('import { Sandbox as __VoidSandbox } from "@cloudflare/sandbox"');
+    expect(code).toContain('export { __VoidSandbox as Sandbox };');
+    expect(code).toContain('__setSandboxBindingName("SANDBOX");');
+  });
+
+  it('exports the configured Cloudflare Sandbox Durable Object class', () => {
+    const code = compileWorkerEntry(false, undefined, 'assets', [], 'void/_env', undefined, {
+      bindingName: 'CODE',
+      className: 'CodeSandbox',
+      runtimePath: 'void/sandbox',
+    });
+
+    expect(code).toContain('import { Sandbox as __VoidSandbox } from "@cloudflare/sandbox"');
+    expect(code).toContain('export class CodeSandbox extends __VoidSandbox {}');
+    expect(code).toContain('__setSandboxBindingName("CODE");');
+  });
+
   it('generates queue() export in worker entry when hasQueues=true', () => {
     const code = compileWorkerEntry(true);
 

@@ -4,6 +4,12 @@ import { parse, type ParseError } from 'jsonc-parser';
 import type { VoidConfig } from '../config';
 import type { InferredBindings } from '../inference/walk';
 import type { WebSocketRouteDefinition } from '../router/websocket';
+import {
+  DEFAULT_SANDBOX_BINDING,
+  SANDBOX_MIGRATION_TAG,
+  resolveSandboxConfig,
+  type ResolvedSandboxConfig,
+} from '../sandbox/config';
 
 const COMPAT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const NODEJS_ALS_FLAG = 'nodejs_als';
@@ -174,8 +180,9 @@ export function syncWranglerBindings(
   root: string,
   bindings: InferredBindings,
   options?: {
-    bindingNames?: { d1?: string; kv?: string; r2?: string };
+    bindingNames?: { d1?: string; kv?: string; r2?: string; sandbox?: string };
     websockets?: Array<WebSocketRouteDefinition>;
+    sandbox?: ResolvedSandboxConfig;
   },
 ): boolean {
   // Find the wrangler config file
@@ -256,6 +263,73 @@ export function syncWranglerBindings(
         {
           tag: 'void-ws-v1',
           new_classes: options.websockets.map((route) => route.className),
+        },
+      ];
+      modified = true;
+    }
+  }
+
+  if (bindings.needsSandbox) {
+    const sandbox = options?.sandbox ?? resolveSandboxConfig({ sandbox: true }, root);
+    const bindingName =
+      options?.bindingNames?.sandbox ?? sandbox?.binding ?? DEFAULT_SANDBOX_BINDING;
+    const className = sandbox?.className ?? 'Sandbox';
+    const existingDurableObjectBindings =
+      ((
+        parsed.durable_objects as
+          | { bindings?: Array<{ name: string; class_name: string }> }
+          | undefined
+      )?.bindings as Array<{ name: string; class_name: string }> | undefined) ?? [];
+    if (!existingDurableObjectBindings.some((binding) => binding.name === bindingName)) {
+      parsed.durable_objects = {
+        bindings: [
+          ...existingDurableObjectBindings,
+          {
+            name: bindingName,
+            class_name: className,
+          },
+        ],
+      };
+      modified = true;
+    }
+
+    const existingContainers =
+      (parsed.containers as Array<{ name?: string; class_name?: string }> | undefined) ?? [];
+    if (!existingContainers.some((container) => container.class_name === className)) {
+      parsed.containers = [
+        ...existingContainers,
+        {
+          name: sandbox?.containerName ?? 'void-sandbox',
+          class_name: className,
+          image: sandbox?.image,
+          ...(sandbox?.imageBuildContext && {
+            image_build_context: sandbox.imageBuildContext,
+          }),
+          ...(sandbox?.instanceType && { instance_type: sandbox.instanceType }),
+          ...(sandbox?.maxInstances != null && { max_instances: sandbox.maxInstances }),
+        },
+      ];
+      modified = true;
+    }
+
+    const migrations = Array.isArray(parsed.migrations)
+      ? (parsed.migrations as Array<{
+          tag?: string;
+          new_classes?: Array<string>;
+          new_sqlite_classes?: Array<string>;
+        }>)
+      : [];
+    const hasMigration = migrations.some(
+      (migration) =>
+        migration.tag === SANDBOX_MIGRATION_TAG ||
+        migration.new_sqlite_classes?.includes(className),
+    );
+    if (!hasMigration) {
+      parsed.migrations = [
+        ...migrations,
+        {
+          tag: SANDBOX_MIGRATION_TAG,
+          new_sqlite_classes: [className],
         },
       ];
       modified = true;

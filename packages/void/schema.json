@@ -251,6 +251,61 @@
       "type": "boolean",
       "description": "Connect to remote D1/KV/R2 bindings during local development. Can also be set via VOID_REMOTE=1 environment variable."
     },
+    "sandbox": {
+      "description": "Enable Cloudflare Sandboxes. `true` uses the default SANDBOX binding and Cloudflare sandbox image; an object customizes the Durable Object binding, container image, and scaling.",
+      "oneOf": [
+        { "type": "boolean" },
+        {
+          "type": "object",
+          "properties": {
+            "binding": {
+              "type": "string",
+              "description": "Worker binding name for the sandbox Durable Object namespace. Defaults to SANDBOX."
+            },
+            "className": {
+              "type": "string",
+              "description": "Durable Object class name. Defaults to Sandbox."
+            },
+            "containerName": {
+              "type": "string",
+              "description": "Cloudflare Container application name. Defaults to void-sandbox."
+            },
+            "image": {
+              "type": "string",
+              "description": "Container image or Dockerfile path used by local Wrangler development."
+            },
+            "imageBuildContext": {
+              "type": "string",
+              "description": "Optional Docker build context path for local Wrangler development."
+            },
+            "platformImage": {
+              "type": "string",
+              "description": "Registry image reference used by `void deploy`. Required when `image` is a custom local Dockerfile path."
+            },
+            "instanceType": {
+              "type": "string",
+              "enum": [
+                "dev",
+                "lite",
+                "basic",
+                "standard",
+                "standard-1",
+                "standard-2",
+                "standard-3",
+                "standard-4"
+              ],
+              "description": "Cloudflare Container instance type."
+            },
+            "maxInstances": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Maximum number of sandbox container instances."
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "worker": {
       "type": "object",
       "description": "Curated wrangler config passthrough. Cloudflare-targeted apps require compatibility_date here unless provided by wrangler.jsonc/wrangler.json; Void pins the latest known-good date here if none is configured. Binding arrays (d1_databases, kv_namespaces, r2_buckets) are not allowed here — bindings are fully managed by void.",

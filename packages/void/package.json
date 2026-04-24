@@ -25,6 +25,7 @@
     "#self/remote": "./dist/runtime/remote/index.mjs",
     "#self/remote/binding-handler": "./dist/runtime/remote/binding-handler.mjs",
     "#self/response": "./dist/runtime/response.mjs",
+    "#self/sandbox": "./dist/runtime/sandbox.mjs",
     "#self/runtime/fetch": "./dist/runtime/fetch.mjs",
     "#self/runtime/fetch-stream": "./dist/runtime/fetch-stream.mjs",
     "#self/runtime/migration-handler": "./dist/runtime/migration-handler.mjs",
@@ -140,6 +141,11 @@
       "import": "./dist/runtime/ai.mjs",
       "require": "./dist/runtime/ai.mjs"
     },
+    "./sandbox": {
+      "types": "./dist/runtime/sandbox.d.mts",
+      "import": "./dist/runtime/sandbox.mjs",
+      "require": "./dist/runtime/sandbox.mjs"
+    },
     "./remote": {
       "types": "./dist/runtime/remote/index.d.mts",
       "import": "./dist/runtime/remote/index.mjs",
@@ -244,6 +250,7 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
+    "@cloudflare/sandbox": "^0.8.11",
     "@cloudflare/vite-plugin": "^1.32.3",
     "@cloudflare/workers-types": "catalog:",
     "@hono/oauth-providers": "^0.8.5",

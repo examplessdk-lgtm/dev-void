@@ -194,12 +194,10 @@ describe('ProxyR2Bucket', () => {
     it('createMultipartUpload throws', () => {
       const r2 = new ProxyR2Bucket(createClient(), 'STORAGE');
       expect(() =>
-        (r2 as ProxyR2Bucket & { createMultipartUpload(key: string): unknown }).createMultipartUpload(
-          'key',
-        ),
-      ).toThrow(
-        'not supported with remote bindings',
-      );
+        (
+          r2 as ProxyR2Bucket & { createMultipartUpload(key: string): unknown }
+        ).createMultipartUpload('key'),
+      ).toThrow('not supported with remote bindings');
     });
 
     it('resumeMultipartUpload throws', () => {
@@ -210,9 +208,7 @@ describe('ProxyR2Bucket', () => {
             resumeMultipartUpload(key: string, uploadId: string): unknown;
           }
         ).resumeMultipartUpload('key', 'id'),
-      ).toThrow(
-        'not supported with remote bindings',
-      );
+      ).toThrow('not supported with remote bindings');
     });
   });
 });

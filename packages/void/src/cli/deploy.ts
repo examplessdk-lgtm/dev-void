@@ -42,6 +42,11 @@ import {
 import { collectPrerenderPaths, collectPrerenderPathsNode } from '../prerender';
 import { scanQueuesSync } from '../queues/scan';
 import { scanWebSocketRoutesSync } from '../router/websocket';
+import {
+  isSandboxEnabled,
+  requiresSandboxPlatformImage,
+  resolveSandboxConfig,
+} from '../sandbox/config';
 import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env';
 import { validateSsrEntry } from '../ssr/entry';
 import { getToken, getTokenSource } from './auth';
@@ -846,6 +851,9 @@ async function runFullDeploy(
   const deployScanDirs =
     deployConfig.inference?.scanDirs ?? (isFrameworkMode ? FRAMEWORK_SCAN_DIRS : undefined);
   const bindings = inferProjectBindings(root, undefined, deployScanDirs);
+  if (isSandboxEnabled(deployConfig)) {
+    bindings.needsSandbox = true;
+  }
   const authEnabled =
     bindings.needsAuth || findVoidAuthConfig(root) !== null || deployConfig.auth !== undefined;
   const effectiveBindings =
@@ -854,6 +862,21 @@ async function runFullDeploy(
   if (isFrameworkMode && authEnabled) {
     log.error(
       "Void-managed Better Auth is only supported in Void apps. Use Better Auth's official integration for this framework instead.",
+    );
+    process.exit(1);
+  }
+
+  if (isFrameworkMode && bindings.needsSandbox) {
+    log.error('deploy: Cloudflare Sandboxes are currently supported in Void apps only.');
+    process.exit(1);
+  }
+
+  const sandboxConfig = bindings.needsSandbox
+    ? resolveSandboxConfig(deployConfig, root)
+    : undefined;
+  if (bindings.needsSandbox && requiresSandboxPlatformImage(deployConfig)) {
+    log.error(
+      'deploy: `sandbox.image` points at a local Dockerfile. Add `sandbox.platformImage` with a pushed registry image for `void deploy`, or deploy this sandbox directly with Wrangler.',
     );
     process.exit(1);
   }
@@ -1087,6 +1110,7 @@ async function runFullDeploy(
     {
       compatibilityDate: wranglerCompat?.compatibilityDate,
       compatibilityFlags: wranglerCompat?.compatibilityFlags,
+      ...(sandboxConfig && { sandbox: sandboxConfig }),
     },
     neededSet,
     assetsPrefix,

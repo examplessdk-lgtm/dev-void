@@ -30,6 +30,7 @@ export interface CloudBindings {
   KV: KVNamespace;
   STORAGE: R2Bucket;
   AI: Ai;
+  SANDBOX: DurableObjectNamespace<import('@cloudflare/sandbox').Sandbox>;
   [key: string]: unknown;
 }
 

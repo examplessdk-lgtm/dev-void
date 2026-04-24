@@ -10,9 +10,10 @@ export interface InferredBindings {
   needsAuth: boolean;
   needsQueues: boolean;
   needsAI: boolean;
+  needsSandbox: boolean;
 }
 
-const ENV_BINDING_RE = /\benv\s*\.\s*(DB|KV|STORAGE|QUEUE_\w+|AI)\b/;
+const ENV_BINDING_RE = /\benv\s*\.\s*(DB|KV|STORAGE|QUEUE_\w+|AI|SANDBOX)\b/;
 
 /**
  * Infer which Cloudflare bindings a source file uses.
@@ -30,6 +31,7 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
     needsAuth: false,
     needsQueues: false,
     needsAI: false,
+    needsSandbox: false,
   };
 
   // Tier 1: Fast import detection via es-module-lexer
@@ -59,6 +61,9 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
           break;
         case 'void/ai':
           result.needsAI = true;
+          break;
+        case 'void/sandbox':
+          result.needsSandbox = true;
           break;
         case 'void/client': {
           // Check if the `auth` specifier is imported (not just `fetch`)
@@ -90,13 +95,16 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
     if (/\bfrom\s+["']void\/ai["']/.test(code)) {
       result.needsAI = true;
     }
+    if (/\bfrom\s+["']void\/sandbox["']/.test(code)) {
+      result.needsSandbox = true;
+    }
     if (/\bfrom\s+["']void\/client["']/.test(code) && /\bauth\b/.test(code)) {
       result.needsAuth = true;
     }
   }
 
   // If imports resolved all bindings, we're done
-  if (result.needsD1 && result.needsKV && result.needsR2 && result.needsAI) {
+  if (result.needsD1 && result.needsKV && result.needsR2 && result.needsAI && result.needsSandbox) {
     return result;
   }
 
@@ -152,6 +160,9 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
         case 'AI':
           result.needsAI = true;
           break;
+        case 'SANDBOX':
+          result.needsSandbox = true;
+          break;
         default:
           if (property.name.startsWith('QUEUE_')) {
             result.needsQueues = true;
@@ -175,5 +186,6 @@ export function mergeBindings(bindings: Array<InferredBindings>): InferredBindin
     needsAuth: bindings.some((b) => b.needsAuth),
     needsQueues: bindings.some((b) => b.needsQueues),
     needsAI: bindings.some((b) => b.needsAI),
+    needsSandbox: bindings.some((b) => b.needsSandbox),
   };
 }

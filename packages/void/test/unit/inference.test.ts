@@ -262,6 +262,29 @@ describe('inferBindingsFromSource', () => {
     expect(result.needsAI).toBe(true);
   });
 
+  it("detects import { getSandbox } from 'void/sandbox'", () => {
+    const code = `
+      import { getSandbox } from "void/sandbox";
+      export const POST = defineHandler(async () => {
+        const sandbox = getSandbox("session-1");
+        return sandbox.exec("node --version");
+      })
+    `;
+    const result = inferBindingsFromSource(code, 'test.ts');
+    expect(result.needsSandbox).toBe(true);
+  });
+
+  it('detects c.env.SANDBOX access', () => {
+    const code = `
+      export const POST = defineHandler(async (c) => {
+        const id = c.env.SANDBOX.idFromName("session-1");
+        return c.env.SANDBOX.get(id);
+      })
+    `;
+    const result = inferBindingsFromSource(code, 'test.ts');
+    expect(result.needsSandbox).toBe(true);
+  });
+
   it('detects env.AI access', () => {
     const code = `
       export async function handler(request, env) {
@@ -292,6 +315,7 @@ describe('mergeBindings', () => {
     needsAuth: false,
     needsQueues: false,
     needsAI: false,
+    needsSandbox: false,
   };
 
   it('merges multiple binding results (union)', () => {
@@ -329,6 +353,11 @@ describe('mergeBindings', () => {
   it('merges AI flag', () => {
     const result = mergeBindings([empty, { ...empty, needsAI: true }]);
     expect(result.needsAI).toBe(true);
+  });
+
+  it('merges sandbox flag', () => {
+    const result = mergeBindings([empty, { ...empty, needsSandbox: true }]);
+    expect(result.needsSandbox).toBe(true);
   });
 
   it('merges AI with other bindings', () => {
