@@ -13,11 +13,11 @@ export class ProxyClient {
     private proxyUrl: string,
     token: string,
     private projectId: string,
-    cfAccess?: { id?: unknown; secret?: unknown },
+    env: Record<string, unknown> = {},
   ) {
     this.authHeaders = {
       Authorization: `Bearer ${token}`,
-      ...cfAccessHeaders(cfAccess?.id, cfAccess?.secret),
+      ...cfAccessHeaders(env),
     };
   }
 

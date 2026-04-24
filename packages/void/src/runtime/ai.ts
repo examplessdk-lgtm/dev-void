@@ -139,7 +139,7 @@ function makeHttpBackend(token: string, projectId: string, runtimeEnv: RuntimeEn
   const headers = {
     'content-type': 'application/json',
     authorization: `Bearer ${token}`,
-    ...cfAccessHeaders(runtimeEnv.CF_ACCESS_CLIENT_ID, runtimeEnv.CF_ACCESS_CLIENT_SECRET),
+    ...cfAccessHeaders(runtimeEnv),
   };
 
   async function proxyFetch(action: string, body: Record<string, unknown>): Promise<Response> {
