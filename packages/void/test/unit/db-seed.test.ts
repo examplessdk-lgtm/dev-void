@@ -158,7 +158,7 @@ export const messages = sqliteTable("messages", {
 
     await expect(runDbCommand(root, { action: 'seed' })).rejects.toThrow('process.exit:1');
     expect(mockLog.error).toHaveBeenCalledWith(
-      'Multiple default seed files found: db/seed.ts, db/seed.sql. Use --file <path> to choose one.',
+      'db: Multiple default seed files found: db/seed.ts, db/seed.sql. Use --file <path> to choose one.',
     );
   });
 });

@@ -256,7 +256,7 @@ function readKey(key: string): unknown {
   const result = validator['~standard'].validate(rawValue);
   if (result instanceof Promise) {
     throw new Error(
-      `Async env validator for "${key}" cannot be resolved synchronously. ` +
+      `env: Async validator for '${key}' cannot be resolved synchronously. ` +
         `Proxy property access is synchronous, so async Standard Schema ` +
         `validators must be pre-resolved by calling \`_validateEnvOnce(env)\` ` +
         `at worker boot (Void splices this into the generated entry) or by ` +
@@ -398,6 +398,7 @@ declare global {
       KV: KVNamespace;
       STORAGE: R2Bucket;
       AI: Ai;
+      SANDBOX: DurableObjectNamespace<import('@cloudflare/sandbox').Sandbox>;
       /** @internal Service binding to proxy worker (AI, revalidation, future features) */
       __VOID_PROXY?: Fetcher;
       /** @internal Custom proxy URL override */

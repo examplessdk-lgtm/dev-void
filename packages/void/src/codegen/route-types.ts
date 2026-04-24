@@ -206,7 +206,7 @@ export function generateRouteTypes(
 
       if (hasAction && hasActions) {
         throw new Error(
-          `Page "${page.pattern}" exports both "action" and "actions". Use one or the other.`,
+          `pages: Page '${page.pattern}' exports both "action" and "actions". Use one or the other.`,
         );
       }
 

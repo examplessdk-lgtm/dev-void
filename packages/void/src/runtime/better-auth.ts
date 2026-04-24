@@ -8,7 +8,7 @@ import {
 
 async function resolveDatabase(env: VoidAuthEnv): Promise<ResolvedDatabase> {
   if (!env.DB) {
-    throw new Error('Better Auth requires the "DB" D1 binding for sqlite apps.');
+    throw new Error('auth: Better Auth requires the "DB" D1 binding for sqlite apps.');
   }
   return {
     database: env.DB,
@@ -23,18 +23,18 @@ async function runSqliteAuthMigrations(
   migrationSchema: Parameters<VoidAuthRuntimeApi['runVoidAuthMigrations']>[3],
 ): Promise<void> {
   if (!migrationSchema) {
-    throw new Error('Void auth migration schema is unavailable.');
+    throw new Error('auth: Migration schema is unavailable.');
   }
   if (runtime.dialect !== 'sqlite') {
-    throw new Error(`Void auth runtime mismatch: expected sqlite, received ${runtime.dialect}.`);
+    throw new Error(`auth: Runtime mismatch. Expected sqlite, received '${runtime.dialect}'.`);
   }
   if (migrationSchema.dialect !== 'sqlite') {
     throw new Error(
-      `Void auth runtime mismatch: expected sqlite, received ${migrationSchema.dialect}.`,
+      `auth: Runtime mismatch. Expected sqlite, received '${migrationSchema.dialect}'.`,
     );
   }
   if (!env.DB) {
-    throw new Error('Better Auth requires the "DB" D1 binding for sqlite apps.');
+    throw new Error('auth: Better Auth requires the "DB" D1 binding for sqlite apps.');
   }
 
   await applySqliteAuthMigrations(

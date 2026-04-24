@@ -23,7 +23,7 @@ export async function action<U extends ActionUrl & string>(
   ...args: HasParams<U> extends true ? [options: ActionOptions<U>] : [options?: ActionOptions<U>]
 ): Promise<ActionResult> {
   if (!_router) {
-    throw new Error('action() called before router initialized');
+    throw new Error('action(): called before router initialization.');
   }
 
   const options = args[0] as ActionOptions<U> | undefined;

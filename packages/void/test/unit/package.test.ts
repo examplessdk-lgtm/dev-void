@@ -204,6 +204,7 @@ describe('packageBuild', () => {
       needsAuth: false,
       needsQueues: false,
       needsAI: false,
+      needsSandbox: false,
     });
 
     const workerKeys: Array<string> = [];
@@ -229,6 +230,7 @@ describe('packageBuild', () => {
       needsAuth: false,
       needsQueues: false,
       needsAI: false,
+      needsSandbox: false,
     });
 
     const manifestRaw = form.get('manifest') as string;
@@ -248,6 +250,7 @@ describe('packageBuild', () => {
       needsAuth: true,
       needsQueues: false,
       needsAI: false,
+      needsSandbox: false,
     });
 
     const manifestRaw = form.get('manifest') as string;
@@ -273,6 +276,7 @@ describe('packageBuild', () => {
         needsAuth: false,
         needsQueues: false,
         needsAI: false,
+        needsSandbox: false,
       },
       undefined, // migrations
       undefined, // schedules
@@ -323,6 +327,7 @@ describe('packageBuild', () => {
         needsAuth: false,
         needsQueues: false,
         needsAI: false,
+        needsSandbox: false,
       },
       undefined, // migrations
       undefined, // schedules
@@ -375,6 +380,7 @@ describe('packageBuild', () => {
         needsAuth: false,
         needsQueues: false,
         needsAI: false,
+        needsSandbox: false,
       },
       undefined, // migrations
       undefined, // schedules
@@ -413,6 +419,7 @@ describe('packageBuild', () => {
         needsAuth: false,
         needsQueues: false,
         needsAI: false,
+        needsSandbox: false,
       },
       undefined,
       undefined,
@@ -428,6 +435,53 @@ describe('packageBuild', () => {
     const manifest = JSON.parse(form.get('manifest') as string);
     expect(manifest.assetConfig).toEqual({ not_found_handling: 'single-page-application' });
     expect(manifest.fallbackRules).toBeUndefined();
+  });
+
+  it('includes sandbox metadata in the manifest', async () => {
+    const workerDir = join(TMP, 'worker');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, 'index.js'), 'export default {}');
+
+    const form = await packageBuild(
+      TMP,
+      'worker',
+      {
+        needsD1: false,
+        needsKV: false,
+        needsR2: false,
+        needsAuth: false,
+        needsQueues: false,
+        needsAI: false,
+        needsSandbox: true,
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        sandbox: {
+          binding: 'SANDBOX',
+          className: 'Sandbox',
+          containerName: 'void-sandbox',
+          image: '/tmp/Dockerfile',
+          platformImage: 'docker.io/cloudflare/sandbox:0.8.11',
+        },
+      },
+    );
+
+    const manifestRaw = form.get('manifest') as string;
+    const manifest = JSON.parse(manifestRaw);
+    expect(manifest.sandbox).toEqual({
+      bindingName: 'SANDBOX',
+      className: 'Sandbox',
+      containerName: 'void-sandbox',
+      image: 'docker.io/cloudflare/sandbox:0.8.11',
+    });
   });
 });
 
@@ -485,6 +539,7 @@ describe('packageFrameworkBuild', () => {
         needsAuth: false,
         needsQueues: false,
         needsAI: false,
+        needsSandbox: false,
       },
       redirectRules,
       fallbackRules,
@@ -692,7 +747,7 @@ describe('_worker.js safety guard', () => {
     writeFileSync(join(TMP, '_worker.js'), 'export default {}');
 
     await expect(packageStaticBuild(TMP, 'static')).rejects.toThrow(
-      'Uploading _worker.js file as an asset',
+      'deploy: Refusing to upload _worker.js file as an asset',
     );
   });
 
@@ -702,7 +757,7 @@ describe('_worker.js safety guard', () => {
     writeFileSync(join(TMP, '_worker.js', 'index.js'), 'export default {}');
 
     await expect(packageStaticBuild(TMP, 'static')).rejects.toThrow(
-      'Uploading _worker.js directory as an asset',
+      'deploy: Refusing to upload _worker.js directory as an asset',
     );
   });
 
@@ -744,7 +799,7 @@ describe('_worker.js safety guard', () => {
     writeFileSync(join(TMP, '_worker.js'), 'export default {}');
 
     await expect(collectAndHashAssets(TMP)).rejects.toThrow(
-      'Uploading _worker.js file as an asset',
+      'deploy: Refusing to upload _worker.js file as an asset',
     );
   });
 
@@ -767,8 +822,9 @@ describe('_worker.js safety guard', () => {
         needsAuth: false,
         needsQueues: false,
         needsAI: false,
+        needsSandbox: false,
       }),
-    ).rejects.toThrow('Uploading _worker.js file as an asset');
+    ).rejects.toThrow('deploy: Refusing to upload _worker.js file as an asset');
   });
 
   it('guards packageFrameworkBuild assets against _worker.js', async () => {
@@ -793,8 +849,9 @@ describe('_worker.js safety guard', () => {
           needsAuth: false,
           needsQueues: false,
           needsAI: false,
+          needsSandbox: false,
         },
       }),
-    ).rejects.toThrow('Uploading _worker.js file as an asset');
+    ).rejects.toThrow('deploy: Refusing to upload _worker.js file as an asset');
   });
 });

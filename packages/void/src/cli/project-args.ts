@@ -31,7 +31,7 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
   if (subcommand === 'status') {
     const [name, extra] = rest;
     if (extra) {
-      throw new Error(`Error: Unexpected argument: ${extra}`);
+      throw new Error(`project: Unexpected argument '${extra}'.`);
     }
     return { subcommand, name: name ?? '' };
   }
@@ -39,14 +39,14 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
   if (subcommand === 'link') {
     const [name, extra] = rest;
     if (extra) {
-      throw new Error(`Error: Unexpected argument: ${extra}`);
+      throw new Error(`project: Unexpected argument '${extra}'.`);
     }
     return { subcommand, name: name ?? '' };
   }
 
   if (subcommand === 'list') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`project: Unexpected argument '${rest[0]}'.`);
     }
     return { subcommand };
   }
@@ -63,7 +63,7 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
       } else if (rest[i] === '--deployment' && rest[i + 1]) {
         deployment = rest[++i];
       } else {
-        throw new Error(`Error: Unexpected argument: ${rest[i]}`);
+        throw new Error(`project: Unexpected argument '${rest[i]}'.`);
       }
     }
     return { subcommand, filter, range, deployment };
@@ -72,7 +72,7 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
   if (subcommand === 'rollback') {
     const [deployId, extra] = rest;
     if (extra) {
-      throw new Error(`Error: Unexpected argument: ${extra}`);
+      throw new Error(`project: Unexpected argument '${extra}'.`);
     }
     return { subcommand, deployId: deployId ?? '' };
   }
@@ -80,7 +80,7 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
   if (subcommand === 'cancel') {
     const [deployId, extra] = rest;
     if (extra) {
-      throw new Error(`Error: Unexpected argument: ${extra}`);
+      throw new Error(`project: Unexpected argument '${extra}'.`);
     }
     return { subcommand, deployId: deployId ?? '' };
   }
@@ -92,9 +92,9 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
       if (arg === '--force' || arg === '-f') {
         force = true;
       } else if (arg.startsWith('-')) {
-        throw new Error(`Error: Unknown flag: ${arg}`);
+        throw new Error(`project: Unknown flag '${arg}'.`);
       } else if (name) {
-        throw new Error(`Error: Unexpected argument: ${arg}`);
+        throw new Error(`project: Unexpected argument '${arg}'.`);
       } else {
         name = arg;
       }
@@ -108,13 +108,13 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
       if (rest[i] === '--project' && rest[i + 1]) {
         projectSlug = rest[++i];
       } else {
-        throw new Error(`Error: Unexpected argument: ${rest[i]}`);
+        throw new Error(`project: Unexpected argument '${rest[i]}'.`);
       }
     }
     return { subcommand, projectSlug };
   }
 
   throw new Error(
-    'Error: Usage: void project <status|link|list|logs|rollback|cancel|delete|purge-cache>',
+    'project: Usage: void project <status|link|list|logs|rollback|cancel|delete|purge-cache>.',
   );
 }

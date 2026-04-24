@@ -29,7 +29,7 @@ export function formatDeployFailureMessage(message: string, deploymentId: string
  * `done` or `error`, so there is no underlying error to carry.
  */
 export function formatConnectionLostMessage(deploymentId: string | null): string {
-  return appendDeploymentLine('Connection lost during deploy', deploymentId);
+  return appendDeploymentLine('deploy: Connection lost during deploy.', deploymentId);
 }
 
 /**
@@ -54,19 +54,19 @@ export function formatStreamDeployError(err: unknown, deploymentId: string | nul
 
     if (err.status === 409 && parsedError) {
       return new Error(
-        appendDeploymentLine(`Deploy failed: ${parsedError}`, effectiveDeploymentId),
+        appendDeploymentLine(`deploy: Deploy failed: ${parsedError}`, effectiveDeploymentId),
       );
     }
 
     const detail = parsedError ?? trimSnippet(err.body);
     const base = detail
-      ? `Deploy failed (HTTP ${err.status}): ${detail}`
-      : `Deploy failed (HTTP ${err.status})`;
+      ? `deploy: Deploy failed (HTTP ${err.status}): ${detail}`
+      : `deploy: Deploy failed (HTTP ${err.status}).`;
     return new Error(appendDeploymentLine(base, effectiveDeploymentId));
   }
 
   const original = err instanceof Error ? err.message : String(err);
   return new Error(
-    appendDeploymentLine(`Connection lost during deploy: ${original}`, deploymentId),
+    appendDeploymentLine(`deploy: Connection lost during deploy: '${original}'.`, deploymentId),
   );
 }

@@ -112,6 +112,7 @@ export function inferProjectBindings(
       needsAuth: false,
       needsQueues: false,
       needsAI: Boolean(options.bindings.ai),
+      needsSandbox: false,
     };
   }
 

@@ -52,7 +52,7 @@ function appendQueryValue(params: URLSearchParams, key: string, value: unknown):
     return true;
   }
   throw new Error(
-    `Void Link GET data only supports primitive values and arrays. Received nested data for "${key}".`,
+    `Link: GET data only supports primitive values and arrays. Remove nested data for '${key}'.`,
   );
 }
 
@@ -145,11 +145,11 @@ export function Link({
 
   if (hasPrefetch(prefetchProp) && !isGet) {
     throw new Error(
-      'Void Link prefetch only supports GET links. Remove `prefetch` or use method="GET".',
+      'Link: prefetch only supports GET links. Remove `prefetch` or use method="GET".',
     );
   }
   if (reloadDocument && !isGet) {
-    throw new Error('Void Link reloadDocument only supports GET links.');
+    throw new Error('Link: reloadDocument only supports GET links.');
   }
 
   const doPrefetch = useCallback(() => {

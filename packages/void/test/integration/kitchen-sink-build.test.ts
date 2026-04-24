@@ -106,6 +106,25 @@ describe('playground/kitchen-sink build', () => {
     const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
     expect(vars.LEGIT_USER_VAR).toBe('kept');
   });
+
+  it('includes sandbox bindings and container metadata', () => {
+    const wranglerConfig = JSON.parse(readFileSync(join(DIST, 'ssr', 'wrangler.json'), 'utf-8'));
+    expect(wranglerConfig.compatibility_flags).toContain('nodejs_compat');
+    expect(wranglerConfig.durable_objects.bindings).toContainEqual({
+      name: 'SANDBOX',
+      class_name: 'Sandbox',
+    });
+    expect(wranglerConfig.containers).toEqual([
+      expect.objectContaining({
+        name: 'void-sandbox',
+        class_name: 'Sandbox',
+      }),
+    ]);
+    expect(wranglerConfig.migrations).toContainEqual({
+      tag: 'void-sandbox-v1',
+      new_sqlite_classes: ['Sandbox'],
+    });
+  });
 });
 
 function collectFiles(dir: string): Array<string> {

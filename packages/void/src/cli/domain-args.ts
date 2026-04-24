@@ -16,7 +16,9 @@ export interface DomainArgs {
 export function parseDomainArgs(args: Array<string>): DomainArgs {
   const subcommand = args[0] as DomainArgs['subcommand'];
   if (!subcommand || !['add', 'delete', 'list', 'status'].includes(subcommand)) {
-    throw new Error('Usage: void domain <add|delete|list|status> [hostname] [--project <name>]');
+    throw new Error(
+      'domain: Usage: void domain <add|delete|list|status> [hostname] [--project <name>].',
+    );
   }
 
   let hostname: string | undefined;
@@ -32,7 +34,7 @@ export function parseDomainArgs(args: Array<string>): DomainArgs {
   }
 
   if ((subcommand === 'add' || subcommand === 'delete' || subcommand === 'status') && !hostname) {
-    throw new Error(`Usage: void domain ${subcommand} <hostname> [--project <name>]`);
+    throw new Error(`domain: Usage: void domain ${subcommand} <hostname> [--project <name>].`);
   }
 
   return { subcommand, hostname, projectSlug };

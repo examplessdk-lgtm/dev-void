@@ -35,7 +35,7 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
   const token = rawEnv.__VOID_PROXY_TOKEN as string | undefined;
 
   if (!projectId || !token) {
-    throw new Error('ISR revalidation requires __PROJECT_ID and __VOID_PROXY_TOKEN bindings.');
+    throw new Error('isr: Revalidation requires __PROJECT_ID and __VOID_PROXY_TOKEN bindings.');
   }
 
   const response = await proxy.fetch('https://proxy/revalidate', {
@@ -46,6 +46,6 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Revalidation failed (${response.status}): ${text}`);
+    throw new Error(`isr: Revalidation failed with ${response.status}: '${text}'.`);
   }
 }

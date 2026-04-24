@@ -153,7 +153,7 @@ export function useForm(
   const [, dispatchAction, pending] = useActionState(
     async (previousSuccessVersion: number, payload: SubmitPayload) => {
       if (!router) {
-        throw new Error('useForm() requires the Void Pages router');
+        throw new Error('useForm(): requires the Void Pages router.');
       }
 
       const method = payload instanceof FormData ? 'POST' : payload.method;

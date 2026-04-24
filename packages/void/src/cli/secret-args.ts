@@ -28,33 +28,33 @@ export function parseSecretArgs(args: Array<string>): SecretArgs {
   const tokens = parsed.tokens ?? [];
   const projectTokens = tokens.filter((t) => t.kind === 'option' && t.name === 'project');
   if (projectTokens.length > 1) {
-    throw new Error('Error: --project can only be specified once');
+    throw new Error('secret: --project can only be specified once.');
   }
 
   const projectValue = parsed.values.project;
   const projectName = typeof projectValue === 'string' ? projectValue : undefined;
   if (projectName?.startsWith('-')) {
-    throw new Error('Error: --project requires a name');
+    throw new Error('secret: --project requires a name.');
   }
 
   const [action, name, value, extra] = parsed.positionals;
   if (extra) {
-    throw new Error(`Error: Unexpected argument for secret: ${extra}`);
+    throw new Error(`secret: Unexpected argument '${extra}'.`);
   }
 
   if (action === 'list') {
     if (name) {
-      throw new Error('Error: Usage: void secret list [--project <name>]');
+      throw new Error('secret: Usage: void secret list [--project <name>].');
     }
     return { action, projectName };
   }
 
   if (action === 'put') {
     if (!name) {
-      throw new Error('Error: Usage: void secret put <name> [--project <name>]');
+      throw new Error('secret: Usage: void secret put <name> [--project <name>].');
     }
     if (value) {
-      throw new Error('Error: Usage: void secret put <name> [--project <name>]');
+      throw new Error('secret: Usage: void secret put <name> [--project <name>].');
     }
     const eqIndex = name.indexOf('=');
     if (eqIndex === -1) {
@@ -64,30 +64,30 @@ export function parseSecretArgs(args: Array<string>): SecretArgs {
     const key = name.slice(0, eqIndex);
     const inlineValue = name.slice(eqIndex + 1);
     if (!key || !inlineValue) {
-      throw new Error('Error: Usage: void secret put <name> [--project <name>]');
+      throw new Error('secret: Usage: void secret put <name> [--project <name>].');
     }
     return { action, name: key, value: inlineValue, projectName };
   }
 
   if (action === 'delete') {
     if (!name) {
-      throw new Error('Error: Usage: void secret delete <name> [--project <name>]');
+      throw new Error('secret: Usage: void secret delete <name> [--project <name>].');
     }
     if (value) {
-      throw new Error('Error: Usage: void secret delete <name> [--project <name>]');
+      throw new Error('secret: Usage: void secret delete <name> [--project <name>].');
     }
     return { action, name, projectName };
   }
 
   if (action === 'sync') {
     if (!name) {
-      throw new Error('Error: Usage: void secret sync <file> [--project <name>]');
+      throw new Error('secret: Usage: void secret sync <file> [--project <name>].');
     }
     if (value) {
-      throw new Error('Error: Usage: void secret sync <file> [--project <name>]');
+      throw new Error('secret: Usage: void secret sync <file> [--project <name>].');
     }
     return { action, file: name, projectName };
   }
 
-  throw new Error('Error: Usage: void secret <list|put|delete|sync> ...');
+  throw new Error('secret: Usage: void secret <list|put|delete|sync> ...');
 }

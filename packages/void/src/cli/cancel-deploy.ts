@@ -30,7 +30,7 @@ export async function runCancelDeployCommand(root: string, deployId?: string): P
 
   if (!target) {
     if (deployId) {
-      log.error(`Deployment ${deployId} was not found.`);
+      log.error(`project: Deployment '${deployId}' was not found.`);
       process.exit(1);
     }
     log.warn('No active deploy found.');
@@ -40,10 +40,10 @@ export async function runCancelDeployCommand(root: string, deployId?: string): P
 
   if (!ACTIVE_STATUSES.has(target.status)) {
     if (deployId) {
-      log.error(`Deployment ${target.id} is already ${target.status}.`);
+      log.error(`project: Deployment '${target.id}' is already '${target.status}'.`);
       process.exit(1);
     }
-    log.warn(`Deployment ${target.id} is already ${target.status}.`);
+    log.warn(`project: Deployment '${target.id}' is already '${target.status}'.`);
     outro('Nothing canceled.');
     return;
   }

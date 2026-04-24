@@ -20,6 +20,7 @@ import {
   VALID_REDIRECT_STATUSES,
 } from '../../src/config';
 import { voidWarn } from '../../src/log';
+import { resolveSandboxConfig } from '../../src/sandbox/config';
 
 const warnMock = vi.mocked(voidWarn);
 
@@ -63,6 +64,12 @@ describe('readConfig', () => {
           compatibility_date: '2025-12-01',
           compatibility_flags: ['nodejs_compat'],
         },
+        sandbox: {
+          binding: 'CODE',
+          image: './Dockerfile.sandbox',
+          instanceType: 'lite',
+          maxInstances: 2,
+        },
       }),
     );
     const config = readConfig(tmpDir);
@@ -76,6 +83,12 @@ describe('readConfig', () => {
     expect(config.worker).toEqual({
       compatibility_date: '2025-12-01',
       compatibility_flags: ['nodejs_compat'],
+    });
+    expect(config.sandbox).toEqual({
+      binding: 'CODE',
+      image: './Dockerfile.sandbox',
+      instanceType: 'lite',
+      maxInstances: 2,
     });
     cleanup();
   });
@@ -138,7 +151,7 @@ describe('readConfig', () => {
 
   it('rejects unknown top-level auth providers', () => {
     setup(JSON.stringify({ auth: { providers: ['email', 'patreon'] } }));
-    expect(() => readConfig(tmpDir)).toThrow('"auth.providers" value "patreon"');
+    expect(() => readConfig(tmpDir)).toThrow('"auth.providers" value \'patreon\'');
     cleanup();
   });
 
@@ -158,7 +171,7 @@ describe('readConfig', () => {
 
   it('throws on unknown binding key', () => {
     setup(JSON.stringify({ inference: { bindings: { db: true, queue: true } } }));
-    expect(() => readConfig(tmpDir)).toThrow('Unknown binding "queue"');
+    expect(() => readConfig(tmpDir)).toThrow("Unknown binding 'queue'");
     cleanup();
   });
 
@@ -184,6 +197,62 @@ describe('readConfig', () => {
   it('throws on invalid binding value type', () => {
     setup(JSON.stringify({ inference: { bindings: { db: 42 } } }));
     expect(() => readConfig(tmpDir)).toThrow('must be a boolean or a string');
+    cleanup();
+  });
+
+  it('accepts sandbox boolean and object config', () => {
+    setup(JSON.stringify({ sandbox: true }));
+    expect(readConfig(tmpDir).sandbox).toBe(true);
+    cleanup();
+
+    setup(
+      JSON.stringify({
+        sandbox: {
+          binding: 'CODE',
+          className: 'CodeSandbox',
+          containerName: 'code-sandbox',
+          image: './Dockerfile.sandbox',
+          imageBuildContext: '.',
+          platformImage: 'registry.example.com/code-sandbox:latest',
+          instanceType: 'basic',
+          maxInstances: 3,
+        },
+      }),
+    );
+    expect(readConfig(tmpDir).sandbox).toEqual({
+      binding: 'CODE',
+      className: 'CodeSandbox',
+      containerName: 'code-sandbox',
+      image: './Dockerfile.sandbox',
+      imageBuildContext: '.',
+      platformImage: 'registry.example.com/code-sandbox:latest',
+      instanceType: 'basic',
+      maxInstances: 3,
+    });
+    cleanup();
+  });
+
+  it('preserves registry sandbox images when resolving config', () => {
+    const config = resolveSandboxConfig(
+      {
+        sandbox: {
+          image: 'docker.io/cloudflare/sandbox:0.8.11',
+        },
+      },
+      tmpDir,
+    );
+
+    expect(config.image).toBe('docker.io/cloudflare/sandbox:0.8.11');
+    expect(config.platformImage).toBe('docker.io/cloudflare/sandbox:0.8.11');
+  });
+
+  it('throws on invalid sandbox config', () => {
+    setup(JSON.stringify({ sandbox: { instanceType: 'huge' } }));
+    expect(() => readConfig(tmpDir)).toThrow('"sandbox.instanceType"');
+    cleanup();
+
+    setup(JSON.stringify({ sandbox: { maxInstances: 0 } }));
+    expect(() => readConfig(tmpDir)).toThrow('"sandbox.maxInstances"');
     cleanup();
   });
 

@@ -8,8 +8,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "hono": "^4.12.14",
-    "vue": "^3.5.32"
+    "hono": "^4.12.15",
+    "vue": "^3.5.33"
   },
   "devDependencies": {
     "@void/vue": "workspace:@void-sdk/vue@*",

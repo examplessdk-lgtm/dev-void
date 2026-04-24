@@ -17,7 +17,7 @@ function resolveConnectionString(env: VoidAuthEnv): string {
 
   if (!connectionString) {
     throw new Error(
-      'Better Auth requires DATABASE_URL for local PostgreSQL dev or HYPERDRIVE in production.',
+      'auth: Better Auth requires DATABASE_URL for local PostgreSQL dev or HYPERDRIVE in production.',
     );
   }
 
@@ -43,16 +43,14 @@ async function runPostgresAuthMigrations(
   migrationSchema: Parameters<VoidAuthRuntimeApi['runVoidAuthMigrations']>[3],
 ): Promise<void> {
   if (!migrationSchema) {
-    throw new Error('Void auth migration schema is unavailable.');
+    throw new Error('auth: Migration schema is unavailable.');
   }
   if (runtime.dialect !== 'postgresql') {
-    throw new Error(
-      `Void auth runtime mismatch: expected postgresql, received ${runtime.dialect}.`,
-    );
+    throw new Error(`auth: Runtime mismatch. Expected postgresql, received '${runtime.dialect}'.`);
   }
   if (migrationSchema.dialect !== 'postgresql') {
     throw new Error(
-      `Void auth runtime mismatch: expected postgresql, received ${migrationSchema.dialect}.`,
+      `auth: Runtime mismatch. Expected postgresql, received '${migrationSchema.dialect}'.`,
     );
   }
 

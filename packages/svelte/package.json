@@ -1,6 +1,6 @@
 {
   "name": "@void-sdk/svelte",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "files": [
     "dist",
     "src/runtime"
@@ -41,7 +41,7 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "pathe": "catalog:",
-    "svelte": "^5.55.4",
+    "svelte": "^5.55.5",
     "tsdown": "catalog:",
     "vite": "catalog:",
     "void": "workspace:@void-sdk/void@*"

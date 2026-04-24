@@ -20,7 +20,7 @@ export async function runLogsCommand(
   }
 
   if (!/^\d+(m|h|d)$/.test(range)) {
-    log.error(`Invalid range "${range}". Use format like 15m, 2h, 3d.`);
+    log.error(`logs: Invalid range '${range}'. Use a format like 15m, 2h, or 3d.`);
     process.exit(1);
   }
 

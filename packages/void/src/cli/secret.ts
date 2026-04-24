@@ -24,7 +24,7 @@ export async function runSecretCommand(root: string, args: SecretArgs): Promise<
     const projects = await client.listProjects();
     const config = resolveProjectBySlug(projects, requestedProjectName);
     if (!config) {
-      throw new Error(`No project found with slug "${requestedProjectName}".`);
+      throw new Error(`secret: No project found with slug '${requestedProjectName}'.`);
     }
     projectId = config.projectId;
   } else {
@@ -102,7 +102,7 @@ export function parseDotenvFile(filePath: string): Array<{ name: string; value: 
 
     const eqIndex = trimmed.indexOf('=');
     if (eqIndex === -1) {
-      throw new Error(`Invalid line (missing =): ${trimmed}`);
+      throw new Error(`secret: Invalid dotenv line '${trimmed}'. Add KEY=value.`);
     }
 
     const key = trimmed.slice(0, eqIndex).trim();
@@ -117,7 +117,7 @@ export function parseDotenvFile(filePath: string): Array<{ name: string; value: 
 
     if (!SECRET_KEY_RE.test(key)) {
       throw new Error(
-        `Invalid secret name: ${key}. Names must match ${SECRET_KEY_RE} (uppercase letters, digits, underscores).`,
+        `secret: Invalid secret name '${key}'. Use uppercase letters, digits, and underscores.`,
       );
     }
 

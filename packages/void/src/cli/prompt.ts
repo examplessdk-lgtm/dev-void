@@ -12,14 +12,40 @@ interface CreateResult {
 }
 
 export type PromptResult = SelectResult | CreateResult;
+export type ProjectSetupAction = 'create' | 'link';
+
+export async function promptProjectSetupAction(
+  message = 'Set up a Void project:',
+  options: { includeLink?: boolean } = {},
+): Promise<ProjectSetupAction> {
+  const result = await select({
+    message,
+    options: [
+      { value: 'create', label: 'Create a new project' },
+      ...(options.includeLink === false
+        ? []
+        : [{ value: 'link', label: 'Link an existing project' }]),
+    ],
+  });
+
+  if (isCancel(result)) {
+    cancel('Deploy cancelled.');
+    process.exit(0);
+  }
+
+  return result as ProjectSetupAction;
+}
 
 export async function promptProjectSelection(
   projects: Array<ProjectResponse>,
   message = 'Select a project:',
   root: string = process.cwd(),
+  options: { includeCreate?: boolean } = {},
 ): Promise<PromptResult> {
-  const options = [
-    { value: '__create__', label: 'Create new project' },
+  const choices = [
+    ...(options.includeCreate === false
+      ? []
+      : [{ value: '__create__', label: 'Create new project' }]),
     ...projects.map((p) => ({
       value: p.id,
       label: `${p.slug} (${p.slug}.${getSiteDomain(root)})`,
@@ -28,7 +54,7 @@ export async function promptProjectSelection(
 
   const result = await select({
     message,
-    options,
+    options: choices,
   });
 
   if (isCancel(result)) {

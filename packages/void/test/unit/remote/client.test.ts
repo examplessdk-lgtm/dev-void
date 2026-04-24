@@ -57,7 +57,7 @@ describe('ProxyClient', () => {
 
       const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
       await expect(client.fetch('/d1/query', { binding: 'MISSING' })).rejects.toThrow(
-        /Remote proxy error \(404\)/,
+        /remote: Proxy request failed with 404/,
       );
     });
 
@@ -130,7 +130,7 @@ describe('ProxyClient', () => {
           method: 'POST',
           body: JSON.stringify({ binding: 'STORAGE', key: 'file.txt' }),
         }),
-      ).rejects.toThrow(/Remote proxy error \(502\)/);
+      ).rejects.toThrow(/remote: Proxy request failed with 502/);
     });
   });
 });

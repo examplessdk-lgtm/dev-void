@@ -169,7 +169,7 @@ function readInitialPageData(appEl: HTMLElement): PageData {
     return JSON.parse(legacyData) as PageData;
   }
 
-  throw new Error('Missing initial page payload');
+  throw new Error('pages: Missing initial page payload.');
 }
 
 function parsePageDataFromHtml(html: string): PageData | null {
@@ -250,7 +250,7 @@ export async function createPageNavigationEngine(
   async function resolveComponent(id: string): Promise<unknown> {
     const loader = components[id];
     if (!loader) {
-      throw new Error('Unknown page component: ' + id);
+      throw new Error(`pages: Unknown page component '${id}'.`);
     }
     return (await loader()).default;
   }
@@ -807,7 +807,7 @@ export async function createPageNavigationEngine(
     }
 
     if (!pageData) {
-      throw new Error('Missing page payload');
+      throw new Error('pages: Missing page payload.');
     }
 
     if (method !== 'GET') {
@@ -1034,7 +1034,7 @@ export async function createPageNavigationEngine(
     prefetch(url, options = {}) {
       const method = (options.method || 'GET').toUpperCase();
       if (method !== 'GET') {
-        throw new Error('router.prefetch() only supports GET requests.');
+        throw new Error('pages: router.prefetch() only supports GET requests.');
       }
 
       const id = matchRoute(url);

@@ -30,13 +30,13 @@ function resolveProviderKey(model: string, runtimeEnv: RuntimeEnv): string {
   const envVar = PROVIDER_KEY_MAP[provider];
   if (!envVar) {
     throw new Error(
-      `Unknown AI provider: "${provider}". Supported: ${Object.keys(PROVIDER_KEY_MAP).join(', ')}`,
+      `ai: Unknown provider '${provider}'. Use one of: ${Object.keys(PROVIDER_KEY_MAP).join(', ')}.`,
     );
   }
   const key = runtimeEnv[envVar];
   if (typeof key !== 'string' || key.length === 0) {
     throw new Error(
-      `Missing ${envVar} secret. Add it as a project secret for provider "${provider}".`,
+      `ai: Missing ${envVar} secret. Add it as a project secret for provider '${provider}'.`,
     );
   }
   return key;
@@ -76,14 +76,12 @@ function resolveBackend(): AiBackend {
     };
   }
 
-  throw new Error(
-    'AI not available. Run `void auth login` and `void project link` to get started.',
-  );
+  throw new Error('ai: Not available. Run `void auth login` and `void project link` first.');
 }
 
 function unsupported(method: string): () => never {
   return () => {
-    throw new Error(`ai.${method}() is not supported in this environment`);
+    throw new Error(`ai: ai.${method}() is not supported in this environment.`);
   };
 }
 
@@ -96,7 +94,7 @@ function makeServiceBindingBackend(proxy: Fetcher, runtimeEnv: RuntimeEnv): AiBa
     });
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`AI proxy error: ${res.status} ${text}`);
+      throw new Error(`ai: Proxy request failed with ${res.status}: '${text}'.`);
     }
     return res;
   }
@@ -152,7 +150,7 @@ function makeHttpBackend(token: string, projectId: string, runtimeEnv: RuntimeEn
     });
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`AI proxy error: ${res.status} ${text}`);
+      throw new Error(`ai: Proxy request failed with ${res.status}: '${text}'.`);
     }
     return res;
   }

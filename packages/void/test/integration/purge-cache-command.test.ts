@@ -158,7 +158,7 @@ describe('runPurgeCacheCommand', () => {
     const out = capture.output();
     capture.restore();
 
-    expect(out).toContain('No project found with slug "nonexistent"');
+    expect(out).toContain("project: No project found with slug 'nonexistent'");
     expect(exitSpy).toHaveBeenCalled();
   });
 

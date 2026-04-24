@@ -197,19 +197,19 @@ export function createSsrRouter(url = '/'): VoidRouter {
       return this.url.searchParams;
     },
     visit() {
-      throw new Error('router.visit() is not available during SSR');
+      throw new Error('pages: router.visit() is not available during SSR.');
     },
     refresh() {
-      throw new Error('router.refresh() is not available during SSR');
+      throw new Error('pages: router.refresh() is not available during SSR.');
     },
     prefetch() {
-      throw new Error('router.prefetch() is not available during SSR');
+      throw new Error('pages: router.prefetch() is not available during SSR.');
     },
     flush() {
-      throw new Error('router.flush() is not available during SSR');
+      throw new Error('pages: router.flush() is not available during SSR.');
     },
     flushAll() {
-      throw new Error('router.flushAll() is not available during SSR');
+      throw new Error('pages: router.flushAll() is not available during SSR.');
     },
   };
 

@@ -41,7 +41,7 @@ describe('internal binding filtering (real implementation)', () => {
   it('requireRuntimeBinding throws for __VOID_ prefixed names', () => {
     expect(() =>
       withRuntimeEnv(testEnv, () => requireRuntimeBinding('__VOID_PROXY_TOKEN')),
-    ).toThrow('Missing Cloudflare binding "__VOID_PROXY_TOKEN"');
+    ).toThrow("env: Missing Cloudflare binding '__VOID_PROXY_TOKEN'");
   });
 
   it('getRuntimeEnv hides __VOID_ keys from property access', () => {

@@ -19,7 +19,7 @@ describe('parseProjectArgs', () => {
 
     it('errors on unexpected argument', () => {
       expect(() => parseProjectArgs(['cancel', 'dpl_123', 'extra'])).toThrow(
-        'Unexpected argument: extra',
+        "project: Unexpected argument 'extra'.",
       );
     });
   });
@@ -41,7 +41,7 @@ describe('parseProjectArgs', () => {
 
     it('errors on unexpected argument', () => {
       expect(() => parseProjectArgs(['purge-cache', 'extra'])).toThrow(
-        'Unexpected argument: extra',
+        "project: Unexpected argument 'extra'.",
       );
     });
   });

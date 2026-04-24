@@ -11,5 +11,5 @@
     "jsx": "preserve",
     "types": ["void/env"]
   },
-  "include": ["pages", "routes", "middleware", "crons", "queues"]
+  "include": ["pages", "routes", "middleware", "crons", "queues", "lib"]
 }

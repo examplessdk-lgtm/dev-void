@@ -125,7 +125,9 @@ async function validateSchema(
 async function serializeServerEvent(schema: StandardSchemaV1, event: unknown): Promise<string> {
   const result = await validateSchema(schema, event);
   if (!result.ok) {
-    throw new Error(result.issues.map((issue) => issue.message).join('; '));
+    throw new Error(
+      `ws: Message validation failed: ${result.issues.map((issue) => issue.message).join('; ')}.`,
+    );
   }
   return JSON.stringify(result.value);
 }
@@ -267,7 +269,7 @@ function createSocketContext<ServerEvent>(
 
 function assertDefinition(definition: AnyWebSocketDefinition): void {
   if (!definition?.messages?.client || !definition?.messages?.server) {
-    throw new Error('WebSocket routes must define both messages.client and messages.server');
+    throw new Error('ws: WebSocket routes must define both messages.client and messages.server.');
   }
 }
 

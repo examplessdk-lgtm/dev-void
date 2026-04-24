@@ -78,11 +78,11 @@ export async function loadUserEnvFile(envFile: string): Promise<void> {
     await import(/* @vite-ignore */ url);
   } catch (err) {
     const specifier = extractFailedSpecifier(err);
-    const base = `Failed to load ${envFile}: ${(err as Error).message}`;
+    const base = `env: Failed to load '${envFile}': '${(err as Error).message}'.`;
     if (specifier && looksLikeAlias(specifier)) {
       throw new Error(
         `${base}\n\n` +
-          `Hint: "${specifier}" looks like a tsconfig path alias. ` +
+          `Hint: '${specifier}' looks like a tsconfig path alias. ` +
           `env.ts is loaded directly by Node and does not resolve tsconfig "paths" — ` +
           `use a relative import (e.g. "./shared/...") instead.`,
       );

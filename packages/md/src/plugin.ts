@@ -182,7 +182,7 @@ export function voidMarkdown(options?: MarkdownOptions): Array<Plugin> {
         }
         if (!adapter) {
           throw new Error(
-            '[void-md] No framework adapter detected. Install @void/vue, @void/react, @void/svelte, or @void/solid.',
+            'void-md: No framework adapter detected. Install @void/vue, @void/react, @void/svelte, or @void/solid.',
           );
         }
       },
@@ -261,7 +261,7 @@ export function voidMarkdown(options?: MarkdownOptions): Array<Plugin> {
             if (code) {
               return code;
             }
-            throw new Error(`[void-md] Missing client script for: ${componentId}`);
+            throw new Error(`void-md: Missing client script for '${componentId}'.`);
           }
 
           if (id.startsWith(SVELTE_VIRTUAL_PREFIX)) {
@@ -269,14 +269,14 @@ export function voidMarkdown(options?: MarkdownOptions): Array<Plugin> {
             if (source) {
               return source;
             }
-            throw new Error(`[void-md] Missing Svelte markdown module: ${id}`);
+            throw new Error(`void-md: Missing Svelte markdown module '${id}'.`);
           }
           if (id.startsWith(SOLID_VIRTUAL_PREFIX)) {
             const source = solidModules.get(id);
             if (source) {
               return source;
             }
-            throw new Error(`[void-md] Missing Solid markdown module: ${id}`);
+            throw new Error(`void-md: Missing Solid markdown module '${id}'.`);
           }
 
           if (id === '\0void-md-runtime') {
@@ -308,7 +308,7 @@ export const FrontmatterContext = createContext({});
 export function useFrontmatter() { return useContext(FrontmatterContext) ?? {}; }
 `;
             }
-            throw new Error('[void-md] Adapter not initialized');
+            throw new Error('void-md: Adapter is not initialized.');
           }
           if (id === '\0void-md-pages') {
             return `export default ${JSON.stringify(mdPages)};`;
@@ -383,7 +383,7 @@ export function useFrontmatter() { return useContext(FrontmatterContext) ?? {}; 
             };
           }
 
-          throw new Error(`[void-md] Unsupported adapter: ${adapter}`);
+          throw new Error(`void-md: Unsupported adapter '${adapter}'.`);
         },
       },
     },

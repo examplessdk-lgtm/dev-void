@@ -27,7 +27,7 @@ describe('runtime env resolution', () => {
 
   it('ignores pending Nuxt env promises', () => {
     globalScope.__env__ = Promise.resolve({ DB: { tag: 'nuxt-db' } });
-    expect(() => getRuntimeEnv()).toThrow('Cloudflare env is unavailable');
+    expect(() => getRuntimeEnv()).toThrow('env: Cloudflare env is unavailable');
   });
 
   it('uses request-scoped context env when provided', () => {
@@ -38,6 +38,6 @@ describe('runtime env resolution', () => {
   });
 
   it('throws when no runtime env is available', () => {
-    expect(() => getRuntimeEnv()).toThrow('Cloudflare env is unavailable');
+    expect(() => getRuntimeEnv()).toThrow('env: Cloudflare env is unavailable');
   });
 });

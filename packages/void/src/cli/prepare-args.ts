@@ -11,7 +11,7 @@ export function parsePrepareArgs(args: Array<string>): PrepareArgs {
   });
 
   if (parsed.positionals.length > 0) {
-    throw new Error(`Error: Unexpected argument for prepare: ${parsed.positionals[0]}`);
+    throw new Error(`prepare: Unexpected argument '${parsed.positionals[0]}'.`);
   }
 
   return {};

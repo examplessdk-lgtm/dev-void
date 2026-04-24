@@ -47,7 +47,9 @@ export function readJournal(migrationsDir: string): DrizzleJournal | undefined {
   try {
     return JSON.parse(readFileSync(journalPath, 'utf-8')) as DrizzleJournal;
   } catch (err) {
-    throw new Error(`Failed to parse db/migrations/meta/_journal.json: ${(err as Error).message}`);
+    throw new Error(
+      `db: Failed to parse db/migrations/meta/_journal.json: '${(err as Error).message}'.`,
+    );
   }
 }
 

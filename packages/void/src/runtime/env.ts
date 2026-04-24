@@ -72,5 +72,5 @@ export function requireRuntimeBinding<T = unknown>(name: string): T {
   if (value !== undefined && value !== null) {
     return value;
   }
-  throw new Error(`Missing Cloudflare binding "${name}".`);
+  throw new Error(`env: Missing Cloudflare binding '${name}'.`);
 }

@@ -2,114 +2,19 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { log, outro, note } from '@clack/prompts';
+import { log } from '@clack/prompts';
 import { getPackageDir } from './agents';
 import { parseDeployArgs } from './args';
-import { asciiArts } from './ascii';
 import { authSubcommands, parseAuthArgs } from './auth-args';
 import { dbSubcommands, parseDbArgs } from './db-args';
 import { domainSubcommands, parseDomainArgs } from './domain-args';
 import { envSubcommands, parseEnvArgs } from './env-args';
 import { genSubcommands, parseGenArgs } from './gen-args';
-import { categoryTitle, helpLine, pc, sectionTitle } from './output';
+import { getHelpPath, printGlobalHelp, printHelpPage, printVoidHeader } from './help';
 import { parsePrepareArgs } from './prepare-args';
 import { projectSubcommands, parseProjectArgs } from './project-args';
 import { secretSubcommands, parseSecretArgs } from './secret-args';
 import type { SubcommandDef, SubcommandResult } from './subcommand-prompt';
-
-function printHelp() {
-  const version = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf-8')).version;
-  const art = asciiArts[Math.floor(Math.random() * asciiArts.length)];
-  console.log(pc.blue(`${art}  v${version}\n`));
-  note(
-    [
-      helpLine('void init', 'Set up void in a new or existing project'),
-      helpLine('  --agents', 'Set up agent instructions, skills, and MCP config'),
-      helpLine('  --tsconfig', 'Only update tsconfig.json'),
-      helpLine('  --github', 'Only create GitHub Actions workflow'),
-      '',
-      helpLine('void deploy', 'Build and deploy to Void'),
-      helpLine('  --project <name>', 'Deploy target project name'),
-      helpLine('  --dir <path>', 'Deploy a static directory (skip build)'),
-      helpLine('  --spa', 'Use SPA mode (default: SSG)'),
-      helpLine('  --skip-build', 'Skip the build step (use existing output)'),
-      '',
-      categoryTitle('auth'),
-      helpLine('void auth login', 'Log in with GitHub or Google'),
-      helpLine('void auth logout', 'Log out and remove credentials'),
-      helpLine('void auth whoami', 'Show the logged-in username'),
-      helpLine('void auth token', 'Copy auth token to clipboard'),
-      '',
-      categoryTitle('project'),
-      helpLine('void project status [name]', 'Show deployments for a project'),
-      helpLine('void project link [name]', 'Link directory to a project'),
-      helpLine('void project list', 'List your projects'),
-      helpLine('void project logs [--filter] [--range]', 'Show runtime logs from deployed project'),
-      helpLine('void project rollback [deployId]', 'Roll back to a previous deployment'),
-      helpLine('void project cancel [deployId]', 'Cancel an active deployment'),
-      helpLine('void project delete [name]', 'Delete a project and all its resources'),
-      helpLine('void project purge-cache [--project]', 'Purge all cached pages'),
-      '',
-      categoryTitle('secrets'),
-      helpLine('void secret list', 'List project secrets'),
-      helpLine('void secret put <name> [--project]', 'Set a project secret'),
-      helpLine('void secret delete <name>', 'Delete a project secret'),
-      helpLine('void secret sync <file>', 'Sync secrets from a dotenv file'),
-      '',
-      categoryTitle('domains'),
-      helpLine('void domain add <hostname>', 'Add a custom domain'),
-      helpLine('void domain delete <hostname>', 'Remove a custom domain'),
-      helpLine('void domain list', 'List custom domains + status'),
-      helpLine('void domain status <hostname>', 'Check domain verification status'),
-      '',
-      categoryTitle('database'),
-      helpLine('void db status', 'Show migration status (local + remote)'),
-      helpLine('void db reset', 'Reset local DB and re-run migrations'),
-      helpLine('void db seed [--file <path>]', 'Reset local DB, run migrations, and seed'),
-      helpLine('void db execute <sql>', 'Run SQL against the local database'),
-      helpLine('  --file <path>', 'Run SQL from a file instead'),
-      helpLine('void db migrate', 'Apply pending migrations locally'),
-      helpLine('void db studio', 'Open Drizzle Studio for the local database'),
-      helpLine('void db export [--output <path>]', 'Export local database as SQL'),
-      helpLine('  --no-data', 'Schema only (no INSERT statements)'),
-      helpLine('  --no-schema', 'Data only (no CREATE TABLE)'),
-      helpLine('  --table <name>', 'Export a single table'),
-      helpLine('void db rename-migrations', 'Rename to timestamp-based format'),
-      '',
-      categoryTitle('env'),
-      helpLine('void env check', 'Validate env.ts against .env files'),
-      helpLine('  --remote', 'Also check that required keys exist as remote secrets'),
-      helpLine('void env types', 'Regenerate .void/env.d.ts from env.ts'),
-      helpLine('void env example', 'Generate .env.example from env.ts schema'),
-      helpLine('  --force', 'Overwrite .env.example without confirmation'),
-      '',
-      categoryTitle('codegen'),
-      helpLine('void prepare', 'Generate .void artifacts without starting Vite'),
-      helpLine('void gen model <name> [cols...]', 'Generate migration + CRUD routes + db types'),
-      helpLine('void gen migration <name>', 'Generate an empty migration file'),
-      helpLine('void gen route <path> [--methods]', 'Generate a route with handler exports'),
-      helpLine('void gen middleware <name>', 'Generate a numbered middleware file'),
-      helpLine('void gen ssr [--react|--vue|...]', 'Generate SSR entry + client + App component'),
-      helpLine('void gen cron <name>', 'Generate a cron job file'),
-      helpLine('void gen queue <name>', 'Generate a queue consumer file'),
-      '',
-      categoryTitle('agent'),
-      helpLine('void init --agents', 'Set up agent instructions, skills, and MCP config'),
-      helpLine('void mcp', 'Start MCP server (stdio, for AI agents)'),
-    ].join('\n'),
-    sectionTitle('Commands'),
-  );
-
-  note(
-    [
-      helpLine('VOID_TOKEN', 'Auth token (or use `void login`)'),
-      helpLine('VOID_PROJECT', 'Deploy target project name override'),
-    ].join('\n'),
-    sectionTitle('Environment'),
-  );
-
-  outro('https://void.cloud');
-}
 
 function buildArgs(result: SubcommandResult, trailingArgs: Array<string>): Array<string> {
   const out = [result.subcommand];
@@ -164,8 +69,20 @@ async function runSubcommandGroup<T>(
 
 const args = process.argv.slice(2);
 const command = args[0];
+const helpPath = getHelpPath(args);
 
-if (command === 'deploy') {
+if (helpPath) {
+  if (helpPath.length === 0) {
+    printGlobalHelp();
+  } else {
+    try {
+      printHelpPage(helpPath);
+    } catch (err) {
+      log.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  }
+} else if (command === 'deploy') {
   const root = process.cwd();
   let deployArgs;
   try {
@@ -253,7 +170,7 @@ if (command === 'deploy') {
   const version = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf-8')).version;
   console.log(version);
 } else if (command && command !== 'help' && command !== '--help' && command !== '-h') {
-  log.error(`Unknown command: ${command}. Run \`void --help\` for usage.`);
+  log.error(`cli: Unknown command '${command}'. Run \`void --help\` for usage.`);
   process.exit(1);
 } else if (!command && process.stdin.isTTY) {
   // Interactive top-level prompt
@@ -300,11 +217,7 @@ if (command === 'deploy') {
   ];
 
   (async () => {
-    const version = JSON.parse(
-      readFileSync(join(getPackageDir(), 'package.json'), 'utf-8'),
-    ).version;
-    const art = asciiArts[Math.floor(Math.random() * asciiArts.length)];
-    console.log(pc.blue(`${art}  v${version}\n`));
+    printVoidHeader();
 
     const { promptSubcommand } = await import('./subcommand-prompt');
     const result = await promptSubcommand('', topLevelCommands);
@@ -365,7 +278,7 @@ if (command === 'deploy') {
         return;
       }
       case 'help':
-        printHelp();
+        printGlobalHelp();
         return;
     }
   })().catch((err) => {
@@ -373,5 +286,5 @@ if (command === 'deploy') {
     process.exit(1);
   });
 } else {
-  printHelp();
+  printGlobalHelp();
 }

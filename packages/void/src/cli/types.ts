@@ -97,6 +97,22 @@ export interface WebSocketManifestMeta {
   migrations?: Array<WebSocketMigrationMeta>;
 }
 
+export interface SandboxMigrationMeta {
+  tag: string;
+  newSqliteClasses?: Array<string>;
+  deletedClasses?: Array<string>;
+}
+
+export interface SandboxManifestMeta {
+  bindingName: string;
+  className: string;
+  containerName: string;
+  image: string;
+  instanceType?: string;
+  maxInstances?: number;
+  migrations?: Array<SandboxMigrationMeta>;
+}
+
 export interface DeployManifest {
   version: number;
   auth?: boolean;
@@ -128,6 +144,7 @@ export interface DeployManifest {
   redirectRules?: Array<RedirectRule>;
   fallbackRules?: Array<RedirectRule>;
   websocket?: WebSocketManifestMeta;
+  sandbox?: SandboxManifestMeta;
 }
 
 export type DeployEvent =

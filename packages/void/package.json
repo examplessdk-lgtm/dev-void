@@ -1,6 +1,6 @@
 {
   "name": "@void-sdk/void",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "bin": {
     "void": "dist/cli/cli.mjs"
   },
@@ -25,6 +25,7 @@
     "#self/remote": "./dist/runtime/remote/index.mjs",
     "#self/remote/binding-handler": "./dist/runtime/remote/binding-handler.mjs",
     "#self/response": "./dist/runtime/response.mjs",
+    "#self/sandbox": "./dist/runtime/sandbox.mjs",
     "#self/runtime/fetch": "./dist/runtime/fetch.mjs",
     "#self/runtime/fetch-stream": "./dist/runtime/fetch-stream.mjs",
     "#self/runtime/migration-handler": "./dist/runtime/migration-handler.mjs",
@@ -140,6 +141,11 @@
       "import": "./dist/runtime/ai.mjs",
       "require": "./dist/runtime/ai.mjs"
     },
+    "./sandbox": {
+      "types": "./dist/runtime/sandbox.d.mts",
+      "import": "./dist/runtime/sandbox.mjs",
+      "require": "./dist/runtime/sandbox.mjs"
+    },
     "./remote": {
       "types": "./dist/runtime/remote/index.d.mts",
       "import": "./dist/runtime/remote/index.mjs",
@@ -202,6 +208,14 @@
     },
     "./env": {
       "types": "./dist/runtime/env-public.d.mts",
+      "workerd": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
+      },
+      "worker": {
+        "import": "./dist/runtime/env-public.mjs",
+        "require": "./dist/runtime/env-public.mjs"
+      },
       "browser": {
         "import": "./dist/runtime/env-public-client.mjs",
         "require": "./dist/runtime/env-public-client.mjs"
@@ -236,11 +250,12 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "@cloudflare/vite-plugin": "^1.32.3",
+    "@cloudflare/sandbox": "^0.8.11",
+    "@cloudflare/vite-plugin": "^1.33.1",
     "@cloudflare/workers-types": "catalog:",
     "@hono/oauth-providers": "^0.8.5",
     "@napi-rs/keyring": "1.2.0",
-    "better-auth": "^1.6.5",
+    "better-auth": "^1.6.9",
     "better-sqlite3": "^12.9.0",
     "blake3-jit": "^1.1.0",
     "drizzle-arktype": "^0.1.3",
@@ -248,7 +263,7 @@
     "drizzle-orm": "^0.45.2",
     "drizzle-valibot": "^0.4.2",
     "drizzle-zod": "^0.8.3",
-    "hono": "^4.12.14",
+    "hono": "^4.12.15",
     "ignore": "^7.0.5",
     "jsonc-parser": "3.3.1",
     "pg": "^8.20.0",

@@ -22,7 +22,7 @@ export async function runPurgeCacheCommand(root: string, projectSlug?: string): 
     const projects = await client.listProjects();
     const config = resolveProjectBySlug(projects, requestedSlug);
     if (!config) {
-      log.error(`No project found with slug "${requestedSlug}".`);
+      log.error(`project: No project found with slug '${requestedSlug}'.`);
       process.exit(1);
     }
     projectId = config.projectId;

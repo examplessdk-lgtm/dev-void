@@ -91,7 +91,7 @@ export function parseDotenv(
       if (skipInvalidKeys) {
         continue;
       }
-      throw new Error(`Invalid dotenv key: ${parsed.key}`);
+      throw new Error(`dotenv: Invalid key '${parsed.key}'.`);
     }
     env[parsed.key] = parsed.value;
   }

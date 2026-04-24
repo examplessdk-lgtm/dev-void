@@ -13,7 +13,7 @@ export async function promptAndCreateProject(
     // promptProjectSlug exits the process on Ctrl+C, so no cancel check needed here
     const slug = await promptProjectSlug(defaultSlug);
     try {
-      log.step(`Creating project "${slug}"...`);
+      log.step(`Creating project '${slug}'...`);
       const project = await client.createProject(slug);
       const config: ProjectConfig = { projectId: project.id, slug: project.slug };
       writeProjectConfig(root, config);
@@ -22,7 +22,7 @@ export async function promptAndCreateProject(
     } catch (error) {
       if (error instanceof PlatformApiError && isRetryableCreateError(error)) {
         const reason = error.code || error.body || `HTTP ${error.status}`;
-        log.error(`Could not create project "${slug}": ${reason}`);
+        log.error(`project: Could not create project '${slug}': ${reason}.`);
         defaultSlug = slug;
         continue;
       }

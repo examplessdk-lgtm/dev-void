@@ -172,7 +172,7 @@ function page(title: string, message: string): string {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${title} - Void</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui,-apple-system,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#fafafa;color:#111}.card{text-align:center;padding:3rem}h1{font-size:1.5rem;font-weight:600;margin-bottom:.75rem}p{color:#666;font-size:1rem}</style>
+<style>:root{color-scheme:light dark}*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui,-apple-system,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#fafafa;color:#111}.card{text-align:center;padding:3rem}h1{font-size:1.5rem;font-weight:600;margin-bottom:.75rem}p{color:#666;font-size:1rem}@media (prefers-color-scheme:dark){body{background:#0a0a0a;color:#fafafa}p{color:#a3a3a3}}</style>
 </head><body><div class="card"><h1>${title}</h1><p>${message}</p></div></body></html>`;
 }
 
@@ -215,7 +215,7 @@ export async function runLogin(root: string = process.cwd(), provider = 'github'
         res.writeHead(400, { 'Content-Type': 'text/html' });
         res.end(page('Login failed', 'No token received. Please try again.'));
         server.close();
-        reject(new Error('No token received from callback'));
+        reject(new Error('auth: No token received from callback. Try logging in again.'));
         return;
       }
 
@@ -231,7 +231,7 @@ export async function runLogin(root: string = process.cwd(), provider = 'github'
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address();
       if (!addr || typeof addr === 'string') {
-        reject(new Error('Failed to start local server'));
+        reject(new Error('auth: Failed to start local callback server.'));
         return;
       }
 
@@ -252,7 +252,7 @@ export async function runLogin(root: string = process.cwd(), provider = 'github'
     const timeout = setTimeout(
       () => {
         server.close();
-        reject(new Error('Login timed out after 5 minutes'));
+        reject(new Error('auth: Login timed out after 5 minutes. Try again.'));
       },
       5 * 60 * 1000,
     );

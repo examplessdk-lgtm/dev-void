@@ -220,7 +220,7 @@ export async function scanPages(
     // Check root layout
     if (layouts.some((l) => l.directory === '' && l.island)) {
       throw new Error(
-        `[void] Regular page "${page.componentPath}" is under an island layout — use .island suffix`,
+        `pages: Regular page '${page.componentPath}' is under an island layout. Add a .island suffix.`,
       );
     }
     // Check each directory level
@@ -228,7 +228,7 @@ export async function scanPages(
       current = current ? `${current}/${seg}` : seg;
       if (layouts.some((l) => l.directory === current && l.island)) {
         throw new Error(
-          `[void] Regular page "${page.componentPath}" is under an island layout — use .island suffix`,
+          `pages: Regular page '${page.componentPath}' is under an island layout. Add a .island suffix.`,
         );
       }
     }
@@ -247,7 +247,7 @@ export async function scanPages(
     }
     if (!resolveNamedLayout(name, page.componentId, namedLayouts)) {
       throw new Error(
-        `[void] Page "${page.componentPath}" specifies layout "${page.layout}" but no _layouts/${name}.vue was found in any ancestor directory.`,
+        `pages: Page '${page.componentPath}' specifies layout '${page.layout}', but _layouts/${name}.vue was not found in any ancestor directory.`,
       );
     }
   }

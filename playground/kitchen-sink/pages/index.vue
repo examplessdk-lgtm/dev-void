@@ -13,6 +13,7 @@ defineProps<Props>();
       <li><Link href="/kv">KV</Link> — Key-Value storage</li>
       <li><Link href="/storage">Storage</Link> — Object storage</li>
       <li><Link href="/ai">AI</Link> — Workers AI inference</li>
+      <li><Link href="/sandbox">Sandbox</Link> — Isolated user code execution</li>
       <li><Link href="/cron">Cron</Link> — Scheduled jobs</li>
       <li><Link href="/queues">Queues</Link> — Message queues</li>
       <li><Link href="/env">Env</Link> — Environment bindings</li>

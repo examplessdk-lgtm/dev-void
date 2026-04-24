@@ -22,6 +22,7 @@ const noBindings: InferredBindings = {
   needsAuth: false,
   needsQueues: false,
   needsAI: false,
+  needsSandbox: false,
 };
 
 const sampleMigrations: Array<MigrationFile> = [

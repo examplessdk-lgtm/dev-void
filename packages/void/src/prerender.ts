@@ -50,12 +50,12 @@ function pageDataFileForPath(path: string): string {
 
 async function readPrerenderPathsResponse(response: Response): Promise<Array<string>> {
   if (!response.ok) {
-    throw new Error(`Failed to collect prerender paths: HTTP ${response.status}`);
+    throw new Error(`prerender: Failed to collect prerender paths. HTTP ${response.status}.`);
   }
 
   const payload = (await response.json()) as { paths?: unknown };
   if (!Array.isArray(payload.paths) || !payload.paths.every((path) => typeof path === 'string')) {
-    throw new Error('Failed to collect prerender paths: invalid response payload');
+    throw new Error('prerender: Failed to collect prerender paths. Response payload is invalid.');
   }
 
   return payload.paths;
@@ -192,7 +192,7 @@ export function collectPrerenderWorkerModules(
   });
 
   if (!modules.some((module) => module.relativePath === normalizedEntry)) {
-    throw new Error(`[void] worker entry "${normalizedEntry}" not found in ${workerDir}`);
+    throw new Error(`prerender: Worker entry '${normalizedEntry}' not found in '${workerDir}'.`);
   }
 
   return modules.map(({ relativePath: _relativePath, ...module }) => module);
@@ -246,7 +246,7 @@ async function createCloudflarePrerenderRunner(options: {
 
   const wranglerPath = join(workerDir, 'wrangler.json');
   if (!existsSync(wranglerPath)) {
-    throw new Error(`[void] wrangler.json not found in ${workerDir}`);
+    throw new Error(`prerender: wrangler.json not found in '${workerDir}'.`);
   }
   const wranglerConfig = JSON.parse(readFileSync(wranglerPath, 'utf-8'));
   const wranglerCompat = readWranglerCompat(root, readConfig(root), workerDir);
@@ -482,11 +482,11 @@ async function collectPaths() {
     new Request("http://localhost${PRERENDER_PATHS_ENDPOINT}", { method: "POST", headers }),
   );
   if (!response.ok) {
-    throw new Error("Failed to collect prerender paths: HTTP " + response.status);
+    throw new Error("prerender: Failed to collect prerender paths. HTTP " + response.status + ".");
   }
   const payload = await response.json();
   if (!payload || !Array.isArray(payload.paths) || !payload.paths.every((path) => typeof path === "string")) {
-    throw new Error("Failed to collect prerender paths: invalid response payload");
+    throw new Error("prerender: Failed to collect prerender paths. Response payload is invalid.");
   }
   return payload.paths;
 }

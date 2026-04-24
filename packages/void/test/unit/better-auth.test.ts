@@ -62,7 +62,7 @@ describe('resolveVoidAuthOptions', () => {
         },
         {} as never,
       ),
-    ).rejects.toThrow('Missing auth credentials for provider "google"');
+    ).rejects.toThrow("auth: Missing credentials for provider 'google'");
   });
 
   it('requires BETTER_AUTH_SECRET outside localhost', async () => {
@@ -78,7 +78,7 @@ describe('resolveVoidAuthOptions', () => {
         },
         {} as never,
       ),
-    ).rejects.toThrow('Missing Better Auth secret. Set BETTER_AUTH_SECRET.');
+    ).rejects.toThrow('auth: Missing Better Auth secret. Set BETTER_AUTH_SECRET.');
   });
 
   it('uses the localhost fallback when BETTER_AUTH_SECRET is missing', async () => {

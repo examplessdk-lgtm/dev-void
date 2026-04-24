@@ -1,6 +1,6 @@
 {
   "name": "@void-sdk/vue",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "files": [
     "dist"
   ],
@@ -44,7 +44,7 @@
     "tsdown": "catalog:",
     "vite": "catalog:",
     "void": "workspace:@void-sdk/void@*",
-    "vue": "^3.5.32"
+    "vue": "^3.5.33"
   },
   "peerDependencies": {
     "vite": "catalog:",

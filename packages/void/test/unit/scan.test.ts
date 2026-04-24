@@ -118,7 +118,9 @@ describe('scanRoutes', () => {
     createFile('routes/api/hello.ts');
     createFile('crons/sync.ts', 'export default () => {}');
 
-    await expect(scanRoutes(TMP)).rejects.toThrow('missing `export const cron');
+    await expect(scanRoutes(TMP)).rejects.toThrow(
+      "cron: Invalid job file 'sync.ts'. Add `export const cron",
+    );
   });
 
   it('discovers queue consumers from queues directory', async () => {

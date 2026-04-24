@@ -442,7 +442,7 @@ describe('env proxy with async validators', () => {
     };
     defineEnv({ TOKEN: asyncValidator });
     withRuntimeEnv({ TOKEN: 'value' }, () => {
-      expect(() => env.TOKEN).toThrow(/Async env validator for "TOKEN"/);
+      expect(() => env.TOKEN).toThrow(/env: Async validator for 'TOKEN'/);
       expect(() => env.TOKEN).toThrow(/_validateEnvOnce/);
     });
   });

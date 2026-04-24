@@ -60,7 +60,7 @@ export function parseInitArgs(args: Array<string>): InitArgs {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Error: ${message}`);
+    throw new Error(`init: ${message}.`);
   }
 
   return {

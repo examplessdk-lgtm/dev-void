@@ -16,7 +16,9 @@ export function writeDrizzleConfig(
 ): string {
   const schema = discoverSchema(root);
   if (!schema) {
-    throw new Error('No Drizzle schema found. Create db/schema.ts or run "void gen model <name>".');
+    throw new Error(
+      'db: No Drizzle schema found. Create db/schema.ts or run `void gen model <name>`.',
+    );
   }
 
   const outDir = join(root, '.void');

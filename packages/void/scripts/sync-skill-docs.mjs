@@ -9,7 +9,7 @@ const sourceDir = resolve(packageDir, '../../docs');
 const targetDir = resolve(packageDir, 'skills/void/docs');
 
 if (!existsSync(sourceDir)) {
-  throw new Error(`Missing docs source directory: ${sourceDir}`);
+  throw new Error(`docs: Missing source directory '${sourceDir}'.`);
 }
 
 rmSync(targetDir, { recursive: true, force: true });

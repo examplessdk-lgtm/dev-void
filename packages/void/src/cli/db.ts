@@ -501,7 +501,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
       remoteApplied = new Set(status.applied.map((m) => m.name));
     } catch (err) {
       log.error(
-        `Failed to fetch remote migration status: ${err instanceof Error ? err.message : String(err)}`,
+        `db: Failed to fetch remote migration status: '${err instanceof Error ? err.message : String(err)}'.`,
       );
       process.exit(1);
     }
@@ -523,7 +523,11 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
     const result = await client.applyRemoteMigrations(config.projectId, pendingMigrations);
 
     if (!result.ok) {
-      log.error(result.error ?? 'Remote migration failed.');
+      log.error(
+        result.error
+          ? `db: Remote migration failed: '${result.error}'.`
+          : 'db: Remote migration failed.',
+      );
       process.exit(1);
     }
 
@@ -801,13 +805,13 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     }
     if (missingSnapshots.length > 0) {
       log.error(
-        'Cannot rename migrations: this is a drizzle-managed project but one or more snapshot files are missing:',
+        'db: Cannot rename migrations because one or more Drizzle snapshot files are missing:',
       );
       for (const p of missingSnapshots) {
         log.error(`  - db/migrations/${p}`);
       }
       log.error(
-        '\nRestore the missing snapshot(s) from version control, or reset the migration directory with `void db generate`, then retry `void db rename-migrations`.',
+        '\nRestore the missing snapshot(s) from version control, or reset the migration directory with `void db generate`, then retry.',
       );
       // No reverseRemote() here — the remote has not been touched yet.
       process.exit(1);
@@ -835,7 +839,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       log.info('Remote migration records updated.');
     } catch (err) {
       log.error(
-        'Failed to update remote migration records. No local changes were made.\n' +
+        'db: Failed to update remote migration records. No local changes were made.\n' +
           'Fix the connection and run `void db rename-migrations` again.',
       );
       log.error(String(err));
@@ -853,7 +857,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       const reversed = renames.map(({ from, to }) => ({ from: to, to: from }));
       await client.renameMigrations(config.projectId, reversed);
     } catch {
-      log.warn('Could not reverse remote rename. Run `void deploy` to sync remote records.');
+      log.warn('db: Could not reverse remote rename. Run `void deploy` to sync remote records.');
     }
   };
 
@@ -893,7 +897,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       } catch (err) {
         // best-effort rollback — warn but don't fail
         log.warn(
-          `Could not reverse snapshot rename for ${from}. ` +
+          `db: Could not reverse snapshot rename for '${from}'. ` +
             'The meta/ directory may be in a partial state.',
         );
         log.warn(String(err));
@@ -928,7 +932,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     }
     restoreJournal();
     await reverseRemote();
-    log.error('Failed to rename migration files. All changes have been reverted.');
+    log.error('db: Failed to rename migration files. All changes have been reverted.');
     log.error(String(err));
     process.exit(1);
   }
@@ -947,7 +951,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
         // failure so the rename flow rolls back rather than silently
         // losing journal coherence.
         throw new Error(
-          'db/migrations/meta/_journal.json disappeared mid-run. File renames will be reverted.',
+          'db: db/migrations/meta/_journal.json disappeared mid-run. File renames will be reverted.',
         );
       }
       const renameMap = new Map<string, string>();
@@ -981,7 +985,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       restoreJournal();
       await reverseRemote();
       log.error(
-        'Failed to update db/migrations/meta/_journal.json. File renames have been reverted.',
+        'db: Failed to update db/migrations/meta/_journal.json. File renames have been reverted.',
       );
       log.error(String(err));
       process.exit(1);
@@ -1021,7 +1025,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       restoreJournal();
       await reverseRemote();
       log.error(
-        'Failed to update PostgreSQL tracking table. File renames have been reverted.\n' +
+        'db: Failed to update PostgreSQL tracking table. File renames have been reverted.\n' +
           'Fix the database connection and run `void db rename-migrations` again.',
       );
       log.error(String(err));
@@ -1069,7 +1073,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
         restoreJournal();
         await reverseRemote();
         log.error(
-          'Failed to update SQLite tracking table. File renames have been reverted.\n' +
+          'db: Failed to update SQLite tracking table. File renames have been reverted.\n' +
             'Fix the database issue and run `void db rename-migrations` again.',
         );
         log.error(String(err));
@@ -1097,7 +1101,7 @@ async function runExport(
           [args.table],
         );
         if (check.rows.length === 0) {
-          log.error(`Table not found: ${args.table}`);
+          log.error(`db: Table '${args.table}' not found.`);
           process.exit(1);
         }
         tables = [args.table];
@@ -1177,7 +1181,7 @@ async function runExport(
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
         .get(args.table);
       if (!exists) {
-        log.error(`Table not found: ${args.table}`);
+        log.error(`db: Table '${args.table}' not found.`);
         process.exit(1);
       }
       tables = [args.table];
@@ -1242,7 +1246,9 @@ async function runSetUrl(root: string): Promise<void> {
   const dialect = getDialect(config);
 
   if (dialect !== 'postgresql') {
-    log.error('This command is only for PostgreSQL projects. Set "database": "pg" in void.json.');
+    log.error(
+      'db: This command is only for PostgreSQL projects. Set "database": "pg" in void.json.',
+    );
     process.exit(1);
   }
 
@@ -1289,14 +1295,14 @@ function resolveSeedTarget(root: string, file: string | undefined): SeedTarget {
   const defaults = DEFAULT_SEED_FILES.filter((candidate) => existsSync(join(root, candidate)));
   if (defaults.length === 0) {
     log.error(
-      `No seed file found. Create one of: ${DEFAULT_SEED_FILES.join(', ')} or pass --file <path>.`,
+      `db: No seed file found. Create one of: ${DEFAULT_SEED_FILES.join(', ')} or pass --file <path>.`,
     );
     process.exit(1);
   }
 
   if (defaults.length > 1) {
     log.error(
-      `Multiple default seed files found: ${defaults.join(', ')}. Use --file <path> to choose one.`,
+      `db: Multiple default seed files found: ${defaults.join(', ')}. Use --file <path> to choose one.`,
     );
     process.exit(1);
   }
@@ -1307,7 +1313,7 @@ function resolveSeedTarget(root: string, file: string | undefined): SeedTarget {
 
 function toSeedTarget(root: string, seedPath: string, displayPath?: string): SeedTarget {
   if (!existsSync(seedPath)) {
-    log.error(`Seed file not found: ${seedPath}`);
+    log.error(`db: Seed file '${seedPath}' not found.`);
     process.exit(1);
   }
 
@@ -1320,7 +1326,7 @@ function toSeedTarget(root: string, seedPath: string, displayPath?: string): See
     return { path: seedPath, displayPath: normalizedDisplay, kind: 'module' };
   }
 
-  log.error(`Unsupported seed file: ${normalizedDisplay}. Use .sql, .ts, .mts, .js, or .mjs.`);
+  log.error(`db: Unsupported seed file '${normalizedDisplay}'. Use .sql, .ts, .mts, .js, or .mjs.`);
   process.exit(1);
 }
 
@@ -1367,7 +1373,7 @@ async function loadSeedFunction(seedPath: string): Promise<SeedFn<Record<string,
         : undefined;
   if (!seed) {
     throw new Error(
-      `Seed module must export a default function or a named "seed" function: ${seedPath}`,
+      `db: Seed module '${seedPath}' must export a default function or a named "seed" function.`,
     );
   }
   return seed as SeedFn<Record<string, unknown>>;

@@ -8,8 +8,9 @@ const shared = useShared();
       <strong>{{ shared.appName }}</strong> &mdash; <Link href="/">Home</Link> |
       <Link href="/db">DB</Link> | <Link href="/kv">KV</Link> |
       <Link href="/storage">Storage</Link> | <Link href="/ai">AI</Link> |
-      <Link href="/cron">Cron</Link> | <Link href="/queues">Queues</Link> |
-      <Link href="/env">Env</Link> | <Link href="/revalidate">Revalidate</Link> |
+      <Link href="/sandbox">Sandbox</Link> | <Link href="/cron">Cron</Link> |
+      <Link href="/queues">Queues</Link> | <Link href="/env">Env</Link> |
+      <Link href="/revalidate">Revalidate</Link> |
       <Link href="/auth">Auth</Link>
     </nav>
     <slot />

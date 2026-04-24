@@ -47,7 +47,7 @@ function resolveSingleEntry(
   }
   if (matches.length > 1) {
     const names = matches.map((entry) => entry.relativePath).join(', ');
-    throw new Error(`Multiple ${label} entry files found: ${names}. Keep only one.`);
+    throw new Error(`ssr: Multiple ${label} entry files found: ${names}. Keep only one.`);
   }
   return matches[0];
 }
@@ -78,7 +78,7 @@ function validateServerRenderExport(entry: ResolvedEntry): void {
     parsed = parseSync(relativePath, source);
   } catch (err) {
     throw new Error(
-      `Invalid SSR entry at ${relativePath}: could not parse source (${err instanceof Error ? err.message : String(err)}).`,
+      `ssr: Invalid entry '${relativePath}'. Could not parse source: '${err instanceof Error ? err.message : String(err)}'.`,
     );
   }
 
@@ -125,7 +125,7 @@ function validateServerRenderExport(entry: ResolvedEntry): void {
 
   if (!hasRenderExport) {
     throw new Error(
-      `Invalid SSR entry at ${relativePath}: expected \`export function render(c, assetTags)\` or \`export default defineRender(...)\`.`,
+      `ssr: Invalid entry '${relativePath}'. Export \`render(c, assetTags)\` or \`export default defineRender(...)\`.`,
     );
   }
 }
@@ -143,12 +143,12 @@ export function validateSsrEntries(root: string): SsrEntries | null {
   }
   if (server && !client) {
     throw new Error(
-      `SSR mode requires a client entry. Add one of: ${SSR_CLIENT_ENTRY_RELATIVE_PATHS.join(', ')}`,
+      `ssr: Missing client entry. Add one of: ${SSR_CLIENT_ENTRY_RELATIVE_PATHS.join(', ')}.`,
     );
   }
   if (!server && client) {
     throw new Error(
-      `SSR mode requires a server entry. Add one of: ${SSR_SERVER_ENTRY_RELATIVE_PATHS.join(', ')}`,
+      `ssr: Missing server entry. Add one of: ${SSR_SERVER_ENTRY_RELATIVE_PATHS.join(', ')}.`,
     );
   }
 

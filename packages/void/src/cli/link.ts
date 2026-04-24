@@ -32,7 +32,7 @@ export async function runLink(root: string, slug?: string): Promise<void> {
     // Non-interactive: link by slug
     const project = projects.find((p) => p.slug === slug);
     if (!project) {
-      cancel(`No project found with slug "${slug}".`);
+      cancel(`project: No project found with slug '${slug}'.`);
       process.exit(1);
     }
     writeProjectConfig(root, { projectId: project.id, slug: project.slug });

@@ -129,7 +129,7 @@ export function drizzlePlugin(
 export { ${DRIZZLE_OPERATORS} } from ${JSON.stringify(drizzleOrmResolved)};
 export const db = {};
 export function createDb() {
-  throw new Error("createDb() is unavailable when importing void/db from a schema file.");
+  throw new Error("db: createDb() is unavailable when importing void/db from a schema file.");
 }
 `;
         }
@@ -155,7 +155,7 @@ function getConnectionString() {
   if (url) return url;
   const hd = getRuntimeBinding("HYPERDRIVE");
   if (hd?.connectionString) return hd.connectionString;
-  throw new Error("PostgreSQL not configured. Add DATABASE_URL to .env.local for local dev, or configure Hyperdrive for production.");
+  throw new Error("db: PostgreSQL is not configured. Add DATABASE_URL to .env.local for local dev, or configure Hyperdrive for production.");
 }
 
 function getInstance() {

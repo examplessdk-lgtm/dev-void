@@ -23,7 +23,7 @@ function extractCronExpressions(source: string, filePath: string): Array<string>
   if (singleMatch) {
     const cron = singleMatch[2].trim();
     if (!cron) {
-      throw new Error(`Invalid job file "${filePath}": cron expression cannot be empty`);
+      throw new Error(`cron: Invalid job file '${filePath}'. Cron expression cannot be empty.`);
     }
     return [cron];
   }
@@ -33,7 +33,7 @@ function extractCronExpressions(source: string, filePath: string): Array<string>
   if (arrayMatch) {
     const items = arrayMatch[1].match(/(['"`])([^'"`]+)\1/g);
     if (!items || items.length === 0) {
-      throw new Error(`Invalid job file "${filePath}": cron array cannot be empty`);
+      throw new Error(`cron: Invalid job file '${filePath}'. Cron array cannot be empty.`);
     }
     return items.map((item) => {
       const m = item.match(/['"`]([^'"`]+)['"`]/);
@@ -42,7 +42,7 @@ function extractCronExpressions(source: string, filePath: string): Array<string>
   }
 
   throw new Error(
-    `Invalid job file "${filePath}": missing \`export const cron = "<schedule>"\` literal`,
+    `cron: Invalid job file '${filePath}'. Add \`export const cron = "<schedule>"\`.`,
   );
 }
 

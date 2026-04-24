@@ -26,7 +26,7 @@ function readClientKey(key: string): unknown {
     return meta[key];
   }
   throw new Error(
-    `Env key "${key}" is not exposed to the client. ` +
+    `env: Key '${key}' is not exposed to the client. ` +
       `Vite only injects keys matching the configured envPrefix (default: VITE_*). ` +
       `Either rename the key in env.ts to match envPrefix, or move this access to a server module.`,
   );

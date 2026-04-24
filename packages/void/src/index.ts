@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vite-plugin';
 import { loadEnv, type Plugin } from 'vite';
 import { findVoidAuthConfig } from './auth/config';
@@ -32,6 +33,7 @@ import { restartPlugin } from './plugin-restart';
 import { routingPlugin } from './plugin-routing';
 import { scanQueuesSync } from './queues/scan';
 import { scanWebSocketRoutesSync } from './router/websocket';
+import { SANDBOX_MIGRATION_TAG, isSandboxEnabled, resolveSandboxConfig } from './sandbox/config';
 import { filterLoadedEnv, resolveRemoteMode, stripInternalEnvKeys } from './shared/env';
 import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy';
 import { validateSsrEntry } from './ssr/entry';
@@ -112,6 +114,12 @@ function hasBinding(list: ReadonlyArray<{ binding: string }> | undefined, name: 
 }
 
 const CLOUDFLARE_BUILTIN_IMPORT = /^cloudflare:/;
+const SANDBOX_SDK_IMPORT = '@cloudflare/sandbox';
+const SANDBOX_SDK_IMPORT_FILTER = /^@cloudflare\/sandbox$/;
+
+function resolveSandboxSdkEntry(): string {
+  return fileURLToPath(import.meta.resolve(SANDBOX_SDK_IMPORT));
+}
 
 function createCloudflareBuiltinsExternalPlugin(): Plugin {
   return {
@@ -128,6 +136,25 @@ function createCloudflareBuiltinsExternalPlugin(): Plugin {
           },
         },
       };
+    },
+  };
+}
+
+function createSandboxSdkResolvePlugin(): Plugin {
+  let resolved: string | undefined;
+
+  return {
+    name: 'void:sandbox-sdk-resolve',
+    enforce: 'pre',
+    resolveId: {
+      filter: { id: SANDBOX_SDK_IMPORT_FILTER },
+      handler(id) {
+        if (id !== SANDBOX_SDK_IMPORT) {
+          return;
+        }
+        resolved ??= resolveSandboxSdkEntry();
+        return resolved;
+      },
     },
   };
 }
@@ -234,7 +261,9 @@ async function runAiSetupPrompt(
       projectId = created.id;
       slug = created.slug;
     } catch (err: unknown) {
-      voidError(`Failed to create project: ${err instanceof Error ? err.message : String(err)}`);
+      voidError(
+        `project: Failed to create project: '${err instanceof Error ? err.message : String(err)}'.`,
+      );
       return;
     }
     log.success(`Project created: ${slug}`);
@@ -285,14 +314,20 @@ export function voidPlugin(options?: {
   const inferenceOptions = config.inference?.bindings
     ? { bindings: config.inference.bindings }
     : undefined;
-  const bindings = inferProjectBindings(root, inferenceOptions, scanDirs);
+  const inferredBindings = inferProjectBindings(root, inferenceOptions, scanDirs);
+  const sandboxEnabled = isSandboxEnabled(config);
+  const bindings = sandboxEnabled ? { ...inferredBindings, needsSandbox: true } : inferredBindings;
+  const sandboxConfig = bindings.needsSandbox ? resolveSandboxConfig(config, root) : undefined;
   const authConfigPath = findVoidAuthConfig(root);
   const authEnabled = bindings.needsAuth || authConfigPath !== null || config.auth !== undefined;
 
   if (detected && authEnabled) {
     throw new Error(
-      "Void-managed Better Auth is only supported in Void apps. Use Better Auth's official integration for this framework instead.",
+      "auth: Void-managed Better Auth is only supported in Void apps. Use Better Auth's official integration for this framework instead.",
     );
+  }
+  if (detected && bindings.needsSandbox) {
+    throw new Error('sandbox: Cloudflare Sandboxes are currently supported in Void apps only.');
   }
 
   // Server-only void/* imports (db, kv, ai, etc.) must not pull in
@@ -306,6 +341,7 @@ export function voidPlugin(options?: {
     'void/queues': 'export const queues = {};',
     'void/storage': 'export const storage = {}; export const createStorage = () => ({});',
     'void/isr': 'export const revalidate = async () => {};',
+    'void/sandbox': 'export const sandbox = {}; export const getSandbox = () => ({});',
   };
   const STUB_RESOLVE_FILTER = new RegExp(
     `^(${Object.keys(SERVER_ONLY_STUBS).join('|').replaceAll('/', '\\/')})$`,
@@ -380,6 +416,7 @@ export function voidPlugin(options?: {
         const synced = syncWranglerBindings(root, bindings, {
           bindingNames,
           websockets: websocketRoutes,
+          sandbox: sandboxConfig,
         });
         if (synced) {
           voidLog('Synced bindings to wrangler.jsonc');
@@ -559,6 +596,87 @@ export function voidPlugin(options?: {
           {
             tag: 'void-ws-v1',
             new_classes: websocketRoutes.map((route) => route.className),
+          },
+        ];
+      }
+    }
+
+    if (bindings.needsSandbox && sandboxConfig) {
+      const currentDurableObjects =
+        ((result as Record<string, unknown>).durable_objects as
+          | { bindings?: Array<{ name: string; class_name: string }> }
+          | undefined) ??
+        ((resolved as Record<string, unknown>).durable_objects as
+          | { bindings?: Array<{ name: string; class_name: string }> }
+          | undefined);
+      const existingDurableObjectBindings =
+        (currentDurableObjects?.bindings as
+          | Array<{ name: string; class_name: string }>
+          | undefined) ?? [];
+      if (
+        !existingDurableObjectBindings.some((binding) => binding.name === sandboxConfig.binding)
+      ) {
+        (result as Record<string, unknown>).durable_objects = {
+          bindings: [
+            ...existingDurableObjectBindings,
+            {
+              name: sandboxConfig.binding,
+              class_name: sandboxConfig.className,
+            },
+          ],
+        };
+      }
+
+      const existingContainers =
+        ((result as Record<string, unknown>).containers as
+          | Array<{ class_name?: string }>
+          | undefined) ??
+        ((resolved as Record<string, unknown>).containers as
+          | Array<{ class_name?: string }>
+          | undefined) ??
+        [];
+      if (
+        !existingContainers.some((container) => container.class_name === sandboxConfig.className)
+      ) {
+        (result as Record<string, unknown>).containers = [
+          ...existingContainers,
+          {
+            name: sandboxConfig.containerName,
+            class_name: sandboxConfig.className,
+            image: sandboxConfig.image,
+            ...(sandboxConfig.imageBuildContext && {
+              image_build_context: sandboxConfig.imageBuildContext,
+            }),
+            ...(sandboxConfig.instanceType && { instance_type: sandboxConfig.instanceType }),
+            ...(sandboxConfig.maxInstances != null && {
+              max_instances: sandboxConfig.maxInstances,
+            }),
+          },
+        ];
+      }
+
+      const currentMigrations =
+        (result as Record<string, unknown>).migrations ??
+        (resolved as Record<string, unknown>).migrations;
+      const existingMigrations = Array.isArray(currentMigrations)
+        ? (currentMigrations as Array<{
+            tag?: string;
+            new_classes?: Array<string>;
+            new_sqlite_classes?: Array<string>;
+          }>)
+        : [];
+      if (
+        !existingMigrations.some(
+          (migration) =>
+            migration.tag === SANDBOX_MIGRATION_TAG ||
+            migration.new_sqlite_classes?.includes(sandboxConfig.className),
+        )
+      ) {
+        (result as Record<string, unknown>).migrations = [
+          ...existingMigrations,
+          {
+            tag: SANDBOX_MIGRATION_TAG,
+            new_sqlite_classes: [sandboxConfig.className],
           },
         ];
       }
@@ -779,6 +897,9 @@ export function voidPlugin(options?: {
             if (fileBindings.needsAI && !bindings.needsAI) {
               newBindings.push('AI (void/ai)');
             }
+            if (fileBindings.needsSandbox && !bindings.needsSandbox) {
+              newBindings.push('Sandbox (void/sandbox)');
+            }
           }
           if (autoDetectAuth && fileBindings.needsAuth) {
             newBindings.push('Auth (void/auth)');
@@ -890,7 +1011,7 @@ export function voidPlugin(options?: {
   if (isNodeTarget(config.target)) {
     if (authEnabled) {
       throw new Error(
-        'Void-managed Better Auth is only supported in Cloudflare Void apps. Use Better Auth directly for this target instead.',
+        'auth: Void-managed Better Auth is only supported in Cloudflare Void apps. Use Better Auth directly for this target instead.',
       );
     }
     if (config.inference?.bindings) {
@@ -901,6 +1022,11 @@ export function voidPlugin(options?: {
     }
     if (config.remote) {
       voidWarn('"remote" in void.json is ignored with target: "' + config.target + '"');
+    }
+    if (bindings.needsSandbox) {
+      throw new Error(
+        `sandbox: Cloudflare Sandboxes require target: "cloudflare". They are not available with target: '${config.target}'.`,
+      );
     }
     if (config.routing?.revalidate) {
       voidWarn(
@@ -924,16 +1050,18 @@ export function voidPlugin(options?: {
         // `public/_redirects` / `public/_headers` with `void.json` rules at
         // `configResolved` time and again on HMR (parity with deploy).
         routing: config.routing,
+        hasSandbox: false,
       }),
       prerenderPlugin(root, config),
       ...nodeTargetPlugin(config.target as 'node' | 'bun' | 'deno'),
     ];
   }
 
-  // PostgreSQL needs nodejs_compat for the `pg` driver (events, net, tls, dns, etc.)
-  // Other apps only need nodejs_als for AsyncLocalStorage (isomorphic fetch context threading)
+  // PostgreSQL needs nodejs_compat for the `pg` driver (events, net, tls, dns, etc.).
+  // Cloudflare's Sandbox SDK also imports Node built-ins.
+  // Other apps only need nodejs_als for AsyncLocalStorage (isomorphic fetch context threading).
   const existingFlags = (workerConfig.compatibility_flags as Array<string> | undefined) ?? [];
-  const needsNodejsCompat = dialect === 'postgresql';
+  const needsNodejsCompat = dialect === 'postgresql' || bindings.needsSandbox;
   if (needsNodejsCompat && !existingFlags.includes('nodejs_compat')) {
     workerConfig.compatibility_flags = [
       ...existingFlags.filter((f) => f !== 'nodejs_als'),
@@ -977,6 +1105,7 @@ export function voidPlugin(options?: {
     envClientGuardPlugin(root),
     envClientFoldPlugin(),
     clientStubsPlugin,
+    ...(bindings.needsSandbox ? [createSandboxSdkResolvePlugin()] : []),
     routingPlugin(root, {
       isAuthEnabled: () => authEnabled,
       headConfig: config.head,
@@ -989,6 +1118,9 @@ export function voidPlugin(options?: {
       // platform dispatch worker owns the pipeline and the plugin compiles
       // these rules out of the worker bundle.
       routing: config.routing,
+      hasSandbox: bindings.needsSandbox,
+      sandboxBindingName: sandboxConfig?.binding,
+      sandboxClassName: sandboxConfig?.className,
     }),
     drizzlePlugin(root, true, dialect, { forceVirtualDb: authEnabled }),
     migrationPlugin(root, dialect, 'local', join(root, '.void'), {

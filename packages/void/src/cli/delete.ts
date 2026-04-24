@@ -29,7 +29,7 @@ export async function runDeleteCommand(
     const projects = await client.listProjects();
     const config = resolveProjectBySlug(projects, slug);
     if (!config) {
-      log.error(`No project found with slug "${slug}".`);
+      log.error(`project: No project found with slug '${slug}'.`);
       process.exit(1);
     }
     projectId = config.projectId;

@@ -66,7 +66,7 @@ describe('Link', () => {
       renderToStaticMarkup(
         createElement(Link, { href: '/users', data: { filters: { status: 'open' } } }, 'Users'),
       ),
-    ).toThrow('Void Link GET data only supports primitive values and arrays');
+    ).toThrow('Link: GET data only supports primitive values and arrays');
   });
 
   it('rejects prefetch on non-GET links', () => {
@@ -74,7 +74,7 @@ describe('Link', () => {
       renderToStaticMarkup(
         createElement(Link, { href: '/users', method: 'POST', prefetch: true }, 'Create'),
       ),
-    ).toThrow('Void Link prefetch only supports GET links');
+    ).toThrow('Link: prefetch only supports GET links');
   });
 
   it('rejects reloadDocument on non-GET links', () => {
@@ -82,6 +82,6 @@ describe('Link', () => {
       renderToStaticMarkup(
         createElement(Link, { href: '/users', method: 'POST', reloadDocument: true }, 'Create'),
       ),
-    ).toThrow('Void Link reloadDocument only supports GET links');
+    ).toThrow('Link: reloadDocument only supports GET links');
   });
 });

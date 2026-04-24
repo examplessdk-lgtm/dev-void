@@ -51,7 +51,7 @@ async function main() {
   if (existsSync(targetDir)) {
     const entries = readdirSync(targetDir);
     if (entries.length > 0) {
-      p.log.error(`Directory ${pc.bold(appName)} is not empty.`);
+      p.log.error(`create-void: Directory '${pc.bold(appName)}' is not empty.`);
       process.exit(1);
     }
   }

@@ -1633,6 +1633,26 @@ describe('compileWorkerEntry', () => {
     expect(code).toContain('const ws = await __voidHandleWebSocket(request, env);');
   });
 
+  it('re-exports the Cloudflare Sandbox Durable Object class when enabled', () => {
+    const code = compileWorkerEntry(false, undefined, 'assets', [], 'void/_env', undefined, true);
+
+    expect(code).toContain('import { Sandbox as __VoidSandbox } from "@cloudflare/sandbox"');
+    expect(code).toContain('export { __VoidSandbox as Sandbox };');
+    expect(code).toContain('__setSandboxBindingName("SANDBOX");');
+  });
+
+  it('exports the configured Cloudflare Sandbox Durable Object class', () => {
+    const code = compileWorkerEntry(false, undefined, 'assets', [], 'void/_env', undefined, {
+      bindingName: 'CODE',
+      className: 'CodeSandbox',
+      runtimePath: 'void/sandbox',
+    });
+
+    expect(code).toContain('import { Sandbox as __VoidSandbox } from "@cloudflare/sandbox"');
+    expect(code).toContain('export class CodeSandbox extends __VoidSandbox {}');
+    expect(code).toContain('__setSandboxBindingName("CODE");');
+  });
+
   it('generates queue() export in worker entry when hasQueues=true', () => {
     const code = compileWorkerEntry(true);
 
@@ -1660,13 +1680,30 @@ describe('compileWorkerEntry', () => {
     expect(code).toContain('url.pathname !== "/__void/prerender-paths"');
     expect(code).toContain('env.ASSETS');
     expect(code).toContain('"/assets/"');
-    // Both cache-control values (hashed + non-hashed)
+    // Hashed assets: immutable + long max-age (content-addressed, safe to cache forever).
     expect(code).toContain('public, max-age=31536000, immutable');
-    expect(code).toContain('public, s-maxage=60, max-age=0, must-revalidate');
+    // Fallback (SPA shell / non-hashed): no-store — see regression test below for why.
+    expect(code).toContain('"Cache-Control", "no-store"');
     // No Cache API usage (edge caching happens at dispatch layer)
     expect(code).not.toContain('caches.default');
     expect(code).not.toContain('cache.match');
     expect(code).not.toContain('cache.put');
+  });
+
+  it('stamps no-store on the SPA shell fallback to avoid edge-cache poisoning across deploys', () => {
+    const code = compileWorkerEntry();
+
+    // The non-`/assets/*` branch of serveWithAssets is the SPA shell fallback:
+    // it fires whenever app.fetch returns 404 and ASSETS has a catch-all
+    // index.html. A single poisoned entry (transient 404 from a broken deploy,
+    // a path that later becomes a real route) would otherwise shadow the new
+    // behavior across the edge for every subsequent request until manually
+    // purged — the platform's atomic-deploy cache keying lives at the
+    // dispatch layer and can't reach CF's managed edge cache once s-maxage
+    // puts an entry there. no-store keeps these responses out of that cache
+    // entirely. The shell is cheap to regenerate from the ASSETS binding.
+    expect(code).not.toMatch(/s-maxage=\d+.*must-revalidate/);
+    expect(code).toContain('"Cache-Control", "no-store"');
   });
 
   it('serveWithAssets skips non-GET/HEAD requests to avoid body-reuse crash', () => {

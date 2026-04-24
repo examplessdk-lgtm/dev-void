@@ -60,11 +60,11 @@ const VALID_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 function parseModelArgs(args: Array<string>): GenArgs {
   const [name, ...rest] = args;
   if (!name) {
-    throw new Error('Error: Usage: void gen model <name> [columns...]');
+    throw new Error('gen: Usage: void gen model <name> [columns...].');
   }
   if (!/^[a-z_][a-z0-9_]*$/.test(name)) {
     throw new Error(
-      'Error: Model name must be lowercase alphanumeric + underscores, no leading digits.',
+      'gen: Model name must be lowercase alphanumeric with underscores and no leading digits.',
     );
   }
 
@@ -72,12 +72,12 @@ function parseModelArgs(args: Array<string>): GenArgs {
   for (const col of rest) {
     const match = col.match(/^([a-z_][a-z0-9_]*):([a-z]+)(\?)?$/);
     if (!match) {
-      throw new Error(`Error: Invalid column format: ${col} (expected name:type or name:type?)`);
+      throw new Error(`gen: Invalid column format '${col}'. Use name:type or name:type?.`);
     }
     const [, colName, colType, nullable] = match;
     if (!COLUMN_TYPES.has(colType)) {
       throw new Error(
-        `Error: Unknown column type: ${colType} (expected: ${[...COLUMN_TYPES].join(', ')})`,
+        `gen: Unknown column type '${colType}'. Use one of: ${[...COLUMN_TYPES].join(', ')}.`,
       );
     }
     columns.push({ name: colName, type: colType, nullable: !!nullable });
@@ -89,14 +89,14 @@ function parseModelArgs(args: Array<string>): GenArgs {
 function parseMigrationArgs(args: Array<string>): GenArgs {
   const [name, extra] = args;
   if (!name) {
-    throw new Error('Error: Usage: void gen migration <name>');
+    throw new Error('gen: Usage: void gen migration <name>.');
   }
   if (extra) {
-    throw new Error(`Error: Unexpected argument: ${extra}`);
+    throw new Error(`gen: Unexpected argument '${extra}'.`);
   }
   if (!/^[a-z_][a-z0-9_]*$/.test(name)) {
     throw new Error(
-      'Error: Migration name must be lowercase alphanumeric + underscores, no leading digits.',
+      'gen: Migration name must be lowercase alphanumeric with underscores and no leading digits.',
     );
   }
   return { subcommand: 'migration', name };
@@ -114,10 +114,10 @@ function parseRouteArgs(args: Array<string>): GenArgs {
 
   const [routePath, extra] = parsed.positionals;
   if (!routePath) {
-    throw new Error('Error: Usage: void gen route <path> [--methods get,post,...]');
+    throw new Error('gen: Usage: void gen route <path> [--methods get,post,...].');
   }
   if (extra) {
-    throw new Error(`Error: Unexpected argument: ${extra}`);
+    throw new Error(`gen: Unexpected argument '${extra}'.`);
   }
 
   let methods = ['get'];
@@ -126,7 +126,7 @@ function parseRouteArgs(args: Array<string>): GenArgs {
     for (const m of methods) {
       if (!VALID_METHODS.has(m)) {
         throw new Error(
-          `Error: Unknown HTTP method: ${m} (expected: ${[...VALID_METHODS].join(', ')})`,
+          `gen: Unknown HTTP method '${m}'. Use one of: ${[...VALID_METHODS].join(', ')}.`,
         );
       }
     }
@@ -140,10 +140,10 @@ function parseRouteArgs(args: Array<string>): GenArgs {
 function parseMiddlewareArgs(args: Array<string>): GenArgs {
   const [name, extra] = args;
   if (!name) {
-    throw new Error('Error: Usage: void gen middleware <name>');
+    throw new Error('gen: Usage: void gen middleware <name>.');
   }
   if (extra) {
-    throw new Error(`Error: Unexpected argument: ${extra}`);
+    throw new Error(`gen: Unexpected argument '${extra}'.`);
   }
   return { subcommand: 'middleware', name };
 }
@@ -162,12 +162,12 @@ function parseSsrArgs(args: Array<string>): GenArgs {
   });
 
   if (parsed.positionals.length > 0) {
-    throw new Error(`Error: Unexpected argument: ${parsed.positionals[0]}`);
+    throw new Error(`gen: Unexpected argument '${parsed.positionals[0]}'.`);
   }
 
   const frameworks = (['react', 'vue', 'svelte', 'solid'] as const).filter((f) => parsed.values[f]);
   if (frameworks.length > 1) {
-    throw new Error('Error: Only one framework flag can be specified.');
+    throw new Error('gen: Specify only one framework flag.');
   }
 
   return { subcommand: 'ssr', framework: frameworks[0] };
@@ -176,14 +176,14 @@ function parseSsrArgs(args: Array<string>): GenArgs {
 function parseCronArgs(args: Array<string>): GenArgs {
   const [name, extra] = args;
   if (!name) {
-    throw new Error('Error: Usage: void gen cron <name>');
+    throw new Error('gen: Usage: void gen cron <name>.');
   }
   if (extra) {
-    throw new Error(`Error: Unexpected argument: ${extra}`);
+    throw new Error(`gen: Unexpected argument '${extra}'.`);
   }
   if (!/^[a-z_][a-z0-9_-]*$/.test(name)) {
     throw new Error(
-      'Error: Cron name must be lowercase alphanumeric + underscores/hyphens, no leading digits.',
+      'gen: Cron name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
     );
   }
   return { subcommand: 'cron', name };
@@ -192,14 +192,14 @@ function parseCronArgs(args: Array<string>): GenArgs {
 function parseQueueArgs(args: Array<string>): GenArgs {
   const [name, extra] = args;
   if (!name) {
-    throw new Error('Error: Usage: void gen queue <name>');
+    throw new Error('gen: Usage: void gen queue <name>.');
   }
   if (extra) {
-    throw new Error(`Error: Unexpected argument: ${extra}`);
+    throw new Error(`gen: Unexpected argument '${extra}'.`);
   }
   if (!/^[a-z_][a-z0-9_-]*$/.test(name)) {
     throw new Error(
-      'Error: Queue name must be lowercase alphanumeric + underscores/hyphens, no leading digits.',
+      'gen: Queue name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
     );
   }
   return { subcommand: 'queue', name };
@@ -230,5 +230,5 @@ export function parseGenArgs(args: Array<string>): GenArgs {
     return parseQueueArgs(rest);
   }
 
-  throw new Error('Error: Usage: void gen <model|migration|route|middleware|ssr|cron|queue>');
+  throw new Error('gen: Usage: void gen <model|migration|route|middleware|ssr|cron|queue>.');
 }

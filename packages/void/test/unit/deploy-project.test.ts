@@ -135,7 +135,7 @@ describe('resolveDistDir', () => {
     tempDirs.push(root);
 
     expect(() => resolveDistDir(root, FRAMEWORK_PRESETS['react-router'])).toThrow(
-      'Build output directory "build" not found',
+      "deploy: Build output directory 'build' not found",
     );
   });
 
@@ -144,7 +144,7 @@ describe('resolveDistDir', () => {
     tempDirs.push(root);
 
     expect(() => resolveDistDir(root, FRAMEWORK_PRESETS.sveltekit, 'vp build')).toThrow(
-      'Run "vp build" first.',
+      "Run 'vp build' first.",
     );
   });
 });
@@ -239,7 +239,7 @@ describe('resolveWorkerDirName', () => {
     mkdirSync(buildDir, { recursive: true });
 
     expect(() => resolveWorkerDirName(buildDir, FRAMEWORK_PRESETS['react-router'])).toThrow(
-      'Worker output not found at "build/server"',
+      "deploy: Worker output 'build/server' not found",
     );
   });
 
@@ -250,7 +250,7 @@ describe('resolveWorkerDirName', () => {
     mkdirSync(dist, { recursive: true });
 
     expect(() => resolveWorkerDirName(dist, FRAMEWORK_PRESETS.sveltekit, 'vp build')).toThrow(
-      'Run "vp build" first.',
+      "Run 'vp build' first.",
     );
   });
 

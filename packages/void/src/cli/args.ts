@@ -26,15 +26,15 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
     const message = error instanceof Error ? error.message : String(error);
 
     if (message.includes('argument missing') || message.includes('argument is ambiguous')) {
-      throw new Error('Error: --project requires a slug');
+      throw new Error('deploy: --project requires a slug.');
     }
 
     const unknownOptionMatch = message.match(/Unknown option '([^']+)'/);
     if (unknownOptionMatch) {
-      throw new Error(`Error: Unknown option for deploy: ${unknownOptionMatch[1]}`);
+      throw new Error(`deploy: Unknown option '${unknownOptionMatch[1]}'.`);
     }
 
-    throw new Error(`Error: ${message}`);
+    throw new Error(`deploy: ${message}.`);
   }
 
   const tokens = parsed.tokens ?? [];
@@ -42,17 +42,17 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
     (token) => token.kind === 'option' && token.name === 'project',
   );
   if (projectTokens.length > 1) {
-    throw new Error('Error: --project can only be specified once');
+    throw new Error('deploy: --project can only be specified once.');
   }
 
   if (parsed.positionals.length > 0) {
-    throw new Error(`Error: Unexpected argument for deploy: ${parsed.positionals[0]}`);
+    throw new Error(`deploy: Unexpected argument '${parsed.positionals[0]}'.`);
   }
 
   const projectValue = parsed.values.project;
   const projectSlug = typeof projectValue === 'string' ? projectValue : undefined;
   if (typeof projectSlug === 'string' && projectSlug.startsWith('-')) {
-    throw new Error('Error: --project requires a slug');
+    throw new Error('deploy: --project requires a slug.');
   }
 
   const dir = typeof parsed.values.dir === 'string' ? parsed.values.dir : undefined;

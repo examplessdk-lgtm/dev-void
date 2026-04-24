@@ -571,7 +571,7 @@ export async function startReactPages(config: ReactPagesConfig): Promise<ReactPa
 
   const appEl = document.getElementById('app');
   if (!appEl) {
-    throw new Error('Missing #app element for Void React pages hydration');
+    throw new Error('pages: Missing #app element for Void React pages hydration.');
   }
 
   hydrateRoot(

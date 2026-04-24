@@ -183,6 +183,34 @@ You can also enable remote mode via the `VOID_REMOTE=1` environment variable wit
 VOID_REMOTE=1 pnpm dev
 ```
 
+### `sandbox`
+
+Enable and configure Cloudflare Sandboxes for Void apps. Importing from `void/sandbox` enables this automatically; set `sandbox` when you need custom container settings.
+
+```json
+{
+  "sandbox": {
+    "image": "./Dockerfile.sandbox",
+    "platformImage": "registry.example.com/acme/sandbox:latest",
+    "instanceType": "lite",
+    "maxInstances": 2
+  }
+}
+```
+
+| Field               | Type     | Default                                  |
+| ------------------- | -------- | ---------------------------------------- |
+| `binding`           | `string` | `SANDBOX`                                |
+| `className`         | `string` | `Sandbox`                                |
+| `containerName`     | `string` | `void-sandbox`                           |
+| `image`             | `string` | Bundled `@cloudflare/sandbox` Dockerfile |
+| `imageBuildContext` | `string` | Directory of `image`                     |
+| `platformImage`     | `string` | Matching sandbox SDK registry image      |
+| `instanceType`      | `string` | `lite` on Void deploy                    |
+| `maxInstances`      | `number` | `20` on Void deploy                      |
+
+Sandbox support currently applies to Void apps on the Cloudflare target. `void deploy` supports registry images. If `sandbox.image` is a custom local Dockerfile path, set `sandbox.platformImage` to the pushed image that the platform should run.
+
 ### `target`
 
 Deploy target runtime. Defaults to `"cloudflare"`.
@@ -194,7 +222,7 @@ Deploy target runtime. Defaults to `"cloudflare"`.
 | `"bun"`        | Bun, using `Bun.serve()`                                  |
 | `"deno"`       | Deno, using `Deno.serve()`                                |
 
-Non-CF targets disable CF bindings (`void/db`, `void/kv`, `void/auth`, `void/storage`, `void/ai`, `void/env`, `void/ws`). Importing any of these with a non-CF target produces a compile-time error. File-based routing, middleware, and `void/client` all work normally.
+Non-CF targets disable CF bindings (`void/db`, `void/kv`, `void/auth`, `void/storage`, `void/ai`, `void/sandbox`, `void/env`, `void/ws`). Importing any of these with a non-CF target produces a compile-time error. File-based routing, middleware, and `void/client` all work normally.
 
 ```json
 { "target": "node" }

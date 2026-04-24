@@ -535,7 +535,7 @@ function pushDefaultErrorPageHelpers(lines: Array<string>, options: CompileOptio
   lines.push(`    <title>\${__voidEscapeHtml(heading)}</title>`);
   lines.push(`    <style>`);
   lines.push(`      :root {`);
-  lines.push(`        color-scheme: light;`);
+  lines.push(`        color-scheme: light dark;`);
   lines.push(`        font-family: \${__VOID_ERROR_PAGE_FONT_STACK};`);
   lines.push(`        background: #f5f5f5;`);
   lines.push(`        color: #171717;`);
@@ -571,6 +571,21 @@ function pushDefaultErrorPageHelpers(lines: Array<string>, options: CompileOptio
   lines.push(`      }`);
   lines.push(`      strong {`);
   lines.push(`        font-weight: 600;`);
+  lines.push(`      }`);
+  lines.push(`      @media (prefers-color-scheme: dark) {`);
+  lines.push(`        :root {`);
+  lines.push(`          background: #0a0a0a;`);
+  lines.push(`          color: #f5f5f5;`);
+  lines.push(`        }`);
+  lines.push(`        body {`);
+  lines.push(
+    `          background: radial-gradient(circle at top, rgba(38, 38, 38, 0.96), rgba(10, 10, 10, 0.96) 52%), linear-gradient(180deg, #171717 0%, #0a0a0a 100%);`,
+  );
+  lines.push(`        }`);
+  lines.push(`        main {`);
+  lines.push(`          border-color: #27272a;`);
+  lines.push(`          background: rgba(23, 23, 23, 0.88);`);
+  lines.push(`        }`);
   lines.push(`      }`);
   lines.push(`    </style>`);
   lines.push(`  </head>`);
@@ -1164,9 +1179,7 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push(`async function renderSsrResponse(c, mod) {`);
     lines.push(`  const render = typeof mod.render === "function" ? mod.render : mod.default;`);
     lines.push(`  if (typeof render !== "function") {`);
-    lines.push(
-      `    throw new Error("Invalid SSR entry: expected exported render(c, assetTags) function.");`,
-    );
+    lines.push(`    throw new Error("ssr: Invalid entry. Export render(c, assetTags).");`);
     lines.push(`  }`);
     lines.push(`  const assetTags = await getClientAssetTags(c.req.raw, c.env);`);
     lines.push(`  return render(c, assetTags);`);
@@ -2012,8 +2025,24 @@ export function compileWorkerEntry(
   webSocketClasses: Array<string> = [],
   runtimeEnvPath = 'void/_env',
   envSchemaModule?: { importPath: string; helperPath: string },
+  sandbox?: boolean | { bindingName?: string; className?: string; runtimePath?: string },
 ): string {
   const remotePath = remote?.remotePath;
+  const hasSandbox = sandbox === true || typeof sandbox === 'object';
+  const sandboxClassName =
+    typeof sandbox === 'object' ? (sandbox.className ?? 'Sandbox') : 'Sandbox';
+  const sandboxBindingName =
+    typeof sandbox === 'object' ? (sandbox.bindingName ?? 'SANDBOX') : 'SANDBOX';
+  const sandboxRuntimePath =
+    typeof sandbox === 'object' ? (sandbox.runtimePath ?? 'void/sandbox') : 'void/sandbox';
+  const sandboxImport = hasSandbox
+    ? `import { Sandbox as __VoidSandbox } from "@cloudflare/sandbox";\nimport { __setSandboxBindingName } from ${JSON.stringify(sandboxRuntimePath)};\n`
+    : '';
+  const sandboxExport = hasSandbox
+    ? sandboxClassName === 'Sandbox'
+      ? `export { __VoidSandbox as Sandbox };\n__setSandboxBindingName(${JSON.stringify(sandboxBindingName)});\n`
+      : `export class ${sandboxClassName} extends __VoidSandbox {}\n__setSandboxBindingName(${JSON.stringify(sandboxBindingName)});\n`
+    : '';
   const runtimeEnvImport = `import { withRuntimeEnv } from ${JSON.stringify(runtimeEnvPath)};\n`;
   const remoteImport = remote
     ? `import { createRemoteEnv } from ${JSON.stringify(remote.remotePath)};\n`
@@ -2063,6 +2092,13 @@ function __filterInternalBindings(env) {
   // for static files and set cache headers. Edge caching of hashed assets
   // happens at the dispatch layer (see design doc 0042).
   // Safe for workers without ASSETS binding (env.ASSETS check short-circuits).
+  //
+  // Hashed assets under assetsDir get long immutable caching (content-addressed).
+  // The non-hashed fallback branch — the SPA shell served on any unmatched
+  // 404 — is stamped no-store: a stale entry there would shadow routes that
+  // are added or fixed in subsequent deploys across the edge cache boundary,
+  // which the platform's deploy-scoped cache keys (dispatch layer) can't
+  // reach once CF's managed edge has cached the response.
   const assetHelper = `
 async function serveWithAssets(request, env, response) {
   if (response.status !== 404 || !env.ASSETS || (request.method !== "GET" && request.method !== "HEAD")) return response;
@@ -2072,7 +2108,7 @@ async function serveWithAssets(request, env, response) {
   if (new URL(request.url).pathname.startsWith(${JSON.stringify('/' + assetsDir + '/')})) {
     res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
   } else {
-    res.headers.set("Cache-Control", "public, s-maxage=60, max-age=0, must-revalidate");
+    res.headers.set("Cache-Control", "no-store");
   }
   return res;
 }
@@ -2136,7 +2172,7 @@ ${envValidateCall}  const userEnv = __filterInternalBindings(env);
 }`;
 
   if (hasQueues) {
-    return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv, __processQueue${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
+    return `${sandboxImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv, __processQueue${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
 ${runtimeEnvImport}${envSchemaImport}${remoteImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${scheduledHandler}
@@ -2158,17 +2194,19 @@ ${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = createR
       else if (d.action === "retry") m.retry(d.delaySeconds != null ? { delaySeconds: d.delaySeconds } : undefined);
     }
   }
-  if (!__qr.ok) throw new Error("Queue handler failed");
+  if (!__qr.ok) throw new Error("queue: Handler failed.");
 }
 
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
+${sandboxExport}
 export default { fetch: ${fetchHandler}, scheduled: handleScheduled, queue };`;
   }
-  return `import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
+  return `${sandboxImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
 ${runtimeEnvImport}${envSchemaImport}${remoteImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${scheduledHandler}
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
+${sandboxExport}
 export default { fetch: ${fetchHandler}, scheduled: handleScheduled };`;
 }
 
@@ -2277,7 +2315,7 @@ export { auth, createAuthClient } from ${JSON.stringify(authClientPath)};
 
 export class FetchError extends Error {
   constructor(status, statusText, data) {
-    super(\`Request failed with status \${status}\`);
+    super(\`fetch: Request failed with status \${status}.\`);
     this.name = "FetchError";
     this.status = status;
     this.statusText = statusText;
@@ -2614,7 +2652,7 @@ export { auth, createAuthClient } from ${JSON.stringify(authClientPath)};
 
 export class FetchError extends Error {
   constructor(status, statusText, data) {
-    super(\`Request failed with status \${status}\`);
+    super(\`fetch: Request failed with status \${status}.\`);
     this.name = "FetchError";
     this.status = status;
     this.statusText = statusText;

@@ -37,7 +37,7 @@ export class ProxyClient {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
-      throw new Error(`Remote proxy error (${res.status}): ${text}`);
+      throw new Error(`remote: Proxy request failed with ${res.status}: '${text}'.`);
     }
     return res;
   }
@@ -69,7 +69,7 @@ export class ProxyClient {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
-      throw new Error(`Remote proxy error (${res.status}): ${text}`);
+      throw new Error(`remote: Proxy request failed with ${res.status}: '${text}'.`);
     }
     return res;
   }

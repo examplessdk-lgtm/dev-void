@@ -55,22 +55,24 @@ describe('parseDotenvFile', () => {
 
   it('errors on lowercase key names', () => {
     const file = writeTemp('lowercase=value');
-    expect(() => parseDotenvFile(file)).toThrow('Invalid secret name: lowercase');
+    expect(() => parseDotenvFile(file)).toThrow("secret: Invalid secret name 'lowercase'");
   });
 
   it('errors on keys with special characters', () => {
     const file = writeTemp('MY-KEY=value');
-    expect(() => parseDotenvFile(file)).toThrow('Invalid secret name: MY-KEY');
+    expect(() => parseDotenvFile(file)).toThrow("secret: Invalid secret name 'MY-KEY'");
   });
 
   it('errors on keys starting with a digit', () => {
     const file = writeTemp('1KEY=value');
-    expect(() => parseDotenvFile(file)).toThrow('Invalid secret name: 1KEY');
+    expect(() => parseDotenvFile(file)).toThrow("secret: Invalid secret name '1KEY'");
   });
 
   it('errors on lines without =', () => {
     const file = writeTemp('NOTAVALIDLINE');
-    expect(() => parseDotenvFile(file)).toThrow('Invalid line (missing =)');
+    expect(() => parseDotenvFile(file)).toThrow(
+      "secret: Invalid dotenv line 'NOTAVALIDLINE'. Add KEY=value",
+    );
   });
 
   it('returns empty array for empty file', () => {

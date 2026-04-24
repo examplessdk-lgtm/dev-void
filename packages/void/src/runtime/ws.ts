@@ -181,7 +181,7 @@ export class VoidSocket<P extends keyof WebSocketRouteMap & string> {
   private connect(): void {
     const WebSocketCtor = (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
     if (!WebSocketCtor) {
-      throw new Error('WebSocket is not available in this runtime');
+      throw new Error('ws: WebSocket is not available in this runtime.');
     }
 
     this.socket = new WebSocketCtor(this.url, this.options.protocols);
@@ -262,7 +262,7 @@ function resolveBaseUrl(baseURL?: string): URL {
   }
   const location = (globalThis as { location?: { href: string } }).location;
   if (!location) {
-    throw new Error('connect() requires a browser-like runtime or an explicit "baseURL"');
+    throw new Error('ws: connect() requires a browser-like runtime or an explicit "baseURL".');
   }
   return new URL(location.href);
 }

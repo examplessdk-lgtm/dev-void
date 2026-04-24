@@ -46,13 +46,13 @@ describe('parseDbArgs', () => {
 
   it('errors on execute with no SQL and no --file', () => {
     expect(() => parseDbArgs(['execute'])).toThrow(
-      'Error: Usage: void db execute <sql> or void db execute --file <path>',
+      'db: Usage: void db execute <sql> or void db execute --file <path>.',
     );
   });
 
   it('errors on execute with both SQL and --file', () => {
     expect(() => parseDbArgs(['execute', 'SELECT 1', '--file', 'query.sql'])).toThrow(
-      'Error: Provide either SQL inline or --file, not both',
+      'db: Provide either SQL inline or --file, not both.',
     );
   });
 
@@ -61,7 +61,7 @@ describe('parseDbArgs', () => {
   });
 
   it('errors on migrate with extra positional', () => {
-    expect(() => parseDbArgs(['migrate', 'extra'])).toThrow('Error: Unexpected argument: extra');
+    expect(() => parseDbArgs(['migrate', 'extra'])).toThrow("db: Unexpected argument 'extra'.");
   });
 
   it('parses push', () => {
@@ -69,7 +69,7 @@ describe('parseDbArgs', () => {
   });
 
   it('errors on push with extra positional', () => {
-    expect(() => parseDbArgs(['push', 'extra'])).toThrow('Error: Unexpected argument: extra');
+    expect(() => parseDbArgs(['push', 'extra'])).toThrow("db: Unexpected argument 'extra'.");
   });
 
   it('parses generate', () => {
@@ -77,7 +77,7 @@ describe('parseDbArgs', () => {
   });
 
   it('errors on generate with extra positional', () => {
-    expect(() => parseDbArgs(['generate', 'extra'])).toThrow('Error: Unexpected argument: extra');
+    expect(() => parseDbArgs(['generate', 'extra'])).toThrow("db: Unexpected argument 'extra'.");
   });
 
   it('parses export with no flags', () => {
@@ -143,7 +143,7 @@ describe('parseDbArgs', () => {
   });
 
   it('errors on export with extra positional', () => {
-    expect(() => parseDbArgs(['export', 'extra'])).toThrow('Error: Unexpected argument: extra');
+    expect(() => parseDbArgs(['export', 'extra'])).toThrow("db: Unexpected argument 'extra'.");
   });
 
   it('parses studio', () => {
@@ -151,22 +151,22 @@ describe('parseDbArgs', () => {
   });
 
   it('errors on studio with extra positional', () => {
-    expect(() => parseDbArgs(['studio', 'extra'])).toThrow('Error: Unexpected argument: extra');
+    expect(() => parseDbArgs(['studio', 'extra'])).toThrow("db: Unexpected argument 'extra'.");
   });
 
   it('errors on unknown subcommand', () => {
     expect(() => parseDbArgs(['unknown'])).toThrow(
-      'Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>',
+      'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>.',
     );
   });
 
   it('errors on no subcommand', () => {
     expect(() => parseDbArgs([])).toThrow(
-      'Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>',
+      'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>.',
     );
   });
 
   it('errors on extra positional', () => {
-    expect(() => parseDbArgs(['status', 'extra'])).toThrow('Error: Unexpected argument: extra');
+    expect(() => parseDbArgs(['status', 'extra'])).toThrow("db: Unexpected argument 'extra'.");
   });
 });

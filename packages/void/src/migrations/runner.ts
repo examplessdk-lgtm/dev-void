@@ -33,7 +33,7 @@ function toBetterSqlite3Error(error: unknown): Error {
   }
 
   return new Error(
-    'better-sqlite3 is installed but its native binding was not built. ' +
+    'db: better-sqlite3 is installed but its native binding was not built. ' +
       "Add it to your 'onlyBuiltDependencies' and run `pnpm rebuild better-sqlite3`. See https://pnpm.io/settings#onlybuiltdependencies",
   );
 }

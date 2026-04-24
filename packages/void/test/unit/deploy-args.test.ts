@@ -63,28 +63,26 @@ describe('parseDeployArgs', () => {
   });
 
   it('throws when --project has no value', () => {
-    expect(() => parseDeployArgs(['--project'])).toThrow('Error: --project requires a slug');
+    expect(() => parseDeployArgs(['--project'])).toThrow('deploy: --project requires a slug.');
   });
 
   it('throws when --project value looks like another flag', () => {
     expect(() => parseDeployArgs(['--project', '--foo'])).toThrow(
-      'Error: --project requires a slug',
+      'deploy: --project requires a slug.',
     );
   });
 
   it('throws for duplicate --project flags', () => {
     expect(() => parseDeployArgs(['--project', 'a', '--project', 'b'])).toThrow(
-      'Error: --project can only be specified once',
+      'deploy: --project can only be specified once.',
     );
   });
 
   it('throws for unknown options', () => {
-    expect(() => parseDeployArgs(['--foo'])).toThrow('Error: Unknown option for deploy: --foo');
+    expect(() => parseDeployArgs(['--foo'])).toThrow("deploy: Unknown option '--foo'.");
   });
 
   it('throws for unexpected positional arguments', () => {
-    expect(() => parseDeployArgs(['my-app'])).toThrow(
-      'Error: Unexpected argument for deploy: my-app',
-    );
+    expect(() => parseDeployArgs(['my-app'])).toThrow("deploy: Unexpected argument 'my-app'.");
   });
 });

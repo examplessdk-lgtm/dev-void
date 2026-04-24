@@ -42,7 +42,7 @@ function findPackageRoot(from: string): string {
     }
     dir = parent;
   }
-  throw new Error('Could not find package.json from: ' + from);
+  throw new Error(`mcp: Could not find package.json from '${from}'.`);
 }
 
 function resolveDocsDir(): string {
@@ -60,7 +60,9 @@ function resolveDocsDir(): string {
     return workspaceDocsDir;
   }
 
-  throw new Error(`Void docs directory not found. Expected bundled docs at: ${bundledDocsDir}`);
+  throw new Error(
+    `mcp: Void docs directory not found. Expected bundled docs at '${bundledDocsDir}'.`,
+  );
 }
 
 function findMdFiles(dir: string, prefix = ''): Array<string> {
@@ -398,7 +400,7 @@ export function handleRequest(
           const result = await Promise.race([
             fn(sdk),
             new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('Query timed out after 10 seconds')), 10_000),
+              setTimeout(() => reject(new Error('mcp: Query timed out after 10 seconds.')), 10_000),
             ),
           ]);
           return {

@@ -30,25 +30,25 @@ describe('parseSecretArgs', () => {
 
   it('errors on extra delete positional value', () => {
     expect(() => parseSecretArgs(['delete', 'API_KEY', 'extra'])).toThrow(
-      'Error: Usage: void secret delete <name> [--project <name>]',
+      'secret: Usage: void secret delete <name> [--project <name>].',
     );
   });
 
   it('errors on missing put name', () => {
     expect(() => parseSecretArgs(['put'])).toThrow(
-      'Error: Usage: void secret put <name> [--project <name>]',
+      'secret: Usage: void secret put <name> [--project <name>].',
     );
   });
 
   it('errors on malformed put KEY= form', () => {
     expect(() => parseSecretArgs(['put', 'API_KEY='])).toThrow(
-      'Error: Usage: void secret put <name> [--project <name>]',
+      'secret: Usage: void secret put <name> [--project <name>].',
     );
   });
 
   it('errors on extra put positional value', () => {
     expect(() => parseSecretArgs(['put', 'API_KEY', 'abc123'])).toThrow(
-      'Error: Usage: void secret put <name> [--project <name>]',
+      'secret: Usage: void secret put <name> [--project <name>].',
     );
   });
 
@@ -68,19 +68,19 @@ describe('parseSecretArgs', () => {
 
   it('errors on list with extra positional', () => {
     expect(() => parseSecretArgs(['list', 'extra'])).toThrow(
-      'Error: Usage: void secret list [--project <name>]',
+      'secret: Usage: void secret list [--project <name>].',
     );
   });
 
   it('errors on unknown action', () => {
     expect(() => parseSecretArgs(['unknown'])).toThrow(
-      'Error: Usage: void secret <list|put|delete|sync> ...',
+      'secret: Usage: void secret <list|put|delete|sync> ...',
     );
   });
 
   it('errors on unsupported set action', () => {
     expect(() => parseSecretArgs(['set', 'API_KEY'])).toThrow(
-      'Error: Usage: void secret <list|put|delete|sync> ...',
+      'secret: Usage: void secret <list|put|delete|sync> ...',
     );
   });
 
@@ -102,13 +102,13 @@ describe('parseSecretArgs', () => {
 
   it('errors on missing sync file path', () => {
     expect(() => parseSecretArgs(['sync'])).toThrow(
-      'Error: Usage: void secret sync <file> [--project <name>]',
+      'secret: Usage: void secret sync <file> [--project <name>].',
     );
   });
 
   it('errors on extra sync positional', () => {
     expect(() => parseSecretArgs(['sync', '.env', 'extra'])).toThrow(
-      'Error: Usage: void secret sync <file> [--project <name>]',
+      'secret: Usage: void secret sync <file> [--project <name>].',
     );
   });
 });

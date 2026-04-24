@@ -64,35 +64,35 @@ export function parseDbArgs(args: Array<string>): DbArgs {
 
   if (action === 'push') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
     }
     return { action };
   }
 
   if (action === 'generate') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
     }
     return { action };
   }
 
   if (action === 'status') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
     }
     return { action };
   }
 
   if (action === 'reset') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
     }
     return { action };
   }
 
   if (action === 'seed') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
     }
     const file = typeof parsed.values.file === 'string' ? parsed.values.file : undefined;
     return { action, file };
@@ -101,21 +101,21 @@ export function parseDbArgs(args: Array<string>): DbArgs {
   if (action === 'execute') {
     const command = rest[0];
     if (rest.length > 1) {
-      throw new Error(`Error: Unexpected argument: ${rest[1]}`);
+      throw new Error(`db: Unexpected argument '${rest[1]}'.`);
     }
     const file = typeof parsed.values.file === 'string' ? parsed.values.file : undefined;
     if (!command && !file) {
-      throw new Error('Error: Usage: void db execute <sql> or void db execute --file <path>');
+      throw new Error('db: Usage: void db execute <sql> or void db execute --file <path>.');
     }
     if (command && file) {
-      throw new Error('Error: Provide either SQL inline or --file, not both');
+      throw new Error('db: Provide either SQL inline or --file, not both.');
     }
     return { action, command, file };
   }
 
   if (action === 'migrate') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
     }
     const remote = parsed.values.remote === true ? true : undefined;
     return { action, remote };
@@ -123,28 +123,28 @@ export function parseDbArgs(args: Array<string>): DbArgs {
 
   if (action === 'studio') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
     }
     return { action };
   }
 
   if (action === 'set-url') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
     }
     return { action };
   }
 
   if (action === 'rename-migrations') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
     }
     return { action };
   }
 
   if (action === 'export') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
     }
     const output = typeof parsed.values.output === 'string' ? parsed.values.output : undefined;
     const noData = parsed.values['no-data'] === true ? true : undefined;
@@ -154,6 +154,6 @@ export function parseDbArgs(args: Array<string>): DbArgs {
   }
 
   throw new Error(
-    'Error: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>',
+    'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>.',
   );
 }

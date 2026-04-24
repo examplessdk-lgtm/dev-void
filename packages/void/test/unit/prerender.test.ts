@@ -100,7 +100,7 @@ describe('collectPrerenderWorkerModules', () => {
     writeFileSync(join(workerDir, 'pages-client.js'), 'export const client = true;');
 
     expect(() => collectPrerenderWorkerModules(workerDir, 'index.js')).toThrow(
-      'worker entry "index.js" not found',
+      "Worker entry 'index.js' not found",
     );
   });
 });

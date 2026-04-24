@@ -150,7 +150,7 @@ export function useForm(
 
     try {
       if (!router) {
-        throw new Error('useForm() requires the Void Pages router');
+        throw new Error('useForm(): requires the Void Pages router.');
       }
 
       const result = await submitAction(router, resolvedUrl, {

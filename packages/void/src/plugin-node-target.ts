@@ -11,6 +11,7 @@ export const CF_ONLY_IMPORTS: Array<string> = [
   'void/auth',
   'void/storage',
   'void/ai',
+  'void/sandbox',
   'void/env',
 ];
 
@@ -117,7 +118,7 @@ export function nodeTargetPlugin(target: NodeTarget): Array<Plugin> {
       filter: { id: CF_ONLY_REGEX },
       handler(id) {
         throw new Error(
-          `'${id}' is not available with target: "${target}". ` +
+          `target: '${id}' is not available with target '${target}'. ` +
             `CF bindings require target: "cloudflare".`,
         );
       },

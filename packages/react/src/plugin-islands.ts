@@ -212,7 +212,7 @@ export function islandsPlugin(pagesDir: string): Array<Plugin> {
         handler(code, id) {
           if (/import\s+\{[^}]*\buseForm\b/.test(code)) {
             this.warn(
-              `useForm imported in island page "${id}" — useForm requires the Inertia client-side router. Use useIslandForm instead.`,
+              `islands: useForm cannot be imported in island page '${id}'. Use useIslandForm instead.`,
             );
           }
 

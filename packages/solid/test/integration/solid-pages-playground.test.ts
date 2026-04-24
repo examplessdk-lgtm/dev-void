@@ -445,14 +445,14 @@ function defineClientTests(getBase: () => string) {
 
       await page.click('[data-testid="toggle-prefetch-method"]');
       await page.waitForSelector('[data-testid="reactive-prefetch-error"]');
-      expect(await page.textContent('[data-testid="reactive-prefetch-error"]')).toContain(
-        'Void Link prefetch only supports GET links',
+      expect(await page.textContent('[data-testid="reactive-prefetch-error"]')).toMatch(
+        /(?:Link:|Void Link) prefetch only supports GET links/,
       );
 
       await page.click('[data-testid="toggle-reload-method"]');
       await page.waitForSelector('[data-testid="reactive-reload-error"]');
-      expect(await page.textContent('[data-testid="reactive-reload-error"]')).toContain(
-        'Void Link reloadDocument only supports GET links',
+      expect(await page.textContent('[data-testid="reactive-reload-error"]')).toMatch(
+        /(?:Link:|Void Link) reloadDocument only supports GET links/,
       );
     } finally {
       await page.context().close();

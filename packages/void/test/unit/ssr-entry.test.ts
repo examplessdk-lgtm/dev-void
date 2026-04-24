@@ -94,7 +94,7 @@ describe('ssr entry helpers', () => {
     );
 
     expect(() => validateSsrEntry(root)).toThrow(
-      'expected `export function render(c, assetTags)` or `export default defineRender(...)`',
+      'Export `render(c, assetTags)` or `export default defineRender(...)`',
     );
   });
 
@@ -105,13 +105,13 @@ describe('ssr entry helpers', () => {
       "export async function render(request, env) { return new Response('ok'); }",
     );
 
-    expect(() => validateSsrEntry(root)).toThrow('SSR mode requires a client entry');
+    expect(() => validateSsrEntry(root)).toThrow('ssr: Missing client entry');
   });
 
   it('throws when client entry exists without server entry', () => {
     const root = createTempRoot();
     writeFileSync(join(root, 'src', 'main.client.ts'), "console.log('client entry');");
 
-    expect(() => validateSsrEntry(root)).toThrow('SSR mode requires a server entry');
+    expect(() => validateSsrEntry(root)).toThrow('ssr: Missing server entry');
   });
 });

@@ -97,7 +97,7 @@ function resolveSecret(request: Request, env: VoidAuthEnv): string {
     return 'void-dev-better-auth-secret-1234567890';
   }
 
-  throw new Error('Missing Better Auth secret. Set BETTER_AUTH_SECRET.');
+  throw new Error('auth: Missing Better Auth secret. Set BETTER_AUTH_SECRET.');
 }
 
 function readEnvString(env: VoidAuthEnv, ...keys: Array<string>): string | undefined {
@@ -137,7 +137,7 @@ function resolveSocialProviderCredentials(
 
   if (!clientId || !clientSecret) {
     throw new Error(
-      `Missing auth credentials for provider "${provider}". Set ${envNames.clientId} and ${envNames.clientSecret}, or remove "${provider}" from auth.providers.`,
+      `auth: Missing credentials for provider '${provider}'. Set ${envNames.clientId} and ${envNames.clientSecret}, or remove '${provider}' from auth.providers.`,
     );
   }
 
@@ -198,9 +198,7 @@ function resolveUserConfig(
 
 function assertRuntimeDialect(runtime: VoidAuthRuntimeOptions, dialect: VoidAuthDialect): void {
   if (runtime.dialect !== dialect) {
-    throw new Error(
-      `Void auth runtime mismatch: expected ${dialect}, received ${runtime.dialect}.`,
-    );
+    throw new Error(`auth: Runtime mismatch. Expected ${dialect}, received '${runtime.dialect}'.`);
   }
 }
 

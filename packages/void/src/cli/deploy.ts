@@ -47,6 +47,11 @@ import {
 import { collectPrerenderPaths, collectPrerenderPathsNode } from '../prerender';
 import { scanQueuesSync } from '../queues/scan';
 import { scanWebSocketRoutesSync } from '../router/websocket';
+import {
+  isSandboxEnabled,
+  requiresSandboxPlatformImage,
+  resolveSandboxConfig,
+} from '../sandbox/config';
 import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env';
 import { validateSsrEntry } from '../ssr/entry';
 import { getToken, getTokenSource } from './auth';
@@ -81,7 +86,7 @@ import {
   type FrameworkPreset,
 } from './preset';
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project';
-import { promptProjectSelection } from './prompt';
+import { promptProjectSelection, promptProjectSetupAction } from './prompt';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project';
 import type { AssetConfig, DeployEvent, DevRedirectRule, HeaderRule } from './types';
 import { readWranglerCompat, type WranglerCompat } from './wrangler';
@@ -189,26 +194,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
       }
 
       if (!config) {
-        const projects = await client.listProjects();
-
-        if (projects.length > 0) {
-          // User has existing projects — let them choose
-          const result = await promptProjectSelection(
-            projects,
-            'Select a project to deploy to:',
-            root,
-          );
-
-          if (result.action === 'select') {
-            config = { projectId: result.project.id, slug: result.project.slug };
-            writeProjectConfig(root, config);
-            log.step(`Linked to ${config.slug}`);
-          } else {
-            config = await promptAndCreateProject(root, client);
-          }
-        } else {
-          config = await promptAndCreateProject(root, client);
-        }
+        config = await promptDeployProjectConfig(root, client);
       }
 
       // 3. Resolve deploy app type: void.json > CLI flags > auto-detection
@@ -324,6 +310,33 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
       throw error;
     }
   }
+}
+
+export async function promptDeployProjectConfig(
+  root: string,
+  client: PlatformClient,
+): Promise<ProjectConfig> {
+  const projects = await client.listProjects();
+  const action = await promptProjectSetupAction('Set up a Void project for deploy:', {
+    includeLink: projects.length > 0,
+  });
+
+  if (action === 'create') {
+    return promptAndCreateProject(root, client);
+  }
+
+  // Project names are only shown after the user opts into linking.
+  const result = await promptProjectSelection(projects, 'Select a project to deploy to:', root, {
+    includeCreate: false,
+  });
+
+  if (result.action === 'create') {
+    throw new Error('Unexpected project selection result.');
+  }
+  const config = { projectId: result.project.id, slug: result.project.slug };
+  writeProjectConfig(root, config);
+  log.step(`Linked to ${config.slug}`);
+  return config;
 }
 
 export function resolveStaticBuildCommand(
@@ -479,7 +492,7 @@ async function runStaticDeploy(
   }
 
   if (!existsSync(preset.outputDir)) {
-    log.error(`Output directory not found: ${preset.outputDir}`);
+    log.error(`deploy: Output directory '${preset.outputDir}' not found. Run the build first.`);
     process.exit(1);
   }
 
@@ -590,7 +603,7 @@ async function runFrameworkDeploy(
   lintDestinationSplats(fallbackRules, 'fallbacks (post-asset)');
 
   if (!existsSync(workerDir)) {
-    log.error(`Worker output not found at "${fwPreset.workerDir}". Run "${buildCmd}" first.`);
+    log.error(`deploy: Worker output '${fwPreset.workerDir}' not found. Run '${buildCmd}' first.`);
     process.exit(1);
   }
 
@@ -605,7 +618,7 @@ async function runFrameworkDeploy(
 
   if (authEnabled) {
     log.error(
-      "Void-managed Better Auth is only supported in Void apps. Use Better Auth's official integration for this framework instead.",
+      "deploy: Void-managed Better Auth is only supported in Void apps. Use Better Auth's official integration for this framework instead.",
     );
     process.exit(1);
   }
@@ -873,6 +886,9 @@ async function runFullDeploy(
   const deployScanDirs =
     deployConfig.inference?.scanDirs ?? (isFrameworkMode ? FRAMEWORK_SCAN_DIRS : undefined);
   const bindings = inferProjectBindings(root, undefined, deployScanDirs);
+  if (isSandboxEnabled(deployConfig)) {
+    bindings.needsSandbox = true;
+  }
   const authEnabled =
     bindings.needsAuth || findVoidAuthConfig(root) !== null || deployConfig.auth !== undefined;
   const effectiveBindings =
@@ -881,6 +897,21 @@ async function runFullDeploy(
   if (isFrameworkMode && authEnabled) {
     log.error(
       "Void-managed Better Auth is only supported in Void apps. Use Better Auth's official integration for this framework instead.",
+    );
+    process.exit(1);
+  }
+
+  if (isFrameworkMode && bindings.needsSandbox) {
+    log.error('deploy: Cloudflare Sandboxes are currently supported in Void apps only.');
+    process.exit(1);
+  }
+
+  const sandboxConfig = bindings.needsSandbox
+    ? resolveSandboxConfig(deployConfig, root)
+    : undefined;
+  if (bindings.needsSandbox && requiresSandboxPlatformImage(deployConfig)) {
+    log.error(
+      'deploy: `sandbox.image` points at a local Dockerfile. Add `sandbox.platformImage` with a pushed registry image for `void deploy`, or deploy this sandbox directly with Wrangler.',
     );
     process.exit(1);
   }
@@ -1119,6 +1150,7 @@ async function runFullDeploy(
     {
       compatibilityDate: wranglerCompat?.compatibilityDate,
       compatibilityFlags: wranglerCompat?.compatibilityFlags,
+      ...(sandboxConfig && { sandbox: sandboxConfig }),
     },
     neededSet,
     assetsPrefix,
@@ -1446,7 +1478,7 @@ async function assertEnvSchemaValid(
       `Add the missing values to .env / .env.production, or upload them with \`void secret put <NAME>\`.`,
     );
   }
-  throw new DeployEventError('Aborting deploy — env.ts schema is not satisfied.');
+  throw new DeployEventError('deploy: Aborting because env.ts schema is not satisfied.');
 }
 
 /**
@@ -1513,7 +1545,7 @@ export function resolveDistDir(
     const distDir = join(root, topDir);
     if (!existsSync(distDir)) {
       throw new Error(
-        `Build output directory "${topDir}" not found. Run "${buildCommand ?? fwPreset.buildCommand}" first.`,
+        `deploy: Build output directory '${topDir}' not found. Run '${buildCommand ?? fwPreset.buildCommand}' first.`,
       );
     }
     return distDir;
@@ -1541,7 +1573,7 @@ export function resolveWorkerDirName(
     const subDir = parts.slice(1).join('/');
     if (!existsSync(join(distDir, subDir))) {
       throw new Error(
-        `Worker output not found at "${fwPreset.workerDir}". Run "${buildCommand ?? fwPreset.buildCommand}" first.`,
+        `deploy: Worker output '${fwPreset.workerDir}' not found. Run '${buildCommand ?? fwPreset.buildCommand}' first.`,
       );
     }
     return subDir;
@@ -1553,5 +1585,5 @@ export function resolveWorkerDirName(
       return name;
     }
   }
-  throw new Error('Worker output not found: expected dist/ssr/ or dist/rsc/');
+  throw new Error('deploy: Worker output not found. Expected dist/ssr/ or dist/rsc/.');
 }

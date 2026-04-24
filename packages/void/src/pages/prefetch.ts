@@ -16,7 +16,9 @@ const UNITS: Record<string, number> = {
 function parseUnit(value: string): number {
   const match = value.match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)$/);
   if (!match) {
-    throw new Error(`Invalid cacheFor value: ${value}`);
+    throw new Error(
+      `prefetch: Invalid cacheFor value '${value}'. Use a number with ms, s, m, h, or d.`,
+    );
   }
   return Number(match[1]) * UNITS[match[2]];
 }

@@ -4,13 +4,13 @@ import { parseGenArgs } from '../../src/cli/gen-args';
 describe('parseGenArgs', () => {
   it('errors on no subcommand', () => {
     expect(() => parseGenArgs([])).toThrow(
-      'Error: Usage: void gen <model|migration|route|middleware|ssr|cron|queue>',
+      'gen: Usage: void gen <model|migration|route|middleware|ssr|cron|queue>.',
     );
   });
 
   it('errors on unknown subcommand', () => {
     expect(() => parseGenArgs(['unknown'])).toThrow(
-      'Error: Usage: void gen <model|migration|route|middleware|ssr|cron|queue>',
+      'gen: Usage: void gen <model|migration|route|middleware|ssr|cron|queue>.',
     );
   });
 
@@ -58,30 +58,32 @@ describe('parseGenArgs', () => {
     });
 
     it('errors on missing name', () => {
-      expect(() => parseGenArgs(['model'])).toThrow('Error: Usage: void gen model <name>');
+      expect(() => parseGenArgs(['model'])).toThrow(
+        'gen: Usage: void gen model <name> [columns...].',
+      );
     });
 
     it('errors on invalid model name', () => {
       expect(() => parseGenArgs(['model', '1bad'])).toThrow(
-        'Error: Model name must be lowercase alphanumeric',
+        'gen: Model name must be lowercase alphanumeric with underscores and no leading digits.',
       );
     });
 
     it('errors on uppercase model name', () => {
       expect(() => parseGenArgs(['model', 'Posts'])).toThrow(
-        'Error: Model name must be lowercase alphanumeric',
+        'gen: Model name must be lowercase alphanumeric with underscores and no leading digits.',
       );
     });
 
     it('errors on invalid column format', () => {
       expect(() => parseGenArgs(['model', 'posts', 'bad'])).toThrow(
-        'Error: Invalid column format: bad',
+        "gen: Invalid column format 'bad'. Use name:type or name:type?.",
       );
     });
 
     it('errors on unknown column type', () => {
       expect(() => parseGenArgs(['model', 'posts', 'col:varchar'])).toThrow(
-        'Error: Unknown column type: varchar',
+        "gen: Unknown column type 'varchar'. Use one of: string, text, datetime, integer, boolean, real, blob.",
       );
     });
   });
@@ -95,18 +97,18 @@ describe('parseGenArgs', () => {
     });
 
     it('errors on missing name', () => {
-      expect(() => parseGenArgs(['migration'])).toThrow('Error: Usage: void gen migration <name>');
+      expect(() => parseGenArgs(['migration'])).toThrow('gen: Usage: void gen migration <name>.');
     });
 
     it('errors on extra argument', () => {
       expect(() => parseGenArgs(['migration', 'foo', 'bar'])).toThrow(
-        'Error: Unexpected argument: bar',
+        "gen: Unexpected argument 'bar'.",
       );
     });
 
     it('errors on invalid name', () => {
       expect(() => parseGenArgs(['migration', '1bad'])).toThrow(
-        'Error: Migration name must be lowercase alphanumeric',
+        'gen: Migration name must be lowercase alphanumeric with underscores and no leading digits.',
       );
     });
   });
@@ -137,18 +139,20 @@ describe('parseGenArgs', () => {
     });
 
     it('errors on missing path', () => {
-      expect(() => parseGenArgs(['route'])).toThrow('Error: Usage: void gen route <path>');
+      expect(() => parseGenArgs(['route'])).toThrow(
+        'gen: Usage: void gen route <path> [--methods get,post,...].',
+      );
     });
 
     it('errors on extra argument', () => {
       expect(() => parseGenArgs(['route', 'api/foo', 'bar'])).toThrow(
-        'Error: Unexpected argument: bar',
+        "gen: Unexpected argument 'bar'.",
       );
     });
 
     it('errors on unknown HTTP method', () => {
       expect(() => parseGenArgs(['route', 'api/foo', '--methods', 'get,head'])).toThrow(
-        'Error: Unknown HTTP method: head',
+        "gen: Unknown HTTP method 'head'. Use one of: get, post, put, patch, delete.",
       );
     });
   });
@@ -162,14 +166,12 @@ describe('parseGenArgs', () => {
     });
 
     it('errors on missing name', () => {
-      expect(() => parseGenArgs(['middleware'])).toThrow(
-        'Error: Usage: void gen middleware <name>',
-      );
+      expect(() => parseGenArgs(['middleware'])).toThrow('gen: Usage: void gen middleware <name>.');
     });
 
     it('errors on extra argument', () => {
       expect(() => parseGenArgs(['middleware', 'auth', 'extra'])).toThrow(
-        'Error: Unexpected argument: extra',
+        "gen: Unexpected argument 'extra'.",
       );
     });
   });
@@ -212,12 +214,12 @@ describe('parseGenArgs', () => {
 
     it('errors on multiple framework flags', () => {
       expect(() => parseGenArgs(['ssr', '--react', '--vue'])).toThrow(
-        'Error: Only one framework flag can be specified.',
+        'gen: Specify only one framework flag.',
       );
     });
 
     it('errors on unexpected positional', () => {
-      expect(() => parseGenArgs(['ssr', 'extra'])).toThrow('Error: Unexpected argument: extra');
+      expect(() => parseGenArgs(['ssr', 'extra'])).toThrow("gen: Unexpected argument 'extra'.");
     });
   });
 
@@ -230,18 +232,18 @@ describe('parseGenArgs', () => {
     });
 
     it('errors on missing name', () => {
-      expect(() => parseGenArgs(['cron'])).toThrow('Error: Usage: void gen cron <name>');
+      expect(() => parseGenArgs(['cron'])).toThrow('gen: Usage: void gen cron <name>.');
     });
 
     it('errors on extra argument', () => {
       expect(() => parseGenArgs(['cron', 'sync', 'extra'])).toThrow(
-        'Error: Unexpected argument: extra',
+        "gen: Unexpected argument 'extra'.",
       );
     });
 
     it('errors on invalid name', () => {
       expect(() => parseGenArgs(['cron', '1bad'])).toThrow(
-        'Error: Cron name must be lowercase alphanumeric',
+        'gen: Cron name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
       );
     });
 
@@ -262,18 +264,18 @@ describe('parseGenArgs', () => {
     });
 
     it('errors on missing name', () => {
-      expect(() => parseGenArgs(['queue'])).toThrow('Error: Usage: void gen queue <name>');
+      expect(() => parseGenArgs(['queue'])).toThrow('gen: Usage: void gen queue <name>.');
     });
 
     it('errors on extra argument', () => {
       expect(() => parseGenArgs(['queue', 'emails', 'extra'])).toThrow(
-        'Error: Unexpected argument: extra',
+        "gen: Unexpected argument 'extra'.",
       );
     });
 
     it('errors on invalid name', () => {
       expect(() => parseGenArgs(['queue', '1bad'])).toThrow(
-        'Error: Queue name must be lowercase alphanumeric',
+        'gen: Queue name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
       );
     });
 

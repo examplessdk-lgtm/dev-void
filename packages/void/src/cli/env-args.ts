@@ -43,13 +43,13 @@ export function parseEnvArgs(args: Array<string>): EnvArgs {
       strict: true,
     });
     if (parsed.positionals.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${parsed.positionals[0]}`);
+      throw new Error(`env: Unexpected argument '${parsed.positionals[0]}'.`);
     }
     return { subcommand: 'check', useRemoteSecrets: !!parsed.values.remote };
   }
   if (subcommand === 'types') {
     if (rest.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${rest[0]}`);
+      throw new Error(`env: Unexpected argument '${rest[0]}'.`);
     }
     return { subcommand: 'types' };
   }
@@ -61,9 +61,9 @@ export function parseEnvArgs(args: Array<string>): EnvArgs {
       strict: true,
     });
     if (parsed.positionals.length > 0) {
-      throw new Error(`Error: Unexpected argument: ${parsed.positionals[0]}`);
+      throw new Error(`env: Unexpected argument '${parsed.positionals[0]}'.`);
     }
     return { subcommand: 'example', force: !!parsed.values.force };
   }
-  throw new Error('Error: Usage: void env <check|types|example>');
+  throw new Error('env: Usage: void env <check|types|example>.');
 }

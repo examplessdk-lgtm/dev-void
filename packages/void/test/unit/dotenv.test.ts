@@ -53,7 +53,9 @@ describe('parseDotenv', () => {
   });
 
   it('throws on invalid keys when skipInvalidKeys=false', () => {
-    expect(() => parseDotenv('1BAD=2\n', { skipInvalidKeys: false })).toThrow(/Invalid dotenv key/);
+    expect(() => parseDotenv('1BAD=2\n', { skipInvalidKeys: false })).toThrow(
+      /dotenv: Invalid key/,
+    );
   });
 
   it('expands by default', () => {

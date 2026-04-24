@@ -43,7 +43,7 @@ export function run(argv: Array<string>, cwd?: string): Promise<void> {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`${cmd} exited with code ${code}`));
+        reject(new Error(`create-void: '${cmd}' exited with code ${code}.`));
       }
     });
     child.on('error', reject);

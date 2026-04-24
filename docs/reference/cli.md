@@ -42,6 +42,20 @@ Alternatively, you can add `./node_modules/.bin` to your `PATH` so that you can 
 We do not recommend installing `void` globally, because the CLI needs to be in sync with same version of the runtime framework. Always install `void` locally as a dev dependency of your project.
 :::
 
+## Help
+
+```
+void --help
+void help
+void help <command>
+void help <group> <command>
+void <command> --help
+void <group> <command> --help
+void <group> help <command>
+```
+
+Use `void --help` or `void help` for the top-level command list. Every command and grouped subcommand has a focused help page, so `void deploy --help`, `void help db execute`, and `void db help execute` all print command-specific usage before any command validation or network/auth work runs.
+
 ## Setup
 
 ### `void init`

@@ -5,6 +5,7 @@ import type { DevRedirectRule, HeaderRule, RedirectRule } from './cli/types';
 export type { RedirectRule };
 import { VOID_AUTH_PROVIDERS, isVoidAuthProvider, type VoidAuthProvider } from './auth/providers';
 import type { HeadConfig } from './pages/head';
+import type { SandboxConfig, SandboxInstanceType } from './sandbox/config';
 
 /** Redirect destination — string (302) or object with explicit status. */
 export type RedirectDestination = string | { to: string; status?: 301 | 302 | 303 | 307 | 308 };
@@ -56,6 +57,7 @@ export interface VoidConfig {
   head?: HeadConfig;
   routing?: RoutingConfig;
   inference?: InferenceConfig;
+  sandbox?: boolean | SandboxConfig;
   remote?: boolean;
   worker?: WranglerConfig;
   database?: 'pg';
@@ -74,6 +76,16 @@ const VALID_OUTPUTS = new Set(['server', 'static']);
  */
 export const VALID_REDIRECT_STATUSES: Set<number> = new Set([301, 302, 303, 307, 308]);
 const VALID_DATABASE_VALUES = new Set(['pg']);
+const VALID_SANDBOX_INSTANCE_TYPES = new Set<SandboxInstanceType>([
+  'dev',
+  'lite',
+  'basic',
+  'standard',
+  'standard-1',
+  'standard-2',
+  'standard-3',
+  'standard-4',
+]);
 
 /** Count `*` occurrences in a pattern without allocating a split. */
 export function countSplats(source: string): number {
@@ -181,11 +193,11 @@ export function readConfig(root: string): VoidConfig {
   try {
     config = JSON.parse(raw);
   } catch {
-    throw new Error(`Invalid JSON in ${CONFIG_FILE}`);
+    throw new Error(`config: Invalid JSON in ${CONFIG_FILE}.`);
   }
 
   if (typeof config !== 'object' || config === null || Array.isArray(config)) {
-    throw new Error(`${CONFIG_FILE} must be a JSON object`);
+    throw new Error(`config: ${CONFIG_FILE} must be a JSON object.`);
   }
 
   const obj = config as Record<string, unknown>;
@@ -193,57 +205,63 @@ export function readConfig(root: string): VoidConfig {
   // Check for old flat keys that have moved
   for (const [key, message] of Object.entries(MIGRATION_ERRORS)) {
     if (obj[key] !== undefined) {
-      throw new Error(`${message} in ${CONFIG_FILE}`);
+      throw new Error(`config: ${message} in ${CONFIG_FILE}.`);
     }
   }
 
   // Validate target
   if (obj.target !== undefined) {
     if (typeof obj.target !== 'string' || !VALID_TARGETS.has(obj.target)) {
-      throw new Error(`"target" in ${CONFIG_FILE} must be one of: cloudflare, node, bun, deno`);
+      throw new Error(
+        `config: "target" in ${CONFIG_FILE} must be one of: cloudflare, node, bun, deno.`,
+      );
     }
   }
 
   // Validate output
   if (obj.output !== undefined) {
     if (typeof obj.output !== 'string' || !VALID_OUTPUTS.has(obj.output)) {
-      throw new Error(`"output" in ${CONFIG_FILE} must be one of: server, static`);
+      throw new Error(`config: "output" in ${CONFIG_FILE} must be one of: server, static.`);
     }
   }
 
   // Validate auth
   if (obj.auth !== undefined) {
     if (typeof obj.auth !== 'object' || obj.auth === null || Array.isArray(obj.auth)) {
-      throw new Error(`"auth" in ${CONFIG_FILE} must be an object`);
+      throw new Error(`config: "auth" in ${CONFIG_FILE} must be an object.`);
     }
 
     const auth = obj.auth as Record<string, unknown>;
     for (const key of Object.keys(auth)) {
       if (key !== 'providers') {
-        throw new Error(`Unknown key "auth.${key}" in ${CONFIG_FILE}. Valid: providers`);
+        throw new Error(`config: Unknown key 'auth.${key}' in ${CONFIG_FILE}. Valid: providers.`);
       }
     }
 
     if (auth.providers !== undefined) {
       if (!Array.isArray(auth.providers)) {
-        throw new Error(`"auth.providers" in ${CONFIG_FILE} must be an array of strings`);
+        throw new Error(`config: "auth.providers" in ${CONFIG_FILE} must be an array of strings.`);
       }
       if (auth.providers.length === 0) {
-        throw new Error(`"auth.providers" in ${CONFIG_FILE} must not be empty`);
+        throw new Error(`config: "auth.providers" in ${CONFIG_FILE} must not be empty.`);
       }
 
       const seen = new Set<string>();
       for (const provider of auth.providers) {
         if (typeof provider !== 'string') {
-          throw new Error(`"auth.providers" in ${CONFIG_FILE} must be an array of strings`);
+          throw new Error(
+            `config: "auth.providers" in ${CONFIG_FILE} must be an array of strings.`,
+          );
         }
         if (!isVoidAuthProvider(provider)) {
           throw new Error(
-            `"auth.providers" value "${provider}" in ${CONFIG_FILE} must be one of: ${VOID_AUTH_PROVIDERS.join(', ')}`,
+            `config: "auth.providers" value '${provider}' in ${CONFIG_FILE} must be one of: ${VOID_AUTH_PROVIDERS.join(', ')}.`,
           );
         }
         if (seen.has(provider)) {
-          throw new Error(`"auth.providers" in ${CONFIG_FILE} must not contain duplicates`);
+          throw new Error(
+            `config: "auth.providers" in ${CONFIG_FILE} must not contain duplicates.`,
+          );
         }
         seen.add(provider);
       }
@@ -253,43 +271,43 @@ export function readConfig(root: string): VoidConfig {
   // Validate head
   if (obj.head !== undefined) {
     if (typeof obj.head !== 'object' || obj.head === null || Array.isArray(obj.head)) {
-      throw new Error(`"head" in ${CONFIG_FILE} must be an object`);
+      throw new Error(`config: "head" in ${CONFIG_FILE} must be an object.`);
     }
     const h = obj.head as Record<string, unknown>;
     if (h.title !== undefined && typeof h.title !== 'string') {
-      throw new Error(`"head.title" in ${CONFIG_FILE} must be a string`);
+      throw new Error(`config: "head.title" in ${CONFIG_FILE} must be a string.`);
     }
     if (h.titleTemplate !== undefined && typeof h.titleTemplate !== 'string') {
-      throw new Error(`"head.titleTemplate" in ${CONFIG_FILE} must be a string`);
+      throw new Error(`config: "head.titleTemplate" in ${CONFIG_FILE} must be a string.`);
     }
     if (h.meta !== undefined) {
       if (!Array.isArray(h.meta)) {
-        throw new Error(`"head.meta" in ${CONFIG_FILE} must be an array`);
+        throw new Error(`config: "head.meta" in ${CONFIG_FILE} must be an array.`);
       }
       for (const entry of h.meta) {
         if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-          throw new Error(`"head.meta" entries in ${CONFIG_FILE} must be objects`);
+          throw new Error(`config: "head.meta" entries in ${CONFIG_FILE} must be objects.`);
         }
       }
     }
     if (h.link !== undefined) {
       if (!Array.isArray(h.link)) {
-        throw new Error(`"head.link" in ${CONFIG_FILE} must be an array`);
+        throw new Error(`config: "head.link" in ${CONFIG_FILE} must be an array.`);
       }
     }
     if (h.script !== undefined) {
       if (!Array.isArray(h.script)) {
-        throw new Error(`"head.script" in ${CONFIG_FILE} must be an array`);
+        throw new Error(`config: "head.script" in ${CONFIG_FILE} must be an array.`);
       }
     }
     if (h.htmlAttrs !== undefined) {
       if (typeof h.htmlAttrs !== 'object' || h.htmlAttrs === null || Array.isArray(h.htmlAttrs)) {
-        throw new Error(`"head.htmlAttrs" in ${CONFIG_FILE} must be an object`);
+        throw new Error(`config: "head.htmlAttrs" in ${CONFIG_FILE} must be an object.`);
       }
     }
     if (h.bodyAttrs !== undefined) {
       if (typeof h.bodyAttrs !== 'object' || h.bodyAttrs === null || Array.isArray(h.bodyAttrs)) {
-        throw new Error(`"head.bodyAttrs" in ${CONFIG_FILE} must be an object`);
+        throw new Error(`config: "head.bodyAttrs" in ${CONFIG_FILE} must be an object.`);
       }
     }
   }
@@ -297,7 +315,7 @@ export function readConfig(root: string): VoidConfig {
   // Validate routing
   if (obj.routing !== undefined) {
     if (typeof obj.routing !== 'object' || obj.routing === null || Array.isArray(obj.routing)) {
-      throw new Error(`"routing" in ${CONFIG_FILE} must be an object`);
+      throw new Error(`config: "routing" in ${CONFIG_FILE} must be an object.`);
     }
     const routing = obj.routing as Record<string, unknown>;
 
@@ -306,7 +324,7 @@ export function readConfig(root: string): VoidConfig {
       if (typeof routing.revalidate === 'number') {
         if (!Number.isFinite(routing.revalidate) || routing.revalidate < 0) {
           throw new Error(
-            `"routing.revalidate" in ${CONFIG_FILE} must be a non-negative finite number`,
+            `config: "routing.revalidate" in ${CONFIG_FILE} must be a non-negative finite number.`,
           );
         }
       } else if (
@@ -318,18 +336,18 @@ export function readConfig(root: string): VoidConfig {
         for (const [pattern, value] of Object.entries(r)) {
           if (pattern !== '*' && !pattern.startsWith('/')) {
             throw new Error(
-              `"routing.revalidate" key "${pattern}" in ${CONFIG_FILE} must start with "/" or be "*"`,
+              `config: "routing.revalidate" key '${pattern}' in ${CONFIG_FILE} must start with "/" or be "*".`,
             );
           }
           if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
             throw new Error(
-              `"routing.revalidate" value for "${pattern}" in ${CONFIG_FILE} must be a non-negative finite number`,
+              `config: "routing.revalidate" value for '${pattern}' in ${CONFIG_FILE} must be a non-negative finite number.`,
             );
           }
         }
       } else {
         throw new Error(
-          `"routing.revalidate" in ${CONFIG_FILE} must be a number or an object of path patterns to numbers`,
+          `config: "routing.revalidate" in ${CONFIG_FILE} must be a number or an object of path patterns to numbers.`,
         );
       }
     }
@@ -340,11 +358,15 @@ export function readConfig(root: string): VoidConfig {
         !Array.isArray(routing.prerender) ||
         !routing.prerender.every((p) => typeof p === 'string')
       ) {
-        throw new Error(`"routing.prerender" in ${CONFIG_FILE} must be an array of strings`);
+        throw new Error(
+          `config: "routing.prerender" in ${CONFIG_FILE} must be an array of strings.`,
+        );
       }
       for (const p of routing.prerender as Array<string>) {
         if (!p.startsWith('/')) {
-          throw new Error(`"routing.prerender" path "${p}" in ${CONFIG_FILE} must start with "/"`);
+          throw new Error(
+            `config: "routing.prerender" path '${p}' in ${CONFIG_FILE} must start with "/".`,
+          );
         }
       }
     }
@@ -356,16 +378,20 @@ export function readConfig(root: string): VoidConfig {
         routing.headers === null ||
         Array.isArray(routing.headers)
       ) {
-        throw new Error(`"routing.headers" in ${CONFIG_FILE} must be an object`);
+        throw new Error(`config: "routing.headers" in ${CONFIG_FILE} must be an object.`);
       }
       const h = routing.headers as Record<string, unknown>;
       for (const [pattern, values] of Object.entries(h)) {
         if (!pattern.startsWith('/')) {
-          throw new Error(`Header pattern "${pattern}" in ${CONFIG_FILE} must start with "/"`);
+          throw new Error(
+            `config: Header pattern '${pattern}' in ${CONFIG_FILE} must start with "/".`,
+          );
         }
         assertSingleSplat(pattern, 'Header');
         if (!Array.isArray(values) || !values.every((v) => typeof v === 'string')) {
-          throw new Error(`Headers for "${pattern}" in ${CONFIG_FILE} must be an array of strings`);
+          throw new Error(
+            `config: Headers for '${pattern}' in ${CONFIG_FILE} must be an array of strings.`,
+          );
         }
       }
     }
@@ -377,12 +403,14 @@ export function readConfig(root: string): VoidConfig {
         routing.redirects === null ||
         Array.isArray(routing.redirects)
       ) {
-        throw new Error(`"routing.redirects" in ${CONFIG_FILE} must be an object`);
+        throw new Error(`config: "routing.redirects" in ${CONFIG_FILE} must be an object.`);
       }
       const r = routing.redirects as Record<string, unknown>;
       for (const [source, dest] of Object.entries(r)) {
         if (!source.startsWith('/')) {
-          throw new Error(`Redirect source "${source}" in ${CONFIG_FILE} must start with "/"`);
+          throw new Error(
+            `config: Redirect source '${source}' in ${CONFIG_FILE} must start with "/".`,
+          );
         }
         assertSingleSplat(source, 'Redirect');
         if (typeof dest === 'string') {
@@ -392,19 +420,21 @@ export function readConfig(root: string): VoidConfig {
         } else if (typeof dest === 'object' && dest !== null && !Array.isArray(dest)) {
           const d = dest as Record<string, unknown>;
           if (typeof d.to !== 'string') {
-            throw new Error(`Redirect for "${source}" in ${CONFIG_FILE} must have a "to" string`);
+            throw new Error(
+              `config: Redirect for '${source}' in ${CONFIG_FILE} must have a "to" string.`,
+            );
           }
           if ((d.to as string).startsWith('/')) {
             assertNotProtocolRelative(d.to as string, source, 'Redirect');
           }
           if (d.status !== undefined && !VALID_REDIRECT_STATUSES.has(d.status as number)) {
             throw new Error(
-              `Redirect status for "${source}" in ${CONFIG_FILE} must be 301, 302, 303, 307, or 308`,
+              `config: Redirect status for '${source}' in ${CONFIG_FILE} must be 301, 302, 303, 307, or 308.`,
             );
           }
         } else {
           throw new Error(
-            `Redirect for "${source}" in ${CONFIG_FILE} must be a string or an object with "to" and optional "status"`,
+            `config: Redirect for '${source}' in ${CONFIG_FILE} must be a string or an object with "to" and optional "status".`,
           );
         }
       }
@@ -476,13 +506,13 @@ export function readConfig(root: string): VoidConfig {
       obj.inference === null ||
       Array.isArray(obj.inference)
     ) {
-      throw new Error(`"inference" in ${CONFIG_FILE} must be an object`);
+      throw new Error(`config: "inference" in ${CONFIG_FILE} must be an object.`);
     }
     const inf = obj.inference as Record<string, unknown>;
 
     if (inf.auth !== undefined) {
       throw new Error(
-        `"inference.auth" in ${CONFIG_FILE} is no longer supported; use auth.ts or import from "void/auth"/"void/client" instead`,
+        `config: "inference.auth" in ${CONFIG_FILE} is no longer supported. Use auth.ts or import from "void/auth"/"void/client" instead.`,
       );
     }
 
@@ -493,21 +523,25 @@ export function readConfig(root: string): VoidConfig {
         inf.bindings === null ||
         Array.isArray(inf.bindings)
       ) {
-        throw new Error(`"inference.bindings" in ${CONFIG_FILE} must be an object`);
+        throw new Error(`config: "inference.bindings" in ${CONFIG_FILE} must be an object.`);
       }
       const b = inf.bindings as Record<string, unknown>;
       for (const key of Object.keys(b)) {
         if (!['db', 'kv', 'storage', 'ai'].includes(key)) {
-          throw new Error(`Unknown binding "${key}" in ${CONFIG_FILE}. Valid: db, kv, storage, ai`);
+          throw new Error(
+            `config: Unknown binding '${key}' in ${CONFIG_FILE}. Valid: db, kv, storage, ai.`,
+          );
         }
         if (key === 'ai') {
           if (typeof b[key] !== 'boolean') {
-            throw new Error(`"inference.bindings.${key}" in ${CONFIG_FILE} must be a boolean`);
+            throw new Error(
+              `config: "inference.bindings.${key}" in ${CONFIG_FILE} must be a boolean.`,
+            );
           }
         } else {
           if (typeof b[key] !== 'boolean' && typeof b[key] !== 'string') {
             throw new Error(
-              `"inference.bindings.${key}" in ${CONFIG_FILE} must be a boolean or a string (custom binding name)`,
+              `config: "inference.bindings.${key}" in ${CONFIG_FILE} must be a boolean or a string custom binding name.`,
             );
           }
         }
@@ -516,18 +550,20 @@ export function readConfig(root: string): VoidConfig {
 
     // Validate inference.build
     if (inf.build !== undefined && typeof inf.build !== 'string') {
-      throw new Error(`"inference.build" in ${CONFIG_FILE} must be a string`);
+      throw new Error(`config: "inference.build" in ${CONFIG_FILE} must be a string.`);
     }
 
     // Validate inference.scanDirs
     if (inf.scanDirs !== undefined) {
       if (!Array.isArray(inf.scanDirs) || !inf.scanDirs.every((d) => typeof d === 'string')) {
-        throw new Error(`"inference.scanDirs" in ${CONFIG_FILE} must be an array of strings`);
+        throw new Error(
+          `config: "inference.scanDirs" in ${CONFIG_FILE} must be an array of strings.`,
+        );
       }
       for (const d of inf.scanDirs as Array<string>) {
         if (d.startsWith('/') || d.startsWith('..')) {
           throw new Error(
-            `"inference.scanDirs" path "${d}" in ${CONFIG_FILE} must be a relative directory`,
+            `config: "inference.scanDirs" path '${d}' in ${CONFIG_FILE} must be a relative directory.`,
           );
         }
       }
@@ -537,34 +573,100 @@ export function readConfig(root: string): VoidConfig {
     if (inf.appType !== undefined) {
       if (typeof inf.appType !== 'string' || !VALID_APP_TYPES.has(inf.appType)) {
         throw new Error(
-          `"inference.appType" in ${CONFIG_FILE} must be one of: spa, static, void, framework`,
+          `config: "inference.appType" in ${CONFIG_FILE} must be one of: spa, static, void, framework.`,
         );
       }
     }
 
     // Validate inference.outputDir
     if (inf.outputDir !== undefined && typeof inf.outputDir !== 'string') {
-      throw new Error(`"inference.outputDir" in ${CONFIG_FILE} must be a string`);
+      throw new Error(`config: "inference.outputDir" in ${CONFIG_FILE} must be a string.`);
     }
   }
 
   // Validate remote
   if (obj.remote !== undefined && typeof obj.remote !== 'boolean') {
-    throw new Error(`"remote" in ${CONFIG_FILE} must be a boolean`);
+    throw new Error(`config: "remote" in ${CONFIG_FILE} must be a boolean.`);
+  }
+
+  // Validate sandbox
+  if (obj.sandbox !== undefined) {
+    if (typeof obj.sandbox === 'boolean') {
+      // ok
+    } else if (
+      typeof obj.sandbox === 'object' &&
+      obj.sandbox !== null &&
+      !Array.isArray(obj.sandbox)
+    ) {
+      const sandbox = obj.sandbox as Record<string, unknown>;
+      for (const key of Object.keys(sandbox)) {
+        if (
+          ![
+            'binding',
+            'className',
+            'containerName',
+            'image',
+            'imageBuildContext',
+            'platformImage',
+            'instanceType',
+            'maxInstances',
+          ].includes(key)
+        ) {
+          throw new Error(
+            `config: Unknown key 'sandbox.${key}' in ${CONFIG_FILE}. Valid: binding, className, containerName, image, imageBuildContext, platformImage, instanceType, maxInstances.`,
+          );
+        }
+      }
+      for (const key of [
+        'binding',
+        'className',
+        'containerName',
+        'image',
+        'imageBuildContext',
+        'platformImage',
+      ]) {
+        if (sandbox[key] !== undefined && typeof sandbox[key] !== 'string') {
+          throw new Error(`config: "sandbox.${key}" in ${CONFIG_FILE} must be a string.`);
+        }
+      }
+      if (
+        sandbox.instanceType !== undefined &&
+        (typeof sandbox.instanceType !== 'string' ||
+          !VALID_SANDBOX_INSTANCE_TYPES.has(sandbox.instanceType as SandboxInstanceType))
+      ) {
+        throw new Error(
+          `config: "sandbox.instanceType" in ${CONFIG_FILE} must be one of: ${[...VALID_SANDBOX_INSTANCE_TYPES].join(', ')}.`,
+        );
+      }
+      if (
+        sandbox.maxInstances !== undefined &&
+        (typeof sandbox.maxInstances !== 'number' ||
+          !Number.isInteger(sandbox.maxInstances) ||
+          sandbox.maxInstances < 1)
+      ) {
+        throw new Error(
+          `config: "sandbox.maxInstances" in ${CONFIG_FILE} must be a positive integer.`,
+        );
+      }
+    } else {
+      throw new Error(`config: "sandbox" in ${CONFIG_FILE} must be a boolean or an object.`);
+    }
   }
 
   // Validate worker
   if (obj.worker !== undefined) {
     if (typeof obj.worker !== 'object' || obj.worker === null || Array.isArray(obj.worker)) {
-      throw new Error(`"worker" in ${CONFIG_FILE} must be an object`);
+      throw new Error(`config: "worker" in ${CONFIG_FILE} must be an object.`);
     }
     const w = obj.worker as Record<string, unknown>;
     if (w.compatibility_date !== undefined) {
       if (typeof w.compatibility_date !== 'string') {
-        throw new Error(`"worker.compatibility_date" in ${CONFIG_FILE} must be a string`);
+        throw new Error(`config: "worker.compatibility_date" in ${CONFIG_FILE} must be a string.`);
       }
       if (!/^\d{4}-\d{2}-\d{2}$/.test(w.compatibility_date)) {
-        throw new Error(`"worker.compatibility_date" in ${CONFIG_FILE} must be YYYY-MM-DD format`);
+        throw new Error(
+          `config: "worker.compatibility_date" in ${CONFIG_FILE} must use YYYY-MM-DD format.`,
+        );
       }
     }
     if (w.compatibility_flags !== undefined) {
@@ -573,7 +675,7 @@ export function readConfig(root: string): VoidConfig {
         !w.compatibility_flags.every((f) => typeof f === 'string')
       ) {
         throw new Error(
-          `"worker.compatibility_flags" in ${CONFIG_FILE} must be an array of strings`,
+          `config: "worker.compatibility_flags" in ${CONFIG_FILE} must be an array of strings.`,
         );
       }
     }
@@ -582,7 +684,7 @@ export function readConfig(root: string): VoidConfig {
   // Validate database
   if (obj.database !== undefined) {
     if (typeof obj.database !== 'string' || !VALID_DATABASE_VALUES.has(obj.database)) {
-      throw new Error(`"database" in ${CONFIG_FILE} must be "pg"`);
+      throw new Error(`config: "database" in ${CONFIG_FILE} must be "pg".`);
     }
   }
 

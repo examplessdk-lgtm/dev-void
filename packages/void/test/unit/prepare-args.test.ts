@@ -7,8 +7,6 @@ describe('parsePrepareArgs', () => {
   });
 
   it('rejects unexpected positional arguments', () => {
-    expect(() => parsePrepareArgs(['extra'])).toThrow(
-      'Error: Unexpected argument for prepare: extra',
-    );
+    expect(() => parsePrepareArgs(['extra'])).toThrow("prepare: Unexpected argument 'extra'.");
   });
 });

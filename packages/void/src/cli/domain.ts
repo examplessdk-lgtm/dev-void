@@ -22,7 +22,7 @@ export async function runDomainCommand(root: string, args: DomainArgs): Promise<
     const projects = await client.listProjects();
     const project = projects.find((p) => p.slug === requestedSlug);
     if (!project) {
-      log.error(`No project found with slug "${requestedSlug}".`);
+      log.error(`project: No project found with slug '${requestedSlug}'.`);
       process.exit(1);
     }
     projectId = project.id;
@@ -67,7 +67,7 @@ async function domainRemove(
   const domains = await client.listDomains(projectId);
   const domain = domains.find((d) => d.hostname === hostname);
   if (!domain) {
-    log.error(`Domain "${hostname}" not found on this project.`);
+    log.error(`domain: Domain '${hostname}' not found on this project.`);
     process.exit(1);
   }
 
@@ -97,7 +97,7 @@ async function domainStatus(
   const domains = await client.listDomains(projectId);
   const domain = domains.find((d) => d.hostname === hostname);
   if (!domain) {
-    log.error(`Domain "${hostname}" not found on this project.`);
+    log.error(`domain: Domain '${hostname}' not found on this project.`);
     process.exit(1);
   }
 

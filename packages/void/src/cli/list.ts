@@ -24,7 +24,7 @@ export async function runListCommand(root: string, slug?: string): Promise<void>
     const projects = await client.listProjects();
     const config = resolveProjectBySlug(projects, slug);
     if (!config) {
-      log.error(`No project found with slug "${slug}".`);
+      log.error(`project: No project found with slug '${slug}'.`);
       process.exit(1);
     }
     projectId = config.projectId;
@@ -56,7 +56,7 @@ async function showDeployments(
 
   const latest = deployments[0];
   if (latest.status === 'failed' && latest.error_message) {
-    log.error(`Latest deploy failed: ${latest.error_message}`);
+    log.error(`project: Latest deploy failed: '${latest.error_message}'.`);
   }
 
   const rows = deployments.map((d) => formatDeploymentRow(d, activeDeploymentId));

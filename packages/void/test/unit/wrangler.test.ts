@@ -311,6 +311,7 @@ const noBindings: InferredBindings = {
   needsAuth: false,
   needsQueues: false,
   needsAI: false,
+  needsSandbox: false,
 };
 
 describe('ensureWranglerNodejsAlsFlag', () => {
@@ -395,6 +396,53 @@ describe('syncWranglerBindings', () => {
     );
     const result = syncWranglerBindings(tmpDir, { ...noBindings, needsD1: true });
     expect(result).toBe(false);
+  });
+
+  it('adds sandbox durable object, container, and migration metadata', () => {
+    setup('wrangler.jsonc', '{ "name": "test" }');
+    const result = syncWranglerBindings(tmpDir, { ...noBindings, needsSandbox: true });
+    expect(result).toBe(true);
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.durable_objects.bindings).toEqual([{ name: 'SANDBOX', class_name: 'Sandbox' }]);
+    expect(parsed.containers[0]).toMatchObject({
+      name: 'void-sandbox',
+      class_name: 'Sandbox',
+    });
+    expect(parsed.containers[0].image).toContain('Dockerfile');
+    expect(parsed.migrations).toEqual([
+      { tag: 'void-sandbox-v1', new_sqlite_classes: ['Sandbox'] },
+    ]);
+  });
+
+  it('uses custom sandbox config', () => {
+    setup('wrangler.jsonc', '{ "name": "test" }');
+    syncWranglerBindings(
+      tmpDir,
+      { ...noBindings, needsSandbox: true },
+      {
+        sandbox: {
+          binding: 'CODE',
+          className: 'CodeSandbox',
+          containerName: 'code-sandbox',
+          image: '/project/Dockerfile.sandbox',
+          platformImage: 'registry.example.com/code-sandbox:latest',
+          instanceType: 'lite',
+          maxInstances: 2,
+        },
+      },
+    );
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.durable_objects.bindings[0]).toEqual({
+      name: 'CODE',
+      class_name: 'CodeSandbox',
+    });
+    expect(parsed.containers[0]).toMatchObject({
+      name: 'code-sandbox',
+      class_name: 'CodeSandbox',
+      image: '/project/Dockerfile.sandbox',
+      instance_type: 'lite',
+      max_instances: 2,
+    });
   });
 
   it('returns false when no bindings are needed', () => {
