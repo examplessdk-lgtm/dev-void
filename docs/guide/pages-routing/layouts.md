@@ -192,7 +192,7 @@ export default function Page() {
 ```
 
 ```vue [Vue]
-<script setup>
+<script>
 export const layout = 'landing';
 </script>
 
@@ -277,7 +277,7 @@ export default function Landing() {
 ```
 
 ```vue [Vue]
-<script setup>
+<script>
 export const layout = false;
 </script>
 
