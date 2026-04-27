@@ -1875,14 +1875,36 @@ function __filterInternalBindings(env) {
 async function serveWithAssets(request, env, response) {
   if (response.status !== 404 || !env.ASSETS || (request.method !== "GET" && request.method !== "HEAD")) return response;
   const asset = await env.ASSETS.fetch(new Request(request.url, { method: request.method, headers: request.headers }));
-  if (asset.status === 404) return response;
-  const res = new Response(asset.body, asset);
-  if (new URL(request.url).pathname.startsWith(${JSON.stringify('/' + assetsDir + '/')})) {
-    res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
-  } else {
-    res.headers.set("Cache-Control", "no-store");
+  if (asset.status !== 404) {
+    const res = new Response(asset.body, asset);
+    if (new URL(request.url).pathname.startsWith(${JSON.stringify('/' + assetsDir + '/')})) {
+      res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    } else {
+      res.headers.set("Cache-Control", "no-store");
+    }
+    return res;
   }
-  return res;
+  // SPA fallback: with assetConfig.not_found_handling = 'none' (the default
+  // for any project whose worker handles HTML), the asset binding returns
+  // 404 instead of falling back to index.html itself. Do that fallback here,
+  // *after* user routes/middleware have run, so auth gates and OAuth
+  // callbacks see the request first. Only fires for HTML accept on
+  // GET/HEAD; non-HTML or non-existent SPAs get the worker's original 404.
+  const accept = request.headers.get("accept") ?? "";
+  if (accept.includes("text/html")) {
+    const indexUrl = new URL("/index.html", request.url);
+    const indexAsset = await env.ASSETS.fetch(new Request(indexUrl, { method: request.method }));
+    if (indexAsset.status === 200) {
+      const res = new Response(indexAsset.body, {
+        status: 200,
+        headers: indexAsset.headers,
+      });
+      res.headers.set("Cache-Control", "no-store");
+      res.headers.set("Content-Type", "text/html; charset=utf-8");
+      return res;
+    }
+  }
+  return response;
 }
 `;
 

@@ -1076,11 +1076,18 @@ async function runFullDeploy(
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
 
-  // Derive asset config: SSR and pages-mode workers handle their own 404s, non-SSR uses SPA fallback
-  const assetConfig: AssetConfig =
-    isSsr || hasPages
-      ? { not_found_handling: 'none' }
-      : { not_found_handling: 'single-page-application' };
+  // Derive asset config. Any worker capable of handling HTML — SSR, pages,
+  // routes, or middleware — needs `not_found_handling: 'none'` so the asset
+  // binding returns 404 for unmatched paths and the worker (run_worker_first)
+  // owns the response. With `'single-page-application'`, CF Workers Static
+  // Assets short-circuits browser navigations (`Sec-Fetch-Mode: navigate`)
+  // straight to the SPA shell, bypassing run_worker_first and any auth
+  // middleware — and breaks OAuth callbacks like /api/auth/callback/google,
+  // which arrive as navigations from the provider's redirect.
+  const workerHandlesHtml = isSsr || hasPages || hasRoutes || hasMiddleware;
+  const assetConfig: AssetConfig = workerHandlesHtml
+    ? { not_found_handling: 'none' }
+    : { not_found_handling: 'single-page-application' };
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
