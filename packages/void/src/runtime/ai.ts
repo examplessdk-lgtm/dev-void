@@ -4,14 +4,27 @@ import {
   type ThirdPartyModel,
   type ChatCompletionInputs,
   type ChatCompletionResponse,
+  type ImageEditInputs,
+  type ImageEditOptions,
+  type ImageGenerationInputs,
+  type ImageGenerationOptions,
 } from './ai-types';
 import { getRawRuntimeEnv, type RuntimeEnv } from './env-raw';
 
 const PROXY_URL = 'https://proxy.void.cloud/ai';
 const STAGING_PROXY_URL = 'https://proxy.staging.void.cloud/ai';
+const VOID_FILE_MARKER = '__voidFile';
+
+interface SerializedFileInput {
+  [VOID_FILE_MARKER]: true;
+  data: string;
+  name?: string;
+  type?: string;
+}
 
 interface AiBackend {
   run(model: string, inputs: unknown, options?: unknown): Promise<unknown>;
+  image(model: string, inputs: unknown, options?: unknown): Promise<Response>;
   models(params?: unknown): Promise<unknown>;
   toMarkdown(items: unknown, options?: unknown): Promise<unknown>;
 }
@@ -23,6 +36,179 @@ function hasStreamFlag(value: unknown): value is { stream?: boolean } {
 function isThirdPartyModel(model: string): boolean {
   const provider = model.split('/')[0];
   return provider in PROVIDER_KEY_MAP;
+}
+
+function mediaTypeFromContentType(contentType: string | null): string | null {
+  if (!contentType) {
+    return null;
+  }
+  const [mediaType] = contentType.split(';', 1);
+  const normalized = mediaType?.trim().toLowerCase();
+  return normalized || null;
+}
+
+function isJsonMediaType(mediaType: string | null): boolean {
+  if (mediaType === 'application/json') {
+    return true;
+  }
+  const slash = mediaType?.indexOf('/') ?? -1;
+  return Boolean(mediaType && slash >= 0 && mediaType.slice(slash + 1).endsWith('+json'));
+}
+
+async function readProxyResult(response: Response): Promise<unknown> {
+  if (isJsonMediaType(mediaTypeFromContentType(response.headers.get('content-type')))) {
+    return response.json();
+  }
+  return response.blob();
+}
+
+function hasResponseMethod(value: unknown): value is { response(): Response | Promise<Response> } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'response' in value &&
+    typeof (value as { response?: unknown }).response === 'function'
+  );
+}
+
+function isBinaryView(value: unknown): value is ArrayBufferView {
+  return ArrayBuffer.isView(value);
+}
+
+function copyBinaryView(value: ArrayBufferView): ArrayBuffer {
+  const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer as ArrayBuffer;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  return bytesToBase64(new Uint8Array(buffer));
+}
+
+function isFileLikeRecord(value: Record<string, unknown>): value is {
+  data: string;
+  name?: string;
+  type?: string;
+} {
+  return (
+    typeof value.data === 'string' &&
+    (value.name === undefined || typeof value.name === 'string') &&
+    (value.type === undefined || typeof value.type === 'string')
+  );
+}
+
+function fileNameFromBlob(value: Blob): string | undefined {
+  const name = (value as { name?: unknown }).name;
+  return typeof name === 'string' && name.length > 0 ? name : undefined;
+}
+
+async function serializeProxyValue(
+  value: unknown,
+  serializeDataObjectAsFile = false,
+): Promise<unknown> {
+  if (value instanceof Blob) {
+    return {
+      [VOID_FILE_MARKER]: true,
+      data: arrayBufferToBase64(await value.arrayBuffer()),
+      name: fileNameFromBlob(value),
+      type: value.type || undefined,
+    } satisfies SerializedFileInput;
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return {
+      [VOID_FILE_MARKER]: true,
+      data: arrayBufferToBase64(value),
+      type: 'application/octet-stream',
+    } satisfies SerializedFileInput;
+  }
+
+  if (isBinaryView(value)) {
+    return {
+      [VOID_FILE_MARKER]: true,
+      data: arrayBufferToBase64(copyBinaryView(value)),
+      type: 'application/octet-stream',
+    } satisfies SerializedFileInput;
+  }
+
+  if (Array.isArray(value)) {
+    return Promise.all(value.map((item) => serializeProxyValue(item, serializeDataObjectAsFile)));
+  }
+
+  if (typeof value === 'object' && value !== null) {
+    const record = value as Record<string, unknown>;
+    if (serializeDataObjectAsFile && isFileLikeRecord(record)) {
+      return {
+        [VOID_FILE_MARKER]: true,
+        data: record.data,
+        name: record.name,
+        type: record.type,
+      } satisfies SerializedFileInput;
+    }
+
+    const serialized: Record<string, unknown> = {};
+    for (const [key, nestedValue] of Object.entries(record)) {
+      serialized[key] = await serializeProxyValue(nestedValue, key === 'image' || key === 'mask');
+    }
+    return serialized;
+  }
+
+  return value;
+}
+
+async function serializeImageInputs(inputs: unknown, endpoint: string): Promise<unknown> {
+  return endpoint === 'images/edits' ? serializeProxyValue(inputs) : inputs;
+}
+
+async function responseFromResult(result: unknown): Promise<Response> {
+  if (result instanceof Response) {
+    return result;
+  }
+  if (hasResponseMethod(result)) {
+    return result.response();
+  }
+  if (result instanceof Blob) {
+    return new Response(result, {
+      headers: result.type ? { 'content-type': result.type } : undefined,
+    });
+  }
+  if (result instanceof ReadableStream) {
+    return new Response(result, { headers: { 'content-type': 'application/octet-stream' } });
+  }
+  if (result instanceof ArrayBuffer) {
+    return new Response(result, { headers: { 'content-type': 'application/octet-stream' } });
+  }
+  if (isBinaryView(result)) {
+    return new Response(copyBinaryView(result), {
+      headers: { 'content-type': 'application/octet-stream' },
+    });
+  }
+  return Response.json(result);
+}
+
+function splitImageOptions(options: unknown): {
+  endpoint: string;
+  runOptions: Record<string, unknown> | undefined;
+} {
+  if (typeof options !== 'object' || options === null) {
+    return { endpoint: 'images/generations', runOptions: undefined };
+  }
+
+  const { endpoint, ...runOptions } = options as Record<string, unknown>;
+  return {
+    endpoint: typeof endpoint === 'string' ? endpoint : 'images/generations',
+    runOptions: Object.keys(runOptions).length > 0 ? runOptions : undefined,
+  };
 }
 
 function resolveProviderKey(model: string, runtimeEnv: RuntimeEnv): string {
@@ -71,6 +257,12 @@ function resolveBackend(): AiBackend {
   if (directAi) {
     return {
       run: directAi.run.bind(directAi),
+      async image(model, inputs, options) {
+        const { runOptions } = splitImageOptions(options);
+        return responseFromResult(
+          await directAi.run(model as keyof AiModels, inputs as never, runOptions as AiOptions),
+        );
+      },
       models: directAi.models.bind(directAi),
       toMarkdown: directAi.toMarkdown?.bind(directAi) ?? unsupported('toMarkdown'),
     };
@@ -110,14 +302,34 @@ function makeServiceBindingBackend(proxy: Fetcher, runtimeEnv: RuntimeEnv): AiBa
         if (hasStreamFlag(inputs) && inputs.stream) {
           return res.body;
         }
-        return res.json();
+        return readProxyResult(res);
       }
 
       const res = await proxyFetch('run', { model, inputs, options, projectId, aiToken });
       if (hasStreamFlag(inputs) && inputs.stream) {
         return res.body;
       }
-      return res.json();
+      return readProxyResult(res);
+    },
+    async image(model, inputs, options) {
+      const projectId = runtimeEnv.__PROJECT_ID;
+      const aiToken = runtimeEnv.__VOID_PROXY_TOKEN;
+      const { endpoint, runOptions } = splitImageOptions(options);
+
+      if (isThirdPartyModel(model as string)) {
+        const providerKey = resolveProviderKey(model as string, runtimeEnv);
+        const proxyInputs = await serializeImageInputs(inputs, endpoint);
+        return proxyFetch('gateway', {
+          model,
+          endpoint,
+          inputs: proxyInputs,
+          providerKey,
+          projectId,
+          aiToken,
+        });
+      }
+
+      return proxyFetch('run', { model, inputs, options: runOptions, projectId, aiToken });
     },
     async models(params) {
       const projectId = runtimeEnv.__PROJECT_ID;
@@ -139,7 +351,7 @@ function makeHttpBackend(token: string, projectId: string, runtimeEnv: RuntimeEn
   const headers = {
     'content-type': 'application/json',
     authorization: `Bearer ${token}`,
-    ...cfAccessHeaders(runtimeEnv.CF_ACCESS_CLIENT_ID, runtimeEnv.CF_ACCESS_CLIENT_SECRET),
+    ...cfAccessHeaders(runtimeEnv),
   };
 
   async function proxyFetch(action: string, body: Record<string, unknown>): Promise<Response> {
@@ -163,14 +375,25 @@ function makeHttpBackend(token: string, projectId: string, runtimeEnv: RuntimeEn
         if (hasStreamFlag(inputs) && inputs.stream) {
           return res.body;
         }
-        return res.json();
+        return readProxyResult(res);
       }
 
       const res = await proxyFetch('run', { model, inputs, options });
       if (hasStreamFlag(inputs) && inputs.stream) {
         return res.body;
       }
-      return res.json();
+      return readProxyResult(res);
+    },
+    async image(model, inputs, options) {
+      const { endpoint, runOptions } = splitImageOptions(options);
+
+      if (isThirdPartyModel(model as string)) {
+        const providerKey = resolveProviderKey(model as string, runtimeEnv);
+        const proxyInputs = await serializeImageInputs(inputs, endpoint);
+        return proxyFetch('gateway', { model, endpoint, inputs: proxyInputs, providerKey });
+      }
+
+      return proxyFetch('run', { model, inputs, options: runOptions });
     },
     async models(params) {
       const res = await proxyFetch('models', { inputs: params });
@@ -210,6 +433,27 @@ export interface VoidAi extends Omit<Ai, 'run'> {
     options?: AiOptions,
   ): Promise<ChatCompletionResponse>;
 
+  /** Image generation. Returns the proxy response so callers can return or parse it. */
+  image<Name extends keyof AiModels>(
+    model: Name,
+    inputs: AiModels[Name]['inputs'],
+    options?: ImageGenerationOptions,
+  ): Promise<Response>;
+
+  /** Third-party image generation or editing through AI Gateway. */
+  image(
+    model: ThirdPartyModel,
+    inputs: ImageEditInputs,
+    options: ImageEditOptions,
+  ): Promise<Response>;
+
+  /** Third-party image generation through AI Gateway. */
+  image(
+    model: ThirdPartyModel,
+    inputs: ImageGenerationInputs,
+    options?: ImageGenerationOptions,
+  ): Promise<Response>;
+
   /** Stream Workers AI response as SSE */
   stream<Name extends keyof AiModels>(
     model: Name,
@@ -238,6 +482,9 @@ export const ai: VoidAi = new Proxy({} as VoidAi, {
     if (prop === 'run') {
       return backend().run;
     }
+    if (prop === 'image') {
+      return backend().image;
+    }
     if (prop === 'models') {
       return backend().models;
     }
@@ -257,4 +504,13 @@ export type {
   ChatCompletionUsage,
   ChatCompletionChunk,
   ChatMessage,
+  ChatContent,
+  ImageGatewayEndpoint,
+  ImageEditInputs,
+  ImageEditOptions,
+  ImageFileInput,
+  ImageGenerationInputs,
+  ImageGenerationResponse,
+  ImageGenerationData,
+  ImageGenerationOptions,
 } from './ai-types';

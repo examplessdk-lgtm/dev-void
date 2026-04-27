@@ -2,7 +2,7 @@ import { intro, outro, log, cancel } from '@clack/prompts';
 import { getToken, getSiteDomain } from './auth';
 import { PlatformClient } from './client';
 import { promptAndCreateProject } from './create-project';
-import { cliTitle } from './output';
+import { cliTitle, pc } from './output';
 import { readProjectConfig, writeProjectConfig } from './project';
 import { promptProjectSelection } from './prompt';
 
@@ -13,7 +13,7 @@ export async function runLink(root: string, slug?: string): Promise<void> {
   // Check if already linked
   const existing = readProjectConfig(root);
   if (existing) {
-    log.warn(`Already linked to ${existing.slug} (${existing.slug}.${getSiteDomain(root)})`);
+    log.warn(`Already linked to ${pc.blue(existing.slug)}.${getSiteDomain(root)}`);
     outro('To re-link, delete .void/project.json and run again.');
     return;
   }
@@ -36,7 +36,7 @@ export async function runLink(root: string, slug?: string): Promise<void> {
       process.exit(1);
     }
     writeProjectConfig(root, { projectId: project.id, slug: project.slug });
-    outro(`Linked to ${project.slug} (${project.slug}.${getSiteDomain(root)})`);
+    outro(`Linked to ${pc.blue(project.slug)}.${getSiteDomain(root)}`);
     return;
   }
 
@@ -45,10 +45,10 @@ export async function runLink(root: string, slug?: string): Promise<void> {
 
   if (result.action === 'create') {
     const config = await promptAndCreateProject(root, client);
-    outro(`Created and linked to ${config.slug} (${config.slug}.${getSiteDomain(root)})`);
+    outro(`Created and linked to ${pc.blue(config.slug)}.${getSiteDomain(root)}`);
     return;
   }
 
   writeProjectConfig(root, { projectId: result.project.id, slug: result.project.slug });
-  outro(`Linked to ${result.project.slug} (${result.project.slug}.${getSiteDomain(root)})`);
+  outro(`Linked to ${pc.blue(result.project.slug)}.${getSiteDomain(root)}`);
 }

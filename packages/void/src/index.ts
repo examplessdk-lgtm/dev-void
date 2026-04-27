@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vite-plugin';
+import pc from 'picocolors';
 import { loadEnv, type Plugin } from 'vite';
 import { findVoidAuthConfig } from './auth/config';
 import { getToken, isStagingMode } from './cli/auth';
@@ -266,7 +267,7 @@ async function runAiSetupPrompt(
       );
       return;
     }
-    log.success(`Project created: ${slug}`);
+    log.success(`Project created: ${pc.blue(slug)}`);
   } else {
     const project = projects.find((p: import('./cli/client').ProjectResponse) => p.id === result)!;
     projectId = project.id;
@@ -274,7 +275,7 @@ async function runAiSetupPrompt(
   }
 
   writeProjectConfig(root, { projectId, slug });
-  log.success(`Linked to ${slug}`);
+  log.success(`Linked to ${pc.blue(slug)}`);
 
   // Restart the dev server so mergeBindings picks up fresh credentials
   await server.restart();

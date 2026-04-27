@@ -70,7 +70,7 @@ import {
 } from './env-validation';
 import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers';
 import { promptForLoginToken } from './login';
-import { cliTitle, createSpinner } from './output';
+import { cliTitle, createSpinner, pc } from './output';
 import {
   packageBuild,
   packageStaticBuild,
@@ -335,7 +335,7 @@ export async function promptDeployProjectConfig(
   }
   const config = { projectId: result.project.id, slug: result.project.slug };
   writeProjectConfig(root, config);
-  log.step(`Linked to ${config.slug}`);
+  log.step(`Linked to ${pc.blue(config.slug)}`);
   return config;
 }
 
@@ -1207,11 +1207,11 @@ async function createProjectFromSlug(
   client: PlatformClient,
   slug: string,
 ): Promise<ProjectConfig> {
-  log.step(`Creating project "${slug}"...`);
+  log.step(`Creating project ${pc.blue(slug)}...`);
   const project = await client.createProject(slug);
   const config = { projectId: project.id, slug: project.slug };
   writeProjectConfig(root, config);
-  log.success(`Project created: ${config.slug}`);
+  log.success(`Project created: ${pc.blue(config.slug)}`);
   return config;
 }
 

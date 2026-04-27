@@ -24,9 +24,16 @@ export type ThirdPartyProvider =
 
 export type ThirdPartyModel = `${ThirdPartyProvider}/${string}`;
 
+export type ChatContent =
+  | string
+  | Array<
+      | { type: 'text'; text: string }
+      | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } }
+    >;
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: ChatContent;
 }
 
 export interface ChatCompletionInputs {
@@ -68,6 +75,62 @@ export interface ChatCompletionChunk {
     delta: { role?: string; content?: string };
     finish_reason: string | null;
   }>;
+}
+
+export type ImageGatewayEndpoint = 'images/generations' | 'images/edits';
+
+export type ImageFileInput =
+  | Blob
+  | ArrayBuffer
+  | ArrayBufferView
+  | {
+      data: string;
+      name?: string;
+      type?: string;
+    };
+
+export interface ImageGenerationInputs {
+  prompt: string;
+  n?: number;
+  size?: string;
+  quality?: string;
+  response_format?: 'url' | 'b64_json';
+  user?: string;
+  [key: string]: unknown;
+}
+
+export interface ImageGenerationData {
+  url?: string;
+  b64_json?: string;
+  revised_prompt?: string;
+}
+
+export interface ImageGenerationResponse {
+  created?: number;
+  data: Array<ImageGenerationData>;
+  usage?: unknown;
+  [key: string]: unknown;
+}
+
+export interface ImageGenerationOptions {
+  endpoint?: 'images/generations';
+  [key: string]: unknown;
+}
+
+export interface ImageEditOptions {
+  endpoint: 'images/edits';
+  [key: string]: unknown;
+}
+
+export interface ImageEditInputs {
+  prompt: string;
+  image: ImageFileInput | Array<ImageFileInput>;
+  mask?: ImageFileInput;
+  n?: number;
+  size?: string;
+  response_format?: 'url' | 'b64_json';
+  user?: string;
+  [key: string]: unknown;
 }
 
 /** Maps provider prefix to expected env var name for the API key */

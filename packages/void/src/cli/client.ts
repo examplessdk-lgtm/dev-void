@@ -1,5 +1,6 @@
 import { cfAccessHeaders } from '../shared/cf-access';
 import { getApiUrl } from './auth';
+import { ensureCloudflaredToken } from './cf-access';
 import type { DeployEvent } from './types';
 
 export type PlatformErrorPayload = {
@@ -123,15 +124,16 @@ export class PlatformClient {
   private authHeaders: Record<string, string>;
 
   constructor(token: string, options?: string | { apiUrl?: string; root?: string }) {
-    this.authHeaders = {
-      Authorization: `Bearer ${token}`,
-      ...cfAccessHeaders(process.env.CF_ACCESS_CLIENT_ID, process.env.CF_ACCESS_CLIENT_SECRET),
-    };
     if (typeof options === 'string') {
       this.baseUrl = options;
     } else {
       this.baseUrl = options?.apiUrl ?? getApiUrl(options?.root);
     }
+    ensureCloudflaredToken(this.baseUrl);
+    this.authHeaders = {
+      Authorization: `Bearer ${token}`,
+      ...cfAccessHeaders(process.env),
+    };
   }
 
   async whoami(): Promise<{ login: string; plan: string }> {

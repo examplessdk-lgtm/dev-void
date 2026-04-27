@@ -29,7 +29,7 @@ export const POST = defineHandler(async (c) => {
 });
 ```
 
-You can use any model available on [Workers AI](https://developers.cloudflare.com/workers-ai/models/), including text generation, image classification, embeddings, translation, and more.
+You can use any model available on [Workers AI](https://developers.cloudflare.com/workers-ai/models/), including text generation, image classification, image-to-text, text-to-image, embeddings, translation, and more. Models that return binary data, such as generated images, are returned as a `Blob` from `ai.run()`.
 
 ## Streaming
 
@@ -112,6 +112,69 @@ export const POST = defineHandler(async (c) => {
 The same `ai.run()` and `ai.stream()` methods work for both Workers AI and third-party models. The framework detects the provider from the model string and routes the request through [AI Gateway](https://developers.cloudflare.com/ai-gateway/) automatically.
 
 The options follow each provider's conventions. All third-party providers use the OpenAI-compatible chat completions format, including `messages`, `max_tokens`, and `temperature`. TypeScript narrows the input and return types based on the model string: Workers AI models get per-model typed inputs from `@cloudflare/workers-types`, while third-party models such as `"provider/model"` get `ChatCompletionInputs` and `ChatCompletionResponse`.
+
+### Vision
+
+Third-party chat models that accept image inputs can receive OpenAI-compatible multimodal message content:
+
+```ts
+const result = await ai.run('openai/gpt-4o', {
+  messages: [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'What is in this image?' },
+        {
+          type: 'image_url',
+          image_url: { url: 'data:image/png;base64,...', detail: 'high' },
+        },
+      ],
+    },
+  ],
+});
+```
+
+### Image Generation
+
+Use `ai.image()` for image-generation providers or Workers AI image models. It returns a `Response`, so route handlers can return it directly or parse it as JSON depending on the provider:
+
+```ts
+export const POST = defineHandler(async (c) => {
+  const { prompt } = await c.req.json();
+
+  return ai.image('openai/gpt-image-1.5', {
+    prompt,
+    size: '1024x1024',
+    response_format: 'b64_json',
+  });
+});
+```
+
+For Workers AI text-to-image models, pass the model name and input shape from Cloudflare's model docs:
+
+```ts
+export const POST = defineHandler(async (c) => {
+  const { prompt } = await c.req.json();
+  return ai.image('@cf/black-forest-labs/flux-1-schnell', { prompt });
+});
+```
+
+For image edits, pass the file-like input and select the edit endpoint. Void serializes the file through the proxy and forwards it to AI Gateway as multipart form data:
+
+```ts
+export const POST = defineHandler(async (c) => {
+  const body = await c.req.parseBody();
+
+  return ai.image(
+    'openai/gpt-image-1.5',
+    {
+      prompt: String(body.prompt),
+      image: body.image as Blob,
+    },
+    { endpoint: 'images/edits' },
+  );
+});
+```
 
 ### Provider Key Convention
 

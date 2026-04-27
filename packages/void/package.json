@@ -1,6 +1,6 @@
 {
   "name": "@void-sdk/void",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "bin": {
     "void": "dist/cli/cli.mjs"
   },

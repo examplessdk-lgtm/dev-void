@@ -12,7 +12,7 @@ export function createRemoteEnv(env: Record<string, unknown>): Record<string, un
     env.__VOID_PROXY_URL as string,
     env.__VOID_TOKEN as string,
     env.__VOID_PROJECT_ID as string,
-    { id: env.CF_ACCESS_CLIENT_ID, secret: env.CF_ACCESS_CLIENT_SECRET },
+    env,
   );
   return {
     ...env,

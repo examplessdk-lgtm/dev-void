@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { chromium, type Browser, type Page } from 'playwright';
@@ -55,6 +55,7 @@ describe('playground/kitchen-sink', () => {
       cwd: ROOT,
       stdio: 'pipe',
     });
+    disablePreviewContainers(pg);
 
     // Start preview server — pre-built assets, no lazy optimization.
     child = spawn(
@@ -80,7 +81,10 @@ describe('playground/kitchen-sink', () => {
       },
     );
 
-    await waitForServer(BASE, 30_000, { expectBody: 'Kitchen Sink' });
+    await waitForServer(BASE, 30_000, {
+      expectBody: 'Kitchen Sink',
+      isAlive: () => child.exitCode === null && child.signalCode === null,
+    });
 
     // Preview mode doesn't auto-run migrations (dev mode's migrationPlugin
     // handles this via configureServer). Apply them directly to the local
@@ -534,3 +538,15 @@ describe('playground/kitchen-sink', () => {
 
   // Cron: skipped — __scheduled endpoint is only available via wrangler, not Vite dev/preview
 });
+
+function disablePreviewContainers(pg: string): void {
+  const wranglerPath = join(pg, 'dist', 'ssr', 'wrangler.json');
+  const wranglerConfig = JSON.parse(readFileSync(wranglerPath, 'utf-8')) as {
+    dev?: Record<string, unknown>;
+  };
+  wranglerConfig.dev = {
+    ...(wranglerConfig.dev ?? {}),
+    enable_containers: false,
+  };
+  writeFileSync(wranglerPath, `${JSON.stringify(wranglerConfig, null, 2)}\n`);
+}
