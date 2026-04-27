@@ -108,6 +108,33 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Resolve the Cloudflare Workers Static Assets `not_found_handling` config.
+ *
+ * Any worker capable of producing HTML (SSR, pages, file-based routes, or
+ * middleware) must use `'none'` so the asset binding returns 404 for
+ * unmatched paths and the worker — gated by `run_worker_first` — owns the
+ * response. With `'single-page-application'`, CF short-circuits any
+ * `Sec-Fetch-Mode: navigate` request straight to the SPA shell *before*
+ * `run_worker_first` is consulted, silently bypassing auth middleware and
+ * breaking OAuth callbacks (which arrive as navigations from the provider's
+ * 302 redirect).
+ *
+ * Pure-frontend SPAs without any backend code keep the SPA-fallback config
+ * because the worker has no responsibility for HTML routing.
+ */
+export function resolveAssetConfig(opts: {
+  isSsr: boolean;
+  hasPages: boolean;
+  hasRoutes: boolean;
+  hasMiddleware: boolean;
+}): AssetConfig {
+  const workerHandlesHtml = opts.isSsr || opts.hasPages || opts.hasRoutes || opts.hasMiddleware;
+  return workerHandlesHtml
+    ? { not_found_handling: 'none' }
+    : { not_found_handling: 'single-page-application' };
+}
+
 function getExitCode(error: unknown): number {
   if (
     typeof error === 'object' &&
@@ -1076,18 +1103,12 @@ async function runFullDeploy(
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
 
-  // Derive asset config. Any worker capable of handling HTML — SSR, pages,
-  // routes, or middleware — needs `not_found_handling: 'none'` so the asset
-  // binding returns 404 for unmatched paths and the worker (run_worker_first)
-  // owns the response. With `'single-page-application'`, CF Workers Static
-  // Assets short-circuits browser navigations (`Sec-Fetch-Mode: navigate`)
-  // straight to the SPA shell, bypassing run_worker_first and any auth
-  // middleware — and breaks OAuth callbacks like /api/auth/callback/google,
-  // which arrive as navigations from the provider's redirect.
-  const workerHandlesHtml = isSsr || hasPages || hasRoutes || hasMiddleware;
-  const assetConfig: AssetConfig = workerHandlesHtml
-    ? { not_found_handling: 'none' }
-    : { not_found_handling: 'single-page-application' };
+  const assetConfig: AssetConfig = resolveAssetConfig({
+    isSsr,
+    hasPages,
+    hasRoutes,
+    hasMiddleware,
+  });
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');

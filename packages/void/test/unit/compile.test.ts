@@ -590,6 +590,30 @@ describe('compileWorkerEntry', () => {
     expect(code).not.toContain('"/assets/"');
   });
 
+  it('serveWithAssets falls back to /index.html for unmatched HTML GET/HEADs', () => {
+    const code = compileWorkerEntry();
+
+    // With assetConfig.not_found_handling: 'none' (now the default for any
+    // worker that handles HTML — see deploy.ts assetConfig logic), the asset
+    // binding returns 404 instead of a SPA shell. The worker entry must fall
+    // back to /index.html itself for HTML navigations so client-side routing
+    // (Vue Router, React Router, etc.) keeps working without relying on
+    // Cloudflare's `Sec-Fetch-Mode: navigate` short-circuit, which bypasses
+    // run_worker_first and silently breaks auth middleware + OAuth callbacks.
+    expect(code).toContain('text/html');
+    expect(code).toContain('"/index.html"');
+    expect(code).toMatch(/env\.ASSETS\.fetch\(new Request\(indexUrl/);
+  });
+
+  it('serveWithAssets only falls back to index.html for HTML accept', () => {
+    const code = compileWorkerEntry();
+
+    // Non-HTML requests (e.g. JSON API calls hitting an unknown route) must
+    // get the worker's original 404 — not the SPA shell — so clients can
+    // distinguish "endpoint missing" from "user landed on a SPA route".
+    expect(code).toContain('accept.includes("text/html")');
+  });
+
   it('native queue handler calls __processQueue directly without HTTP', () => {
     const code = compileWorkerEntry(true);
 
