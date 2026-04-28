@@ -293,6 +293,18 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     };
   }
 
+  function shouldServeSpaFallback(): boolean {
+    return (
+      !!scan &&
+      scan.pages.pages.length === 0 &&
+      !ssr &&
+      (scan.routes.length > 0 ||
+        (scan.websockets?.length ?? 0) > 0 ||
+        scan.middleware.length > 0 ||
+        compileOptions.auth !== null)
+    );
+  }
+
   // Generate the entry file and tsconfig eagerly (at plugin creation time,
   // during voidPlugin()). The CF plugin needs the `main` file to exist at
   // config resolution time, which is before any hooks like buildStart fire.
@@ -435,6 +447,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
                   runtimePath: sandboxRuntimePath,
                 }
               : false,
+            shouldServeSpaFallback(),
           ),
         );
       }
@@ -552,6 +565,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
                     runtimePath: sandboxRuntimePath,
                   }
                 : false,
+              shouldServeSpaFallback(),
             ),
           );
         }

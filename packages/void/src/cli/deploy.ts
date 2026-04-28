@@ -46,6 +46,7 @@ import {
 } from '../plugin-inference';
 import { collectPrerenderPaths, collectPrerenderPathsNode } from '../prerender';
 import { scanQueuesSync } from '../queues/scan';
+import { scanRoutes } from '../router/scan';
 import { scanWebSocketRoutesSync } from '../router/websocket';
 import {
   isSandboxEnabled,
@@ -111,6 +112,41 @@ interface ResourceSummary {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Resolve the Cloudflare Workers Static Assets `not_found_handling` config.
+ *
+ * Any worker capable of producing HTML (SSR, pages, file-based routes, or
+ * middleware) must use `'none'` so the asset binding returns 404 for
+ * unmatched paths and the worker — gated by `run_worker_first` — owns the
+ * response. With `'single-page-application'`, CF short-circuits any
+ * `Sec-Fetch-Mode: navigate` request straight to the SPA shell *before*
+ * `run_worker_first` is consulted, silently bypassing auth middleware and
+ * breaking OAuth callbacks (which arrive as navigations from the provider's
+ * 302 redirect).
+ *
+ * Pure-frontend SPAs without any backend code keep the SPA-fallback config
+ * because the worker has no responsibility for HTML routing.
+ */
+export function resolveAssetConfig(opts: {
+  isSsr: boolean;
+  hasPages: boolean;
+  hasRoutes: boolean;
+  hasMiddleware: boolean;
+  hasWebSockets?: boolean;
+  authEnabled?: boolean;
+}): AssetConfig {
+  const workerHandlesHtml =
+    opts.isSsr ||
+    opts.hasPages ||
+    opts.hasRoutes ||
+    opts.hasMiddleware ||
+    opts.hasWebSockets === true ||
+    opts.authEnabled === true;
+  return workerHandlesHtml
+    ? { not_found_handling: 'none' }
+    : { not_found_handling: 'single-page-application' };
 }
 
 function getExitCode(error: unknown): number {
@@ -891,8 +927,9 @@ async function runFullDeploy(
   }
   const authEnabled =
     bindings.needsAuth || findVoidAuthConfig(root) !== null || deployConfig.auth !== undefined;
-  const effectiveBindings =
-    authEnabled && !bindings.needsD1 ? { ...bindings, needsD1: true } : bindings;
+  const effectiveBindings = authEnabled
+    ? { ...bindings, needsAuth: true, needsD1: true }
+    : bindings;
 
   if (isFrameworkMode && authEnabled) {
     log.error(
@@ -996,7 +1033,8 @@ async function runFullDeploy(
       cron,
     })),
   );
-  const webSockets = scanWebSocketRoutesSync(root);
+  const routeScan = await scanRoutes(root, { output: deployConfig.output });
+  const webSockets = routeScan.websockets ?? scanWebSocketRoutesSync(root);
   const queues = scanQueuesSync(root).map((q) => ({
     name: q.name,
     bindingName: q.bindingName,
@@ -1004,8 +1042,9 @@ async function runFullDeploy(
     ...(q.maxBatchTimeout != null && { maxBatchTimeout: q.maxBatchTimeout }),
   }));
   const hasPages = existsSync(join(root, 'pages'));
-  const hasRoutes = existsSync(join(root, 'routes'));
-  const hasMiddleware = existsSync(join(root, 'middleware'));
+  const hasRoutes = routeScan.routes.length > 0;
+  const hasMiddleware = routeScan.middleware.length > 0;
+  const hasWebSockets = webSockets.length > 0;
   const isSsr = isFrameworkMode
     ? true
     : Boolean(validateSsrEntry(root)) || (hasPages && deployConfig.output !== 'static');
@@ -1018,7 +1057,9 @@ async function runFullDeploy(
   }
   // Merge per-page revalidate exports (pages mode)
   const pageScan = existsSync(join(root, 'pages'))
-    ? await scanPages(root, { output: deployConfig.output })
+    ? routeScan.pages.pages.length > 0
+      ? routeScan.pages
+      : await scanPages(root, { output: deployConfig.output })
     : null;
   if (pageScan) {
     const perPageRules: Record<string, number> = {};
@@ -1049,7 +1090,7 @@ async function runFullDeploy(
     const allPrerenderable = pageScan.pages.every(
       (p) => p.prerender && ((p.params.length === 0 && !p.catchAll) || p.hasGetPrerenderPaths),
     );
-    const hasNonPageBackend = hasRoutes || hasMiddleware;
+    const hasNonPageBackend = hasRoutes || hasMiddleware || hasWebSockets || authEnabled;
     if (allPrerenderable && !hasNonPageBackend && schedules.length === 0 && queues.length === 0) {
       log.info('All pages prerendered — deploying as static site');
       return runStaticDeploy(
@@ -1116,11 +1157,14 @@ async function runFullDeploy(
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
 
-  // Derive asset config: SSR and pages-mode workers handle their own 404s, non-SSR uses SPA fallback
-  const assetConfig: AssetConfig =
-    isSsr || hasPages
-      ? { not_found_handling: 'none' }
-      : { not_found_handling: 'single-page-application' };
+  const assetConfig: AssetConfig = resolveAssetConfig({
+    isSsr,
+    hasPages,
+    hasRoutes,
+    hasMiddleware,
+    hasWebSockets,
+    authEnabled,
+  });
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
@@ -1140,7 +1184,7 @@ async function runFullDeploy(
     effectiveBindings,
     validatedMigrations,
     schedules,
-    isSsr || hasRoutes || hasMiddleware,
+    isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
     isFrameworkMode ? detected!.name : undefined,
     revalidate,
     envVars,

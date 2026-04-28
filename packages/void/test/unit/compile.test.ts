@@ -1682,7 +1682,7 @@ describe('compileWorkerEntry', () => {
     expect(code).toContain('"/assets/"');
     // Hashed assets: immutable + long max-age (content-addressed, safe to cache forever).
     expect(code).toContain('public, max-age=31536000, immutable');
-    // Fallback (SPA shell / non-hashed): no-store — see regression test below for why.
+    // Non-hashed asset responses: no-store — see regression test below for why.
     expect(code).toContain('"Cache-Control", "no-store"');
     // No Cache API usage (edge caching happens at dispatch layer)
     expect(code).not.toContain('caches.default');
@@ -1690,18 +1690,15 @@ describe('compileWorkerEntry', () => {
     expect(code).not.toContain('cache.put');
   });
 
-  it('stamps no-store on the SPA shell fallback to avoid edge-cache poisoning across deploys', () => {
+  it('stamps no-store on non-hashed asset responses to avoid edge-cache poisoning across deploys', () => {
     const code = compileWorkerEntry();
 
-    // The non-`/assets/*` branch of serveWithAssets is the SPA shell fallback:
-    // it fires whenever app.fetch returns 404 and ASSETS has a catch-all
-    // index.html. A single poisoned entry (transient 404 from a broken deploy,
-    // a path that later becomes a real route) would otherwise shadow the new
-    // behavior across the edge for every subsequent request until manually
-    // purged — the platform's atomic-deploy cache keying lives at the
-    // dispatch layer and can't reach CF's managed edge cache once s-maxage
-    // puts an entry there. no-store keeps these responses out of that cache
-    // entirely. The shell is cheap to regenerate from the ASSETS binding.
+    // A single poisoned entry (transient 404 from a broken deploy, a path that
+    // later becomes a real route) would otherwise shadow the new behavior
+    // across the edge for every subsequent request until manually purged — the
+    // platform's atomic-deploy cache keying lives at the dispatch layer and
+    // can't reach CF's managed edge cache once s-maxage puts an entry there.
+    // no-store keeps these responses out of that cache entirely.
     expect(code).not.toMatch(/s-maxage=\d+.*must-revalidate/);
     expect(code).toContain('"Cache-Control", "no-store"');
   });
@@ -1731,6 +1728,56 @@ describe('compileWorkerEntry', () => {
 
     expect(code).toContain('"/_astro/"');
     expect(code).not.toContain('"/assets/"');
+  });
+
+  it('serveWithAssets does not include the SPA shell fallback by default', () => {
+    const code = compileWorkerEntry();
+
+    // Pages and SSR apps generate intentional HTML 404 responses. The outer
+    // asset fallthrough must not rewrite those to the SPA shell.
+    expect(code).not.toContain('"/index.html"');
+    expect(code).not.toContain('accept.includes("text/html")');
+  });
+
+  it('serveWithAssets falls back to /index.html for unmatched HTML GET/HEADs when enabled', () => {
+    const code = compileWorkerEntry(
+      false,
+      undefined,
+      'assets',
+      [],
+      'void/_env',
+      undefined,
+      false,
+      true,
+    );
+
+    // With assetConfig.not_found_handling: 'none' (now the default for any
+    // routes/middleware SPA), the asset binding returns 404 instead of a SPA
+    // shell. The worker entry must fall back to /index.html itself for HTML
+    // navigations so client-side routing keeps working without relying on
+    // Cloudflare's `Sec-Fetch-Mode: navigate` short-circuit, which bypasses
+    // run_worker_first and silently breaks auth middleware + OAuth callbacks.
+    expect(code).toContain('text/html');
+    expect(code).toContain('"/index.html"');
+    expect(code).toMatch(/env\.ASSETS\.fetch\(new Request\(indexUrl/);
+  });
+
+  it('serveWithAssets only falls back to index.html for HTML accept', () => {
+    const code = compileWorkerEntry(
+      false,
+      undefined,
+      'assets',
+      [],
+      'void/_env',
+      undefined,
+      false,
+      true,
+    );
+
+    // Non-HTML requests (e.g. JSON API calls hitting an unknown route) must
+    // get the worker's original 404 — not the SPA shell — so clients can
+    // distinguish "endpoint missing" from "user landed on a SPA route".
+    expect(code).toContain('accept.includes("text/html")');
   });
 
   it('native queue handler calls __processQueue directly without HTTP', () => {
