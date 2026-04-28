@@ -811,6 +811,27 @@ export function compileRouteTable(
   );
   lines.push('}');
   lines.push('');
+  // Internal signal consumed by platform dispatch: a 404 came from generated
+  // no-route handling, not from a user route intentionally returning 404.
+  // Dispatch strips the header before responding to the client.
+  lines.push('function __voidShouldMarkNoMatch(request) {');
+  lines.push('  const url = new URL(request.url);');
+  lines.push('  if (request.method !== "GET" && request.method !== "HEAD") return false;');
+  lines.push('  if (url.pathname === "/api" || url.pathname.startsWith("/api/")) return false;');
+  lines.push('  if (/\\/[^/]+\\.[^/]+$/.test(url.pathname)) return false;');
+  lines.push('  return true;');
+  lines.push('}');
+  lines.push('function __voidMarkNoMatch(request, response) {');
+  lines.push(
+    '  if (!response || response.status !== 404 || !__voidShouldMarkNoMatch(request)) return response;',
+  );
+  lines.push('  const headers = new Headers(response.headers);');
+  lines.push('  headers.set("X-Void-No-Match", "1");');
+  lines.push(
+    '  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });',
+  );
+  lines.push('}');
+  lines.push('');
 
   // `__mergeQueryIntoLocation` is used by both the routing-rules middleware
   // (static redirects) and the `c.redirect` wrapper below — emit it up-front
@@ -1174,11 +1195,13 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push(`async function fetchFromAssets(c) {`);
     lines.push(`  const assets = c.env?.ASSETS;`);
     lines.push(`  if (!assets || typeof assets.fetch !== "function") {`);
-    lines.push(`    return new Response("Not Found", { status: 404 });`);
+    lines.push(
+      `    return __voidMarkNoMatch(c.req.raw, new Response("Not Found", { status: 404 }));`,
+    );
     lines.push(`  }`);
     lines.push(`  const response = await assets.fetch(c.req.raw);`);
     lines.push(
-      `  return response.status === 404 ? new Response("Not Found", { status: 404 }) : response;`,
+      `  return response.status === 404 ? __voidMarkNoMatch(c.req.raw, new Response("Not Found", { status: 404 })) : response;`,
     );
     lines.push(`}`);
     lines.push('');
@@ -1260,7 +1283,9 @@ window.__vite_plugin_react_preamble_installed__ = true;
       '  ',
       options.nodeTarget === true,
     );
-    lines.push(`  return new Response("Not Found", { status: 404 });`);
+    lines.push(
+      `  return __voidMarkNoMatch(c.req.raw, new Response("Not Found", { status: 404 }));`,
+    );
     lines.push(`});`);
     lines.push('');
   }
@@ -1906,7 +1931,9 @@ function compilePageRoutes(
   lines.push(`  }`);
   lines.push(`  const assets = c.env?.ASSETS;`);
   lines.push(`  if (!assets || typeof assets.fetch !== "function") {`);
-  lines.push(`    return new Response("Not Found", { status: 404 });`);
+  lines.push(
+    `    return __voidMarkNoMatch(c.req.raw, new Response("Not Found", { status: 404 }));`,
+  );
   lines.push(`  }`);
   lines.push(`  return assets.fetch(c.req.raw);`);
   lines.push(`}`);
@@ -2004,7 +2031,9 @@ function compilePageRoutes(
   // All page routes are registered as explicit Hono handlers above.
   // Any path reaching here is genuinely unknown — serve the app's custom
   // 404 page when available, otherwise fall back to Void's default one.
-  lines.push(`  return serveCustomErrorPage(c, 404, "Not Found");`);
+  lines.push(
+    `  return __voidMarkNoMatch(c.req.raw, await serveCustomErrorPage(c, 404, "Not Found"));`,
+  );
   lines.push(`});`);
   lines.push('');
 }

@@ -1405,6 +1405,8 @@ describe('X-Void-Routing dev trace header', () => {
     expect(code).toContain('app.notFound(async (c) => {');
     // Guard against re-dispatched loops (same invariant as the pre-asset phase).
     expect(code).toContain('if (!__voidOriginalUrls.has(c.req.raw))');
+    // Generated no-route 404s are marked for dispatch; user handler 404s are not.
+    expect(code).toContain('headers.set("X-Void-No-Match", "1")');
   });
 
   it('strips fallback origin metadata in production builds', () => {
@@ -1594,6 +1596,52 @@ describe('default-target dev parity', () => {
     expect(code).toContain('if (!shouldHandleSsrRequest(c)) {');
     expect(code).toContain('const __assetRes = await fetchFromAssets(c);');
     expect(code).toContain('if (__assetRes.status !== 404) return __assetRes;');
+  });
+
+  it('does not mark pages API no-match responses as fallback-eligible', () => {
+    const code = compileRouteTable(
+      {
+        ...emptyScan,
+        pages: {
+          pages: [
+            {
+              componentId: 'pages/index.vue',
+              componentPath: '/pages/index.vue',
+              serverPath: null,
+              pattern: '/',
+              params: [],
+              catchAll: false,
+              methods: [],
+            },
+          ],
+          layouts: [],
+          namedLayouts: [],
+        },
+      },
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      {
+        ...testOptions,
+        nodeTarget: false,
+        dev: false,
+      },
+      {
+        pagesDir: '/pages',
+        pagesDirRelative: 'pages',
+        protocolPath: '/resolved/void/pages-protocol.mjs',
+        headPath: '/resolved/void/pages-head.mjs',
+        clientEntryId: 'virtual:void-pages-client',
+      },
+    );
+
+    expect(code).toContain('if (path === "/api" || path.startsWith("/api/"))');
+    expect(code).toContain('return c.text("Not Found", 404);');
+    expect(code).toContain(
+      'return __voidMarkNoMatch(c.req.raw, await serveCustomErrorPage(c, 404, "Not Found"));',
+    );
   });
 
   it('leaves SSR notFound unchanged on node target (plain fetchFromAssets return)', () => {

@@ -193,6 +193,8 @@ Internally this reads the pre-rewrite URL from an in-worker `WeakMap<Request, UR
 
 `routing.fallbacks` shares the same shape as `rewrites` but runs **only when no static asset or route matched** — i.e. the request would otherwise return a 404. This lets you add catch-all rewrites without preempting real routes.
 
+In Void apps, production dispatch only treats generated no-route 404s as fallback-eligible. A route handler or API endpoint that intentionally returns `404` is returned as-is, so catch-all fallbacks do not turn missing API resources into HTML. Third-party framework deployments do not expose Void's no-route marker, so their fallback rules still apply after the framework worker returns `404`.
+
 ```json
 {
   "routing": {
