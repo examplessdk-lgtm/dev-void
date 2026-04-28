@@ -524,7 +524,12 @@ describe('compileRouteTable', () => {
     // start with "/" (internal), passing through absolute URLs untouched.
     expect(code).toContain('const __origRedirect = c.redirect.bind(c);');
     expect(code).toContain('c.redirect = (location, status)');
-    expect(code).toContain('typeof location === "string" && location.startsWith("/")');
+    // Guard against protocol-relative ("//host/x") URLs — those satisfy
+    // `startsWith("/")` but the browser resolves them cross-origin, so
+    // merging the incoming query would leak request params off-origin.
+    expect(code).toContain(
+      'typeof location === "string" && location.startsWith("/") && !location.startsWith("//")',
+    );
     expect(code).toContain('__origRedirect(__mergeQueryIntoLocation(location, search), status)');
   });
 });
@@ -610,7 +615,7 @@ function installVoidWrappers(app: Hono, voidOriginalUrls: WeakMap<Request, URL>)
     };
     const origRedirect = c.redirect.bind(c);
     (c as any).redirect = (location: string, status?: number) => {
-      if (typeof location === 'string' && location.startsWith('/')) {
+      if (typeof location === 'string' && location.startsWith('/') && !location.startsWith('//')) {
         const search = new URL(c.req.raw.url).search;
         return origRedirect(mergeQueryIntoLocation(location, search), status as any);
       }
@@ -645,6 +650,24 @@ describe('c.redirect runtime wrapper', () => {
     // `foo=1` from destination must NOT be replaced by `foo=override`;
     // `bar=2` from the request is merged since destination doesn't carry it.
     expect(res.headers.get('Location')).toBe('/new?foo=1&bar=2');
+  });
+
+  it('does not merge incoming query into protocol-relative ("//host/x") locations', async () => {
+    // `"//partner.example.com/landing".startsWith("/")` is true — a naive
+    // path-absolute check would merge the request query into the Location
+    // header, leaking attacker-controlled params (or victim session tokens)
+    // to a cross-origin host. Protocol-relative URLs must pass through
+    // untouched, just like absolute URLs.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakMap<Request, URL>());
+    app.get('/old', (c) => c.redirect('//partner.example.com/landing', 302));
+
+    const res = await app.fetch(
+      new Request('http://localhost/old?session=ATTACKER_TOKEN&email=victim@example.com'),
+    );
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe('//partner.example.com/landing');
   });
 });
 

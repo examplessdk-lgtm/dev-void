@@ -895,7 +895,13 @@ export function compileRouteTable(
   lines.push('  };');
   lines.push('  const __origRedirect = c.redirect.bind(c);');
   lines.push('  c.redirect = (location, status) => {');
-  lines.push('    if (typeof location === "string" && location.startsWith("/")) {');
+  // `startsWith("/")` alone matches protocol-relative URLs ("//host/x"),
+  // which the browser resolves cross-origin — merging the request query
+  // there would leak params (incl. session tokens) off-origin. External
+  // and protocol-relative locations pass through to the original redirect.
+  lines.push(
+    '    if (typeof location === "string" && location.startsWith("/") && !location.startsWith("//")) {',
+  );
   lines.push('      const search = new URL(c.req.raw.url).search;');
   lines.push('      return __origRedirect(__mergeQueryIntoLocation(location, search), status);');
   lines.push('    }');
