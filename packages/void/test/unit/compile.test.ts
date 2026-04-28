@@ -549,17 +549,20 @@ function mergeQueryIntoLocation(destination: string, search: string): string {
   if (!search || search === '?') {
     return destination;
   }
-  const q = destination.indexOf('?');
+  const fragIdx = destination.indexOf('#');
+  const base = fragIdx === -1 ? destination : destination.slice(0, fragIdx);
+  const fragment = fragIdx === -1 ? '' : destination.slice(fragIdx);
+  const q = base.indexOf('?');
   if (q === -1) {
-    return destination + search;
+    return base + search + fragment;
   }
-  const dp = new URLSearchParams(destination.slice(q + 1));
+  const dp = new URLSearchParams(base.slice(q + 1));
   for (const [k, v] of new URLSearchParams(search)) {
     if (!dp.has(k)) {
       dp.append(k, v);
     }
   }
-  return destination.slice(0, q) + '?' + dp.toString();
+  return base.slice(0, q) + '?' + dp.toString() + fragment;
 }
 
 /**
@@ -650,6 +653,28 @@ describe('c.redirect runtime wrapper', () => {
     // `foo=1` from destination must NOT be replaced by `foo=override`;
     // `bar=2` from the request is merged since destination doesn't carry it.
     expect(res.headers.get('Location')).toBe('/new?foo=1&bar=2');
+  });
+
+  it('keeps destination fragments after the merged query string', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakMap<Request, URL>());
+    app.get('/old', (c) => c.redirect('/new#faq', 302));
+
+    const res = await app.fetch(new Request('http://localhost/old?utm=x'));
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe('/new?utm=x#faq');
+  });
+
+  it('keeps destination fragments after merged destination and request queries', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakMap<Request, URL>());
+    app.get('/old', (c) => c.redirect('/new?a=1#faq', 302));
+
+    const res = await app.fetch(new Request('http://localhost/old?a=override&b=2'));
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe('/new?a=1&b=2#faq');
   });
 
   it('does not merge incoming query into protocol-relative ("//host/x") locations', async () => {

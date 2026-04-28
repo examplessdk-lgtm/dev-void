@@ -2510,13 +2510,16 @@ function ensureMergeQueryHelperEmitted(lines: Array<string>): void {
   }
   lines.push('function __mergeQueryIntoLocation(destination, search) {');
   lines.push('  if (!search || search === "?") return destination;');
-  lines.push('  const q = destination.indexOf("?");');
-  lines.push('  if (q === -1) return destination + search;');
-  lines.push('  const dp = new URLSearchParams(destination.slice(q + 1));');
+  lines.push('  const fragIdx = destination.indexOf("#");');
+  lines.push('  const base = fragIdx === -1 ? destination : destination.slice(0, fragIdx);');
+  lines.push('  const fragment = fragIdx === -1 ? "" : destination.slice(fragIdx);');
+  lines.push('  const q = base.indexOf("?");');
+  lines.push('  if (q === -1) return base + search + fragment;');
+  lines.push('  const dp = new URLSearchParams(base.slice(q + 1));');
   lines.push('  for (const [k, v] of new URLSearchParams(search)) {');
   lines.push('    if (!dp.has(k)) dp.append(k, v);');
   lines.push('  }');
-  lines.push('  return destination.slice(0, q) + "?" + dp.toString();');
+  lines.push('  return base.slice(0, q) + "?" + dp.toString() + fragment;');
   lines.push('}');
   lines.push('');
 }
