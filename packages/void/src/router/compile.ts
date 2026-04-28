@@ -1798,6 +1798,7 @@ export function compileWorkerEntry(
   runtimeEnvPath = 'void/_env',
   envSchemaModule?: { importPath: string; helperPath: string },
   sandbox?: boolean | { bindingName?: string; className?: string; runtimePath?: string },
+  serveSpaFallback = false,
 ): string {
   const remotePath = remote?.remotePath;
   const hasSandbox = sandbox === true || typeof sandbox === 'object';
@@ -1866,30 +1867,16 @@ function __filterInternalBindings(env) {
   // Safe for workers without ASSETS binding (env.ASSETS check short-circuits).
   //
   // Hashed assets under assetsDir get long immutable caching (content-addressed).
-  // The non-hashed fallback branch — the SPA shell served on any unmatched
-  // 404 — is stamped no-store: a stale entry there would shadow routes that
-  // are added or fixed in subsequent deploys across the edge cache boundary,
-  // which the platform's deploy-scoped cache keys (dispatch layer) can't
-  // reach once CF's managed edge has cached the response.
-  const assetHelper = `
-async function serveWithAssets(request, env, response) {
-  if (response.status !== 404 || !env.ASSETS || (request.method !== "GET" && request.method !== "HEAD")) return response;
-  const asset = await env.ASSETS.fetch(new Request(request.url, { method: request.method, headers: request.headers }));
-  if (asset.status !== 404) {
-    const res = new Response(asset.body, asset);
-    if (new URL(request.url).pathname.startsWith(${JSON.stringify('/' + assetsDir + '/')})) {
-      res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
-    } else {
-      res.headers.set("Cache-Control", "no-store");
-    }
-    return res;
-  }
-  // SPA fallback: with assetConfig.not_found_handling = 'none' (the default
-  // for any project whose worker handles HTML), the asset binding returns
-  // 404 instead of falling back to index.html itself. Do that fallback here,
-  // *after* user routes/middleware have run, so auth gates and OAuth
-  // callbacks see the request first. Only fires for HTML accept on
-  // GET/HEAD; non-HTML or non-existent SPAs get the worker's original 404.
+  // Non-hashed asset responses are stamped no-store: a stale entry there would
+  // shadow routes that are added or fixed in subsequent deploys across the edge
+  // cache boundary, which the platform's deploy-scoped cache keys (dispatch
+  // layer) can't reach once CF's managed edge has cached the response.
+  const spaFallbackCode = serveSpaFallback
+    ? `  // SPA fallback: when routes/middleware make assetConfig.not_found_handling
+  // = 'none', the asset binding returns 404 instead of falling back to
+  // index.html itself. Do that fallback here, after user routes/middleware
+  // have run, so auth gates and OAuth callbacks see the request first.
+  // Pages and SSR apps leave this disabled so intentional HTML 404s stay 404.
   const accept = request.headers.get("accept") ?? "";
   if (accept.includes("text/html")) {
     const indexUrl = new URL("/index.html", request.url);
@@ -1904,7 +1891,23 @@ async function serveWithAssets(request, env, response) {
       return res;
     }
   }
-  return response;
+  return response;`
+    : `  return response;`;
+
+  const assetHelper = `
+async function serveWithAssets(request, env, response) {
+  if (response.status !== 404 || !env.ASSETS || (request.method !== "GET" && request.method !== "HEAD")) return response;
+  const asset = await env.ASSETS.fetch(new Request(request.url, { method: request.method, headers: request.headers }));
+  if (asset.status !== 404) {
+    const res = new Response(asset.body, asset);
+    if (new URL(request.url).pathname.startsWith(${JSON.stringify('/' + assetsDir + '/')})) {
+      res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    } else {
+      res.headers.set("Cache-Control", "no-store");
+    }
+    return res;
+  }
+${spaFallbackCode}
 }
 `;
 

@@ -35,6 +35,30 @@ describe('resolveAssetConfig', () => {
     ).toEqual(NONE);
   });
 
+  it('uses none when the project has websocket routes', () => {
+    expect(
+      resolveAssetConfig({
+        isSsr: false,
+        hasPages: false,
+        hasRoutes: false,
+        hasMiddleware: false,
+        hasWebSockets: true,
+      }),
+    ).toEqual(NONE);
+  });
+
+  it('uses none when managed auth is enabled', () => {
+    expect(
+      resolveAssetConfig({
+        isSsr: false,
+        hasPages: false,
+        hasRoutes: false,
+        hasMiddleware: false,
+        authEnabled: true,
+      }),
+    ).toEqual(NONE);
+  });
+
   it('uses none for the common SPA + auth-middleware shape', () => {
     // Regression: this is the case the SPA-fallback shortcut silently
     // breaks. Browser navigation to /api/auth/callback/google would arrive
