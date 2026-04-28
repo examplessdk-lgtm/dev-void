@@ -133,6 +133,7 @@ export interface DeployManifest {
   framework?: string;
   type?: 'void' | 'spa' | 'static' | 'framework';
   revalidate?: number | Record<string, number>;
+  revalidateQueryAllowlist?: Record<string, Array<string>>;
   prerender?: Array<string>;
   assetConfig?: AssetConfig;
   vars?: Record<string, string>;

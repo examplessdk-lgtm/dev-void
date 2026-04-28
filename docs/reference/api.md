@@ -238,7 +238,7 @@ URL rewrites re-dispatch a request at a different internal path without changing
 
 ### `c.rewrite(destination)`
 
-Re-dispatches the current request at `destination` and returns the resulting `Response`. The browser URL does not change — this is a server-side hop. If `destination` has no query string, the original request query is preserved. If `destination` includes a query string, it replaces the original query. `destination` must start with `/` and is type-checked against the generated route tree via [`RewriteDestination`](#rewritedestination).
+Re-dispatches the current request at `destination` and returns the resulting `Response`. The browser URL does not change — this is a server-side hop. If `destination` has no query string, the original request query is preserved. If `destination` includes a query string, it replaces the original query. `destination` must start with `/`; known generated routes autocomplete via [`RewriteDestination`](#rewritedestination), while arbitrary strings remain accepted for dynamic paths.
 
 `c.redirect()` also preserves request query params for internal destinations, but it merges rather than replaces: destination params win on collision, and request-only params are appended.
 

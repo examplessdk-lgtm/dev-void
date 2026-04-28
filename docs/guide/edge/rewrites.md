@@ -125,7 +125,7 @@ export default defineMiddleware(async (c, next) => {
 
 `c.rewrite(path)` re-dispatches the request through the router with the new pathname. You must `return` the result — same shape as `c.redirect()`. A queryless destination preserves the incoming query string; a destination with `?` replaces it, so `c.rewrite('/search')` keeps `?q=...` and `c.rewrite('/search?q=all')` forwards exactly `?q=all`.
 
-The `path` argument is typed as [`RewriteDestination`](../../reference/api#rewritedestination), a union of your generated route patterns plus `string`. Known route patterns (e.g. `/posts/[id]`, `/en/docs`) surface as autocomplete entries in your editor, and literal paths are checked against the tree at compile time — `c.rewrite('/en/dcos')` is flagged as a typo — while interpolated strings like ``c.rewrite(`/${locale}${c.req.path}`)`` widen to `string` and pass the check by design. Treat it as autocomplete + typo-guard, not a proof of reachability.
+The `path` argument is typed as [`RewriteDestination`](../../reference/api#rewritedestination), a union of your generated route patterns plus `string`. Known route patterns (e.g. `/posts/[id]`, `/en/docs`) surface as autocomplete entries in your editor, while interpolated strings like ``c.rewrite(`/${locale}${c.req.path}`)`` stay accepted by design. Treat it as autocomplete, not a proof of reachability.
 
 ### Runtime rewrites cannot reach static assets
 
@@ -323,7 +323,7 @@ Two mitigations:
 
 ## ISR cache keys with rewrites
 
-If you use [`routing.revalidate`](./revalidation) on a rewritten path, the cache slot is keyed on the **rewritten** pathname plus the original request URL. So a direct request to `/en/docs/foo` and a rewrite from `/docs/foo → /en/docs/foo` cache independently — useful when your worker reads `c.isRewritten()` or `c.originalUrl()`.
+If you use [`routing.revalidate`](./revalidation) on a dispatch rewrite (`routing.rewrites`, `routing.fallbacks`, or `_redirects` 200/200!), the cache slot is keyed on the **rewritten** pathname plus the original request URL's pathname. By default, query parameters are dropped from the rewrite variant key to avoid unbounded cache fanout; add `routing.revalidateQueryAllowlist` when selected query params should vary cached output. So a direct request to `/en/docs/foo` and a rewrite from `/docs/foo → /en/docs/foo` cache independently — useful when your worker reads `c.isRewritten()` or `c.originalUrl()`. Middleware `c.rewrite()` runs after ISR lookup, so it does not create a separate ISR variant.
 
 `revalidate({ paths })` operates on the rewritten pathname (the slot's primary key). Purging `/en/docs/foo` removes all variants — direct + every rewrite source — under that path. Purging the source path (`/docs/foo`) invalidates nothing, because no slot is written under the source.
 

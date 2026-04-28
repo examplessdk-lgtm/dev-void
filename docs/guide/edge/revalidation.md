@@ -104,7 +104,7 @@ Requests with `Cookie` or `Authorization` headers bypass the ISR cache entirely 
 
 ## Cache keys and rewrites
 
-If a request is rewritten (via `routing.rewrites`, `routing.fallbacks`, `_redirects` 200/200!, or `c.rewrite()`), the ISR cache slot is keyed on the **rewritten** pathname **plus** the original request URL. So a direct request to `/en/docs/foo` and a rewrite from `/docs/foo → /en/docs/foo` no longer share a slot — each renders and caches independently. This matters when your worker branches on `c.isRewritten()` or `c.originalUrl()`.
+If a request is rewritten at dispatch (`routing.rewrites`, `routing.fallbacks`, or `_redirects` 200/200!), the ISR cache slot is keyed on the **rewritten** pathname **plus** the original request URL's pathname. Query parameters are dropped from rewrite variant keys by default; use `routing.revalidateQueryAllowlist` to keep selected query params when they should vary cached output. So a direct request to `/en/docs/foo` and a rewrite from `/docs/foo → /en/docs/foo` no longer share a slot — each renders and caches independently. Middleware `c.rewrite()` runs after ISR lookup, so it observes rewrite metadata but does not create a separate ISR variant.
 
 `revalidate({ paths })` operates on the rewritten pathname (the slot's primary key). Purging `/en/docs/foo` removes **all variants** (direct + every rewrite source) under that path. Purging the source path (`/docs/foo`) invalidates nothing, because no slot was ever written under it.
 

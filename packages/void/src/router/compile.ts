@@ -2515,6 +2515,7 @@ function ensureMergeQueryHelperEmitted(lines: Array<string>): void {
   lines.push('  const fragment = fragIdx === -1 ? "" : destination.slice(fragIdx);');
   lines.push('  const q = base.indexOf("?");');
   lines.push('  if (q === -1) return base + search + fragment;');
+  lines.push('  if (q === base.length - 1) return base.slice(0, q) + fragment;');
   lines.push('  const dp = new URLSearchParams(base.slice(q + 1));');
   lines.push('  for (const [k, v] of new URLSearchParams(search)) {');
   lines.push('    if (!dp.has(k)) dp.append(k, v);');

@@ -81,17 +81,7 @@ export function parseHeadersFile(dir: string): Array<HeaderRule> | undefined {
       if (current && current.headers.length > 0) {
         rules.push(current);
       }
-      // Drop blocks whose pattern would crash pattern compilation at runtime
-      // (two `*` → duplicate `splat` capture group). Warn so the author can
-      // fix the file, but keep the rest of the manifest valid.
-      if (countSplats(trimmed) > 1) {
-        voidWarn(
-          `Skipping _headers block for "${trimmed}": pattern must contain at most one "*" wildcard (captured as :splat).`,
-        );
-        current = null;
-      } else {
-        current = { pattern: trimmed, headers: [] };
-      }
+      current = { pattern: trimmed, headers: [] };
     }
   }
 

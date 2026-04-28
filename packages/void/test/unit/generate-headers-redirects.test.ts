@@ -13,7 +13,7 @@ vi.mock('@clack/prompts', () => ({
   spinner: () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }),
 }));
 
-import { parseRedirectsFile } from '../../src/cli/headers';
+import { parseHeadersFile, parseRedirectsFile } from '../../src/cli/headers';
 
 const tmpDir = join(import.meta.dirname, '.tmp-parse-redirects-test');
 
@@ -27,6 +27,22 @@ function setup(content?: string) {
 
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
+});
+
+describe('parseHeadersFile', () => {
+  it('keeps header patterns with multiple anonymous splats', () => {
+    setup();
+    writeFileSync(
+      join(tmpDir, '_headers'),
+      '/assets/*/img/*\n  Cache-Control: public, max-age=3600\n',
+    );
+    expect(parseHeadersFile(tmpDir)).toEqual([
+      {
+        pattern: '/assets/*/img/*',
+        headers: [['Cache-Control', 'public, max-age=3600']],
+      },
+    ]);
+  });
 });
 
 describe('parseRedirectsFile', () => {

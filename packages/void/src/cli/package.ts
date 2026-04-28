@@ -286,6 +286,8 @@ export interface PackageOptions {
   compatibilityFlags?: Array<string>;
   /** Cloudflare Sandbox container metadata for platform deploys. */
   sandbox?: ResolvedSandboxConfig;
+  /** Query params that participate in ISR variant keys for dispatch rewrites. */
+  revalidateQueryAllowlist?: Record<string, Array<string>>;
 }
 
 function toWebSocketManifest(
@@ -408,6 +410,12 @@ export async function packageBuild(
 
   if (revalidate != null && revalidate !== 0) {
     manifest.revalidate = revalidate;
+  }
+  if (
+    options?.revalidateQueryAllowlist &&
+    Object.keys(options.revalidateQueryAllowlist).length > 0
+  ) {
+    manifest.revalidateQueryAllowlist = options.revalidateQueryAllowlist;
   }
 
   if (prerender && prerender.length > 0) {
@@ -618,6 +626,7 @@ export async function packageFrameworkBuild(opts: {
   schedules?: Array<ScheduleMeta>;
   queues?: Array<QueueMeta>;
   revalidate?: number | Record<string, number>;
+  revalidateQueryAllowlist?: Record<string, Array<string>>;
   prerender?: Array<string>;
   assetConfig?: AssetConfig;
   vars?: Record<string, string>;
@@ -675,6 +684,9 @@ export async function packageFrameworkBuild(opts: {
   }
   if (opts.revalidate != null && opts.revalidate !== 0) {
     manifest.revalidate = opts.revalidate;
+  }
+  if (opts.revalidateQueryAllowlist && Object.keys(opts.revalidateQueryAllowlist).length > 0) {
+    manifest.revalidateQueryAllowlist = opts.revalidateQueryAllowlist;
   }
   if (opts.prerender && opts.prerender.length > 0) {
     manifest.prerender = opts.prerender;

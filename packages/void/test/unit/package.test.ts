@@ -238,6 +238,39 @@ describe('packageBuild', () => {
     expect(manifest.version).toBe(3);
   });
 
+  it('includes revalidateQueryAllowlist in worker manifests', async () => {
+    const workerDir = join(TMP, 'worker');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, 'index.js'), 'export default {}');
+
+    const form = await packageBuild(
+      TMP,
+      'worker',
+      {
+        needsD1: false,
+        needsKV: false,
+        needsR2: false,
+        needsAuth: false,
+        needsQueues: false,
+        needsAI: false,
+        needsSandbox: false,
+      },
+      undefined,
+      undefined,
+      true,
+      undefined,
+      60,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { revalidateQueryAllowlist: { '/search': ['q'] } },
+    );
+
+    const manifest = JSON.parse(form.get('manifest') as string);
+    expect(manifest.revalidateQueryAllowlist).toEqual({ '/search': ['q'] });
+  });
+
   it('marks auth-enabled deploys in the manifest', async () => {
     const workerDir = join(TMP, 'worker');
     mkdirSync(workerDir, { recursive: true });
@@ -486,6 +519,36 @@ describe('packageBuild', () => {
 });
 
 describe('packageFrameworkBuild', () => {
+  it('includes revalidateQueryAllowlist in framework manifests', async () => {
+    const workerDir = join(TMP, 'server');
+    const assetsDir = join(TMP, 'public');
+    mkdirSync(workerDir, { recursive: true });
+    mkdirSync(assetsDir, { recursive: true });
+    writeFileSync(join(workerDir, 'index.js'), 'export default {}');
+    writeFileSync(join(assetsDir, 'index.html'), '<html></html>');
+
+    const form = await packageFrameworkBuild({
+      frameworkName: 'test',
+      workerDir,
+      workerMain: 'index.js',
+      assetsDir,
+      bindings: {
+        needsD1: false,
+        needsKV: false,
+        needsR2: false,
+        needsAuth: false,
+        needsQueues: false,
+        needsAI: false,
+        needsSandbox: false,
+      },
+      revalidate: 60,
+      revalidateQueryAllowlist: { '/search': ['q'] },
+    });
+
+    const manifest = JSON.parse(form.get('manifest') as string);
+    expect(manifest.revalidateQueryAllowlist).toEqual({ '/search': ['q'] });
+  });
+
   it('strips dev-only origin and force metadata from redirectRules and fallbackRules in the manifest', async () => {
     const workerDir = join(TMP, 'server');
     const assetsDir = join(TMP, 'public');

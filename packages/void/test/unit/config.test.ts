@@ -771,11 +771,14 @@ describe('duplicate "*" wildcards in rule sources', () => {
     cleanup();
   });
 
-  it('rejects a header pattern with two "*"', () => {
+  it('accepts a header pattern with multiple "*"', () => {
     setup(
       JSON.stringify({ routing: { headers: { '/assets/*/img/*': ['Cache-Control: no-cache'] } } }),
     );
-    expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
+    const config = readConfig(tmpDir);
+    expect(config.routing?.headers).toEqual({
+      '/assets/*/img/*': ['Cache-Control: no-cache'],
+    });
     cleanup();
   });
 
@@ -790,6 +793,49 @@ describe('duplicate "*" wildcards in rule sources', () => {
     setup(JSON.stringify({ routing: { rewrites: { '/docs': '/en/docs' } } }));
     const config = readConfig(tmpDir);
     expect(config.routing?.rewrites).toEqual({ '/docs': '/en/docs' });
+    cleanup();
+  });
+});
+
+describe('routing.revalidateQueryAllowlist validation', () => {
+  it('accepts path-pattern arrays', () => {
+    setup(
+      JSON.stringify({
+        routing: {
+          revalidateQueryAllowlist: {
+            '/search': ['q'],
+            '/products/*': ['variant'],
+            '*': [],
+          },
+        },
+      }),
+    );
+    const config = readConfig(tmpDir);
+    expect(config.routing?.revalidateQueryAllowlist).toEqual({
+      '/search': ['q'],
+      '/products/*': ['variant'],
+      '*': [],
+    });
+    cleanup();
+  });
+
+  it('throws when allowlist is not an object', () => {
+    setup(JSON.stringify({ routing: { revalidateQueryAllowlist: ['/search'] } }));
+    expect(() => readConfig(tmpDir)).toThrow(
+      '"routing.revalidateQueryAllowlist" in void.json must be an object',
+    );
+    cleanup();
+  });
+
+  it('throws when pattern does not start with /', () => {
+    setup(JSON.stringify({ routing: { revalidateQueryAllowlist: { search: ['q'] } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must start with "/" or be "*"');
+    cleanup();
+  });
+
+  it('throws when params are not string arrays', () => {
+    setup(JSON.stringify({ routing: { revalidateQueryAllowlist: { '/search': ['q', 1] } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be an array of strings');
     cleanup();
   });
 });

@@ -295,7 +295,7 @@ URL rewrites. Keys are source URL patterns, values are destination paths. Serves
 }
 ```
 
-Destinations use the `RewriteDestination` shape — typed route patterns plus `string`, so literal paths get typo-checked against the known route tree while interpolated strings widen to `string` by design. See [Programmatic rewrites in middleware](../guide/edge/rewrites#programmatic-rewrites-in-middleware) for the narrowing trade-off and performance notes.
+Destinations use the `RewriteDestination` shape — typed route patterns plus `string`, so known routes autocomplete while dynamic paths remain accepted. See [Programmatic rewrites in middleware](../guide/edge/rewrites#programmatic-rewrites-in-middleware) for the trade-off and performance notes.
 
 #### `routing.fallbacks`
 
@@ -322,6 +322,22 @@ ISR revalidation TTL in seconds, either globally or per path. See [Revalidation]
       "/": 60,
       "/docs/*": 31536000,
       "*": 30
+    }
+  }
+}
+```
+
+#### `routing.revalidateQueryAllowlist`
+
+Query parameters that participate in ISR variant keys for dispatch rewrites. Keys are source URL patterns, values are query parameter names to keep. When omitted, rewritten ISR cache keys drop every incoming query parameter to avoid unbounded cache fanout.
+
+```json
+{
+  "routing": {
+    "revalidateQueryAllowlist": {
+      "/search": ["q"],
+      "/products/*": ["variant", "currency"],
+      "*": []
     }
   }
 }

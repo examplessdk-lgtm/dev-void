@@ -556,6 +556,9 @@ function mergeQueryIntoLocation(destination: string, search: string): string {
   if (q === -1) {
     return base + search + fragment;
   }
+  if (q === base.length - 1) {
+    return base.slice(0, q) + fragment;
+  }
   const dp = new URLSearchParams(base.slice(q + 1));
   for (const [k, v] of new URLSearchParams(search)) {
     if (!dp.has(k)) {
@@ -653,6 +656,28 @@ describe('c.redirect runtime wrapper', () => {
     // `foo=1` from destination must NOT be replaced by `foo=override`;
     // `bar=2` from the request is merged since destination doesn't carry it.
     expect(res.headers.get('Location')).toBe('/new?foo=1&bar=2');
+  });
+
+  it('drops the incoming query when destination has an explicit empty query', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakMap<Request, URL>());
+    app.get('/old', (c) => c.redirect('/new?', 302));
+
+    const res = await app.fetch(new Request('http://localhost/old?token=secret&bar=2'));
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe('/new');
+  });
+
+  it('preserves fragments when an explicit empty query drops incoming params', async () => {
+    const app = new Hono();
+    installVoidWrappers(app, new WeakMap<Request, URL>());
+    app.get('/old', (c) => c.redirect('/new?#faq', 302));
+
+    const res = await app.fetch(new Request('http://localhost/old?token=secret&bar=2'));
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe('/new#faq');
   });
 
   it('keeps destination fragments after the merged query string', async () => {

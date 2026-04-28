@@ -21,15 +21,10 @@ import {
   readConfig,
   resolveBindingNames,
   type DatabaseDialect,
+  type RoutingConfig,
   type VoidConfig,
   getDatabaseDialect,
   isNodeTarget,
-} from '../config';
-import {
-  convertFallbacksConfig,
-  convertHeadersConfig,
-  convertRedirectsConfig,
-  convertRewritesConfig,
 } from '../config';
 import { scanJobsSync } from '../crons/scan';
 import { writeDrizzleConfig } from '../drizzle/config';
@@ -316,12 +311,10 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
           options?.skipBuild,
           gitCommit,
           undefined,
-          convertHeadersConfig(voidConfig.routing?.headers) ?? [],
-          [
-            ...(convertRedirectsConfig(voidConfig.routing?.redirects) ?? []),
-            ...(convertRewritesConfig(voidConfig.routing?.rewrites) ?? []),
-          ],
-          convertFallbacksConfig(voidConfig.routing?.fallbacks) ?? [],
+          undefined,
+          undefined,
+          undefined,
+          voidConfig.routing,
         );
       } else {
         await runFullDeploy(root, config, client, undefined, options?.skipBuild, gitCommit);
@@ -517,6 +510,7 @@ async function runStaticDeploy(
   headerRules?: Array<HeaderRule>,
   redirectRules?: Array<DevRedirectRule>,
   fallbackRules?: Array<DevRedirectRule>,
+  routing?: RoutingConfig,
 ): Promise<void> {
   const typeLabel = preset.appType === 'spa' ? 'Static SPA' : 'Static Site';
   log.info(`${typeLabel} deploy`);
@@ -530,6 +524,18 @@ async function runStaticDeploy(
   if (!existsSync(preset.outputDir)) {
     log.error(`deploy: Output directory '${preset.outputDir}' not found. Run the build first.`);
     process.exit(1);
+  }
+
+  if (routing) {
+    const merged = mergeRoutingRules({ dir: preset.outputDir, routing });
+    warnRedundantForceOn3xx(merged.redundantForceOn3xx);
+    lintDuplicateSources(merged.redirectRules, 'redirects/rewrites (pre-asset)');
+    lintDuplicateSources(merged.fallbackRules, 'fallbacks (post-asset)');
+    lintDestinationSplats(merged.redirectRules, 'redirects/rewrites (pre-asset)');
+    lintDestinationSplats(merged.fallbackRules, 'fallbacks (post-asset)');
+    headerRules = merged.headerRules;
+    redirectRules = merged.redirectRules;
+    fallbackRules = merged.fallbackRules;
   }
 
   const s = createSpinner();
@@ -814,6 +820,7 @@ async function runFrameworkDeploy(
       compatibilityDate: wranglerCompat.compatibilityDate,
       compatibilityFlags: wranglerCompat.compatibilityFlags,
     },
+    revalidateQueryAllowlist: voidConfig.routing?.revalidateQueryAllowlist,
     neededAssets: neededSet,
     hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? 'assets',
     headerRules,
@@ -1195,6 +1202,7 @@ async function runFullDeploy(
       compatibilityDate: wranglerCompat?.compatibilityDate,
       compatibilityFlags: wranglerCompat?.compatibilityFlags,
       ...(sandboxConfig && { sandbox: sandboxConfig }),
+      revalidateQueryAllowlist: deployConfig.routing?.revalidateQueryAllowlist,
     },
     neededSet,
     assetsPrefix,

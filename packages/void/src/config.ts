@@ -22,6 +22,7 @@ export interface WranglerConfig {
 /** Routing configuration — headers, redirects, rewrites, fallbacks, revalidation, prerendering. */
 export interface RoutingConfig {
   revalidate?: number | Record<string, number>;
+  revalidateQueryAllowlist?: Record<string, Array<string>>;
   prerender?: Array<string>;
   headers?: Record<string, Array<string>>;
   redirects?: Record<string, RedirectDestination>;
@@ -387,7 +388,6 @@ export function readConfig(root: string): VoidConfig {
             `config: Header pattern '${pattern}' in ${CONFIG_FILE} must start with "/".`,
           );
         }
-        assertSingleSplat(pattern, 'Header');
         if (!Array.isArray(values) || !values.every((v) => typeof v === 'string')) {
           throw new Error(
             `config: Headers for '${pattern}' in ${CONFIG_FILE} must be an array of strings.`,
@@ -435,6 +435,29 @@ export function readConfig(root: string): VoidConfig {
         } else {
           throw new Error(
             `config: Redirect for '${source}' in ${CONFIG_FILE} must be a string or an object with "to" and optional "status".`,
+          );
+        }
+      }
+    }
+
+    // Validate routing.revalidateQueryAllowlist
+    if (routing.revalidateQueryAllowlist !== undefined) {
+      if (
+        typeof routing.revalidateQueryAllowlist !== 'object' ||
+        routing.revalidateQueryAllowlist === null ||
+        Array.isArray(routing.revalidateQueryAllowlist)
+      ) {
+        throw new Error(`"routing.revalidateQueryAllowlist" in ${CONFIG_FILE} must be an object`);
+      }
+      for (const [pattern, params] of Object.entries(routing.revalidateQueryAllowlist)) {
+        if (pattern !== '*' && !pattern.startsWith('/')) {
+          throw new Error(
+            `config: revalidateQueryAllowlist pattern '${pattern}' in ${CONFIG_FILE} must start with "/" or be "*".`,
+          );
+        }
+        if (!Array.isArray(params) || !params.every((v) => typeof v === 'string')) {
+          throw new Error(
+            `config: revalidateQueryAllowlist for '${pattern}' in ${CONFIG_FILE} must be an array of strings.`,
           );
         }
       }
