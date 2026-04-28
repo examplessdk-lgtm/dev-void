@@ -123,7 +123,7 @@ export default defineMiddleware(async (c, next) => {
 });
 ```
 
-`c.rewrite(path)` re-dispatches the request through the router with the new pathname. You must `return` the result — same shape as `c.redirect()`.
+`c.rewrite(path)` re-dispatches the request through the router with the new pathname. You must `return` the result — same shape as `c.redirect()`. A queryless destination preserves the incoming query string; a destination with `?` replaces it, so `c.rewrite('/search')` keeps `?q=...` and `c.rewrite('/search?q=all')` forwards exactly `?q=all`.
 
 The `path` argument is typed as [`RewriteDestination`](../../reference/api#rewritedestination), a union of your generated route patterns plus `string`. Known route patterns (e.g. `/posts/[id]`, `/en/docs`) surface as autocomplete entries in your editor, and literal paths are checked against the tree at compile time — `c.rewrite('/en/dcos')` is flagged as a typo — while interpolated strings like ``c.rewrite(`/${locale}${c.req.path}`)`` widen to `string` and pass the check by design. Treat it as autocomplete + typo-guard, not a proof of reachability.
 
