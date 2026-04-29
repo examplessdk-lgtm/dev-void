@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { CompileResult } from '../../src/compile';
-import { emitSolidComponent, emitSolidComponentWithIslands } from '../../src/emit-solid';
+import type { CompileResult } from '../../src/compile.ts';
+import { emitSolidComponent, emitSolidComponentWithIslands } from '../../src/emit-solid.ts';
 
 function makeResult(overrides?: Partial<CompileResult>): CompileResult {
   return {

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ensureProjectTsconfig } from '../../src/codegen/project-tsconfig';
+import { ensureProjectTsconfig } from '../../src/codegen/project-tsconfig.ts';
 
 describe('ensureProjectTsconfig', () => {
   let root: string;

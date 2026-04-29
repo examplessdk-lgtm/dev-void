@@ -1,8 +1,8 @@
 import react from '@vitejs/plugin-react';
 import { join } from 'pathe';
 import type { Plugin } from 'vite';
-import { islandsPlugin } from './plugin-islands';
-import { pagesPlugin } from './plugin-pages';
+import { islandsPlugin } from './plugin-islands.ts';
+import { pagesPlugin } from './plugin-pages.ts';
 
 interface PrefetchConfig {
   hoverDelay?: number;

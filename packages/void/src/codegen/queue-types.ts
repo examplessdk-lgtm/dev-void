@@ -1,5 +1,5 @@
 import { relative } from 'pathe';
-import type { QueueDefinition } from '../queues/scan';
+import type { QueueDefinition } from '../queues/scan.ts';
 
 /**
  * Generate .void/queues.d.ts content.
@@ -19,8 +19,7 @@ export function generateQueueTypes(
 
   for (const q of queues) {
     const absPath = `${queuesDir}/${q.filePath}`;
-    const relPath = relative(outDir, absPath);
-    const importPath = relPath.replace(/\.(ts|mts|js|mjs)$/, '');
+    const importPath = relative(outDir, absPath);
 
     lines.push(
       `  ${JSON.stringify(q.name)}: Queue<(typeof import(${JSON.stringify(importPath)}))["default"]["__payload"]>;`,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseDbArgs } from '../../src/cli/db-args';
+import { parseDbArgs } from '../../src/cli/db-args.ts';
 
 describe('parseDbArgs', () => {
   it('parses status', () => {

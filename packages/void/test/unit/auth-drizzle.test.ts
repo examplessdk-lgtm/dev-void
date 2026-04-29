@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   generateVoidAuthDatabaseModule,
   generateVoidAuthDrizzleSchema,
-} from '../../src/auth/drizzle';
+} from '../../src/auth/drizzle.ts';
 
 describe('Better Auth Drizzle codegen', () => {
   it('generates sqlite auth tables with Drizzle-friendly types', () => {

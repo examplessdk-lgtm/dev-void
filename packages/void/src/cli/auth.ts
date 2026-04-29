@@ -2,8 +2,8 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Entry } from '@napi-rs/keyring';
-import { pc } from './output';
-import { isVoidInternalStaging } from './project';
+import { pc } from './output.ts';
+import { isVoidInternalStaging } from './project.ts';
 
 const CONFIG_DIR = join(homedir(), '.void');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');

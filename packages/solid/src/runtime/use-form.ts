@@ -8,7 +8,7 @@ import {
   type VisitOptions,
 } from 'void/pages-client';
 import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
-import { RouterContext, ErrorsContext } from './context';
+import { RouterContext, ErrorsContext } from './context.ts';
 
 type FormSubmitOptions = Omit<VisitOptions, 'method' | 'data'> & {
   data?: Record<string, unknown>;

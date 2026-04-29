@@ -1,4 +1,4 @@
-import type { CloudContext } from '../runtime/handler';
+import type { CloudContext } from '../runtime/handler.ts';
 
 export const DEFERRED: unique symbol = Symbol('deferred');
 

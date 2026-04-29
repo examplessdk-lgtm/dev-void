@@ -1,6 +1,6 @@
 import { Link, useForm } from '@void/solid';
 import { For, Show } from 'solid-js';
-import type { Props } from './index.server';
+import type { Props } from './index.server.ts';
 
 export default function UsersPage(props: Props) {
   const form = useForm('/users', {

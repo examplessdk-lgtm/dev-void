@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Link, useForm } from "@void/svelte";
-  import type { Props } from "./index.server";
+  import type { Props } from "./index.server.ts";
 
   let { users }: Props = $props();
 

@@ -1,14 +1,14 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { resolveLayoutIds } from '../../src/pages/layout-resolution';
+import { resolveLayoutIds } from '../../src/pages/layout-resolution.ts';
 import {
   scanPages,
   resolveLayoutChain,
   resolveNamedLayout,
   resolveEffectiveLayoutChain,
   MAX_REVALIDATE,
-} from '../../src/pages/scan';
+} from '../../src/pages/scan.ts';
 
 const TMP = join(import.meta.dirname, '__tmp_pages_scan__');
 

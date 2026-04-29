@@ -2,7 +2,7 @@
 import { useRouter } from '@void/vue';
 import { auth } from 'void/client';
 import { ref } from 'vue';
-import type { Props } from './auth.server';
+import type { Props } from './auth.server.ts';
 
 defineProps<Props>();
 

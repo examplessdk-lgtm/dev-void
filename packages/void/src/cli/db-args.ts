@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util';
-import type { SubcommandDef } from './subcommand-prompt';
+import type { SubcommandDef } from './subcommand-prompt.ts';
 
 export const dbSubcommands: Array<SubcommandDef> = [
   { name: 'push', description: 'Push schema to local D1 (no migration files)' },

@@ -2,8 +2,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { getMiniflareDatabasePath } from '../../src/migrations/runner';
-import { migrationPlugin } from '../../src/plugin-migration';
+import { getMiniflareDatabasePath } from '../../src/migrations/runner.ts';
+import { migrationPlugin } from '../../src/plugin-migration.ts';
 
 const roots: Array<string> = [];
 type HookWithHandler<T> = { handler: T };

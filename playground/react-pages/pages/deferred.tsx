@@ -1,5 +1,5 @@
 import { Suspense, use } from 'react';
-import type { Props } from './deferred.server';
+import type { Props } from './deferred.server.ts';
 
 function Stats({ stats }: Pick<Props, 'stats'>) {
   const resolved = use(stats);

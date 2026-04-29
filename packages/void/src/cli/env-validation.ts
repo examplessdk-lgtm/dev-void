@@ -9,12 +9,12 @@
  * `void env check` (CI/pre-push validation).
  */
 import { join } from 'node:path';
-import { findEnvFile } from '../codegen/env-types';
-import { loadUserEnvFile } from '../host/load-user-env';
-import { voidWarn } from '../log';
-import type { EnvValidationReport } from '../runtime/env-public';
-import { mergeAndExpand, parseDotenvFile } from '../shared/dotenv';
-import type { PlatformClient } from './client';
+import { findEnvFile } from '../codegen/env-types.ts';
+import { loadUserEnvFile } from '../host/load-user-env.ts';
+import { voidWarn } from '../log.ts';
+import type { EnvValidationReport } from '../runtime/env-public.ts';
+import { mergeAndExpand, parseDotenvFile } from '../shared/dotenv.ts';
+import type { PlatformClient } from './client.ts';
 
 interface EnvPublicModule {
   _getRegisteredSchema(): Record<string, unknown> | null;
@@ -43,7 +43,7 @@ export async function getDeployEnvDefaults(root: string): Promise<Record<string,
 /** Load the registered schema by importing the user's env.ts. */
 async function loadSchema(envFile: string): Promise<EnvPublicModule | null> {
   await loadUserEnvFile(envFile);
-  const mod = (await import('../runtime/env-public')) as unknown as EnvPublicModule;
+  const mod = (await import('../runtime/env-public.ts')) as unknown as EnvPublicModule;
   if (!mod._hasRegisteredSchema()) {
     return null;
   }

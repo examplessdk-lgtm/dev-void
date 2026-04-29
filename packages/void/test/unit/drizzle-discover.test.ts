@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { discoverSchema } from '../../src/drizzle/discover';
+import { discoverSchema } from '../../src/drizzle/discover.ts';
 
 describe('discoverSchema', () => {
   let root: string;

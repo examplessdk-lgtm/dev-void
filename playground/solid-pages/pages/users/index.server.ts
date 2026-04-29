@@ -1,6 +1,6 @@
 import * as v from 'valibot';
 import { defineHandler } from 'void';
-import { USERS } from './_data';
+import { USERS } from './_data.ts';
 
 export interface Props {
   users: typeof USERS;

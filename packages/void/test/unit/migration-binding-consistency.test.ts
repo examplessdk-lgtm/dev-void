@@ -1,17 +1,17 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { packageBuild, packageFrameworkBuild } from '../../src/cli/package';
-import type { DeployManifest } from '../../src/cli/types';
-import { inferBindingsFromSource, mergeBindings } from '../../src/inference/walk';
-import type { InferredBindings } from '../../src/inference/walk';
-import { collectMigrations } from '../../src/migrations/collect';
-import { validateMigrations } from '../../src/migrations/validate';
-import type { MigrationFile } from '../../src/migrations/validate';
+import { packageBuild, packageFrameworkBuild } from '../../src/cli/package.ts';
+import type { DeployManifest } from '../../src/cli/types.ts';
+import { inferBindingsFromSource, mergeBindings } from '../../src/inference/walk.ts';
+import type { InferredBindings } from '../../src/inference/walk.ts';
+import { collectMigrations } from '../../src/migrations/collect.ts';
+import { validateMigrations } from '../../src/migrations/validate.ts';
+import type { MigrationFile } from '../../src/migrations/validate.ts';
 import {
   createMigrationHandler,
   type MigrationResponse,
-} from '../../src/runtime/migration-handler';
+} from '../../src/runtime/migration-handler.ts';
 
 const TMP = join(import.meta.dirname, '.tmp-migration-binding-test');
 

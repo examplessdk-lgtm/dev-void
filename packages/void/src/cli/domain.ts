@@ -1,9 +1,9 @@
 import { log, note } from '@clack/prompts';
-import { getToken } from './auth';
-import { PlatformClient } from './client';
-import type { DomainArgs } from './domain-args';
-import { pc } from './output';
-import { readProjectConfig } from './project';
+import { getToken } from './auth.ts';
+import { PlatformClient } from './client.ts';
+import type { DomainArgs } from './domain-args.ts';
+import { pc } from './output.ts';
+import { readProjectConfig } from './project.ts';
 
 export async function runDomainCommand(root: string, args: DomainArgs): Promise<void> {
   const token = getToken(root);

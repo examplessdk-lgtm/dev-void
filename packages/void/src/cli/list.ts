@@ -1,9 +1,9 @@
 import { intro, outro, log } from '@clack/prompts';
-import { getToken } from './auth';
-import { PlatformClient, type DeploymentResponse } from './client';
-import { cliTitle, dim, ensureUtc, pc, tablePrefix } from './output';
-import { readProjectConfig } from './project';
-import { resolveProjectBySlug } from './resolve-project';
+import { getToken } from './auth.ts';
+import { PlatformClient, type DeploymentResponse } from './client.ts';
+import { cliTitle, dim, ensureUtc, pc, tablePrefix } from './output.ts';
+import { readProjectConfig } from './project.ts';
+import { resolveProjectBySlug } from './resolve-project.ts';
 
 export async function runListCommand(root: string, slug?: string): Promise<void> {
   console.log();

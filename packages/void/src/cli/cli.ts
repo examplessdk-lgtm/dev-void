@@ -3,18 +3,18 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from '@clack/prompts';
-import { getPackageDir } from './agents';
-import { parseDeployArgs } from './args';
-import { authSubcommands, parseAuthArgs } from './auth-args';
-import { dbSubcommands, parseDbArgs } from './db-args';
-import { domainSubcommands, parseDomainArgs } from './domain-args';
-import { envSubcommands, parseEnvArgs } from './env-args';
-import { genSubcommands, parseGenArgs } from './gen-args';
-import { getHelpPath, printGlobalHelp, printHelpPage, printVoidHeader } from './help';
-import { parsePrepareArgs } from './prepare-args';
-import { projectSubcommands, parseProjectArgs } from './project-args';
-import { secretSubcommands, parseSecretArgs } from './secret-args';
-import type { SubcommandDef, SubcommandResult } from './subcommand-prompt';
+import { getPackageDir } from './agents.ts';
+import { parseDeployArgs } from './args.ts';
+import { authSubcommands, parseAuthArgs } from './auth-args.ts';
+import { dbSubcommands, parseDbArgs } from './db-args.ts';
+import { domainSubcommands, parseDomainArgs } from './domain-args.ts';
+import { envSubcommands, parseEnvArgs } from './env-args.ts';
+import { genSubcommands, parseGenArgs } from './gen-args.ts';
+import { getHelpPath, printGlobalHelp, printHelpPage, printVoidHeader } from './help.ts';
+import { parsePrepareArgs } from './prepare-args.ts';
+import { projectSubcommands, parseProjectArgs } from './project-args.ts';
+import { secretSubcommands, parseSecretArgs } from './secret-args.ts';
+import type { SubcommandDef, SubcommandResult } from './subcommand-prompt.ts';
 
 function buildArgs(result: SubcommandResult, trailingArgs: Array<string>): Array<string> {
   const out = [result.subcommand];
@@ -50,7 +50,7 @@ async function runSubcommandGroup<T>(
   const sub = args[1];
   try {
     if ((!sub || sub.startsWith('-')) && process.stdin.isTTY) {
-      const { promptSubcommand } = await import('./subcommand-prompt');
+      const { promptSubcommand } = await import('./subcommand-prompt.ts');
       const result = await promptSubcommand(command, subcommands);
       if (!result) {
         process.exit(0);
@@ -92,7 +92,7 @@ if (helpPath) {
     process.exit(1);
   }
 
-  import('./deploy').then(({ runDeploy }) => {
+  import('./deploy.ts').then(({ runDeploy }) => {
     runDeploy(root, {
       projectSlug: deployArgs.projectSlug,
       dir: deployArgs.dir,
@@ -105,31 +105,31 @@ if (helpPath) {
   });
 } else if (command === 'auth') {
   runSubcommandGroup('auth', authSubcommands, parseAuthArgs, (root, parsed) =>
-    import('./auth-cmd').then(({ runAuthCommand }) => runAuthCommand(root, parsed)),
+    import('./auth-cmd.ts').then(({ runAuthCommand }) => runAuthCommand(root, parsed)),
   );
 } else if (command === 'project') {
   runSubcommandGroup('project', projectSubcommands, parseProjectArgs, (root, parsed) =>
-    import('./project-cmd').then(({ runProjectCommand }) => runProjectCommand(root, parsed)),
+    import('./project-cmd.ts').then(({ runProjectCommand }) => runProjectCommand(root, parsed)),
   );
 } else if (command === 'secret') {
   runSubcommandGroup('secret', secretSubcommands, parseSecretArgs, (root, parsed) =>
-    import('./secret').then(({ runSecretCommand }) => runSecretCommand(root, parsed)),
+    import('./secret.ts').then(({ runSecretCommand }) => runSecretCommand(root, parsed)),
   );
 } else if (command === 'domain') {
   runSubcommandGroup('domain', domainSubcommands, parseDomainArgs, (root, parsed) =>
-    import('./domain').then(({ runDomainCommand }) => runDomainCommand(root, parsed)),
+    import('./domain.ts').then(({ runDomainCommand }) => runDomainCommand(root, parsed)),
   );
 } else if (command === 'db') {
   runSubcommandGroup('db', dbSubcommands, parseDbArgs, (root, parsed) =>
-    import('./db').then(({ runDbCommand }) => runDbCommand(root, parsed)),
+    import('./db.ts').then(({ runDbCommand }) => runDbCommand(root, parsed)),
   );
 } else if (command === 'env') {
   runSubcommandGroup('env', envSubcommands, parseEnvArgs, (root, parsed) =>
-    import('./env').then(({ runEnvCommand }) => runEnvCommand(root, parsed)),
+    import('./env.ts').then(({ runEnvCommand }) => runEnvCommand(root, parsed)),
   );
 } else if (command === 'gen') {
   runSubcommandGroup('gen', genSubcommands, parseGenArgs, (root, parsed) =>
-    import('./gen').then(({ runGenCommand }) => runGenCommand(root, parsed)),
+    import('./gen.ts').then(({ runGenCommand }) => runGenCommand(root, parsed)),
   );
 } else if (command === 'prepare') {
   const root = process.cwd();
@@ -141,7 +141,7 @@ if (helpPath) {
     process.exit(1);
   }
 
-  import('./prepare').then(({ runPrepareCommand }) => {
+  import('./prepare.ts').then(({ runPrepareCommand }) => {
     runPrepareCommand(root, prepareArgs).catch((err) => {
       log.error(err.message ?? err);
       process.exit(1);
@@ -149,7 +149,7 @@ if (helpPath) {
   });
 } else if (command === 'init') {
   const root = process.cwd();
-  import('./init').then(({ runInitCommand, parseInitArgs }) => {
+  import('./init.ts').then(({ runInitCommand, parseInitArgs }) => {
     let initArgs;
     try {
       initArgs = parseInitArgs(args.slice(1));
@@ -163,7 +163,7 @@ if (helpPath) {
     });
   });
 } else if (command === 'mcp') {
-  import('./mcp').then(({ runMcp }) => {
+  import('./mcp.ts').then(({ runMcp }) => {
     runMcp();
   });
 } else if (command === '-v' || command === '--version') {
@@ -219,7 +219,7 @@ if (helpPath) {
   (async () => {
     printVoidHeader();
 
-    const { promptSubcommand } = await import('./subcommand-prompt');
+    const { promptSubcommand } = await import('./subcommand-prompt.ts');
     const result = await promptSubcommand('', topLevelCommands);
     if (!result) {
       process.exit(0);
@@ -230,50 +230,50 @@ if (helpPath) {
 
     switch (cmd) {
       case 'init': {
-        const { runInitCommand, parseInitArgs } = await import('./init');
+        const { runInitCommand, parseInitArgs } = await import('./init.ts');
         await runInitCommand(root, parseInitArgs([]));
         return;
       }
       case 'deploy': {
-        const { runDeploy } = await import('./deploy');
+        const { runDeploy } = await import('./deploy.ts');
         await runDeploy(root);
         return;
       }
       case 'mcp': {
-        const { runMcp } = await import('./mcp');
+        const { runMcp } = await import('./mcp.ts');
         runMcp();
         return;
       }
       case 'auth':
         return runSubcommandGroup('auth', authSubcommands, parseAuthArgs, (r, p) =>
-          import('./auth-cmd').then(({ runAuthCommand }) => runAuthCommand(r, p)),
+          import('./auth-cmd.ts').then(({ runAuthCommand }) => runAuthCommand(r, p)),
         );
       case 'project':
         return runSubcommandGroup('project', projectSubcommands, parseProjectArgs, (r, p) =>
-          import('./project-cmd').then(({ runProjectCommand }) => runProjectCommand(r, p)),
+          import('./project-cmd.ts').then(({ runProjectCommand }) => runProjectCommand(r, p)),
         );
       case 'secret':
         return runSubcommandGroup('secret', secretSubcommands, parseSecretArgs, (r, p) =>
-          import('./secret').then(({ runSecretCommand }) => runSecretCommand(r, p)),
+          import('./secret.ts').then(({ runSecretCommand }) => runSecretCommand(r, p)),
         );
       case 'domain':
         return runSubcommandGroup('domain', domainSubcommands, parseDomainArgs, (r, p) =>
-          import('./domain').then(({ runDomainCommand }) => runDomainCommand(r, p)),
+          import('./domain.ts').then(({ runDomainCommand }) => runDomainCommand(r, p)),
         );
       case 'db':
         return runSubcommandGroup('db', dbSubcommands, parseDbArgs, (r, p) =>
-          import('./db').then(({ runDbCommand }) => runDbCommand(r, p)),
+          import('./db.ts').then(({ runDbCommand }) => runDbCommand(r, p)),
         );
       case 'env':
         return runSubcommandGroup('env', envSubcommands, parseEnvArgs, (r, p) =>
-          import('./env').then(({ runEnvCommand }) => runEnvCommand(r, p)),
+          import('./env.ts').then(({ runEnvCommand }) => runEnvCommand(r, p)),
         );
       case 'gen':
         return runSubcommandGroup('gen', genSubcommands, parseGenArgs, (r, p) =>
-          import('./gen').then(({ runGenCommand }) => runGenCommand(r, p)),
+          import('./gen.ts').then(({ runGenCommand }) => runGenCommand(r, p)),
         );
       case 'prepare': {
-        const { runPrepareCommand } = await import('./prepare');
+        const { runPrepareCommand } = await import('./prepare.ts');
         await runPrepareCommand(root, parsePrepareArgs([]));
         return;
       }

@@ -1,5 +1,5 @@
 import { relative } from 'pathe';
-import type { ScanResult } from '../router/scan';
+import type { ScanResult } from '../router/scan.ts';
 
 export interface RouteTypesResult {
   dts: string;
@@ -151,9 +151,7 @@ export function generateRouteTypes(
 
     // Compute relative path from outDir (.void/) to the route file
     const absRoutePath = `${routesDir}/${route.filePath}`;
-    const relPath = relative(outDir, absRoutePath);
-    // Strip extension for TypeScript import
-    const importPath = relPath.replace(/\.(ts|mts|js|mjs)$/, '');
+    const importPath = relative(outDir, absRoutePath);
 
     lines.push(`    ${JSON.stringify(route.pattern)}: {`);
 
@@ -177,8 +175,7 @@ export function generateRouteTypes(
 
   for (const route of scan.websockets ?? []) {
     const absRoutePath = `${routesDir}/${route.filePath}`;
-    const relPath = relative(outDir, absRoutePath);
-    const importPath = relPath.replace(/\.(ts|mts|js|mjs)$/, '');
+    const importPath = relative(outDir, absRoutePath);
 
     lines.push(`    ${JSON.stringify(route.pattern)}: {`);
     lines.push(`      params: RouteParams<${JSON.stringify(route.params)}>;`);
@@ -217,8 +214,7 @@ export function generateRouteTypes(
       if (page.serverPath) {
         // Companion .server.ts — resolve directly
         const absPath = `${pagesDir}/${page.serverPath}`;
-        const rel = relative(outDir, absPath);
-        importPath = rel.replace(/\.(ts|mts|js|mjs)$/, '');
+        importPath = relative(outDir, absPath);
       }
 
       if (hasActions) {

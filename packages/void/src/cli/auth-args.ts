@@ -1,4 +1,4 @@
-import type { SubcommandDef } from './subcommand-prompt';
+import type { SubcommandDef } from './subcommand-prompt.ts';
 
 export const authSubcommands: Array<SubcommandDef> = [
   { name: 'login', description: 'Log in with GitHub or Google' },

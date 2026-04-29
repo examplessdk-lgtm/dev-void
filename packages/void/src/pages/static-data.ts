@@ -1,6 +1,6 @@
 import { join } from 'node:path';
-import { parseRedirectsFile } from '../cli/headers';
-import { readConfig } from '../config';
+import { parseRedirectsFile } from '../cli/headers.ts';
+import { readConfig } from '../config.ts';
 
 export interface StaticPageDataBuildOptions {
   enabled: boolean;

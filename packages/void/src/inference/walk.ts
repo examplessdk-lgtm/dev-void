@@ -1,7 +1,7 @@
 import { parse } from 'es-module-lexer/js';
 import { walk } from 'estree-walker';
 import { parseSync } from 'vite';
-import { isIdentifier, isMemberExpression, type AstNode, type AstProgram } from '../shared/ast';
+import { isIdentifier, isMemberExpression, type AstNode, type AstProgram } from '../shared/ast.ts';
 
 export interface InferredBindings {
   needsD1: boolean;

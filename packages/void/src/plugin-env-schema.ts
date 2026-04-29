@@ -1,10 +1,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'pathe';
 import { type Plugin } from 'vite';
-import { findEnvFile, generateEnvTypes } from './codegen/env-types';
-import { loadUserEnvFile } from './host/load-user-env';
-import { voidLog, voidWarn } from './log';
-import { filterLoadedEnv } from './shared/env';
+import { findEnvFile, generateEnvTypes } from './codegen/env-types.ts';
+import { loadUserEnvFile } from './host/load-user-env.ts';
+import { voidLog, voidWarn } from './log.ts';
+import { filterLoadedEnv } from './shared/env.ts';
 
 interface RegisteredSchemaModule {
   _getRegisteredSchema(): Record<
@@ -38,7 +38,7 @@ async function loadSchemaModule(): Promise<RegisteredSchemaModule> {
   if (cachedSchemaModule) {
     return cachedSchemaModule;
   }
-  const mod = (await import('./runtime/env-public')) as unknown as RegisteredSchemaModule;
+  const mod = (await import('./runtime/env-public.ts')) as unknown as RegisteredSchemaModule;
   cachedSchemaModule = mod;
   return mod;
 }

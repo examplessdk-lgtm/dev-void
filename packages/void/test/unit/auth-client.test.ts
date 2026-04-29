@@ -8,7 +8,7 @@ vi.mock('better-auth/client', () => ({
   createAuthClient: createAuthClientMock,
 }));
 
-import { auth, createAuthClient } from '../../src/runtime/auth-client';
+import { auth, createAuthClient } from '../../src/runtime/auth-client.ts';
 
 describe('auth-client runtime', () => {
   it("re-exports Better Auth's createAuthClient", () => {

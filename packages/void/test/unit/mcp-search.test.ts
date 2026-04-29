@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { searchDocs } from '../../src/cli/mcp';
+import { searchDocs } from '../../src/cli/mcp.ts';
 
 interface DocPage {
   slug: string;

@@ -3,7 +3,7 @@ import {
   getSandbox as getCloudflareSandbox,
   type SandboxOptions,
 } from '@cloudflare/sandbox';
-import { requireRuntimeBinding } from './env';
+import { requireRuntimeBinding } from './env.ts';
 
 export { Sandbox };
 export type { SandboxOptions };

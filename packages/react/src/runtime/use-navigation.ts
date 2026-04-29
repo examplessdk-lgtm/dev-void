@@ -1,6 +1,6 @@
 import { useContext } from 'react';
 import type { NavigationState } from 'void/pages-client';
-import { NavigationContext } from './context';
+import { NavigationContext } from './context.ts';
 
 export type { NavigationState } from 'void/pages-client';
 

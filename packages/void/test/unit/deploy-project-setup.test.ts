@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PlatformClient } from '../../src/cli/client';
+import type { PlatformClient } from '../../src/cli/client.ts';
 
 const mockSelect = vi.fn();
 const mockText = vi.fn();
@@ -58,7 +58,7 @@ describe('promptDeployProjectConfig', () => {
   });
 
   it('does not show link option when there are no existing projects', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy');
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
     const client = createClient();
     client.listProjects.mockResolvedValueOnce([]);
     client.createProject.mockResolvedValueOnce({ id: 'proj_new', slug: 'new-app' });
@@ -78,7 +78,7 @@ describe('promptDeployProjectConfig', () => {
   });
 
   it('does not show project names when creating with existing projects available', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy');
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
     const client = createClient();
     client.listProjects.mockResolvedValueOnce([
       {
@@ -110,7 +110,7 @@ describe('promptDeployProjectConfig', () => {
   });
 
   it('only shows project names after the user chooses to link', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy');
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
     const client = createClient();
     client.listProjects.mockResolvedValueOnce([
       {

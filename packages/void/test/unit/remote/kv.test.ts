@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { ProxyClient } from '../../../src/runtime/remote/client';
-import { ProxyKVNamespace } from '../../../src/runtime/remote/kv';
+import { ProxyClient } from '../../../src/runtime/remote/client.ts';
+import { ProxyKVNamespace } from '../../../src/runtime/remote/kv.ts';
 
 function createClient() {
   return new ProxyClient('https://proxy.void.cloud', 'jwt-token', 'proj_1');

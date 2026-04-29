@@ -8,7 +8,7 @@ import {
   S_CHECKBOX_ACTIVE,
   S_CHECKBOX_INACTIVE,
 } from '@clack/prompts';
-import { pc } from './output';
+import { pc } from './output.ts';
 
 export interface FlagDef {
   name: string; // e.g. "--output" (include dashes)

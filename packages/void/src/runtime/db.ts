@@ -6,7 +6,7 @@
  * This stub exists for the published npm package and type declarations.
  */
 import { drizzle as _drizzle, type DrizzleD1Database } from 'drizzle-orm/d1';
-import { requireRuntimeBinding } from './env';
+import { requireRuntimeBinding } from './env.ts';
 
 // Re-export commonly used Drizzle utilities so consumers never need
 // to depend on drizzle-orm directly.

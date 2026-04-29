@@ -9,7 +9,7 @@ import {
 } from 'react';
 import { VoidActionError, isAbortError, isEqualFormValue, submitAction } from 'void/pages-client';
 import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
-import { RouterContext } from './context';
+import { RouterContext } from './context.ts';
 
 type SubmitPayload = FormData | { method: string };
 type UntypedForm = {

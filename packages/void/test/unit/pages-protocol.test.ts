@@ -1,12 +1,12 @@
 import { Hono, type Context } from 'hono';
 import { describe, expect, it, vi } from 'vitest';
-import { defer } from '../../src/pages/defer';
+import { defer } from '../../src/pages/defer.ts';
 import {
   handlePageGet,
   handlePageMutation,
   flattenValidationErrors,
   ValidationError,
-} from '../../src/pages/protocol';
+} from '../../src/pages/protocol.ts';
 
 type TestContext = Context & { set(key: string, value: unknown): void };
 type RenderPage = { component: string };

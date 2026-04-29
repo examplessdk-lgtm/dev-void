@@ -2,8 +2,8 @@ import { type as arktype } from 'arktype';
 import * as v from 'valibot';
 import { describe, expectTypeOf, it } from 'vitest';
 import { z } from 'zod';
-import { defineHandler } from '../../src/runtime/handler';
-import type { StandardSchemaV1 } from '../../src/standard-schema';
+import { defineHandler } from '../../src/runtime/handler.ts';
+import type { StandardSchemaV1 } from '../../src/standard-schema.ts';
 
 /**
  * These types mirror what generateRouteTypes() emits in .void/routes.d.ts.

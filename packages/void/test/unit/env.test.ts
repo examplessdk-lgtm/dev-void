@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { getRuntimeBinding, getRuntimeEnv, withRuntimeEnv } from '../../src/runtime/env';
+import { getRuntimeBinding, getRuntimeEnv, withRuntimeEnv } from '../../src/runtime/env.ts';
 
 const globalScope = globalThis as {
   __env__?: unknown;

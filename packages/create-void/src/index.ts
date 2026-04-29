@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
-import { detectPM, pmExec, pmInstall, run } from './pm';
+import { detectPM, pmExec, pmInstall, run } from './pm.ts';
 
 const pm = detectPM();
 

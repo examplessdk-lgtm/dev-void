@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { CompileResult } from '../../src/compile';
-import { emitSvelteComponent, emitSvelteComponentWithIslands } from '../../src/emit-svelte';
+import type { CompileResult } from '../../src/compile.ts';
+import { emitSvelteComponent, emitSvelteComponentWithIslands } from '../../src/emit-svelte.ts';
 
 function makeResult(overrides?: Partial<CompileResult>): CompileResult {
   return {

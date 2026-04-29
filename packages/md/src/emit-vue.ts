@@ -1,6 +1,6 @@
-import type { CompileResult } from './compile';
-import { toIslandId } from './emit-shared';
-import type { IslandImport } from './extract-script';
+import type { CompileResult } from './compile.ts';
+import { toIslandId } from './emit-shared.ts';
+import type { IslandImport } from './extract-script.ts';
 
 export function emitVueComponent(result: CompileResult): string {
   return `

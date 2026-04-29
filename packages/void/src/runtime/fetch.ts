@@ -1,5 +1,5 @@
 import { ofetch } from 'ofetch';
-import { FetchError } from './fetch-error';
+import { FetchError } from './fetch-error.ts';
 export { FetchError };
 
 import type { RouteMap } from 'void/routes';

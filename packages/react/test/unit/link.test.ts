@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { Link } from '../../src/runtime/link';
+import { Link } from '../../src/runtime/link.tsx';
 
 describe('Link', () => {
   it('merges GET data into the rendered href', () => {

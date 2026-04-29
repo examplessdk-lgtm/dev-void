@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import type { Props } from './ai.server';
+import type { Props } from './ai.server.ts';
 
 const props = defineProps<Props>();
 

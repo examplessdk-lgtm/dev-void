@@ -1,9 +1,9 @@
 import { execSync } from 'node:child_process';
 import { log } from '@clack/prompts';
-import { getToken, removeToken } from './auth';
-import type { AuthArgs } from './auth-args';
-import { PlatformClient } from './client';
-import { runLoginCommand } from './login';
+import type { AuthArgs } from './auth-args.ts';
+import { getToken, removeToken } from './auth.ts';
+import { PlatformClient } from './client.ts';
+import { runLoginCommand } from './login.ts';
 
 export async function runAuthCommand(root: string, args: AuthArgs): Promise<void> {
   switch (args.subcommand) {

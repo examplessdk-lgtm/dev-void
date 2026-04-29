@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { ProxyD1Database } from '../../../src/runtime/remote/d1';
-import { createRemoteEnv } from '../../../src/runtime/remote/index';
-import { ProxyKVNamespace } from '../../../src/runtime/remote/kv';
-import { ProxyR2Bucket } from '../../../src/runtime/remote/r2';
+import { ProxyD1Database } from '../../../src/runtime/remote/d1.ts';
+import { createRemoteEnv } from '../../../src/runtime/remote/index.ts';
+import { ProxyKVNamespace } from '../../../src/runtime/remote/kv.ts';
+import { ProxyR2Bucket } from '../../../src/runtime/remote/r2.ts';
 
 const BASE_ENV: Record<string, unknown> = {
   __VOID_PROXY_URL: 'https://proxy.void.cloud',

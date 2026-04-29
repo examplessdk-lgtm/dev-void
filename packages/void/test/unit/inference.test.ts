@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inferBindingsFromSource, mergeBindings } from '../../src/inference/walk';
+import { inferBindingsFromSource, mergeBindings } from '../../src/inference/walk.ts';
 
 describe('inferBindingsFromSource', () => {
   it('detects c.env.DB', () => {

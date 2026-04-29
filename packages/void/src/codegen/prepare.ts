@@ -2,17 +2,17 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'pathe';
 import { loadEnv } from 'vite';
-import { findVoidAuthConfig, loadVoidAuthConfig } from '../auth/config';
-import { generateVoidAuthDatabaseModule, generateVoidAuthDrizzleSchema } from '../auth/drizzle';
-import { getDatabaseDialect, readConfig } from '../config';
-import { discoverSchema } from '../drizzle/discover';
-import { FRAMEWORK_SCAN_DIRS, detectFramework, inferProjectBindings } from '../plugin-inference';
-import { scanRoutes } from '../router/scan';
-import { generateDbDts } from './db-types';
-import { findEnvFile, generateEnvTypes } from './env-types';
-import { ensureProjectTsconfig } from './project-tsconfig';
-import { generateQueueTypes } from './queue-types';
-import { generateRouteTypes } from './route-types';
+import { findVoidAuthConfig, loadVoidAuthConfig } from '../auth/config.ts';
+import { generateVoidAuthDatabaseModule, generateVoidAuthDrizzleSchema } from '../auth/drizzle.ts';
+import { getDatabaseDialect, readConfig } from '../config.ts';
+import { discoverSchema } from '../drizzle/discover.ts';
+import { FRAMEWORK_SCAN_DIRS, detectFramework, inferProjectBindings } from '../plugin-inference.ts';
+import { scanRoutes } from '../router/scan.ts';
+import { generateDbDts } from './db-types.ts';
+import { findEnvFile, generateEnvTypes } from './env-types.ts';
+import { ensureProjectTsconfig } from './project-tsconfig.ts';
+import { generateQueueTypes } from './queue-types.ts';
+import { generateRouteTypes } from './route-types.ts';
 
 export interface PrepareProjectResult {
   written: Array<string>;

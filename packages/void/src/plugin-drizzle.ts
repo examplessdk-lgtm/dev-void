@@ -2,10 +2,10 @@ import { existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'pathe';
 import { normalizePath, type Plugin } from 'vite';
-import { DRIZZLE_OPERATORS, generateDbDts } from './codegen/db-types';
-import { ensureProjectTsconfig } from './codegen/project-tsconfig';
-import { discoverSchema } from './drizzle/discover';
-import { voidWarn } from './log';
+import { DRIZZLE_OPERATORS, generateDbDts } from './codegen/db-types.ts';
+import { ensureProjectTsconfig } from './codegen/project-tsconfig.ts';
+import { discoverSchema } from './drizzle/discover.ts';
+import { voidWarn } from './log.ts';
 
 // Resolve drizzle-orm paths from void's own deps so they work in any project
 // (including metaframeworks where drizzle-orm isn't a direct dependency).

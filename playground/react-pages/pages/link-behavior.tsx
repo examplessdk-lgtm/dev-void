@@ -1,6 +1,6 @@
 import { Link, useNavigation, useRouter } from '@void/react';
 import { useEffect, useRef } from 'react';
-import type { Props } from './link-behavior.server';
+import type { Props } from './link-behavior.server.ts';
 
 type LinkBehaviorWindow = Window & {
   __hashNavigationStarts?: number;

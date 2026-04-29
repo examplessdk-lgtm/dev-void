@@ -1,6 +1,6 @@
 import { defineHandler } from 'void';
 import { getSandbox } from 'void/sandbox';
-import { sampleRequests } from '../../lib/sandbox-demo';
+import { sampleRequests } from '../../lib/sandbox-demo.ts';
 
 const MAX_CODE_LENGTH = 8_000;
 const WORKDIR = '/workspace/void-kitchen-sink-code-lab';

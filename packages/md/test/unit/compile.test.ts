@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compile } from '../../src/compile';
+import { compile } from '../../src/compile.ts';
 
 describe('compile', () => {
   it('compiles basic markdown to HTML', { timeout: 30_000 }, async () => {

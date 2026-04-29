@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { chromium, type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers';
+import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 declare global {
   interface Window {
@@ -89,11 +89,12 @@ describe('playground/kitchen-sink', () => {
     // Preview mode doesn't auto-run migrations (dev mode's migrationPlugin
     // handles this via configureServer). Apply them directly to the local
     // D1 database so pages that query DB/Auth tables work.
-    const { runMigrations, getMiniflareDatabasePath } = await import('../../src/migrations/runner');
+    const { runMigrations, getMiniflareDatabasePath } =
+      await import('../../src/migrations/runner.ts');
     const dbPath = getMiniflareDatabasePath(join(pg, '.void'), 'local');
     await runMigrations(join(pg, 'db', 'migrations'), dbPath);
 
-    const { runLocalVoidAuthMigrations } = await import('../../src/auth/node');
+    const { runLocalVoidAuthMigrations } = await import('../../src/auth/node.ts');
     await runLocalVoidAuthMigrations(pg, 'sqlite', join(pg, '.void'), 'local', null);
   });
 

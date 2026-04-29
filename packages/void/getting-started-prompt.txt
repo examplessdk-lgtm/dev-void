@@ -22,7 +22,7 @@ Then run:
 
 npx void init
 
-In an empty directory, `void init` will add the matching Pages adapter and starter dependencies after you choose a framework.
+In an empty directory, `void init` will add the matching Pages adapter and starter dependencies after you choose a framework. In an existing app, it configures Void in place by adding missing Vite scripts and creating or patching `vite.config.*` with `voidPlugin()`.
 
 During `void init`, first choose a Pages framework (React, Vue, Svelte, or Solid), then choose D1 for a zero-config, fully managed default or PostgreSQL if you already have Postgres infrastructure or expect heavier writes and more complex queries.
 

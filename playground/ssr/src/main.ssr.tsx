@@ -1,6 +1,6 @@
 import { renderToString } from 'react-dom/server';
 import { defineRender } from 'void';
-import App from './App';
+import App from './App.tsx';
 
 async function readBlogPost(slug: string): Promise<string | null> {
   return (await import(`../blog/${slug}.md?raw`)).default;

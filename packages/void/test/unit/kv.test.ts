@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('cloudflare:workers', () => ({ env: {} }));
 
-import { createKV, type KVClient } from '../../src/runtime/kv';
+import { createKV, type KVClient } from '../../src/runtime/kv.ts';
 
 function createMockKVNamespace() {
   const ns = {

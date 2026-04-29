@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { runGenCommand, formatTimestamp } from '../../src/cli/gen';
+import { runGenCommand, formatTimestamp } from '../../src/cli/gen.ts';
 
 const mockSelect = vi.fn();
 
@@ -675,8 +675,8 @@ describe('gen migration', () => {
     expect(existsSync(join(migrationsDir, 'meta'))).toBe(false);
 
     // assertJournalCoherence tolerates a missing journal and stays quiet.
-    const { collectMigrations } = await import('../../src/migrations/collect');
-    const { assertJournalCoherence } = await import('../../src/migrations/validate');
+    const { collectMigrations } = await import('../../src/migrations/collect.ts');
+    const { assertJournalCoherence } = await import('../../src/migrations/validate.ts');
     expect(() =>
       assertJournalCoherence(migrationsDir, collectMigrations(migrationsDir)),
     ).not.toThrow();
@@ -728,8 +728,8 @@ describe('gen migration', () => {
   });
 
   it('running assertJournalCoherence after gen migration does not throw (bare-legacy)', async () => {
-    const { collectMigrations } = await import('../../src/migrations/collect');
-    const { assertJournalCoherence } = await import('../../src/migrations/validate');
+    const { collectMigrations } = await import('../../src/migrations/collect.ts');
+    const { assertJournalCoherence } = await import('../../src/migrations/validate.ts');
 
     await runGenCommand(TMP, { subcommand: 'migration', name: 'coherent' });
 

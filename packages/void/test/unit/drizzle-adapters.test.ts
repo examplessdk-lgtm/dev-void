@@ -22,9 +22,9 @@ vi.mock('drizzle-zod', () => drizzleZodMock);
 vi.mock('drizzle-valibot', () => drizzleValibotMock);
 vi.mock('drizzle-arktype', () => drizzleArktypeMock);
 
-import * as drizzleArktype from '../../src/runtime/drizzle-arktype';
-import * as drizzleValibot from '../../src/runtime/drizzle-valibot';
-import * as drizzleZod from '../../src/runtime/drizzle-zod';
+import * as drizzleArktype from '../../src/runtime/drizzle-arktype.ts';
+import * as drizzleValibot from '../../src/runtime/drizzle-valibot.ts';
+import * as drizzleZod from '../../src/runtime/drizzle-zod.ts';
 
 describe('drizzle validator runtimes', () => {
   it('re-exports drizzle-zod', () => {

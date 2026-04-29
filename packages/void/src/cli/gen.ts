@@ -10,14 +10,14 @@ import {
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { intro, outro, log, select, isCancel, cancel } from '@clack/prompts';
-import { ensureProjectTsconfig } from '../codegen/project-tsconfig';
-import { readConfig, getDatabaseDialect } from '../config';
-import { writeDrizzleConfig } from '../drizzle/config';
-import { collectMigrations, readJournal } from '../migrations/collect';
-import { assertJournalCoherence, listDrizzleArtifacts } from '../migrations/validate';
-import type { GenArgs } from './gen-args';
-import { cliTitle } from './output';
-import { buildDrizzleKitSpawnEnv } from './yarn-pnp';
+import { ensureProjectTsconfig } from '../codegen/project-tsconfig.ts';
+import { readConfig, getDatabaseDialect } from '../config.ts';
+import { writeDrizzleConfig } from '../drizzle/config.ts';
+import { collectMigrations, readJournal } from '../migrations/collect.ts';
+import { assertJournalCoherence, listDrizzleArtifacts } from '../migrations/validate.ts';
+import type { GenArgs } from './gen-args.ts';
+import { cliTitle } from './output.ts';
+import { buildDrizzleKitSpawnEnv } from './yarn-pnp.ts';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 

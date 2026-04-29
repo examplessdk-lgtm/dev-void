@@ -1,14 +1,14 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname, basename, extname } from 'node:path';
 import { glob } from 'tinyglobby';
-import { parseRouteFilename } from '../router/parse-filename';
-import { resolveNamedLayout } from './layout-resolution';
+import { parseRouteFilename } from '../router/parse-filename.ts';
+import { resolveNamedLayout } from './layout-resolution.ts';
 import type {
   PageDefinition,
   LayoutDefinition,
   NamedLayoutDefinition,
   PageScanResult,
-} from './types';
+} from './types.ts';
 
 const COMPONENT_EXTENSIONS = ['vue', 'tsx', 'jsx', 'svelte', 'md'];
 const SERVER_EXTENSIONS = ['ts', 'tsx', 'js', 'mjs', 'mts'];
@@ -301,4 +301,4 @@ export {
   resolveLayoutChain,
   resolveNamedLayout,
   resolveEffectiveLayoutChain,
-} from './layout-resolution';
+} from './layout-resolution.ts';

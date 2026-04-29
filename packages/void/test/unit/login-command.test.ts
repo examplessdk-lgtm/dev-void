@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { runLoginCommand } from '../../src/cli/login';
+import { runLoginCommand } from '../../src/cli/login.ts';
 
 const mockWarn = vi.fn();
 const mockError = vi.fn();

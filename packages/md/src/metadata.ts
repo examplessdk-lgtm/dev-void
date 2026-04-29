@@ -2,7 +2,7 @@ import matter from 'gray-matter';
 import MarkdownExit from 'markdown-exit';
 import type { Token } from 'markdown-exit';
 import anchor from 'markdown-it-anchor';
-import type { Heading } from './compile';
+import type { Heading } from './compile.ts';
 
 let metadataCompiler: MarkdownExit | null = null;
 

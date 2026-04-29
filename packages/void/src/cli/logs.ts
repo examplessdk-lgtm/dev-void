@@ -1,8 +1,8 @@
 import { intro, outro, log } from '@clack/prompts';
-import { getToken } from './auth';
-import { PlatformClient, type LogEntry } from './client';
-import { cliTitle, dim, pc } from './output';
-import { readProjectConfig } from './project';
+import { getToken } from './auth.ts';
+import { PlatformClient, type LogEntry } from './client.ts';
+import { cliTitle, dim, pc } from './output.ts';
+import { readProjectConfig } from './project.ts';
 
 export async function runLogsCommand(
   root: string,

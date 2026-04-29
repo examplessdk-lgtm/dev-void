@@ -1,4 +1,4 @@
-import type { SubcommandDef } from './subcommand-prompt';
+import type { SubcommandDef } from './subcommand-prompt.ts';
 
 export const projectSubcommands: Array<SubcommandDef> = [
   { name: 'status', arg: '[name]', description: 'Show deployments (omit name for linked project)' },

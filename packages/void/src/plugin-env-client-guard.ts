@@ -10,7 +10,7 @@ import {
   type AstMemberExpression,
   type AstNode,
   type AstProgram,
-} from './shared/ast';
+} from './shared/ast.ts';
 
 type EnvPublicModule = {
   _getRegisteredSchema(): Record<string, unknown> | null;
@@ -23,7 +23,7 @@ async function loadEnvPublic(): Promise<EnvPublicModule> {
   if (cachedModule) {
     return cachedModule;
   }
-  const mod = (await import('./runtime/env-public')) as unknown as EnvPublicModule;
+  const mod = (await import('./runtime/env-public.ts')) as unknown as EnvPublicModule;
   cachedModule = mod;
   return mod;
 }

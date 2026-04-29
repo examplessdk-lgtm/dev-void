@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import type { Props } from './sandbox.server';
+import type { Props } from './sandbox.server.ts';
 
 const props = defineProps<Props>();
 

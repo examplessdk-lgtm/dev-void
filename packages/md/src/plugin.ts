@@ -3,14 +3,14 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { dirname, join, relative, resolve } from 'node:path';
 import { glob } from 'tinyglobby';
 import { normalizePath, type Plugin, type ResolvedConfig, type ViteDevServer } from 'vite';
-import { generateMdTypes } from './codegen/md-types';
-import type { CompileOptions } from './compile';
-import { emitReactComponent, emitReactComponentWithIslands } from './emit-react';
-import { emitSolidComponent, emitSolidComponentWithIslands } from './emit-solid';
-import { emitSvelteComponent, emitSvelteComponentWithIslands } from './emit-svelte';
-import { emitVueComponent, emitVueComponentWithIslands } from './emit-vue';
-import { extractScript } from './extract-script';
-import { extractMetadata } from './metadata';
+import { generateMdTypes } from './codegen/md-types.ts';
+import type { CompileOptions } from './compile.ts';
+import { emitReactComponent, emitReactComponentWithIslands } from './emit-react.ts';
+import { emitSolidComponent, emitSolidComponentWithIslands } from './emit-solid.ts';
+import { emitSvelteComponent, emitSvelteComponentWithIslands } from './emit-svelte.ts';
+import { emitVueComponent, emitVueComponentWithIslands } from './emit-vue.ts';
+import { extractScript } from './extract-script.ts';
+import { extractMetadata } from './metadata.ts';
 
 const MD_CLIENT_ENTRY_ID = 'virtual:void-md-client';
 
@@ -332,7 +332,7 @@ export function useFrontmatter() { return useContext(FrontmatterContext) ?? {}; 
             imp.islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '');
           }
 
-          const { compile } = await import('./compile');
+          const { compile } = await import('./compile.ts');
           const result = await compile(body, { shiki: options?.shiki });
 
           if (adapter === 'vue') {
@@ -407,5 +407,5 @@ function generateMdClientEntry(scripts: Map<string, string>): string {
   return lines.join('\n');
 }
 
-export type { CompileOptions, CompileResult } from './compile';
-export type { IslandImport, ScriptExtraction } from './extract-script';
+export type { CompileOptions, CompileResult } from './compile.ts';
+export type { IslandImport, ScriptExtraction } from './extract-script.ts';

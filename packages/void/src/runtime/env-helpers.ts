@@ -1,4 +1,4 @@
-import type { SecretOverride } from '../shared/env-mask';
+import type { SecretOverride } from '../shared/env-mask.ts';
 /**
  * Built-in env schema helpers — Standard Schema-conformant.
  *
@@ -9,7 +9,7 @@ import type { SecretOverride } from '../shared/env-mask';
  * Every helper returns a fluent builder with `.optional()` and
  * `.default(value)` modifiers.
  */
-import type { StandardSchemaV1 } from '../standard-schema';
+import type { StandardSchemaV1 } from '../standard-schema.ts';
 
 interface ParseResult<T> {
   ok: true;

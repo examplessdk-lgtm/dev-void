@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { defer, separateDeferred, DEFERRED } from '../../src/pages/defer';
+import { defer, separateDeferred, DEFERRED } from '../../src/pages/defer.ts';
 
 describe('defer', () => {
   it('single prop — returns sentinel with null group', () => {

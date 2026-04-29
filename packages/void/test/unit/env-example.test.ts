@@ -5,8 +5,8 @@ import {
   ENV_EXAMPLE_END_MARKER,
   ENV_EXAMPLE_START_MARKER,
   formatEnvExample,
-} from '../../src/cli/env-example';
-import { boolean, json, number, oneOf, string, url } from '../../src/runtime/env-helpers';
+} from '../../src/cli/env-example.ts';
+import { boolean, json, number, oneOf, string, url } from '../../src/runtime/env-helpers.ts';
 
 describe('classifySchema', () => {
   it('classifies a plain string() as required', () => {

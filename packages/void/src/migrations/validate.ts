@@ -1,6 +1,11 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { readJournal, stripSqlExt, type DrizzleJournal, type DrizzleJournalEntry } from './collect';
+import {
+  readJournal,
+  stripSqlExt,
+  type DrizzleJournal,
+  type DrizzleJournalEntry,
+} from './collect.ts';
 
 export interface MigrationFile {
   name: string;

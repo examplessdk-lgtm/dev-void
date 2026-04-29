@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { discoverSchema, schemaSpecifier } from './discover';
+import { discoverSchema, schemaSpecifier } from './discover.ts';
 
 /**
  * Write a temporary drizzle-kit config to `.void/drizzle.config.json`.

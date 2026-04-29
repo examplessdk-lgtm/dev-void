@@ -8,9 +8,9 @@ import {
   LATEST_KNOWN_COMPAT_DATE,
   readWranglerCompat,
   syncWranglerBindings,
-} from '../../src/cli/wrangler';
-import type { VoidConfig } from '../../src/config';
-import type { InferredBindings } from '../../src/inference/walk';
+} from '../../src/cli/wrangler.ts';
+import type { VoidConfig } from '../../src/config.ts';
+import type { InferredBindings } from '../../src/inference/walk.ts';
 
 const tmpDir = join(import.meta.dirname, '.tmp-wrangler-test');
 

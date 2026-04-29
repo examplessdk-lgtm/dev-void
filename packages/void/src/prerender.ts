@@ -11,12 +11,12 @@ import { createRequire } from 'node:module';
 import { dirname, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadEnv } from 'vite';
-import { getToken, isStagingMode } from './cli/auth';
-import { readWranglerCompat } from './cli/wrangler';
-import { readConfig } from './config';
-import { voidLog, voidWarn } from './log';
-import { filterLoadedEnv, stripInternalEnvKeys } from './shared/env';
-import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy';
+import { getToken, isStagingMode } from './cli/auth.ts';
+import { readWranglerCompat } from './cli/wrangler.ts';
+import { readConfig } from './config.ts';
+import { voidLog, voidWarn } from './log.ts';
+import { filterLoadedEnv, stripInternalEnvKeys } from './shared/env.ts';
+import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy.ts';
 
 const PRERENDER_PATHS_ENDPOINT = '/__void/prerender-paths';
 const STATIC_PAGE_DATA_DIR = '_void/pages';

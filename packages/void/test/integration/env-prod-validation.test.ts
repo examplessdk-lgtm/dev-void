@@ -2,9 +2,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { formatEnvReport, validateProdEnv } from '../../src/cli/env-validation';
-import { number, string } from '../../src/runtime/env-helpers';
-import { defineEnv } from '../../src/runtime/env-public';
+import { formatEnvReport, validateProdEnv } from '../../src/cli/env-validation.ts';
+import { number, string } from '../../src/runtime/env-helpers.ts';
+import { defineEnv } from '../../src/runtime/env-public.ts';
 
 /**
  * Integration coverage for the deploy-time env validation path. The

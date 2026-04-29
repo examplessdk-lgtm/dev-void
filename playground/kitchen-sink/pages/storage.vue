@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useForm } from '@void/vue';
 import { ref } from 'vue';
-import type { Props } from './storage.server';
+import type { Props } from './storage.server.ts';
 
 defineProps<Props>();
 

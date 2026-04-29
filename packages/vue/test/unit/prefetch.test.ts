@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseCacheFor, PrefetchCache } from '../../src/runtime/prefetch';
+import { parseCacheFor, PrefetchCache } from '../../src/runtime/prefetch.ts';
 
 describe('parseCacheFor', () => {
   it('passes numbers through as milliseconds', () => {

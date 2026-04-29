@@ -1,4 +1,4 @@
-import type { PageObject } from './protocol';
+import type { PageObject } from './protocol.ts';
 
 export type ActionErrorHandlingScope = 'callSite' | 'boundary';
 

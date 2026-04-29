@@ -5,7 +5,7 @@ import {
   isAbortError,
   submitAction,
   type VoidRouter,
-} from '../../src/pages/client';
+} from '../../src/pages/client.ts';
 
 function routerWithVisit(visit: VoidRouter['visit']): VoidRouter {
   return {

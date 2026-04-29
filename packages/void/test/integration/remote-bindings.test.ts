@@ -1,10 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ProxyClient } from '../../src/runtime/remote/client';
-import { ProxyD1Database } from '../../src/runtime/remote/d1';
-import { createRemoteEnv } from '../../src/runtime/remote/index';
-import { ProxyKVNamespace } from '../../src/runtime/remote/kv';
-import { ProxyR2Bucket } from '../../src/runtime/remote/r2';
+import { ProxyClient } from '../../src/runtime/remote/client.ts';
+import { ProxyD1Database } from '../../src/runtime/remote/d1.ts';
+import { createRemoteEnv } from '../../src/runtime/remote/index.ts';
+import { ProxyKVNamespace } from '../../src/runtime/remote/kv.ts';
+import { ProxyR2Bucket } from '../../src/runtime/remote/r2.ts';
 
 const TOKEN = 'test-jwt';
 const PROJECT_ID = 'proj_test';

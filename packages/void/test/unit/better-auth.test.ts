@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveVoidAuthOptions } from '../../src/runtime/better-auth';
+import { resolveVoidAuthOptions } from '../../src/runtime/better-auth.ts';
 
 describe('resolveVoidAuthOptions', () => {
   it('defaults to email auth when no providers are configured', async () => {

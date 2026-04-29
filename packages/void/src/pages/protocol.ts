@@ -1,8 +1,8 @@
-import type { CloudBindings, CloudContext } from '../runtime/handler';
-import { isConvertedResponse } from '../runtime/response';
-import { DEFERRED, separateDeferred, type ResolvedDeferredGroup } from './defer';
-import { resolveHead, type HeadDescriptor, type HeadConfig } from './head';
-import { ValidationError } from './validation-error';
+import type { CloudBindings, CloudContext } from '../runtime/handler.ts';
+import { isConvertedResponse } from '../runtime/response.ts';
+import { DEFERRED, separateDeferred, type ResolvedDeferredGroup } from './defer.ts';
+import { resolveHead, type HeadDescriptor, type HeadConfig } from './head.ts';
+import { ValidationError } from './validation-error.ts';
 
 export { ValidationError };
 

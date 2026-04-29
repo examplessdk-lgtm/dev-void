@@ -1,14 +1,14 @@
-import type { StandardSchemaV1 } from '../standard-schema';
-import { authContext, type AuthState, type AuthUser } from './auth';
-import type { VoidAuthEnv, VoidAuthRuntimeOptions } from './better-auth-shared';
-import type { CloudEnv } from './handler';
+import type { StandardSchemaV1 } from '../standard-schema.ts';
+import { authContext, type AuthState, type AuthUser } from './auth.ts';
+import type { VoidAuthEnv, VoidAuthRuntimeOptions } from './better-auth-shared.ts';
+import type { CloudEnv } from './handler.ts';
 import type {
   AnyWebSocketDefinition,
   RoomController,
   RoomDefinition,
   SocketDefinition,
   WebSocketConnection,
-} from './ws';
+} from './ws.ts';
 
 export interface WebSocketRouteMeta {
   pattern: string;

@@ -1,5 +1,5 @@
 /// <reference lib="dom" />
-import type { HeadDescriptor } from './head';
+import type { HeadDescriptor } from './head.ts';
 
 const ATTR = 'data-void-head';
 

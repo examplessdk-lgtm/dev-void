@@ -1,9 +1,9 @@
 import { log } from '@clack/prompts';
-import { PlatformApiError, type PlatformClient } from './client';
-import { pc } from './output';
-import { writeProjectConfig, type ProjectConfig } from './project';
-import { promptProjectSlug } from './prompt';
-import { inferDefaultSlug } from './resolve-project';
+import { PlatformApiError, type PlatformClient } from './client.ts';
+import { pc } from './output.ts';
+import { writeProjectConfig, type ProjectConfig } from './project.ts';
+import { promptProjectSlug } from './prompt.ts';
+import { inferDefaultSlug } from './resolve-project.ts';
 
 export async function promptAndCreateProject(
   root: string,

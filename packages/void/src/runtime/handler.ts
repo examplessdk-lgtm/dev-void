@@ -1,9 +1,9 @@
 import type { Context, Env, MiddlewareHandler } from 'hono';
 import type { RewriteDestination } from 'void/routes';
-import type { HeadDescriptor } from '../pages/head';
-import type { AuthSession, AuthUser } from './auth';
-import { convertReturnValue } from './response';
-import { runValidation, type ValidatorSlots, type HandlerInput } from './validator';
+import type { HeadDescriptor } from '../pages/head.ts';
+import type { AuthSession, AuthUser } from './auth.ts';
+import { convertReturnValue } from './response.ts';
+import { runValidation, type ValidatorSlots, type HandlerInput } from './validator.ts';
 
 /**
  * Thrown when `c.rewrite()` is called with a destination whose final path
@@ -32,7 +32,7 @@ export class VoidAssetRewriteError extends Error {
 export interface CloudContextVariables {
   user: AuthUser | null;
   session: AuthSession | null;
-  headDefaults?: import('../pages/head').HeadDescriptor;
+  headDefaults?: import('../pages/head.ts').HeadDescriptor;
   [key: string]: unknown;
 }
 
@@ -315,7 +315,7 @@ export function defineQueue<T = unknown>(handler: QueueFn<T>): TypedQueueHandler
   return handler as TypedQueueHandler<T>;
 }
 
-export type { ValidatorSlots, HandlerInput } from './validator';
-export { ValidationError } from '../pages/validation-error';
-export { defer } from '../pages/defer';
-export type { Deferred, InferProps } from '../pages/defer';
+export type { ValidatorSlots, HandlerInput } from './validator.ts';
+export { ValidationError } from '../pages/validation-error.ts';
+export { defer } from '../pages/defer.ts';
+export type { Deferred, InferProps } from '../pages/defer.ts';

@@ -6,7 +6,7 @@ import {
   renderBodyAttrs,
   type HeadConfig,
   type HeadDescriptor,
-} from '../../src/pages/head';
+} from '../../src/pages/head.ts';
 
 describe('resolveHead', () => {
   it('returns undefined when all inputs are undefined', () => {

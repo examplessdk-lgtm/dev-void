@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { routingPlugin } from '../../src/plugin-routing';
+import { routingPlugin } from '../../src/plugin-routing.ts';
 
 const tempDirs: Array<string> = [];
 

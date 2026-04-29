@@ -1,11 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RewriteDestination } from 'void/routes';
-import type { DevRedirectRule, HeaderRule, RedirectRule } from './cli/types';
+import type { DevRedirectRule, HeaderRule, RedirectRule } from './cli/types.ts';
 export type { RedirectRule };
-import { VOID_AUTH_PROVIDERS, isVoidAuthProvider, type VoidAuthProvider } from './auth/providers';
-import type { HeadConfig } from './pages/head';
-import type { SandboxConfig, SandboxInstanceType } from './sandbox/config';
+import {
+  VOID_AUTH_PROVIDERS,
+  isVoidAuthProvider,
+  type VoidAuthProvider,
+} from './auth/providers.ts';
+import type { HeadConfig } from './pages/head.ts';
+import type { SandboxConfig, SandboxInstanceType } from './sandbox/config.ts';
 
 /** Redirect destination — string (302) or object with explicit status. */
 export type RedirectDestination = string | { to: string; status?: 301 | 302 | 303 | 307 | 308 };

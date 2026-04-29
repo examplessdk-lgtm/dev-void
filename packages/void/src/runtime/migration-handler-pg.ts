@@ -1,4 +1,4 @@
-import type { MigrationEntry, MigrationResponse, MigrationResult } from './migration-handler';
+import type { MigrationEntry, MigrationResponse, MigrationResult } from './migration-handler.ts';
 
 export function createMigrationHandler(
   env: Record<string, unknown>,

@@ -1,25 +1,35 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+export interface ProjectTsconfigOptions {
+  redirectDbModule?: boolean;
+}
+
+export interface ProjectTsconfig {
+  files: Array<string>;
+  compilerOptions?: {
+    paths?: Record<string, Array<string>>;
+  };
+}
+
 /**
- * Ensure .void/tsconfig.json exists so the user's root tsconfig can
- * extend it. Lists the generated declaration files so TypeScript discovers
- * them via the `files` field (which is inherited by `extends`, unlike `include`).
+ * Build the generated .void/tsconfig.json contents. Lists the generated
+ * declaration files so TypeScript discovers them via the `files` field
+ * (which is inherited by `extends`, unlike `include`).
  *
  * @param hasRouteTypes - When true, include routes.d.ts. When omitted,
  *   auto-detect by checking for a routes/ directory.
  * @param hasDrizzle - When true, configure `@schema` paths for the user's
  *   Drizzle schema.
  */
-export function ensureProjectTsconfig(
+export function createProjectTsconfig(
   root: string,
   hasRouteTypes?: boolean,
   hasDb?: boolean,
   hasSchema?: boolean,
-  options: { redirectDbModule?: boolean } = {},
-): void {
+  options: ProjectTsconfigOptions = {},
+): ProjectTsconfig {
   const outDir = join(root, '.void');
-  mkdirSync(outDir, { recursive: true });
   const includeRoutes = hasRouteTypes ?? existsSync(join(root, 'routes'));
   const includeQueues = existsSync(join(root, 'queues'));
   const includeMd = existsSync(join(outDir, 'md.d.ts'));
@@ -32,7 +42,7 @@ export function ensureProjectTsconfig(
     ...(includeEnv ? ['env.d.ts'] : []),
   ];
 
-  const tsconfig: Record<string, unknown> = { files };
+  const tsconfig: ProjectTsconfig = { files };
 
   if (hasDb) {
     const paths: Record<string, Array<string>> = {};
@@ -59,9 +69,7 @@ export function ensureProjectTsconfig(
   }
 
   if (includeRoutes) {
-    const compilerOptions = (tsconfig.compilerOptions ??= {}) as {
-      paths?: Record<string, Array<string>>;
-    };
+    const compilerOptions = (tsconfig.compilerOptions ??= {});
     const paths = (compilerOptions.paths ??= {});
 
     // moduleResolution: "bundler" prefers the resolved package file for
@@ -70,9 +78,7 @@ export function ensureProjectTsconfig(
   }
 
   if (includeQueues) {
-    const compilerOptions = (tsconfig.compilerOptions ??= {}) as {
-      paths?: Record<string, Array<string>>;
-    };
+    const compilerOptions = (tsconfig.compilerOptions ??= {});
     const paths = (compilerOptions.paths ??= {});
 
     // Same issue as void/routes: with moduleResolution "bundler", TypeScript
@@ -82,9 +88,7 @@ export function ensureProjectTsconfig(
   }
 
   if (includeMd) {
-    const compilerOptions = (tsconfig.compilerOptions ??= {}) as {
-      paths?: Record<string, Array<string>>;
-    };
+    const compilerOptions = (tsconfig.compilerOptions ??= {});
     const paths = (compilerOptions.paths ??= {});
 
     // Override the package export stub with the generated project-local
@@ -92,5 +96,21 @@ export function ensureProjectTsconfig(
     paths['@void/md/pages'] = ['./md.d.ts'];
   }
 
+  return tsconfig;
+}
+
+/**
+ * Ensure .void/tsconfig.json exists so the user's root tsconfig can extend it.
+ */
+export function ensureProjectTsconfig(
+  root: string,
+  hasRouteTypes?: boolean,
+  hasDb?: boolean,
+  hasSchema?: boolean,
+  options: ProjectTsconfigOptions = {},
+): void {
+  const outDir = join(root, '.void');
+  mkdirSync(outDir, { recursive: true });
+  const tsconfig = createProjectTsconfig(root, hasRouteTypes, hasDb, hasSchema, options);
   writeFileSync(join(outDir, 'tsconfig.json'), JSON.stringify(tsconfig, null, 2) + '\n');
 }

@@ -1,10 +1,10 @@
 import { intro, outro, log, cancel } from '@clack/prompts';
-import { getToken, getSiteDomain } from './auth';
-import { PlatformClient } from './client';
-import { promptAndCreateProject } from './create-project';
-import { cliTitle, pc } from './output';
-import { readProjectConfig, writeProjectConfig } from './project';
-import { promptProjectSelection } from './prompt';
+import { getToken, getSiteDomain } from './auth.ts';
+import { PlatformClient } from './client.ts';
+import { promptAndCreateProject } from './create-project.ts';
+import { cliTitle, pc } from './output.ts';
+import { readProjectConfig, writeProjectConfig } from './project.ts';
+import { promptProjectSelection } from './prompt.ts';
 
 export async function runLink(root: string, slug?: string): Promise<void> {
   console.log();

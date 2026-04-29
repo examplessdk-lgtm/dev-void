@@ -8,7 +8,7 @@ import {
   parseDotenv,
   parseDotenvFile,
   parseDotenvLine,
-} from '../../src/shared/dotenv';
+} from '../../src/shared/dotenv.ts';
 
 /**
  * Parser + expander unit coverage. These are the lowest-level helpers behind

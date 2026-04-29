@@ -2,11 +2,11 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
 import { hash as blake3hash } from 'blake3-jit';
 import ignore from 'ignore';
-import type { InferredBindings } from '../inference/walk';
-import type { MigrationFile } from '../migrations/validate';
-import type { WebSocketRouteDefinition } from '../router/websocket';
-import type { ResolvedSandboxConfig } from '../sandbox/config';
-import { toSlash } from '../shared/utils';
+import type { InferredBindings } from '../inference/walk.ts';
+import type { MigrationFile } from '../migrations/validate.ts';
+import type { WebSocketRouteDefinition } from '../router/websocket.ts';
+import type { ResolvedSandboxConfig } from '../sandbox/config.ts';
+import { toSlash } from '../shared/utils.ts';
 import type {
   AssetConfig,
   DeployManifest,
@@ -17,7 +17,7 @@ import type {
   SandboxManifestMeta,
   ScheduleMeta,
   WebSocketManifestMeta,
-} from './types';
+} from './types.ts';
 
 const textEncoder = new TextEncoder();
 

@@ -49,7 +49,7 @@ function captureOutput(): { output: () => string; restore: () => void } {
 
 async function importRunPurgeCacheCommand() {
   vi.resetModules();
-  const mod = await import('../../src/cli/cache');
+  const mod = await import('../../src/cli/cache.ts');
   return mod.runPurgeCacheCommand;
 }
 

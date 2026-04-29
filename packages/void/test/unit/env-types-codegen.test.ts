@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 import { describe, it, expect } from 'vitest';
-import { generateEnvTypes, findEnvFile } from '../../src/codegen/env-types';
+import { generateEnvTypes, findEnvFile } from '../../src/codegen/env-types.ts';
 
 function withTempProject(setup: (root: string) => void): {
   root: string;
@@ -91,8 +91,8 @@ describe('generateEnvTypes', () => {
       expect(dts).toContain('declare module "void/handler"');
       expect(dts).toContain('interface ValidatedEnv extends _VoidEnvShape');
       expect(dts).toContain('interface CloudBindings extends _VoidEnvShape');
-      // Path is relative to outDir and stripped of extension.
-      expect(dts).toContain('typeof import("../env")');
+      // Path is relative to outDir and keeps the source extension for NodeNext.
+      expect(dts).toContain('typeof import("../env.ts")');
       // Resolves both `export default defineEnv(...)` and
       // `export const env = defineEnv(...)` source forms.
       expect(dts).toContain('_VoidEnvSchema extends { default: infer D } ? D');
@@ -128,7 +128,7 @@ describe('generateEnvTypes', () => {
     try {
       const outDir = join(root, '.void');
       const { dts } = generateEnvTypes(join(root, 'src', 'env.ts'), outDir);
-      expect(dts).toContain('typeof import("../src/env")');
+      expect(dts).toContain('typeof import("../src/env.ts")');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

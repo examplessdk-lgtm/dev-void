@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Link } from "@void/svelte";
-  import type { Props } from "./index.server";
+  import type { Props } from "./index.server.ts";
 
   let { title }: Props = $props();
 </script>

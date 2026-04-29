@@ -12,8 +12,8 @@ import {
   type AstProgram,
   type AstProperty,
   type AstVariableDeclaration,
-} from '../shared/ast';
-import { parseWebSocketFilename, type RouteDefinition } from './parse-filename';
+} from '../shared/ast.ts';
+import { parseWebSocketFilename, type RouteDefinition } from './parse-filename.ts';
 
 const HANDLER_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
 const WEBSOCKET_ROUTE_RE = /(?:\.(?:dev|prod))?\.ws\.(?:ts|mts|js|mjs)$/;

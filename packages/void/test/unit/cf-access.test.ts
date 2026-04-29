@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cfAccessHeaders } from '../../src/shared/cf-access';
+import { cfAccessHeaders } from '../../src/shared/cf-access.ts';
 
 describe('cfAccessHeaders', () => {
   it('returns empty when nothing is set', () => {
@@ -70,27 +70,27 @@ describe('ensureCloudflaredToken', () => {
   it('does not probe when service token is present', async () => {
     process.env.CF_ACCESS_CLIENT_ID = 'id';
     process.env.CF_ACCESS_CLIENT_SECRET = 'secret';
-    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access');
+    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access.ts');
     ensureCloudflaredToken('https://api.staging.void.cloud');
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
   it('does not probe when CF_ACCESS_TOKEN is already set', async () => {
     process.env.CF_ACCESS_TOKEN = 'jwt';
-    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access');
+    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access.ts');
     ensureCloudflaredToken('https://api.staging.void.cloud');
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
   it('does not probe non-gated hosts', async () => {
-    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access');
+    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access.ts');
     ensureCloudflaredToken('https://api.void.cloud');
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
   it('does not poison the cache when a non-gated host is hit first', async () => {
     spawnSyncMock.mockReturnValue({ status: 0, stdout: 'mocked-jwt' });
-    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access');
+    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access.ts');
 
     // First: non-gated host. Should be a noop.
     ensureCloudflaredToken('https://api.void.cloud');
@@ -104,7 +104,7 @@ describe('ensureCloudflaredToken', () => {
 
   it('caches per gated host so the same host is not probed twice', async () => {
     spawnSyncMock.mockReturnValue({ status: 0, stdout: 'jwt-a' });
-    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access');
+    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access.ts');
 
     ensureCloudflaredToken('https://api.staging.void.cloud');
     ensureCloudflaredToken('https://api.staging.void.cloud/some/path');
@@ -113,7 +113,7 @@ describe('ensureCloudflaredToken', () => {
 
   it('skips re-probing once CF_ACCESS_TOKEN has been populated by an earlier probe', async () => {
     spawnSyncMock.mockReturnValue({ status: 0, stdout: 'jwt-a' });
-    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access');
+    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access.ts');
 
     // First gated host triggers probe and sets the env var.
     ensureCloudflaredToken('https://api.staging.void.cloud');

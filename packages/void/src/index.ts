@@ -4,40 +4,40 @@ import { fileURLToPath } from 'node:url';
 import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vite-plugin';
 import pc from 'picocolors';
 import { loadEnv, type Plugin } from 'vite';
-import { findVoidAuthConfig } from './auth/config';
-import { getToken, isStagingMode } from './cli/auth';
-import { readProjectConfig } from './cli/project';
+import { findVoidAuthConfig } from './auth/config.ts';
+import { getToken, isStagingMode } from './cli/auth.ts';
+import { readProjectConfig } from './cli/project.ts';
 import {
   ensureWranglerCompatibilityDate,
   ensureWranglerNodejsAlsFlag,
   readWranglerCompat,
   syncWranglerBindings,
-} from './cli/wrangler';
-import { readConfig, resolveBindingNames, isNodeTarget, getDatabaseDialect } from './config';
-import { scanJobsSync } from './crons/scan';
-import { inferBindingsFromSource } from './inference/walk';
-import { voidLog, voidWarn, voidError } from './log';
-import { drizzlePlugin } from './plugin-drizzle';
-import { envClientFoldPlugin } from './plugin-env-client-fold';
-import { envClientGuardPlugin } from './plugin-env-client-guard';
-import { envSchemaPlugin } from './plugin-env-schema';
+} from './cli/wrangler.ts';
+import { readConfig, resolveBindingNames, isNodeTarget, getDatabaseDialect } from './config.ts';
+import { scanJobsSync } from './crons/scan.ts';
+import { inferBindingsFromSource } from './inference/walk.ts';
+import { voidLog, voidWarn, voidError } from './log.ts';
+import { drizzlePlugin } from './plugin-drizzle.ts';
+import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
+import { envClientGuardPlugin } from './plugin-env-client-guard.ts';
+import { envSchemaPlugin } from './plugin-env-schema.ts';
 import {
   inferProjectBindings,
   detectFramework,
   FRAMEWORK_SCAN_DIRS,
   type Framework,
-} from './plugin-inference';
-import { migrationPlugin } from './plugin-migration';
-import { nodeTargetPlugin } from './plugin-node-target';
-import { prerenderPlugin } from './plugin-prerender';
-import { restartPlugin } from './plugin-restart';
-import { routingPlugin } from './plugin-routing';
-import { scanQueuesSync } from './queues/scan';
-import { scanWebSocketRoutesSync } from './router/websocket';
-import { SANDBOX_MIGRATION_TAG, isSandboxEnabled, resolveSandboxConfig } from './sandbox/config';
-import { filterLoadedEnv, resolveRemoteMode, stripInternalEnvKeys } from './shared/env';
-import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy';
-import { validateSsrEntry } from './ssr/entry';
+} from './plugin-inference.ts';
+import { migrationPlugin } from './plugin-migration.ts';
+import { nodeTargetPlugin } from './plugin-node-target.ts';
+import { prerenderPlugin } from './plugin-prerender.ts';
+import { restartPlugin } from './plugin-restart.ts';
+import { routingPlugin } from './plugin-routing.ts';
+import { scanQueuesSync } from './queues/scan.ts';
+import { scanWebSocketRoutesSync } from './router/websocket.ts';
+import { SANDBOX_MIGRATION_TAG, isSandboxEnabled, resolveSandboxConfig } from './sandbox/config.ts';
+import { filterLoadedEnv, resolveRemoteMode, stripInternalEnvKeys } from './shared/env.ts';
+import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy.ts';
+import { validateSsrEntry } from './ssr/entry.ts';
 
 /** Resolve the server entry module for a Class A framework. */
 function getFrameworkEntry(framework: Framework, root: string): string {
@@ -200,14 +200,14 @@ async function runAiSetupPrompt(
   server: import('vite').ViteDevServer,
 ): Promise<void> {
   const { select, text, isCancel, log } = await import('@clack/prompts');
-  const { PlatformClient } = await import('./cli/client');
-  const { writeProjectConfig } = await import('./cli/project');
-  const { inferDefaultSlug } = await import('./cli/resolve-project');
+  const { PlatformClient } = await import('./cli/client.ts');
+  const { writeProjectConfig } = await import('./cli/project.ts');
+  const { inferDefaultSlug } = await import('./cli/resolve-project.ts');
 
   const apiUrl = staging ? STAGING_API_URL : DEFAULT_API_URL;
   const client = new PlatformClient(token, apiUrl);
 
-  let projects: Array<import('./cli/client').ProjectResponse>;
+  let projects: Array<import('./cli/client.ts').ProjectResponse>;
   try {
     projects = await client.listProjects();
   } catch {
@@ -217,7 +217,7 @@ async function runAiSetupPrompt(
 
   const options = [
     { value: '__create__' as const, label: 'Create new project' },
-    ...projects.map((p: import('./cli/client').ProjectResponse) => ({
+    ...projects.map((p: import('./cli/client.ts').ProjectResponse) => ({
       value: p.id,
       label: p.slug,
     })),
@@ -269,7 +269,9 @@ async function runAiSetupPrompt(
     }
     log.success(`Project created: ${pc.blue(slug)}`);
   } else {
-    const project = projects.find((p: import('./cli/client').ProjectResponse) => p.id === result)!;
+    const project = projects.find(
+      (p: import('./cli/client.ts').ProjectResponse) => p.id === result,
+    )!;
     projectId = project.id;
     slug = project.slug;
   }
@@ -1148,7 +1150,7 @@ export {
   defineHead,
   defineQueue,
   VoidAssetRewriteError,
-} from './runtime/handler';
+} from './runtime/handler.ts';
 export type {
   CloudContext,
   CloudContextVariables,
@@ -1159,10 +1161,10 @@ export type {
   QueueBatch,
   QueueMessage,
   QueueRetryOptions,
-} from './runtime/handler';
-export type { ValidatorSlots, HandlerInput } from './runtime/validator';
-export type { AuthUser } from './runtime/auth';
-export type { QueueMap } from './runtime/queues';
-export { defer } from './pages/defer';
-export type { Deferred, DeferredState, InferProps } from './pages/defer';
-export type { HeadDescriptor } from './pages/head';
+} from './runtime/handler.ts';
+export type { ValidatorSlots, HandlerInput } from './runtime/validator.ts';
+export type { AuthUser } from './runtime/auth.ts';
+export type { QueueMap } from './runtime/queues.ts';
+export { defer } from './pages/defer.ts';
+export type { Deferred, DeferredState, InferProps } from './pages/defer.ts';
+export type { HeadDescriptor } from './pages/head.ts';

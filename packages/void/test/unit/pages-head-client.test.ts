@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { applyClientHead } from '../../src/pages/head-client';
+import { applyClientHead } from '../../src/pages/head-client.ts';
 
 class HeadElement {
   readonly tagName: string;

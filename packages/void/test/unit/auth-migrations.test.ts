@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { VoidAuthMigrationSchema } from '../../src/auth/drizzle';
-import { resolveVoidAuthMigrationSchema } from '../../src/auth/drizzle';
+import type { VoidAuthMigrationSchema } from '../../src/auth/drizzle.ts';
+import { resolveVoidAuthMigrationSchema } from '../../src/auth/drizzle.ts';
 import {
   applyPgAuthMigrations,
   applySqliteAuthMigrations,
-} from '../../src/runtime/auth-migrations';
+} from '../../src/runtime/auth-migrations.ts';
 
 describe('auth migration runner', () => {
   it('applies the sqlite auth schema idempotently', async () => {

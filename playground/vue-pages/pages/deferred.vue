@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Props } from './deferred.server';
+import type { Props } from './deferred.server.ts';
 
 defineProps<Props>();
 </script>

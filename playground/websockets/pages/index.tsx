@@ -1,5 +1,5 @@
 import { Link } from '@void/react';
-import type { Props } from './index.server';
+import type { Props } from './index.server.ts';
 
 export default function HomePage({ highlights }: Props) {
   return (

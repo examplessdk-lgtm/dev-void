@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { envClientFoldPlugin } from '../../src/plugin-env-client-fold';
-import { number, string } from '../../src/runtime/env-helpers';
-import { defineEnv } from '../../src/runtime/env-public';
+import { envClientFoldPlugin } from '../../src/plugin-env-client-fold.ts';
+import { number, string } from '../../src/runtime/env-helpers.ts';
+import { defineEnv } from '../../src/runtime/env-public.ts';
 
 const ROOT = '/project';
 type MessagePayload = string | { message: string };

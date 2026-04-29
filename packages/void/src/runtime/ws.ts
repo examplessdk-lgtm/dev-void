@@ -1,7 +1,7 @@
 import type { WebSocketRouteMap } from 'void/routes';
-import type { StandardSchemaV1 } from '../standard-schema';
-import type { AuthUser } from './auth';
-import type { CloudEnv } from './handler';
+import type { StandardSchemaV1 } from '../standard-schema.ts';
+import type { AuthUser } from './auth.ts';
+import type { CloudEnv } from './handler.ts';
 
 type MaybePromise<T> = T | Promise<T>;
 type ParamsRecord = Record<string, string>;

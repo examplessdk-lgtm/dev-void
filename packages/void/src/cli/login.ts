@@ -1,7 +1,14 @@
 import { intro, outro, log, select, isCancel, cancel } from '@clack/prompts';
-import { getToken, getTokenSource, removeToken, runLogin, saveToken, isStagingMode } from './auth';
-import { isExpiredTokenError, PlatformClient } from './client';
-import { cliTitle, createSpinner } from './output';
+import {
+  getToken,
+  getTokenSource,
+  removeToken,
+  runLogin,
+  saveToken,
+  isStagingMode,
+} from './auth.ts';
+import { isExpiredTokenError, PlatformClient } from './client.ts';
+import { cliTitle, createSpinner } from './output.ts';
 
 export async function promptForLoginToken(root: string = process.cwd()): Promise<string> {
   const provider = await select({

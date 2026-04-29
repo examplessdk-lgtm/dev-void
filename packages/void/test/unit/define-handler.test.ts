@@ -6,9 +6,9 @@ import {
   defineMiddleware,
   type CloudContext,
   type TypedHandler,
-} from '../../src/runtime/handler';
-import { convertReturnValue } from '../../src/runtime/response';
-import type { StandardSchemaV1 } from '../../src/standard-schema';
+} from '../../src/runtime/handler.ts';
+import { convertReturnValue } from '../../src/runtime/response.ts';
+import type { StandardSchemaV1 } from '../../src/standard-schema.ts';
 
 type ValidationIssueBody = {
   error: string;

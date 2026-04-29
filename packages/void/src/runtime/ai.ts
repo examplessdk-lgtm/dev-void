@@ -1,4 +1,4 @@
-import { cfAccessHeaders } from '../shared/cf-access';
+import { cfAccessHeaders } from '../shared/cf-access.ts';
 import {
   PROVIDER_KEY_MAP,
   type ThirdPartyModel,
@@ -8,8 +8,8 @@ import {
   type ImageEditOptions,
   type ImageGenerationInputs,
   type ImageGenerationOptions,
-} from './ai-types';
-import { getRawRuntimeEnv, type RuntimeEnv } from './env-raw';
+} from './ai-types.ts';
+import { getRawRuntimeEnv, type RuntimeEnv } from './env-raw.ts';
 
 const PROXY_URL = 'https://proxy.void.cloud/ai';
 const STAGING_PROXY_URL = 'https://proxy.staging.void.cloud/ai';
@@ -513,4 +513,4 @@ export type {
   ImageGenerationResponse,
   ImageGenerationData,
   ImageGenerationOptions,
-} from './ai-types';
+} from './ai-types.ts';

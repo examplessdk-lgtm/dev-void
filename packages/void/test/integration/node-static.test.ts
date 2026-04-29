@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http';
 import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { collectPrerenderPathsNode } from '../../src/prerender';
+import { collectPrerenderPathsNode } from '../../src/prerender.ts';
 
 declare global {
   interface Window {

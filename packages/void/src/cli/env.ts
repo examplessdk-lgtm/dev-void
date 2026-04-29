@@ -1,14 +1,14 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { intro, outro, log, note } from '@clack/prompts';
-import { findEnvFile, generateEnvTypes } from '../codegen/env-types';
-import { getToken } from './auth';
-import { PlatformClient } from './client';
-import type { EnvArgs } from './env-args';
-import { runEnvExample } from './env-example';
-import { fetchRemoteSecretNames, formatEnvReport, validateProdEnv } from './env-validation';
-import { cliTitle } from './output';
-import { readProjectConfig } from './project';
+import { findEnvFile, generateEnvTypes } from '../codegen/env-types.ts';
+import { getToken } from './auth.ts';
+import { PlatformClient } from './client.ts';
+import type { EnvArgs } from './env-args.ts';
+import { runEnvExample } from './env-example.ts';
+import { fetchRemoteSecretNames, formatEnvReport, validateProdEnv } from './env-validation.ts';
+import { cliTitle } from './output.ts';
+import { readProjectConfig } from './project.ts';
 
 export async function runEnvCommand(root: string, args: EnvArgs): Promise<void> {
   console.log();

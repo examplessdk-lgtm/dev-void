@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { vi, describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
-import { handleRequest, type McpContext } from '../../src/cli/mcp';
+import { handleRequest, type McpContext } from '../../src/cli/mcp.ts';
 
 function findMdFiles(dir: string, prefix = ''): Array<string> {
   const results: Array<string> = [];

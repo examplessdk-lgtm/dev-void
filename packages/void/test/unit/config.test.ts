@@ -19,9 +19,9 @@ import {
   getDatabaseDialect,
   VALID_REDIRECT_STATUSES,
   countSplats,
-} from '../../src/config';
-import { voidWarn } from '../../src/log';
-import { resolveSandboxConfig } from '../../src/sandbox/config';
+} from '../../src/config.ts';
+import { voidWarn } from '../../src/log.ts';
+import { resolveSandboxConfig } from '../../src/sandbox/config.ts';
 
 const warnMock = vi.mocked(voidWarn);
 
@@ -1267,7 +1267,7 @@ describe('lintDestinationSplats', () => {
   // author meant. Warn (not fail) so misuse surfaces at deploy-time without
   // blocking otherwise-valid configs.
   it('emits no warning when destinations only contain :splat / :name', async () => {
-    const { lintDestinationSplats } = await import('../../src/cli/headers');
+    const { lintDestinationSplats } = await import('../../src/cli/headers.ts');
     const rules = convertRewritesConfig({
       '/docs/*': '/en/docs/:splat',
       '/posts/:id': '/archive/:id',
@@ -1277,7 +1277,7 @@ describe('lintDestinationSplats', () => {
   });
 
   it('emits a single aggregated warning for a redirect destination with *', async () => {
-    const { lintDestinationSplats } = await import('../../src/cli/headers');
+    const { lintDestinationSplats } = await import('../../src/cli/headers.ts');
     const rules = convertRedirectsConfig({ '/old/*': '/new/*' });
     lintDestinationSplats(rules, 'redirects/rewrites (pre-asset)');
     expect(warnMock).toHaveBeenCalledOnce();
@@ -1288,7 +1288,7 @@ describe('lintDestinationSplats', () => {
   });
 
   it('emits a single aggregated warning covering all affected rules', async () => {
-    const { lintDestinationSplats } = await import('../../src/cli/headers');
+    const { lintDestinationSplats } = await import('../../src/cli/headers.ts');
     const rules = [
       ...(convertRewritesConfig({ '/a/*': '/x/*' }) ?? []),
       ...(convertRewritesConfig({ '/b/*': '/y/:splat' }) ?? []),
@@ -1306,7 +1306,7 @@ describe('lintDestinationSplats', () => {
   });
 
   it('works with fallbacks output shape as well', async () => {
-    const { lintDestinationSplats } = await import('../../src/cli/headers');
+    const { lintDestinationSplats } = await import('../../src/cli/headers.ts');
     const rules = convertFallbacksConfig({ '/docs/*': '/docs/*' });
     lintDestinationSplats(rules, 'fallbacks (post-asset)');
     expect(warnMock).toHaveBeenCalledOnce();

@@ -7,7 +7,7 @@ import {
   inferHelperForValue,
   maybeScaffoldEnvTs,
   renderEnvTs,
-} from '../../src/cli/env-scaffold';
+} from '../../src/cli/env-scaffold.ts';
 
 describe('inferHelperForValue', () => {
   it('returns string for empty or missing values', () => {

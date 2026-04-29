@@ -1,8 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { globSync } from 'tinyglobby';
-import { inferBindingsFromSource, mergeBindings, type InferredBindings } from './inference/walk';
-import { getSsrServerEntryPath } from './ssr/entry';
+import { inferBindingsFromSource, mergeBindings, type InferredBindings } from './inference/walk.ts';
+import { getSsrServerEntryPath } from './ssr/entry.ts';
 
 const SOURCE_GLOB = '**/*.{ts,tsx,mts,js,jsx,mjs,astro}';
 

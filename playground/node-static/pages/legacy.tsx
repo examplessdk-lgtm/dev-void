@@ -1,4 +1,4 @@
-import type { Props } from './legacy.server';
+import type { Props } from './legacy.server.ts';
 
 export default function LegacyPage({ description }: Props) {
   return (

@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { normalizePath } from 'vite';
 import { describe, it, expect } from 'vitest';
-import { rewriteCssImportForVirtualModule } from '../../src/pages/islands-plugin';
+import { rewriteCssImportForVirtualModule } from '../../src/pages/islands-plugin.ts';
 
 /** Resolve a POSIX-style absolute path to a platform-correct path with forward slashes. */
 const p = (posix: string) => normalizePath(resolve(posix));

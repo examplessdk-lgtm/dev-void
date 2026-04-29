@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import type { Plugin, ResolvedConfig } from 'vite';
 import { resolveStaticPageDataBuildOptions, scanPages } from 'void/pages';
 import type { PageScanResult, StaticPageDataBuildOptions } from 'void/pages';
-import { generateComponentManifest } from './pages-manifest';
+import { generateComponentManifest } from './pages-manifest.ts';
 
 const RENDERER_ID = 'virtual:void-pages-renderer';
 const CLIENT_ENTRY_ID = 'virtual:void-pages-client';

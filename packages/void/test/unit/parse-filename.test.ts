@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
-import { parseRouteFilename } from '../../src/router/parse-filename';
+import { parseRouteFilename } from '../../src/router/parse-filename.ts';
 
 describe('parseRouteFilename', () => {
   describe('static routes', () => {

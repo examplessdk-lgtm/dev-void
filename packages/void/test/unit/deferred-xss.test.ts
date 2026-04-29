@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { safeJsonStringify } from '../../src/pages/protocol';
+import { safeJsonStringify } from '../../src/pages/protocol.ts';
 
 describe('deferred data XSS prevention (real implementation)', () => {
   it('escapes </script> in string values', () => {

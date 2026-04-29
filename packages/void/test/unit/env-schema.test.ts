@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { withRuntimeEnv } from '../../src/runtime/env';
-import { boolean, email, json, number, oneOf, string, url } from '../../src/runtime/env-helpers';
+import { boolean, email, json, number, oneOf, string, url } from '../../src/runtime/env-helpers.ts';
 import {
   defineEnv,
   env,
@@ -10,7 +9,8 @@ import {
   _getSchemaDefaults,
   _hasRegisteredSchema,
   _validateEnvOnce,
-} from '../../src/runtime/env-public';
+} from '../../src/runtime/env-public.ts';
+import { withRuntimeEnv } from '../../src/runtime/env.ts';
 
 // Reset schema between tests so order doesn't leak state.
 function resetSchema() {

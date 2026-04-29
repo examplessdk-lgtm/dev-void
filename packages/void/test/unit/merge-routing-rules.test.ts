@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { mergeRoutingRules } from '../../src/cli/headers';
+import { mergeRoutingRules } from '../../src/cli/headers.ts';
 
 const tmpDir = join(import.meta.dirname, '.tmp-merge-routing-rules');
 

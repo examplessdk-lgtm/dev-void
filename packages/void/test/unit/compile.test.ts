@@ -6,9 +6,9 @@ import {
   compileWorkerEntry,
   compileNodeApp,
   compileNodeServer,
-} from '../../src/router/compile';
-import type { ScanResult } from '../../src/router/scan';
-import { VoidAssetRewriteError } from '../../src/runtime/handler';
+} from '../../src/router/compile.ts';
+import type { ScanResult } from '../../src/router/scan.ts';
+import { VoidAssetRewriteError } from '../../src/runtime/handler.ts';
 
 const testOptions = {
   honoPath: '/resolved/hono/index.mjs',
@@ -933,7 +933,7 @@ describe('c.rewrite runtime wrapper', () => {
     // the fallback never reaches the request. This is enforced by splitting
     // rules into separate buckets via `splitRedirectRulesByForce` — the
     // pre-asset bucket resolves the request before the post-asset one runs.
-    const { splitRedirectRulesByForce } = await import('../../src/cli/headers');
+    const { splitRedirectRulesByForce } = await import('../../src/cli/headers.ts');
     const allRules = [
       {
         source: '/docs/*',

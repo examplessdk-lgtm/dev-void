@@ -5,7 +5,7 @@ import { PGlite } from '@electric-sql/pglite';
 import spawn from 'cross-spawn';
 import { createServer } from 'pglite-server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers';
+import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const ENV_LOCAL_PATH = join(ROOT, 'playground/pg-test/.env.local');

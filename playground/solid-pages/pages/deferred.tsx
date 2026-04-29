@@ -1,4 +1,4 @@
-import type { Props } from './deferred.server';
+import type { Props } from './deferred.server.ts';
 
 export default function DeferredPage(props: Props) {
   const stats = props.stats;

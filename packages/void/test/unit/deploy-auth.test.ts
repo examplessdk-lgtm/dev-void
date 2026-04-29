@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { runDeploy } from '../../src/cli/deploy';
+import { runDeploy } from '../../src/cli/deploy.ts';
 
 const mockError = vi.fn();
 const mockInfo = vi.fn();

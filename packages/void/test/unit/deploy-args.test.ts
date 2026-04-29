@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseDeployArgs } from '../../src/cli/args';
+import { parseDeployArgs } from '../../src/cli/args.ts';
 
 describe('parseDeployArgs', () => {
   it('parses --project slug', () => {

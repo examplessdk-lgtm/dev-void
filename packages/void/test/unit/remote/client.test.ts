@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { ProxyClient } from '../../../src/runtime/remote/client';
+import { ProxyClient } from '../../../src/runtime/remote/client.ts';
 
 const PROXY_URL = 'https://proxy.void.cloud';
 const TOKEN = 'test-jwt-token';

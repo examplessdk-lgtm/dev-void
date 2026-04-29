@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util';
-import type { SubcommandDef } from './subcommand-prompt';
+import type { SubcommandDef } from './subcommand-prompt.ts';
 
 export const secretSubcommands: Array<SubcommandDef> = [
   { name: 'list', description: 'List project secrets' },

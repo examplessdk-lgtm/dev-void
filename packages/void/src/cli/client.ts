@@ -1,7 +1,7 @@
-import { cfAccessHeaders } from '../shared/cf-access';
-import { getApiUrl } from './auth';
-import { ensureCloudflaredToken } from './cf-access';
-import type { DeployEvent } from './types';
+import { cfAccessHeaders } from '../shared/cf-access.ts';
+import { getApiUrl } from './auth.ts';
+import { ensureCloudflaredToken } from './cf-access.ts';
+import type { DeployEvent } from './types.ts';
 
 export type PlatformErrorPayload = {
   error?: string;

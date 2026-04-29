@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseProjectArgs } from '../../src/cli/project-args';
+import { parseProjectArgs } from '../../src/cli/project-args.ts';
 
 describe('parseProjectArgs', () => {
   describe('cancel', () => {

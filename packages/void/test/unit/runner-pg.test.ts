@@ -1,6 +1,6 @@
 import { PGlite } from '@electric-sql/pglite';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { applyPgMigrations, type PgClient } from '../../src/migrations/runner-pg';
+import { applyPgMigrations, type PgClient } from '../../src/migrations/runner-pg.ts';
 
 let pglite: PGlite;
 let client: PgClient;

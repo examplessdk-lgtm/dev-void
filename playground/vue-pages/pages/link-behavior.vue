@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Link } from '@void/vue';
-import type { Props } from './link-behavior.server';
+import type { Props } from './link-behavior.server.ts';
 
 defineProps<Props>();
 

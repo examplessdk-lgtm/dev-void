@@ -3,13 +3,13 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'pathe';
 import { loadEnv, type Plugin } from 'vite';
-import { findVoidAuthConfig, loadVoidAuthConfig } from './auth/config';
-import { generateVoidAuthDatabaseModule, generateVoidAuthDrizzleSchema } from './auth/drizzle';
-import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './cli/headers';
-import { findEnvFile } from './codegen/env-types';
-import { generateQueueTypes } from './codegen/queue-types';
-import { generateRouteTypes } from './codegen/route-types';
-import { readConfig, getDatabaseDialect } from './config';
+import { findVoidAuthConfig, loadVoidAuthConfig } from './auth/config.ts';
+import { generateVoidAuthDatabaseModule, generateVoidAuthDrizzleSchema } from './auth/drizzle.ts';
+import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './cli/headers.ts';
+import { findEnvFile } from './codegen/env-types.ts';
+import { generateQueueTypes } from './codegen/queue-types.ts';
+import { generateRouteTypes } from './codegen/route-types.ts';
+import { readConfig, getDatabaseDialect } from './config.ts';
 import {
   compileRouteTable,
   compileBrowserClient,
@@ -21,14 +21,14 @@ import {
   type CompileOptions,
   type SsrCompileOptions,
   type PagesCompileOptions,
-} from './router/compile';
-import { scanRoutes, type ScanResult } from './router/scan';
-import type { VoidAuthRuntimeOptions } from './runtime/better-auth-shared';
+} from './router/compile.ts';
+import { scanRoutes, type ScanResult } from './router/scan.ts';
+import type { VoidAuthRuntimeOptions } from './runtime/better-auth-shared.ts';
 import {
   validateSsrEntries,
   SSR_SERVER_ENTRY_RELATIVE_PATHS,
   SSR_CLIENT_ENTRY_RELATIVE_PATHS,
-} from './ssr/entry';
+} from './ssr/entry.ts';
 
 const VIRTUAL_ROUTES_ID = 'virtual:void-routes';
 const VIRTUAL_CLIENT_WORKER_ID = 'virtual:void-client-worker';
@@ -46,7 +46,7 @@ const LOAD_ID_FILTER = /^virtual:void-(routes|client-worker|client-browser)$/;
  */
 interface RoutingPluginOptions {
   isAuthEnabled: () => boolean;
-  headConfig?: import('./pages/head').HeadConfig;
+  headConfig?: import('./pages/head.ts').HeadConfig;
   output?: 'server' | 'static';
   prerenderPaths?: Array<string>;
   remoteMode?: boolean;
@@ -65,7 +65,7 @@ interface RoutingPluginOptions {
    * only in dev so `vite dev` matches the deployed runtime — in production
    * the platform dispatch worker owns the pipeline instead.
    */
-  routing?: import('./config').RoutingConfig;
+  routing?: import('./config.ts').RoutingConfig;
   hasSandbox?: boolean;
   sandboxBindingName?: string;
   sandboxClassName?: string;
@@ -411,7 +411,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       if (!options.target) {
         const migrationsDir = join(root, 'db', 'migrations');
         if (existsSync(migrationsDir) || compileOptions.auth) {
-          const { collectMigrations } = await import('./migrations/collect');
+          const { collectMigrations } = await import('./migrations/collect.ts');
           const migrations = existsSync(migrationsDir) ? collectMigrations(migrationsDir) : [];
           const dialect = getDatabaseDialect(readConfig(root));
           compileOptions.migrationHandlerPath = resolveFile(

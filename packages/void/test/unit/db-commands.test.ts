@@ -23,7 +23,7 @@ vi.mock('node:child_process', () => ({
 }));
 
 vi.mock('../../src/migrations/runner', async () => {
-  const actual = await vi.importActual<typeof import('../../src/migrations/runner')>(
+  const actual = await vi.importActual<typeof import('../../src/migrations/runner.ts')>(
     '../../src/migrations/runner',
   );
   return {
@@ -48,7 +48,7 @@ vi.mock('../../src/migrations/runner', async () => {
 });
 
 vi.mock('../../src/migrations/collect', async () => {
-  const actual = await vi.importActual<typeof import('../../src/migrations/collect')>(
+  const actual = await vi.importActual<typeof import('../../src/migrations/collect.ts')>(
     '../../src/migrations/collect',
   );
   return {
@@ -57,7 +57,7 @@ vi.mock('../../src/migrations/collect', async () => {
       mockWriteJournal.getMockImplementation()
         ? mockWriteJournal(...args)
         : actual.writeJournal(
-            ...(args as [string, import('../../src/migrations/collect').DrizzleJournal]),
+            ...(args as [string, import('../../src/migrations/collect.ts').DrizzleJournal]),
           ),
   };
 });
@@ -116,7 +116,7 @@ afterEach(() => {
 
 describe('getAppliedMigrations', () => {
   it('returns [] when DB file does not exist', async () => {
-    const { getAppliedMigrations } = await import('../../src/migrations/runner');
+    const { getAppliedMigrations } = await import('../../src/migrations/runner.ts');
     const result = await getAppliedMigrations(join(TMP_DIR, 'nonexistent.sqlite'));
     expect(result).toEqual([]);
   });
@@ -130,7 +130,7 @@ describe('getAppliedMigrations', () => {
     db.exec('CREATE TABLE other (id INTEGER)');
     db.close();
 
-    const { getAppliedMigrations } = await import('../../src/migrations/runner');
+    const { getAppliedMigrations } = await import('../../src/migrations/runner.ts');
     const result = await getAppliedMigrations(dbPath);
     expect(result).toEqual([]);
   });
@@ -148,7 +148,7 @@ describe('getAppliedMigrations', () => {
     `);
     db.close();
 
-    const { getAppliedMigrations } = await import('../../src/migrations/runner');
+    const { getAppliedMigrations } = await import('../../src/migrations/runner.ts');
     const result = await getAppliedMigrations(dbPath);
     expect(result).toEqual([
       { name: '001_first.sql', applied_at: '2025-01-01T00:00:00Z' },
@@ -214,7 +214,7 @@ function createDrizzleProjectRoot(): string {
 }
 
 describe('void db drizzle-kit subprocesses', () => {
-  let runDbCommand: typeof import('../../src/cli/db').runDbCommand;
+  let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -222,7 +222,7 @@ describe('void db drizzle-kit subprocesses', () => {
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
-    runDbCommand = (await import('../../src/cli/db')).runDbCommand;
+    runDbCommand = (await import('../../src/cli/db.ts')).runDbCommand;
   });
 
   afterEach(() => {
@@ -252,7 +252,7 @@ describe('void db drizzle-kit subprocesses', () => {
 });
 
 describe('void db reset', () => {
-  let runDbCommand: typeof import('../../src/cli/db').runDbCommand;
+  let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -260,7 +260,7 @@ describe('void db reset', () => {
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
-    runDbCommand = (await import('../../src/cli/db')).runDbCommand;
+    runDbCommand = (await import('../../src/cli/db.ts')).runDbCommand;
   });
 
   afterEach(() => {
@@ -327,7 +327,7 @@ describe('void db reset', () => {
 });
 
 describe('void db status', () => {
-  let runDbCommand: typeof import('../../src/cli/db').runDbCommand;
+  let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -335,7 +335,7 @@ describe('void db status', () => {
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
-    runDbCommand = (await import('../../src/cli/db')).runDbCommand;
+    runDbCommand = (await import('../../src/cli/db.ts')).runDbCommand;
   });
 
   afterEach(() => {
@@ -374,7 +374,7 @@ describe('void db status', () => {
 });
 
 describe('void db rename-migrations', () => {
-  let runDbCommand: typeof import('../../src/cli/db').runDbCommand;
+  let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -389,7 +389,7 @@ describe('void db rename-migrations', () => {
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
-    runDbCommand = (await import('../../src/cli/db')).runDbCommand;
+    runDbCommand = (await import('../../src/cli/db.ts')).runDbCommand;
   });
 
   afterEach(() => {
@@ -448,8 +448,8 @@ describe('void db rename-migrations', () => {
     expect(journal.entries[0].when).toBe(1_700_000_000_000);
     expect(journal.entries[1].when).toBe(1_700_000_000_001);
 
-    const { collectMigrations } = await import('../../src/migrations/collect');
-    const { assertJournalCoherence } = await import('../../src/migrations/validate');
+    const { collectMigrations } = await import('../../src/migrations/collect.ts');
+    const { assertJournalCoherence } = await import('../../src/migrations/validate.ts');
     expect(() =>
       assertJournalCoherence(migrationsDir, collectMigrations(migrationsDir)),
     ).not.toThrow();

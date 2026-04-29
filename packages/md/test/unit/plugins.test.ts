@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compile } from '../../src/compile';
+import { compile } from '../../src/compile.ts';
 
 describe('plugins', () => {
   describe('pre-wrapper', () => {

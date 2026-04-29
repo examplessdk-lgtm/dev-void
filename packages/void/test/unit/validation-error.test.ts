@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ValidationError } from '../../src/pages/validation-error';
+import { ValidationError } from '../../src/pages/validation-error.ts';
 
 describe('ValidationError', () => {
   it('has correct name and message', () => {

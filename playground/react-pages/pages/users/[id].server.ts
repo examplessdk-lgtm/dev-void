@@ -1,5 +1,5 @@
 import { defineHandler, defineHead } from 'void';
-import { USERS } from './_data';
+import { USERS } from './_data.ts';
 
 export interface Props {
   user: (typeof USERS)[number];

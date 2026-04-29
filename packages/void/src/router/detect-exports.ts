@@ -7,7 +7,7 @@ import {
   type AstFunctionDeclaration,
   type AstProgram,
   type AstVariableDeclaration,
-} from '../shared/ast';
+} from '../shared/ast.ts';
 
 const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']);
 

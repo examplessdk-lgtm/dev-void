@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { fetch as typedFetch, FetchError } from '../../src/runtime/fetch';
+import { fetch as typedFetch, FetchError } from '../../src/runtime/fetch.ts';
 
 declare module 'void/routes' {
   interface RouteMap {

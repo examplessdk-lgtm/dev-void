@@ -2,19 +2,19 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ProjectResponse } from '../../src/cli/client';
+import type { ProjectResponse } from '../../src/cli/client.ts';
 import {
   resolveDistDir,
   resolveDeployWranglerCompat,
   resolveStaticBuildCommand,
   resolveWorkerDirName,
-} from '../../src/cli/deploy';
-import { FRAMEWORK_PRESETS } from '../../src/cli/preset';
+} from '../../src/cli/deploy.ts';
+import { FRAMEWORK_PRESETS } from '../../src/cli/preset.ts';
 import {
   getRequestedProjectSlug,
   inferDefaultSlug,
   resolveProjectBySlug,
-} from '../../src/cli/resolve-project';
+} from '../../src/cli/resolve-project.ts';
 
 const tempDirs: Array<string> = [];
 

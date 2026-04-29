@@ -3,7 +3,7 @@ import { renderToReadableStream } from 'react-dom/server';
 import { createSsrRouter, idleNavigationState } from 'void/pages-client';
 import { renderBodyAttrs, renderHeadToString, renderHtmlAttrs } from 'void/pages-head';
 import type { PageObject } from 'void/pages-protocol';
-import { ErrorsContext, NavigationContext, RouterContext, SharedContext } from './context';
+import { ErrorsContext, NavigationContext, RouterContext, SharedContext } from './context.ts';
 
 // oxlint-disable-next-line no-explicit-any -- component props are narrowed by generated route types
 type ComponentModule = { default: ComponentType<any> };

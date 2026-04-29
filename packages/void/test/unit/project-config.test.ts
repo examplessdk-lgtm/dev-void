@@ -2,12 +2,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { getApiUrl } from '../../src/cli/auth';
+import { getApiUrl } from '../../src/cli/auth.ts';
 import {
   isVoidInternalStaging,
   readProjectConfig,
   writeProjectConfig,
-} from '../../src/cli/project';
+} from '../../src/cli/project.ts';
 
 const roots: Array<string> = [];
 

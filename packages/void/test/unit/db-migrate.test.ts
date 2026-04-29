@@ -67,7 +67,7 @@ function createProjectRoot(migrations: Record<string, string>): string {
 }
 
 describe('void db migrate', () => {
-  let runDbCommand: typeof import('../../src/cli/db').runDbCommand;
+  let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -78,7 +78,7 @@ describe('void db migrate', () => {
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
-    runDbCommand = (await import('../../src/cli/db')).runDbCommand;
+    runDbCommand = (await import('../../src/cli/db.ts')).runDbCommand;
   });
 
   afterEach(() => {

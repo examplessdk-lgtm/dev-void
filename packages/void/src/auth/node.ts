@@ -1,11 +1,11 @@
 import { join } from 'node:path';
 import { loadEnv } from 'vite';
-import { readConfig } from '../config';
-import { getMiniflareDatabasePath } from '../migrations/runner';
-import { applyPgAuthMigrations, applySqliteAuthMigrations } from '../runtime/auth-migrations';
-import type { VoidAuthDialect, VoidAuthEnv } from '../runtime/better-auth-shared';
-import { findVoidAuthConfig, loadVoidAuthConfig } from './config';
-import { resolveVoidAuthMigrationSchema } from './drizzle';
+import { readConfig } from '../config.ts';
+import { getMiniflareDatabasePath } from '../migrations/runner.ts';
+import { applyPgAuthMigrations, applySqliteAuthMigrations } from '../runtime/auth-migrations.ts';
+import type { VoidAuthDialect, VoidAuthEnv } from '../runtime/better-auth-shared.ts';
+import { findVoidAuthConfig, loadVoidAuthConfig } from './config.ts';
+import { resolveVoidAuthMigrationSchema } from './drizzle.ts';
 
 export async function runLocalVoidAuthMigrations(
   root: string,

@@ -5,13 +5,13 @@ import {
   type BetterAuthDBSchema,
   type DBFieldAttribute,
 } from 'better-auth/db';
-import type { VoidAuthConfig } from '../runtime/auth';
-import type { VoidAuthRuntimeOptions } from '../runtime/better-auth-shared';
+import type { VoidAuthConfig } from '../runtime/auth.ts';
+import type { VoidAuthRuntimeOptions } from '../runtime/better-auth-shared.ts';
 import {
   VOID_EMAIL_AUTH_PROVIDER,
   isVoidSocialAuthProvider,
   type VoidAuthProvider,
-} from './providers';
+} from './providers.ts';
 
 type AuthIdStrategy = 'serial' | 'text' | 'uuid';
 const DEFAULT_TABLE_ORDER = Number.MAX_SAFE_INTEGER;

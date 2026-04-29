@@ -1,15 +1,15 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse, type ParseError } from 'jsonc-parser';
-import type { VoidConfig } from '../config';
-import type { InferredBindings } from '../inference/walk';
-import type { WebSocketRouteDefinition } from '../router/websocket';
+import type { VoidConfig } from '../config.ts';
+import type { InferredBindings } from '../inference/walk.ts';
+import type { WebSocketRouteDefinition } from '../router/websocket.ts';
 import {
   DEFAULT_SANDBOX_BINDING,
   SANDBOX_MIGRATION_TAG,
   resolveSandboxConfig,
   type ResolvedSandboxConfig,
-} from '../sandbox/config';
+} from '../sandbox/config.ts';
 
 const COMPAT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const NODEJS_ALS_FLAG = 'nodejs_als';

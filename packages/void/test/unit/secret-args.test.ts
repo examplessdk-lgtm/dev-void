@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseSecretArgs } from '../../src/cli/secret-args';
+import { parseSecretArgs } from '../../src/cli/secret-args.ts';
 
 describe('parseSecretArgs', () => {
   it('parses put with project', () => {

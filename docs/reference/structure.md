@@ -167,7 +167,7 @@ Generate or refresh it with `void prepare`, or let `vite dev` / `vite build` pop
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `vite.config.ts`        | Vite configuration. Must include `voidPlugin()`.                                                                                                         |
 | `void.json`             | Optional Void config for [routing](/reference/config#routing), [inference](/reference/config#inference), and [worker settings](/reference/config#worker) |
-| `tsconfig.json`         | TypeScript config. Extend `.void/tsconfig.json` for auto-generated types.                                                                                |
+| `tsconfig.json`         | TypeScript config. Extend `.void/tsconfig.json` for auto-generated types; run `void init --tsconfig` when an existing config already uses `extends`.     |
 | `.env`                  | Public environment variables (committed)                                                                                                                 |
 | `.env.local`            | Secret variables for local dev (gitignored)                                                                                                              |
 | `.env.production`       | Public production variables (committed)                                                                                                                  |

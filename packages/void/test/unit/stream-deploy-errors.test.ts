@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { PlatformApiError } from '../../src/cli/client';
-import { formatStreamDeployError } from '../../src/cli/deploy-errors';
+import { PlatformApiError } from '../../src/cli/client.ts';
+import { formatStreamDeployError } from '../../src/cli/deploy-errors.ts';
 
 describe('formatStreamDeployError', () => {
   it('surfaces 409 deploy-in-progress with the server-supplied deployment id', () => {

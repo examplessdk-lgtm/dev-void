@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('cloudflare:workers', () => ({ env: {} }));
 
-import { createStorage } from '../../src/runtime/storage';
+import { createStorage } from '../../src/runtime/storage.ts';
 
 function createMockR2Bucket() {
   return {

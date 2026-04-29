@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { FRAMEWORK_PRESETS } from '../../src/cli/preset';
+import { FRAMEWORK_PRESETS } from '../../src/cli/preset.ts';
 
 describe('FRAMEWORK_PRESETS', () => {
   it('has preset for sveltekit', () => {

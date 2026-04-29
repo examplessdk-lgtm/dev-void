@@ -1,7 +1,7 @@
 import { useContext } from 'react';
 import { ssrProxy } from 'void/pages-client';
 import type { VoidRouter } from 'void/pages-client';
-import { RouterContext } from './context';
+import { RouterContext } from './context.ts';
 
 export type { VoidRouter } from 'void/pages-client';
 

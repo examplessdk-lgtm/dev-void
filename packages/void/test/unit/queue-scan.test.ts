@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { scanQueuesSync } from '../../src/queues/scan';
+import { scanQueuesSync } from '../../src/queues/scan.ts';
 
 describe('scanQueuesSync', () => {
   let root: string;

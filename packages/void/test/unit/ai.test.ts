@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
-import type { ai } from '../../src/runtime/ai';
+import type { ai } from '../../src/runtime/ai.ts';
 
 describe('runtime ai', () => {
   afterEach(() => {
@@ -9,8 +9,8 @@ describe('runtime ai', () => {
 
   it('routes third-party image generation through the gateway endpoint', async () => {
     vi.resetModules();
-    const { envContext } = await import('../../src/runtime/env-raw');
-    const { ai } = await import('../../src/runtime/ai');
+    const { envContext } = await import('../../src/runtime/env-raw.ts');
+    const { ai } = await import('../../src/runtime/ai.ts');
 
     const fetchMock = vi.fn(
       async (_url: string | URL | Request, init?: RequestInit) =>
@@ -90,8 +90,8 @@ describe('runtime ai', () => {
 
   it('serializes third-party image edit files for the gateway endpoint', async () => {
     vi.resetModules();
-    const { envContext } = await import('../../src/runtime/env-raw');
-    const { ai } = await import('../../src/runtime/ai');
+    const { envContext } = await import('../../src/runtime/env-raw.ts');
+    const { ai } = await import('../../src/runtime/ai.ts');
 
     const fetchMock = vi.fn(
       async (_url: string | URL | Request, _init?: RequestInit) =>
@@ -165,8 +165,8 @@ describe('runtime ai', () => {
 
   it('returns blobs for non-JSON run responses', async () => {
     vi.resetModules();
-    const { envContext } = await import('../../src/runtime/env-raw');
-    const { ai } = await import('../../src/runtime/ai');
+    const { envContext } = await import('../../src/runtime/env-raw.ts');
+    const { ai } = await import('../../src/runtime/ai.ts');
 
     vi.stubGlobal(
       'fetch',

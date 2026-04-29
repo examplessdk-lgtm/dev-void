@@ -1,11 +1,11 @@
 /// <reference lib="dom" />
 
-import { createActionErrorFromResponse } from './action-result';
-import type { HeadDescriptor } from './head';
-import { initClientHead, applyClientHead } from './head-client';
-import { PrefetchCache, parseCacheFor } from './prefetch';
-import type { CacheForInput, CacheForResult } from './prefetch';
-import type { PageObject } from './protocol';
+import { createActionErrorFromResponse } from './action-result.ts';
+import { initClientHead, applyClientHead } from './head-client.ts';
+import type { HeadDescriptor } from './head.ts';
+import { PrefetchCache, parseCacheFor } from './prefetch.ts';
+import type { CacheForInput, CacheForResult } from './prefetch.ts';
+import type { PageObject } from './protocol.ts';
 
 export interface PageComponentModule {
   default: unknown;

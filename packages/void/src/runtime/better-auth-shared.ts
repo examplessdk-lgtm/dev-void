@@ -1,14 +1,14 @@
 import { betterAuth, type BetterAuthOptions } from 'better-auth';
 import type { Context } from 'hono';
-import type { VoidAuthMigrationSchema } from '../auth/drizzle';
+import type { VoidAuthMigrationSchema } from '../auth/drizzle.ts';
 import {
   VOID_EMAIL_AUTH_PROVIDER,
   getVoidAuthProviderEnvNames,
   isVoidSocialAuthProvider,
   type VoidAuthProvider,
   type VoidSocialAuthProvider,
-} from '../auth/providers';
-import { authContext, type AuthState, type VoidAuthConfig } from './auth';
+} from '../auth/providers.ts';
+import { authContext, type AuthState, type VoidAuthConfig } from './auth.ts';
 
 export type VoidAuthDialect = 'sqlite' | 'postgresql';
 

@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { writeDrizzleConfig } from '../../src/drizzle/config';
+import { writeDrizzleConfig } from '../../src/drizzle/config.ts';
 
 describe('writeDrizzleConfig', () => {
   let root: string;

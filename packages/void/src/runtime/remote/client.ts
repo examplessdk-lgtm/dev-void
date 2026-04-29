@@ -1,4 +1,4 @@
-import { cfAccessHeaders } from '../../shared/cf-access';
+import { cfAccessHeaders } from '../../shared/cf-access.ts';
 
 /**
  * HTTP client for the remote bindings proxy (proxy.void.cloud).

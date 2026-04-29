@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractScript } from '../../src/extract-script';
+import { extractScript } from '../../src/extract-script.ts';
 
 describe('extractScript', () => {
   it('returns null script when no <script> block', () => {

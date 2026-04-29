@@ -11,7 +11,7 @@ import {
   getRawRuntimeEnv,
   INTERNAL_BINDING_PREFIXES,
   type RuntimeEnv,
-} from './env-raw';
+} from './env-raw.ts';
 
 export type { RuntimeEnv };
 

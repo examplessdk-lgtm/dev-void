@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Props } from "./deferred.server";
+  import type { Props } from "./deferred.server.ts";
 
   let { title, stats }: Props = $props();
 </script>

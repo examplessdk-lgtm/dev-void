@@ -163,4 +163,17 @@ Extend the generated tsconfig in your project:
 }
 ```
 
-The `.void/tsconfig.json` uses `"files"` to include `routes.d.ts` and `db.d.ts`, which TypeScript inherits automatically. Run `void prepare` in CI or after a fresh clone, or let `vite dev` / `vite build` generate them during normal app workflows.
+If your project already extends another config, use `void init --tsconfig` so Void can patch the file without dropping existing `files` or `compilerOptions.paths` entries. The resulting config may use TypeScript's multi-extends form:
+
+```json
+{
+  "extends": ["./tsconfig.base.json", "./.void/tsconfig.json"],
+  "compilerOptions": {
+    "types": ["void/env"]
+  }
+}
+```
+
+The `.void/tsconfig.json` uses `"files"` and `compilerOptions.paths` for generated declarations such as `routes.d.ts`, `db.d.ts`, and `queues.d.ts`. TypeScript inherits those fields, but `files` and `paths` are replaced rather than deeply merged when another config defines them. `void init --tsconfig` handles the common existing-config cases by adding Void's generated files and aliases directly to the root config when needed.
+
+Run `void prepare` in CI or after a fresh clone, or let `vite dev` / `vite build` generate the `.void/` files during normal app workflows.

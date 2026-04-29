@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ProjectResponse } from './client';
-import type { ProjectConfig } from './project';
+import type { ProjectResponse } from './client.ts';
+import type { ProjectConfig } from './project.ts';
 
 export function getRequestedProjectSlug(options?: { projectSlug?: string }): string | null {
   const cliSlug = options?.projectSlug?.trim();

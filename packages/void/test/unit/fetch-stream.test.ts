@@ -27,7 +27,7 @@ declare module 'void/routes' {
 }
 
 import { ofetch } from 'ofetch';
-import { fetchStream } from '../../src/runtime/fetch-stream';
+import { fetchStream } from '../../src/runtime/fetch-stream.ts';
 
 function makeSSEStream(chunks: Array<string>): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();

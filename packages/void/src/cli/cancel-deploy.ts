@@ -1,8 +1,8 @@
 import { intro, outro, log, confirm, isCancel } from '@clack/prompts';
-import { getToken } from './auth';
-import { PlatformClient, type DeploymentResponse } from './client';
-import { cliTitle } from './output';
-import { readProjectConfig } from './project';
+import { getToken } from './auth.ts';
+import { PlatformClient, type DeploymentResponse } from './client.ts';
+import { cliTitle } from './output.ts';
+import { readProjectConfig } from './project.ts';
 
 const ACTIVE_STATUSES = new Set(['pending', 'uploading', 'migrating', 'prerendering']);
 

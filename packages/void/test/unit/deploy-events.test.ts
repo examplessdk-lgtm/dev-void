@@ -12,8 +12,8 @@ vi.mock('@clack/prompts', () => ({
 }));
 
 import type { SpinnerResult } from '@clack/prompts';
-import { applyDeployEvent } from '../../src/cli/deploy';
-import type { DeployEvent } from '../../src/cli/types';
+import { applyDeployEvent } from '../../src/cli/deploy.ts';
+import type { DeployEvent } from '../../src/cli/types.ts';
 
 function createMockSpinner() {
   const calls = {

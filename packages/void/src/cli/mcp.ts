@@ -2,9 +2,9 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { getToken } from './auth';
-import { PlatformClient } from './client';
-import { writeProjectConfig } from './project';
+import { getToken } from './auth.ts';
+import { PlatformClient } from './client.ts';
+import { writeProjectConfig } from './project.ts';
 
 // --- Types ---
 

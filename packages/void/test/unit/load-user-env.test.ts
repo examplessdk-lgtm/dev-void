@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadUserEnvFile } from '../../src/host/load-user-env';
+import { loadUserEnvFile } from '../../src/host/load-user-env.ts';
 
 /**
  * Coverage for the env.ts loader. The loader uses Node's native `import()`,

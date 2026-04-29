@@ -1,6 +1,6 @@
-import type { CompileResult } from './compile';
-import { buildRenderChunks, toIslandId } from './emit-shared';
-import type { IslandImport } from './extract-script';
+import type { CompileResult } from './compile.ts';
+import { buildRenderChunks, toIslandId } from './emit-shared.ts';
+import type { IslandImport } from './extract-script.ts';
 
 export function emitSolidComponent(result: CompileResult): string {
   return `

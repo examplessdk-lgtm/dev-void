@@ -1,9 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ES2022",
+    "module": "NodeNext",
     "lib": ["ES2022"],
-    "moduleResolution": "bundler",
+    "moduleResolution": "NodeNext",
     "paths": {
       "*": ["./*"],
       "void": ["./src/index.ts"],
@@ -18,7 +18,8 @@
     "outDir": "dist",
     "rootDir": ".",
     "types": ["node", "@cloudflare/workers-types"],
-    "isolatedDeclarations": true
+    "isolatedDeclarations": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["src", "test", "env.d.ts"]
 }

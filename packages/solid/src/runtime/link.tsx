@@ -1,6 +1,6 @@
 import { createMemo, onCleanup, onMount, splitProps, useContext } from 'solid-js';
 import type { JSX } from 'solid-js';
-import { RouterContext } from './context';
+import { RouterContext } from './context.ts';
 
 type PrefetchStrategy = 'hover' | 'click' | 'mount' | 'visible';
 type LinkMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';

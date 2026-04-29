@@ -1,5 +1,5 @@
 import { defineHandler } from 'void';
-import { POSTS } from './_data';
+import { POSTS } from './_data.ts';
 
 export interface Props {
   post: (typeof POSTS)[number];

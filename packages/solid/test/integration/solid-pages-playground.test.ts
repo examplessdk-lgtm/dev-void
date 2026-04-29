@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { chromium, type Browser, type Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers';
+import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 declare global {
   interface Window {

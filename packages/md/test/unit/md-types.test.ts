@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { generateMdTypes } from '../../src/codegen/md-types';
+import { generateMdTypes } from '../../src/codegen/md-types.ts';
 
 /**
  * Tests for the md type declaration generation.

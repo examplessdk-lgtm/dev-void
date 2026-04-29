@@ -1,4 +1,4 @@
-import type { LayoutDefinition, NamedLayoutDefinition } from './types';
+import type { LayoutDefinition, NamedLayoutDefinition } from './types.ts';
 
 export interface ResolvedLayoutEntry {
   id: string;

@@ -20,8 +20,8 @@ import {
   isVoidResolvableFrom,
   runInitCommand,
   toAliasedPreviewSpec,
-} from '../../src/cli/init';
-import { buildDrizzleKitSpawnEnv } from '../../src/cli/yarn-pnp';
+} from '../../src/cli/init.ts';
+import { buildDrizzleKitSpawnEnv } from '../../src/cli/yarn-pnp.ts';
 
 const mockSpawnSync = vi.fn();
 const mockSelect = vi.fn();
@@ -1126,6 +1126,398 @@ describe('isScaffoldableEmptyProject', () => {
     }
   });
 
+  it('configures an existing project with Void deps, Vite scripts, and vite.config.ts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      mkdirSync(join(root, 'src'));
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'existing-app', private: true }, null, 2) + '\n',
+      );
+      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+      expect(pkg.scripts.dev).toBe('vite');
+      expect(pkg.scripts.build).toBe('vite build');
+      expect(pkg.devDependencies.void).toBeDefined();
+      expect(pkg.devDependencies.vite).toBe('^8.0.10');
+
+      const viteConfig = readFileSync(join(root, 'vite.config.ts'), 'utf-8');
+      expect(viteConfig).toContain('import { voidPlugin } from "void";');
+      expect(viteConfig).toContain('plugins: [voidPlugin()]');
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'npm',
+        ['install'],
+        expect.objectContaining({
+          cwd: root,
+          stdio: 'inherit',
+          shell: process.platform === 'win32',
+        }),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('configures an existing class-C framework without plain Vite package setup', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'existing-astro-app',
+            private: true,
+            dependencies: {
+              astro: '^5.0.0',
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+      expect(pkg.scripts).toBeUndefined();
+      expect(pkg.devDependencies.void).toBeDefined();
+      expect(pkg.devDependencies.vite).toBeUndefined();
+      expect(existsSync(join(root, 'vite.config.ts'))).toBe(false);
+      expect(mockNote).toHaveBeenCalledWith(
+        expect.stringContaining('Add `voidPlugin()` to the Astro Vite plugins option'),
+        'Manual Astro config step',
+      );
+      expect(mockNote).toHaveBeenCalledWith(
+        expect.stringContaining('vite: { plugins: [voidPlugin()] }'),
+        'Manual Astro config step',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('prints a Nuxt-specific manual config step for existing Nuxt projects', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'existing-nuxt-app',
+            private: true,
+            dependencies: {
+              nuxt: '^4.0.0',
+              void: 'npm:@void-sdk/void@^0.6.0',
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      expect(existsSync(join(root, 'vite.config.ts'))).toBe(false);
+      expect(mockNote).toHaveBeenCalledWith(
+        expect.stringContaining('Add `voidPlugin()` to the Nuxt Vite plugins option'),
+        'Manual Nuxt config step',
+      );
+      expect(mockNote).toHaveBeenCalledWith(
+        expect.stringContaining('export default defineNuxtConfig'),
+        'Manual Nuxt config step',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('adds voidPlugin to an existing Vite plugins array without replacing scripts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'vite-app',
+            scripts: {
+              dev: 'custom-dev',
+              test: 'vitest',
+            },
+            devDependencies: {
+              vite: '^8.0.10',
+              void: 'npm:@void-sdk/void@^0.6.0',
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(
+        join(root, 'vite.config.ts'),
+        `import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [
+    react(),
+  ],
+});
+`,
+      );
+      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+      expect(pkg.scripts.dev).toBe('custom-dev');
+      expect(pkg.scripts.build).toBe('vite build');
+      expect(pkg.scripts.test).toBe('vitest');
+
+      const viteConfig = readFileSync(join(root, 'vite.config.ts'), 'utf-8');
+      expect(viteConfig).toContain('import { voidPlugin } from "void";');
+      expect(viteConfig).toContain(`plugins: [
+    voidPlugin(),
+    react(),`);
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'npm',
+        ['install'],
+        expect.objectContaining({
+          cwd: root,
+          stdio: 'inherit',
+          shell: process.platform === 'win32',
+        }),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('patches only the top-level Vite plugins array', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'nested-vite-plugins-app',
+            devDependencies: {
+              vite: '^8.0.10',
+              void: 'npm:@void-sdk/void@^0.6.0',
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(
+        join(root, 'vite.config.ts'),
+        `import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import legacy from "@vitejs/plugin-legacy";
+
+export default defineConfig({
+  build: {
+    rollupOptions: {
+      plugins: [legacy()],
+    },
+  },
+  plugins: [
+    react(),
+  ],
+});
+`,
+      );
+      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      const viteConfig = readFileSync(join(root, 'vite.config.ts'), 'utf-8');
+      expect(viteConfig).toContain(`rollupOptions: {
+      plugins: [legacy()],
+    },`);
+      expect(viteConfig).toContain(`plugins: [
+    voidPlugin(),
+    react(),`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('adds a top-level Vite plugins property instead of patching nested plugin options', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'nested-vite-no-top-level-plugins-app',
+            devDependencies: {
+              vite: '^8.0.10',
+              void: 'npm:@void-sdk/void@^0.6.0',
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(
+        join(root, 'vite.config.ts'),
+        `import { defineConfig } from "vite";
+import legacy from "@vitejs/plugin-legacy";
+
+export default defineConfig({
+  build: {
+    rollupOptions: {
+      plugins: [legacy()],
+    },
+  },
+});
+`,
+      );
+      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      const viteConfig = readFileSync(join(root, 'vite.config.ts'), 'utf-8');
+      expect(viteConfig).toContain(`export default defineConfig({
+  plugins: [voidPlugin()],
+  build: {`);
+      expect(viteConfig).toContain(`rollupOptions: {
+      plugins: [legacy()],
+    },`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('prints a manual Vite config step when an existing config is too dynamic to patch', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'dynamic-vite-app',
+            devDependencies: {
+              vite: '^8.0.10',
+              void: 'npm:@void-sdk/void@^0.6.0',
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(
+        join(root, 'vite.config.ts'),
+        `const config = buildConfig();
+
+export default config;
+`,
+      );
+      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      expect(readFileSync(join(root, 'vite.config.ts'), 'utf-8'))
+        .toBe(`const config = buildConfig();
+
+export default config;
+`);
+      expect(mockNote).toHaveBeenCalledWith(
+        expect.stringContaining('Could not safely update vite.config.ts automatically'),
+        'Manual Vite config step',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not patch nested plugin arrays when the top-level Vite config object is dynamic', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'dynamic-nested-vite-app',
+            devDependencies: {
+              vite: '^8.0.10',
+              void: 'npm:@void-sdk/void@^0.6.0',
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(
+        join(root, 'vite.config.ts'),
+        `const config = {
+  build: {
+    rollupOptions: {
+      plugins: [legacy()],
+    },
+  },
+};
+
+export default config;
+`,
+      );
+      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      expect(readFileSync(join(root, 'vite.config.ts'), 'utf-8')).toBe(`const config = {
+  build: {
+    rollupOptions: {
+      plugins: [legacy()],
+    },
+  },
+};
+
+export default config;
+`);
+      expect(mockNote).toHaveBeenCalledWith(
+        expect.stringContaining('Add `voidPlugin()` to the top-level Vite plugins array'),
+        'Manual Vite config step',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not run existing-project setup for targeted init flags', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      mkdirSync(join(root, 'src'));
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'targeted-app' }, null, 2) + '\n',
+      );
+
+      await runInitCommand(root, { tsconfig: true, github: false, agents: false });
+
+      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+      expect(pkg.scripts).toBeUndefined();
+      expect(pkg.devDependencies).toBeUndefined();
+      expect(existsSync(join(root, 'vite.config.ts'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('creates .gitignore with Void defaults during targeted setup', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
@@ -1178,6 +1570,185 @@ describe('isScaffoldableEmptyProject', () => {
       const tsconfig = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf-8'));
       expect(tsconfig.extends).toBeDefined();
       expect(tsconfig.compilerOptions.types).toContain('void/env');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('merges Void type files and path aliases into root-level tsconfig fields', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      mkdirSync(join(root, 'routes'), { recursive: true });
+      mkdirSync(join(root, 'src'), { recursive: true });
+      writeFileSync(join(root, 'src', 'main.ts'), 'export {};\n');
+      writeFileSync(
+        join(root, 'tsconfig.json'),
+        JSON.stringify(
+          {
+            extends: './tsconfig.base.json',
+            compilerOptions: {
+              paths: {
+                '@/*': ['src/*'],
+              },
+            },
+            files: ['src/main.ts'],
+            include: ['src', 'routes'],
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+
+      await runInitCommand(root, { tsconfig: true, github: false, agents: false });
+
+      const tsconfig = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf-8'));
+      expect(tsconfig.extends).toEqual(['./tsconfig.base.json', './.void/tsconfig.json']);
+      expect(tsconfig.files).toEqual(['./src/main.ts', './.void/routes.d.ts']);
+      expect(tsconfig.compilerOptions.paths).toEqual({
+        '@/*': ['./src/*'],
+        'void/routes': ['./.void/routes.d.ts'],
+      });
+      expect(tsconfig.compilerOptions.types).toContain('void/env');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves directly extended tsconfig files and paths when adding Void config', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      mkdirSync(join(root, 'routes'), { recursive: true });
+      writeFileSync(join(root, 'base.d.ts'), 'declare const baseValue: string;\n');
+      writeFileSync(
+        join(root, 'tsconfig.base.json'),
+        JSON.stringify(
+          {
+            compilerOptions: {
+              paths: {
+                '~/*': ['./src/*'],
+              },
+            },
+            files: ['base.d.ts'],
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(
+        join(root, 'tsconfig.json'),
+        JSON.stringify(
+          {
+            extends: ['./tsconfig.base.json'],
+            include: ['src', 'routes'],
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+
+      await runInitCommand(root, { tsconfig: true, github: false, agents: false });
+
+      const tsconfig = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf-8'));
+      expect(tsconfig.extends).toEqual(['./tsconfig.base.json', './.void/tsconfig.json']);
+      expect(tsconfig.files).toEqual(['./base.d.ts', './.void/routes.d.ts']);
+      expect(tsconfig.compilerOptions.paths).toEqual({
+        '~/*': ['./src/*'],
+        'void/routes': ['./.void/routes.d.ts'],
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('writes Void path aliases relative to an inherited baseUrl', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      const root = join(workspaceRoot, 'packages', 'app');
+      mkdirSync(join(root, 'routes'), { recursive: true });
+      writeFileSync(
+        join(workspaceRoot, 'tsconfig.base.json'),
+        JSON.stringify(
+          {
+            compilerOptions: {
+              baseUrl: '.',
+              paths: {
+                '@shared/*': ['shared/*'],
+              },
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(
+        join(root, 'tsconfig.json'),
+        JSON.stringify(
+          {
+            extends: '../../tsconfig.base.json',
+            include: ['src', 'routes'],
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+
+      await runInitCommand(root, { tsconfig: true, github: false, agents: false });
+
+      const tsconfig = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf-8'));
+      expect(tsconfig.extends).toEqual(['../../tsconfig.base.json', './.void/tsconfig.json']);
+      expect(tsconfig.compilerOptions.paths).toEqual({
+        '@shared/*': ['./shared/*'],
+        'void/routes': ['./packages/app/.void/routes.d.ts'],
+      });
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('merges Void type files and paths into explicit empty tsconfig override fields', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      mkdirSync(join(root, 'routes'), { recursive: true });
+      writeFileSync(join(root, 'base.d.ts'), 'declare const baseValue: string;\n');
+      writeFileSync(
+        join(root, 'tsconfig.base.json'),
+        JSON.stringify(
+          {
+            compilerOptions: {
+              paths: {
+                '~/*': ['./src/*'],
+              },
+            },
+            files: ['base.d.ts'],
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(
+        join(root, 'tsconfig.json'),
+        JSON.stringify(
+          {
+            extends: './tsconfig.base.json',
+            compilerOptions: {
+              paths: {},
+            },
+            files: [],
+            include: ['src', 'routes'],
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+
+      await runInitCommand(root, { tsconfig: true, github: false, agents: false });
+
+      const tsconfig = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf-8'));
+      expect(tsconfig.extends).toEqual(['./tsconfig.base.json', './.void/tsconfig.json']);
+      expect(tsconfig.files).toEqual(['./.void/routes.d.ts']);
+      expect(tsconfig.compilerOptions.paths).toEqual({
+        'void/routes': ['./.void/routes.d.ts'],
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1724,7 +2295,9 @@ describe('isScaffoldableEmptyProject', () => {
       const matching = noteCalls.filter((call) => call[1] === 'Workspace subpackage');
       expect(matching.length).toBeGreaterThan(0);
       // And the body mentions the next-step instructions.
-      const body = String(matching[0][0]);
+      const body = String(
+        matching.find((call) => String(call[0]).includes('Scaffolded the starter demo'))?.[0] ?? '',
+      );
       expect(body).toMatch(/Scaffolded the starter demo/);
       expect(body).toMatch(/void db generate/);
     } finally {

@@ -1,6 +1,6 @@
 import { Link } from '@void/solid';
 import { ErrorBoundary, createSignal } from 'solid-js';
-import type { Props } from './link-behavior.server';
+import type { Props } from './link-behavior.server.ts';
 
 type LinkBehaviorWindow = Window & {
   __boundClickData?: string;

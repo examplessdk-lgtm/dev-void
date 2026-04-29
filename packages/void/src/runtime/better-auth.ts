@@ -1,10 +1,10 @@
-import { applySqliteAuthMigrations } from './auth-migrations';
+import { applySqliteAuthMigrations } from './auth-migrations.ts';
 import {
   createVoidAuthRuntime,
   type ResolvedDatabase,
   type VoidAuthEnv,
   type VoidAuthRuntimeApi,
-} from './better-auth-shared';
+} from './better-auth-shared.ts';
 
 async function resolveDatabase(env: VoidAuthEnv): Promise<ResolvedDatabase> {
   if (!env.DB) {
@@ -65,4 +65,4 @@ export const handleVoidAuthRequest: VoidAuthRuntimeApi['handleVoidAuthRequest'] 
 export const runVoidAuthMigrations: VoidAuthRuntimeApi['runVoidAuthMigrations'] =
   runtime.runVoidAuthMigrations;
 
-export type { VoidAuthDialect, VoidAuthEnv, VoidAuthRuntimeOptions } from './better-auth-shared';
+export type { VoidAuthDialect, VoidAuthEnv, VoidAuthRuntimeOptions } from './better-auth-shared.ts';

@@ -1,8 +1,8 @@
 import { intro, outro, log, select, confirm, isCancel, cancel } from '@clack/prompts';
-import { getToken } from './auth';
-import { PlatformClient } from './client';
-import { cliTitle, createSpinner, dim, ensureUtc, pc } from './output';
-import { readProjectConfig } from './project';
+import { getToken } from './auth.ts';
+import { PlatformClient } from './client.ts';
+import { cliTitle, createSpinner, dim, ensureUtc, pc } from './output.ts';
+import { readProjectConfig } from './project.ts';
 
 export async function runRollbackCommand(root: string, deployId?: string): Promise<void> {
   console.log();

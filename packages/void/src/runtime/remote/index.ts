@@ -1,7 +1,7 @@
-import { ProxyClient } from './client';
-import { ProxyD1Database } from './d1';
-import { ProxyKVNamespace } from './kv';
-import { ProxyR2Bucket } from './r2';
+import { ProxyClient } from './client.ts';
+import { ProxyD1Database } from './d1.ts';
+import { ProxyKVNamespace } from './kv.ts';
+import { ProxyR2Bucket } from './r2.ts';
 
 /**
  * Replace local D1/KV/R2 bindings with proxy-backed versions.

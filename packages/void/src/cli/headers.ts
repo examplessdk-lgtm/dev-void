@@ -10,9 +10,9 @@ import {
   parseHostPrefixedSource,
   VALID_REDIRECT_STATUSES,
   type RoutingConfig,
-} from '../config';
-import { voidWarn } from '../log';
-import type { DevRedirectRule, HeaderRule } from './types';
+} from '../config.ts';
+import { voidWarn } from '../log.ts';
+import type { DevRedirectRule, HeaderRule } from './types.ts';
 
 /**
  * Result of parsing a `_redirects` file.

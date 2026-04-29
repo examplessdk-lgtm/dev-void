@@ -1,9 +1,9 @@
 import { intro, outro, note, log, text, isCancel, cancel } from '@clack/prompts';
-import { getToken } from './auth';
-import { PlatformClient } from './client';
-import { cliTitle, createSpinner } from './output';
-import { readProjectConfig, removeProjectConfig } from './project';
-import { resolveProjectBySlug } from './resolve-project';
+import { getToken } from './auth.ts';
+import { PlatformClient } from './client.ts';
+import { cliTitle, createSpinner } from './output.ts';
+import { readProjectConfig, removeProjectConfig } from './project.ts';
+import { resolveProjectBySlug } from './resolve-project.ts';
 
 export async function runDeleteCommand(
   root: string,

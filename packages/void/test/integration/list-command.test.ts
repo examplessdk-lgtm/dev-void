@@ -14,7 +14,7 @@ function setIsolatedHome(): void {
 
 async function importRunListCommand() {
   vi.resetModules();
-  const mod = await import('../../src/cli/list');
+  const mod = await import('../../src/cli/list.ts');
   return mod.runListCommand;
 }
 

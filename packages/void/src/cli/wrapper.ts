@@ -97,7 +97,7 @@ export async function generateWrapper(
   // Collect migrations and copy handler if needed
   let migrations: Array<{ name: string; sql: string }> | undefined;
   if (features.hasMigrations) {
-    const { collectMigrations } = await import('../migrations/collect');
+    const { collectMigrations } = await import('../migrations/collect.ts');
     const migrationsDir = join(root, 'db', 'migrations');
     migrations = collectMigrations(migrationsDir);
     // Copy the migration handler runtime into the worker directory.

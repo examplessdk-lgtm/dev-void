@@ -6,9 +6,9 @@ vi.mock('../../src/log', () => ({
   voidError: vi.fn(),
 }));
 
-import { lintDuplicateSources } from '../../src/cli/headers';
-import type { DevRedirectRule } from '../../src/cli/types';
-import { voidWarn } from '../../src/log';
+import { lintDuplicateSources } from '../../src/cli/headers.ts';
+import type { DevRedirectRule } from '../../src/cli/types.ts';
+import { voidWarn } from '../../src/log.ts';
 
 const warnMock = vi.mocked(voidWarn);
 

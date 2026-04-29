@@ -1,5 +1,5 @@
-import { resolveLayoutIds } from './layout-resolution';
-import type { PageScanResult } from './types';
+import { resolveLayoutIds } from './layout-resolution.ts';
+import type { PageScanResult } from './types.ts';
 
 /**
  * Generates the component import map and layout tree as code strings.

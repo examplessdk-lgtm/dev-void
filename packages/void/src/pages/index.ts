@@ -3,15 +3,15 @@ export {
   resolveLayoutChain,
   resolveNamedLayout,
   resolveEffectiveLayoutChain,
-} from './scan';
+} from './scan.ts';
 export type {
   PageDefinition,
   LayoutDefinition,
   NamedLayoutDefinition,
   PageScanResult,
-} from './types';
-export { resolveHead, renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from './head';
-export type { HeadDescriptor, HeadConfig } from './head';
-export { generateComponentManifest } from './manifest';
-export { resolveStaticPageDataBuildOptions } from './static-data';
-export type { StaticPageDataBuildOptions } from './static-data';
+} from './types.ts';
+export { resolveHead, renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from './head.ts';
+export type { HeadDescriptor, HeadConfig } from './head.ts';
+export { generateComponentManifest } from './manifest.ts';
+export { resolveStaticPageDataBuildOptions } from './static-data.ts';
+export type { StaticPageDataBuildOptions } from './static-data.ts';

@@ -1,4 +1,4 @@
-import { collectMigrations } from './collect';
+import { collectMigrations } from './collect.ts';
 
 /**
  * Minimal client interface satisfied by both pg.Client and PGlite.

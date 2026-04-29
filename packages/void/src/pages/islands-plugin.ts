@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { normalizePath, type ResolvedConfig, type ViteDevServer } from 'vite';
-import { resolveEffectiveLayoutChain, scanPages } from './scan';
-import type { PageScanResult } from './types';
+import { resolveEffectiveLayoutChain, scanPages } from './scan.ts';
+import type { PageScanResult } from './types.ts';
 
 export const ISLANDS_RENDERER_ID = 'virtual:void-islands-renderer';
 export const ISLANDS_CLIENT_ENTRY_ID = 'virtual:void-islands-client';

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { generateRouteTypes } from '../../src/codegen/route-types';
-import type { ScanResult } from '../../src/router/scan';
+import { generateRouteTypes } from '../../src/codegen/route-types.ts';
+import type { ScanResult } from '../../src/router/scan.ts';
 
 describe('generateRouteTypes', () => {
   it('generates route type declarations for single-method routes', () => {
@@ -26,7 +26,7 @@ describe('generateRouteTypes', () => {
     expect(dts).toContain('declare module "void/routes"');
     expect(dts).toContain('"/api/hello"');
     expect(dts).toContain('GET: {');
-    expect(dts).toContain('typeof import("../routes/api/hello")');
+    expect(dts).toContain('typeof import("../routes/api/hello.ts")');
     expect(dts).toContain('input:');
     expect(dts).toContain('output:');
   });
@@ -53,7 +53,7 @@ describe('generateRouteTypes', () => {
 
     expect(dts).toContain('GET: {');
     expect(dts).toContain('POST: {');
-    expect(dts).toContain('typeof import("../routes/api/users/index")');
+    expect(dts).toContain('typeof import("../routes/api/users/index.ts")');
   });
 
   it('skips routes with no methods', () => {
@@ -100,7 +100,7 @@ describe('generateRouteTypes', () => {
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
 
     expect(dts).toContain('"/api/users/:id"');
-    expect(dts).toContain('typeof import("../routes/api/users/[id]")');
+    expect(dts).toContain('typeof import("../routes/api/users/[id].ts")');
   });
 
   it('includes Serialize and ExtractInput helper types', () => {
@@ -184,7 +184,7 @@ describe('generateRouteTypes', () => {
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
 
     // Should have relative path from .void to routes
-    expect(dts).toContain('../routes/api/deep/nested');
+    expect(dts).toContain('../routes/api/deep/nested.ts');
   });
 
   it('generates PageActionMap for pages with actions', () => {
@@ -214,7 +214,7 @@ describe('generateRouteTypes', () => {
 
     expect(dts).toContain('interface PageActionMap');
     expect(dts).toContain('"/users"');
-    expect(dts).toContain('typeof import("../pages/users/index.server")');
+    expect(dts).toContain('typeof import("../pages/users/index.server.ts")');
     expect(dts).toContain('body:');
   });
 
@@ -274,7 +274,7 @@ describe('generateRouteTypes', () => {
 
     expect(dts).toContain('interface WebSocketRouteMap');
     expect(dts).toContain('"/chat/:room"');
-    expect(dts).toContain('typeof import("../routes/chat/[room].ws")');
+    expect(dts).toContain('typeof import("../routes/chat/[room].ws.ts")');
     expect(dts).toContain('client:');
     expect(dts).toContain('server:');
     expect(dts).toContain('params: RouteParams<["room"]>');

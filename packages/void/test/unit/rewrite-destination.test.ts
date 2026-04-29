@@ -1,5 +1,5 @@
 import { describe, expectTypeOf, it } from 'vitest';
-import type { RewriteDestination, RouteName } from '../../src/routes-stub';
+import type { RewriteDestination, RouteName } from '../../src/routes-stub.ts';
 
 /**
  * Type-level tests for RouteName / RewriteDestination on the `void/routes`

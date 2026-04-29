@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createPageRouter, ssrProxy } from '../../src/pages/client';
-import { parseCacheFor } from '../../src/pages/prefetch';
+import { createPageRouter, ssrProxy } from '../../src/pages/client.ts';
+import { parseCacheFor } from '../../src/pages/prefetch.ts';
 
 type DeferredTestWindow = Window & {
   __resolveDeferred(group: string, data: unknown): void;

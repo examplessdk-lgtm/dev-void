@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getMiniflareDatabasePath } from '../../src/migrations/runner';
+import { getMiniflareDatabasePath } from '../../src/migrations/runner.ts';
 
 const mockIntro = vi.fn();
 const mockOutro = vi.fn();
@@ -82,7 +82,7 @@ async function readMessages(root: string): Promise<Array<{ id: number; text: str
 }
 
 describe('void db seed', () => {
-  let runDbCommand: typeof import('../../src/cli/db').runDbCommand;
+  let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -90,7 +90,7 @@ describe('void db seed', () => {
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
-    runDbCommand = (await import('../../src/cli/db')).runDbCommand;
+    runDbCommand = (await import('../../src/cli/db.ts')).runDbCommand;
   });
 
   afterEach(() => {

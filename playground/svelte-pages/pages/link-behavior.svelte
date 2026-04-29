@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Link } from "@void/svelte";
-  import type { Props } from "./link-behavior.server";
+  import type { Props } from "./link-behavior.server.ts";
 
   type LinkBehaviorWindow = Window & {
     __linkOnClick?: boolean;

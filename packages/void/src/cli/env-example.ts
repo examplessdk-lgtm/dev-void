@@ -27,9 +27,9 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { log, outro } from '@clack/prompts';
-import { findEnvFile } from '../codegen/env-types';
-import { loadUserEnvFile } from '../host/load-user-env';
-import type { StandardSchemaV1 } from '../standard-schema';
+import { findEnvFile } from '../codegen/env-types.ts';
+import { loadUserEnvFile } from '../host/load-user-env.ts';
+import type { StandardSchemaV1 } from '../standard-schema.ts';
 
 interface EnvPublicModule {
   _getRegisteredSchema(): Record<string, StandardSchemaV1<unknown, unknown>> | null;
@@ -40,7 +40,7 @@ async function loadRegisteredSchema(
   envFile: string,
 ): Promise<Record<string, StandardSchemaV1<unknown, unknown>> | null> {
   await loadUserEnvFile(envFile);
-  const mod = (await import('../runtime/env-public')) as unknown as EnvPublicModule;
+  const mod = (await import('../runtime/env-public.ts')) as unknown as EnvPublicModule;
   return mod._getRegisteredSchema();
 }
 

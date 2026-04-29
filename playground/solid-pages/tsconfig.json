@@ -2,15 +2,16 @@
   "extends": "./.void/tsconfig.json",
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "strict": true,
     "noUnusedLocals": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "jsx": "preserve",
     "jsxImportSource": "solid-js",
-    "types": ["void/env"]
+    "types": ["void/env"],
+    "allowImportingTsExtensions": true
   },
   "include": ["pages", "routes", "middleware"]
 }

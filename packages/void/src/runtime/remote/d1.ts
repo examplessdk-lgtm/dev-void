@@ -1,4 +1,4 @@
-import type { ProxyClient } from './client';
+import type { ProxyClient } from './client.ts';
 
 type ProxyPreparedStatement = D1PreparedStatement & {
   _sql: string;

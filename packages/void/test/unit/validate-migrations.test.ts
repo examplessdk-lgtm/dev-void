@@ -6,7 +6,7 @@ import {
   assertJournalCoherence,
   isDestructive,
   validateMigrations,
-} from '../../src/migrations/validate';
+} from '../../src/migrations/validate.ts';
 
 describe('isDestructive', () => {
   it('detects DROP TABLE', () => {

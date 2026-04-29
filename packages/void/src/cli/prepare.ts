@@ -1,7 +1,7 @@
 import { intro, log, note, outro } from '@clack/prompts';
-import { prepareProject } from '../codegen/prepare';
-import { cliTitle } from './output';
-import type { PrepareArgs } from './prepare-args';
+import { prepareProject } from '../codegen/prepare.ts';
+import { cliTitle } from './output.ts';
+import type { PrepareArgs } from './prepare-args.ts';
 
 export async function runPrepareCommand(root: string, _args: PrepareArgs): Promise<void> {
   console.log();

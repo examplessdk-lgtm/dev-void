@@ -1,4 +1,4 @@
-import type { Props } from './about.server';
+import type { Props } from './about.server.ts';
 
 export default function AboutPage({ description }: Props) {
   return (

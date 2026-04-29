@@ -1,6 +1,6 @@
 import { select, text, isCancel, cancel } from '@clack/prompts';
-import { getSiteDomain } from './auth';
-import type { ProjectResponse } from './client';
+import { getSiteDomain } from './auth.ts';
+import type { ProjectResponse } from './client.ts';
 
 interface SelectResult {
   action: 'select';

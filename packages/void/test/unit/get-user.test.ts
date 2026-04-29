@@ -5,7 +5,7 @@ import {
   authContext,
   type AuthState,
   type AuthUser,
-} from '../../src/runtime/auth';
+} from '../../src/runtime/auth.ts';
 
 function createUser(overrides: Partial<AuthUser> = {}): AuthUser {
   return {

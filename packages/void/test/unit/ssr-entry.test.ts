@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, afterEach } from 'vitest';
-import { getSsrServerEntryPath, hasSsrEntry, validateSsrEntry } from '../../src/ssr/entry';
+import { getSsrServerEntryPath, hasSsrEntry, validateSsrEntry } from '../../src/ssr/entry.ts';
 
 const tempDirs: Array<string> = [];
 

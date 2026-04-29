@@ -1,4 +1,4 @@
-import type { IslandImport } from './extract-script';
+import type { IslandImport } from './extract-script.ts';
 
 // Match self-closing uppercase tags: <Counter />, <Counter attr="val" />
 // and paired uppercase tags: <Counter>...</Counter>

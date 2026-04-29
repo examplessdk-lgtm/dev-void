@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { compileWorkerClient } from '../../src/router/compile';
+import { compileWorkerClient } from '../../src/router/compile.ts';
 
 describe('compileWorkerClient', () => {
   it('generates module with fetch function and FetchError class', () => {

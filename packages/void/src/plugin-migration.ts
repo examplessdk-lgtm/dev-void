@@ -1,8 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Plugin } from 'vite';
-import type { DatabaseDialect } from './config';
-import { voidLog, voidWarn, voidError } from './log';
+import type { DatabaseDialect } from './config.ts';
+import { voidLog, voidWarn, voidError } from './log.ts';
 
 function readDatabaseUrl(root: string): string | undefined {
   const envPath = join(root, '.env.local');
@@ -75,9 +75,9 @@ export function migrationPlugin(
             return;
           }
           const { runPgMigrations, getPgAppliedMigrations } =
-            await import('./migrations/runner-pg');
-          const { collectMigrations } = await import('./migrations/collect');
-          const { validateMigrations } = await import('./migrations/validate');
+            await import('./migrations/runner-pg.ts');
+          const { collectMigrations } = await import('./migrations/collect.ts');
+          const { validateMigrations } = await import('./migrations/validate.ts');
 
           const allMigrations = collectMigrations(migrationsDir);
           const pgApplied = await getPgAppliedMigrations(url);
@@ -97,9 +97,9 @@ export function migrationPlugin(
           }
         } else if (hasSqlMigrations) {
           const { runMigrations, getMiniflareDatabasePath, getAppliedMigrations } =
-            await import('./migrations/runner');
-          const { collectMigrations } = await import('./migrations/collect');
-          const { validateMigrations } = await import('./migrations/validate');
+            await import('./migrations/runner.ts');
+          const { collectMigrations } = await import('./migrations/collect.ts');
+          const { validateMigrations } = await import('./migrations/validate.ts');
           const dbPath = getMiniflareDatabasePath(persistRoot, databaseId);
 
           const allMigrations = collectMigrations(migrationsDir);
@@ -121,7 +121,7 @@ export function migrationPlugin(
         }
 
         if (auth?.enabled) {
-          const { runLocalVoidAuthMigrations } = await import('./auth/node');
+          const { runLocalVoidAuthMigrations } = await import('./auth/node.ts');
           await runLocalVoidAuthMigrations(root, dialect, persistRoot, databaseId, auth.configPath);
           voidLog('Applied Better Auth migrations');
         }

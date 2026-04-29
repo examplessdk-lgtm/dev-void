@@ -13,13 +13,13 @@ import anchor from 'markdown-it-anchor';
 import attrs from 'markdown-it-attrs';
 import { full as emoji } from 'markdown-it-emoji';
 import { createHighlighter, bundledLanguages, isSpecialLang, type BundledLanguage } from 'shiki';
-import { containerPlugin } from './plugins/containers';
-import { gitHubAlertsPlugin } from './plugins/github-alerts';
-import { imagePlugin } from './plugins/image';
-import { lineNumberPlugin } from './plugins/line-numbers';
-import { linkPlugin } from './plugins/link';
-import { preWrapperPlugin } from './plugins/pre-wrapper';
-import { tocPlugin } from './plugins/toc';
+import { containerPlugin } from './plugins/containers.ts';
+import { gitHubAlertsPlugin } from './plugins/github-alerts.ts';
+import { imagePlugin } from './plugins/image.ts';
+import { lineNumberPlugin } from './plugins/line-numbers.ts';
+import { linkPlugin } from './plugins/link.ts';
+import { preWrapperPlugin } from './plugins/pre-wrapper.ts';
+import { tocPlugin } from './plugins/toc.ts';
 
 export interface Heading {
   depth: number;

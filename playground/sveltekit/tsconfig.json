@@ -3,6 +3,7 @@
   "compilerOptions": {
     "noUnusedLocals": true,
     "skipLibCheck": true,
-    "types": ["void/env"]
+    "types": ["void/env"],
+    "allowImportingTsExtensions": true
   }
 }

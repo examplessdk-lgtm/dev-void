@@ -1,6 +1,6 @@
 import { Link, useForm } from '@void/react';
 import { useFormStatus } from 'react-dom';
-import type { Props } from './index.server';
+import type { Props } from './index.server.ts';
 
 function SubmitButton() {
   const { pending } = useFormStatus();

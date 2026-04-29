@@ -12,7 +12,7 @@ import {
   type AstProgram,
   type AstVariableDeclaration,
   type AstVariableDeclarator,
-} from '../shared/ast';
+} from '../shared/ast.ts';
 
 export const SSR_SERVER_ENTRY_RELATIVE_PATHS = ['src/main.ssr.ts', 'src/main.ssr.tsx'] as const;
 export const SSR_CLIENT_ENTRY_RELATIVE_PATHS = [

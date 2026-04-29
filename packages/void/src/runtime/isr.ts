@@ -1,4 +1,4 @@
-import { getRawRuntimeEnv } from './env-raw';
+import { getRawRuntimeEnv } from './env-raw.ts';
 
 export interface RevalidateOptions {
   paths?: Array<string>;

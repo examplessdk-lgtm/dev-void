@@ -10,27 +10,27 @@ Use this page as a command reference. If you are setting up a project for the fi
 
 ## Cheat Sheet
 
-| Command                           | Purpose                                             |
-| --------------------------------- | --------------------------------------------------- |
-| `void deploy`                     | Build and deploy to Void                            |
-| `void prepare`                    | Generate `.void` artifacts without starting Vite    |
-| `void gen model <name> [cols...]` | Scaffold migration + CRUD routes                    |
-| `void gen route <path>`           | Create an API route                                 |
-| `void db status`                  | Show local/remote migration status                  |
-| `void db reset`                   | Drop and re-apply all migrations                    |
-| `void db seed`                    | Reset + seed local database                         |
-| `void db studio`                  | Open Drizzle Studio for local database              |
-| `void secret put <name=value>`    | Set a production secret                             |
-| `void secret sync .env.local`     | Bulk upload secrets from dotenv file                |
-| `void env check [--remote]`       | Validate env.ts schema                              |
-| `void env types`                  | Regenerate .void/env.d.ts from env.ts               |
-| `void env example`                | Refresh the void-managed block in .env.example      |
-| `void auth login`                 | Authenticate with Void                              |
-| `void project link`               | Link directory to a project                         |
-| `void project logs`               | Show runtime logs from deployed project             |
-| `void project rollback`           | Roll back to a previous deployment                  |
-| `void project purge-cache`        | Purge all cached pages                              |
-| `void init`                       | Setup wizard (Pages scaffold, tsconfig, agents, CI) |
+| Command                           | Purpose                                          |
+| --------------------------------- | ------------------------------------------------ |
+| `void deploy`                     | Build and deploy to Void                         |
+| `void prepare`                    | Generate `.void` artifacts without starting Vite |
+| `void gen model <name> [cols...]` | Scaffold migration + CRUD routes                 |
+| `void gen route <path>`           | Create an API route                              |
+| `void db status`                  | Show local/remote migration status               |
+| `void db reset`                   | Drop and re-apply all migrations                 |
+| `void db seed`                    | Reset + seed local database                      |
+| `void db studio`                  | Open Drizzle Studio for local database           |
+| `void secret put <name=value>`    | Set a production secret                          |
+| `void secret sync .env.local`     | Bulk upload secrets from dotenv file             |
+| `void env check [--remote]`       | Validate env.ts schema                           |
+| `void env types`                  | Regenerate .void/env.d.ts from env.ts            |
+| `void env example`                | Refresh the void-managed block in .env.example   |
+| `void auth login`                 | Authenticate with Void                           |
+| `void project link`               | Link directory to a project                      |
+| `void project logs`               | Show runtime logs from deployed project          |
+| `void project rollback`           | Roll back to a previous deployment               |
+| `void project purge-cache`        | Purge all cached pages                           |
+| `void init`                       | Setup wizard for new or existing projects        |
 
 ## Binary Invocation
 
@@ -64,13 +64,15 @@ Use `void --help` or `void help` for the top-level command list. Every command a
 void init [--tsconfig] [--github] [--agents]
 ```
 
-Setup wizard for void projects (new or existing).
+Setup wizard for Void projects (new or existing).
 
 If run in a scaffoldable empty directory, `void init` scaffolds a Pages starter. If a single Pages adapter is already installed, it reuses that framework; otherwise it asks which framework to scaffold (React, Vue, Svelte, or Solid). It then asks which starter you want: D1, PostgreSQL, or Static Pages. The D1 and PostgreSQL starters write a framework-specific `vite.config.ts`, a `pages/` home page plus `.server.ts` loader, `db/schema.ts`, `db/seed.ts`, a generated initial migration under `db/migrations/`, and `routes/api/hello.ts`. The Static Pages starter writes just the framework-specific `vite.config.ts` and a `pages/` home page so you can add server features later.
 
+If run in an existing project, `void init` configures the project in place: it ensures `void` and `vite` are declared, adds missing `dev` (`vite`) and `build` (`vite build`) scripts without overwriting existing scripts, and creates or patches `vite.config.*` with `voidPlugin()` when the config shape is safe to edit. If the Vite config is too dynamic to patch confidently, it prints the manual snippet instead of rewriting it.
+
 After that, the full interactive flow walks through:
 
-1. **TypeScript:** creates or updates `tsconfig.json`, including `extends .void/tsconfig.json` and `void/env` types.
+1. **TypeScript:** creates or updates `tsconfig.json`, including `extends .void/tsconfig.json`, `void/env` types, and root-level `files` / `compilerOptions.paths` merges when an existing config would otherwise replace Void's generated entries.
 2. **Database:** asks whether you want D1, PostgreSQL, or no database yet. Choosing PostgreSQL writes `"database": "pg"` to `void.json`; D1 stays implicit; choosing no database leaves config unchanged so you can add data features later.
 3. **Agent instructions:** detects agents once and injects instructions into `CLAUDE.md` or `AGENTS.md`.
 4. **Skills:** links Void skills using the same detected or selected agent context.
@@ -91,6 +93,8 @@ Use flags to run individual steps without prompts:
 | `--github`   | Only create GitHub Actions workflow               |
 
 Flags can be combined. When any flag is provided, only the specified steps run and interactive prompts are skipped.
+
+For projects that already have `"extends"`, `void init --tsconfig` preserves the existing config and adds `./.void/tsconfig.json`. If the existing config defines `files` or `compilerOptions.paths`, Void also merges its generated declaration files and aliases into the root config because TypeScript replaces those fields across `extends` instead of deeply merging them.
 
 ### `void prepare`
 

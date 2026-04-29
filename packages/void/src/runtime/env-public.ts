@@ -28,11 +28,11 @@
  */
 /// <reference types="@cloudflare/workers-types" />
 
-import { isUnmaskActive, redactMessage, type SecretOverride } from '../shared/env-mask';
-import type { StandardSchemaV1 } from '../standard-schema';
-import { getRuntimeEnv } from './env';
-import { getSecretOverride } from './env-helpers';
-import { getRawRuntimeEnv } from './env-raw';
+import { isUnmaskActive, redactMessage, type SecretOverride } from '../shared/env-mask.ts';
+import type { StandardSchemaV1 } from '../standard-schema.ts';
+import { getSecretOverride } from './env-helpers.ts';
+import { getRawRuntimeEnv } from './env-raw.ts';
+import { getRuntimeEnv } from './env.ts';
 
 interface AnyValidator extends StandardSchemaV1<unknown, unknown> {}
 type AnySchema = Record<string, AnyValidator>;
@@ -386,7 +386,7 @@ async function validateAllEnvWithValues(
   return report;
 }
 
-export { string, number, boolean, url, email, oneOf, json, type EnvSchema } from './env-helpers';
+export { string, number, boolean, url, email, oneOf, json, type EnvSchema } from './env-helpers.ts';
 
 // Preserve ambient Cloudflare.Env declarations from the previous env.d.ts
 // so user tsconfigs that include `types: ["void/env"]` continue to expose

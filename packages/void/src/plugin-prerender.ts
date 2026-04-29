@@ -1,10 +1,10 @@
 import { join } from 'node:path';
 import type { Plugin } from 'vite';
-import { resolveDistDir, resolveWorkerDirName } from './cli/deploy';
-import { isNodeTarget, type VoidConfig } from './config';
-import { voidLog, voidWarn, setShowTimestamp } from './log';
-import { prerenderPages, prerenderPagesNode } from './prerender';
-import { resolveRemoteMode } from './shared/env';
+import { resolveDistDir, resolveWorkerDirName } from './cli/deploy.ts';
+import { isNodeTarget, type VoidConfig } from './config.ts';
+import { voidLog, voidWarn, setShowTimestamp } from './log.ts';
+import { prerenderPages, prerenderPagesNode } from './prerender.ts';
+import { resolveRemoteMode } from './shared/env.ts';
 
 /**
  * Vite plugin that prerenders pages at build time when `output: "static"`.

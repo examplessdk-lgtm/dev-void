@@ -1,8 +1,8 @@
-import type { VoidAuthProvider } from '../auth/providers';
-import type { DevRedirectRule, HeaderRule } from '../cli/types';
-import { resolveLayoutIds } from '../pages/layout-resolution';
-import { INTERNAL_BINDING_PREFIXES } from '../runtime/env-raw';
-import type { ScanResult } from './scan';
+import type { VoidAuthProvider } from '../auth/providers.ts';
+import type { DevRedirectRule, HeaderRule } from '../cli/types.ts';
+import { resolveLayoutIds } from '../pages/layout-resolution.ts';
+import { INTERNAL_BINDING_PREFIXES } from '../runtime/env-raw.ts';
+import type { ScanResult } from './scan.ts';
 
 /**
  * Script tag injected into dev HTML to load the binding-hint virtual module.
@@ -692,7 +692,7 @@ export interface PagesCompileOptions {
   /** Virtual module ID for the md plugin's client entry (script execution) */
   mdClientEntryId?: string;
   /** Head config from void.json */
-  headConfig?: import('../pages/head').HeadConfig;
+  headConfig?: import('../pages/head.ts').HeadConfig;
 }
 
 /**

@@ -11,7 +11,7 @@
  */
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { expandDotenv, parseDotenvFile as sharedParseDotenvFile } from '../shared/dotenv';
+import { expandDotenv, parseDotenvFile as sharedParseDotenvFile } from '../shared/dotenv.ts';
 
 /** Dotenv files we harvest keys from, in trust order (first wins per key). */
 export const SCAFFOLD_SOURCE_FILES = [

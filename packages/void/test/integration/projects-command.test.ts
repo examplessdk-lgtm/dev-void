@@ -25,7 +25,7 @@ function createProjectRoot(opts?: { staging?: boolean }): string {
 
 async function importRunProjectsCommand() {
   vi.resetModules();
-  const mod = await import('../../src/cli/projects');
+  const mod = await import('../../src/cli/projects.ts');
   return mod.runProjectsCommand;
 }
 

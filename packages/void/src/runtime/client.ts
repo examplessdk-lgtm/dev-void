@@ -1,4 +1,4 @@
-export { fetch, FetchError } from './fetch';
-export { fetchStream, StreamError } from './fetch-stream';
-export { auth, createAuthClient } from './auth-client';
-export type { AuthSession, AuthState, AuthUser } from './auth';
+export { fetch, FetchError } from './fetch.ts';
+export { fetchStream, StreamError } from './fetch-stream.ts';
+export { auth, createAuthClient } from './auth-client.ts';
+export type { AuthSession, AuthState, AuthUser } from './auth.ts';

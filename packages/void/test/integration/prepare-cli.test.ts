@@ -83,7 +83,7 @@ describe('void prepare (subprocess)', () => {
     expect(existsSync(envDts)).toBe(true);
     expect(existsSync(tsconfig)).toBe(true);
 
-    expect(readFileSync(routesDts, 'utf8')).toContain('typeof import("../routes/api/hello")');
+    expect(readFileSync(routesDts, 'utf8')).toContain('typeof import("../routes/api/hello.ts")');
     expect(readFileSync(dbDts, 'utf8')).toContain('import type * as schema from "@schema"');
     expect(readFileSync(envDts, 'utf8')).toContain('declare module "void/env"');
 

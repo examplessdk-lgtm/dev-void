@@ -15,7 +15,7 @@ import {
   ISLANDS_CLIENT_ENTRY_ID,
 } from 'void/pages-islands-plugin';
 import type { IslandEntry } from 'void/pages-islands-plugin';
-import { generateComponentManifest } from './pages-manifest';
+import { generateComponentManifest } from './pages-manifest.ts';
 
 const COMPONENT_EXTENSIONS = ['.vue', '.tsx', '.jsx', '.ts', '.js'];
 type MdPluginWithApi = Plugin & {

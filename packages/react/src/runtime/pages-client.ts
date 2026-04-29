@@ -26,8 +26,8 @@ import {
 } from 'void/pages-client';
 import type { CacheForResult } from 'void/pages-prefetch';
 import type { PageObject } from 'void/pages-protocol';
-import { setActionRouter } from './action';
-import { ErrorsContext, NavigationContext, RouterContext, SharedContext } from './context';
+import { setActionRouter } from './action.ts';
+import { ErrorsContext, NavigationContext, RouterContext, SharedContext } from './context.ts';
 
 // oxlint-disable-next-line no-explicit-any -- component props are narrowed by generated route types
 type ComponentModule = { default: ComponentType<any> };

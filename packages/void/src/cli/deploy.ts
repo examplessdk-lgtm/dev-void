@@ -15,8 +15,8 @@ import { fileURLToPath } from 'node:url';
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
 import { intro, outro, log, note, confirm, isCancel, type SpinnerResult } from '@clack/prompts';
-import { findVoidAuthConfig } from '../auth/config';
-import { findEnvFile } from '../codegen/env-types';
+import { findVoidAuthConfig } from '../auth/config.ts';
+import { findEnvFile } from '../codegen/env-types.ts';
 import {
   readConfig,
   resolveBindingNames,
@@ -25,54 +25,54 @@ import {
   type VoidConfig,
   getDatabaseDialect,
   isNodeTarget,
-} from '../config';
-import { scanJobsSync } from '../crons/scan';
-import { writeDrizzleConfig } from '../drizzle/config';
-import { discoverSchema } from '../drizzle/discover';
-import { voidWarn } from '../log';
-import { collectMigrations } from '../migrations/collect';
-import { assertJournalCoherence, validateMigrations } from '../migrations/validate';
-import { scanPages } from '../pages/scan';
+} from '../config.ts';
+import { scanJobsSync } from '../crons/scan.ts';
+import { writeDrizzleConfig } from '../drizzle/config.ts';
+import { discoverSchema } from '../drizzle/discover.ts';
+import { voidWarn } from '../log.ts';
+import { collectMigrations } from '../migrations/collect.ts';
+import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
+import { scanPages } from '../pages/scan.ts';
 import {
   inferProjectBindings,
   FRAMEWORK_SCAN_DIRS,
   detectFramework,
   type DetectedFramework,
-} from '../plugin-inference';
-import { collectPrerenderPaths, collectPrerenderPathsNode } from '../prerender';
-import { scanQueuesSync } from '../queues/scan';
-import { scanRoutes } from '../router/scan';
-import { scanWebSocketRoutesSync } from '../router/websocket';
+} from '../plugin-inference.ts';
+import { collectPrerenderPaths, collectPrerenderPathsNode } from '../prerender.ts';
+import { scanQueuesSync } from '../queues/scan.ts';
+import { scanRoutes } from '../router/scan.ts';
+import { scanWebSocketRoutesSync } from '../router/websocket.ts';
 import {
   isSandboxEnabled,
   requiresSandboxPlatformImage,
   resolveSandboxConfig,
-} from '../sandbox/config';
-import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env';
-import { validateSsrEntry } from '../ssr/entry';
-import { getToken, getTokenSource } from './auth';
-import { isExpiredTokenError, PlatformClient } from './client';
-import { promptAndCreateProject } from './create-project';
+} from '../sandbox/config.ts';
+import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env.ts';
+import { validateSsrEntry } from '../ssr/entry.ts';
+import { getToken, getTokenSource } from './auth.ts';
+import { isExpiredTokenError, PlatformClient } from './client.ts';
+import { promptAndCreateProject } from './create-project.ts';
 import {
   formatConnectionLostMessage,
   formatDeployFailureMessage,
   formatStreamDeployError,
-} from './deploy-errors';
+} from './deploy-errors.ts';
 import {
   fetchRemoteSecretNames,
   formatEnvReport,
   getDeployEnvDefaults,
   validateProdEnv,
-} from './env-validation';
-import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers';
-import { promptForLoginToken } from './login';
-import { cliTitle, createSpinner, pc } from './output';
+} from './env-validation.ts';
+import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers.ts';
+import { promptForLoginToken } from './login.ts';
+import { cliTitle, createSpinner, pc } from './output.ts';
 import {
   packageBuild,
   packageStaticBuild,
   packageFrameworkBuild,
   collectAndHashAssets,
-} from './package';
+} from './package.ts';
 import {
   detectPreset,
   FRAMEWORK_PRESETS,
@@ -80,16 +80,16 @@ import {
   resolveProjectCommand,
   type StaticPreset,
   type FrameworkPreset,
-} from './preset';
-import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project';
-import { promptProjectSelection, promptProjectSetupAction } from './prompt';
-import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project';
-import type { AssetConfig, DeployEvent, DevRedirectRule, HeaderRule } from './types';
-import { readWranglerCompat, type WranglerCompat } from './wrangler';
-import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper';
+} from './preset.ts';
+import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project.ts';
+import { promptProjectSelection, promptProjectSetupAction } from './prompt.ts';
+import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
+import type { AssetConfig, DeployEvent, DevRedirectRule, HeaderRule } from './types.ts';
+import { readWranglerCompat, type WranglerCompat } from './wrangler.ts';
+import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper.ts';
 
 class DeployEventError extends Error {}
-import type { WrapperFeatures } from './wrapper';
+import type { WrapperFeatures } from './wrapper.ts';
 
 export interface RunDeployOptions {
   projectSlug?: string;

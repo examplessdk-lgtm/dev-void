@@ -1,27 +1,27 @@
 /// <reference lib="dom" />
 
-import { VoidActionError, isCallSiteActionError, type ActionResult } from './action-result';
+import { VoidActionError, isCallSiteActionError, type ActionResult } from './action-result.ts';
 import {
   createPageNavigationEngine as createNavigationEngine,
   type PageComponentModule,
   type PageData,
-} from './navigation-engine';
-import type { CacheForResult, CacheForInput } from './prefetch';
+} from './navigation-engine.ts';
+import type { CacheForResult, CacheForInput } from './prefetch.ts';
 
 export {
   VoidActionError,
   categorizeActionError,
   isAbortError,
   isCallSiteActionError,
-} from './action-result';
-export type { ActionErrorHandlingScope, ActionResult } from './action-result';
-export { isEqualFormValue } from './form-value-equality';
-export { createPageNavigationEngine } from './navigation-engine';
+} from './action-result.ts';
+export type { ActionErrorHandlingScope, ActionResult } from './action-result.ts';
+export { isEqualFormValue } from './form-value-equality.ts';
+export { createPageNavigationEngine } from './navigation-engine.ts';
 export type {
   PageNavigationEngine,
   PageNavigationResource,
   PageNavigationResult,
-} from './navigation-engine';
+} from './navigation-engine.ts';
 
 // --- Types ---
 

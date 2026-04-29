@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { SchemaLocation } from '../drizzle/discover';
+import type { SchemaLocation } from '../drizzle/discover.ts';
 
 export const DRIZZLE_OPERATORS =
   'sql, eq, ne, gt, gte, lt, lte, and, or, not, desc, asc, like, ilike, notLike, inArray, notInArray, isNull, isNotNull, between, notBetween, exists, notExists, count, sum, avg, min, max';

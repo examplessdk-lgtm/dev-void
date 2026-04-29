@@ -1,4 +1,4 @@
-import { parsePlatformErrorBody, PlatformApiError } from './client';
+import { parsePlatformErrorBody, PlatformApiError } from './client.ts';
 
 const BODY_SNIPPET_MAX = 200;
 

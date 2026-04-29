@@ -1,4 +1,4 @@
-import type { SubcommandDef } from './subcommand-prompt';
+import type { SubcommandDef } from './subcommand-prompt.ts';
 
 export const domainSubcommands: Array<SubcommandDef> = [
   { name: 'add', arg: '<hostname>', description: 'Add a custom domain' },

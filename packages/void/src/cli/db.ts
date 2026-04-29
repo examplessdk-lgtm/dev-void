@@ -3,20 +3,25 @@ import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSyn
 import { extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { intro, outro, log } from '@clack/prompts';
-import { readConfig, getDatabaseDialect, type DatabaseDialect } from '../config';
-import { collectMigrations, readJournal, stripSqlExt, writeJournal } from '../migrations/collect';
+import { readConfig, getDatabaseDialect, type DatabaseDialect } from '../config.ts';
+import {
+  collectMigrations,
+  readJournal,
+  stripSqlExt,
+  writeJournal,
+} from '../migrations/collect.ts';
 import {
   assertJournalCoherence,
   listDrizzleArtifacts,
   validateMigrations,
-} from '../migrations/validate';
-import type { SeedFn } from '../runtime/seed';
-import { getToken } from './auth';
-import { PlatformClient } from './client';
-import type { DbArgs } from './db-args';
-import { formatTimestamp } from './gen';
-import { cliTitle, dim, pc } from './output';
-import { readProjectConfig } from './project';
+} from '../migrations/validate.ts';
+import type { SeedFn } from '../runtime/seed.ts';
+import { getToken } from './auth.ts';
+import { PlatformClient } from './client.ts';
+import type { DbArgs } from './db-args.ts';
+import { formatTimestamp } from './gen.ts';
+import { cliTitle, dim, pc } from './output.ts';
+import { readProjectConfig } from './project.ts';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const DEFAULT_SEED_FILES = [
@@ -149,7 +154,7 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
 }
 
 async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
-  const { writeDrizzleConfig } = await import('../drizzle/config');
+  const { writeDrizzleConfig } = await import('../drizzle/config.ts');
 
   let configPath: string;
   if (dialect === 'postgresql') {
@@ -158,7 +163,7 @@ async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
   } else {
     const { mkdirSync } = await import('node:fs');
     const { dirname } = await import('node:path');
-    const { getMiniflareDatabasePath } = await import('../migrations/runner');
+    const { getMiniflareDatabasePath } = await import('../migrations/runner.ts');
     const persistRoot = join(root, '.void');
     const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -174,7 +179,7 @@ async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
 }
 
 async function runGenerate(root: string, dialect: DatabaseDialect): Promise<void> {
-  const { writeDrizzleConfig } = await import('../drizzle/config');
+  const { writeDrizzleConfig } = await import('../drizzle/config.ts');
 
   const configPath =
     dialect === 'postgresql'
@@ -223,7 +228,8 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
       localApplied = [];
     }
   } else {
-    const { getMiniflareDatabasePath, getAppliedMigrations } = await import('../migrations/runner');
+    const { getMiniflareDatabasePath, getAppliedMigrations } =
+      await import('../migrations/runner.ts');
     const persistRoot = join(root, '.void');
     const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
     localApplied = await getAppliedMigrations(dbPath);
@@ -325,7 +331,7 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
     return migrations.length;
   }
 
-  const { getMiniflareDatabasePath, runMigrations } = await import('../migrations/runner');
+  const { getMiniflareDatabasePath, runMigrations } = await import('../migrations/runner.ts');
   const persistRoot = join(root, '.void');
   const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
 
@@ -369,7 +375,8 @@ async function runSeed(
       return;
     }
 
-    const { getMiniflareDatabasePath, openSqliteDatabase } = await import('../migrations/runner');
+    const { getMiniflareDatabasePath, openSqliteDatabase } =
+      await import('../migrations/runner.ts');
     const persistRoot = join(root, '.void');
     const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
     const db = await openSqliteDatabase(dbPath);
@@ -407,7 +414,7 @@ async function runExecute(
     return;
   }
 
-  const { getMiniflareDatabasePath, openSqliteDatabase } = await import('../migrations/runner');
+  const { getMiniflareDatabasePath, openSqliteDatabase } = await import('../migrations/runner.ts');
   const persistRoot = join(root, '.void');
   const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
 
@@ -544,7 +551,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
   }
 
   if (dialect === 'postgresql') {
-    const { applyPgMigrations } = await import('../migrations/runner-pg');
+    const { applyPgMigrations } = await import('../migrations/runner-pg.ts');
     const applied = await withPgClient(root, async (client) => {
       let existingRows: Array<{ name: string }> = [];
       try {
@@ -577,7 +584,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
   }
 
   const { getMiniflareDatabasePath, getAppliedMigrations, runMigrations } =
-    await import('../migrations/runner');
+    await import('../migrations/runner.ts');
   const persistRoot = join(root, '.void');
   const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
 
@@ -604,7 +611,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
 
 async function runStudio(root: string, dialect: DatabaseDialect): Promise<void> {
   if (dialect === 'postgresql') {
-    const { writeDrizzleConfig } = await import('../drizzle/config');
+    const { writeDrizzleConfig } = await import('../drizzle/config.ts');
     const url = getPgUrl(root);
     const configPath = writeDrizzleConfig(root, url, 'postgresql');
 
@@ -617,8 +624,8 @@ async function runStudio(root: string, dialect: DatabaseDialect): Promise<void> 
     return;
   }
 
-  const { writeDrizzleConfig } = await import('../drizzle/config');
-  const { getMiniflareDatabasePath } = await import('../migrations/runner');
+  const { writeDrizzleConfig } = await import('../drizzle/config.ts');
+  const { getMiniflareDatabasePath } = await import('../migrations/runner.ts');
 
   const persistRoot = join(root, '.void');
   const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
@@ -1032,7 +1039,8 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       process.exit(1);
     }
   } else {
-    const { getMiniflareDatabasePath, openSqliteDatabase } = await import('../migrations/runner');
+    const { getMiniflareDatabasePath, openSqliteDatabase } =
+      await import('../migrations/runner.ts');
     const persistRoot = join(root, '.void');
     const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
     if (existsSync(dbPath)) {
@@ -1164,7 +1172,7 @@ async function runExport(
     return;
   }
 
-  const { getMiniflareDatabasePath, openSqliteDatabase } = await import('../migrations/runner');
+  const { getMiniflareDatabasePath, openSqliteDatabase } = await import('../migrations/runner.ts');
   const persistRoot = join(root, '.void');
   const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
 
@@ -1241,7 +1249,8 @@ async function runExport(
 }
 
 async function runSetUrl(root: string): Promise<void> {
-  const { readConfig: readVoidConfig, getDatabaseDialect: getDialect } = await import('../config');
+  const { readConfig: readVoidConfig, getDatabaseDialect: getDialect } =
+    await import('../config.ts');
   const config = readVoidConfig(root);
   const dialect = getDialect(config);
 
@@ -1350,7 +1359,7 @@ async function runSeedModule(
   }
 
   const { drizzle } = await import('drizzle-orm/better-sqlite3');
-  const { getMiniflareDatabasePath, openSqliteDatabase } = await import('../migrations/runner');
+  const { getMiniflareDatabasePath, openSqliteDatabase } = await import('../migrations/runner.ts');
   const persistRoot = join(root, '.void');
   const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
   const sqlite = await openSqliteDatabase(dbPath);
@@ -1380,7 +1389,7 @@ async function loadSeedFunction(seedPath: string): Promise<SeedFn<Record<string,
 }
 
 async function loadSeedSchema(root: string): Promise<Record<string, unknown>> {
-  const { discoverSchema } = await import('../drizzle/discover');
+  const { discoverSchema } = await import('../drizzle/discover.ts');
   const location = discoverSchema(root);
   if (!location) {
     return {};

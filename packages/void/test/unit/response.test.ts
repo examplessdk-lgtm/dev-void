@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { convertReturnValue } from '../../src/runtime/response';
+import { convertReturnValue } from '../../src/runtime/response.ts';
 
 describe('convertReturnValue', () => {
   it('passes through Response objects', () => {

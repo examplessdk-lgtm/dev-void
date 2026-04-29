@@ -2,8 +2,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { voidPlugin } from '../../src/index';
-import { inferProjectBindings, detectFramework } from '../../src/plugin-inference';
+import { voidPlugin } from '../../src/index.ts';
+import { inferProjectBindings, detectFramework } from '../../src/plugin-inference.ts';
 
 const tempDirs: Array<string> = [];
 

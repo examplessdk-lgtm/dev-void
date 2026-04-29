@@ -6,7 +6,7 @@ import {
   getAppliedMigrations,
   openSqliteDatabase,
   runMigrations,
-} from '../../src/migrations/runner';
+} from '../../src/migrations/runner.ts';
 
 /**
  * Low-level tests for `runMigrations` against a real better-sqlite3

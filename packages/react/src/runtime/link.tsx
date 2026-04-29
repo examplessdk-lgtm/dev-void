@@ -8,7 +8,7 @@ import type {
   CSSProperties,
   RefObject,
 } from 'react';
-import { RouterContext } from './context';
+import { RouterContext } from './context.ts';
 
 type PrefetchStrategy = 'hover' | 'click' | 'mount' | 'visible';
 type LinkMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';

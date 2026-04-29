@@ -3,8 +3,8 @@
     "target": "ES2022",
     "lib": ["ES2022", "DOM"],
     "types": ["node"],
-    "module": "ES2022",
-    "moduleResolution": "bundler",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "strict": true,
     "noUnusedLocals": true,
     "esModuleInterop": true,
@@ -13,7 +13,8 @@
     "declaration": true,
     "isolatedDeclarations": true,
     "jsx": "preserve",
-    "jsxImportSource": "solid-js"
+    "jsxImportSource": "solid-js",
+    "allowImportingTsExtensions": true
   },
   "include": ["src", "test"]
 }

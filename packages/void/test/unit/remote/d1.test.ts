@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { ProxyClient } from '../../../src/runtime/remote/client';
-import { ProxyD1Database, ProxyD1PreparedStatement } from '../../../src/runtime/remote/d1';
+import { ProxyClient } from '../../../src/runtime/remote/client.ts';
+import { ProxyD1Database, ProxyD1PreparedStatement } from '../../../src/runtime/remote/d1.ts';
 
 function createClient() {
   return new ProxyClient('https://proxy.void.cloud', 'jwt-token', 'proj_1');

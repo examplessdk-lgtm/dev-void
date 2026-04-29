@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { envSchemaPlugin } from '../../src/plugin-env-schema';
+import { envSchemaPlugin } from '../../src/plugin-env-schema.ts';
 
 /**
  * Integration coverage for the auto-discovery path of `envSchemaPlugin`.
@@ -81,8 +81,8 @@ describe('envSchemaPlugin auto-discovery', () => {
     expect(dts).toContain('declare module "void/handler"');
     expect(dts).toContain('interface ValidatedEnv extends _VoidEnvShape');
     expect(dts).toContain('interface CloudBindings extends _VoidEnvShape');
-    // Generated import path is relative from .void/ back to env.ts, extension stripped.
-    expect(dts).toContain('typeof import("../env")');
+    // Generated import path is relative from .void/ back to env.ts.
+    expect(dts).toContain('typeof import("../env.ts")');
   });
 
   it('discovers env.ts nested under src/ and resolves the import path correctly', async () => {
@@ -100,8 +100,8 @@ describe('envSchemaPlugin auto-discovery', () => {
 
     const { readFileSync } = await import('node:fs');
     const dts = readFileSync(join(root, '.void', 'env.d.ts'), 'utf-8');
-    // Relative path from .void/ to src/env → ../src/env.
-    expect(dts).toContain('typeof import("../src/env")');
+    // Relative path from .void/ to src/env.ts.
+    expect(dts).toContain('typeof import("../src/env.ts")');
   });
 
   it('is a no-op when no env.ts exists (no .void/env.d.ts is written)', async () => {
@@ -118,8 +118,8 @@ describe('envSchemaPlugin auto-discovery', () => {
   // by jiti) so the singleton the plugin reads matches the one the test
   // mutated — jiti's own module instance is invisible to vitest imports.
   it('warns when vite `define` shadows a schema env key', async () => {
-    const { defineEnv } = await import('../../src/runtime/env-public');
-    const { string } = await import('../../src/runtime/env-helpers');
+    const { defineEnv } = await import('../../src/runtime/env-public.ts');
+    const { string } = await import('../../src/runtime/env-helpers.ts');
     defineEnv({ STRIPE_KEY: string(), VITE_TITLE: string() });
 
     const root = createTempRoot();
@@ -156,8 +156,8 @@ describe('envSchemaPlugin auto-discovery', () => {
   });
 
   it('does not warn when define has no overlap with the schema', async () => {
-    const { defineEnv } = await import('../../src/runtime/env-public');
-    const { string } = await import('../../src/runtime/env-helpers');
+    const { defineEnv } = await import('../../src/runtime/env-public.ts');
+    const { string } = await import('../../src/runtime/env-helpers.ts');
     defineEnv({ STRIPE_KEY: string() });
 
     const root = createTempRoot();

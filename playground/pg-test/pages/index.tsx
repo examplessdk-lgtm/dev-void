@@ -1,5 +1,5 @@
 import { useForm, action } from '@void/react';
-import type { Props } from './index.server';
+import type { Props } from './index.server.ts';
 
 export default function DbPage({ users, posts }: Props) {
   const userForm = useForm('/?create-user', {

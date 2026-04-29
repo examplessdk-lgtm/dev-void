@@ -9,7 +9,7 @@ import {
   computeAssetHash,
   collectAndHashAssets,
   resolveSpaFallbackChain,
-} from '../../src/cli/package';
+} from '../../src/cli/package.ts';
 
 const TMP = join(import.meta.dirname, '.tmp-package-test');
 

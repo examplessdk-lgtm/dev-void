@@ -130,7 +130,7 @@ describe('void env types (subprocess)', () => {
     const dts = readFileSync(dtsPath, 'utf-8');
     expect(dts).toContain('declare module "void/env"');
     expect(dts).toContain('declare module "void/handler"');
-    expect(dts).toContain('typeof import("../env")');
+    expect(dts).toContain('typeof import("../env.ts")');
   });
 
   it('prints a friendly message and exits 0 when no env.ts exists', () => {

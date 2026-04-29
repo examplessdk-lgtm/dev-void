@@ -1,7 +1,7 @@
 import { intro, outro, log } from '@clack/prompts';
-import { getToken, getSiteDomain } from './auth';
-import { PlatformClient } from './client';
-import { cliTitle, dim, pc, tablePrefix } from './output';
+import { getToken, getSiteDomain } from './auth.ts';
+import { PlatformClient } from './client.ts';
+import { cliTitle, dim, pc, tablePrefix } from './output.ts';
 
 export async function runProjectsCommand(root: string): Promise<void> {
   console.log();

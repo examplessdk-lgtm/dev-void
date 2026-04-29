@@ -7,7 +7,7 @@ import {
   maskValue,
   redactMessage,
   REDACTED,
-} from '../../src/shared/env-mask';
+} from '../../src/shared/env-mask.ts';
 
 /**
  * `env-mask` is the single source of truth for what gets scrubbed out of

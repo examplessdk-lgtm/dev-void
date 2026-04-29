@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { needsWrapper, generateWrapper } from '../../src/cli/wrapper';
-import type { WrapperFeatures } from '../../src/cli/wrapper';
+import { needsWrapper, generateWrapper } from '../../src/cli/wrapper.ts';
+import type { WrapperFeatures } from '../../src/cli/wrapper.ts';
 
 const base: WrapperFeatures = {
   auth: null,

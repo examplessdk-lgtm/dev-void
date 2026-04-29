@@ -1,16 +1,16 @@
 import { join } from 'node:path';
 import { glob } from 'tinyglobby';
-import { scanJobs, type JobDefinition } from '../crons/scan';
-import { scanPages } from '../pages/scan';
-import type { PageScanResult } from '../pages/types';
-import { scanQueues, type QueueDefinition } from '../queues/scan';
-import { detectHttpExports } from './detect-exports';
-import { parseRouteFilename, type RouteDefinition } from './parse-filename';
+import { scanJobs, type JobDefinition } from '../crons/scan.ts';
+import { scanPages } from '../pages/scan.ts';
+import type { PageScanResult } from '../pages/types.ts';
+import { scanQueues, type QueueDefinition } from '../queues/scan.ts';
+import { detectHttpExports } from './detect-exports.ts';
+import { parseRouteFilename, type RouteDefinition } from './parse-filename.ts';
 import {
   isWebSocketPatternFile,
   scanWebSocketRoutes,
   type WebSocketRouteDefinition,
-} from './websocket';
+} from './websocket.ts';
 
 export interface ScanResult {
   routes: Array<RouteDefinition>;

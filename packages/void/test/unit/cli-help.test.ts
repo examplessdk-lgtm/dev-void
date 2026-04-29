@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getHelpPath, hasHelpPage } from '../../src/cli/help';
+import { getHelpPath, hasHelpPage } from '../../src/cli/help.ts';
 
 describe('CLI help resolver', () => {
   it('resolves top-level help requests', () => {

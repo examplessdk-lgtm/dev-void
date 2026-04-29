@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveAssetConfig } from '../../src/cli/deploy';
+import { resolveAssetConfig } from '../../src/cli/deploy.ts';
 
 // `not_found_handling: 'none'` → asset binding 404s on unmatched paths,
 // worker (run_worker_first) owns HTML responses.

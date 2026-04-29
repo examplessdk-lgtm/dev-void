@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseGenArgs } from '../../src/cli/gen-args';
+import { parseGenArgs } from '../../src/cli/gen-args.ts';
 
 describe('parseGenArgs', () => {
   it('errors on no subcommand', () => {

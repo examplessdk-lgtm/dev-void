@@ -11,8 +11,8 @@ import {
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { hasDeploySchemaDrift } from '../../src/cli/deploy';
-import { writeDrizzleConfig } from '../../src/drizzle/config';
+import { hasDeploySchemaDrift } from '../../src/cli/deploy.ts';
+import { writeDrizzleConfig } from '../../src/drizzle/config.ts';
 
 const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');

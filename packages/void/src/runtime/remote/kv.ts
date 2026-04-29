@@ -1,4 +1,4 @@
-import type { ProxyClient } from './client';
+import type { ProxyClient } from './client.ts';
 
 /**
  * KVNamespace implementation backed by the remote proxy.

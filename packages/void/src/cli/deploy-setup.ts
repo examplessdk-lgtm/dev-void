@@ -1,10 +1,10 @@
 import { cancel, confirm, isCancel, log } from '@clack/prompts';
-import { getToken, isStagingMode } from './auth';
-import { PlatformClient } from './client';
-import { promptAndCreateProject } from './create-project';
-import { promptForLoginToken } from './login';
-import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project';
-import { promptProjectSelection } from './prompt';
+import { getToken, isStagingMode } from './auth.ts';
+import { PlatformClient } from './client.ts';
+import { promptAndCreateProject } from './create-project.ts';
+import { promptForLoginToken } from './login.ts';
+import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project.ts';
+import { promptProjectSelection } from './prompt.ts';
 
 async function ensureToken(root: string): Promise<string> {
   const existing = getToken(root);

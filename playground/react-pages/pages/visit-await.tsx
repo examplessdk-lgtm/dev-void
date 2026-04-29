@@ -1,5 +1,5 @@
 import { useRouter } from '@void/react';
-import type { Props } from './visit-await.server';
+import type { Props } from './visit-await.server.ts';
 
 declare global {
   interface Window {

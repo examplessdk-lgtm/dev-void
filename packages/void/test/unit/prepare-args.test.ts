@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parsePrepareArgs } from '../../src/cli/prepare-args';
+import { parsePrepareArgs } from '../../src/cli/prepare-args.ts';
 
 describe('parsePrepareArgs', () => {
   it('accepts no arguments', () => {

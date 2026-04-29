@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { collectMigrations } from '../../src/migrations/collect';
+import { collectMigrations } from '../../src/migrations/collect.ts';
 
 const TMP_DIR = join(import.meta.dirname, '.tmp-collect-test');
 
