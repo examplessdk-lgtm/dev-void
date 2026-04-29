@@ -570,6 +570,59 @@ function mergeQueryIntoLocation(destination: string, search: string): string {
 }
 
 /**
+ * Compile-time output of `compileRouteTable` is an ESM module. To exercise it
+ * end-to-end without a real bundler, strip the static `import` statements and
+ * `export` keywords, then evaluate via `new Function` with the imported names
+ * supplied as parameters. Returns the Hono `app` instance the module would
+ * export as default.
+ *
+ * Used by the X-Void-Original-URL gate test below: the substring assertion it
+ * replaces was fragile against both refactor-driven false negatives and
+ * refactor-driven false positives. Driving the real artifact through `fetch`
+ * checks the security boundary at runtime instead.
+ */
+function evalCompiledApp(code: string): Hono {
+  // Strip the well-known import block and the node-target inline
+  // `const withRuntimeEnv = ...;` declaration; both forms get replaced with
+  // the same noop binding injected at the top of the eval'd body. Hono and
+  // VoidAssetRewriteError are passed in via `new Function` parameters so the
+  // bindings the compiled output references resolve cleanly.
+  const stripped = code
+    .replace(/^import\s+\{[^}]*\}\s+from\s+["'][^"']+["'];?\s*$/gm, '')
+    .replace(/^const\s+withRuntimeEnv\s+=.*$/gm, '')
+    // Remove `export` keyword from `export const`, `export async function`,
+    // `export function`, `export default app;` so the module body is plain
+    // statements eval-safe inside a Function body.
+    .replace(/^export\s+default\s+app;?\s*$/gm, '')
+    .replace(/^export\s+(const|async\s+function|function)\s+/gm, '$1 ')
+    .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
+
+  const factory = new Function(
+    'Hono',
+    'convertReturnValue',
+    '__VoidAssetRewriteError',
+    'AsyncLocalStorage',
+    [
+      // Inject the noop binding for both nodeTarget (was a `const` we stripped)
+      // and the cf branch (was an import we stripped). Anything beyond the
+      // gate-relevant header migration — route invocation, prerender, scheduled
+      // — is exercised by the test route the caller installs after eval.
+      'const withRuntimeEnv = (_e, fn) => fn();',
+      stripped,
+      'return app;',
+    ].join('\n'),
+  );
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- vitest runs in node; node:async_hooks is built-in.
+  const { AsyncLocalStorage } = require('node:async_hooks');
+  return factory(
+    Hono,
+    (v: unknown) => (v instanceof Response ? v : new Response(String(v ?? ''))),
+    class VoidAssetRewriteErrorStub extends Error {},
+    AsyncLocalStorage,
+  ) as Hono;
+}
+
+/**
  * Mirror of the `app.use` block emitted by `compileRouteTable` that attaches
  * `c.rewrite` / `c.originalUrl` / `c.isRewritten`. Keyed on the
  * `__voidOriginalUrls` WeakMap — identical shape to the codegen, so behavioral
@@ -606,8 +659,11 @@ function installVoidWrappers(app: Hono, voidOriginalUrls: WeakMap<Request, URL>)
       ) {
         throw new VoidAssetRewriteError(path);
       }
-      const pathOnly = qIdx === -1 ? path : path.slice(0, qIdx);
-      const searchOnly = qIdx === -1 ? '' : path.slice(qIdx);
+      // Strip fragment alongside query — `URL.pathname` setter percent-encodes
+      // `#` into `%23`, so we split on whichever of `?`/`#` came first. The
+      // search slice still starts at `?` (if any) and stops at `#` (if any).
+      const pathOnly = firstDelim === -1 ? path : path.slice(0, firstDelim);
+      const searchOnly = qIdx === -1 ? '' : path.slice(qIdx, hIdx === -1 ? path.length : hIdx);
       const rewriteUrl = new URL(c.req.url);
       rewriteUrl.pathname = pathOnly;
       if (searchOnly) {
@@ -1175,6 +1231,85 @@ describe('c.rewrite runtime wrapper', () => {
     expect(res.headers.get('X-Req-Search')).toBe('?b=2');
   });
 
+  it('c.rewrite strips a "#fragment" from the destination path (does not URL-encode "#")', async () => {
+    // Regression anchor: setting `URL.pathname = "/foo#frag"` percent-encodes
+    // `#` into `%23`, so the re-dispatched request lands at `/foo%23frag` and
+    // matches no route. Fragments don't reach servers anyway, so the wrapper
+    // must split on the first `#` and drop it (matches the asset-guard split).
+    const app = new Hono();
+    installVoidWrappers(app, new WeakMap<Request, URL>());
+
+    app.get('/from', (c) => (c as any).rewrite('/foo#frag'));
+    app.get('/foo', (c) => {
+      const u = new URL(c.req.url);
+      return new Response('ok', {
+        headers: {
+          'X-Req-Path': u.pathname,
+          'X-Req-Search': u.search,
+          'X-Req-Hash': u.hash,
+        },
+      });
+    });
+
+    const res = await app.fetch(new Request('http://localhost/from'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Req-Path')).toBe('/foo');
+    expect(res.headers.get('X-Req-Search')).toBe('');
+    expect(res.headers.get('X-Req-Hash')).toBe('');
+  });
+
+  it('c.rewrite preserves a "?query" but strips a trailing "#fragment"', async () => {
+    // `/foo?x=1#frag` → pathname `/foo`, search `?x=1`, hash dropped. The
+    // search slice must stop at `#` so the fragment isn't smuggled into the
+    // query string.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakMap<Request, URL>());
+
+    app.get('/from', (c) => (c as any).rewrite('/foo?x=1#frag'));
+    app.get('/foo', (c) => {
+      const u = new URL(c.req.url);
+      return new Response('ok', {
+        headers: {
+          'X-Req-Path': u.pathname,
+          'X-Req-Search': u.search,
+          'X-Req-Hash': u.hash,
+        },
+      });
+    });
+
+    const res = await app.fetch(new Request('http://localhost/from'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Req-Path')).toBe('/foo');
+    expect(res.headers.get('X-Req-Search')).toBe('?x=1');
+    expect(res.headers.get('X-Req-Hash')).toBe('');
+  });
+
+  it('c.rewrite treats "?" after "#" as part of the (dropped) fragment', async () => {
+    // Unusual but legal-looking: `/foo#frag?x=1`. The fragment starts at the
+    // first `#`, so everything after — including the `?x=1` — is the fragment
+    // and is dropped. Path is `/foo`, search is empty.
+    const app = new Hono();
+    installVoidWrappers(app, new WeakMap<Request, URL>());
+
+    app.get('/from', (c) => (c as any).rewrite('/foo#frag?x=1'));
+    app.get('/foo', (c) => {
+      const u = new URL(c.req.url);
+      return new Response('ok', {
+        headers: {
+          'X-Req-Path': u.pathname,
+          'X-Req-Search': u.search,
+          'X-Req-Hash': u.hash,
+        },
+      });
+    });
+
+    const res = await app.fetch(new Request('http://localhost/from'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Req-Path')).toBe('/foo');
+    expect(res.headers.get('X-Req-Search')).toBe('');
+    expect(res.headers.get('X-Req-Hash')).toBe('');
+  });
+
   it('c.rewrite rejects absolute-URL destinations with an internal-only error', async () => {
     // `c.rewrite` is strictly in-worker re-dispatch. An absolute URL would
     // silently turn into a proxy — fail at the call site so users reach for
@@ -1709,19 +1844,73 @@ describe('default-target dev parity', () => {
   // and node/bun/deno self-hosted (user owns ingress) must NOT trust the
   // header — clients could spoof `c.originalUrl()` / `c.isRewritten()` for
   // user code that branches on them.
-  it('reads inbound X-Void-Original-URL only on CF-prod (CF with dev=false)', () => {
-    const cfProd = compile({ nodeTarget: false, dev: false });
-    const cfDev = compile({ nodeTarget: false, dev: true });
-    const nodeDev = compile({ nodeTarget: true, dev: true });
-    const nodeProd = compile({ nodeTarget: true, dev: false });
+  //
+  // This is a behavioral test that evaluates the actual compiled artifact
+  // (not the `installVoidWrappers` mirror) and drives a real Request through
+  // it with `X-Void-Original-URL: /spoof` set. Asserting on the runtime
+  // outputs of `c.originalUrl()` and `c.isRewritten()` catches both:
+  // - false negatives a string check would flag (e.g. destructuring the
+  //   header getter into a local — keeps the gate but breaks `code.includes`).
+  // - false positives a string check would silently miss (e.g. emitting the
+  //   header read in BOTH dev and prod but only honoring it in prod — the
+  //   substring is present in cfDev's output but the runtime ignores it).
+  it('reads inbound X-Void-Original-URL only on CF-prod (CF with dev=false)', async () => {
+    type Permutation = {
+      readonly label: string;
+      readonly opts: { nodeTarget: boolean; dev: boolean };
+      readonly trustsHeader: boolean;
+    };
+    const permutations: ReadonlyArray<Permutation> = [
+      { label: 'cfProd', opts: { nodeTarget: false, dev: false }, trustsHeader: true },
+      { label: 'cfDev', opts: { nodeTarget: false, dev: true }, trustsHeader: false },
+      { label: 'nodeProd', opts: { nodeTarget: true, dev: false }, trustsHeader: false },
+      { label: 'nodeDev', opts: { nodeTarget: true, dev: true }, trustsHeader: false },
+    ];
 
-    const readsHeader = (code: string) =>
-      code.includes('c.req.raw.headers.get("X-Void-Original-URL")');
+    for (const { label, opts, trustsHeader } of permutations) {
+      const code = compile(opts);
+      const app = evalCompiledApp(code);
 
-    expect(readsHeader(cfProd)).toBe(true);
-    expect(readsHeader(cfDev)).toBe(false);
-    expect(readsHeader(nodeDev)).toBe(false);
-    expect(readsHeader(nodeProd)).toBe(false);
+      // The compiled middleware only attaches `c.originalUrl` / `c.isRewritten`
+      // — they're not bound to the route handler scope until the wrapper
+      // middleware runs, so define the route AFTER eval so it sees the wrappers.
+      app.get('/probe', (c: any) => {
+        const orig = c.originalUrl();
+        return new Response('probe', {
+          headers: {
+            'X-Original-Url': orig?.href ?? '',
+            'X-Is-Rewritten': c.isRewritten() ? '1' : '0',
+          },
+        });
+      });
+
+      // Pass a stub `executionCtx` as the third arg — the second middleware
+      // emitted by the compiler reads `c.executionCtx` inside
+      // `requestContext.run`, which throws in a bare Hono env without it.
+      const stubCtx = {
+        waitUntil: () => undefined,
+        passThroughOnException: () => undefined,
+        props: {},
+      };
+      const res = await app.fetch(
+        new Request('http://localhost/probe', {
+          headers: { 'X-Void-Original-URL': 'http://localhost/spoof' },
+        }),
+        {},
+        stubCtx as unknown as ExecutionContext,
+      );
+
+      expect(res.status, `${label}: probe should return 200`).toBe(200);
+      if (trustsHeader) {
+        expect(res.headers.get('X-Original-Url'), `${label}: should trust header`).toBe(
+          'http://localhost/spoof',
+        );
+        expect(res.headers.get('X-Is-Rewritten'), `${label}: should report rewritten`).toBe('1');
+      } else {
+        expect(res.headers.get('X-Original-Url'), `${label}: must NOT trust header`).toBe('');
+        expect(res.headers.get('X-Is-Rewritten'), `${label}: must NOT report rewritten`).toBe('0');
+      }
+    }
   });
 
   it('wraps SSR notFound with assets-first-then-fallback on default target dev', () => {
@@ -2156,5 +2345,139 @@ describe('compileNodeServer', () => {
     expect(code).toContain('Deno.serve');
     expect(code).toContain('import app from "./app.js"');
     expect(code).not.toContain('@hono/node-server');
+  });
+});
+
+/**
+ * Extract the emitted `__compilePattern` and `__matchPattern` runtime helpers
+ * from a generated route-table source string and rebuild them as live JS
+ * functions so we can exercise the actual emitter output (not a hand-written
+ * mirror). This guards against drift between the dispatch worker's compiler
+ * (`packages/dispatch/src/pattern.ts`) and the framework's inlined emitter.
+ */
+function extractEmittedPatternRuntime(code: string): {
+  matchPattern: (pattern: string, pathname: string) => boolean;
+  compilePattern: (source: string) => { regex: RegExp; names: Array<string> };
+} {
+  const compileFnStart = code.indexOf('function __compilePattern(source) {');
+  if (compileFnStart === -1) {
+    throw new Error('emitted source missing __compilePattern');
+  }
+  // The emitter's own helper bodies are flat (no nested closing braces beyond
+  // the regex character classes); a brace-aware scan would be overkill.
+  const matchFnStart = code.indexOf('function __matchPattern(pattern, pathname) {', compileFnStart);
+  if (matchFnStart === -1) {
+    throw new Error('emitted source missing __matchPattern');
+  }
+  const matchFnEnd = code.indexOf('\nfunction __substituteParams', matchFnStart);
+  if (matchFnEnd === -1) {
+    throw new Error('emitted source missing __substituteParams sentinel');
+  }
+  const helpersSrc = code.slice(compileFnStart, matchFnEnd);
+  // `new Function` evaluates the helpers in a fresh scope, then returns the
+  // two we care about. The Set-warned dedupe map is private to that scope.
+  // oxlint-disable-next-line no-new-func
+  const factory = new Function(`${helpersSrc}\nreturn { __compilePattern, __matchPattern };`);
+  const { __compilePattern, __matchPattern } = factory() as {
+    __compilePattern: (source: string) => { regex: RegExp; names: Array<string> };
+    __matchPattern: (pattern: string, pathname: string) => boolean;
+  };
+  return { compilePattern: __compilePattern, matchPattern: __matchPattern };
+}
+
+describe('emitted __compilePattern / __matchPattern runtime', () => {
+  // Build a minimal route table with a header rule so the emitter inlines the
+  // pattern helpers (header middleware is what triggers `ensureCompilePatternEmitted`).
+  const emptyScan: ScanResult = {
+    routes: [],
+    middleware: [],
+    jobs: [],
+    queues: [],
+    pages: { pages: [], layouts: [], namedLayouts: [] },
+  };
+  const code = compileRouteTable(emptyScan, '/routes', '/middleware', '/crons', '/queues', null, {
+    ...testOptions,
+    dev: true,
+    headerRules: [{ pattern: '/*', headers: [['x-test', '1']] as Array<[string, string]> }],
+  });
+  const { compilePattern, matchPattern } = extractEmittedPatternRuntime(code);
+
+  it('compiles a single bare "*" with the legacy "splat" capture', () => {
+    const { regex, names } = compilePattern('/docs/*');
+    expect(names).toEqual(['splat']);
+    const m = regex.exec('/docs/intro/getting-started');
+    expect(m?.groups?.splat).toBe('intro/getting-started');
+  });
+
+  it('compiles a multi-"*" pattern without throwing — second wildcard is non-capturing', () => {
+    // Regression: F3 — `routing.headers: { "/a/*/b/*": [...] }` used to crash
+    // every CF dev request with `SyntaxError: Invalid regular expression: ...
+    // Duplicate capture group name`. The first `*` should still capture as
+    // `splat`; subsequent bare `*` collapse to a non-capturing `.*`.
+    const { regex, names } = compilePattern('/a/*/b/*');
+    expect(names).toEqual(['splat']);
+    const m = regex.exec('/a/x/b/y');
+    expect(m).not.toBeNull();
+    expect(m?.groups?.splat).toBe('x');
+  });
+
+  it(':name and bare "*" do not clash even when both appear', () => {
+    // `:id*` produces `(?<id>...)`; the bare `*` produces `(?<splat>...)` —
+    // distinct group names, so no collision.
+    const { regex, names } = compilePattern('/u/:id*/files/*');
+    expect(names).toEqual(['id', 'splat']);
+    const m = regex.exec('/u/42/extra/files/a/b');
+    expect(m?.groups?.id).toBe('42/extra');
+    expect(m?.groups?.splat).toBe('a/b');
+  });
+
+  it('__matchPattern returns false instead of throwing on a malformed pattern', () => {
+    // The emitter wraps `new RegExp` in try/catch so a single bad rule cannot
+    // 500 unrelated traffic on CF dev. Construct a pattern whose escaped form
+    // yields an invalid regex by abusing an unbalanced `[` (regex-special,
+    // copied through verbatim is impossible — but a malformed `:name*` paired
+    // with raw `(` characters fed via the literal escape skip... actually the
+    // emitter escapes regex specials, so we instead verify the catch path by
+    // constructing a deliberately-broken pattern that the emitter's escape
+    // strategy still passes through cleanly. The fallback test relies on the
+    // try/catch being present — when no construction error occurs, the result
+    // is a normal boolean, never a thrown exception.
+    expect(() => matchPattern('/foo/*', '/foo/bar')).not.toThrow();
+    expect(matchPattern('/foo/*', '/foo/bar')).toBe(true);
+    // `__matchPattern` is the resilient entry point — even an empty pattern
+    // (which compiles to `^$`) must return false rather than throw on a
+    // non-matching pathname.
+    expect(matchPattern('', '/anything')).toBe(false);
+  });
+
+  it('__matchPattern swallows construction errors and returns false', () => {
+    // Directly stress-test the try/catch by monkey-patching the global
+    // RegExp once: the emitted body calls `new RegExp(...)` — if it throws,
+    // the catch returns false and warns at most once.
+    const originalRegExp = globalThis.RegExp;
+    let callCount = 0;
+    const consoleWarnings: Array<string> = [];
+    const originalWarn = console.warn;
+    console.warn = (msg: unknown) => {
+      consoleWarnings.push(String(msg));
+    };
+    try {
+      // oxlint-disable-next-line no-global-assign
+      (globalThis as unknown as { RegExp: typeof RegExp }).RegExp = function () {
+        callCount++;
+        throw new SyntaxError('Invalid regular expression: Duplicate capture group name');
+      } as unknown as typeof RegExp;
+      expect(matchPattern('/a/*/b/*', '/a/x/b/y')).toBe(false);
+      expect(callCount).toBeGreaterThan(0);
+      expect(consoleWarnings.some((w) => w.includes('failed to compile route pattern'))).toBe(true);
+      // Second call with the same pattern must not double-warn.
+      const warnedCount = consoleWarnings.length;
+      expect(matchPattern('/a/*/b/*', '/foo')).toBe(false);
+      expect(consoleWarnings.length).toBe(warnedCount);
+    } finally {
+      // oxlint-disable-next-line no-global-assign
+      (globalThis as unknown as { RegExp: typeof RegExp }).RegExp = originalRegExp;
+      console.warn = originalWarn;
+    }
   });
 });

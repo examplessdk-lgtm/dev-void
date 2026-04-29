@@ -892,8 +892,15 @@ export function compileRouteTable(
   lines.push('    if (__voidAssetRewriteExtRE.test(__assetCheckPath)) {');
   lines.push('      throw new __VoidAssetRewriteError(path);');
   lines.push('    }');
-  lines.push('    const __pathOnly = __qIdx === -1 ? path : path.slice(0, __qIdx);');
-  lines.push('    const __searchOnly = __qIdx === -1 ? "" : path.slice(__qIdx);');
+  // Strip the fragment too: `URL.pathname` setter percent-encodes `#` into
+  // `%23`, so `/foo#frag` would become `/foo%23frag` and the re-dispatched
+  // request would land at the wrong route. Fragments don't reach servers
+  // anyway, so we drop them rather than try to preserve them. The search
+  // portion still starts at `?` (if present), trimmed at `#` (if present).
+  lines.push('    const __pathOnly = __firstDelim === -1 ? path : path.slice(0, __firstDelim);');
+  lines.push(
+    '    const __searchOnly = __qIdx === -1 ? "" : path.slice(__qIdx, __hIdx === -1 ? path.length : __hIdx);',
+  );
   lines.push('    const rewriteUrl = new URL(c.req.url);');
   lines.push('    rewriteUrl.pathname = __pathOnly;');
   // Only override the search when the destination carries its own query.
@@ -2446,16 +2453,24 @@ export async function fetch(path, options) {
 /**
  * Emit inline `__compilePattern()` and `__matchPattern()` — pattern compilation
  * with named captures, matching the dispatch worker's behavior in
- * `packages/dispatch/src/headers.ts`.
+ * `packages/dispatch/src/pattern.ts`.
  *
  * Syntax:
  *   :name    — single path segment (captured as `name`)
  *   :name*   — zero or more segments (captured as `name`)
  *   *        — zero or more segments (captured as `splat`, legacy)
+ *
+ * When a pattern contains multiple bare `*`, only the first captures as
+ * `splat`; later occurrences emit a non-capturing `.*` so the constructed
+ * `RegExp` doesn't reject "duplicate group name" at request time. `:name*`
+ * uses a distinct group name and never clashes with `*`. `__matchPattern`
+ * additionally swallows any compile-time `RegExp` error and returns `false`
+ * so a single malformed rule cannot 500 unrelated requests on CF dev.
  */
 function emitCompilePattern(lines: Array<string>): void {
   lines.push('function __compilePattern(source) {');
   lines.push('  const names = [];');
+  lines.push('  let legacySplatCaptured = false;');
   lines.push('  let pattern = "";');
   lines.push('  let i = 0;');
   lines.push('  while (i < source.length) {');
@@ -2475,8 +2490,13 @@ function emitCompilePattern(lines: Array<string>): void {
   lines.push('        i = j;');
   lines.push('      }');
   lines.push('    } else if (ch === "*") {');
-  lines.push('      names.push("splat");');
-  lines.push('      pattern += "(?<splat>.*)";');
+  lines.push('      if (legacySplatCaptured) {');
+  lines.push('        pattern += ".*";');
+  lines.push('      } else {');
+  lines.push('        names.push("splat");');
+  lines.push('        pattern += "(?<splat>.*)";');
+  lines.push('        legacySplatCaptured = true;');
+  lines.push('      }');
   lines.push('      i++;');
   lines.push('    } else {');
   lines.push('      if (/[.+?^${}()|[\\]\\\\]/.test(ch)) pattern += "\\\\";');
@@ -2486,8 +2506,19 @@ function emitCompilePattern(lines: Array<string>): void {
   lines.push('  }');
   lines.push('  return { regex: new RegExp(`^${pattern}$`), names };');
   lines.push('}');
+  lines.push('const __matchPatternWarned = new Set();');
   lines.push('function __matchPattern(pattern, pathname) {');
-  lines.push('  return __compilePattern(pattern).regex.test(pathname);');
+  lines.push('  try {');
+  lines.push('    return __compilePattern(pattern).regex.test(pathname);');
+  lines.push('  } catch (err) {');
+  lines.push('    if (!__matchPatternWarned.has(pattern)) {');
+  lines.push('      __matchPatternWarned.add(pattern);');
+  lines.push(
+    '      console.warn(`[void] failed to compile route pattern ${JSON.stringify(pattern)}: ${err && err.message ? err.message : err}`);',
+  );
+  lines.push('    }');
+  lines.push('    return false;');
+  lines.push('  }');
   lines.push('}');
   lines.push('function __substituteParams(destination, params) {');
   lines.push('  return destination.replace(/:([A-Za-z0-9_]+)\\*?/g, (whole, name) => {');

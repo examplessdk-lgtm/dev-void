@@ -88,15 +88,26 @@ const VALID_SANDBOX_INSTANCE_TYPES = new Set<SandboxInstanceType>([
   'standard-4',
 ]);
 
-/** Count `*` occurrences in a pattern without allocating a split. */
+/**
+ * Count anonymous `*` wildcards in a pattern, ignoring the `*` that
+ * terminates a `:name*` multi-segment named capture.
+ *
+ * Both the framework's emitted `__compilePattern` (router/compile.ts) and
+ * dispatch's `compilePattern` (packages/dispatch/src/pattern.ts) emit a
+ * distinct `(?<name>.*)` group for `:name*` and a `(?<splat>.*)` group for
+ * the first bare `*` — those don't clash, so a pattern with both a named
+ * multi-segment capture and a bare splat is legitimate and must validate.
+ * Walking raw chars would over-count and cause `assertSingleSplat` to
+ * reject such patterns.
+ *
+ * The identifier character class matches `[A-Za-z0-9_]+` from both compilers.
+ */
 export function countSplats(source: string): number {
-  let count = 0;
-  for (let i = 0; i < source.length; i++) {
-    if (source[i] === '*') {
-      count++;
-    }
-  }
-  return count;
+  // Strip `:name*` first — the `*` there is the tail of a named multi-segment
+  // capture (matches `[A-Za-z0-9_]+` per both compilers' identifier class),
+  // not an anonymous splat. The remaining `*`s are the ones validators care
+  // about for duplicate-group-name avoidance.
+  return source.replace(/:[A-Za-z0-9_]+\*/g, '').match(/\*/g)?.length ?? 0;
 }
 
 /**
@@ -388,6 +399,7 @@ export function readConfig(root: string): VoidConfig {
             `config: Header pattern '${pattern}' in ${CONFIG_FILE} must start with "/".`,
           );
         }
+        assertSingleSplat(pattern, 'Header');
         if (!Array.isArray(values) || !values.every((v) => typeof v === 'string')) {
           throw new Error(
             `config: Headers for '${pattern}' in ${CONFIG_FILE} must be an array of strings.`,
@@ -454,6 +466,9 @@ export function readConfig(root: string): VoidConfig {
           throw new Error(
             `config: revalidateQueryAllowlist pattern '${pattern}' in ${CONFIG_FILE} must start with "/" or be "*".`,
           );
+        }
+        if (pattern !== '*') {
+          assertSingleSplat(pattern, 'revalidateQueryAllowlist');
         }
         if (!Array.isArray(params) || !params.every((v) => typeof v === 'string')) {
           throw new Error(

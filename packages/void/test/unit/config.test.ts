@@ -18,6 +18,7 @@ import {
   isNodeTarget,
   getDatabaseDialect,
   VALID_REDIRECT_STATUSES,
+  countSplats,
 } from '../../src/config';
 import { voidWarn } from '../../src/log';
 import { resolveSandboxConfig } from '../../src/sandbox/config';
@@ -771,14 +772,25 @@ describe('duplicate "*" wildcards in rule sources', () => {
     cleanup();
   });
 
-  it('accepts a header pattern with multiple "*"', () => {
+  it('rejects a header pattern with two "*"', () => {
+    // Multi-`*` header rules used to crash `vite dev` on the first request:
+    // the framework's emitted `__compilePattern` produced two `(?<splat>...)`
+    // capture groups, so `new RegExp()` threw "Duplicate capture group name"
+    // and every request 500'd. Validation now catches this at config-read time.
     setup(
       JSON.stringify({ routing: { headers: { '/assets/*/img/*': ['Cache-Control: no-cache'] } } }),
     );
-    const config = readConfig(tmpDir);
-    expect(config.routing?.headers).toEqual({
-      '/assets/*/img/*': ['Cache-Control: no-cache'],
-    });
+    expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
+    cleanup();
+  });
+
+  it('rejects a revalidateQueryAllowlist pattern with two "*"', () => {
+    setup(
+      JSON.stringify({
+        routing: { revalidateQueryAllowlist: { '/a/*/b/*': ['q'] } },
+      }),
+    );
+    expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
     cleanup();
   });
 
@@ -793,6 +805,51 @@ describe('duplicate "*" wildcards in rule sources', () => {
     setup(JSON.stringify({ routing: { rewrites: { '/docs': '/en/docs' } } }));
     const config = readConfig(tmpDir);
     expect(config.routing?.rewrites).toEqual({ '/docs': '/en/docs' });
+    cleanup();
+  });
+
+  // `countSplats` only counts anonymous `*` wildcards. The `*` that terminates
+  // a `:name*` multi-segment named capture compiles to `(?<name>.*)` (distinct
+  // group name from the legacy `(?<splat>.*)`), so it doesn't trigger the
+  // duplicate-group-name `RegExp` failure that `assertSingleSplat` guards.
+  describe('countSplats', () => {
+    it('returns 0 for a path with no wildcards', () => {
+      expect(countSplats('/foo')).toBe(0);
+    });
+
+    it('counts a bare trailing splat', () => {
+      expect(countSplats('/foo/*')).toBe(1);
+    });
+
+    it('counts multiple anonymous splats', () => {
+      expect(countSplats('/foo/*/bar/*')).toBe(2);
+    });
+
+    it('does not count the "*" inside a named multi-segment capture', () => {
+      expect(countSplats('/users/:id*/files/*')).toBe(1);
+    });
+
+    it('returns 0 when both "*"s are tails of named captures', () => {
+      expect(countSplats('/users/:id*/files/:rest*')).toBe(0);
+    });
+
+    it('counts a single bare splat alongside a single-segment named param', () => {
+      expect(countSplats('/users/:id/files/*')).toBe(1);
+    });
+  });
+
+  it('accepts a rewrite combining ":name*" and "*"', () => {
+    // `:id*` → `(?<id>.*)` and `*` → `(?<splat>.*)` are distinct named groups.
+    // The validator must not reject this pattern as a duplicate-splat pattern.
+    setup(
+      JSON.stringify({
+        routing: { rewrites: { '/users/:id*/files/*': '/v2/:id/files/:splat' } },
+      }),
+    );
+    const config = readConfig(tmpDir);
+    expect(config.routing?.rewrites).toEqual({
+      '/users/:id*/files/*': '/v2/:id/files/:splat',
+    });
     cleanup();
   });
 });
