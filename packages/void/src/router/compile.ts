@@ -2577,7 +2577,24 @@ function emitApplyRoutingRules(
 ): void {
   lines.push(`${indent}let matched;`);
   lines.push(`${indent}for (const rule of ${rulesVar}) {`);
-  lines.push(`${indent}  const { regex } = __compilePattern(rule.source);`);
+  // A malformed rule.source (e.g. `:id/:id` or `:splat`+`*` colliding on
+  // the same group name) makes `new RegExp` throw inside __compilePattern.
+  // Build-time validators reject those, but a hand-crafted manifest could
+  // still reach the worker — skip the offending rule rather than 500ing
+  // every request that hits this middleware. Mirrors dispatch's
+  // applyRoutingRules try/catch (packages/dispatch/src/routing-rules.ts).
+  lines.push(`${indent}  let regex;`);
+  lines.push(`${indent}  try {`);
+  lines.push(`${indent}    ({ regex } = __compilePattern(rule.source));`);
+  lines.push(`${indent}  } catch (err) {`);
+  lines.push(`${indent}    if (!__matchPatternWarned.has(rule.source)) {`);
+  lines.push(`${indent}      __matchPatternWarned.add(rule.source);`);
+  lines.push(
+    `${indent}      console.warn(\`[void] skipping routing rule with invalid source \${JSON.stringify(rule.source)}: \${err && err.message ? err.message : err}\`);`,
+  );
+  lines.push(`${indent}    }`);
+  lines.push(`${indent}    continue;`);
+  lines.push(`${indent}  }`);
   lines.push(`${indent}  const m = regex.exec(pathname);`);
   lines.push(`${indent}  if (m) matched = { rule, params: m.groups || {} };`);
   lines.push(`${indent}}`);

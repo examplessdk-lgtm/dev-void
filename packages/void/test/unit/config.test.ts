@@ -852,6 +852,34 @@ describe('duplicate "*" wildcards in rule sources', () => {
     });
     cleanup();
   });
+
+  it('rejects a redirect with two ":name" tokens sharing an identifier', () => {
+    // `/:id/:id` would compile to `(?<id>...)/(?<id>...)`, which throws
+    // `SyntaxError: Duplicate capture group name` at request time. The
+    // validator must reject this at config-read time.
+    setup(JSON.stringify({ routing: { redirects: { '/:id/:id': '/x' } } }));
+    expect(() => readConfig(tmpDir)).toThrow(/duplicate capture group name/);
+    cleanup();
+  });
+
+  it('rejects a rewrite with ":splat" colliding with a bare "*"', () => {
+    // The bare `*` emits `(?<splat>.*)`; an explicit `:splat` token also
+    // emits a `<splat>` group. Both compile to a duplicate group name.
+    setup(JSON.stringify({ routing: { rewrites: { '/:splat/*': '/x' } } }));
+    expect(() => readConfig(tmpDir)).toThrow(/duplicate capture group name/);
+    cleanup();
+  });
+
+  it('rejects a fallback with two ":name*" tokens sharing an identifier', () => {
+    // `/:rest{splat-suffix}/:rest{splat-suffix}` would emit two `<rest>` groups.
+    setup(
+      JSON.stringify({
+        routing: { fallbacks: { '/api/:rest*/v2/:rest*': '/index.html' } },
+      }),
+    );
+    expect(() => readConfig(tmpDir)).toThrow(/duplicate capture group name/);
+    cleanup();
+  });
 });
 
 describe('routing.revalidateQueryAllowlist validation', () => {

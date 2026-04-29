@@ -2450,6 +2450,62 @@ describe('emitted __compilePattern / __matchPattern runtime', () => {
     expect(matchPattern('', '/anything')).toBe(false);
   });
 
+  it('__compilePattern itself still throws on duplicate capture group names', () => {
+    // The legacySplatCaptured flag prevents two bare `*`s clashing on the
+    // implicit `splat` name, but it does NOT cover duplicate `:name` tokens
+    // or a `:splat` colliding with a bare `*`. These cases still throw at
+    // construction. They're caught by:
+    //   1. Build-time validation (`assertUniqueCaptureNames` in config.ts)
+    //   2. Runtime per-rule try/catch in `emitApplyRoutingRules` (so one
+    //      malformed rule cannot 500 unrelated traffic if validation is bypassed)
+    expect(() => compilePattern('/:id/:id')).toThrow(/duplicate capture group name/i);
+    expect(() => compilePattern('/:splat/*')).toThrow(/duplicate capture group name/i);
+    expect(() => compilePattern('/:rest*/:rest*')).toThrow(/duplicate capture group name/i);
+  });
+
+  it('emitApplyRoutingRules wraps per-rule compile in try/catch and skips bad rules', () => {
+    // Behavioral verification of the runtime guard: a single rule with a bad
+    // source must not 500 the request — it should be skipped (with a warn-once)
+    // and other rules in the table should still match.
+    const codeWithRules = compileRouteTable(
+      emptyScan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      {
+        ...testOptions,
+        dev: true,
+        // First rule is malformed (duplicate `:id`); second rule is valid.
+        // The middleware must skip the bad one, log warn once, and apply the good one.
+        redirectRules: [
+          {
+            source: '/:id/:id',
+            destination: '/x',
+            status: 200,
+            force: true,
+            origin: 'test',
+          },
+          {
+            source: '/old',
+            destination: '/new',
+            status: 200,
+            force: true,
+            origin: 'test',
+          },
+        ],
+      },
+    );
+    // String-shape assertion: the emitted middleware must wrap __compilePattern
+    // in try/catch around the `regex` extraction, mirroring dispatch's
+    // applyRoutingRules. Without this, a single bad rule would 500 every request.
+    expect(codeWithRules).toContain('try {');
+    expect(codeWithRules).toContain('({ regex } = __compilePattern(rule.source));');
+    expect(codeWithRules).toContain('skipping routing rule with invalid source');
+    expect(codeWithRules).toContain('continue;');
+  });
+
   it('__matchPattern swallows construction errors and returns false', () => {
     // Directly stress-test the try/catch by monkey-patching the global
     // RegExp once: the emitted body calls `new RegExp(...)` — if it throws,

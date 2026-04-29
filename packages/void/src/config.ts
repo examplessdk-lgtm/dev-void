@@ -128,6 +128,50 @@ export function assertSingleSplat(source: string, kind: string): void {
 }
 
 /**
+ * Reject patterns whose compilation would produce duplicate named-capture
+ * groups, which makes `new RegExp()` throw `SyntaxError: Duplicate capture
+ * group name` at request time. Two cases:
+ *
+ *   1. Two `:name` (or `:name` + trailing `*`) tokens with the same
+ *      identifier — e.g. `/:id/:id`, or two named-multi-segment captures
+ *      sharing a name.
+ *   2. A `:splat` (named) token alongside a bare `*` — both compile to a
+ *      `(?<splat>...)` group.
+ *
+ * `assertSingleSplat` already prevents two bare `*`s clashing on the
+ * implicit `splat` name. This complements it. The runtime emitter has a
+ * try/catch defense-in-depth in `emitApplyRoutingRules`, but failing at
+ * config-read with a precise message is friendlier than a CLI-log warn.
+ */
+export function assertUniqueCaptureNames(source: string, kind: string): void {
+  const seen = new Set<string>();
+  const dups = new Set<string>();
+  // Same identifier class as both compilers (`__compilePattern` and
+  // dispatch's `compilePattern`). Trailing `*` is optional — `:name` and
+  // `:name*` both produce a `<name>` capture group.
+  const re = /:([A-Za-z0-9_]+)\*?/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    const name = m[1]!;
+    if (seen.has(name)) {
+      dups.add(name);
+    }
+    seen.add(name);
+  }
+  // Bare `*` (post-`:name*` strip) emits `(?<splat>...)`. If the pattern
+  // also has a `:splat` token, both produce the same group name.
+  if (countSplats(source) >= 1 && seen.has('splat')) {
+    dups.add('splat');
+  }
+  if (dups.size > 0) {
+    const names = [...dups].map((n) => `:${n}`).join(', ');
+    throw new Error(
+      `${kind} source "${source}" in ${CONFIG_FILE} has duplicate capture group name(s) (${names}); each :name token must be unique within a pattern, and :splat collides with a bare "*"`,
+    );
+  }
+}
+
+/**
  * Predicate for the "protocol-relative" shape: a leading `//` parses as
  * `//host/path` → `https://host/path`, which silently turns an intended
  * in-worker rewrite/redirect into a cross-origin proxy.
@@ -425,6 +469,7 @@ export function readConfig(root: string): VoidConfig {
           );
         }
         assertSingleSplat(source, 'Redirect');
+        assertUniqueCaptureNames(source, 'Redirect');
         if (typeof dest === 'string') {
           if (dest.startsWith('/')) {
             assertNotProtocolRelative(dest, source, 'Redirect');
@@ -493,6 +538,7 @@ export function readConfig(root: string): VoidConfig {
           throw new Error(`Rewrite source "${source}" in ${CONFIG_FILE} must start with "/"`);
         }
         assertSingleSplat(source, 'Rewrite');
+        assertUniqueCaptureNames(source, 'Rewrite');
         if (typeof dest !== 'string') {
           throw new Error(`Rewrite destination for "${source}" in ${CONFIG_FILE} must be a string`);
         }
@@ -521,6 +567,7 @@ export function readConfig(root: string): VoidConfig {
           throw new Error(`Fallback source "${source}" in ${CONFIG_FILE} must start with "/"`);
         }
         assertSingleSplat(source, 'Fallback');
+        assertUniqueCaptureNames(source, 'Fallback');
         if (typeof dest !== 'string') {
           throw new Error(
             `Fallback destination for "${source}" in ${CONFIG_FILE} must be a string`,
