@@ -1571,6 +1571,89 @@ describe('c.rewrite runtime wrapper', () => {
     // Exceeded MAX_HOPS, confirming no built-in guard intervened.
     expect(hops).toBeGreaterThan(MAX_HOPS);
   });
+
+  it('emits asset-rewrite blocklist excluding extensions used by registered routes', () => {
+    // Regression: dotted-extension routes (e.g. routes/feed.xml.ts → /feed.xml,
+    // routes/api/openapi.json.ts → /api/openapi.json) are first-class in Void's
+    // file-based router. The c.rewrite asset-extension blocklist must not
+    // shadow those — a static `routing.rewrites` rule routes to the same
+    // destination without complaint, so c.rewrite should too.
+    const scan: ScanResult = {
+      routes: [
+        {
+          pattern: '/feed.xml',
+          methods: ['GET'],
+          params: [],
+          catchAll: false,
+          env: null,
+          filePath: 'feed.xml.ts',
+        },
+        {
+          pattern: '/api/openapi.json',
+          methods: ['GET'],
+          params: [],
+          catchAll: false,
+          env: null,
+          filePath: 'api/openapi.json.ts',
+        },
+      ],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+    const code = compileRouteTable(scan, '/routes', '/middleware', '/crons', '/queues', null, {
+      ...testOptions,
+      dev: true,
+    });
+    // The emitted regex must NOT include `xml` or `json` since both are used
+    // by registered routes — c.rewrite to those targets should re-dispatch
+    // through Hono normally.
+    const m = /__voidAssetRewriteExtRE = \/[^/]+\//.exec(code);
+    expect(m).not.toBeNull();
+    const regexSrc = m![0]!;
+    expect(regexSrc).not.toContain('|xml|');
+    expect(regexSrc).not.toContain('|xml)');
+    expect(regexSrc).not.toContain('|json|');
+    expect(regexSrc).not.toContain('|json)');
+    // Untouched extensions still in the blocklist.
+    expect(regexSrc).toContain('png');
+    expect(regexSrc).toContain('css');
+    expect(regexSrc).toContain('woff2');
+  });
+
+  it('emits the full asset-rewrite blocklist when no routes use dotted extensions', () => {
+    // Sanity: with only conventional routes, the blocklist stays as-is and
+    // the diagnostic still fires for genuinely-asset paths (the original
+    // motivation: catch /hero.png mystery 404s with a useful error).
+    const scan: ScanResult = {
+      routes: [
+        {
+          pattern: '/api/users',
+          methods: ['GET'],
+          params: [],
+          catchAll: false,
+          env: null,
+          filePath: 'api/users.ts',
+        },
+      ],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+    const code = compileRouteTable(scan, '/routes', '/middleware', '/crons', '/queues', null, {
+      ...testOptions,
+      dev: true,
+    });
+    const m = /__voidAssetRewriteExtRE = (\/[^/]+\/i?)/.exec(code);
+    expect(m).not.toBeNull();
+    const regexSrc = m![1]!;
+    // All canonical asset extensions present.
+    for (const ext of ['png', 'css', 'json', 'xml', 'txt', 'wasm']) {
+      expect(regexSrc).toContain(ext);
+    }
+  });
 });
 
 describe('X-Void-Routing dev trace header', () => {

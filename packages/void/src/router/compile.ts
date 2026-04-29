@@ -798,9 +798,66 @@ export function compileRouteTable(
   // the Hono router and 404s (static asset handlers run in front of the
   // worker, not inside it). `.html` is deliberately excluded: it's ambiguous
   // with legit route handlers at `.html` paths.
-  lines.push(
-    'const __voidAssetRewriteExtRE = /\\.(png|jpg|jpeg|gif|webp|avif|svg|ico|css|js|mjs|cjs|woff|woff2|ttf|otf|eot|mp4|webm|mp3|wav|pdf|txt|xml|json|wasm|map)$/i;',
-  );
+  //
+  // The framework also lets users name route files with dotted extensions
+  // (e.g. `routes/feed.xml.ts` → pattern `/feed.xml`), so we filter the
+  // blocklist down to extensions NOT used by any registered route/page.
+  // Without this, `c.rewrite("/feed.xml")` to a real `feed.xml.ts` route
+  // would falsely throw, diverging from `routing.rewrites` which routes
+  // the same destination to the same handler without complaint.
+  const ASSET_EXTENSIONS = [
+    'png',
+    'jpg',
+    'jpeg',
+    'gif',
+    'webp',
+    'avif',
+    'svg',
+    'ico',
+    'css',
+    'js',
+    'mjs',
+    'cjs',
+    'woff',
+    'woff2',
+    'ttf',
+    'otf',
+    'eot',
+    'mp4',
+    'webm',
+    'mp3',
+    'wav',
+    'pdf',
+    'txt',
+    'xml',
+    'json',
+    'wasm',
+    'map',
+  ];
+  const routePatterns: Array<string> = [];
+  for (const r of scan.routes) {
+    routePatterns.push(r.pattern);
+  }
+  if (pages && scan.pages.pages.length > 0) {
+    for (const p of scan.pages.pages) {
+      routePatterns.push(p.pattern);
+    }
+  }
+  const usedExts = new Set<string>();
+  for (const p of routePatterns) {
+    const m = /\.([A-Za-z0-9]+)$/.exec(p);
+    if (m) {
+      usedExts.add(m[1]!.toLowerCase());
+    }
+  }
+  const blockedExts = ASSET_EXTENSIONS.filter((e) => !usedExts.has(e));
+  if (blockedExts.length > 0) {
+    lines.push(`const __voidAssetRewriteExtRE = /\\.(${blockedExts.join('|')})$/i;`);
+  } else {
+    // Every asset extension is shadowed by a route — no blocklist needed.
+    // Match-nothing regex keeps the throw site shape unchanged.
+    lines.push('const __voidAssetRewriteExtRE = /(?!)/;');
+  }
   // Dev-only compile-time flag gating the `X-Void-Routing` trace header.
   // Stays `false` in production builds so the header never ships to users.
   lines.push(`const __VOID_DEV_ROUTING = ${JSON.stringify(options.dev === true)};`);
