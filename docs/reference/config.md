@@ -267,14 +267,15 @@ Custom response headers for static assets. Keys are URL patterns, values are arr
 
 #### `routing.redirects`
 
-URL redirects. Keys are source URL patterns, values are destination strings (302 default) or objects with `to` and optional `status`. See [Redirects](../guide/edge/redirects) for details.
+URL redirects. Keys are source URL patterns, values are destination strings (302 default) or objects with `to`, optional `status`, and optional `host`. See [Redirects](../guide/edge/redirects) for details.
 
 ```json
 {
   "routing": {
     "redirects": {
       "/old": "/new",
-      "/blog/*": { "to": "/posts/:splat", "status": 301 }
+      "/blog/*": { "to": "/posts/:splat", "status": 301 },
+      "/*": { "to": "https://example.com/:splat", "status": 308, "host": "www.example.com" }
     }
   }
 }
@@ -282,7 +283,7 @@ URL redirects. Keys are source URL patterns, values are destination strings (302
 
 #### `routing.revalidate`
 
-ISR revalidation TTL in seconds, either globally or per path. See [Revalidation](../guide/edge/revalidation.md) for details.
+ISR revalidation TTL in seconds, either globally, per path, or as structured rules for query-aware and API/JSON caching. See [Revalidation](../guide/edge/revalidation.md) for details.
 
 ```json
 {
@@ -292,6 +293,20 @@ ISR revalidation TTL in seconds, either globally or per path. See [Revalidation]
       "/docs/*": 31536000,
       "*": 30
     }
+  }
+}
+```
+
+Structured rules support `ttl: "deploy"` and query policies:
+
+```json
+{
+  "routing": {
+    "revalidate": [
+      { "pattern": "/products/*", "ttl": 300, "query": { "allow": ["color"] } },
+      { "pattern": "/api/badges/*", "ttl": 3600, "kind": "api", "query": true },
+      { "pattern": "/account/*", "ttl": 0 }
+    ]
   }
 }
 ```

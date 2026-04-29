@@ -11,8 +11,10 @@ import type {
   AssetConfig,
   DeployManifest,
   HeaderRule,
+  IsrFallbackRule,
   QueueMeta,
   RedirectRule,
+  RevalidateRule,
   SandboxManifestMeta,
   ScheduleMeta,
   WebSocketManifestMeta,
@@ -233,7 +235,7 @@ export async function packageBuild(
   schedules?: Array<ScheduleMeta>,
   ssr?: boolean,
   framework?: string,
-  revalidate?: number | Record<string, number>,
+  revalidate?: number | Record<string, number> | Array<RevalidateRule>,
   vars?: Record<string, string>,
   queues?: Array<QueueMeta>,
   prerender?: Array<string>,
@@ -246,6 +248,7 @@ export async function packageBuild(
   dialect?: 'sqlite' | 'postgresql',
   webSockets?: Array<WebSocketRouteDefinition>,
   onProgress?: ProgressCallback,
+  isrFallbacks?: Array<IsrFallbackRule>,
 ): Promise<FormData> {
   const formData = new FormData();
 
@@ -349,6 +352,10 @@ export async function packageBuild(
 
   if (redirectRules && redirectRules.length > 0) {
     manifest.redirectRules = redirectRules;
+  }
+
+  if (isrFallbacks && isrFallbacks.length > 0) {
+    manifest.isrFallbacks = isrFallbacks;
   }
 
   const websocketManifest = toWebSocketManifest(webSockets);
@@ -485,7 +492,7 @@ export async function packageFrameworkBuild(opts: {
   migrations?: Array<MigrationFile>;
   schedules?: Array<ScheduleMeta>;
   queues?: Array<QueueMeta>;
-  revalidate?: number | Record<string, number>;
+  revalidate?: number | Record<string, number> | Array<RevalidateRule>;
   prerender?: Array<string>;
   assetConfig?: AssetConfig;
   vars?: Record<string, string>;
@@ -494,6 +501,7 @@ export async function packageFrameworkBuild(opts: {
   hashedAssetsPrefix?: string;
   headerRules?: Array<HeaderRule>;
   redirectRules?: Array<RedirectRule>;
+  isrFallbacks?: Array<IsrFallbackRule>;
   dialect?: 'sqlite' | 'postgresql';
   webSockets?: Array<WebSocketRouteDefinition>;
   onProgress?: ProgressCallback;
@@ -574,6 +582,10 @@ export async function packageFrameworkBuild(opts: {
 
   if (opts.redirectRules && opts.redirectRules.length > 0) {
     manifest.redirectRules = opts.redirectRules;
+  }
+
+  if (opts.isrFallbacks && opts.isrFallbacks.length > 0) {
+    manifest.isrFallbacks = opts.isrFallbacks;
   }
 
   const websocketManifest = toWebSocketManifest(opts.webSockets);

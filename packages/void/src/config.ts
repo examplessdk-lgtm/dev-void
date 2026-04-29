@@ -1,13 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { HeaderRule, RedirectRule } from './cli/types';
+import type { HeaderRule, RedirectRule, RevalidateRule } from './cli/types';
 export type { RedirectRule };
 import { VOID_AUTH_PROVIDERS, isVoidAuthProvider, type VoidAuthProvider } from './auth/providers';
 import type { HeadConfig } from './pages/head';
 import type { SandboxConfig, SandboxInstanceType } from './sandbox/config';
 
 /** Redirect destination — string (302) or object with explicit status. */
-export type RedirectDestination = string | { to: string; status?: 301 | 302 | 307 | 308 };
+export type RedirectDestination =
+  | string
+  | { to: string; status?: 301 | 302 | 303 | 307 | 308; host?: string };
 
 /** Supported database dialects (internal representation). */
 export type DatabaseDialect = 'sqlite' | 'postgresql';
@@ -20,7 +22,7 @@ export interface WranglerConfig {
 
 /** Routing configuration — headers, redirects, revalidation, prerendering. */
 export interface RoutingConfig {
-  revalidate?: number | Record<string, number>;
+  revalidate?: number | Record<string, number> | Array<RevalidateRule>;
   prerender?: Array<string>;
   headers?: Record<string, Array<string>>;
   redirects?: Record<string, RedirectDestination>;
@@ -65,7 +67,7 @@ const CONFIG_FILE = 'void.json';
 const VALID_TARGETS = new Set(['cloudflare', 'node', 'bun', 'deno']);
 const VALID_APP_TYPES = new Set(['spa', 'static', 'void', 'framework']);
 const VALID_OUTPUTS = new Set(['server', 'static']);
-const VALID_REDIRECT_STATUSES = new Set([301, 302, 307, 308]);
+const VALID_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const VALID_DATABASE_VALUES = new Set(['pg']);
 const VALID_SANDBOX_INSTANCE_TYPES = new Set<SandboxInstanceType>([
   'dev',
@@ -245,6 +247,45 @@ export function readConfig(root: string): VoidConfig {
             `config: "routing.revalidate" in ${CONFIG_FILE} must be a non-negative finite number.`,
           );
         }
+      } else if (Array.isArray(routing.revalidate)) {
+        for (const [index, value] of routing.revalidate.entries()) {
+          if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+            throw new Error(
+              `config: "routing.revalidate[${index}]" in ${CONFIG_FILE} must be an object.`,
+            );
+          }
+          const rule = value as Record<string, unknown>;
+          if (typeof rule.pattern !== 'string' || !isValidRoutePattern(rule.pattern)) {
+            throw new Error(
+              `config: "routing.revalidate[${index}].pattern" in ${CONFIG_FILE} must start with "/" or be "*".`,
+            );
+          }
+          if (
+            !(
+              rule.ttl === 'deploy' ||
+              (typeof rule.ttl === 'number' && Number.isFinite(rule.ttl) && rule.ttl >= 0)
+            )
+          ) {
+            throw new Error(
+              `config: "routing.revalidate[${index}].ttl" in ${CONFIG_FILE} must be a non-negative number or "deploy".`,
+            );
+          }
+          if (
+            rule.kind !== undefined &&
+            rule.kind !== 'page' &&
+            rule.kind !== 'api' &&
+            rule.kind !== 'any'
+          ) {
+            throw new Error(
+              `config: "routing.revalidate[${index}].kind" in ${CONFIG_FILE} must be "page", "api", or "any".`,
+            );
+          }
+          if (rule.query !== undefined && !isValidRevalidateQuery(rule.query)) {
+            throw new Error(
+              `config: "routing.revalidate[${index}].query" in ${CONFIG_FILE} must be false, true, or { "allow": string[] }.`,
+            );
+          }
+        }
       } else if (
         typeof routing.revalidate === 'object' &&
         routing.revalidate !== null &&
@@ -265,7 +306,7 @@ export function readConfig(root: string): VoidConfig {
         }
       } else {
         throw new Error(
-          `config: "routing.revalidate" in ${CONFIG_FILE} must be a number or an object of path patterns to numbers.`,
+          `config: "routing.revalidate" in ${CONFIG_FILE} must be a number, an object of path patterns to numbers, or an array of structured rules.`,
         );
       }
     }
@@ -340,7 +381,12 @@ export function readConfig(root: string): VoidConfig {
           }
           if (d.status !== undefined && !VALID_REDIRECT_STATUSES.has(d.status as number)) {
             throw new Error(
-              `config: Redirect status for '${source}' in ${CONFIG_FILE} must be 301, 302, 307, or 308.`,
+              `config: Redirect status for '${source}' in ${CONFIG_FILE} must be 301, 302, 303, 307, or 308.`,
+            );
+          }
+          if (d.host !== undefined && typeof d.host !== 'string') {
+            throw new Error(
+              `config: Redirect host for '${source}' in ${CONFIG_FILE} must be a string.`,
             );
           }
         } else {
@@ -619,6 +665,24 @@ export function convertHeadersConfig(
   return rules.length > 0 ? rules : undefined;
 }
 
+function isValidRoutePattern(pattern: string): boolean {
+  return pattern === '*' || pattern.startsWith('/');
+}
+
+function isValidRevalidateQuery(value: unknown): boolean {
+  if (value === false || value === true) {
+    return true;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const query = value as Record<string, unknown>;
+  return (
+    Array.isArray(query.allow) &&
+    query.allow.every((entry) => typeof entry === 'string' && entry.length > 0)
+  );
+}
+
 /**
  * Convert the `redirects` config field into `RedirectRule[]` for the deploy manifest.
  *
@@ -638,7 +702,12 @@ export function convertRedirectsConfig(
     if (typeof dest === 'string') {
       rules.push({ source, destination: dest, status: 302 });
     } else {
-      rules.push({ source, destination: dest.to, status: dest.status ?? 302 });
+      rules.push({
+        source,
+        destination: dest.to,
+        status: dest.status ?? 302,
+        ...(dest.host ? { host: dest.host } : {}),
+      });
     }
   }
 

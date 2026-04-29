@@ -49,7 +49,7 @@ import {
 } from '../sandbox/config';
 import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env';
 import { validateSsrEntry } from '../ssr/entry';
-import { getToken, getTokenSource } from './auth';
+import { getSiteDomain, getToken, getTokenSource } from './auth';
 import { isExpiredTokenError, PlatformClient } from './client';
 import { promptAndCreateProject } from './create-project';
 import {
@@ -65,6 +65,7 @@ import {
 } from './env-validation';
 import { parseHeadersFile, parseRedirectsFile } from './headers';
 import { promptForLoginToken } from './login';
+import { importNuxtRouteRules, mergeStructuredRevalidate } from './nuxt-route-rules';
 import { cliTitle, createSpinner, pc } from './output';
 import {
   packageBuild,
@@ -83,7 +84,8 @@ import {
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project';
 import { promptProjectSelection, promptProjectSetupAction } from './prompt';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project';
-import type { AssetConfig, DeployEvent, HeaderRule, RedirectRule } from './types';
+import { normalizeConfigRevalidate } from './revalidate';
+import type { AssetConfig, DeployEvent, HeaderRule, RedirectRule, RevalidateRule } from './types';
 import { readWranglerCompat, type WranglerCompat } from './wrangler';
 import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper';
 
@@ -548,6 +550,7 @@ async function runFrameworkDeploy(
     execSync(voidConfig.inference?.build ?? resolveProjectCommand(root, fwPreset.buildCommand), {
       cwd: root,
       stdio: 'inherit',
+      env: createDeployBuildEnv(root, config, commit),
     });
   }
 
@@ -558,15 +561,23 @@ async function runFrameworkDeploy(
   // Collect header rules: parse framework-generated _headers file + void.json config
   const fwHeaderRules = existsSync(assetsDir) ? parseHeadersFile(assetsDir) : undefined;
   const cfgHeaderRules = convertHeadersConfig(voidConfig.routing?.headers);
-  const headerRules: Array<HeaderRule> = [...(fwHeaderRules ?? []), ...(cfgHeaderRules ?? [])];
+  let headerRules: Array<HeaderRule> = [...(fwHeaderRules ?? []), ...(cfgHeaderRules ?? [])];
 
   // Collect redirect rules: parse framework-generated _redirects file + void.json config
   const fwRedirectRules = existsSync(assetsDir) ? parseRedirectsFile(assetsDir) : undefined;
   const cfgRedirectRules = convertRedirectsConfig(voidConfig.routing?.redirects);
-  const redirectRules: Array<RedirectRule> = [
+  let redirectRules: Array<RedirectRule> = [
     ...(fwRedirectRules ?? []),
     ...(cfgRedirectRules ?? []),
   ];
+  const nuxtRules = detected.name === 'nuxt' ? importNuxtRouteRules(root) : null;
+  if (nuxtRules) {
+    for (const warning of nuxtRules.warnings) {
+      log.warn(warning);
+    }
+    headerRules = [...nuxtRules.headerRules, ...headerRules];
+    redirectRules = [...nuxtRules.redirectRules, ...redirectRules];
+  }
 
   if (!existsSync(workerDir)) {
     log.error(`deploy: Worker output '${fwPreset.workerDir}' not found. Run '${buildCmd}' first.`);
@@ -681,8 +692,10 @@ async function runFrameworkDeploy(
   const wranglerCompat = readWranglerCompat(root, voidConfig, workerDir);
 
   // 9. Resolve revalidate + prerender from void.json
-  const revalidate = voidConfig.routing?.revalidate;
-  const prerender = voidConfig.routing?.prerender;
+  const revalidate = nuxtRules
+    ? mergeStructuredRevalidate(nuxtRules.revalidate, voidConfig.routing?.revalidate)
+    : voidConfig.routing?.revalidate;
+  const prerender = [...(nuxtRules?.prerender ?? []), ...(voidConfig.routing?.prerender ?? [])];
 
   // Build manifest-format schedules and queues from raw scans
   const schedules = rawJobs.flatMap((job) =>
@@ -748,6 +761,7 @@ async function runFrameworkDeploy(
     hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? 'assets',
     headerRules,
     redirectRules,
+    isrFallbacks: nuxtRules?.isrFallbacks,
     dialect,
     onProgress,
   });
@@ -810,7 +824,10 @@ async function runFullDeploy(
       execSync(resolveProjectCommand(root, 'vite build'), {
         cwd: root,
         stdio: 'inherit',
-        env: { ...process.env, VOID_DEPLOY_PROJECT_ID: config.projectId },
+        env: {
+          ...createDeployBuildEnv(root, config, commit),
+          VOID_DEPLOY_PROJECT_ID: config.projectId,
+        },
       });
     } catch (err: unknown) {
       process.exit(getExitCode(err));
@@ -973,7 +990,7 @@ async function runFullDeploy(
 
   // Resolve revalidate config from void.json + per-page .server.ts exports
   const vcRevalidate = readConfig(root).routing?.revalidate;
-  let revalidate: number | Record<string, number> | undefined;
+  let revalidate: number | Record<string, number> | Array<RevalidateRule> | undefined;
   if (vcRevalidate != null) {
     revalidate = vcRevalidate;
   }
@@ -992,6 +1009,17 @@ async function runFullDeploy(
       if (typeof revalidate === 'number') {
         // Global number → pathmap with "*" fallback, per-page entries first
         revalidate = Object.fromEntries([...Object.entries(perPageRules), ['*', revalidate]]);
+      } else if (Array.isArray(revalidate)) {
+        revalidate = [
+          ...Object.entries(perPageRules).map(([pattern, ttl]) => ({
+            pattern,
+            ttl,
+            query: false as const,
+            kind: 'page' as const,
+            source: 'framework' as const,
+          })),
+          ...normalizeConfigRevalidate(revalidate),
+        ];
       } else if (typeof revalidate === 'object') {
         // Per-page entries first (higher precedence in first-match)
         revalidate = Object.fromEntries([
@@ -1187,6 +1215,49 @@ function getGitCommit(root: string): string | null {
     return execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf-8' }).trim();
   } catch {
     return null;
+  }
+}
+
+function createDeployBuildEnv(
+  root: string,
+  config: ProjectConfig,
+  commit: string | null | undefined,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    VOID: '1',
+    VOID_ENV: process.env.VOID_ENV ?? 'production',
+    VOID_PROJECT_SLUG: config.slug,
+    VOID_PROJECT_PRODUCTION_URL: `https://${config.slug}.${getSiteDomain(root)}`,
+  };
+
+  const sha = commit ?? getGitValue(root, ['rev-parse', 'HEAD']);
+  if (sha) {
+    env.VOID_GIT_COMMIT_SHA = sha;
+  }
+  const ref =
+    process.env.GITHUB_REF_NAME ??
+    process.env.VERCEL_GIT_COMMIT_REF ??
+    getGitValue(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (ref && ref !== 'HEAD') {
+    env.VOID_GIT_COMMIT_REF = ref;
+  }
+  const pr = process.env.GITHUB_PR_NUMBER ?? process.env.VERCEL_GIT_PULL_REQUEST_ID;
+  if (pr) {
+    env.VOID_PULL_REQUEST_ID = pr;
+  }
+  return env;
+}
+
+function getGitValue(root: string, args: Array<string>): string | undefined {
+  try {
+    return execFileSync('git', args, {
+      cwd: root,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return undefined;
   }
 }
 

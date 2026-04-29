@@ -43,8 +43,25 @@ Rules are matched in order, and the first match wins. The `*` glob matches any c
 
 Special values:
 
-- `31536000` (1 year): effectively cached until the next deploy, since deploys clear the ISR cache
+- `"deploy"` in structured rules: cached until the next deploy
 - `0`: never cached and always rendered by the worker, which is equivalent to plain SSR for that path
+
+## Query-aware and API revalidation
+
+Use structured rules when a response varies by query string or when you want to cache an API/JSON endpoint:
+
+```json
+{
+  "routing": {
+    "revalidate": [
+      { "pattern": "/products/*", "ttl": 300, "query": { "allow": ["color", "size"] } },
+      { "pattern": "/api/badges/*", "ttl": 3600, "kind": "api", "query": true }
+    ]
+  }
+}
+```
+
+`query: false` ignores query strings, `query: true` includes the full normalized query string, and `{ "allow": [...] }` includes only those parameters. API ISR only caches credential-free `GET` responses with safe public headers and JSON/text/XML/SVG content types.
 
 ## Per-page revalidation (Pages mode)
 

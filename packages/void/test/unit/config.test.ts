@@ -588,7 +588,7 @@ describe('readConfig redirects', () => {
 
   it('throws on invalid status code', () => {
     setup(JSON.stringify({ routing: { redirects: { '/old': { to: '/new', status: 200 } } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must be 301, 302, 307, or 308');
+    expect(() => readConfig(tmpDir)).toThrow('must be 301, 302, 303, 307, or 308');
     cleanup();
   });
 });

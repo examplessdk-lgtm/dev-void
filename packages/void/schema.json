@@ -140,7 +140,7 @@
       "description": "Routing configuration — headers, redirects, revalidation, prerendering.",
       "properties": {
         "revalidate": {
-          "description": "Edge caching TTL in seconds. A number sets a global TTL for all SSR pages. An object maps URL patterns to TTLs (first match wins). Set to 0 to disable caching for a path.",
+          "description": "Edge caching TTL in seconds. A number sets a global TTL for all SSR pages. An object maps URL patterns to TTLs. An array enables structured rules with query-aware cache keys and API/JSON ISR.",
           "oneOf": [
             {
               "type": "number",
@@ -155,6 +155,45 @@
                 }
               },
               "additionalProperties": false
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "pattern": {
+                    "type": "string",
+                    "pattern": "^(\\/|\\*)",
+                    "description": "URL pattern to match."
+                  },
+                  "ttl": {
+                    "oneOf": [{ "type": "number", "minimum": 0 }, { "const": "deploy" }],
+                    "description": "TTL in seconds, 0 to disable, or \"deploy\" to cache until the next deployment."
+                  },
+                  "query": {
+                    "oneOf": [
+                      { "const": false },
+                      { "const": true },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "allow": { "type": "array", "items": { "type": "string" } }
+                        },
+                        "required": ["allow"],
+                        "additionalProperties": false
+                      }
+                    ],
+                    "description": "Query-string cache-key policy. false ignores query, true includes all params, allow includes only listed params."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": ["page", "api", "any"],
+                    "description": "Which response kind the rule can cache."
+                  }
+                },
+                "required": ["pattern", "ttl"],
+                "additionalProperties": false
+              }
             }
           ]
         },
@@ -186,7 +225,8 @@
                   "type": "object",
                   "properties": {
                     "to": { "type": "string" },
-                    "status": { "type": "integer", "enum": [301, 302, 307, 308] }
+                    "status": { "type": "integer", "enum": [301, 302, 303, 307, 308] },
+                    "host": { "type": "string" }
                   },
                   "required": ["to"],
                   "additionalProperties": false

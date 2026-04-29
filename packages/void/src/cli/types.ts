@@ -24,6 +24,26 @@ export interface RedirectRule {
   source: string;
   destination: string;
   status: number;
+  host?: string;
+}
+
+export type RevalidateTtl = number | 'deploy';
+export type RevalidateQueryPolicy = false | true | { allow: Array<string> };
+export type RevalidateKind = 'page' | 'api' | 'any';
+
+export interface RevalidateRule {
+  pattern: string;
+  ttl: RevalidateTtl;
+  query?: RevalidateQueryPolicy;
+  kind?: RevalidateKind;
+  source?: 'framework' | 'config';
+}
+
+export interface IsrFallbackRule {
+  pattern: string;
+  htmlAsset?: string;
+  payloadAsset?: string;
+  payloadHeaders?: Record<string, string>;
 }
 
 export interface AssetConfig {
@@ -86,7 +106,7 @@ export interface DeployManifest {
   ssr?: boolean;
   framework?: string;
   type?: 'void' | 'spa' | 'static' | 'framework';
-  revalidate?: number | Record<string, number>;
+  revalidate?: number | Record<string, number> | Array<RevalidateRule>;
   prerender?: Array<string>;
   assetConfig?: AssetConfig;
   vars?: Record<string, string>;
@@ -96,6 +116,7 @@ export interface DeployManifest {
   hashedAssetsPrefix?: string;
   headerRules?: Array<HeaderRule>;
   redirectRules?: Array<RedirectRule>;
+  isrFallbacks?: Array<IsrFallbackRule>;
   websocket?: WebSocketManifestMeta;
   sandbox?: SandboxManifestMeta;
 }

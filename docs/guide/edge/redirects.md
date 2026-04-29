@@ -20,7 +20,7 @@ Define URL redirects in [`void.json`](../../reference/config) using the `routing
 ## Rules
 
 - **Source patterns** start with `/`. `*` matches any characters including `/`.
-- **Destinations** can be strings (defaults to `302` temporary redirect) or objects with `to` and optional `status` (`301`, `302`, `307`, `308`).
+- **Destinations** can be strings (defaults to `302` temporary redirect) or objects with `to`, optional `status` (`301`, `302`, `303`, `307`, `308`), and optional `host`.
 - `:splat` in the destination is replaced with the portion of the path matched by `*` in the source pattern.
 - When multiple rules match, the **last match wins**.
 - Redirects are evaluated **before** the request reaches the worker, so they short-circuit static asset serving, ISR, and SSR.
@@ -50,6 +50,22 @@ Define URL redirects in [`void.json`](../../reference/config) using the `routing
 ```
 
 A request to `/blog/hello-world` redirects to `/posts/hello-world` with a `301` status.
+
+## Host-specific redirects
+
+Add `host` to restrict a redirect to a verified custom domain on the same project:
+
+```json
+{
+  "routing": {
+    "redirects": {
+      "/*": { "to": "https://example.com/:splat", "status": 308, "host": "www.example.com" }
+    }
+  }
+}
+```
+
+The host must be registered and active as a project domain before dispatch can evaluate the rule.
 
 ## Framework `_redirects` files
 
