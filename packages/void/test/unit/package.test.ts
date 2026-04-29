@@ -177,6 +177,33 @@ describe('resolveSpaFallbackChain', () => {
     expect(result.fallbackRules).toEqual(userRules);
   });
 
+  it('still appends synthetic catch-all when user catch-all is host-scoped (SPA)', () => {
+    // A host-scoped `/*` -> `/index.html` only covers one hostname, so other
+    // bound hosts still need the synthetic global SPA fallback.
+    const userRules = [
+      {
+        host: 'www.example.com',
+        source: '/*',
+        destination: '/index.html',
+        status: 200,
+        force: false,
+        origin: 'void.json#routing.fallbacks',
+      },
+    ];
+    const result = resolveSpaFallbackChain('spa', userRules);
+    expect(result.assetConfig).toEqual({ not_found_handling: 'none' });
+    expect(result.fallbackRules).toEqual([
+      ...userRules,
+      {
+        source: '/*',
+        destination: '/index.html',
+        status: 200,
+        force: false,
+        origin: 'spa-default',
+      },
+    ]);
+  });
+
   it('leaves user fallbacks untouched for static app type', () => {
     const userRules = [{ source: '/docs/*', destination: '/docs.html', status: 200, force: false }];
     const result = resolveSpaFallbackChain('static', userRules);

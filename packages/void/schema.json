@@ -177,9 +177,9 @@
         },
         "redirects": {
           "type": "object",
-          "description": "URL redirects. Keys are source URL patterns; values are destination strings (302) or objects with \"to\" and optional \"status\".",
+          "description": "URL redirects. Keys are source URL patterns (path-only `/path` or host-scoped `https://host/path`); values are destination strings (302) or objects with \"to\" and optional \"status\".",
           "patternProperties": {
-            "^/": {
+            "^(/|https://)": {
               "oneOf": [
                 { "type": "string" },
                 {
@@ -209,9 +209,9 @@
         },
         "rewrites": {
           "type": "object",
-          "description": "URL rewrites. Keys are source URL patterns; values are destination paths. Serves content from the destination without changing the browser URL. Destinations must start with \"/\" and must not contain \"?\" — the incoming request's query string is preserved automatically.",
+          "description": "URL rewrites. Keys are source URL patterns (path-only `/path` or host-scoped `https://host/path`); values are destination paths. Serves content from the destination without changing the browser URL. Destinations must start with \"/\" and must not contain \"?\" — the incoming request's query string is preserved automatically.",
           "patternProperties": {
-            "^/": { "type": "string", "pattern": "^/[^?]*$" }
+            "^(/|https://)": { "type": "string", "pattern": "^/[^?]*$" }
           },
           "additionalProperties": false
         },
@@ -219,7 +219,7 @@
           "type": "object",
           "description": "Fallback rewrites. Same shape as `rewrites`, but only fire when no static asset matched the request. Useful for SPA shells or default-locale catch-alls without pre-empting real routes. Destinations must start with \"/\" and must not contain \"?\".",
           "patternProperties": {
-            "^/": { "type": "string", "pattern": "^/[^?]*$" }
+            "^(/|https://)": { "type": "string", "pattern": "^/[^?]*$" }
           },
           "additionalProperties": false
         }

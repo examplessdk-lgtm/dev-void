@@ -616,8 +616,8 @@ describe('readConfig redirects', () => {
   it('schema.json redirect status enum matches VALID_REDIRECT_STATUSES', () => {
     const schema = JSON.parse(readFileSync(join(import.meta.dirname, '../../schema.json'), 'utf8'));
     const schemaEnum: Array<number> =
-      schema.properties.routing.properties.redirects.patternProperties['^/'].oneOf[1].properties
-        .status.enum;
+      schema.properties.routing.properties.redirects.patternProperties['^(/|https://)'].oneOf[1]
+        .properties.status.enum;
     expect(new Set(schemaEnum)).toEqual(VALID_REDIRECT_STATUSES);
   });
 });

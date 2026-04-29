@@ -93,10 +93,12 @@ export function resolveSpaFallbackChain(
   // User fallbacks present on a SPA app — disable the platform-level SPA
   // switch and append a synthetic catch-all rule after user rules, so that
   // under first-match-wins any more specific user rule fires first. If the
-  // user already has `/*` → `/index.html`, skip the append so we don't ship
-  // two identical rules (which would trip the duplicate-source lint).
+  // user already has an *unscoped* `/*` → `/index.html`, skip the append so
+  // we don't ship two identical rules (which would trip the duplicate-source
+  // lint). A host-scoped catch-all only covers one hostname, so other bound
+  // hosts still need the synthetic global SPA fallback.
   const alreadyHasCatchAll = userRules.some(
-    (r) => r.source === '/*' && r.destination === '/index.html',
+    (r) => r.host === undefined && r.source === '/*' && r.destination === '/index.html',
   );
   if (alreadyHasCatchAll) {
     return { assetConfig: { not_found_handling: 'none' }, fallbackRules: userRules };
