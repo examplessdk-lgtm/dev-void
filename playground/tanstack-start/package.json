@@ -7,13 +7,13 @@
     "dev": "vite dev"
   },
   "dependencies": {
-    "@tanstack/react-router": "^1.168.23",
-    "@tanstack/react-start": "^1.167.43",
+    "@tanstack/react-router": "^1.168.25",
+    "@tanstack/react-start": "^1.167.50",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
   "devDependencies": {
-    "@rsbuild/core": "^2.0.1",
+    "@rsbuild/core": "^2.0.3",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@typescript/native-preview": "catalog:",

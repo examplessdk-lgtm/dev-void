@@ -6,13 +6,13 @@ packages:
 
 catalog:
   '@clack/prompts': ^1.2.0
-  '@cloudflare/workers-types': ^4.20260424.1
+  '@cloudflare/workers-types': ^4.20260426.1
   '@types/node': ^25.6.0
-  '@typescript/native-preview': 7.0.0-dev.20260424.1
+  '@typescript/native-preview': 7.0.0-dev.20260429.1
   pathe: ^2.0.3
   tsdown: ^0.21.10
   vite: ^8.0.10
-  wrangler: ^4.84.1
+  wrangler: ^4.86.0
 
 onlyBuiltDependencies:
   - better-sqlite3

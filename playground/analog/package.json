@@ -7,7 +7,7 @@
     "dev": "vite dev"
   },
   "dependencies": {
-    "@analogjs/router": "^2.4.10",
+    "@analogjs/router": "^2.5.0",
     "@angular/common": "^21.2.10",
     "@angular/compiler": "^21.2.10",
     "@angular/core": "^21.2.10",
@@ -18,8 +18,8 @@
     "tslib": "^2.8.1"
   },
   "devDependencies": {
-    "@analogjs/platform": "^2.4.10",
-    "@analogjs/vite-plugin-angular": "^2.4.10",
+    "@analogjs/platform": "^2.5.0",
+    "@analogjs/vite-plugin-angular": "^2.5.0",
     "@angular/build": "^21.2.8",
     "@angular/compiler-cli": "^21.2.10",
     "nitro-cloudflare-dev": "^0.2.2",

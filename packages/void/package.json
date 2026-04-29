@@ -250,8 +250,8 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "^0.8.11",
-    "@cloudflare/vite-plugin": "^1.33.1",
+    "@cloudflare/sandbox": "^0.9.1",
+    "@cloudflare/vite-plugin": "^1.34.0",
     "@cloudflare/workers-types": "catalog:",
     "@hono/oauth-providers": "^0.8.5",
     "@napi-rs/keyring": "1.2.0",
@@ -271,13 +271,13 @@
   },
   "devDependencies": {
     "@clack/prompts": "catalog:",
-    "@electric-sql/pglite": "0.4.4",
+    "@electric-sql/pglite": "0.4.5",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "catalog:",
     "@types/pg": "^8.20.0",
     "@typescript/native-preview": "catalog:",
     "arktype": "^2.2.0",
-    "es-module-lexer": "^2.0.0",
+    "es-module-lexer": "^2.1.0",
     "estree-walker": "^3.0.3",
     "magic-string": "^0.30.21",
     "ofetch": "2.0.0-alpha.3",
@@ -292,10 +292,6 @@
   },
   "peerDependencies": {
     "@void-sdk/md": "workspace:*",
-    "@void-sdk/react": "workspace:*",
-    "@void-sdk/solid": "workspace:*",
-    "@void-sdk/svelte": "workspace:*",
-    "@void-sdk/vue": "workspace:*",
     "arktype": ">=2.0.0",
     "valibot": ">=1.0.0-beta.7",
     "vite": "^8.0.0",
@@ -303,18 +299,6 @@
   },
   "peerDependenciesMeta": {
     "@void-sdk/md": {
-      "optional": true
-    },
-    "@void-sdk/vue": {
-      "optional": true
-    },
-    "@void-sdk/react": {
-      "optional": true
-    },
-    "@void-sdk/svelte": {
-      "optional": true
-    },
-    "@void-sdk/solid": {
       "optional": true
     },
     "arktype": {
