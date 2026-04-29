@@ -788,6 +788,12 @@ export function compileRouteTable(
   // set by an outer edge dispatcher into the map once per request. WeakMap
   // so entries collect when the Request is GC'd.
   lines.push('const __voidOriginalUrls = new WeakMap();');
+  // WeakSet<Request> — marks re-dispatches that have already been through
+  // the fallback-rules phase, so the `notFound` fallback check skips them
+  // (prevents fallback→fallback cycles). Populated only by fallback rule
+  // re-dispatches, NOT by `c.rewrite` or the static-rewrite middleware —
+  // those should still get a chance at fallbacks for their target URL.
+  lines.push('const __voidFallbackHandled = new WeakSet();');
   // Known static-asset extensions — `c.rewrite()` into one of these re-enters
   // the Hono router and 404s (static asset handlers run in front of the
   // worker, not inside it). `.html` is deliberately excluded: it's ambiguous
@@ -2536,6 +2542,7 @@ function emitApplyRoutingRules(
   rulesVar: string,
   indent: string,
   nodeTarget: boolean,
+  markFallbackHandled: boolean = false,
 ): void {
   lines.push(`${indent}let matched;`);
   lines.push(`${indent}for (const rule of ${rulesVar}) {`);
@@ -2564,6 +2571,12 @@ function emitApplyRoutingRules(
   // a static rewrite).
   lines.push(`${indent}    const __prior = __voidOriginalUrls.get(c.req.raw);`);
   lines.push(`${indent}    __voidOriginalUrls.set(rewriteReq, __prior ?? new URL(c.req.url));`);
+  if (markFallbackHandled) {
+    // Fallback rule re-dispatch: tag the next hop so its `notFound` won't
+    // re-enter the fallback phase (single-hop fallback semantics, parity
+    // with dispatch's single `applyRoutingRules(fallbackRules, ...)` call).
+    lines.push(`${indent}    __voidFallbackHandled.add(rewriteReq);`);
+  }
   // Branch at compile time on target — Hono's `c.executionCtx` getter throws
   // on node/bun/deno targets where the ExecutionContext is absent.
   if (nodeTarget) {
@@ -2681,9 +2694,15 @@ function emitFallbackRulesCheck(
     );
     lines.push('');
   }
-  lines.push(`${indent}if (!__voidOriginalUrls.has(c.req.raw)) {`);
+  // Single-hop guard: skip when this request was itself produced by a
+  // fallback re-dispatch. User `c.rewrite` and static-rewrite middleware
+  // re-dispatches are NOT marked here — they should still get a chance at
+  // fallbacks for the rewrite target (`/old → /new` then `/new` matches
+  // a fallback, or `c.rewrite('/missing')` where `/missing` is a fallback
+  // source). See `__voidFallbackHandled` declaration above.
+  lines.push(`${indent}if (!__voidFallbackHandled.has(c.req.raw)) {`);
   lines.push(`${indent}  const pathname = new URL(c.req.url).pathname;`);
-  emitApplyRoutingRules(lines, '__fallbackRules', `${indent}  `, nodeTarget);
+  emitApplyRoutingRules(lines, '__fallbackRules', `${indent}  `, nodeTarget, true);
   lines.push(`${indent}}`);
 }
 

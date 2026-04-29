@@ -492,6 +492,7 @@ describe('compileRouteTable', () => {
     );
 
     expect(code).toContain('const __voidOriginalUrls = new WeakMap();');
+    expect(code).toContain('const __voidFallbackHandled = new WeakSet();');
     expect(code).toContain('c.rewrite = (path)');
     expect(code).toContain('c.originalUrl = () =>');
     expect(code).toContain('c.isRewritten = () =>');
@@ -1015,6 +1016,104 @@ describe('c.rewrite runtime wrapper', () => {
     expect(observedOriginalUrls[1]?.href).toBe('http://localhost/missing/deep');
   });
 
+  it('c.rewrite() target reaches fallbackRules when no route matches', async () => {
+    // Regression anchor for F4: a user-initiated `c.rewrite("/missing")` whose
+    // target has no route should still get a chance at `routing.fallbacks` —
+    // the fallback rule was authored as the last-resort handler for `/missing`
+    // regardless of how the request arrived. The original framework bug
+    // conflated three populators of `__voidOriginalUrls` (dispatch handoff,
+    // static-rewrite middleware, user `c.rewrite`) under one fallback guard,
+    // so user rewrites silently bypassed fallbacks. The fix splits the guard
+    // onto a separate `__voidFallbackHandled` WeakSet that is populated only
+    // by fallback re-dispatches (preserving single-hop semantics + parity
+    // with dispatch's pipeline) — user rewrites and static rewrites flow
+    // through to fallbacks normally.
+    const app = new Hono();
+    const voidOriginalUrls = new WeakMap<Request, URL>();
+    const voidFallbackHandled = new WeakSet<Request>();
+    installVoidWrappers(app, voidOriginalUrls);
+
+    app.use('*', async (c, next) => {
+      if (new URL(c.req.url).pathname === '/trigger') {
+        return (c as any).rewrite('/missing');
+      }
+      await next();
+    });
+
+    const fallbackRules = [{ source: '/missing', destination: '/index', status: 200 }];
+    app.notFound((c) => {
+      // New guard: skip only if THIS request already came from a fallback
+      // re-dispatch. User c.rewrite (sets __voidOriginalUrls but not
+      // __voidFallbackHandled) reaches fallbacks correctly.
+      if (voidFallbackHandled.has(c.req.raw)) {
+        return c.text('not-found', 404);
+      }
+      const pathname = new URL(c.req.url).pathname;
+      for (const rule of fallbackRules) {
+        if (rule.source === pathname && rule.status === 200) {
+          const rewriteUrl = new URL(c.req.url);
+          rewriteUrl.pathname = rule.destination;
+          const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
+          const prior = voidOriginalUrls.get(c.req.raw);
+          voidOriginalUrls.set(rewriteReq, prior ?? new URL(c.req.url));
+          // Mark only the fallback re-dispatch — single-hop semantics.
+          voidFallbackHandled.add(rewriteReq);
+          return app.fetch(rewriteReq, (c as any).env);
+        }
+      }
+      return c.text('not-found', 404);
+    });
+
+    app.get('/index', (c) => c.text('index-body', 200));
+
+    const res = await app.fetch(new Request('http://localhost/trigger'));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('index-body');
+  });
+
+  it('fallback re-dispatch does not cycle if its destination is also a fallback source', async () => {
+    // Regression anchor for the `__voidFallbackHandled` cycle guard: a
+    // fallback rewrite whose destination matches another fallback source
+    // should fire exactly once — the re-dispatch is marked so the inner
+    // notFound skips fallbacks. Mirrors dispatch's single-pass semantics.
+    const app = new Hono();
+    const voidOriginalUrls = new WeakMap<Request, URL>();
+    const voidFallbackHandled = new WeakSet<Request>();
+    installVoidWrappers(app, voidOriginalUrls);
+
+    let fallbackInvocations = 0;
+    const fallbackRules = [
+      { source: '/a', destination: '/b', status: 200 },
+      { source: '/b', destination: '/c', status: 200 },
+    ];
+    app.notFound((c) => {
+      if (voidFallbackHandled.has(c.req.raw)) {
+        return c.text('terminal-404', 404);
+      }
+      fallbackInvocations++;
+      const pathname = new URL(c.req.url).pathname;
+      for (const rule of fallbackRules) {
+        if (rule.source === pathname) {
+          const rewriteUrl = new URL(c.req.url);
+          rewriteUrl.pathname = rule.destination;
+          const rewriteReq = new Request(rewriteUrl.toString(), c.req.raw);
+          const prior = voidOriginalUrls.get(c.req.raw);
+          voidOriginalUrls.set(rewriteReq, prior ?? new URL(c.req.url));
+          voidFallbackHandled.add(rewriteReq);
+          return app.fetch(rewriteReq, (c as any).env);
+        }
+      }
+      return c.text('terminal-404', 404);
+    });
+
+    const res = await app.fetch(new Request('http://localhost/a'));
+    // First fallback fires (/a → /b), second hop is marked, /b's notFound
+    // skips fallbacks → terminal 404.
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe('terminal-404');
+    expect(fallbackInvocations).toBe(1);
+  });
+
   it('c.rewrite preserves a "?query" in the destination path (does not URL-encode "?")', async () => {
     // Regression anchor: setting `URL.pathname = "/page?x=1"` percent-encodes
     // the `?` into `%3F`, so the re-dispatched request lands at `/page%3Fx=1`
@@ -1453,8 +1552,11 @@ describe('X-Void-Routing dev trace header', () => {
     expect(code).toContain('const __fallbackRules =');
     expect(code).toContain('"origin":"void.json#routing.fallbacks"');
     expect(code).toContain('app.notFound(async (c) => {');
-    // Guard against re-dispatched loops (same invariant as the pre-asset phase).
-    expect(code).toContain('if (!__voidOriginalUrls.has(c.req.raw))');
+    // Cycle guard against fallback→fallback re-entry. Distinct from
+    // `__voidOriginalUrls` so user `c.rewrite` and static-rewrite chains
+    // still reach fallbacks for the rewrite target.
+    expect(code).toContain('if (!__voidFallbackHandled.has(c.req.raw))');
+    expect(code).toContain('__voidFallbackHandled.add(rewriteReq);');
     // Generated no-route 404s are marked for dispatch; user handler 404s are not.
     expect(code).toContain('headers.set("X-Void-No-Match", "1")');
   });
