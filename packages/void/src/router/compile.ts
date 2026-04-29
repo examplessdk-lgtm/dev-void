@@ -2634,6 +2634,10 @@ function emitApplyRoutingRules(
 ): void {
   lines.push(`${indent}let matched;`);
   lines.push(`${indent}for (const rule of ${rulesVar}) {`);
+  // Host-scoped rules: skip when `rule.host` is set and doesn't match the
+  // request's hostname. Path-only rules apply to every host. Mirrors the
+  // host filter in dispatch's `applyRoutingRules`.
+  lines.push(`${indent}  if (rule.host && rule.host !== requestHost) continue;`);
   // A malformed rule.source (e.g. `:id/:id` or `:splat`+`*` colliding on
   // the same group name) makes `new RegExp` throw inside __compilePattern.
   // Build-time validators reject those, but a hand-crafted manifest could
@@ -2653,7 +2657,10 @@ function emitApplyRoutingRules(
   lines.push(`${indent}    continue;`);
   lines.push(`${indent}  }`);
   lines.push(`${indent}  const m = regex.exec(pathname);`);
-  lines.push(`${indent}  if (m) matched = { rule, params: m.groups || {} };`);
+  // First-match-wins: assign and break, mirroring dispatch's
+  // `applyRoutingRules`. Header rules use last-match-wins for `_headers`
+  // compat — the asymmetry is intentional.
+  lines.push(`${indent}  if (m) { matched = { rule, params: m.groups || {} }; break; }`);
   lines.push(`${indent}}`);
   lines.push(`${indent}if (matched) {`);
   lines.push(
@@ -2747,7 +2754,9 @@ function compileRoutingRulesMiddleware(
   // rule or a user `c.rewrite()`) owns annotating the final response, so
   // we intentionally don't set a trace header here.
   lines.push('  if (__voidOriginalUrls.has(c.req.raw)) return next();');
-  lines.push('  const pathname = new URL(c.req.url).pathname;');
+  lines.push('  const __reqUrl = new URL(c.req.url);');
+  lines.push('  const pathname = __reqUrl.pathname;');
+  lines.push('  const requestHost = __reqUrl.hostname;');
   emitApplyRoutingRules(lines, '__routingRules', '  ', nodeTarget);
   if (dev) {
     // No static rule matched — let the pipeline run, then annotate the final
@@ -2806,7 +2815,9 @@ function emitFallbackRulesCheck(
   // a fallback, or `c.rewrite('/missing')` where `/missing` is a fallback
   // source). See `__voidFallbackHandled` declaration above.
   lines.push(`${indent}if (!__voidFallbackHandled.has(c.req.raw)) {`);
-  lines.push(`${indent}  const pathname = new URL(c.req.url).pathname;`);
+  lines.push(`${indent}  const __reqUrl = new URL(c.req.url);`);
+  lines.push(`${indent}  const pathname = __reqUrl.pathname;`);
+  lines.push(`${indent}  const requestHost = __reqUrl.hostname;`);
   emitApplyRoutingRules(lines, '__fallbackRules', `${indent}  `, nodeTarget, true);
   lines.push(`${indent}}`);
 }

@@ -203,6 +203,71 @@ function assertNotProtocolRelative(
 }
 
 /**
+ * Strict literal-hostname regex used by `parseHostPrefixedSource` to validate
+ * the host portion of an `https://host/path` rule source. Mirrors
+ * `LITERAL_HOSTNAME_REGEX` in `packages/api/src/routes/deploy.ts` and the
+ * regex in `packages/api/src/routes/domains.ts`. Rejects scheme prefixes,
+ * ports, paths, whitespace, control chars, wildcards, single-label hosts,
+ * IPv4 literals, and userinfo. The host is lowercased before testing so the
+ * same byte-exact form reaches dispatch (which compares against the
+ * lowercase `url.hostname`).
+ */
+const LITERAL_HOSTNAME_REGEX = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/;
+
+export interface ParsedRuleSource {
+  host: string | undefined;
+  path: string;
+}
+
+/**
+ * Split an optional `https://host/path` prefix from a rule source.
+ *
+ * Path-only sources (no scheme) are returned as `{ host: undefined, path }`.
+ * Sources starting with `https://` have the host portion extracted and
+ * lowercase-normalized; the remaining path becomes `path` (including the
+ * leading `/`, which the caller may further validate).
+ *
+ * Rejected (returns `{ error }`):
+ * - `http://...` — TLS terminates upstream of the dispatch worker; only
+ *   `https://` requests ever reach the runtime, so an `http://`-scoped rule
+ *   physically cannot fire.
+ * - `//host/path` — protocol-relative; ambiguous and rejected by the same
+ *   reasoning.
+ * - `https://` with a wildcarded, ported, or otherwise non-literal host
+ *   (v1 only supports literal hosts).
+ * - `https://` with no path (`https://host`) — accepted and normalized to
+ *   `https://host/` so the path is always non-empty.
+ */
+export function parseHostPrefixedSource(raw: string): ParsedRuleSource | { error: string } {
+  if (raw.startsWith('//')) {
+    return {
+      error: `must not start with "//" (protocol-relative URLs are ambiguous; use "/path" for path-only or "https://host/path")`,
+    };
+  }
+  if (raw.startsWith('http://')) {
+    return {
+      error: `must not start with "http://" (TLS terminates upstream of the worker; only "https://" requests reach the runtime — use "https://host/path" instead)`,
+    };
+  }
+  if (!raw.startsWith('https://')) {
+    return { host: undefined, path: raw };
+  }
+
+  // Find the first `/` after `https://` — that's where the path starts.
+  const afterScheme = raw.slice('https://'.length);
+  const slashIdx = afterScheme.indexOf('/');
+  const rawHost = slashIdx === -1 ? afterScheme : afterScheme.slice(0, slashIdx);
+  const path = slashIdx === -1 ? '/' : afterScheme.slice(slashIdx);
+  const host = rawHost.toLowerCase();
+  if (!LITERAL_HOSTNAME_REGEX.test(host)) {
+    return {
+      error: `host must be a literal hostname (e.g. "https://www.example.com/path"; no port, wildcards, or userinfo): ${JSON.stringify(rawHost)}`,
+    };
+  }
+  return { host, path };
+}
+
+/**
  * Shared guard for rewrite/fallback destinations: they preserve the incoming
  * request's query string, so embedding one in the destination would silently
  * override (or merge confusingly with) the request query.
@@ -463,13 +528,19 @@ export function readConfig(root: string): VoidConfig {
       }
       const r = routing.redirects as Record<string, unknown>;
       for (const [source, dest] of Object.entries(r)) {
-        if (!source.startsWith('/')) {
+        const parsed = parseHostPrefixedSource(source);
+        if ('error' in parsed) {
           throw new Error(
-            `config: Redirect source '${source}' in ${CONFIG_FILE} must start with "/".`,
+            `config: Redirect source '${source}' in ${CONFIG_FILE}: ${parsed.error}.`,
           );
         }
-        assertSingleSplat(source, 'Redirect');
-        assertUniqueCaptureNames(source, 'Redirect');
+        if (!parsed.path.startsWith('/')) {
+          throw new Error(
+            `config: Redirect source '${source}' in ${CONFIG_FILE} must start with "/" (or be "https://host/path" with a path-absolute path).`,
+          );
+        }
+        assertSingleSplat(parsed.path, 'Redirect');
+        assertUniqueCaptureNames(parsed.path, 'Redirect');
         if (typeof dest === 'string') {
           if (dest.startsWith('/')) {
             assertNotProtocolRelative(dest, source, 'Redirect');
@@ -534,11 +605,17 @@ export function readConfig(root: string): VoidConfig {
       }
       const rw = routing.rewrites as Record<string, unknown>;
       for (const [source, dest] of Object.entries(rw)) {
-        if (!source.startsWith('/')) {
-          throw new Error(`Rewrite source "${source}" in ${CONFIG_FILE} must start with "/"`);
+        const parsed = parseHostPrefixedSource(source);
+        if ('error' in parsed) {
+          throw new Error(`Rewrite source "${source}" in ${CONFIG_FILE}: ${parsed.error}`);
         }
-        assertSingleSplat(source, 'Rewrite');
-        assertUniqueCaptureNames(source, 'Rewrite');
+        if (!parsed.path.startsWith('/')) {
+          throw new Error(
+            `Rewrite source "${source}" in ${CONFIG_FILE} must start with "/" (or be "https://host/path" with a path-absolute path)`,
+          );
+        }
+        assertSingleSplat(parsed.path, 'Rewrite');
+        assertUniqueCaptureNames(parsed.path, 'Rewrite');
         if (typeof dest !== 'string') {
           throw new Error(`Rewrite destination for "${source}" in ${CONFIG_FILE} must be a string`);
         }
@@ -563,11 +640,17 @@ export function readConfig(root: string): VoidConfig {
       }
       const fb = routing.fallbacks as Record<string, unknown>;
       for (const [source, dest] of Object.entries(fb)) {
-        if (!source.startsWith('/')) {
-          throw new Error(`Fallback source "${source}" in ${CONFIG_FILE} must start with "/"`);
+        const parsed = parseHostPrefixedSource(source);
+        if ('error' in parsed) {
+          throw new Error(`Fallback source "${source}" in ${CONFIG_FILE}: ${parsed.error}`);
         }
-        assertSingleSplat(source, 'Fallback');
-        assertUniqueCaptureNames(source, 'Fallback');
+        if (!parsed.path.startsWith('/')) {
+          throw new Error(
+            `Fallback source "${source}" in ${CONFIG_FILE} must start with "/" (or be "https://host/path" with a path-absolute path)`,
+          );
+        }
+        assertSingleSplat(parsed.path, 'Fallback');
+        assertUniqueCaptureNames(parsed.path, 'Fallback');
         if (typeof dest !== 'string') {
           throw new Error(
             `Fallback destination for "${source}" in ${CONFIG_FILE} must be a string`,
@@ -867,11 +950,22 @@ export function convertRedirectsConfig(
 
   const origin = 'void.json#routing.redirects';
   const rules: Array<DevRedirectRule> = [];
-  for (const [source, dest] of Object.entries(redirects)) {
+  for (const [rawSource, dest] of Object.entries(redirects)) {
+    // `readConfig` already validated the source via `parseHostPrefixedSource`
+    // and threw on errors, so the parse here is effectively re-extraction.
+    // Defensive: callers that bypass `readConfig` (e.g. tests, programmatic
+    // config) get the same parse path, and an error here surfaces as a
+    // thrown exception for diagnosability.
+    const parsed = parseHostPrefixedSource(rawSource);
+    if ('error' in parsed) {
+      throw new Error(`convertRedirectsConfig: source "${rawSource}": ${parsed.error}`);
+    }
+    const { host, path } = parsed;
+    const base = { source: path, status: 302, origin, ...(host && { host }) };
     if (typeof dest === 'string') {
-      rules.push({ source, destination: dest, status: 302, origin });
+      rules.push({ ...base, destination: dest });
     } else {
-      rules.push({ source, destination: dest.to, status: dest.status ?? 302, origin });
+      rules.push({ ...base, destination: dest.to, status: dest.status ?? 302 });
     }
   }
 
@@ -896,8 +990,20 @@ export function convertRewritesConfig(
 
   const origin = 'void.json#routing.rewrites';
   const rules: Array<DevRedirectRule> = [];
-  for (const [source, destination] of Object.entries(rewrites)) {
-    rules.push({ source, destination, status: 200, force: true, origin });
+  for (const [rawSource, destination] of Object.entries(rewrites)) {
+    const parsed = parseHostPrefixedSource(rawSource);
+    if ('error' in parsed) {
+      throw new Error(`convertRewritesConfig: source "${rawSource}": ${parsed.error}`);
+    }
+    const { host, path } = parsed;
+    rules.push({
+      source: path,
+      destination,
+      status: 200,
+      force: true,
+      origin,
+      ...(host && { host }),
+    });
   }
 
   return rules.length > 0 ? rules : undefined;
@@ -921,8 +1027,20 @@ export function convertFallbacksConfig(
 
   const origin = 'void.json#routing.fallbacks';
   const rules: Array<DevRedirectRule> = [];
-  for (const [source, destination] of Object.entries(fallbacks)) {
-    rules.push({ source, destination, status: 200, force: false, origin });
+  for (const [rawSource, destination] of Object.entries(fallbacks)) {
+    const parsed = parseHostPrefixedSource(rawSource);
+    if ('error' in parsed) {
+      throw new Error(`convertFallbacksConfig: source "${rawSource}": ${parsed.error}`);
+    }
+    const { host, path } = parsed;
+    rules.push({
+      source: path,
+      destination,
+      status: 200,
+      force: false,
+      origin,
+      ...(host && { host }),
+    });
   }
 
   return rules.length > 0 ? rules : undefined;

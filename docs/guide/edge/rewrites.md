@@ -36,7 +36,7 @@ If you **do** want the user to see the new URL (e.g., for SEO canonical signals 
 - **Source patterns** start with `/`. `*` matches any characters including `/`.
 - **Destinations** are strings starting with `/` (only internal paths are supported).
 - `:splat` in the destination is replaced with the portion of the path matched by `*` in the source pattern.
-- When multiple rules match, the **last match wins**.
+- When multiple rules match, the **first match wins**. Put more-specific rules above more-general ones (matches Netlify `_redirects` and Vercel `vercel.json` semantics).
 - On the default target, rewrites are evaluated at the edge **before** the request reaches the worker. On `node` / `bun` / `deno` targets they run in-process as Hono middleware, still before route dispatch. Either way, the rewritten path is then used for static asset serving, ISR, and SSR.
 - Unlike redirects, rewrites do **not** change the URL in the browser or send a `Location` header.
 
@@ -155,7 +155,7 @@ Also avoid deep rewrite chains for performance: every hop re-runs all middleware
 
 ### Performance notes
 
-- Static `routing.rewrites` and `routing.fallbacks` rules are evaluated in order, last-match-wins, at O(rules) per request. The list is small in practice, but keep it bounded — don't programmatically generate thousands of entries.
+- Static `routing.rewrites` and `routing.fallbacks` rules are evaluated in order, first-match-wins, at O(rules) per request. The list is small in practice, but keep it bounded — don't programmatically generate thousands of entries.
 - Each `c.rewrite()` hop replays the full middleware stack against a fresh `Request`. A chain of three middleware rewrites with four middleware in the stack is roughly twelve middleware invocations, not four.
 - The WeakMap loop guard is keyed on the `Request` identity and only suppresses the _static rules_ middleware on re-dispatched requests. User middleware is not guarded: if `c.rewrite('/a')` lands on `/a`, and middleware on `/a` calls `c.rewrite('/b')`, that second hop runs — each hop allocates a new `Request`, so the guard never matches. Chain depth is your responsibility.
 
@@ -221,7 +221,7 @@ Use `rewrites` when you want to force a path mapping regardless of what exists; 
 
 For the `spa` app type, the platform already serves `/index.html` for any asset miss by default (`not_found_handling: 'single-page-application'`). Adding `routing.fallbacks` to a SPA app is **additive, not an override**:
 
-1. Your `routing.fallbacks` rules are checked first, in the order they appear (last match wins among user rules).
+1. Your `routing.fallbacks` rules are checked first, in the order they appear (first match wins among user rules).
 2. If none of them match, the implicit `/* → /index.html` SPA fallback still fires.
 
 So a SPA app can carve out specific paths without losing the SPA shell behavior for everything else:
@@ -238,7 +238,7 @@ So a SPA app can carve out specific paths without losing the SPA shell behavior 
 
 With this config, an asset miss under `/docs/getting-started` resolves to `/docs.html`, while an asset miss under `/app/settings` still resolves to `/index.html` (the SPA default).
 
-You don't need to write `"/*": "/index.html"` yourself — the CLI **prepends** a synthetic `{ source: '/*', destination: '/index.html' }` rule to the fallback list when packaging a SPA deploy that has user fallbacks. Because evaluation is last-match-wins, user rules come after the synthetic entry and take precedence; the synthetic rule only fires when no user rule matched. This is why the shipped manifest may contain more fallback rules than you wrote in `void.json`. If you do write `"/*": "/index.html"` yourself, the CLI emits a warning on `void deploy` noting that the rule duplicates the default and can be omitted.
+You don't need to write `"/*": "/index.html"` yourself — the CLI **appends** a synthetic `{ source: '/*', destination: '/index.html' }` rule to the fallback list when packaging a SPA deploy that has user fallbacks. Because evaluation is first-match-wins, user rules come before the synthetic entry and take precedence; the synthetic rule only fires when no user rule matched. This is why the shipped manifest may contain more fallback rules than you wrote in `void.json`. If you do write `"/*": "/index.html"` yourself, the CLI emits a warning on `void deploy` noting that the rule duplicates the default and can be omitted.
 
 ## `_redirects` file
 
@@ -257,20 +257,20 @@ Rewrites can also be defined in a `_redirects` file placed in Vite's `publicDir`
 | `... 200`       | `routing.fallbacks`    | Fires only when no static asset and no route matched (would have 404'd). |
 | `... 200!`      | `routing.rewrites`     | Always fires, overriding any static asset that would have served.        |
 
-- File-based rules are applied **before** `void.json` rules. Since the last match wins, `routing.rewrites` / `routing.fallbacks` in `void.json` take precedence.
+- `void.json` rules are applied **before** file-based rules. Since the first match wins, `routing.rewrites` / `routing.fallbacks` in `void.json` take precedence.
 - The `_redirects` file can mix 3xx redirects, `200` fallbacks, and `200!` force rewrites. Ordering is preserved within each bucket.
 - The `!` force suffix is only meaningful on `200`. On a 3xx entry like `301!`, the `!` is silently stripped — 3xx redirects always "force" by their nature (they change the URL), so the suffix is meaningless. `void deploy` prints a single aggregated warning tallying all `301!` / `302!` / `307!` / `308!` entries so you can clean them up.
 
 ## Precedence: `_redirects` vs `void.json`
 
-When the same source pattern appears in both a `_redirects` file and `void.json` (`routing.redirects` / `routing.rewrites` / `routing.fallbacks`), the rules don't replace each other — they **merge into a single ordered list per phase**, and the last match wins.
+When the same source pattern appears in both a `_redirects` file and `void.json` (`routing.redirects` / `routing.rewrites` / `routing.fallbacks`), the rules don't replace each other — they **merge into a single ordered list per phase**, and the first match wins.
 
 Rules are bucketed by phase before merging:
 
-- **Pre-asset phase** (always fires, runs before static asset lookup): `_redirects` 3xx entries + `_redirects` `200!` entries + `routing.redirects` + `routing.rewrites`.
-- **Post-asset phase** (only fires on an asset miss): `_redirects` plain `200` entries + `routing.fallbacks`. For SPA app types, the synthetic `/* → /index.html` rule is **prepended first** in this phase, so user fallbacks evaluated later override it under last-match-wins.
+- **Pre-asset phase** (always fires, runs before static asset lookup): `routing.redirects` + `routing.rewrites` + `_redirects` 3xx entries + `_redirects` `200!` entries.
+- **Post-asset phase** (only fires on an asset miss): `routing.fallbacks` + `_redirects` plain `200` entries. For SPA app types, the synthetic `/* → /index.html` rule is **appended last** in this phase, so user fallbacks evaluated earlier take precedence under first-match-wins.
 
-Within each phase, the order is always: **`_redirects` file rules first, then `void.json` rules**. Because evaluation is last-match-wins, **`void.json` rules override `_redirects` rules for the same source**. This holds even though `_redirects` is "closer to the build output" — intuitions like "file wins" or "whichever I wrote last in the file wins" are both wrong.
+Within each phase, the order is always: **`void.json` rules first, then `_redirects` file rules**. Because evaluation is first-match-wins, **`void.json` rules override `_redirects` rules for the same source**. This holds even though `_redirects` is "closer to the build output" — intuitions like "file wins" or "whichever I wrote later in the file wins" are both wrong.
 
 ### Concrete example
 
@@ -290,7 +290,7 @@ Within each phase, the order is always: **`_redirects` file rules first, then `v
 }
 ```
 
-A request to `/docs/intro` matches both rules. Merged order is `[_redirects: /docs/* → /en/docs/:splat, void.json: /docs/* → /handbook/:splat]`, so `void.json` wins and the request resolves to `/handbook/intro`.
+A request to `/docs/intro` matches both rules. Merged order is `[void.json: /docs/* → /handbook/:splat, _redirects: /docs/* → /en/docs/:splat]`, so `void.json` wins and the request resolves to `/handbook/intro`.
 
 To confirm precedence in practice, check the [`X-Void-Routing` dev header](#debugging-with-x-void-routing) on any response during `vite dev` — it names the winning rule and its origin (`_redirects:<line>` vs `void.json#routing.rewrites`).
 

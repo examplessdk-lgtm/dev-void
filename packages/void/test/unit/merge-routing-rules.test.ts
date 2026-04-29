@@ -85,7 +85,7 @@ describe('mergeRoutingRules', () => {
     });
   });
 
-  it('orders file rules before void.json so last-match-wins lets config override', () => {
+  it('orders void.json rules before file rules so first-match-wins lets config override', () => {
     setup({
       redirects: '/docs/*   /en/docs/:splat   200!',
     });
@@ -95,13 +95,13 @@ describe('mergeRoutingRules', () => {
     });
 
     expect(result.redirectRules).toHaveLength(2);
-    expect(result.redirectRules[0].origin).toMatch(/^_redirects:/);
-    expect(result.redirectRules[0].destination).toBe('/en/docs/:splat');
-    expect(result.redirectRules[1].origin).toBe('void.json#routing.rewrites');
-    expect(result.redirectRules[1].destination).toBe('/handbook/:splat');
+    expect(result.redirectRules[0].origin).toBe('void.json#routing.rewrites');
+    expect(result.redirectRules[0].destination).toBe('/handbook/:splat');
+    expect(result.redirectRules[1].origin).toMatch(/^_redirects:/);
+    expect(result.redirectRules[1].destination).toBe('/en/docs/:splat');
   });
 
-  it('merges fallbacks from both sources in file-first order', () => {
+  it('merges fallbacks from both sources in config-first order', () => {
     setup({
       redirects: '/app/*   /app.html   200',
     });
@@ -111,8 +111,8 @@ describe('mergeRoutingRules', () => {
     });
     expect(result.fallbackRules).toBeDefined();
     expect(result.fallbackRules).toHaveLength(2);
-    expect(result.fallbackRules![0].source).toBe('/app/*');
-    expect(result.fallbackRules![1].source).toBe('/docs/*');
+    expect(result.fallbackRules![0].source).toBe('/docs/*');
+    expect(result.fallbackRules![1].source).toBe('/app/*');
   });
 
   it('merges _headers file entries before routing.headers config entries', () => {
@@ -141,12 +141,12 @@ describe('mergeRoutingRules', () => {
 
   // Documented at docs/guide/edge/rewrites.md §"Precedence: _redirects vs
   // void.json" — within the pre-asset phase the order is always
-  //   _redirects → routing.redirects → routing.rewrites
+  //   routing.redirects → routing.rewrites → _redirects
   // so when the same source appears in both `routing.redirects` and
-  // `routing.rewrites`, the rewrite wins under last-match-wins. Pin the
+  // `routing.rewrites`, the redirect wins under first-match-wins. Pin the
   // ordering here so a refactor of `mergeRoutingRules` can't silently flip
   // which entry takes precedence.
-  it('orders routing.redirects before routing.rewrites so same-source rewrites override redirects', () => {
+  it('orders routing.redirects before routing.rewrites so same-source redirects override rewrites', () => {
     setup();
     const result = mergeRoutingRules({
       dir: tmpDir,

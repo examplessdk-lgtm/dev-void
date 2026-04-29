@@ -306,36 +306,115 @@ describe('parseRedirectsFile', () => {
     const parsed = parseRedirectsFile(tmpDir);
     expect(parsed).toBeUndefined();
   });
+
+  // Host-prefixed sources: `https://host/path` on a `_redirects` line scopes
+  // the rule to a specific Host header. The parser splits the URL, strips
+  // the scheme + host, and stores them as `host` on the rule; `source`
+  // becomes the path-only pattern. Lowercase-normalized so the byte-exact
+  // match against `url.hostname` at dispatch is deterministic.
+
+  it('extracts host and path from a https:// prefixed source', () => {
+    setup('https://www.foo.com/* https://foo.com/:splat 301\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toEqual([
+      {
+        source: '/*',
+        destination: 'https://foo.com/:splat',
+        status: 301,
+        host: 'www.foo.com',
+        origin: '_redirects:1',
+      },
+    ]);
+  });
+
+  it('lowercases mixed-case host on a https:// prefixed source', () => {
+    setup('https://WWW.FOO.COM/about /about 301\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules[0].host).toBe('www.foo.com');
+    expect(parsed?.rules[0].source).toBe('/about');
+  });
+
+  it('treats https://host (no path) as https://host/', () => {
+    setup('https://www.foo.com /about 301\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules[0].source).toBe('/');
+    expect(parsed?.rules[0].host).toBe('www.foo.com');
+  });
+
+  it('keeps host undefined for path-only sources', () => {
+    setup('/old /new 301\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules[0]).not.toHaveProperty('host');
+  });
+
+  it('skips http:// sources (TLS terminates upstream)', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    setup('http://www.foo.com/about /about 301\n/ok /new 301\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    // Only the path-only rule survives.
+    expect(parsed?.rules).toEqual([
+      { source: '/ok', destination: '/new', status: 301, origin: '_redirects:2' },
+    ]);
+    const calls = logSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((msg) => msg.includes('http://'))).toBe(true);
+    logSpy.mockRestore();
+  });
+
+  it('skips protocol-relative // sources', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    setup('//www.foo.com/about /about 301\n/ok /new 301\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toHaveLength(1);
+    expect(parsed?.rules[0].source).toBe('/ok');
+    const calls = logSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((msg) => msg.includes('protocol-relative'))).toBe(true);
+    logSpy.mockRestore();
+  });
+
+  it('skips https:// sources with wildcard host', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    setup('https://*.foo.com/* /:splat 301\n/ok /new 301\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed?.rules).toHaveLength(1);
+    expect(parsed?.rules[0].source).toBe('/ok');
+    const calls = logSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((msg) => msg.includes('literal hostname'))).toBe(true);
+    logSpy.mockRestore();
+  });
+
+  it('skips https:// sources with port', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    setup('https://www.foo.com:8080/* /:splat 301\n');
+    const parsed = parseRedirectsFile(tmpDir);
+    expect(parsed).toBeUndefined();
+    const calls = logSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((msg) => msg.includes('literal hostname'))).toBe(true);
+    logSpy.mockRestore();
+  });
 });
 
 describe('_redirects + void.json merge precedence (same source)', () => {
-  // Mirrors the ordering at packages/void/src/cli/deploy.ts:580-586 and 903-909:
-  //   redirectRules = [...always(_redirects), ...redirects(void.json), ...rewrites(void.json)]
-  // Last-match-wins means void.json rules override _redirects rules when they
-  // share a source. Regression anchor for that contract — the merge site is
-  // simple array concat, but if someone reverses the order the silent override
-  // flips direction without failing the deploy.
-  it('places _redirects first and void.json rules last, so void.json wins under last-match-wins', async () => {
-    const { splitRedirectRulesByForce } = await import('../../src/cli/headers');
-    const { convertRedirectsConfig, convertRewritesConfig } = await import('../../src/config');
+  // Mirrors `mergeRoutingRules` (packages/void/src/cli/headers.ts):
+  //   redirectRules = [...redirects(void.json), ...rewrites(void.json), ...always(_redirects)]
+  // First-match-wins means void.json rules override _redirects rules when
+  // they share a source. Regression anchor for that contract — the merge
+  // site is simple array concat, but if someone reverses the order the
+  // silent override flips direction without failing the deploy.
+  it('places void.json rules first and _redirects last, so void.json wins under first-match-wins', async () => {
+    const { mergeRoutingRules } = await import('../../src/cli/headers');
 
     setup('/x /from-file 301\n');
-    const parsed = parseRedirectsFile(tmpDir);
-    const { always: fileAlways, fallbacks: fileFallbacks } = splitRedirectRulesByForce(
-      parsed?.rules,
-    );
     // void.json has a same-source entry under both redirects and rewrites to
     // cover both pre-asset origins.
-    const cfgRedirects = convertRedirectsConfig({ '/x': '/from-config-redirect' });
-    const cfgRewrites = convertRewritesConfig({ '/x': '/from-config-rewrite' });
+    const merged = mergeRoutingRules({
+      dir: tmpDir,
+      routing: {
+        redirects: { '/x': '/from-config-redirect' },
+        rewrites: { '/x': '/from-config-rewrite' },
+      },
+    });
 
-    // Merge order must match deploy.ts — if this drifts, the test fails
-    // loudly with a concrete diff rather than letting a silent precedence
-    // flip hit production.
-    const merged = [...fileAlways, ...(cfgRedirects ?? []), ...(cfgRewrites ?? [])];
-
-    expect(merged).toEqual([
-      { source: '/x', destination: '/from-file', status: 301, origin: '_redirects:1' },
+    expect(merged.redirectRules).toEqual([
       {
         source: '/x',
         destination: '/from-config-redirect',
@@ -349,11 +428,12 @@ describe('_redirects + void.json merge precedence (same source)', () => {
         force: true,
         origin: 'void.json#routing.rewrites',
       },
+      { source: '/x', destination: '/from-file', status: 301, origin: '_redirects:1' },
     ]);
 
     // No _redirects-file fallback entries in this fixture — sanity check
     // that the fallback bucket doesn't accidentally pick up the 3xx entry.
-    expect(fileFallbacks).toEqual([]);
+    expect(merged.fallbackRules).toBeUndefined();
   });
 });
 

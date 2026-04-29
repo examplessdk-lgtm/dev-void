@@ -750,6 +750,127 @@ describe('routing.redirects protocol-relative guard', () => {
   });
 });
 
+describe('routing rules: host-prefixed sources', () => {
+  // `https://host/path` keys on `routing.{redirects,rewrites,fallbacks}`
+  // scope a rule to a specific Host header. The validator splits the URL
+  // and validates the path portion as it would for path-only sources;
+  // `convertRedirectsConfig` etc emit the rule with `host` populated and
+  // `source` set to the path. Validation is symmetric across redirects,
+  // rewrites, and fallbacks — and rejects http://, //host, and non-literal
+  // hosts.
+
+  it('accepts a redirect with https:// prefixed source and emits host on rule', async () => {
+    const { convertRedirectsConfig } = await import('../../src/config');
+    setup(
+      JSON.stringify({
+        routing: { redirects: { 'https://www.foo.com/*': 'https://foo.com/:splat' } },
+      }),
+    );
+    const config = readConfig(tmpDir);
+    const rules = convertRedirectsConfig(config.routing?.redirects);
+    expect(rules).toEqual([
+      {
+        source: '/*',
+        destination: 'https://foo.com/:splat',
+        status: 302,
+        host: 'www.foo.com',
+        origin: 'void.json#routing.redirects',
+      },
+    ]);
+    cleanup();
+  });
+
+  it('lowercases mixed-case host on redirect source', async () => {
+    const { convertRedirectsConfig } = await import('../../src/config');
+    setup(JSON.stringify({ routing: { redirects: { 'https://WWW.FOO.COM/about': '/new' } } }));
+    const config = readConfig(tmpDir);
+    const rules = convertRedirectsConfig(config.routing?.redirects);
+    expect(rules?.[0].host).toBe('www.foo.com');
+    expect(rules?.[0].source).toBe('/about');
+    cleanup();
+  });
+
+  it('accepts a rewrite with https:// prefixed source', async () => {
+    const { convertRewritesConfig } = await import('../../src/config');
+    setup(
+      JSON.stringify({ routing: { rewrites: { 'https://app.foo.com/api/*': '/api/:splat' } } }),
+    );
+    const config = readConfig(tmpDir);
+    const rules = convertRewritesConfig(config.routing?.rewrites);
+    expect(rules?.[0]).toMatchObject({
+      source: '/api/*',
+      destination: '/api/:splat',
+      status: 200,
+      force: true,
+      host: 'app.foo.com',
+    });
+    cleanup();
+  });
+
+  it('accepts a fallback with https:// prefixed source', async () => {
+    const { convertFallbacksConfig } = await import('../../src/config');
+    setup(JSON.stringify({ routing: { fallbacks: { 'https://app.foo.com/*': '/index.html' } } }));
+    const config = readConfig(tmpDir);
+    const rules = convertFallbacksConfig(config.routing?.fallbacks);
+    expect(rules?.[0]).toMatchObject({
+      source: '/*',
+      destination: '/index.html',
+      status: 200,
+      force: false,
+      host: 'app.foo.com',
+    });
+    cleanup();
+  });
+
+  it('omits host when source is path-only', async () => {
+    const { convertRedirectsConfig } = await import('../../src/config');
+    setup(JSON.stringify({ routing: { redirects: { '/old': '/new' } } }));
+    const config = readConfig(tmpDir);
+    const rules = convertRedirectsConfig(config.routing?.redirects);
+    expect(rules?.[0]).not.toHaveProperty('host');
+    cleanup();
+  });
+
+  it('rejects http:// source on redirect', () => {
+    setup(JSON.stringify({ routing: { redirects: { 'http://www.foo.com/*': '/x' } } }));
+    expect(() => readConfig(tmpDir)).toThrow(/http:\/\//);
+    cleanup();
+  });
+
+  it('rejects protocol-relative // source on redirect', () => {
+    setup(JSON.stringify({ routing: { redirects: { '//www.foo.com/*': '/x' } } }));
+    expect(() => readConfig(tmpDir)).toThrow(/protocol-relative/);
+    cleanup();
+  });
+
+  it('rejects non-literal host (wildcard)', () => {
+    setup(JSON.stringify({ routing: { redirects: { 'https://*.foo.com/*': '/x' } } }));
+    expect(() => readConfig(tmpDir)).toThrow(/literal hostname/);
+    cleanup();
+  });
+
+  it('rejects host with port', () => {
+    setup(JSON.stringify({ routing: { redirects: { 'https://www.foo.com:8080/*': '/x' } } }));
+    expect(() => readConfig(tmpDir)).toThrow(/literal hostname/);
+    cleanup();
+  });
+
+  it('rejects host with userinfo', () => {
+    setup(JSON.stringify({ routing: { redirects: { 'https://user@www.foo.com/*': '/x' } } }));
+    expect(() => readConfig(tmpDir)).toThrow(/literal hostname/);
+    cleanup();
+  });
+
+  it('treats https://host (no path) as https://host/', async () => {
+    const { convertRedirectsConfig } = await import('../../src/config');
+    setup(JSON.stringify({ routing: { redirects: { 'https://www.foo.com': '/x' } } }));
+    const config = readConfig(tmpDir);
+    const rules = convertRedirectsConfig(config.routing?.redirects);
+    expect(rules?.[0]).toMatchObject({ source: '/', host: 'www.foo.com' });
+    cleanup();
+  });
+});
+
 describe('duplicate "*" wildcards in rule sources', () => {
   // Dispatch compiles each `*` into a `(?<splat>...)` capture group, so two
   // in one source makes `new RegExp()` throw on duplicate group name at

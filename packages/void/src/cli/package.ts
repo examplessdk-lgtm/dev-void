@@ -57,11 +57,11 @@ function stripDevOnlyRuleFields(
  * switch — set once per deployment — so we can't have the platform evaluate
  * user fallbacks *before* applying it. Instead, when the user has configured
  * fallbacks on a SPA app, we disable the platform-level SPA setting and
- * prepend a synthetic catch-all fallback rule (`/*` → `/index.html`) before
- * the user's rules. The dispatch worker evaluates fallback rules with
- * last-match-wins semantics, so placing the synthetic rule first means any
- * user rule that matches a more specific pattern overrides it; the synthetic
- * rule only fires when no user rule matched.
+ * append a synthetic catch-all fallback rule (`/*` → `/index.html`) after
+ * the user's rules. The dispatch worker evaluates routing rules with
+ * first-match-wins semantics, so placing the synthetic rule last means any
+ * user rule that matches a more specific pattern fires first; the synthetic
+ * rule only catches paths no user rule matched.
  *
  * When the user has no fallbacks configured, the platform-level SPA switch
  * is left intact (zero worker-side overhead for the common case).
@@ -91,9 +91,9 @@ export function resolveSpaFallbackChain(
   }
 
   // User fallbacks present on a SPA app — disable the platform-level SPA
-  // switch and prepend a synthetic catch-all rule before user rules, so that
-  // under last-match-wins any more specific user rule overrides it. If the
-  // user already has `/*` → `/index.html`, skip the prepend so we don't ship
+  // switch and append a synthetic catch-all rule after user rules, so that
+  // under first-match-wins any more specific user rule fires first. If the
+  // user already has `/*` → `/index.html`, skip the append so we don't ship
   // two identical rules (which would trip the duplicate-source lint).
   const alreadyHasCatchAll = userRules.some(
     (r) => r.source === '/*' && r.destination === '/index.html',
@@ -110,7 +110,7 @@ export function resolveSpaFallbackChain(
   };
   return {
     assetConfig: { not_found_handling: 'none' },
-    fallbackRules: [syntheticSpaFallback, ...userRules],
+    fallbackRules: [...userRules, syntheticSpaFallback],
   };
 }
 
@@ -435,7 +435,7 @@ export async function packageBuild(
     resolvedAssetConfig = { ...assetConfig, ...chain.assetConfig };
     resolvedFallbackRules = chain.fallbackRules;
   } else if (fallbackRules && fallbackRules.length > 0) {
-    // Fallbacks ship for any app type, but the SPA-shell chain (prepending
+    // Fallbacks ship for any app type, but the SPA-shell chain (appending
     // `/* -> /index.html`) only runs when `not_found_handling` is
     // `single-page-application`. On SSR / Void / framework apps, user
     // fallbacks still fire post-lookup, but no SPA shell is synthesised —

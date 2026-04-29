@@ -7,6 +7,7 @@ import {
   convertRewritesConfig,
   countSplats,
   isProtocolRelative,
+  parseHostPrefixedSource,
   VALID_REDIRECT_STATUSES,
   type RoutingConfig,
 } from '../config';
@@ -145,7 +146,21 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
 
     const origin = `_redirects:${lineNumber}`;
 
-    const [source, destination, statusStr] = parts;
+    const [rawSource, destination, statusStr] = parts;
+
+    // Optional `https://host/path` prefix: split into `{ host, path }`. The
+    // resulting path replaces the source for the rest of the per-line
+    // validation; `host` (when set) flows onto the rule and is enforced at
+    // dispatch as a Host filter. Rules with malformed hosts are dropped with
+    // a warning so the rest of the file still deploys.
+    const parsedSource = parseHostPrefixedSource(rawSource);
+    if ('error' in parsedSource) {
+      voidWarn(
+        `Skipping _redirects entry "${rawSource} ${destination}${statusStr ? ` ${statusStr}` : ''}" (line ${lineNumber}): source ${parsedSource.error}.`,
+      );
+      continue;
+    }
+    const { host, path: source } = parsedSource;
 
     // The dispatch worker compiles each `*` into a `(?<splat>...)` capture
     // group; two of them in one pattern yield a duplicate-group-name RegExp
@@ -154,7 +169,7 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
     // destinations below.
     if (countSplats(source) > 1) {
       voidWarn(
-        `Skipping _redirects entry "${source} ${destination}${statusStr ? ` ${statusStr}` : ''}" (line ${lineNumber}): source must contain at most one "*" wildcard (captured as :splat).`,
+        `Skipping _redirects entry "${rawSource} ${destination}${statusStr ? ` ${statusStr}` : ''}" (line ${lineNumber}): source must contain at most one "*" wildcard (captured as :splat).`,
       );
       continue;
     }
@@ -188,31 +203,31 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
     if (status === 200) {
       if (!destination.startsWith('/')) {
         voidWarn(
-          `Skipping _redirects rewrite "${source} ${destination} ${force ? '200!' : '200'}": destination must start with "/" (only internal paths are supported).`,
+          `Skipping _redirects rewrite "${rawSource} ${destination} ${force ? '200!' : '200'}": destination must start with "/" (only internal paths are supported).`,
         );
         continue;
       }
       if (isProtocolRelative(destination)) {
         voidWarn(
-          `Skipping _redirects rewrite "${source} ${destination} ${force ? '200!' : '200'}": destination must not start with "//" (protocol-relative URLs parse as cross-origin; only internal paths are supported).`,
+          `Skipping _redirects rewrite "${rawSource} ${destination} ${force ? '200!' : '200'}": destination must not start with "//" (protocol-relative URLs parse as cross-origin; only internal paths are supported).`,
         );
         continue;
       }
       if (destination.includes('?')) {
         voidWarn(
-          `Skipping _redirects rewrite "${source} ${destination} ${force ? '200!' : '200'}": destination must not contain "?" (query strings are not supported in rewrite destinations; the incoming request's query is preserved automatically).`,
+          `Skipping _redirects rewrite "${rawSource} ${destination} ${force ? '200!' : '200'}": destination must not contain "?" (query strings are not supported in rewrite destinations; the incoming request's query is preserved automatically).`,
         );
         continue;
       }
-      rules.push({ source, destination, status, force, origin });
+      rules.push({ source, destination, status, force, origin, ...(host && { host }) });
     } else if (status >= 300 && status < 400) {
       if (!VALID_REDIRECT_STATUSES.has(status)) {
         voidWarn(
-          `Skipping _redirects entry "${source} ${destination} ${statusStr}" (line ${lineNumber}): redirect status must be 301, 302, 303, 307, or 308.`,
+          `Skipping _redirects entry "${rawSource} ${destination} ${statusStr}" (line ${lineNumber}): redirect status must be 301, 302, 303, 307, or 308.`,
         );
         continue;
       }
-      rules.push({ source, destination, status, origin });
+      rules.push({ source, destination, status, origin, ...(host && { host }) });
     }
   }
 
@@ -254,11 +269,16 @@ export function splitRedirectRulesByForce(rules: Array<DevRedirectRule> | undefi
  * rules from `void.json`. Shared between the deploy pipeline and the dev
  * plugin so both surfaces produce identical rule tables.
  *
- * Ordering: file rules first, then `void.json` rules. Because the router
- * evaluates rules with last-match-wins semantics, `void.json` entries
+ * Ordering for routing rules (redirects/rewrites/fallbacks): `void.json`
+ * rules first, then `_redirects` file rules. Because the router evaluates
+ * routing rules with first-match-wins semantics, `void.json` entries
  * override `_redirects` entries for the same source — matching the
  * documented precedence (`docs/guide/edge/rewrites.md`). This holds even
  * though `_redirects` is conceptually "closer to the build output".
+ *
+ * Header rules use the inverse order — `_redirects`/`_headers` last —
+ * because header rules are last-match-wins (`_headers` is Netlify-style
+ * last-wins). The asymmetry is intentional and matches dispatch.
  *
  * Phase split:
  *   - `_redirects` `200!` (force) + 3xx entries → `redirectRules` (always-fire)
@@ -298,13 +318,18 @@ export function mergeRoutingRules(opts: {
   const cfgRewrites = convertRewritesConfig(routing?.rewrites);
   const cfgFallbacks = convertFallbacksConfig(routing?.fallbacks);
 
+  // Header rules: last-match-wins (mirrors `_headers` semantics). `void.json`
+  // entries are emitted last so they override `_headers` for the same pattern.
   const headerRules: Array<HeaderRule> = [...(fileHeaders ?? []), ...(cfgHeaders ?? [])];
+  // Routing rules: first-match-wins (mirrors `_redirects`/`vercel.json`
+  // semantics). `void.json` entries are emitted first so they override
+  // `_redirects` for the same source.
   const redirectRules: Array<DevRedirectRule> = [
-    ...fileAlways,
     ...(cfgRedirects ?? []),
     ...(cfgRewrites ?? []),
+    ...fileAlways,
   ];
-  const mergedFallbacks = [...fileFallbacks, ...(cfgFallbacks ?? [])];
+  const mergedFallbacks = [...(cfgFallbacks ?? []), ...fileFallbacks];
   const fallbackRules = mergedFallbacks.length > 0 ? mergedFallbacks : undefined;
 
   return {
@@ -359,7 +384,7 @@ export function lintDestinationSplats(
  * Sources are scoped to the phase: a pattern appearing once in redirects and
  * once in fallbacks is *not* a collision, because those lists run in separate
  * phases and don't shadow each other. Within a single phase the dispatcher
- * uses last-match-wins semantics, so a duplicate silently hides the earlier
+ * uses first-match-wins semantics, so a duplicate silently hides the later
  * entry. This lint never fails the deploy; it surfaces the collision so the
  * user can decide whether to fix it.
  *
@@ -404,6 +429,6 @@ export function lintDuplicateSources(
   }
 
   voidWarn(
-    `duplicate rule sources detected in ${phaseName} (last match wins — the later entry takes effect):\n${lines.join('\n')}`,
+    `duplicate rule sources detected in ${phaseName} (first match wins — the earlier entry takes effect):\n${lines.join('\n')}`,
   );
 }
