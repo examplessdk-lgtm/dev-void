@@ -640,6 +640,12 @@ export interface CompileOptions {
   reactRefresh: boolean;
   /** Whether the generated route module is being compiled for dev server usage. */
   dev?: boolean;
+  /**
+   * Ephemeral token for local dev manual trigger endpoints when
+   * __VOID_PROXY_TOKEN is unset. Stable for a dev-server process so tooling can
+   * print paste-ready curl commands without requiring .dev.vars.
+   */
+  devTriggerToken?: string;
   /** Auth configuration (null = disabled) */
   auth: AuthCompileOptions | null;
   /** `node`/`bun`/`deno` target — omits executionCtx from ALS context */
@@ -1399,8 +1405,9 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('const __scheduledHandler = async (c) => {');
     lines.push('  const __token = c.req.header("x-void-internal");');
     lines.push('  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;');
+    lines.push('  const __devToken = c.req.header("x-void-dev-trigger");');
     lines.push(
-      '  if (__expected ? __token !== __expected : !import.meta.env.DEV && __token !== __VOID_BUILD_KEY) {',
+      '  if (__expected ? __token !== __expected : import.meta.env.DEV ? __devToken !== __VOID_DEV_TRIGGER_TOKEN : __token !== __VOID_BUILD_KEY) {',
     );
     lines.push('    return c.json({ error: "unauthorized" }, 401);');
     lines.push('  }');
@@ -1465,13 +1472,13 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('}');
     lines.push('');
 
-    // HTTP route — same auth policy as /__void/scheduled (token required in
-    // prod; in dev, skipped when `__VOID_PROXY_TOKEN` is unset).
+    // HTTP route — same auth policy as /__void/scheduled.
     lines.push('const __queueHandler = async (c) => {');
     lines.push('  const __token = c.req.header("x-void-internal");');
     lines.push('  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;');
+    lines.push('  const __devToken = c.req.header("x-void-dev-trigger");');
     lines.push(
-      '  if (__expected ? __token !== __expected : !import.meta.env.DEV && __token !== __VOID_BUILD_KEY) {',
+      '  if (__expected ? __token !== __expected : import.meta.env.DEV ? __devToken !== __VOID_DEV_TRIGGER_TOKEN : __token !== __VOID_BUILD_KEY) {',
     );
     lines.push('    return c.json({ error: "unauthorized" }, 401);');
     lines.push('  }');
@@ -1538,6 +1545,9 @@ window.__vite_plugin_react_preamble_installed__ = true;
   // Build-time key for internal route auth when __VOID_PROXY_TOKEN is absent.
   // Embedded in the compiled route table — only same-build callers know it.
   lines.push(`export const __VOID_BUILD_KEY = ${JSON.stringify(crypto.randomUUID())};`);
+  lines.push(
+    `export const __VOID_DEV_TRIGGER_TOKEN = ${JSON.stringify(options.devTriggerToken ?? crypto.randomUUID())};`,
+  );
   lines.push('');
   lines.push(`export default app;`);
 

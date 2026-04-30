@@ -46,6 +46,7 @@ const LOAD_ID_FILTER = /^virtual:void-(routes|client-worker|client-browser)$/;
  */
 interface RoutingPluginOptions {
   isAuthEnabled: () => boolean;
+  devTriggerToken?: string;
   headConfig?: import('./pages/head.ts').HeadConfig;
   output?: 'server' | 'static';
   prerenderPaths?: Array<string>;
@@ -159,6 +160,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     webSocketRuntimePath: resolveFile('#self/runtime/ws-server'),
     reactRefresh: false,
     dev: false,
+    devTriggerToken: options.devTriggerToken,
     auth: null,
     nodeTarget: !!options.target,
     explicitPrerenderPaths: options.prerenderPaths,
