@@ -760,7 +760,7 @@ describe('routing rules: host-prefixed sources', () => {
   // hosts.
 
   it('accepts a redirect with https:// prefixed source and emits host on rule', async () => {
-    const { convertRedirectsConfig } = await import('../../src/config');
+    const { convertRedirectsConfig } = await import('../../src/config.ts');
     setup(
       JSON.stringify({
         routing: { redirects: { 'https://www.foo.com/*': 'https://foo.com/:splat' } },
@@ -781,7 +781,7 @@ describe('routing rules: host-prefixed sources', () => {
   });
 
   it('lowercases mixed-case host on redirect source', async () => {
-    const { convertRedirectsConfig } = await import('../../src/config');
+    const { convertRedirectsConfig } = await import('../../src/config.ts');
     setup(JSON.stringify({ routing: { redirects: { 'https://WWW.FOO.COM/about': '/new' } } }));
     const config = readConfig(tmpDir);
     const rules = convertRedirectsConfig(config.routing?.redirects);
@@ -791,7 +791,7 @@ describe('routing rules: host-prefixed sources', () => {
   });
 
   it('accepts a rewrite with https:// prefixed source', async () => {
-    const { convertRewritesConfig } = await import('../../src/config');
+    const { convertRewritesConfig } = await import('../../src/config.ts');
     setup(
       JSON.stringify({ routing: { rewrites: { 'https://app.foo.com/api/*': '/api/:splat' } } }),
     );
@@ -808,7 +808,7 @@ describe('routing rules: host-prefixed sources', () => {
   });
 
   it('accepts a fallback with https:// prefixed source', async () => {
-    const { convertFallbacksConfig } = await import('../../src/config');
+    const { convertFallbacksConfig } = await import('../../src/config.ts');
     setup(JSON.stringify({ routing: { fallbacks: { 'https://app.foo.com/*': '/index.html' } } }));
     const config = readConfig(tmpDir);
     const rules = convertFallbacksConfig(config.routing?.fallbacks);
@@ -823,7 +823,7 @@ describe('routing rules: host-prefixed sources', () => {
   });
 
   it('omits host when source is path-only', async () => {
-    const { convertRedirectsConfig } = await import('../../src/config');
+    const { convertRedirectsConfig } = await import('../../src/config.ts');
     setup(JSON.stringify({ routing: { redirects: { '/old': '/new' } } }));
     const config = readConfig(tmpDir);
     const rules = convertRedirectsConfig(config.routing?.redirects);
@@ -862,7 +862,7 @@ describe('routing rules: host-prefixed sources', () => {
   });
 
   it('treats https://host (no path) as https://host/', async () => {
-    const { convertRedirectsConfig } = await import('../../src/config');
+    const { convertRedirectsConfig } = await import('../../src/config.ts');
     setup(JSON.stringify({ routing: { redirects: { 'https://www.foo.com': '/x' } } }));
     const config = readConfig(tmpDir);
     const rules = convertRedirectsConfig(config.routing?.redirects);
