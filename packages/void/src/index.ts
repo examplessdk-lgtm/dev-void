@@ -478,7 +478,7 @@ export function voidPlugin(options?: {
       migrationPlugin(root, dialect, 'local', frameworkPersistRoot, {
         enabled: false,
       }),
-      devTriggersHintPlugin(root, true),
+      devTriggersHintPlugin(root, { framework: true }),
     ];
   }
 
@@ -1000,7 +1000,7 @@ export function voidPlugin(options?: {
       }),
       migrationPlugin(root, getDatabaseDialect(config)),
       ...(vinextCompat ? [vinextCompat] : []),
-      devTriggersHintPlugin(root, true),
+      devTriggersHintPlugin(root, { framework: true }),
       ...cloudflare({
         ...inspectorPortOption,
         persistState: { path: options?.persistTo ?? outDir },
@@ -1134,7 +1134,7 @@ export function voidPlugin(options?: {
       configPath: authConfigPath,
     }),
     prerenderPlugin(root, config),
-    devTriggersHintPlugin(root, false),
+    devTriggersHintPlugin(root, { framework: false }),
     ...cloudflare({
       ...inspectorPortOption,
       persistState: { path: options?.persistTo ?? outDir },

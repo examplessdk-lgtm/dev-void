@@ -12,7 +12,8 @@ import { scanQueuesSync } from './queues/scan.ts';
  * - Framework mode (Class B/C): notes that dev triggering is not yet wired
  *   up, since the wrapper that exposes those endpoints only runs at deploy.
  */
-export function devTriggersHintPlugin(root: string, framework: boolean): Plugin {
+export function devTriggersHintPlugin(root: string, options: { framework: boolean }): Plugin {
+  const { framework } = options;
   return {
     name: 'void:dev-triggers-hint',
     apply: 'serve',
@@ -33,8 +34,11 @@ export function devTriggersHintPlugin(root: string, framework: boolean): Plugin 
 
       afterReady(() => {
         const address = server.httpServer?.address();
-        const port = typeof address === 'object' && address ? address.port : 5173;
-        const baseUrl = `http://localhost:${port}`;
+        const port = typeof address === 'object' && address ? address.port : null;
+        if (port == null && !framework) {
+          return;
+        }
+        const baseUrl = `http://localhost:${port ?? 5173}`;
 
         const summary: Array<string> = [];
         if (jobs.length > 0) {

@@ -48,7 +48,7 @@ describe('devTriggersHintPlugin', () => {
   it('prints nothing when there are no crons or queues', async () => {
     const root = createTempRoot();
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    await runConfigureServer(devTriggersHintPlugin(root, false));
+    await runConfigureServer(devTriggersHintPlugin(root, { framework: false }));
     expect(log).not.toHaveBeenCalled();
   });
 
@@ -61,7 +61,7 @@ describe('devTriggersHintPlugin', () => {
     );
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await runConfigureServer(devTriggersHintPlugin(root, false));
+    await runConfigureServer(devTriggersHintPlugin(root, { framework: false }));
 
     const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
     expect(output).toContain('Detected 1 cron');
@@ -84,7 +84,7 @@ describe('devTriggersHintPlugin', () => {
     writeFileSync(join(root, 'queues', 'emails.ts'), 'export default async () => {};\n');
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await runConfigureServer(devTriggersHintPlugin(root, false));
+    await runConfigureServer(devTriggersHintPlugin(root, { framework: false }));
 
     const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
     expect(output).toContain('Detected 2 crons and 1 queue');
@@ -101,10 +101,24 @@ describe('devTriggersHintPlugin', () => {
     );
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await runConfigureServer(devTriggersHintPlugin(root, true));
+    await runConfigureServer(devTriggersHintPlugin(root, { framework: true }));
 
     const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
     expect(output).toContain('not yet supported in framework mode');
     expect(output).not.toContain('/__void/scheduled');
+  });
+
+  it('counts queues in the framework-mode warning without emitting endpoints', async () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'queues'), { recursive: true });
+    writeFileSync(join(root, 'queues', 'emails.ts'), 'export default async () => {};\n');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runConfigureServer(devTriggersHintPlugin(root, { framework: true }));
+
+    const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
+    expect(output).toContain('1 queue');
+    expect(output).toContain('not yet supported in framework mode');
+    expect(output).not.toContain('/__void/queue');
   });
 });

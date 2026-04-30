@@ -63,7 +63,9 @@ Notes:
 
 ## Local development
 
-Cron triggers do not fire on their schedule during local dev — this is a Cloudflare Workers / miniflare limitation, not specific to Void. To exercise a job locally, POST to the dev-only endpoint Void exposes:
+Cron triggers do not fire on their schedule during local dev — this is a Cloudflare Workers / miniflare limitation, not specific to Void.
+
+In **default Void mode**, exercise a job locally by POSTing to the dev endpoint Void exposes:
 
 ```
 POST /__void/scheduled
@@ -73,30 +75,21 @@ Content-Type: application/json
 
 The `cron` value must match a string you exported from a `crons/*.ts` file — that's how the dispatcher routes to the right handler. Returns `{ "ok": true }` on success.
 
+The endpoint always enforces a token via the `x-void-internal` header. Set `__VOID_PROXY_TOKEN` in `.dev.vars` and pass it as the header:
+
+```bash
+# .dev.vars
+__VOID_PROXY_TOKEN=dev-trigger
+```
+
 ```bash
 curl -X POST http://localhost:5173/__void/scheduled \
   -H "Content-Type: application/json" \
+  -H "x-void-internal: dev-trigger" \
   -d '{"cron":"0 * * * *","scheduledTime":'"$(date +%s000)"'}'
 ```
 
-### Auth
-
-The endpoint enforces a token via the `x-void-internal` header:
-
-- **Framework mode (Nuxt, React Router, etc.):** the check is skipped if neither `__VOID_PROXY_TOKEN` nor `CRON_SECRET` is set in the environment. In typical local dev, no header is needed.
-- **Default Void mode:** the check always runs. Set `__VOID_PROXY_TOKEN` in `.dev.vars` and pass it as the header:
-
-  ```bash
-  # .dev.vars
-  __VOID_PROXY_TOKEN=dev-trigger
-  ```
-
-  ```bash
-  curl -X POST http://localhost:5173/__void/scheduled \
-    -H "Content-Type: application/json" \
-    -H "x-void-internal: dev-trigger" \
-    -d '{"cron":"0 * * * *","scheduledTime":'"$(date +%s000)"'}'
-  ```
+In **framework mode** (Nuxt, SvelteKit, Astro, etc.), the `/__void/scheduled` endpoint is not wired up during dev. To exercise a job, either deploy and trigger via the production endpoint, or import the handler from a regular route for ad-hoc testing.
 
 ## Deployment behavior
 
