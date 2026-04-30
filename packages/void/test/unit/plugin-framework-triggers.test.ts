@@ -123,7 +123,8 @@ describe('nitroDevTriggerInjectPlugin', () => {
     const code = readFileSync(middlewarePath, 'utf-8');
     expect(code).toContain('@ts-nocheck');
     expect(code).toContain(`from "${frameworkTriggersDispatchPath(root)}"`);
-    expect(code).toContain('event.context.cloudflare');
+    expect(code).toContain('event.context?.cloudflare');
+    expect(code).toContain('event.node.req');
   });
 
   it('writes Analog middleware to <root>/src/server/middleware/', () => {
