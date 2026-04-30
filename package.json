@@ -37,5 +37,5 @@
     "*": "oxfmt --no-error-on-unmatched-pattern",
     "*.{js,jsx,ts,tsx,mjs,cjs}": "oxlint"
   },
-  "packageManager": "pnpm@10.29.3"
+  "packageManager": "pnpm@10.33.2"
 }
