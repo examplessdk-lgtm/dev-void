@@ -17,6 +17,7 @@ import { readConfig, resolveBindingNames, isNodeTarget, getDatabaseDialect } fro
 import { scanJobsSync } from './crons/scan.ts';
 import { inferBindingsFromSource } from './inference/walk.ts';
 import { voidLog, voidWarn, voidError } from './log.ts';
+import { devTriggersHintPlugin } from './plugin-dev-triggers-hint.ts';
 import { drizzlePlugin } from './plugin-drizzle.ts';
 import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
 import { envClientGuardPlugin } from './plugin-env-client-guard.ts';
@@ -307,6 +308,7 @@ export function voidPlugin(options?: {
 }): Array<Plugin> {
   // Resolve root relative to CWD — this runs at config time
   const root = process.cwd();
+  const devTriggerToken = crypto.randomUUID();
   const config = readConfig(root);
   const dialect = getDatabaseDialect(config);
   const detected = detectFramework(root);
@@ -477,6 +479,7 @@ export function voidPlugin(options?: {
       migrationPlugin(root, dialect, 'local', frameworkPersistRoot, {
         enabled: false,
       }),
+      devTriggersHintPlugin(root, { framework: true, devTriggerToken }),
     ];
   }
 
@@ -998,6 +1001,7 @@ export function voidPlugin(options?: {
       }),
       migrationPlugin(root, getDatabaseDialect(config)),
       ...(vinextCompat ? [vinextCompat] : []),
+      devTriggersHintPlugin(root, { framework: true, devTriggerToken }),
       ...cloudflare({
         ...inspectorPortOption,
         persistState: { path: options?.persistTo ?? outDir },
@@ -1045,6 +1049,7 @@ export function voidPlugin(options?: {
       envSchemaPlugin(root),
       routingPlugin(root, {
         isAuthEnabled: () => false,
+        devTriggerToken,
         headConfig: config.head,
         output: config.output,
         prerenderPaths: config.routing?.prerender,
@@ -1111,6 +1116,7 @@ export function voidPlugin(options?: {
     ...(bindings.needsSandbox ? [createSandboxSdkResolvePlugin()] : []),
     routingPlugin(root, {
       isAuthEnabled: () => authEnabled,
+      devTriggerToken,
       headConfig: config.head,
       output: config.output,
       prerenderPaths: config.routing?.prerender,
@@ -1131,6 +1137,7 @@ export function voidPlugin(options?: {
       configPath: authConfigPath,
     }),
     prerenderPlugin(root, config),
+    devTriggersHintPlugin(root, { framework: false, devTriggerToken }),
     ...cloudflare({
       ...inspectorPortOption,
       persistState: { path: options?.persistTo ?? outDir },

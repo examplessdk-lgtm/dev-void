@@ -116,4 +116,25 @@ On deploy, Void includes all discovered queues in the deploy manifest. The platf
 
 ## Local development
 
-In local dev, Miniflare delivers queue batches natively. The worker's `queue()` export serializes the batch and routes it to the same internal `/__queue` handler used in production, so behavior is consistent across environments.
+In **default Void mode**, Miniflare delivers queue batches natively — produce a message via the binding and the consumer fires automatically. The worker's `queue()` export serializes the batch and routes it to the same internal `/__queue` handler used in production, so behavior is consistent across environments.
+
+You can also manually dispatch a batch by POSTing to the dev endpoint Void exposes:
+
+```
+POST /__void/queue
+Content-Type: application/json
+{ "queue": "<queue-name>", "messages": [{ "id": "1", "timestamp": <unix_ms>, "body": <any>, "attempts": 1 }] }
+```
+
+The endpoint requires a local dev trigger token. Void prints a paste-ready curl command with the current token when the dev server starts.
+
+```bash
+curl -X POST http://localhost:5173/__void/queue \
+  -H "Content-Type: application/json" \
+  -H "x-void-dev-trigger: <printed-token>" \
+  -d '{"queue":"my-queue","messages":[{"id":"1","timestamp":'"$(date +%s000)"',"body":{"hello":"world"},"attempts":1}]}'
+```
+
+If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence and the printed curl command uses `x-void-internal: <your-token>` instead.
+
+In **framework mode** (Nuxt, SvelteKit, Astro, etc.), queue consumers are not currently scanned during dev — neither native Miniflare delivery nor the `/__void/queue` endpoint is wired up. To exercise a consumer, either deploy and trigger via your producer, or import the consumer's `default` export from a regular route for ad-hoc testing.
