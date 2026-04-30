@@ -75,19 +75,16 @@ Content-Type: application/json
 
 The `cron` value must match a string you exported from a `crons/*.ts` file — that's how the dispatcher routes to the right handler. Returns `{ "ok": true }` on success.
 
-The endpoint always enforces a token via the `x-void-internal` header. Set `__VOID_PROXY_TOKEN` in `.dev.vars` and pass it as the header:
-
-```bash
-# .dev.vars
-__VOID_PROXY_TOKEN=dev-trigger
-```
+The endpoint requires a local dev trigger token. Void prints a paste-ready curl command with the current token when the dev server starts.
 
 ```bash
 curl -X POST http://localhost:5173/__void/scheduled \
   -H "Content-Type: application/json" \
-  -H "x-void-internal: dev-trigger" \
+  -H "x-void-dev-trigger: <printed-token>" \
   -d '{"cron":"0 * * * *","scheduledTime":'"$(date +%s000)"'}'
 ```
+
+If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence. In that case, pass `x-void-internal: <your-token>` instead of `x-void-dev-trigger`.
 
 In **framework mode** (Nuxt, SvelteKit, Astro, etc.), the `/__void/scheduled` endpoint is not wired up during dev. To exercise a job, either deploy and trigger via the production endpoint, or import the handler from a regular route for ad-hoc testing.
 

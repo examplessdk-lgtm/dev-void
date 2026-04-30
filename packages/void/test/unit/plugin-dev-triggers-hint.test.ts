@@ -48,7 +48,9 @@ describe('devTriggersHintPlugin', () => {
   it('prints nothing when there are no crons or queues', async () => {
     const root = createTempRoot();
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    await runConfigureServer(devTriggersHintPlugin(root, { framework: false }));
+    await runConfigureServer(
+      devTriggersHintPlugin(root, { framework: false, devTriggerToken: 'dev-token-test' }),
+    );
     expect(log).not.toHaveBeenCalled();
   });
 
@@ -61,11 +63,14 @@ describe('devTriggersHintPlugin', () => {
     );
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await runConfigureServer(devTriggersHintPlugin(root, { framework: false }));
+    await runConfigureServer(
+      devTriggersHintPlugin(root, { framework: false, devTriggerToken: 'dev-token-test' }),
+    );
 
     const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
     expect(output).toContain('Detected 1 cron');
     expect(output).toContain('/__void/scheduled');
+    expect(output).toContain('x-void-dev-trigger: dev-token-test');
     expect(output).toContain('"cron":"0 * * * *"');
   });
 
@@ -84,11 +89,14 @@ describe('devTriggersHintPlugin', () => {
     writeFileSync(join(root, 'queues', 'emails.ts'), 'export default async () => {};\n');
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await runConfigureServer(devTriggersHintPlugin(root, { framework: false }));
+    await runConfigureServer(
+      devTriggersHintPlugin(root, { framework: false, devTriggerToken: 'dev-token-test' }),
+    );
 
     const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
     expect(output).toContain('Detected 2 crons and 1 queue');
     expect(output).toContain('/__void/queue');
+    expect(output).toContain('x-void-dev-trigger: dev-token-test');
     expect(output).toContain('"queue":"emails"');
   });
 
@@ -101,7 +109,9 @@ describe('devTriggersHintPlugin', () => {
     );
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await runConfigureServer(devTriggersHintPlugin(root, { framework: true }));
+    await runConfigureServer(
+      devTriggersHintPlugin(root, { framework: true, devTriggerToken: 'dev-token-test' }),
+    );
 
     const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
     expect(output).toContain('not yet supported in framework mode');
@@ -114,7 +124,9 @@ describe('devTriggersHintPlugin', () => {
     writeFileSync(join(root, 'queues', 'emails.ts'), 'export default async () => {};\n');
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await runConfigureServer(devTriggersHintPlugin(root, { framework: true }));
+    await runConfigureServer(
+      devTriggersHintPlugin(root, { framework: true, devTriggerToken: 'dev-token-test' }),
+    );
 
     const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
     expect(output).toContain('1 queue');

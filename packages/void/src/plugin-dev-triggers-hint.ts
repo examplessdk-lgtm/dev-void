@@ -12,8 +12,11 @@ import { scanQueuesSync } from './queues/scan.ts';
  * - Framework mode (Class B/C): notes that dev triggering is not yet wired
  *   up, since the wrapper that exposes those endpoints only runs at deploy.
  */
-export function devTriggersHintPlugin(root: string, options: { framework: boolean }): Plugin {
-  const { framework } = options;
+export function devTriggersHintPlugin(
+  root: string,
+  options: { framework: boolean; devTriggerToken: string },
+): Plugin {
+  const { devTriggerToken, framework } = options;
   return {
     name: 'void:dev-triggers-hint',
     apply: 'serve',
@@ -61,13 +64,13 @@ export function devTriggersHintPlugin(root: string, options: { framework: boolea
         if (jobs.length > 0) {
           const sample = jobs[0].crons[0];
           console.log(
-            `         \x1b[2mcurl -X POST ${baseUrl}/__void/scheduled \\\n           -H "x-void-internal: $__VOID_PROXY_TOKEN" \\\n           -d '{"cron":"${sample}","scheduledTime":'"$(date +%s000)"'}'\x1b[22m`,
+            `         \x1b[2mcurl -X POST ${baseUrl}/__void/scheduled \\\n           -H "x-void-dev-trigger: ${devTriggerToken}" \\\n           -d '{"cron":"${sample}","scheduledTime":'"$(date +%s000)"'}'\x1b[22m`,
           );
         }
         if (queues.length > 0) {
           const sample = queues[0].name;
           console.log(
-            `         \x1b[2mcurl -X POST ${baseUrl}/__void/queue \\\n           -H "x-void-internal: $__VOID_PROXY_TOKEN" \\\n           -d '{"queue":"${sample}","messages":[{"id":"1","timestamp":'"$(date +%s000)"',"body":{},"attempts":1}]}'\x1b[22m`,
+            `         \x1b[2mcurl -X POST ${baseUrl}/__void/queue \\\n           -H "x-void-dev-trigger: ${devTriggerToken}" \\\n           -d '{"queue":"${sample}","messages":[{"id":"1","timestamp":'"$(date +%s000)"',"body":{},"attempts":1}]}'\x1b[22m`,
           );
         }
       });

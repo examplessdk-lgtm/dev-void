@@ -126,18 +126,15 @@ Content-Type: application/json
 { "queue": "<queue-name>", "messages": [{ "id": "1", "timestamp": <unix_ms>, "body": <any>, "attempts": 1 }] }
 ```
 
-This endpoint always enforces a token via the `x-void-internal` header. Set `__VOID_PROXY_TOKEN` in `.dev.vars` and pass it as the header:
-
-```bash
-# .dev.vars
-__VOID_PROXY_TOKEN=dev-trigger
-```
+The endpoint requires a local dev trigger token. Void prints a paste-ready curl command with the current token when the dev server starts.
 
 ```bash
 curl -X POST http://localhost:5173/__void/queue \
   -H "Content-Type: application/json" \
-  -H "x-void-internal: dev-trigger" \
+  -H "x-void-dev-trigger: <printed-token>" \
   -d '{"queue":"my-queue","messages":[{"id":"1","timestamp":'"$(date +%s000)"',"body":{"hello":"world"},"attempts":1}]}'
 ```
+
+If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence. In that case, pass `x-void-internal: <your-token>` instead of `x-void-dev-trigger`.
 
 In **framework mode** (Nuxt, SvelteKit, Astro, etc.), queue consumers are not currently scanned during dev — neither native Miniflare delivery nor the `/__void/queue` endpoint is wired up. To exercise a consumer, either deploy and trigger via your producer, or import the consumer's `default` export from a regular route for ad-hoc testing.

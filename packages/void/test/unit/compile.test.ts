@@ -341,10 +341,13 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    // The /__void/scheduled handler: token check OR build key fallback
+    // The /__void/scheduled handler: configured proxy token first; otherwise
+    // dev trigger token in dev, build key in prod.
     expect(code).toContain('app.post("/__void/scheduled"');
     expect(code).toContain('c.req.header("x-void-internal")');
+    expect(code).toContain('c.req.header("x-void-dev-trigger")');
     expect(code).toContain('__getRawEnv()?.__VOID_PROXY_TOKEN');
+    expect(code).toContain('__VOID_DEV_TRIGGER_TOKEN');
     expect(code).toContain('__VOID_BUILD_KEY');
   });
 
@@ -373,9 +376,12 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    // The /__void/queue HTTP route: token check OR build key fallback
+    // The /__void/queue HTTP route: configured proxy token first; otherwise
+    // dev trigger token in dev, build key in prod.
     expect(code).toContain('app.post("/__void/queue"');
     expect(code).toContain('c.req.header("x-void-internal")');
+    expect(code).toContain('c.req.header("x-void-dev-trigger")');
+    expect(code).toContain('__VOID_DEV_TRIGGER_TOKEN');
     expect(code).toContain('__VOID_BUILD_KEY');
     // Queue dispatch logic must be exported as __processQueue for direct native handler use
     expect(code).toContain('export async function __processQueue');
@@ -417,6 +423,24 @@ describe('compileRouteTable', () => {
     expect(match1).toBeTruthy();
     expect(match2).toBeTruthy();
     expect(match1![1]).not.toBe(match2![1]);
+  });
+
+  it('uses configured dev trigger token for local manual trigger auth', () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [{ filePath: 'sync.ts', name: 'sync', crons: ['0 * * * *'] }],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+
+    const code = compileRouteTable(scan, '/routes', '/middleware', '/crons', '/queues', null, {
+      ...testOptions,
+      devTriggerToken: 'dev-trigger-test-token',
+    });
+
+    expect(code).toContain('export const __VOID_DEV_TRIGGER_TOKEN = "dev-trigger-test-token"');
+    expect(code).toContain('__devToken !== __VOID_DEV_TRIGGER_TOKEN');
   });
 
   it('prerender-paths auth checks token when present', () => {
