@@ -119,7 +119,7 @@ describe('devTriggersHintPlugin', () => {
     expect(output).not.toContain('x-void-dev-trigger: dev-token-test');
   });
 
-  it('warns about missing dev support in framework mode', async () => {
+  it('prints curl examples in framework mode (same as default mode)', async () => {
     const root = createTempRoot();
     mkdirSync(join(root, 'crons'), { recursive: true });
     writeFileSync(
@@ -133,23 +133,8 @@ describe('devTriggersHintPlugin', () => {
     );
 
     const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
-    expect(output).toContain('not yet supported in framework mode');
-    expect(output).not.toContain('/__void/scheduled');
-  });
-
-  it('counts queues in the framework-mode warning without emitting endpoints', async () => {
-    const root = createTempRoot();
-    mkdirSync(join(root, 'queues'), { recursive: true });
-    writeFileSync(join(root, 'queues', 'emails.ts'), 'export default async () => {};\n');
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-
-    await runConfigureServer(
-      devTriggersHintPlugin(root, { framework: true, devTriggerToken: 'dev-token-test' }),
-    );
-
-    const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
-    expect(output).toContain('1 queue');
-    expect(output).toContain('not yet supported in framework mode');
-    expect(output).not.toContain('/__void/queue');
+    expect(output).toContain('Detected 1 cron');
+    expect(output).toContain('/__void/scheduled');
+    expect(output).toContain('x-void-dev-trigger: dev-token-test');
   });
 });

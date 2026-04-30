@@ -5,3 +5,4 @@
 node_modules/
 wrangler.jsonc
 wrangler.json
+server/middleware/__void-dev-trigger.ts

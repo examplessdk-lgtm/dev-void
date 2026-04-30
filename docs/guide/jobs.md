@@ -63,9 +63,7 @@ Notes:
 
 ## Local development
 
-Cron triggers do not fire on their schedule during local dev — this is a Cloudflare Workers / miniflare limitation, not specific to Void.
-
-In **default Void mode**, exercise a job locally by POSTing to the dev endpoint Void exposes:
+Cron triggers do not fire on their schedule during local dev — this is a Cloudflare Workers / miniflare limitation, not specific to Void. Exercise a job locally by POSTing to the dev endpoint Void exposes:
 
 ```
 POST /__void/scheduled
@@ -86,7 +84,7 @@ curl -X POST http://localhost:5173/__void/scheduled \
 
 If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence and the printed curl command uses `x-void-internal: <your-token>` instead.
 
-In **framework mode** (Nuxt, SvelteKit, Astro, etc.), the `/__void/scheduled` endpoint is not wired up during dev. To exercise a job, either deploy and trigger via the production endpoint, or import the handler from a regular route for ad-hoc testing.
+This works the same in default Void mode and framework mode (SvelteKit, Nuxt, Astro). In framework mode, the cron handler runs inside the framework adapter's request pipeline, so it sees whatever bindings the adapter exposes (D1, KV, R2, queues, etc.). Analog support is pending — its Nitro variant doesn't expose h3 helpers the same way.
 
 ## Deployment behavior
 

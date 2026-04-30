@@ -23,6 +23,12 @@ import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
 import { envClientGuardPlugin } from './plugin-env-client-guard.ts';
 import { envSchemaPlugin } from './plugin-env-schema.ts';
 import {
+  astroDevTriggerInjectPlugin,
+  frameworkTriggersDispatchPath,
+  frameworkTriggersPlugin,
+  nitroDevTriggerInjectPlugin,
+} from './plugin-framework-triggers.ts';
+import {
   inferProjectBindings,
   detectFramework,
   FRAMEWORK_SCAN_DIRS,
@@ -431,7 +437,9 @@ export function voidPlugin(options?: {
 
     // SvelteKit hooks injection: transform get_hooks() to wrap `handle` with
     // withRuntimeEnv(event.platform.env, ...). This stores the env in
-    // AsyncLocalStorage so void/db resolves it via envContext.getStore().
+    // AsyncLocalStorage so void/db resolves it via envContext.getStore(), and
+    // intercepts /__void/scheduled and /__void/queue so cron and queue
+    // handlers run with the framework adapter's real bindings.
     // Single Miniflare instance (adapter-cloudflare's), no private APIs.
     const svelteKitHooksInjectPlugin: Plugin = {
       name: 'void:sveltekit-hooks-inject',
@@ -447,15 +455,22 @@ export function voidPlugin(options?: {
           return;
         }
 
+        const dispatchPath = JSON.stringify(frameworkTriggersDispatchPath(root));
         return code
           .replace(
             'export async function get_hooks() {',
-            `export async function get_hooks() {\n  const { withRuntimeEnv } = await import("void/_env");`,
+            `export async function get_hooks() {\n` +
+              `  const { withRuntimeEnv } = await import("void/_env");\n` +
+              `  const { handleDevTrigger } = await import(${dispatchPath});`,
           )
           .replace(
             /return\s*\{/,
             `const __origHandle = handle ?? (({ event, resolve }) => resolve(event));\n` +
-              `  handle = ({ event, resolve }) => withRuntimeEnv(event.platform?.env, () => __origHandle({ event, resolve }));\n` +
+              `  handle = ({ event, resolve }) => withRuntimeEnv(event.platform?.env, async () => {\n` +
+              `    const __triggerResp = await handleDevTrigger(event.request, event.platform?.env, undefined);\n` +
+              `    if (__triggerResp) return __triggerResp;\n` +
+              `    return __origHandle({ event, resolve });\n` +
+              `  });\n` +
               `  return {`,
           );
       },
@@ -480,6 +495,15 @@ export function voidPlugin(options?: {
         enabled: false,
       }),
       devTriggersHintPlugin(root, { framework: true, devTriggerToken }),
+      frameworkTriggersPlugin(root, { devTriggerToken }),
+      ...(detected.name === 'nuxt'
+        ? [nitroDevTriggerInjectPlugin(root, { serverDir: 'server' })]
+        : []),
+      // Analog support is deferred — its @analogjs/vite-plugin-nitro variant
+      // doesn't auto-import h3 globals into server middleware AND won't
+      // resolve `from 'h3'` through pnpm strict module resolution. Tracked
+      // separately.
+      ...(detected.name === 'astro' ? [astroDevTriggerInjectPlugin(root)] : []),
     ];
   }
 

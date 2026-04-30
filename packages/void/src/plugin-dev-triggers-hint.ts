@@ -1,24 +1,21 @@
 import { join } from 'pathe';
 import type { Plugin } from 'vite';
 import { scanJobsSync } from './crons/scan.ts';
-import { voidLog, voidWarn } from './log.ts';
+import { voidLog } from './log.ts';
 import { scanQueuesSync } from './queues/scan.ts';
 import { parseDotenvFile } from './shared/dotenv.ts';
 
 /**
  * Prints a one-shot hint on dev server start when the project has crons
- * or queues, explaining how (and whether) to trigger them locally.
- *
- * - Default Void mode: points at the `/__void/scheduled` and `/__void/queue`
- *   endpoints registered by the routing plugin.
- * - Framework mode (Class B/C): notes that dev triggering is not yet wired
- *   up, since the wrapper that exposes those endpoints only runs at deploy.
+ * or queues, explaining how to trigger them locally. Both default Void mode
+ * and framework mode (SvelteKit/Nuxt/Analog/Astro) expose
+ * `/__void/scheduled` and `/__void/queue`.
  */
 export function devTriggersHintPlugin(
   root: string,
   options: { framework: boolean; devTriggerToken: string },
 ): Plugin {
-  const { devTriggerToken, framework } = options;
+  const { devTriggerToken } = options;
   return {
     name: 'void:dev-triggers-hint',
     apply: 'serve',
@@ -40,10 +37,10 @@ export function devTriggersHintPlugin(
       afterReady(() => {
         const address = server.httpServer?.address();
         const port = typeof address === 'object' && address ? address.port : null;
-        if (port == null && !framework) {
+        if (port == null) {
           return;
         }
-        const baseUrl = `http://localhost:${port ?? 5173}`;
+        const baseUrl = `http://localhost:${port}`;
 
         const summary: Array<string> = [];
         if (jobs.length > 0) {
@@ -54,14 +51,6 @@ export function devTriggersHintPlugin(
         }
 
         console.log();
-        if (framework) {
-          voidWarn(
-            `Detected ${summary.join(' and ')} — dev triggering is not yet supported in framework mode.`,
-          );
-          voidWarn('Deploy with `void deploy` to test, or import handlers from a route.');
-          return;
-        }
-
         voidLog(`Detected ${summary.join(' and ')}. Trigger locally:`);
         const configuredProxyToken = parseDotenvFile(join(root, '.dev.vars'), {
           expand: false,
