@@ -349,6 +349,7 @@ describe('compileRouteTable', () => {
     expect(code).toContain('__getRawEnv()?.__VOID_PROXY_TOKEN');
     expect(code).toContain('__VOID_DEV_TRIGGER_TOKEN');
     expect(code).toContain('__VOID_BUILD_KEY');
+    expect(code).toContain('import.meta.env.DEV');
   });
 
   it('generates /__void/queue auth guard with __getRawEnv() and x-void-internal check', () => {
@@ -383,6 +384,7 @@ describe('compileRouteTable', () => {
     expect(code).toContain('c.req.header("x-void-dev-trigger")');
     expect(code).toContain('__VOID_DEV_TRIGGER_TOKEN');
     expect(code).toContain('__VOID_BUILD_KEY');
+    expect(code).toContain('import.meta.env.DEV');
     // Queue dispatch logic must be exported as __processQueue for direct native handler use
     expect(code).toContain('export async function __processQueue');
   });
