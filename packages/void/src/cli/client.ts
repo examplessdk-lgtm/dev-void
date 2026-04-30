@@ -569,6 +569,7 @@ export class PlatformClient {
     since: string,
     limit = 200,
     deploymentId?: string,
+    level?: string,
   ): Promise<Array<LogEntry>> {
     const params = new URLSearchParams({
       since,
@@ -576,6 +577,9 @@ export class PlatformClient {
     });
     if (deploymentId) {
       params.set('deploymentId', deploymentId);
+    }
+    if (level && level !== 'all') {
+      params.set('level', level);
     }
 
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/logs?${params}`, {

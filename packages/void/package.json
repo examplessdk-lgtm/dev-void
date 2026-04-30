@@ -136,6 +136,11 @@
       "import": "./dist/runtime/isr.mjs",
       "require": "./dist/runtime/isr.mjs"
     },
+    "./log": {
+      "types": "./dist/runtime/log.d.mts",
+      "import": "./dist/runtime/log.mjs",
+      "require": "./dist/runtime/log.mjs"
+    },
     "./ai": {
       "types": "./dist/runtime/ai.d.mts",
       "import": "./dist/runtime/ai.mjs",

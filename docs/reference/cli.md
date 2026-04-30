@@ -146,18 +146,28 @@ List all your projects (slug, mode, URL).
 ### `void project logs`
 
 ```
-void project logs [--filter <text>] [--range <duration>] [--deployment <id>]
+void project logs [--level <level>] [--filter <text>] [--range <duration>] [--deployment <id>]
 ```
 
 Show runtime logs from the deployed project. Uses the linked project from `.void/project.json`.
 
-| Flag                 | Purpose                                                                                                                | Default |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------- |
-| `--range <duration>` | How far back to look. Format: `<number><unit>` (m/h/d). Max 7d.                                                        | `1h`    |
-| `--filter <text>`    | Case-insensitive text match against log or exception messages. Shows the full request entry when any log line matches. | none    |
-| `--deployment <id>`  | Filter logs to a specific deployment ID.                                                                               | none    |
+| Flag                 | Purpose                                                                                                                                                 | Default |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `--range <duration>` | How far back to look. Format: `<number><unit>` (m/h/d). Max 7d.                                                                                         | `1h`    |
+| `--level <level>`    | Filter by log level. One of `error`, `warn`, `info`, `log`, `debug`, `all`. `error` also includes uncaught exceptions and non-`ok` requests.            | `all`   |
+| `--filter <text>`    | Case-insensitive **substring** match against log message text and exception name/message — not a level filter. Shows the full request entry on any hit. | none    |
+| `--deployment <id>`  | Filter logs to a specific deployment ID.                                                                                                                | none    |
 
 Output shows one line per request (`HH:MM:SS METHOD URL STATUS`) with indented console log and exception lines beneath. Errors and exceptions are colored red, warnings yellow.
+
+Examples:
+
+```
+void project logs --level error --range 12h
+void project logs --level error --filter websocket
+```
+
+Tip: `void project logs` only sees what Cloudflare Tail captures — top-level `console.*` calls and uncaught throws. Application errors caught and persisted to your own DB are invisible to tail. Surface them via `console.error(...)` or `void/log`'s `logger.error(...)` so they show up under `--level error`.
 
 ### `void project rollback [deployId]`
 

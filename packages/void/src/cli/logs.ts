@@ -9,6 +9,7 @@ export async function runLogsCommand(
   filter: string,
   range: string,
   deployment?: string,
+  level?: string,
 ): Promise<void> {
   console.log();
   intro(cliTitle('project logs'));
@@ -34,32 +35,19 @@ export async function runLogsCommand(
 
   let entries: Array<LogEntry>;
   try {
-    entries = await client.getLogs(linked.projectId, range, 200, deployment || undefined);
+    entries = await client.getLogs(
+      linked.projectId,
+      range,
+      200,
+      deployment || undefined,
+      level || undefined,
+    );
   } catch (err) {
     log.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 
-  if (filter) {
-    const lower = filter.toLowerCase();
-    entries = entries.filter((entry) => {
-      for (const l of entry.logs) {
-        const text = l.message.map(String).join(' ');
-        if (text.toLowerCase().includes(lower)) {
-          return true;
-        }
-      }
-      for (const ex of entry.exceptions) {
-        if (ex.name.toLowerCase().includes(lower)) {
-          return true;
-        }
-        if (ex.message.toLowerCase().includes(lower)) {
-          return true;
-        }
-      }
-      return false;
-    });
-  }
+  entries = filterLogEntries(entries, level, filter);
 
   if (entries.length === 0) {
     outro(`No logs found in the last ${range}.`);
@@ -109,4 +97,75 @@ function printEntry(entry: LogEntry): void {
 function formatTime(ts: number): string {
   const d = new Date(ts);
   return d.toLocaleTimeString('en-GB', { hour12: false });
+}
+
+/**
+ * Filter log entries by `--level` then by `--filter` substring. Exported for tests.
+ *
+ * - `level === 'error'`: keep entries with any error-level log line, OR a
+ *   non-empty `exceptions[]`, OR `outcome !== 'ok'` (exceptions and non-ok
+ *   outcomes are inherently errors).
+ * - `level === 'warn' | 'info' | 'log' | 'debug'`: keep entries with at least
+ *   one matching log line. Mirrors `journalctl -p` — does NOT include error.
+ * - `level` falsy or `'all'`: no level filter.
+ *
+ * `filter` is a plain substring search over log message text and exception
+ * name/message; case-insensitive. Applied after the level filter.
+ */
+export function filterLogEntries(
+  entries: Array<LogEntry>,
+  level: string | undefined,
+  filter: string | undefined,
+): Array<LogEntry> {
+  let result = entries;
+
+  if (level && level !== 'all') {
+    result = result.filter((entry) => {
+      if (level === 'error') {
+        if (entry.outcome !== 'ok') {
+          return true;
+        }
+        if (entry.exceptions.length > 0) {
+          return true;
+        }
+        for (const l of entry.logs) {
+          if (l.level === 'error') {
+            return true;
+          }
+        }
+        return false;
+      }
+      for (const l of entry.logs) {
+        // Normalize a missing level to `log` so the filter matches what
+        // `printEntry` shows (it falls back to `[log]` for nullish levels).
+        if ((l.level ?? 'log') === level) {
+          return true;
+        }
+      }
+      return false;
+    });
+  }
+
+  if (filter) {
+    const lower = filter.toLowerCase();
+    result = result.filter((entry) => {
+      for (const l of entry.logs) {
+        const text = l.message.map(String).join(' ');
+        if (text.toLowerCase().includes(lower)) {
+          return true;
+        }
+      }
+      for (const ex of entry.exceptions) {
+        if (ex.name.toLowerCase().includes(lower)) {
+          return true;
+        }
+        if (ex.message.toLowerCase().includes(lower)) {
+          return true;
+        }
+      }
+      return false;
+    });
+  }
+
+  return result;
 }

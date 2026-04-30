@@ -1,5 +1,7 @@
 import type { SubcommandDef } from './subcommand-prompt.ts';
 
+const LOG_LEVELS = new Set(['error', 'warn', 'info', 'log', 'debug', 'all']);
+
 export const projectSubcommands: Array<SubcommandDef> = [
   { name: 'status', arg: '[name]', description: 'Show deployments (omit name for linked project)' },
   { name: 'link', arg: '[name]', description: 'Link directory to a project' },
@@ -19,7 +21,7 @@ export type ProjectArgs =
   | { subcommand: 'status'; name: string }
   | { subcommand: 'link'; name: string }
   | { subcommand: 'list' }
-  | { subcommand: 'logs'; filter: string; range: string; deployment: string }
+  | { subcommand: 'logs'; filter: string; range: string; deployment: string; level: string }
   | { subcommand: 'rollback'; deployId: string }
   | { subcommand: 'cancel'; deployId: string }
   | { subcommand: 'delete'; name: string; force: boolean }
@@ -55,6 +57,7 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
     let filter = '';
     let range = '1h';
     let deployment = '';
+    let level = '';
     for (let i = 0; i < rest.length; i++) {
       if (rest[i] === '--filter' && rest[i + 1]) {
         filter = rest[++i];
@@ -62,11 +65,19 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
         range = rest[++i];
       } else if (rest[i] === '--deployment' && rest[i + 1]) {
         deployment = rest[++i];
+      } else if (rest[i] === '--level' && rest[i + 1]) {
+        const value = rest[++i];
+        if (!LOG_LEVELS.has(value)) {
+          throw new Error(
+            `project: Invalid --level '${value}'. Use one of error|warn|info|log|debug|all.`,
+          );
+        }
+        level = value;
       } else {
         throw new Error(`project: Unexpected argument '${rest[i]}'.`);
       }
     }
-    return { subcommand, filter, range, deployment };
+    return { subcommand, filter, range, deployment, level };
   }
 
   if (subcommand === 'rollback') {

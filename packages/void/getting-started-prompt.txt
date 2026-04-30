@@ -34,6 +34,8 @@ Database workflow: define Drizzle tables in `db/schema.ts`, import `db` from `vo
 
 Routing extras: declare static redirects/rewrites/fallbacks in `void.json` under `routing.*`, or in a `public/_redirects` file. For dynamic rewrites, call `c.rewrite(path)` in a `defineMiddleware`.
 
+Logs: surface app-level errors via `import { logger } from "void/log"` and `logger.error(msg, fields?)` (also `.warn` / `.info`) so they appear under `void project logs --level error`. Errors only persisted to your own DB are invisible to Cloudflare Tail.
+
 CI / fresh clones: run `void prepare` after install to generate `.void/routes.d.ts`, `.void/db.d.ts`, `.void/queues.d.ts`, `.void/env.d.ts`, and `.void/tsconfig.json` without booting Vite. `vite dev` / `vite build` populate these during normal app workflows.
 
 Now ask me what I want to build.

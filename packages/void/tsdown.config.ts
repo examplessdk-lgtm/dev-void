@@ -99,6 +99,7 @@ export default defineConfig({
     'src/runtime/queues.ts',
     'src/runtime/storage.ts',
     'src/runtime/isr.ts',
+    'src/runtime/log.ts',
     'src/runtime/ai.ts',
     'src/runtime/sandbox.ts',
     'src/runtime/remote/index.ts',

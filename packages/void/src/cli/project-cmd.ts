@@ -15,7 +15,13 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
   }
   if (args.subcommand === 'logs') {
     const { runLogsCommand } = await import('./logs.ts');
-    return runLogsCommand(root, args.filter, args.range, args.deployment || undefined);
+    return runLogsCommand(
+      root,
+      args.filter,
+      args.range,
+      args.deployment || undefined,
+      args.level || undefined,
+    );
   }
   if (args.subcommand === 'rollback') {
     const { runRollbackCommand } = await import('./rollback.ts');
