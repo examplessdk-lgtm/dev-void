@@ -1,6 +1,6 @@
 {
   "name": "@void-sdk/void",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "bin": {
     "void": "dist/cli/cli.mjs"
   },
@@ -135,6 +135,11 @@
       "types": "./dist/runtime/isr.d.mts",
       "import": "./dist/runtime/isr.mjs",
       "require": "./dist/runtime/isr.mjs"
+    },
+    "./log": {
+      "types": "./dist/runtime/log.d.mts",
+      "import": "./dist/runtime/log.mjs",
+      "require": "./dist/runtime/log.mjs"
     },
     "./ai": {
       "types": "./dist/runtime/ai.d.mts",

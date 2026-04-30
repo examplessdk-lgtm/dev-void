@@ -141,6 +141,15 @@ export function promptSubcommand(
 
       lines.push(pc.gray(S_BAR));
       lines.push(`${pc.gray(S_BAR)}  ${pc.dim(focused.description)}`);
+      if (focused.arg) {
+        if (focused.arg.startsWith('<')) {
+          lines.push(`${pc.gray(S_BAR)}  ${pc.dim(`Type ${focused.arg}, then press Enter`)}`);
+        } else {
+          lines.push(
+            `${pc.gray(S_BAR)}  ${pc.dim(`Type ${focused.arg}, then press Enter, or press Enter to skip`)}`,
+          );
+        }
+      }
       lines.push(pc.gray(S_BAR_END));
 
       stdout.write(lines.join('\n') + '\n');
@@ -314,7 +323,7 @@ export function promptSubcommand(
     }
 
     function advancePhase() {
-      // From select: try flags first
+      // After choosing a command, try flags first.
       if (phase === 'select' && selectedSub!.flags && selectedSub!.flags.length > 0) {
         phase = 'flags';
         cursor = 0;
@@ -323,7 +332,7 @@ export function promptSubcommand(
         return;
       }
 
-      // From select or flags: try followUp
+      // Then try any follow-up input phase.
       if ((phase === 'select' || phase === 'flags') && selectedSub!.followUp) {
         const followUp = selectedSub!.followUp;
         if (followUp.type === 'multi-select') {
@@ -529,6 +538,22 @@ export function promptSubcommand(
       }
     }
 
+    function handleKey(key: string) {
+      if (resolved) {
+        return;
+      }
+
+      if (phase === 'select') {
+        handleSelectKey(key);
+      } else if (phase === 'flags') {
+        handleFlagKey(key);
+      } else if (phase === 'multi-select') {
+        handleMultiSelectKey(key);
+      } else {
+        handleRepeatInputKey(key);
+      }
+    }
+
     // --- Main event handler ---
 
     function onData(data: Buffer) {
@@ -547,15 +572,18 @@ export function promptSubcommand(
         submit(null);
         return;
       }
+      // Arrow keys and other escape sequences need to stay grouped.
+      if (key.startsWith('\x1B')) {
+        handleKey(key);
+        return;
+      }
 
-      if (phase === 'select') {
-        handleSelectKey(key);
-      } else if (phase === 'flags') {
-        handleFlagKey(key);
-      } else if (phase === 'multi-select') {
-        handleMultiSelectKey(key);
-      } else {
-        handleRepeatInputKey(key);
+      for (const char of key) {
+        if (char === '\x03') {
+          submit(null);
+          return;
+        }
+        handleKey(char);
       }
     }
 

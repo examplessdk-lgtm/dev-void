@@ -95,13 +95,24 @@ const HELP_TREE: HelpTree = {
         summary: 'Show runtime logs from the deployed project.',
         usage: ['void project logs [options]'],
         options: [
-          { command: '--filter <text>', description: 'Filter log messages' },
+          { command: '--filter <text>', description: 'Substring search over log messages' },
+          {
+            command: '--level <level>',
+            description: 'Filter by level: error|warn|info|log|debug|all (default: all)',
+          },
           { command: '--range <range>', description: 'Time range to query (default: 1h)' },
           { command: '--deployment <id>', description: 'Limit logs to one deployment' },
         ],
         examples: [
           { command: 'void project logs --range 30m', description: 'Show recent project logs' },
-          { command: 'void project logs --filter error', description: 'Filter logs by text' },
+          {
+            command: 'void project logs --level error',
+            description: 'Show only error-level entries and exceptions',
+          },
+          {
+            command: 'void project logs --filter websocket',
+            description: 'Substring search over log messages',
+          },
         ],
       },
       rollback: basicSubcommand(
