@@ -84,7 +84,7 @@ curl -X POST http://localhost:5173/__void/scheduled \
   -d '{"cron":"0 * * * *","scheduledTime":'"$(date +%s000)"'}'
 ```
 
-If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence. In that case, pass `x-void-internal: <your-token>` instead of `x-void-dev-trigger`.
+If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence and the printed curl command uses `x-void-internal: <your-token>` instead.
 
 In **framework mode** (Nuxt, SvelteKit, Astro, etc.), the `/__void/scheduled` endpoint is not wired up during dev. To exercise a job, either deploy and trigger via the production endpoint, or import the handler from a regular route for ad-hoc testing.
 

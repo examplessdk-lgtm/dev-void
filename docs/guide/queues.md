@@ -135,6 +135,6 @@ curl -X POST http://localhost:5173/__void/queue \
   -d '{"queue":"my-queue","messages":[{"id":"1","timestamp":'"$(date +%s000)"',"body":{"hello":"world"},"attempts":1}]}'
 ```
 
-If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence. In that case, pass `x-void-internal: <your-token>` instead of `x-void-dev-trigger`.
+If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence and the printed curl command uses `x-void-internal: <your-token>` instead.
 
 In **framework mode** (Nuxt, SvelteKit, Astro, etc.), queue consumers are not currently scanned during dev — neither native Miniflare delivery nor the `/__void/queue` endpoint is wired up. To exercise a consumer, either deploy and trigger via your producer, or import the consumer's `default` export from a regular route for ad-hoc testing.

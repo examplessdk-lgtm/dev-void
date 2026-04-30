@@ -1,7 +1,9 @@
+import { join } from 'pathe';
 import type { Plugin } from 'vite';
 import { scanJobsSync } from './crons/scan.ts';
 import { voidLog, voidWarn } from './log.ts';
 import { scanQueuesSync } from './queues/scan.ts';
+import { parseDotenvFile } from './shared/dotenv.ts';
 
 /**
  * Prints a one-shot hint on dev server start when the project has crons
@@ -61,16 +63,23 @@ export function devTriggersHintPlugin(
         }
 
         voidLog(`Detected ${summary.join(' and ')}. Trigger locally:`);
+        const configuredProxyToken = parseDotenvFile(join(root, '.dev.vars'), {
+          expand: false,
+        }).__VOID_PROXY_TOKEN;
+        const authHeader = configuredProxyToken
+          ? `x-void-internal: ${configuredProxyToken}`
+          : `x-void-dev-trigger: ${devTriggerToken}`;
+
         if (jobs.length > 0) {
           const sample = jobs[0].crons[0];
           console.log(
-            `         \x1b[2mcurl -X POST ${baseUrl}/__void/scheduled \\\n           -H "x-void-dev-trigger: ${devTriggerToken}" \\\n           -d '{"cron":"${sample}","scheduledTime":'"$(date +%s000)"'}'\x1b[22m`,
+            `         \x1b[2mcurl -X POST ${baseUrl}/__void/scheduled \\\n           -H "${authHeader}" \\\n           -d '{"cron":"${sample}","scheduledTime":'"$(date +%s000)"'}'\x1b[22m`,
           );
         }
         if (queues.length > 0) {
           const sample = queues[0].name;
           console.log(
-            `         \x1b[2mcurl -X POST ${baseUrl}/__void/queue \\\n           -H "x-void-dev-trigger: ${devTriggerToken}" \\\n           -d '{"queue":"${sample}","messages":[{"id":"1","timestamp":'"$(date +%s000)"',"body":{},"attempts":1}]}'\x1b[22m`,
+            `         \x1b[2mcurl -X POST ${baseUrl}/__void/queue \\\n           -H "${authHeader}" \\\n           -d '{"queue":"${sample}","messages":[{"id":"1","timestamp":'"$(date +%s000)"',"body":{},"attempts":1}]}'\x1b[22m`,
           );
         }
       });

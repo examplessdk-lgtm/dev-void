@@ -100,6 +100,25 @@ describe('devTriggersHintPlugin', () => {
     expect(output).toContain('"queue":"emails"');
   });
 
+  it('prints x-void-internal when .dev.vars defines __VOID_PROXY_TOKEN', async () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'crons'), { recursive: true });
+    writeFileSync(
+      join(root, 'crons', 'heartbeat.ts'),
+      'export const cron = "0 * * * *";\nexport default async () => {};\n',
+    );
+    writeFileSync(join(root, '.dev.vars'), '__VOID_PROXY_TOKEN=local-proxy-token\n');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runConfigureServer(
+      devTriggersHintPlugin(root, { framework: false, devTriggerToken: 'dev-token-test' }),
+    );
+
+    const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
+    expect(output).toContain('x-void-internal: local-proxy-token');
+    expect(output).not.toContain('x-void-dev-trigger: dev-token-test');
+  });
+
   it('warns about missing dev support in framework mode', async () => {
     const root = createTempRoot();
     mkdirSync(join(root, 'crons'), { recursive: true });
