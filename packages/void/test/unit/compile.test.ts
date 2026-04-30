@@ -341,11 +341,13 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    // The /__void/scheduled handler: token check OR build key fallback
+    // The /__void/scheduled handler: token check; in dev, skipped when no
+    // token configured; in prod, falls back to build key.
     expect(code).toContain('app.post("/__void/scheduled"');
     expect(code).toContain('c.req.header("x-void-internal")');
     expect(code).toContain('__getRawEnv()?.__VOID_PROXY_TOKEN');
     expect(code).toContain('__VOID_BUILD_KEY');
+    expect(code).toContain('import.meta.env.DEV');
   });
 
   it('generates /__void/queue auth guard with __getRawEnv() and x-void-internal check', () => {
@@ -373,10 +375,12 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    // The /__void/queue HTTP route: token check OR build key fallback
+    // The /__void/queue HTTP route: token check; in dev, skipped when no
+    // token configured; in prod, falls back to build key.
     expect(code).toContain('app.post("/__void/queue"');
     expect(code).toContain('c.req.header("x-void-internal")');
     expect(code).toContain('__VOID_BUILD_KEY');
+    expect(code).toContain('import.meta.env.DEV');
     // Queue dispatch logic must be exported as __processQueue for direct native handler use
     expect(code).toContain('export async function __processQueue');
   });

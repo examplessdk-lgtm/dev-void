@@ -1399,7 +1399,9 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('const __scheduledHandler = async (c) => {');
     lines.push('  const __token = c.req.header("x-void-internal");');
     lines.push('  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;');
-    lines.push('  if (!(__expected ? __token === __expected : __token === __VOID_BUILD_KEY)) {');
+    lines.push(
+      '  if (__expected ? __token !== __expected : !import.meta.env.DEV && __token !== __VOID_BUILD_KEY) {',
+    );
     lines.push('    return c.json({ error: "unauthorized" }, 401);');
     lines.push('  }');
     lines.push('  const { cron, scheduledTime } = await c.req.json();');
@@ -1463,11 +1465,14 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('}');
     lines.push('');
 
-    // HTTP route — unconditionally requires token (same as /__void/scheduled)
+    // HTTP route — same auth policy as /__void/scheduled (token required in
+    // prod; in dev, skipped when `__VOID_PROXY_TOKEN` is unset).
     lines.push('const __queueHandler = async (c) => {');
     lines.push('  const __token = c.req.header("x-void-internal");');
     lines.push('  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;');
-    lines.push('  if (!(__expected ? __token === __expected : __token === __VOID_BUILD_KEY)) {');
+    lines.push(
+      '  if (__expected ? __token !== __expected : !import.meta.env.DEV && __token !== __VOID_BUILD_KEY) {',
+    );
     lines.push('    return c.json({ error: "unauthorized" }, 401);');
     lines.push('  }');
     lines.push('  const payload = await c.req.json();');
