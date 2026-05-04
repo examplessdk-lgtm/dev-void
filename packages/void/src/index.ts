@@ -48,16 +48,20 @@ import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy.ts';
 import { validateSsrEntry } from './ssr/entry.ts';
 
 /**
- * Persist the per-process dev-trigger token at `<root>/.void/dev-trigger-token`
- * so subsequent voidPlugin() invocations (e.g. the worker-environment Vite
- * spawned by `@cloudflare/vite-plugin`) re-read the same value. Without this,
- * each call to voidPlugin generates a fresh UUID, the dispatch file ends up
- * with one token while the hint plugin prints a different one, and curls
- * land on `unauthorized`.
+ * Persist the dev-trigger token at `<root>/.void/dev-trigger-token` so
+ * every voidPlugin() invocation against the same project reads the same
+ * value. This matters because `@cloudflare/vite-plugin` spawns a
+ * worker-environment child Vite that re-imports vite.config.ts and calls
+ * voidPlugin() again — without persistence the parent and child would
+ * generate different UUIDs, the dispatch file would embed one and the
+ * hint plugin would print the other, and curls would land on
+ * `unauthorized`.
  *
- * The token is removed on dev-server close by the framework-triggers /
- * injection plugins (alongside the dispatch file) so a stale token from a
- * previous session never leaks into the next one.
+ * The file persists across dev sessions by design (it lives under `.void/`,
+ * which is gitignored and only wiped by `void deploy`). The token is local
+ * to the project and only honored by a worker bound to localhost; treat it
+ * like the rest of `.void/` — disposable scratch state, safe to remove
+ * manually if desired.
  */
 function getOrCreateDevTriggerToken(root: string): string {
   const tokenPath = join(root, '.void', 'dev-trigger-token');
