@@ -1119,9 +1119,14 @@ async function runFullDeploy(
     }
   }
 
-  // Resolve prerender paths (skip when output: "static" — pages are already built as static assets)
+  // Resolve prerender paths. Skip in two cases:
+  //   - output: "static" — pages are already built as static assets.
+  //   - framework mode (Class A) — the framework's own worker entry has no
+  //     /__void/prerender-paths endpoint (only compileWorkerEntry /
+  //     compileNodeApp emit it for Void apps). Class-A frameworks handle
+  //     prerendering through their own build pipelines.
   const uniquePrerenderPaths =
-    deployConfig.output === 'static'
+    deployConfig.output === 'static' || isFrameworkMode
       ? []
       : isNodeTarget(deployConfig.target)
         ? await collectPrerenderPathsNode({
