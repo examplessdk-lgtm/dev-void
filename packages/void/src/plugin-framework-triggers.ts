@@ -46,20 +46,20 @@ export function frameworkTriggersPlugin(root: string, options: FrameworkTriggers
       writeDispatch();
     },
     configureServer(server) {
-      // Re-emit on cron or queue file add/remove so newly-added handlers are
-      // routable without a full restart.
+      // Re-emit on any cron/queue file mutation so add/remove and edits to
+      // the schedule string or queue name (which are baked into the
+      // generated `__jobs`/`__queues` table at codegen time) are picked up
+      // without a full restart.
       const isInteresting = (file: string) =>
         file.startsWith(join(root, 'crons')) || file.startsWith(join(root, 'queues'));
-      server.watcher.on('add', (file) => {
+      const onChange = (file: string) => {
         if (isInteresting(file)) {
           writeDispatch();
         }
-      });
-      server.watcher.on('unlink', (file) => {
-        if (isInteresting(file)) {
-          writeDispatch();
-        }
-      });
+      };
+      server.watcher.on('add', onChange);
+      server.watcher.on('change', onChange);
+      server.watcher.on('unlink', onChange);
     },
   };
 }
