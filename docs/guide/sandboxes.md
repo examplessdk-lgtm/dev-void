@@ -65,6 +65,10 @@ const result = await sandbox.exec('cat /tmp/input.txt');
 
 You can also use the namespace directly from `c.env.SANDBOX` when you need lower-level Durable Object control.
 
+## State persistence
+
+Sandbox state persists across deploys and rollbacks. `getSandbox(id)` always resolves to the same Durable Object instance for a given `id`, regardless of how many times the project has been deployed or rolled back. The container filesystem, running processes, and exposed ports all survive redeploys. The only event that destroys sandbox state is project deletion.
+
 ## Deployment
 
 `void deploy` provisions the `SANDBOX` Durable Object namespace, attaches the Cloudflare Container metadata to the Worker upload, and creates or updates the matching container application in the Void platform account.
