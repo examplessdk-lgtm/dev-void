@@ -46,6 +46,40 @@ import { filterLoadedEnv, resolveRemoteMode, stripInternalEnvKeys } from './shar
 import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy.ts';
 import { validateSsrEntry } from './ssr/entry.ts';
 
+/**
+ * Warn when the project's `package.json` does not declare `"type": "module"`.
+ *
+ * Vite's default `configLoader: "bundle"` bundles `vite.config.ts`,
+ * externalizes deps, and then loads the bundle. When `package.json` is non-ESM
+ * the bundle is written as `.js` and loaded via CJS `require()`, which throws
+ * `ERR_REQUIRE_ASYNC_MODULE` if any externalized dep's ESM graph contains
+ * top-level await. `@cloudflare/vite-plugin` (which voidPlugin pulls in) has
+ * exactly such a TLA, so non-ESM consumers hit this on every Vite invocation.
+ *
+ * Runs once per Vite process (factory time), single sync read.
+ */
+function warnIfPackageJsonIsNotEsm(root: string): void {
+  const pkgPath = join(root, 'package.json');
+  if (!existsSync(pkgPath)) {
+    return;
+  }
+  let pkg: { type?: unknown };
+  try {
+    pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+  } catch {
+    return;
+  }
+  if (pkg.type === 'module') {
+    return;
+  }
+  voidWarn(
+    'package.json is missing `"type": "module"`. Vite\'s default config loader ' +
+      'will fail with ERR_REQUIRE_ASYNC_MODULE on transitive top-level await ' +
+      '(e.g. @cloudflare/vite-plugin). Add `"type": "module"` to package.json, ' +
+      'or run vite build with `--configLoader runner`.',
+  );
+}
+
 /** Resolve the server entry module for a Class A framework. */
 function getFrameworkEntry(framework: Framework, root: string): string {
   switch (framework) {
@@ -314,6 +348,7 @@ export function voidPlugin(options?: {
 }): Array<Plugin> {
   // Resolve root relative to CWD — this runs at config time
   const root = process.cwd();
+  warnIfPackageJsonIsNotEsm(root);
   const devTriggerToken = crypto.randomUUID();
   const config = readConfig(root);
   const dialect = getDatabaseDialect(config);
