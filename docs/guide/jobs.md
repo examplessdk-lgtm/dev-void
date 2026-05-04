@@ -84,7 +84,7 @@ curl -X POST http://localhost:5173/__void/scheduled \
 
 If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence and the printed curl command uses `x-void-internal: <your-token>` instead.
 
-This works the same in default Void mode and every supported framework — SvelteKit, Nuxt, Analog, Astro, TanStack Start, React Router, and vinext. In framework mode the cron handler runs inside the framework adapter's request pipeline (or the dev miniflare for Class A frameworks), so it sees whatever bindings the adapter exposes (D1, KV, R2, queues, AI, etc.).
+This works the same in default Void mode and every supported framework — SvelteKit, Nuxt, Astro, TanStack Start, React Router, and vinext. In framework mode the cron handler runs inside the framework adapter's request pipeline (or the dev miniflare for Class A frameworks), so it sees whatever bindings the adapter exposes (D1, KV, R2, queues, AI, etc.). Analog support is pending — its Nitro variant doesn't expose h3 helpers the same way.
 
 ## Deployment behavior
 
