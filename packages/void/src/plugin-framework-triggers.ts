@@ -15,6 +15,20 @@ export function frameworkTriggersDispatchPath(root: string): string {
 }
 
 /**
+ * Synchronously emit `<root>/.void/dev-triggers.ts`. We expose this directly
+ * (in addition to the Vite plugin below) so callers like the Class A entry
+ * wrapper can guarantee the file exists at the moment they reference it,
+ * without depending on `configResolved` ordering.
+ */
+export function writeFrameworkTriggersDispatch(root: string, devTriggerToken: string): void {
+  const jobs = scanJobsSync(root);
+  const queues = scanQueuesSync(root);
+  const target = frameworkTriggersDispatchPath(root);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, generateModule(root, jobs, queues, devTriggerToken));
+}
+
+/**
  * Writes a real file at `<root>/.void/dev-triggers.ts` exporting
  * `handleDevTrigger(request, env, ctx)`. We use a real file (not a Vite
  * virtual module) because Nitro and Astro have their own server bundlers
@@ -23,13 +37,7 @@ export function frameworkTriggersDispatchPath(root: string): string {
  * with the framework adapter's real bindings.
  */
 export function frameworkTriggersPlugin(root: string, options: FrameworkTriggersOptions): Plugin {
-  const writeDispatch = () => {
-    const jobs = scanJobsSync(root);
-    const queues = scanQueuesSync(root);
-    const target = frameworkTriggersDispatchPath(root);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, generateModule(root, jobs, queues, options.devTriggerToken));
-  };
+  const writeDispatch = () => writeFrameworkTriggersDispatch(root, options.devTriggerToken);
 
   return {
     name: 'void:framework-triggers',
