@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vite-plugin';
@@ -57,24 +65,69 @@ import { validateSsrEntry } from './ssr/entry.ts';
  * hint plugin would print the other, and curls would land on
  * `unauthorized`.
  *
- * The file persists across dev sessions by design (it lives under `.void/`,
- * which is gitignored and only wiped by `void deploy`). The token is local
- * to the project and only honored by a worker bound to localhost; treat it
- * like the rest of `.void/` — disposable scratch state, safe to remove
- * manually if desired.
+ * The file persists across dev sessions by design — it lives under `.void/`
+ * (gitignored), and `cleanupWrapper` in `void deploy` explicitly preserves
+ * it across its own wipe so saved curl scripts keep working between deploys.
+ * The token is local to the project and only honored by a worker bound to
+ * localhost; treat it like the rest of `.void/` — disposable scratch state,
+ * safe to remove manually if desired.
  */
+/**
+ * Best-effort detection of `vite build` (and `vite preview`) so we can skip
+ * dev-only side effects — writing the dev-trigger token and the dispatch
+ * file — when no dev server will run. Vite's CLI passes the subcommand as
+ * `process.argv[2]`; programmatic API users (and `vite` with no subcommand)
+ * default to `dev`, which we detect as the absence of a build-shaped first
+ * positional. This is intentionally permissive: when in doubt, we behave as
+ * if we're in dev so first-request correctness is preserved.
+ */
+function isViteBuildOrPreview(): boolean {
+  const subcommand = process.argv[2];
+  return subcommand === 'build' || subcommand === 'preview';
+}
+
 function getOrCreateDevTriggerToken(root: string): string {
   const tokenPath = join(root, '.void', 'dev-trigger-token');
-  if (existsSync(tokenPath)) {
-    const existing = readFileSync(tokenPath, 'utf-8').trim();
-    if (existing) {
-      return existing;
+  const readExisting = (): string | undefined => {
+    try {
+      const existing = readFileSync(tokenPath, 'utf-8').trim();
+      return existing.length > 0 ? existing : undefined;
+    } catch {
+      return undefined;
     }
+  };
+
+  const existing = readExisting();
+  if (existing) {
+    return existing;
   }
-  const fresh = crypto.randomUUID();
+
+  // Atomic create — `wx` fails with EEXIST if the file appeared between the
+  // read above and the write below (parent + child Vite both racing). On
+  // EEXIST we re-read the winner's token and use that, so both processes
+  // converge on the same UUID.
   mkdirSync(join(root, '.void'), { recursive: true });
-  writeFileSync(tokenPath, fresh);
-  return fresh;
+  const fresh = crypto.randomUUID();
+  try {
+    const fd = openSync(tokenPath, 'wx');
+    try {
+      writeSync(fd, fresh);
+    } finally {
+      closeSync(fd);
+    }
+    return fresh;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw err;
+    }
+    const winner = readExisting();
+    if (winner) {
+      return winner;
+    }
+    // EEXIST but file is empty — extreme edge case (interrupted writer).
+    // Fall through and accept the fresh UUID; subsequent reads will win.
+    return fresh;
+  }
 }
 
 /**
@@ -92,7 +145,14 @@ function getFrameworkEntry(framework: Framework, root: string, devTriggerToken: 
   // import it on the very first request — the plugin's `configResolved` hook
   // also rewrites it, but we can't rely on that having run before the first
   // request hits the worker.
-  writeFrameworkTriggersDispatch(root, devTriggerToken);
+  //
+  // Skip in `vite build`/`vite preview`: the dispatch import is wrapped in
+  // `if (import.meta.env.DEV)` and DCE'd out of the prod bundle, so the
+  // file is unreferenced. Avoiding the write keeps CI checkouts free of
+  // generated dev state.
+  if (!isViteBuildOrPreview()) {
+    writeFrameworkTriggersDispatch(root, devTriggerToken);
+  }
   return generateClassATriggerWrapper(root, framework, getOriginalFrameworkEntry(framework, root));
 }
 
@@ -406,7 +466,13 @@ export function voidPlugin(options?: {
 }): Array<Plugin> {
   // Resolve root relative to CWD — this runs at config time
   const root = process.cwd();
-  const devTriggerToken = getOrCreateDevTriggerToken(root);
+  // Token only matters in serve — the dispatch module that uses it is
+  // DCE'd from production worker bundles. In build/preview we still need
+  // *some* string (the wrapper embeds it for completeness), but we skip
+  // persisting it so build-only CI workflows don't materialize dev state.
+  const devTriggerToken = isViteBuildOrPreview()
+    ? crypto.randomUUID()
+    : getOrCreateDevTriggerToken(root);
   const config = readConfig(root);
   const dialect = getDatabaseDialect(config);
   const detected = detectFramework(root);

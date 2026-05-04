@@ -18,7 +18,15 @@ export interface DetectedFramework {
 export type Framework = 'tanstack-start' | 'react-router' | 'vinext-app' | 'vinext-pages';
 
 /** Directories to scan for binding inference in framework mode. */
-export const FRAMEWORK_SCAN_DIRS = ['src', 'app', 'pages', 'routes', 'server'] as const;
+export const FRAMEWORK_SCAN_DIRS = [
+  'src',
+  'app',
+  'pages',
+  'routes',
+  'server',
+  'crons',
+  'queues',
+] as const;
 
 /**
  * Map from npm package name to framework identifier.

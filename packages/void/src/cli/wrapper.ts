@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   writeFileSync,
+  readFileSync,
   rmSync,
   renameSync,
   copyFileSync,
@@ -174,10 +175,27 @@ export async function bundleEntry(root: string, entry: string): Promise<WrapperR
 }
 
 /**
- * Clean up generated wrapper/bundle files.
+ * Clean up generated wrapper/bundle files. Preserves `dev-trigger-token`
+ * across the wipe so that subsequent `void dev` sessions keep using the
+ * same UUID — invalidating it on every deploy would force users to update
+ * any saved curl scripts that exercise `/__void/{scheduled,queue}`.
  */
 export function cleanupWrapper(root: string): void {
-  rmSync(join(root, '.void'), { recursive: true, force: true });
+  const voidDir = join(root, '.void');
+  const tokenPath = join(voidDir, 'dev-trigger-token');
+  let preservedToken: string | undefined;
+  if (existsSync(tokenPath)) {
+    try {
+      preservedToken = readFileSync(tokenPath, 'utf-8');
+    } catch {
+      // Best-effort — fall through and let the next dev session regenerate.
+    }
+  }
+  rmSync(voidDir, { recursive: true, force: true });
+  if (preservedToken !== undefined) {
+    mkdirSync(voidDir, { recursive: true });
+    writeFileSync(tokenPath, preservedToken);
+  }
 }
 
 // ─── Source Generators ─────────────────────────────────────────────
