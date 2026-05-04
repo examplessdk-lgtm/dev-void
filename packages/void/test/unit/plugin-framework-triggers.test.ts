@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  analogDevTriggerInjectPlugin,
   astroDevTriggerInjectPlugin,
   frameworkTriggersDispatchPath,
   frameworkTriggersPlugin,
@@ -30,7 +31,9 @@ function callConfigResolved(plugin: ReturnType<typeof frameworkTriggersPlugin>) 
 function callConfigureServer(
   plugin:
     | ReturnType<typeof nitroDevTriggerInjectPlugin>
-    | ReturnType<typeof astroDevTriggerInjectPlugin>,
+    | ReturnType<typeof astroDevTriggerInjectPlugin>
+    | ReturnType<typeof analogDevTriggerInjectPlugin>,
+  serverOverrides: Record<string, unknown> = {},
 ) {
   const hook = plugin.configureServer;
   const fn = typeof hook === 'function' ? hook : hook?.handler;
@@ -38,7 +41,11 @@ function callConfigureServer(
     throw new Error('configureServer not callable');
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (fn as any)({ httpServer: { once() {} } });
+  (fn as any)({
+    httpServer: { once() {} },
+    middlewares: { use() {} },
+    ...serverOverrides,
+  });
 }
 
 afterEach(() => {
@@ -191,5 +198,49 @@ describe('astroDevTriggerInjectPlugin', () => {
     expect(log.mock.calls.map((c) => String(c[0])).join('\n')).toContain(
       'Astro middleware already exists',
     );
+  });
+});
+
+describe('analogDevTriggerInjectPlugin', () => {
+  it('writes scheduled + queue route files under src/server/routes/api/__void/', () => {
+    const root = createTempRoot();
+    const plugin = analogDevTriggerInjectPlugin(root);
+    callConfigureServer(plugin);
+
+    const cron = join(root, 'src', 'server', 'routes', 'api', '__void', 'cron-trigger.ts');
+    const queue = join(root, 'src', 'server', 'routes', 'api', '__void', 'queue-trigger.ts');
+    expect(existsSync(cron)).toBe(true);
+    expect(existsSync(queue)).toBe(true);
+
+    const cronCode = readFileSync(cron, 'utf-8');
+    expect(cronCode).toContain('@ts-nocheck');
+    expect(cronCode).toContain(`from "${frameworkTriggersDispatchPath(root)}"`);
+    expect(cronCode).toContain("from 'h3'");
+    expect(cronCode).toContain('http://localhost/__void/scheduled');
+    expect(cronCode).toContain('event.context?.cloudflare');
+  });
+
+  it('appends both route paths to .gitignore', () => {
+    const root = createTempRoot();
+    const plugin = analogDevTriggerInjectPlugin(root);
+    callConfigureServer(plugin);
+
+    const gitignore = readFileSync(join(root, '.gitignore'), 'utf-8');
+    expect(gitignore).toContain('src/server/routes/api/__void/cron-trigger.ts');
+    expect(gitignore).toContain('src/server/routes/api/__void/queue-trigger.ts');
+  });
+
+  it('registers a Vite middleware for the URL proxy', () => {
+    const root = createTempRoot();
+    const plugin = analogDevTriggerInjectPlugin(root);
+    let registered = 0;
+    callConfigureServer(plugin, {
+      middlewares: {
+        use() {
+          registered += 1;
+        },
+      },
+    });
+    expect(registered).toBeGreaterThan(0);
   });
 });
