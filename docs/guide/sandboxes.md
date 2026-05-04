@@ -67,7 +67,13 @@ You can also use the namespace directly from `c.env.SANDBOX` when you need lower
 
 ## State persistence
 
-Sandbox state persists across deploys and rollbacks. `getSandbox(id)` always resolves to the same Durable Object instance for a given `id`, regardless of how many times the project has been deployed or rolled back. The container filesystem, running processes, and exposed ports all survive redeploys. The only event that destroys sandbox state is project deletion.
+There are two distinct layers to think about: stable Durable Object identity, and ephemeral container state.
+
+`getSandbox(id)` always resolves to the same Durable Object instance for a given `id`, regardless of how many times the project has been deployed or rolled back. Anything written through the DO's persistent storage (`ctx.storage`, the embedded SQLite database) survives deploys, rollbacks, and container restarts. That layer is the durable home for sandbox metadata, session ids, and any data you need to outlive the container.
+
+The container itself — filesystem, running processes, exposed ports, in-memory shell sessions — is tied to a single container lifetime and is **not** durable. Cloudflare Containers idle out after inactivity (the SDK default is `sleepAfter: "10m"`), and a container can also restart on a process crash or a platform-side reschedule. When that happens, files in the container filesystem, background processes, and previously exposed ports are lost. Setting `keepAlive: true` disables the idle timer but does not protect against crashes or infrastructure restarts.
+
+Treat the sandbox container as a working environment, not a source of truth. Persist anything you cannot afford to lose to DO storage, your database, KV, or R2 (the SDK also offers backup/restore helpers for snapshotting a directory to R2). Project deletion destroys both layers, but plenty of routine events destroy only the container layer.
 
 ## Deployment
 
