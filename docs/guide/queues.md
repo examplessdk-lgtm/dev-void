@@ -137,4 +137,4 @@ curl -X POST http://localhost:5173/__void/queue \
 
 If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence and the printed curl command uses `x-void-internal: <your-token>` instead.
 
-In **framework mode** (SvelteKit, Nuxt, Astro, TanStack Start, React Router, vinext), the `/__void/queue` endpoint runs inside the framework adapter's request pipeline (or the dev miniflare for Class A frameworks), so the consumer sees whatever bindings the adapter exposes (D1, KV, R2, queue producers, etc.). Native Miniflare queue delivery is not wired up in framework mode — use the manual dispatch endpoint to exercise a consumer. Analog support is pending.
+In **framework mode** (SvelteKit, Nuxt, Analog, Astro, TanStack Start, React Router, vinext), the `/__void/queue` endpoint runs inside the framework adapter's request pipeline (or the dev miniflare for Class A frameworks), so the consumer sees whatever bindings the adapter exposes (D1, KV, R2, queue producers, etc.). Native Miniflare queue delivery is not wired up in framework mode — use the manual dispatch endpoint to exercise a consumer.

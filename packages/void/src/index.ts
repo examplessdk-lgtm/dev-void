@@ -31,6 +31,7 @@ import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
 import { envClientGuardPlugin } from './plugin-env-client-guard.ts';
 import { envSchemaPlugin } from './plugin-env-schema.ts';
 import {
+  analogDevTriggerInjectPlugin,
   astroDevTriggerInjectPlugin,
   frameworkTriggersDispatchPath,
   frameworkTriggersPlugin,
@@ -657,12 +658,7 @@ export function voidPlugin(options?: {
       ...(detected.name === 'nuxt'
         ? [nitroDevTriggerInjectPlugin(root, { serverDir: 'server' })]
         : []),
-      // Analog support is deferred. @analogjs/vite-plugin-nitro evaluates
-      // server middleware via Vite's connect pipeline before Nitro's plugins
-      // (including nitro-cloudflare-dev) populate `event.context.cloudflare`,
-      // so the cron handler can't reach D1/KV/etc. Tracked in a follow-up;
-      // the upstream fix is to apply Nitro's runtime plugins to dev
-      // middleware too. See PR description for context.
+      ...(detected.name === 'analog' ? [analogDevTriggerInjectPlugin(root)] : []),
       ...(detected.name === 'astro' ? [astroDevTriggerInjectPlugin(root)] : []),
     ];
   }
