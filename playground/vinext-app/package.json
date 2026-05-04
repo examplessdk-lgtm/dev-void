@@ -11,7 +11,7 @@
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-server-dom-webpack": "^19.2.5",
-    "vinext": "^0.0.35"
+    "vinext": "^0.0.45"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
