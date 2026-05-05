@@ -113,6 +113,7 @@ export default defineConfig({
     'src/pages/head-client.ts',
     'src/pages/prefetch.ts',
     'src/pages/client.ts',
+    'src/pages/serialize.ts',
     'src/pages/islands-plugin.ts',
     'src/cli/cli.ts',
   ],

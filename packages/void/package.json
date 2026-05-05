@@ -206,6 +206,11 @@
       "import": "./dist/pages/client.mjs",
       "require": "./dist/pages/client.mjs"
     },
+    "./pages-server": {
+      "types": "./dist/pages/serialize.d.mts",
+      "import": "./dist/pages/serialize.mjs",
+      "require": "./dist/pages/serialize.mjs"
+    },
     "./pages-islands-plugin": {
       "types": "./dist/pages/islands-plugin.d.mts",
       "import": "./dist/pages/islands-plugin.mjs",

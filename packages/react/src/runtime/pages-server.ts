@@ -3,6 +3,7 @@ import { renderToReadableStream } from 'react-dom/server';
 import { createSsrRouter, idleNavigationState } from 'void/pages-client';
 import { renderBodyAttrs, renderHeadToString, renderHtmlAttrs } from 'void/pages-head';
 import type { PageObject } from 'void/pages-protocol';
+import { serializePageData } from 'void/pages-server';
 import { ErrorsContext, NavigationContext, RouterContext, SharedContext } from './context.ts';
 
 // oxlint-disable-next-line no-explicit-any -- component props are narrowed by generated route types
@@ -17,12 +18,6 @@ export interface ReactPagesServerConfig {
   components: Record<string, () => Promise<ComponentModule>>;
   layoutTree: Record<string, Array<string>>;
   preambleScript?: string;
-}
-
-function serializePageData(pageObj: PageObject): string {
-  return JSON.stringify(pageObj).replace(/[<>&\u2028\u2029]/g, (c) => {
-    return `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`;
-  });
 }
 
 function createPendingDeferred(): Promise<never> {

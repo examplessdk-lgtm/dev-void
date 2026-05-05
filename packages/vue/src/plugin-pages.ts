@@ -207,23 +207,15 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Arr
   ];
 }
 
-export function generateRendererModule(scan: PageScanResult, pagesDir: string): string {
+function generateRendererModule(scan: PageScanResult, pagesDir: string): string {
   return `
 import { createSSRApp, h, reactive, provide } from "vue";
 import { renderToString } from "vue/server-renderer";
 import { createSsrRouter, idleNavigationState } from "void/pages-client";
 import { renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from "void/pages-head";
+import { serializePageData } from "void/pages-server";
 
 ${generateComponentManifest(scan, pagesDir)}
-
-function serializePageData(pageObj) {
-  return JSON.stringify(pageObj)
-    .replaceAll("<", "\\\\u003c")
-    .replaceAll(">", "\\\\u003e")
-    .replaceAll("&", "\\\\u0026")
-    .replaceAll("\u2028", "\\\\u2028")
-    .replaceAll("\u2029", "\\\\u2029");
-}
 
 function patchProps(comp, props) {
   if (comp.__voidPatched) return;
