@@ -123,7 +123,7 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
   };
 }
 
-function generateRendererModule(scan: PageScanResult, pagesDir: string): string {
+export function generateRendererModule(scan: PageScanResult, pagesDir: string): string {
   return `
 import { renderToStringAsync, generateHydrationScript } from "solid-js/web";
 import { createComponent } from "solid-js";

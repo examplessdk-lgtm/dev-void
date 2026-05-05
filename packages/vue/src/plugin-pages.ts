@@ -207,7 +207,7 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Arr
   ];
 }
 
-function generateRendererModule(scan: PageScanResult, pagesDir: string): string {
+export function generateRendererModule(scan: PageScanResult, pagesDir: string): string {
   return `
 import { createSSRApp, h, reactive, provide } from "vue";
 import { renderToString } from "vue/server-renderer";

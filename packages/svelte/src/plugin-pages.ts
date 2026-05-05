@@ -125,7 +125,11 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
   };
 }
 
-function generateRendererModule(scan: PageScanResult, pagesDir: string, _isDev: boolean): string {
+export function generateRendererModule(
+  scan: PageScanResult,
+  pagesDir: string,
+  _isDev: boolean,
+): string {
   return `
 import { render } from "svelte/server";
 import App from "@void/svelte/App.svelte";
