@@ -14,6 +14,7 @@ export default defineConfig({
       'fast-string-width',
       'fast-wrap-ansi',
       'sisteransi',
+      'pathe',
       'picocolors',
     ],
   },
