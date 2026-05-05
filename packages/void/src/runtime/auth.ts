@@ -25,12 +25,22 @@ export type VoidAuthConfig =
 /**
  * Shared AsyncLocalStorage that holds the authenticated Better Auth state for the
  * current request.
+ *
+ * Stored on `globalThis` under a `Symbol.for` key so duplicate module loads
+ * (e.g. once by void's bundled runtime and once by Vite's SSR module runner
+ * when user code imports from `void/auth`) share a single ALS instance. Without
+ * this, the middleware writes to one instance and `getUser()` reads another,
+ * always returning null.
  */
-export const authContext: AsyncLocalStorage<{ user: AuthUser | null; state: AuthState | null }> =
-  new AsyncLocalStorage<{
-    user: AuthUser | null;
-    state: AuthState | null;
-  }>();
+type AuthContextStore = { user: AuthUser | null; state: AuthState | null };
+const AUTH_CONTEXT_SYMBOL: unique symbol = Symbol.for('void.authContext.v1');
+type GlobalWithAuthContext = {
+  [AUTH_CONTEXT_SYMBOL]?: AsyncLocalStorage<AuthContextStore>;
+};
+const globalWithAuthContext = globalThis as GlobalWithAuthContext;
+export const authContext: AsyncLocalStorage<AuthContextStore> =
+  globalWithAuthContext[AUTH_CONTEXT_SYMBOL] ??
+  (globalWithAuthContext[AUTH_CONTEXT_SYMBOL] = new AsyncLocalStorage<AuthContextStore>());
 
 export function defineAuth<T extends VoidAuthConfig>(config: T): T {
   return config;
