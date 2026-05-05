@@ -795,6 +795,18 @@ describe('react-pages client (dev)', () => {
     expect(rootHtml).toContain('Welcome');
     expect(rootHtml).toContain('React Pages Demo'); // shared data from middleware
 
+    // Inline page-data must round-trip through the <script> tag without
+    // truncation. If serializePageData ever regresses (e.g. via another
+    // template-literal backslash-collapse), the </script> in scriptProbe
+    // closes the inline tag early, the regex below captures truncated
+    // text, and JSON.parse throws.
+    const probe = '</script><script>alert(1)</script>\u2028\u2029&';
+    const probeMatch = rootHtml.match(/<script id="__VOID_PAGE_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    expect(probeMatch).not.toBeNull();
+    const probeJson = probeMatch![1];
+    expect(probeJson).not.toMatch(/<\/script/i);
+    expect(JSON.parse(probeJson).shared.scriptProbe).toBe(probe);
+
     // 1b. Head management — SSR HTML contains head tags from void.json + page head()
     expect(rootHtml).toContain('<title>Home | React Pages Demo</title>');
     expect(rootHtml).toContain('<meta charset="utf-8">');
