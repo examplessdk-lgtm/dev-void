@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { dirname, join } from 'pathe';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { runGenCommand, formatTimestamp } from '../../src/cli/gen.ts';
 

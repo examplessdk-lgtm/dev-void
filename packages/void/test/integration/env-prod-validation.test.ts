@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { formatEnvReport, validateProdEnv } from '../../src/cli/env-validation.ts';
 import { number, string } from '../../src/runtime/env-helpers.ts';

@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { intro, outro, log } from '@clack/prompts';
+import { extname, join, relative, resolve } from 'pathe';
 import { readConfig, getDatabaseDialect, type DatabaseDialect } from '../config.ts';
 import {
   collectMigrations,

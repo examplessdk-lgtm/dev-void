@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { intro, outro, log, note } from '@clack/prompts';
+import { join } from 'pathe';
 import { findEnvFile, generateEnvTypes } from '../codegen/env-types.ts';
 import { getToken } from './auth.ts';
 import { PlatformClient } from './client.ts';

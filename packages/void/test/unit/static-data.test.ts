@@ -1,5 +1,5 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vitest';
 import { resolveStaticPageDataBuildOptions } from '../../src/pages/static-data.ts';
 

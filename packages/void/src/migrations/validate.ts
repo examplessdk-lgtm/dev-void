@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import {
   readJournal,
   stripSqlExt,

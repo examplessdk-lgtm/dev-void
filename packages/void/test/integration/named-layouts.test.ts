@@ -1,5 +1,5 @@
-import { join } from 'node:path';
 import spawn from 'cross-spawn';
+import { join } from 'pathe';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 

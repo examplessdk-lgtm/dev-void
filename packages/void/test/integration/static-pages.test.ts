@@ -1,6 +1,6 @@
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { collectPrerenderPaths } from '../../src/prerender.ts';
 

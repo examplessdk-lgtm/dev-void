@@ -8,8 +8,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { dirname, join, relative } from 'pathe';
 import { loadEnv } from 'vite';
 import { getToken, isStagingMode } from './cli/auth.ts';
 import { readWranglerCompat } from './cli/wrangler.ts';
@@ -452,7 +452,7 @@ async function runNodePrerenderRunner<T>(root: string, config: NodeRunnerConfig)
     runnerPath,
     `
 import { pathToFileURL } from "node:url";
-import { join, dirname } from "node:path";
+import { join, dirname } from "pathe";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 const config = JSON.parse(process.argv[2]);

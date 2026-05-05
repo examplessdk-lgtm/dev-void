@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join, dirname, basename, extname } from 'node:path';
+import { join, dirname, basename, extname } from 'pathe';
 import { glob } from 'tinyglobby';
 import { parseRouteFilename } from '../router/parse-filename.ts';
 import { resolveNamedLayout } from './layout-resolution.ts';

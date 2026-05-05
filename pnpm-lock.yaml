@@ -99,6 +99,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 25.6.0
+      pathe:
+        specifier: 'catalog:'
+        version: 2.0.3
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -132,6 +135,9 @@ importers:
       markdown-it-emoji:
         specifier: ^3.0.0
         version: 3.0.0
+      pathe:
+        specifier: 'catalog:'
+        version: 2.0.3
       shiki:
         specifier: ^4.0.2
         version: 4.0.2
@@ -427,6 +433,9 @@ importers:
       nitro-cloudflare-dev:
         specifier: ^0.2.2
         version: 0.2.2
+      pathe:
+        specifier: 'catalog:'
+        version: 2.0.3
       typescript:
         specifier: ~6.0.3
         version: 6.0.3
@@ -601,6 +610,9 @@ importers:
       '@void/react':
         specifier: workspace:@void-sdk/react@*
         version: link:../../packages/react
+      pathe:
+        specifier: 'catalog:'
+        version: 2.0.3
       vite:
         specifier: ^8.0.10
         version: 8.0.10(@types/node@25.6.0)(esbuild@0.27.7)(jiti@2.6.1)(sass@1.97.3)(terser@5.46.2)(tsx@4.21.0)(yaml@2.8.3)
@@ -617,6 +629,9 @@ importers:
       '@typescript/native-preview':
         specifier: 'catalog:'
         version: 7.0.0-dev.20260429.1
+      pathe:
+        specifier: 'catalog:'
+        version: 2.0.3
       vite:
         specifier: ^8.0.10
         version: 8.0.10(@types/node@25.6.0)(esbuild@0.27.7)(jiti@2.6.1)(sass@1.97.3)(terser@5.46.2)(tsx@4.21.0)(yaml@2.8.3)

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { note, outro } from '@clack/prompts';
+import { join } from 'pathe';
 import { getPackageDir } from './agents.ts';
 import { asciiArts } from './ascii.ts';
 import { categoryTitle, helpLine, pc, sectionTitle } from './output.ts';

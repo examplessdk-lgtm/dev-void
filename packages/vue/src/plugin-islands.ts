@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve, relative } from 'node:path';
+import { dirname, resolve, relative } from 'pathe';
 import { normalizePath, type Plugin, type ResolvedConfig } from 'vite';
 import { scanPages, resolveEffectiveLayoutChain } from 'void/pages';
 import type { PageScanResult } from 'void/pages';

@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve } from 'pathe';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { detectPreset, formatProjectCommand, resolveProjectCommand } from '../../src/cli/preset.ts';
 

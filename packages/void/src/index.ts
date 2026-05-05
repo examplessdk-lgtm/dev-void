@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vite-plugin';
+import { join } from 'pathe';
 import pc from 'picocolors';
 import { loadEnv, type Plugin } from 'vite';
 import { findVoidAuthConfig } from './auth/config.ts';

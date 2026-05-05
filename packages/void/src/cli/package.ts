@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { extname, join, relative } from 'node:path';
 import { hash as blake3hash } from 'blake3-jit';
 import ignore from 'ignore';
+import { extname, join, relative } from 'pathe';
 import type { InferredBindings } from '../inference/walk.ts';
 import type { MigrationFile } from '../migrations/validate.ts';
 import type { WebSocketRouteDefinition } from '../router/websocket.ts';

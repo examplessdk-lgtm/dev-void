@@ -1,5 +1,5 @@
 import { existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 
 export type SchemaLocation = { type: 'file'; path: string } | { type: 'directory'; path: string };
 

@@ -1,5 +1,5 @@
-import { join } from 'node:path';
 import spawn from 'cross-spawn';
+import { join } from 'pathe';
 import { chromium, type Browser, type Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getPort, killChild, waitForServer } from '../../../../test/integration-helpers.ts';

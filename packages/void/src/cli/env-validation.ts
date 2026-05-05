@@ -8,7 +8,7 @@
  * Used by both `void deploy` (hard error on missing prod env) and
  * `void env check` (CI/pre-push validation).
  */
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { findEnvFile } from '../codegen/env-types.ts';
 import { loadUserEnvFile } from '../host/load-user-env.ts';
 import { voidWarn } from '../log.ts';

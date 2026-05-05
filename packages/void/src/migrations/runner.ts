@@ -1,6 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname } from 'pathe';
 import { collectMigrations } from './collect.ts';
 
 interface SqliteStatement<T = unknown> {

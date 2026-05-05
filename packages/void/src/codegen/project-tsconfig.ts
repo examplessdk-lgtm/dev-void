@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 
 export interface ProjectTsconfigOptions {
   redirectDbModule?: boolean;

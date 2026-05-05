@@ -7,9 +7,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { intro, outro, log, select, isCancel, cancel } from '@clack/prompts';
+import { join, dirname, relative } from 'pathe';
 import { ensureProjectTsconfig } from '../codegen/project-tsconfig.ts';
 import { readConfig, getDatabaseDialect } from '../config.ts';
 import { writeDrizzleConfig } from '../drizzle/config.ts';

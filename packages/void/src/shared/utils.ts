@@ -1,4 +1,4 @@
-import { posix } from 'node:path';
+import { posix } from 'pathe';
 
 export const isWindows: boolean = typeof process !== 'undefined' && process.platform === 'win32';
 
