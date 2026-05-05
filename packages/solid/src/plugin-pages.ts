@@ -135,11 +135,11 @@ ${generateComponentManifest(scan, pagesDir)}
 
 function serializePageData(pageObj) {
   return JSON.stringify(pageObj)
-    .replaceAll("<", "\\u003c")
-    .replaceAll(">", "\\u003e")
-    .replaceAll("&", "\\u0026")
-    .replaceAll("\u2028", "\\u2028")
-    .replaceAll("\u2029", "\\u2029");
+    .replaceAll("<", "\\\\u003c")
+    .replaceAll(">", "\\\\u003e")
+    .replaceAll("&", "\\\\u0026")
+    .replaceAll("\u2028", "\\\\u2028")
+    .replaceAll("\u2029", "\\\\u2029");
 }
 
 export async function renderPage(pageObj, assetTags) {
