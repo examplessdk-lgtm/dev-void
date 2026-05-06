@@ -332,6 +332,8 @@ function hasBinding(list: ReadonlyArray<{ binding: string }> | undefined, name: 
 const CLOUDFLARE_BUILTIN_IMPORT = /^cloudflare:/;
 const SANDBOX_SDK_IMPORT = '@cloudflare/sandbox';
 const SANDBOX_SDK_IMPORT_FILTER = /^@cloudflare\/sandbox$/;
+const DEFAULT_WORKER_ENVIRONMENT_NAME = 'void_worker';
+const DEFAULT_WORKER_OUT_DIR = 'dist/ssr';
 
 function resolveSandboxSdkEntry(): string {
   return fileURLToPath(import.meta.resolve(SANDBOX_SDK_IMPORT));
@@ -349,6 +351,26 @@ function createCloudflareBuiltinsExternalPlugin(): Plugin {
         build: {
           rollupOptions: {
             external: [CLOUDFLARE_BUILTIN_IMPORT],
+          },
+        },
+      };
+    },
+  };
+}
+
+function createDefaultWorkerEnvironmentPlugin(): Plugin {
+  return {
+    name: 'void:default-worker-environment',
+    config(config) {
+      const currentEnvironment = config.environments?.[DEFAULT_WORKER_ENVIRONMENT_NAME];
+      return {
+        environments: {
+          [DEFAULT_WORKER_ENVIRONMENT_NAME]: {
+            ...currentEnvironment,
+            build: {
+              ...currentEnvironment?.build,
+              outDir: currentEnvironment?.build?.outDir ?? DEFAULT_WORKER_OUT_DIR,
+            },
           },
         },
       };
@@ -1333,6 +1355,7 @@ export function voidPlugin(options?: {
 
   return [
     createCloudflareBuiltinsExternalPlugin(),
+    createDefaultWorkerEnvironmentPlugin(),
     restartPlugin(),
     bindingWatchPlugin,
     envPlugin,
@@ -1369,7 +1392,7 @@ export function voidPlugin(options?: {
       ...inspectorPortOption,
       persistState: { path: options?.persistTo ?? outDir },
       auxiliaryWorkers: options?.auxiliaryWorkers,
-      viteEnvironment: { name: 'ssr' },
+      viteEnvironment: { name: DEFAULT_WORKER_ENVIRONMENT_NAME },
       config: mergeBindings,
     }),
   ];
