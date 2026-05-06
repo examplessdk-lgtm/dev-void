@@ -89,6 +89,35 @@ describe('compileRouteTable', () => {
     expect(code).toContain('export default app');
   });
 
+  it('does not cache route modules in dev so transitive route dependency changes reload', () => {
+    const scan: ScanResult = {
+      routes: [
+        {
+          pattern: '/api/hello',
+          methods: ['GET'],
+          params: [],
+          catchAll: false,
+          env: null,
+          filePath: 'api/hello.ts',
+        },
+      ],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+
+    const code = compileRouteTable(scan, '/routes', '/middleware', '/crons', '/queues', null, {
+      ...testOptions,
+      dev: true,
+    });
+
+    expect(code).toContain('async function _load_api_hello_ts()');
+    expect(code).toContain('return import("/routes/api/hello.ts")');
+    expect(code).not.toContain('let _mod_api_hello_ts');
+    expect(code).not.toContain('if (!_mod_api_hello_ts)');
+  });
+
   it('generates multiple case labels for multi-cron jobs', () => {
     const scan: ScanResult = {
       routes: [],

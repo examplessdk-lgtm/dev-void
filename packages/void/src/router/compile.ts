@@ -1082,10 +1082,16 @@ export function compileRouteTable(
 
     if (!seenFiles.has(route.filePath)) {
       seenFiles.add(route.filePath);
-      lines.push(`let ${varName};`);
+      if (options.dev !== true) {
+        lines.push(`let ${varName};`);
+      }
       lines.push(`async function ${loaderName}() {`);
-      lines.push(`  if (!${varName}) ${varName} = await import(${JSON.stringify(filePath)});`);
-      lines.push(`  return ${varName};`);
+      if (options.dev === true) {
+        lines.push(`  return import(${JSON.stringify(filePath)});`);
+      } else {
+        lines.push(`  if (!${varName}) ${varName} = await import(${JSON.stringify(filePath)});`);
+        lines.push(`  return ${varName};`);
+      }
       lines.push(`}`);
     }
 
