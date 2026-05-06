@@ -8,7 +8,7 @@ import {
   isStagingMode,
 } from './auth.ts';
 import { isExpiredTokenError, PlatformClient } from './client.ts';
-import { cliTitle, createSpinner } from './output.ts';
+import { cliTitle, createSpinner, pc } from './output.ts';
 
 export async function promptForLoginToken(root: string = process.cwd()): Promise<string> {
   const provider = await select({
@@ -29,7 +29,11 @@ export async function promptForLoginToken(root: string = process.cwd()): Promise
   s.start(`Opening browser for ${providerName} login...`);
 
   try {
-    const token = await runLogin(root, provider);
+    const token = await runLogin(root, provider, (url) => {
+      s.message(
+        `Waiting for ${providerName} login. If your browser didn't open, visit:\n${pc.cyan(url)}`,
+      );
+    });
     saveToken(token, root);
     s.stop('Logged in!');
     return token;

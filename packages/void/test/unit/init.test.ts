@@ -1908,7 +1908,7 @@ export default config;
       expect(mockConfirm.mock.calls[1]?.[0]).toMatchObject({
         message: 'Set up your Void project now? (log in + link project)',
       });
-      expect(mockRunLogin).toHaveBeenCalledWith(root, 'github');
+      expect(mockRunLogin).toHaveBeenCalledWith(root, 'github', expect.any(Function));
       expect(mockSaveToken).toHaveBeenCalledWith('token_123', root);
       expect(mockListProjects).toHaveBeenCalledOnce();
       expect(mockCreateProject).toHaveBeenCalledWith('my-live-app');

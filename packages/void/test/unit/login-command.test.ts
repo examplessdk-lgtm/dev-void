@@ -111,7 +111,7 @@ describe('runLoginCommand', () => {
 
     expect(mockRemoveToken).toHaveBeenCalledTimes(1);
     expect(mockWarn).toHaveBeenCalledWith('Stored auth token expired. Starting a new login.');
-    expect(mockRunLogin).toHaveBeenCalledWith(root, 'github');
+    expect(mockRunLogin).toHaveBeenCalledWith(root, 'github', expect.any(Function));
     expect(mockSaveToken).toHaveBeenCalledWith('fresh-token', root);
     expect(mockSpinnerStop).toHaveBeenCalledWith('Logged in!');
   });
@@ -128,7 +128,7 @@ describe('runLoginCommand', () => {
     expect(mockWarn).toHaveBeenCalledWith(
       '`VOID_TOKEN` is invalid or expired. Continuing with a new login.',
     );
-    expect(mockRunLogin).toHaveBeenCalledWith(root, 'github');
+    expect(mockRunLogin).toHaveBeenCalledWith(root, 'github', expect.any(Function));
     expect(mockSaveToken).toHaveBeenCalledWith('fresh-token', root);
     expect(mockOutro).toHaveBeenCalledWith('Token saved. Unset `VOID_TOKEN` to use it.');
   });

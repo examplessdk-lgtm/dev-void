@@ -176,11 +176,42 @@ function page(title: string, message: string): string {
 </head><body><div class="card"><h1>${title}</h1><p>${message}</p></div></body></html>`;
 }
 
+function isWsl(): boolean {
+  return Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
+}
+
+function openBrowser(url: string, exec: typeof import('node:child_process').exec): void {
+  if (process.platform === 'win32') {
+    // `start` treats the first quoted arg as window title, pass empty title
+    exec(`start "" "${url}"`);
+    return;
+  }
+  if (process.platform === 'darwin') {
+    exec(`open "${url}"`);
+    return;
+  }
+  // Linux — including WSL2 where `xdg-open` typically has no usable handler.
+  // Try `wslview` (wslu), then `cmd.exe /c start`, then fall back to `xdg-open`.
+  if (isWsl()) {
+    exec(`wslview "${url}" 2>/dev/null || cmd.exe /c start "" "${url}" 2>/dev/null`);
+    return;
+  }
+  exec(`xdg-open "${url}"`);
+}
+
 /**
  * Start a local HTTP server, open the browser to the platform login page,
  * and wait for the OAuth callback with a JWT token.
+ *
+ * `onUrl` is invoked with the login URL once the local server is listening,
+ * so callers can show the URL to the user as a manual fallback when the
+ * browser fails to open (common on WSL2, headless SSH, Docker, etc.).
  */
-export async function runLogin(root: string = process.cwd(), provider = 'github'): Promise<string> {
+export async function runLogin(
+  root: string = process.cwd(),
+  provider = 'github',
+  onUrl?: (url: string) => void,
+): Promise<string> {
   const http = await import('node:http');
   const { exec } = await import('node:child_process');
 
@@ -239,13 +270,8 @@ export async function runLogin(root: string = process.cwd(), provider = 'github'
       const redirect = `http://localhost:${port}/callback`;
       const loginUrl = `${apiUrl}/auth/login?redirect=${encodeURIComponent(redirect)}&provider=${provider}`;
 
-      // Open browser with platform detection
-      if (process.platform === 'win32') {
-        // `start` treats the first quoted arg as window title, pass empty title
-        exec(`start "" "${loginUrl}"`);
-      } else {
-        exec(`${process.platform === 'darwin' ? 'open' : 'xdg-open'} "${loginUrl}"`);
-      }
+      onUrl?.(loginUrl);
+      openBrowser(loginUrl, exec);
     });
 
     // 5-minute timeout
