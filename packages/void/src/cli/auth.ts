@@ -176,10 +176,6 @@ function page(title: string, message: string): string {
 </head><body><div class="card"><h1>${title}</h1><p>${message}</p></div></body></html>`;
 }
 
-function isWsl(): boolean {
-  return Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
-}
-
 function openBrowser(url: string, exec: typeof import('node:child_process').exec): void {
   if (process.platform === 'win32') {
     // `start` treats the first quoted arg as window title, pass empty title
@@ -192,7 +188,7 @@ function openBrowser(url: string, exec: typeof import('node:child_process').exec
   }
   // Linux — including WSL2 where `xdg-open` typically has no usable handler.
   // Try `wslview` (wslu), then `cmd.exe /c start`, then fall back to `xdg-open`.
-  if (isWsl()) {
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
     exec(`wslview "${url}" 2>/dev/null || cmd.exe /c start "" "${url}" 2>/dev/null`);
     return;
   }
