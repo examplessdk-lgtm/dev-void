@@ -25,8 +25,8 @@
  * Void helpers.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { log, outro } from '@clack/prompts';
+import { join } from 'pathe';
 import { findEnvFile } from '../codegen/env-types.ts';
 import { loadUserEnvFile } from '../host/load-user-env.ts';
 import type { StandardSchemaV1 } from '../standard-schema.ts';

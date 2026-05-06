@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { log } from '@clack/prompts';
+import { join } from 'pathe';
 import { getPackageDir } from './agents.ts';
 import { parseDeployArgs } from './args.ts';
 import { authSubcommands, parseAuthArgs } from './auth-args.ts';

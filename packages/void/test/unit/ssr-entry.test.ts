@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { describe, expect, it, afterEach } from 'vitest';
 import { getSsrServerEntryPath, hasSsrEntry, validateSsrEntry } from '../../src/ssr/entry.ts';
 

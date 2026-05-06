@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname } from 'pathe';
 import type { Plugin, ResolvedConfig } from 'vite';
 import { resolveStaticPageDataBuildOptions, scanPages } from 'void/pages';
 import type { PageScanResult, StaticPageDataBuildOptions } from 'void/pages';
@@ -213,17 +213,9 @@ import { createSSRApp, h, reactive, provide } from "vue";
 import { renderToString } from "vue/server-renderer";
 import { createSsrRouter, idleNavigationState } from "void/pages-client";
 import { renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from "void/pages-head";
+import { serializePageData } from "void/pages-server";
 
 ${generateComponentManifest(scan, pagesDir)}
-
-function serializePageData(pageObj) {
-  return JSON.stringify(pageObj)
-    .replaceAll("<", "\\u003c")
-    .replaceAll(">", "\\u003e")
-    .replaceAll("&", "\\u0026")
-    .replaceAll("\u2028", "\\u2028")
-    .replaceAll("\u2029", "\\u2029");
-}
 
 function patchProps(comp, props) {
   if (comp.__voidPatched) return;

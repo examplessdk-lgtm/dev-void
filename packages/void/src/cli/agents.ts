@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { join } from 'pathe';
 
 export function getPackageDir(): string {
   let dir = join(fileURLToPath(import.meta.url), '..');

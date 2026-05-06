@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { describe, it, expect, afterEach } from 'vitest';
 import { parseHeadersFile } from '../../src/cli/headers.ts';
 

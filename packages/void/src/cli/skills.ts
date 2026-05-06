@@ -6,8 +6,8 @@ import {
   readlinkSync,
   symlinkSync,
 } from 'node:fs';
-import { join, relative } from 'node:path';
 import { log } from '@clack/prompts';
+import { join, relative } from 'pathe';
 import { detectAgents, getPackageDir, type AgentConfig } from './agents.ts';
 
 interface SkillInfo {

@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { discoverSchema } from '../../src/drizzle/discover.ts';
 

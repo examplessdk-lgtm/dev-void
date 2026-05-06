@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import type { SchemaLocation } from '../drizzle/discover.ts';
 
 export const DRIZZLE_OPERATORS =

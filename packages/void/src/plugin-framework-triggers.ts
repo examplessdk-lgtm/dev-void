@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join } from 'pathe';
 import { normalizePath, type Plugin } from 'vite';
 import { scanJobsSync, type JobDefinition } from './crons/scan.ts';
 import { voidWarn } from './log.ts';
@@ -94,10 +94,10 @@ function generateModule(
   devTriggerToken: string,
 ): string {
   const jobImports = jobs
-    .map((j, i) => `import __job${i} from ${JSON.stringify(`${root}/crons/${j.filePath}`)};`)
+    .map((j, i) => `import __job${i} from ${JSON.stringify(join(root, 'crons', j.filePath))};`)
     .join('\n');
   const queueImports = queues
-    .map((q, i) => `import __queue${i} from ${JSON.stringify(`${root}/queues/${q.filePath}`)};`)
+    .map((q, i) => `import __queue${i} from ${JSON.stringify(join(root, 'queues', q.filePath))};`)
     .join('\n');
 
   const jobTable = jobs

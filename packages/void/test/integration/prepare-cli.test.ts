@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const PACKAGE_ROOT = join(import.meta.dirname, '..', '..');

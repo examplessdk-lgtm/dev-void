@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { voidPlugin } from '../../src/index.ts';
 import { inferProjectBindings, detectFramework } from '../../src/plugin-inference.ts';

@@ -15,3 +15,4 @@ export type { HeadDescriptor, HeadConfig } from './head.ts';
 export { generateComponentManifest } from './manifest.ts';
 export { resolveStaticPageDataBuildOptions } from './static-data.ts';
 export type { StaticPageDataBuildOptions } from './static-data.ts';
+export { serializePageData } from './serialize.ts';

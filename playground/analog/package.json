@@ -23,6 +23,7 @@
     "@angular/build": "^21.2.8",
     "@angular/compiler-cli": "^21.2.10",
     "nitro-cloudflare-dev": "^0.2.2",
+    "pathe": "catalog:",
     "typescript": "~6.0.3",
     "vite": "catalog:",
     "void": "workspace:@void-sdk/void@*",

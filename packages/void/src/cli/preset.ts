@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve } from 'pathe';
 import { hasSsrEntry } from '../ssr/entry.ts';
 
 /** Build output conventions for a known SSG (static site generator). */

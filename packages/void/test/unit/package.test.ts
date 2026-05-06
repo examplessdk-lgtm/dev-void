@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import { hash as blake3hash } from 'blake3-jit';
+import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   packageBuild,

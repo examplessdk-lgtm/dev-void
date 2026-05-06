@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { islandsPlugin } from '../../src/plugin-islands.ts';
 

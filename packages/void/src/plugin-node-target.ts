@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { join } from 'pathe';
 import type { Plugin } from 'vite';
 
 /** Imports that require CF bindings and are not available in Node.js mode. */

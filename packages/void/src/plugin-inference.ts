@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { globSync } from 'tinyglobby';
 import { inferBindingsFromSource, mergeBindings, type InferredBindings } from './inference/walk.ts';
 import { getSsrServerEntryPath } from './ssr/entry.ts';

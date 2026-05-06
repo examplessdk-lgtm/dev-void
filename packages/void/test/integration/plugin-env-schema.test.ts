@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { envSchemaPlugin } from '../../src/plugin-env-schema.ts';
 

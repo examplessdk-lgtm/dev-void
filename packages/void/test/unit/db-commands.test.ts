@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
 const mockExecFileSync = vi.hoisted(() => vi.fn());

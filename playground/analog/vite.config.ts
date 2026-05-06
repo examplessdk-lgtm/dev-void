@@ -1,5 +1,5 @@
-import { resolve } from 'node:path';
 import analog from '@analogjs/platform';
+import { resolve } from 'pathe';
 import { defineConfig } from 'vite';
 import { voidPlugin } from 'void';
 

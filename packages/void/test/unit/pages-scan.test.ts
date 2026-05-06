@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { resolveLayoutIds } from '../../src/pages/layout-resolution.ts';
 import {

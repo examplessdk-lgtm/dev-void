@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import spawn from 'cross-spawn';
+import { join } from 'pathe';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { toSlash } from '../../src/shared/utils.ts';
 

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { join } from 'pathe';
 import type { VoidAuthConfig } from '../runtime/auth.ts';
 
 const AUTH_CONFIG_CANDIDATES = [

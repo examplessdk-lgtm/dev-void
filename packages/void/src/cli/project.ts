@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname } from 'pathe';
 
 export interface ProjectConfig {
   projectId: string;

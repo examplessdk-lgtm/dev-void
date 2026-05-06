@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { dirname, join } from 'pathe';
 
 /**
  * Read PnP runtime files at a single directory without walking

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'pathe';
 import { glob } from 'tinyglobby';
 import { normalizePath, type Plugin, type ResolvedConfig, type ViteDevServer } from 'vite';
 import { generateMdTypes } from './codegen/md-types.ts';

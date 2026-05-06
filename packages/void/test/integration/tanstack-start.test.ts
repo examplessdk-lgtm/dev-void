@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import spawn from 'cross-spawn';
+import { join } from 'pathe';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 

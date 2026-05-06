@@ -8,8 +8,8 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { join, relative } from 'pathe';
 import { afterEach, describe, expect, it } from 'vitest';
 import { hasDeploySchemaDrift } from '../../src/cli/deploy.ts';
 import { writeDrizzleConfig } from '../../src/drizzle/config.ts';

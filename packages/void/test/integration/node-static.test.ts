@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { extname, isAbsolute, join, relative, resolve } from 'node:path';
+import { extname, isAbsolute, join, relative, resolve } from 'pathe';
 import { chromium } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { collectPrerenderPathsNode } from '../../src/prerender.ts';

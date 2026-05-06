@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import * as p from '@clack/prompts';
+import { resolve } from 'pathe';
 import pc from 'picocolors';
 import { detectPM, pmExec, pmInstall, run } from './pm.ts';
 

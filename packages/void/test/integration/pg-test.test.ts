@@ -1,8 +1,8 @@
 import { once } from 'node:events';
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import spawn from 'cross-spawn';
+import { join } from 'pathe';
 import { createServer } from 'pglite-server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';

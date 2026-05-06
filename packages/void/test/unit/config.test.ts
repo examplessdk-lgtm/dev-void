@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../src/log', () => ({

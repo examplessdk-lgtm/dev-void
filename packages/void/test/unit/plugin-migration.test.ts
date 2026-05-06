@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vitest';
 import { getMiniflareDatabasePath } from '../../src/migrations/runner.ts';
 import { migrationPlugin } from '../../src/plugin-migration.ts';

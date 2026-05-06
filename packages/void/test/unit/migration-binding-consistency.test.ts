@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join } from 'pathe';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { packageBuild, packageFrameworkBuild } from '../../src/cli/package.ts';
 import type { DeployManifest } from '../../src/cli/types.ts';
