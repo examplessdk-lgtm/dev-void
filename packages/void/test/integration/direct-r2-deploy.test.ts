@@ -601,6 +601,67 @@ describe('direct-to-R2 deploy flow', () => {
     expect(events).toContain('finalize_end');
   });
 
+  it('dedupes presign + R2 PUT by content hash when paths share blake3', async () => {
+    // Two files with identical content → identical blake3. The upload
+    // phase must collapse to ONE presign + ONE PUT, but the final
+    // assetManifest must still list BOTH paths (the platform builds the
+    // per-path serving manifest from it).
+    //
+    // We build a fresh fixture: keep `index.html` and `style.css` from
+    // the default set, plus two extra files with the same identical
+    // content so the duplicates are an explicit pair.
+    const sharedHtml = '<!doctype html><html><body>shared</body></html>\n';
+    const dupeRel = '/about.html';
+    const dupeRel2 = '/contact.html';
+    writeFileSync(join(assetsDir, dupeRel.slice(1)), sharedHtml);
+    writeFileSync(join(assetsDir, dupeRel2.slice(1)), sharedHtml);
+
+    const allPaths = [...Object.keys(fixtureFiles), dupeRel, dupeRel2];
+    const state = installPlatformMocks({ preflightNeeded: allPaths });
+    const client = makeClient();
+
+    await runStaticDeploy(
+      workdir,
+      { projectId: 'proj_t', slug: 'test' },
+      client,
+      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+    );
+
+    // 6 paths total but only 5 unique blake3 values (about.html ==
+    // contact.html). Presign request body MUST contain 5 entries,
+    // R2 PUTs MUST be 5, NOT 6.
+    expect(state.uploadUrlsCalls).toHaveLength(1);
+    const presign = state.uploadUrlsCalls[0] as {
+      assets: Array<{ blake3: string }>;
+    };
+    expect(presign.assets).toHaveLength(5);
+    const presignHashes = new Set(presign.assets.map((a) => a.blake3));
+    expect(presignHashes.size).toBe(5);
+
+    expect(state.r2PutCalls).toHaveLength(5);
+    const r2Hashes = new Set(state.r2PutCalls.map(({ url }) => url.split('/').pop()));
+    expect(r2Hashes.size).toBe(5);
+
+    // The finalize payload's assetManifest still includes BOTH duplicate
+    // paths so the platform-side per-path serving manifest is complete.
+    expect(state.finalizeCalls).toHaveLength(1);
+    const finalizeBody = JSON.parse(state.finalizeCalls[0].init.body as string);
+    expect(finalizeBody.assetManifest[dupeRel]).toBeDefined();
+    expect(finalizeBody.assetManifest[dupeRel2]).toBeDefined();
+    expect(finalizeBody.assetManifest[dupeRel].blake3).toBe(
+      finalizeBody.assetManifest[dupeRel2].blake3,
+    );
+  });
+
   it('failure-mode error message ends with the JSONL log path', async () => {
     installPlatformMocks({
       finalizeEvents: [{ event: 'error', message: 'something broke', step: 'finalize' }],

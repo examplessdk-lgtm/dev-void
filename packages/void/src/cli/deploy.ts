@@ -676,7 +676,14 @@ async function streamDirectR2Deploy(
 
     s.message(`Requesting upload URLs for ${needed.length} asset(s)...`);
 
-    const assetsToUpload = needed.map((path) => {
+    // Dedupe by content hash: identical files (same blake3) get presigned
+    // and PUT once. `assetManifest` still lists every path for the
+    // per-path serving manifest the platform builds in `finalizeDeploy`;
+    // this only collapses the upload phase. Common with prerendered HTML,
+    // duplicated images, and framework-emitted twins.
+    const seenBlake3 = new Set<string>();
+    const uniqueNeeded: Array<string> = [];
+    for (const path of needed) {
       const entry = assetManifest[path];
       if (!entry) {
         // Should never fire — `needed` is preflight's projection of
@@ -684,6 +691,15 @@ async function streamDirectR2Deploy(
         // future preflight regression slips through.
         throw new Error(`internal: preflight returned ${path} but assetManifest has no entry`);
       }
+      if (seenBlake3.has(entry.blake3)) {
+        continue;
+      }
+      seenBlake3.add(entry.blake3);
+      uniqueNeeded.push(path);
+    }
+
+    const assetsToUpload = uniqueNeeded.map((path) => {
+      const entry = assetManifest[path];
       return {
         blake3: entry.blake3,
         md5: entry.md5,
@@ -692,7 +708,10 @@ async function streamDirectR2Deploy(
       };
     });
 
-    cliLog?.info('presign_request_start', { assetCount: assetsToUpload.length });
+    cliLog?.info('presign_request_start', {
+      assetCount: assetsToUpload.length,
+      dedupedFrom: needed.length,
+    });
     const presignStartedAt = Date.now();
     const urls = await client.requestUploadUrls(projectId, assetsToUpload);
     cliLog?.info('presign_request_end', {
@@ -700,9 +719,9 @@ async function streamDirectR2Deploy(
       durationMs: Date.now() - presignStartedAt,
     });
 
-    // Map needed paths → DirectR2PutItem, with the asset bytes pulled from
-    // the in-memory cache (no disk reads here).
-    const items: Array<DirectR2PutItem> = needed.map((path) => {
+    // Map unique-by-hash paths → DirectR2PutItem, with the asset bytes
+    // pulled from the in-memory cache (no disk reads here).
+    const items: Array<DirectR2PutItem> = uniqueNeeded.map((path) => {
       const entry = assetManifest[path];
       const presigned = urls[entry.blake3];
       if (!presigned) {
@@ -713,7 +732,7 @@ async function streamDirectR2Deploy(
       }
       const body = assetFiles.get(path);
       if (!body) {
-        // Defensive — `needed` came from `assetManifest`, which was
+        // Defensive — `uniqueNeeded` came from `assetManifest`, which was
         // constructed from `assetFiles`. If this fires, the upstream
         // collection diverged from preflight.
         throw new Error(
