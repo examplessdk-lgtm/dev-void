@@ -151,7 +151,6 @@ export interface ManifestOnlyDeployPayload {
   commitUrl: string | null;
   gitRef: string | null;
   preflight: 'true' | null;
-  vars?: Record<string, string>;
   /** Worker module bytes keyed by relative path, base64-encoded. */
   workerFiles?: Record<string, string>;
 }
