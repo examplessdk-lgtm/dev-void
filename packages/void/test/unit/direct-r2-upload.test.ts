@@ -1,0 +1,163 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  DirectR2PutError,
+  uploadAssetsToR2,
+  type DirectR2PutItem,
+} from '../../src/cli/direct-r2-upload.ts';
+
+function makeItem(
+  path: string,
+  hash: string,
+  body = Buffer.from(`bytes-${path}`),
+): DirectR2PutItem {
+  return {
+    path,
+    hash,
+    body,
+    url: `https://r2/${hash}`,
+    headers: { 'Content-Md5': 'aGVsbG8=', 'Content-Type': 'text/plain' },
+  };
+}
+
+const cliLog = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+  path: '/tmp/test.jsonl',
+  close: vi.fn(),
+} as const;
+
+beforeEach(() => {
+  cliLog.info.mockReset();
+  cliLog.warn.mockReset();
+  cliLog.error.mockReset();
+  cliLog.debug.mockReset();
+});
+
+describe('uploadAssetsToR2', () => {
+  it('PUTs each item once when all succeed', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    const items = [makeItem('/a.html', 'h1'), makeItem('/b.css', 'h2'), makeItem('/c.js', 'h3')];
+
+    await uploadAssetsToR2(items, cliLog, fetchMock);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const urls = new Set(fetchMock.mock.calls.map(([u]) => u));
+    expect(urls).toEqual(new Set(['https://r2/h1', 'https://r2/h2', 'https://r2/h3']));
+
+    // Per-asset start/end events.
+    const startEvents = cliLog.info.mock.calls.filter(([msg]) => msg === 'r2_put_start');
+    const endEvents = cliLog.info.mock.calls.filter(([msg]) => msg === 'r2_put_end');
+    expect(startEvents).toHaveLength(3);
+    expect(endEvents).toHaveLength(3);
+  });
+
+  it('passes presigned headers verbatim and uses PUT method', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+
+    await uploadAssetsToR2([makeItem('/a.html', 'h1')], cliLog, fetchMock);
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.method).toBe('PUT');
+    expect(init.headers['Content-Md5']).toBe('aGVsbG8=');
+    expect(init.headers['Content-Type']).toBe('text/plain');
+    expect(init.body).toBeInstanceOf(Uint8Array);
+  });
+
+  it('retries 5xx up to 3 times then succeeds', async () => {
+    let attempts = 0;
+    const fetchMock = vi.fn().mockImplementation(() => {
+      attempts++;
+      if (attempts < 3) {
+        return Promise.resolve(new Response('temporary failure', { status: 503 }));
+      }
+      return Promise.resolve(new Response(null, { status: 200 }));
+    });
+
+    await uploadAssetsToR2([makeItem('/x.css', 'h-x')], cliLog, fetchMock);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const retries = cliLog.warn.mock.calls.filter(([msg]) => msg === 'r2_put_retry');
+    expect(retries).toHaveLength(2);
+    expect(retries[0][1]).toMatchObject({ attempt: 1, status: 503 });
+    expect(retries[1][1]).toMatchObject({ attempt: 2, status: 503 });
+  });
+
+  it('throws DirectR2PutError on 4xx without retry', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('SignatureMismatch', { status: 403 }));
+
+    await expect(
+      uploadAssetsToR2([makeItem('/oops.html', 'h-oops')], cliLog, fetchMock),
+    ).rejects.toMatchObject({
+      name: 'DirectR2PutError',
+      status: 403,
+      hash: 'h-oops',
+      path: '/oops.html',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws DirectR2PutError when 5xx exceeds retry budget', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('boom', { status: 500 }));
+
+    await expect(
+      uploadAssetsToR2([makeItem('/x.html', 'h-x')], cliLog, fetchMock),
+    ).rejects.toMatchObject({
+      name: 'DirectR2PutError',
+      status: 500,
+      hash: 'h-x',
+      path: '/x.html',
+    });
+    // 1 initial attempt + 3 retries = 4 calls.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('error message identifies the asset path and hash', () => {
+    const err = new DirectR2PutError(403, 'h-bad', '/foo.html', 'SignatureMismatch');
+    expect(err.message).toContain('/foo.html');
+    expect(err.message).toContain('h-bad');
+    expect(err.message).toContain('403');
+    expect(err.message).toContain('SignatureMismatch');
+  });
+
+  it('respects bounded concurrency (max 10 in flight)', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      // Yield once so concurrent requests stack up.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight--;
+      return new Response(null, { status: 200 });
+    });
+
+    const items = Array.from({ length: 25 }, (_, i) => makeItem(`/f${i}.html`, `h${i}`));
+    await uploadAssetsToR2(items, cliLog, fetchMock);
+
+    expect(fetchMock).toHaveBeenCalledTimes(25);
+    expect(maxInFlight).toBeGreaterThan(1);
+    expect(maxInFlight).toBeLessThanOrEqual(10);
+  });
+
+  it('returns immediately when items is empty', async () => {
+    const fetchMock = vi.fn();
+    await uploadAssetsToR2([], cliLog, fetchMock);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('surfaces network errors with retry exhaustion', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+
+    await expect(
+      uploadAssetsToR2([makeItem('/n.html', 'h-n')], cliLog, fetchMock),
+    ).rejects.toMatchObject({
+      name: 'DirectR2PutError',
+      status: 0,
+      hash: 'h-n',
+      path: '/n.html',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+});

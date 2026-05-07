@@ -153,6 +153,60 @@ export function computeAssetHash(content: Buffer, filePath: string): string {
 }
 
 /**
+ * Map of common asset file extensions → content type. Mirrors
+ * `packages/dispatch/src/static.ts`'s MIME_TYPES table so the value the CLI
+ * declares for the R2 PUT signature matches what dispatch will serve later
+ * (dispatch reads `obj.httpMetadata?.contentType` first, falling back to
+ * path-based inference). Keeping the tables aligned avoids a needless
+ * mismatch where R2-stored content-type and serve-time content-type
+ * disagree on the same asset.
+ */
+const ASSET_MIME_TYPES: Record<string, string> = {
+  html: 'text/html; charset=utf-8',
+  htm: 'text/html; charset=utf-8',
+  css: 'text/css; charset=utf-8',
+  js: 'text/javascript; charset=utf-8',
+  mjs: 'text/javascript; charset=utf-8',
+  json: 'application/json; charset=utf-8',
+  xml: 'application/xml; charset=utf-8',
+  svg: 'image/svg+xml; charset=utf-8',
+  txt: 'text/plain; charset=utf-8',
+  csv: 'text/csv; charset=utf-8',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  ico: 'image/x-icon',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  woff: 'font/woff',
+  woff2: 'font/woff2',
+  ttf: 'font/ttf',
+  otf: 'font/otf',
+  eot: 'application/vnd.ms-fontobject',
+  pdf: 'application/pdf',
+  wasm: 'application/wasm',
+  webmanifest: 'application/manifest+json; charset=utf-8',
+  map: 'application/json; charset=utf-8',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mp3: 'audio/mpeg',
+  ogg: 'audio/ogg',
+};
+
+/**
+ * Resolve the content-type to declare on a direct-to-R2 PUT for `path`.
+ * The value is part of the signed Content-Type header on the presigned
+ * URL — if the bytes are uploaded with a different content-type, R2
+ * rejects the PUT (signature mismatch). Defaults to
+ * `application/octet-stream` for unknown extensions.
+ */
+export function getAssetContentType(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  return ASSET_MIME_TYPES[ext] ?? 'application/octet-stream';
+}
+
+/**
  * Compute MD5 of raw content as a 32-char lowercase hex string.
  *
  * Used as the wire-level upload-integrity primitive on direct-to-R2 PUTs:
@@ -387,32 +441,55 @@ function toSandboxManifest(sandbox: ResolvedSandboxConfig): SandboxManifestMeta 
   };
 }
 
-export async function packageBuild(
-  distDir: string,
-  workerDirName: string,
-  bindings: InferredBindings,
-  migrations?: Array<MigrationFile>,
-  schedules?: Array<ScheduleMeta>,
-  ssr?: boolean,
-  framework?: string,
-  revalidate?: number | Record<string, number>,
-  vars?: Record<string, string>,
-  queues?: Array<QueueMeta>,
-  prerender?: Array<string>,
-  assetConfig?: AssetConfig,
-  options?: PackageOptions,
-  neededAssets?: Set<string> | null,
-  hashedAssetsPrefix?: string,
-  headerRules?: Array<HeaderRule>,
-  redirectRules?: Array<DevRedirectRule>,
-  fallbackRules?: Array<DevRedirectRule>,
-  dialect?: 'sqlite' | 'postgresql',
-  webSockets?: Array<WebSocketRouteDefinition>,
-  onProgress?: ProgressCallback,
-): Promise<FormData> {
-  const formData = new FormData();
+/**
+ * Build a Void-app deploy manifest from the inferred bindings + per-feature
+ * inputs. Pure shape transformation: reads no files, has no I/O. Both the
+ * legacy multipart packager (`packageBuild`) and the direct-to-R2 bundler
+ * (`prepareVoidDeployBundle`) call into this so the manifest is computed
+ * once per deploy and the wire shape stays bit-for-bit identical between
+ * the two paths.
+ */
+export function buildVoidManifest(opts: {
+  bindings: InferredBindings;
+  migrations?: Array<MigrationFile>;
+  schedules?: Array<ScheduleMeta>;
+  ssr?: boolean;
+  framework?: string;
+  revalidate?: number | Record<string, number>;
+  vars?: Record<string, string>;
+  queues?: Array<QueueMeta>;
+  prerender?: Array<string>;
+  assetConfig?: AssetConfig;
+  options?: PackageOptions;
+  hashedAssetsPrefix?: string;
+  headerRules?: Array<HeaderRule>;
+  redirectRules?: Array<DevRedirectRule>;
+  fallbackRules?: Array<DevRedirectRule>;
+  dialect?: 'sqlite' | 'postgresql';
+  webSockets?: Array<WebSocketRouteDefinition>;
+  onProgress?: ProgressCallback;
+}): DeployManifest {
+  const {
+    bindings,
+    migrations,
+    schedules,
+    ssr,
+    framework,
+    revalidate,
+    vars,
+    queues,
+    prerender,
+    assetConfig,
+    options,
+    hashedAssetsPrefix,
+    headerRules,
+    redirectRules,
+    fallbackRules,
+    dialect,
+    webSockets,
+    onProgress,
+  } = opts;
 
-  // Build manifest from inferred bindings
   const manifest: DeployManifest = { version: 3, assetManifestVersion: 2, bindings: {} };
   if (bindings.needsAuth) {
     manifest.auth = true;
@@ -444,18 +521,11 @@ export async function packageBuild(
     });
   }
 
-  // Add migration metadata to manifest + SQL content as FormData entries
   if (migrations && migrations.length > 0) {
     manifest.migrations = {
       dialect: dialect ?? 'sqlite',
       pending: migrations.length,
     };
-    onProgress?.(
-      `Packaging ${migrations.length} migration${migrations.length === 1 ? '' : 's'}...`,
-    );
-    for (const m of migrations) {
-      formData.append(`migration:${m.name}`, new Blob([m.sql]), m.name);
-    }
   }
 
   if (schedules && schedules.length > 0) {
@@ -503,13 +573,6 @@ export async function packageBuild(
     resolvedAssetConfig = { ...assetConfig, ...chain.assetConfig };
     resolvedFallbackRules = chain.fallbackRules;
   } else if (fallbackRules && fallbackRules.length > 0) {
-    // Fallbacks ship for any app type, but the SPA-shell chain (appending
-    // `/* -> /index.html`) only runs when `not_found_handling` is
-    // `single-page-application`. On SSR / Void / framework apps, user
-    // fallbacks still fire post-lookup, but no SPA shell is synthesised —
-    // callers relying on the rules to provide an `/index.html` safety net
-    // will hit the platform's default 404 on unmatched paths. Warn so the
-    // expectation mismatch surfaces at build time.
     const msg =
       `routing.fallbacks is set but appType is not "spa"; fallbacks will be applied, ` +
       `but no "/* -> /index.html" SPA shell fallback is synthesised — unmatched paths fall through to the platform 404.`;
@@ -556,46 +619,146 @@ export async function packageBuild(
     manifest.websocket = websocketManifest;
   }
 
-  formData.append('manifest', JSON.stringify(manifest));
+  return manifest;
+}
 
-  // Add worker files
-  onProgress?.('Packaging worker files...');
-  const workerDir = join(distDir, workerDirName);
-  const workerFiles = collectFiles(workerDir);
-  for (const filePath of workerFiles) {
+/**
+ * Read every worker module under `workerDir` once and return them as a map
+ * keyed by relative path. Skipped files (build metadata, wrangler config,
+ * non-module extensions) are filtered out by `isWorkerModule`. Reads each
+ * file from disk exactly once — buffer threading downstream is the caller's
+ * responsibility.
+ */
+export function collectWorkerFiles(workerDir: string): Map<string, Buffer> {
+  const out = new Map<string, Buffer>();
+  let workerPaths: Array<string>;
+  try {
+    workerPaths = collectFiles(workerDir);
+  } catch (err) {
+    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return out;
+    }
+    throw err;
+  }
+  for (const filePath of workerPaths) {
     const relativePath = toSlash(relative(workerDir, filePath));
     if (!isWorkerModule(relativePath)) {
       continue;
     }
-    const content = readFileSync(filePath);
-    formData.append(`worker:${relativePath}`, new Blob([content]), relativePath);
+    out.set(relativePath, readFileSync(filePath));
+  }
+  return out;
+}
+
+export async function packageBuild(
+  distDir: string,
+  workerDirName: string,
+  bindings: InferredBindings,
+  migrations?: Array<MigrationFile>,
+  schedules?: Array<ScheduleMeta>,
+  ssr?: boolean,
+  framework?: string,
+  revalidate?: number | Record<string, number>,
+  vars?: Record<string, string>,
+  queues?: Array<QueueMeta>,
+  prerender?: Array<string>,
+  assetConfig?: AssetConfig,
+  options?: PackageOptions,
+  neededAssets?: Set<string> | null,
+  hashedAssetsPrefix?: string,
+  headerRules?: Array<HeaderRule>,
+  redirectRules?: Array<DevRedirectRule>,
+  fallbackRules?: Array<DevRedirectRule>,
+  dialect?: 'sqlite' | 'postgresql',
+  webSockets?: Array<WebSocketRouteDefinition>,
+  onProgress?: ProgressCallback,
+  /**
+   * Pre-collected asset bytes from `collectAndHashAssets`. When provided,
+   * this function uses these buffers directly instead of re-reading files
+   * from disk. Eliminates the chain double-read between hashing and
+   * packaging (Codex Finding #2 in design doc 0068 review).
+   *
+   * When omitted, falls back to reading the client directory directly —
+   * this preserves backward compatibility for existing test callers.
+   */
+  assetFiles?: Map<string, Buffer>,
+): Promise<FormData> {
+  const formData = new FormData();
+
+  const manifest = buildVoidManifest({
+    bindings,
+    migrations,
+    schedules,
+    ssr,
+    framework,
+    revalidate,
+    vars,
+    queues,
+    prerender,
+    assetConfig,
+    options,
+    hashedAssetsPrefix,
+    headerRules,
+    redirectRules,
+    fallbackRules,
+    dialect,
+    webSockets,
+    onProgress,
+  });
+
+  if (migrations && migrations.length > 0) {
+    onProgress?.(
+      `Packaging ${migrations.length} migration${migrations.length === 1 ? '' : 's'}...`,
+    );
+    for (const m of migrations) {
+      formData.append(`migration:${m.name}`, new Blob([m.sql]), m.name);
+    }
   }
 
-  // Add client assets
-  const clientDir = join(distDir, 'client');
-  try {
-    const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(clientDir);
-    const clientFiles = collectFiles(clientDir);
-    let processed = 0;
-    for (const filePath of clientFiles) {
-      processed++;
-      await tickProgress(processed, clientFiles.length, onProgress, 'Packaging assets');
-      const relativePath = toSlash(relative(clientDir, filePath));
-      if (isIgnored('/' + relativePath)) {
-        continue;
+  formData.append('manifest', JSON.stringify(manifest));
+
+  // Worker files (read once via the shared helper).
+  onProgress?.('Packaging worker files...');
+  const workerDir = join(distDir, workerDirName);
+  for (const [relativePath, content] of collectWorkerFiles(workerDir)) {
+    formData.append(`worker:${relativePath}`, new Blob([new Uint8Array(content)]), relativePath);
+  }
+
+  // Client assets — prefer the pre-collected buffer cache from
+  // `collectAndHashAssets`. Falls back to disk reads only when no cache
+  // was supplied (preserves legacy callers / tests).
+  if (assetFiles) {
+    appendAssetsFromCache(formData, assetFiles, neededAssets ?? null);
+  } else {
+    const clientDir = join(distDir, 'client');
+    try {
+      const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(clientDir);
+      const clientFiles = collectFiles(clientDir);
+      let processed = 0;
+      for (const filePath of clientFiles) {
+        processed++;
+        await tickProgress(processed, clientFiles.length, onProgress, 'Packaging assets');
+        const relativePath = toSlash(relative(clientDir, filePath));
+        if (isIgnored('/' + relativePath)) {
+          continue;
+        }
+        checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
+        if (neededAssets && !neededAssets.has('/' + relativePath)) {
+          continue;
+        }
+        const content = readFileSync(filePath);
+        formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
       }
-      checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
-      if (neededAssets && !neededAssets.has('/' + relativePath)) {
-        continue;
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        'code' in err &&
+        (err as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        // No client directory — API-only project
+      } else {
+        throw err;
       }
-      const content = readFileSync(filePath);
-      formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
-    }
-  } catch (err) {
-    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
-      // No client directory — API-only project
-    } else {
-      throw err;
     }
   }
 
@@ -607,20 +770,42 @@ export async function packageBuild(
 }
 
 /**
- * Package a static build (no worker) into a FormData ready for upload.
+ * Append asset entries to FormData from the in-memory buffer cache. Mirrors
+ * the legacy disk-read loop but consumes pre-hashed bytes — the same buffers
+ * `collectAndHashAssets` computed BLAKE3+MD5 over — so the deploy chain
+ * reads each asset file from disk exactly once end-to-end.
+ *
+ * `_worker.js` safety guards already ran in `collectAndHashAssets` (which
+ * walks the same directory with the same ignore filter), so callers that
+ * feed buffers from there don't need to re-check here.
  */
-export async function packageStaticBuild(
-  outputDir: string,
-  appType: 'spa' | 'static',
-  neededAssets?: Set<string> | null,
-  hashedAssetsPrefix?: string,
-  headerRules?: Array<HeaderRule>,
-  redirectRules?: Array<DevRedirectRule>,
-  fallbackRules?: Array<DevRedirectRule>,
-  onProgress?: ProgressCallback,
-): Promise<FormData> {
-  const formData = new FormData();
+function appendAssetsFromCache(
+  formData: FormData,
+  assetFiles: Map<string, Buffer>,
+  neededAssets: Set<string> | null,
+): void {
+  for (const [absPath, content] of assetFiles) {
+    if (neededAssets && !neededAssets.has(absPath)) {
+      continue;
+    }
+    const key = absPath.startsWith('/') ? absPath.slice(1) : absPath;
+    formData.append(`asset:${key}`, new Blob([new Uint8Array(content)]), key);
+  }
+}
 
+/**
+ * Build a static-deploy manifest. Pure shape transformation — no I/O.
+ * Shared between the legacy multipart packager (`packageStaticBuild`) and
+ * the direct-to-R2 bundler (`prepareStaticDeployBundle`).
+ */
+export function buildStaticManifest(opts: {
+  appType: 'spa' | 'static';
+  hashedAssetsPrefix?: string;
+  headerRules?: Array<HeaderRule>;
+  redirectRules?: Array<DevRedirectRule>;
+  fallbackRules?: Array<DevRedirectRule>;
+}): DeployManifest {
+  const { appType, hashedAssetsPrefix, headerRules, redirectRules, fallbackRules } = opts;
   const { assetConfig, fallbackRules: resolvedFallbackRules } = resolveSpaFallbackChain(
     appType,
     fallbackRules,
@@ -650,24 +835,60 @@ export async function packageStaticBuild(
     manifest.fallbackRules = stripDevOnlyRuleFields(resolvedFallbackRules);
   }
 
+  return manifest;
+}
+
+/**
+ * Package a static build (no worker) into a FormData ready for upload.
+ */
+export async function packageStaticBuild(
+  outputDir: string,
+  appType: 'spa' | 'static',
+  neededAssets?: Set<string> | null,
+  hashedAssetsPrefix?: string,
+  headerRules?: Array<HeaderRule>,
+  redirectRules?: Array<DevRedirectRule>,
+  fallbackRules?: Array<DevRedirectRule>,
+  onProgress?: ProgressCallback,
+  /**
+   * Pre-collected asset bytes from `collectAndHashAssets`. When provided,
+   * skips the directory walk and re-reads — eliminates the chain
+   * double-read flagged in design doc 0068 review.
+   */
+  assetFiles?: Map<string, Buffer>,
+): Promise<FormData> {
+  const formData = new FormData();
+
+  const manifest = buildStaticManifest({
+    appType,
+    hashedAssetsPrefix,
+    headerRules,
+    redirectRules,
+    fallbackRules,
+  });
+
   formData.append('manifest', JSON.stringify(manifest));
 
-  const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(outputDir);
-  const files = collectFiles(outputDir);
-  let processed = 0;
-  for (const filePath of files) {
-    processed++;
-    await tickProgress(processed, files.length, onProgress, 'Packaging assets');
-    const relativePath = toSlash(relative(outputDir, filePath));
-    if (isIgnored('/' + relativePath)) {
-      continue;
+  if (assetFiles) {
+    appendAssetsFromCache(formData, assetFiles, neededAssets ?? null);
+  } else {
+    const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(outputDir);
+    const files = collectFiles(outputDir);
+    let processed = 0;
+    for (const filePath of files) {
+      processed++;
+      await tickProgress(processed, files.length, onProgress, 'Packaging assets');
+      const relativePath = toSlash(relative(outputDir, filePath));
+      if (isIgnored('/' + relativePath)) {
+        continue;
+      }
+      checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
+      if (neededAssets && !neededAssets.has('/' + relativePath)) {
+        continue;
+      }
+      const content = readFileSync(filePath);
+      formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
     }
-    checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
-    if (neededAssets && !neededAssets.has('/' + relativePath)) {
-      continue;
-    }
-    const content = readFileSync(filePath);
-    formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
   }
 
   if (neededAssets) {
@@ -685,11 +906,14 @@ export async function packageStaticBuild(
  * inside the assets directory (SvelteKit, Astro). Worker files are excluded
  * from asset collection when directories overlap.
  */
-export async function packageFrameworkBuild(opts: {
+/**
+ * Build a framework-deploy manifest. Pure shape transformation — no I/O.
+ * Shared between the legacy multipart packager (`packageFrameworkBuild`)
+ * and the direct-to-R2 bundler (`prepareFrameworkDeployBundle`).
+ */
+export function buildFrameworkManifest(opts: {
   frameworkName: string;
-  workerDir: string;
   workerMain: string;
-  assetsDir: string;
   bindings: InferredBindings;
   migrations?: Array<MigrationFile>;
   schedules?: Array<ScheduleMeta>;
@@ -700,20 +924,15 @@ export async function packageFrameworkBuild(opts: {
   assetConfig?: AssetConfig;
   vars?: Record<string, string>;
   packageOptions?: PackageOptions;
-  neededAssets?: Set<string> | null;
   hashedAssetsPrefix?: string;
   headerRules?: Array<HeaderRule>;
   redirectRules?: Array<DevRedirectRule>;
   fallbackRules?: Array<DevRedirectRule>;
   dialect?: 'sqlite' | 'postgresql';
   webSockets?: Array<WebSocketRouteDefinition>;
-  assetIgnorePatterns?: Array<string>;
-  onProgress?: ProgressCallback;
-}): Promise<FormData> {
-  const formData = new FormData();
+}): DeployManifest {
   const po = opts.packageOptions;
 
-  // Build manifest
   const manifest: DeployManifest = { version: 3, assetManifestVersion: 2, bindings: {} };
   const hasMigrations = opts.migrations && opts.migrations.length > 0;
   if (opts.bindings.needsD1 || opts.bindings.needsAuth || hasMigrations) {
@@ -738,12 +957,6 @@ export async function packageFrameworkBuild(opts: {
       dialect: opts.dialect ?? 'sqlite',
       pending: opts.migrations.length,
     };
-    opts.onProgress?.(
-      `Packaging ${opts.migrations.length} migration${opts.migrations.length === 1 ? '' : 's'}...`,
-    );
-    for (const m of opts.migrations) {
-      formData.append(`migration:${m.name}`, new Blob([m.sql]), m.name);
-    }
   }
 
   if (opts.schedules && opts.schedules.length > 0) {
@@ -800,7 +1013,60 @@ export async function packageFrameworkBuild(opts: {
     manifest.websocket = websocketManifest;
   }
 
+  return manifest;
+}
+
+export async function packageFrameworkBuild(opts: {
+  frameworkName: string;
+  workerDir: string;
+  workerMain: string;
+  assetsDir: string;
+  bindings: InferredBindings;
+  migrations?: Array<MigrationFile>;
+  schedules?: Array<ScheduleMeta>;
+  queues?: Array<QueueMeta>;
+  revalidate?: number | Record<string, number>;
+  revalidateQueryAllowlist?: Record<string, Array<string>>;
+  prerender?: Array<string>;
+  assetConfig?: AssetConfig;
+  vars?: Record<string, string>;
+  packageOptions?: PackageOptions;
+  neededAssets?: Set<string> | null;
+  hashedAssetsPrefix?: string;
+  headerRules?: Array<HeaderRule>;
+  redirectRules?: Array<DevRedirectRule>;
+  fallbackRules?: Array<DevRedirectRule>;
+  dialect?: 'sqlite' | 'postgresql';
+  webSockets?: Array<WebSocketRouteDefinition>;
+  assetIgnorePatterns?: Array<string>;
+  onProgress?: ProgressCallback;
+  /**
+   * Pre-collected asset bytes from `collectAndHashAssets`. When provided,
+   * skips the assets directory walk and re-reads — eliminates the chain
+   * double-read flagged in design doc 0068 review.
+   */
+  assetFiles?: Map<string, Buffer>;
+}): Promise<FormData> {
+  const formData = new FormData();
+
+  const manifest = buildFrameworkManifest(opts);
+
+  if (opts.migrations && opts.migrations.length > 0) {
+    opts.onProgress?.(
+      `Packaging ${opts.migrations.length} migration${opts.migrations.length === 1 ? '' : 's'}...`,
+    );
+    for (const m of opts.migrations) {
+      formData.append(`migration:${m.name}`, new Blob([m.sql]), m.name);
+    }
+  }
+
   formData.append('manifest', JSON.stringify(manifest));
+
+  // Worker files (read once via the shared helper).
+  opts.onProgress?.('Packaging worker files...');
+  for (const [relativePath, content] of collectWorkerFiles(opts.workerDir)) {
+    formData.append(`worker:${relativePath}`, new Blob([new Uint8Array(content)]), relativePath);
+  }
 
   // Collect worker files and asset files, handling directory overlap
   const workerDirNorm = opts.workerDir.replace(/\\/g, '/');
@@ -808,49 +1074,44 @@ export async function packageFrameworkBuild(opts: {
   const isOverlap =
     workerDirNorm.startsWith(assetsDirNorm + '/') || workerDirNorm === assetsDirNorm;
 
-  // Worker files
-  opts.onProgress?.('Packaging worker files...');
-  const workerFiles = collectFiles(opts.workerDir);
-  for (const filePath of workerFiles) {
-    const relativePath = toSlash(relative(opts.workerDir, filePath));
-    if (!isWorkerModule(relativePath)) {
-      continue;
-    }
-    const content = readFileSync(filePath);
-    formData.append(`worker:${relativePath}`, new Blob([content]), relativePath);
-  }
-
-  // Asset files
-  try {
-    const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(
-      opts.assetsDir,
-      opts.assetIgnorePatterns,
-    );
-    const assetFiles = collectFiles(opts.assetsDir);
-    let processed = 0;
-    for (const filePath of assetFiles) {
-      processed++;
-      await tickProgress(processed, assetFiles.length, opts.onProgress, 'Packaging assets');
-      // Skip worker files when workerDir overlaps with assetsDir
-      if (isOverlap && filePath.replace(/\\/g, '/').startsWith(workerDirNorm)) {
-        continue;
+  if (opts.assetFiles) {
+    appendAssetsFromCache(formData, opts.assetFiles, opts.neededAssets ?? null);
+  } else {
+    try {
+      const { isIgnored, assetsIgnoreFilePresent } = createAssetsIgnoreFunction(
+        opts.assetsDir,
+        opts.assetIgnorePatterns,
+      );
+      const diskFiles = collectFiles(opts.assetsDir);
+      let processed = 0;
+      for (const filePath of diskFiles) {
+        processed++;
+        await tickProgress(processed, diskFiles.length, opts.onProgress, 'Packaging assets');
+        // Skip worker files when workerDir overlaps with assetsDir
+        if (isOverlap && filePath.replace(/\\/g, '/').startsWith(workerDirNorm)) {
+          continue;
+        }
+        const relativePath = toSlash(relative(opts.assetsDir, filePath));
+        if (isIgnored('/' + relativePath)) {
+          continue;
+        }
+        checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
+        if (opts.neededAssets && !opts.neededAssets.has('/' + relativePath)) {
+          continue;
+        }
+        const content = readFileSync(filePath);
+        formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
       }
-      const relativePath = toSlash(relative(opts.assetsDir, filePath));
-      if (isIgnored('/' + relativePath)) {
-        continue;
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        'code' in err &&
+        (err as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        // No assets directory
+      } else {
+        throw err;
       }
-      checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
-      if (opts.neededAssets && !opts.neededAssets.has('/' + relativePath)) {
-        continue;
-      }
-      const content = readFileSync(filePath);
-      formData.append(`asset:${relativePath}`, new Blob([content]), relativePath);
-    }
-  } catch (err) {
-    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
-      // No assets directory
-    } else {
-      throw err;
     }
   }
 

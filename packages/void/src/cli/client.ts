@@ -2,7 +2,8 @@ import { cfAccessHeaders } from '../shared/cf-access.ts';
 import { getApiUrl } from './auth.ts';
 import { ensureCloudflaredToken } from './cf-access.ts';
 import type { CliLogger } from './log-file.ts';
-import type { DeployEvent } from './types.ts';
+import type { AssetManifestEntry } from './package.ts';
+import type { DeployEvent, DeployManifest } from './types.ts';
 
 export type PlatformErrorPayload = {
   error?: string;
@@ -115,6 +116,44 @@ export interface DomainResponse {
 export interface DomainStatusResponse extends DomainResponse {
   ssl_status: string;
   verification_errors?: Array<string>;
+}
+
+/**
+ * Asset declaration shape for `POST /:id/deploy/upload-urls`. Each entry
+ * carries both hashes the platform needs:
+ *   - `blake3` is the storage key (`assets/${projectId}/${blake3}`)
+ *   - `md5` is the wire-level upload-integrity primitive — the platform
+ *     bakes it into the presigned PUT URL as a SIGNED `Content-Md5`
+ *     header so R2 enforces integrity at write time.
+ */
+export interface UploadUrlAssetRequest {
+  blake3: string;
+  md5: string;
+  size: number;
+  contentType: string;
+}
+
+/**
+ * Manifest-only (direct-to-R2) deploy payload. Sent as JSON to
+ * `POST /:id/deploy` with `Content-Type: application/json`. Mirrors the
+ * `handleManifestOnlyDeploy` server contract documented in design doc 0068.
+ *
+ * Asset bytes are NOT carried in this payload — they were uploaded directly
+ * to R2 via presigned PUT URLs before this call. The server verifies each
+ * declared asset key exists in R2 (parallel HEAD) before flipping routing.
+ */
+export interface ManifestOnlyDeployPayload {
+  manifest: DeployManifest;
+  assetManifest: Record<string, AssetManifestEntry>;
+  source: string | null;
+  commit: string | null;
+  repositoryUrl: string | null;
+  commitUrl: string | null;
+  gitRef: string | null;
+  preflight: 'true' | null;
+  vars?: Record<string, string>;
+  /** Worker module bytes keyed by relative path, base64-encoded. */
+  workerFiles?: Record<string, string>;
 }
 
 /**
@@ -288,19 +327,91 @@ export class PlatformClient {
   }
 
   async *deploy(projectId: string, formData: FormData): AsyncGenerator<DeployEvent> {
-    const cliLog = this.cliLog;
     const url = `${this.baseUrl}/projects/${projectId}/deploy`;
+    yield* this.streamDeployRequest(url, {
+      method: 'POST',
+      headers: {
+        ...this.authHeaders,
+      },
+      body: formData,
+    });
+  }
+
+  /**
+   * Request presigned R2 PUT URLs for a batch of assets. Each entry carries
+   * both `blake3` (storage key) and `md5` (wire-level integrity primitive)
+   * so the platform can sign a PUT URL that R2 enforces against the bytes
+   * the CLI is about to upload. See design doc 0068 for the full protocol.
+   */
+  async requestUploadUrls(
+    projectId: string,
+    assets: Array<UploadUrlAssetRequest>,
+  ): Promise<Record<string, { url: string; headers: Record<string, string> }>> {
+    const url = `${this.baseUrl}/projects/${projectId}/deploy/upload-urls`;
+    this.cliLog?.info('upload_urls_post', { url, assetCount: assets.length });
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.authHeaders,
+      },
+      body: JSON.stringify({ assets }),
+    });
+
+    const cfRay = res.headers.get('cf-ray');
+    const cfCacheStatus = res.headers.get('cf-cache-status');
+    this.cliLog?.info('upload_urls_response', {
+      status: res.status,
+      cfRay,
+      cfCacheStatus,
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to request upload URLs', res);
+    }
+
+    const json = (await res.json()) as {
+      urls: Record<string, { url: string; headers: Record<string, string> }>;
+    };
+    return json.urls;
+  }
+
+  /**
+   * Manifest-only (direct-to-R2) deploy. POSTs a JSON body containing the
+   * deploy manifest, asset manifest (no asset bytes), and any worker module
+   * bytes (base64-encoded). Streams the same NDJSON response shape as the
+   * legacy multipart `deploy(...)` path, so the caller can apply events with
+   * the existing `applyDeployEvent` machinery.
+   */
+  async *finalizeDeploy(
+    projectId: string,
+    payload: ManifestOnlyDeployPayload,
+  ): AsyncGenerator<DeployEvent> {
+    const url = `${this.baseUrl}/projects/${projectId}/deploy`;
+    yield* this.streamDeployRequest(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.authHeaders,
+      },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * Shared POST + NDJSON-stream-reader for the multipart `deploy()` and the
+   * JSON-mode `finalizeDeploy()` paths. Identical wire framing on both, so
+   * the loop is factored here once. Captures `cf-ray` + `cf-cache-status`
+   * for postmortem correlation.
+   */
+  private async *streamDeployRequest(url: string, init: RequestInit): AsyncGenerator<DeployEvent> {
+    const cliLog = this.cliLog;
     cliLog?.info('deploy_post', { url });
 
     let res: Response;
     try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          ...this.authHeaders,
-        },
-        body: formData,
-      });
+      res = await fetch(url, init);
     } catch (err) {
       cliLog?.error('deploy_fetch_rejected', err, { url });
       throw err;

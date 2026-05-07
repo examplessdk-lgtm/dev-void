@@ -51,13 +51,14 @@ import {
 import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env.ts';
 import { validateSsrEntry } from '../ssr/entry.ts';
 import { getToken, getTokenSource } from './auth.ts';
-import { isExpiredTokenError, PlatformClient } from './client.ts';
+import { isExpiredTokenError, PlatformClient, type ManifestOnlyDeployPayload } from './client.ts';
 import { promptAndCreateProject } from './create-project.ts';
 import {
   formatConnectionLostMessage,
   formatDeployFailureMessage,
   formatStreamDeployError,
 } from './deploy-errors.ts';
+import { uploadAssetsToR2, type DirectR2PutItem } from './direct-r2-upload.ts';
 import {
   fetchRemoteSecretNames,
   formatEnvReport,
@@ -74,6 +75,12 @@ import {
   packageStaticBuild,
   packageFrameworkBuild,
   collectAndHashAssets,
+  buildVoidManifest,
+  buildStaticManifest,
+  buildFrameworkManifest,
+  collectWorkerFiles,
+  getAssetContentType,
+  type AssetManifestEntry,
 } from './package.ts';
 import {
   detectPreset,
@@ -86,7 +93,13 @@ import {
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project.ts';
 import { promptProjectSelection, promptProjectSetupAction } from './prompt.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
-import type { AssetConfig, DeployEvent, DevRedirectRule, HeaderRule } from './types.ts';
+import type {
+  AssetConfig,
+  DeployEvent,
+  DeployManifest,
+  DevRedirectRule,
+  HeaderRule,
+} from './types.ts';
 import { readWranglerCompat, type WranglerCompat } from './wrangler.ts';
 import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper.ts';
 
@@ -99,6 +112,13 @@ export interface RunDeployOptions {
   spa?: boolean;
   skipBuild?: boolean;
   debug?: boolean;
+  /**
+   * When true, the CLI uses the legacy multipart `POST /:id/deploy` upload
+   * path instead of the default direct-to-R2 + JSON-mode finalize flow.
+   * Kept as an escape hatch for one release while the new path beds in;
+   * scheduled for removal once direct-to-R2 is proven on production traffic.
+   */
+  legacyUpload?: boolean;
 }
 
 type DeployDoneEvent = Extract<DeployEvent, { event: 'done' }>;
@@ -301,6 +321,7 @@ async function runDeployInner(
             options?.skipBuild,
             gitMetadata,
             cliLog,
+            options?.legacyUpload,
           );
         } else {
           // Class A: preset is optional (e.g. vinext probes at runtime)
@@ -313,6 +334,7 @@ async function runDeployInner(
             gitMetadata,
             detected,
             cliLog,
+            options?.legacyUpload,
           );
         }
         return;
@@ -371,6 +393,7 @@ async function runDeployInner(
           undefined,
           voidConfig.routing,
           cliLog,
+          options?.legacyUpload,
         );
       } else {
         await runFullDeploy(
@@ -382,6 +405,7 @@ async function runDeployInner(
           gitMetadata,
           undefined,
           cliLog,
+          options?.legacyUpload,
         );
       }
       return;
@@ -510,10 +534,16 @@ export function applyDeployEvent(event: DeployEvent, s: SpinnerResult): ApplyDep
   return { kind: 'continue' };
 }
 
-async function streamDeploy(
-  client: PlatformClient,
+/**
+ * Apply a streamed `DeployEvent` iterator to the spinner / cliLog and
+ * resolve with the terminal `done` event (or throw on terminal error /
+ * connection loss). Path-agnostic: the legacy multipart deploy and the
+ * new direct-to-R2 finalize call both produce the same NDJSON event
+ * stream, so this loop is shared between them.
+ */
+async function streamDeployEvents(
   projectId: string,
-  formData: FormData,
+  events: AsyncGenerator<DeployEvent>,
   s: SpinnerResult,
   cliLog?: CliLogger,
 ): Promise<StreamDeployResult> {
@@ -541,7 +571,7 @@ async function streamDeploy(
   process.once('SIGINT', onSigint);
 
   try {
-    for await (const event of client.deploy(projectId, formData)) {
+    for await (const event of events) {
       const result = applyDeployEvent(event, s);
       if (result.kind === 'start') {
         deploymentId = result.deploymentId;
@@ -584,6 +614,147 @@ async function streamDeploy(
   throw new Error(formatConnectionLostMessage(deploymentId, cliLog?.path ?? null));
 }
 
+async function streamDeploy(
+  client: PlatformClient,
+  projectId: string,
+  formData: FormData,
+  s: SpinnerResult,
+  cliLog?: CliLogger,
+): Promise<StreamDeployResult> {
+  return streamDeployEvents(projectId, client.deploy(projectId, formData), s, cliLog);
+}
+
+/**
+ * Direct-to-R2 deploy orchestration. Issues presigned PUT URLs for each
+ * needed asset, uploads bytes directly to R2, then calls the manifest-only
+ * deploy endpoint to finalize. Returns the same `StreamDeployResult` shape
+ * as the legacy multipart `streamDeploy` so callers downstream stay
+ * path-agnostic.
+ *
+ * Key invariants:
+ *   1. No needed assets → skip presign + R2 PUT phase entirely (saves a
+ *      round-trip when every asset was already present from a prior deploy).
+ *   2. Asset bytes come exclusively from the in-memory `assetFiles` cache
+ *      computed by `collectAndHashAssets` — files are NEVER re-read from
+ *      disk during this flow (Codex Finding #2 in design doc 0068 review).
+ *   3. R2 PUT failures (4xx, 5xx, network) are surfaced with the asset
+ *      path + hash so the user can correlate against the JSONL trace.
+ */
+async function streamDirectR2Deploy(
+  client: PlatformClient,
+  projectId: string,
+  manifest: DeployManifest,
+  assetManifest: Record<string, AssetManifestEntry>,
+  assetFiles: Map<string, Buffer>,
+  needed: Array<string>,
+  gitMetadata: GitDeployMetadata | undefined,
+  preflightUsed: boolean,
+  workerFiles: Map<string, Buffer> | undefined,
+  s: SpinnerResult,
+  cliLog?: CliLogger,
+): Promise<StreamDeployResult> {
+  if (needed.length > 0) {
+    s.message(`Requesting upload URLs for ${needed.length} asset(s)...`);
+
+    const assetsToUpload = needed.map((path) => {
+      const entry = assetManifest[path];
+      if (!entry) {
+        // Should never fire — `needed` is preflight's projection of
+        // assetManifest. Defensive throw makes the cause obvious if a
+        // future preflight regression slips through.
+        throw new Error(`internal: preflight returned ${path} but assetManifest has no entry`);
+      }
+      return {
+        blake3: entry.blake3,
+        md5: entry.md5,
+        size: entry.size,
+        contentType: getAssetContentType(path),
+      };
+    });
+
+    cliLog?.info('presign_request_start', { assetCount: assetsToUpload.length });
+    const presignStartedAt = Date.now();
+    const urls = await client.requestUploadUrls(projectId, assetsToUpload);
+    cliLog?.info('presign_request_end', {
+      urlsReceived: Object.keys(urls).length,
+      durationMs: Date.now() - presignStartedAt,
+    });
+
+    // Map needed paths → DirectR2PutItem, with the asset bytes pulled from
+    // the in-memory cache (no disk reads here).
+    const items: Array<DirectR2PutItem> = needed.map((path) => {
+      const entry = assetManifest[path];
+      const presigned = urls[entry.blake3];
+      if (!presigned) {
+        throw new Error(
+          `Platform did not return an upload URL for ${path} (blake3=${entry.blake3}). ` +
+            `This indicates a server-side bug or a stale client.`,
+        );
+      }
+      const body = assetFiles.get(path);
+      if (!body) {
+        // Defensive — `needed` came from `assetManifest`, which was
+        // constructed from `assetFiles`. If this fires, the upstream
+        // collection diverged from preflight.
+        throw new Error(
+          `internal: asset ${path} declared in manifest but missing from buffer cache`,
+        );
+      }
+      return {
+        path,
+        hash: entry.blake3,
+        body,
+        url: presigned.url,
+        headers: presigned.headers,
+      };
+    });
+
+    s.message(`Uploading ${items.length} asset(s) to R2...`);
+    await uploadAssetsToR2(items, cliLog);
+  } else {
+    cliLog?.info('presign_skipped', { reason: 'no_needed_assets' });
+  }
+
+  // Build the JSON-mode payload. Worker bytes go in as base64 — the
+  // manifest-only endpoint's design (0068) keeps worker bundles in the
+  // body since they are bounded at 32 MiB total.
+  const payload: ManifestOnlyDeployPayload = {
+    manifest,
+    assetManifest,
+    source: getTokenSource(),
+    commit: gitMetadata?.commit ?? null,
+    repositoryUrl: gitMetadata?.repositoryUrl ?? null,
+    commitUrl: gitMetadata?.commitUrl ?? null,
+    gitRef: gitMetadata?.gitRef ?? null,
+    preflight: preflightUsed ? 'true' : null,
+  };
+  if (workerFiles && workerFiles.size > 0) {
+    const encoded: Record<string, string> = {};
+    for (const [relPath, buf] of workerFiles) {
+      encoded[relPath] = buf.toString('base64');
+    }
+    payload.workerFiles = encoded;
+  }
+
+  s.message('Finalizing deploy...');
+  cliLog?.info('finalize_start', {
+    workerFileCount: workerFiles?.size ?? 0,
+    assetCount: Object.keys(assetManifest).length,
+  });
+  const finalizeStartedAt = Date.now();
+
+  try {
+    return await streamDeployEvents(
+      projectId,
+      client.finalizeDeploy(projectId, payload),
+      s,
+      cliLog,
+    );
+  } finally {
+    cliLog?.info('finalize_end', { durationMs: Date.now() - finalizeStartedAt });
+  }
+}
+
 function formatKnownAssetSummary(result: DeployDoneEvent, skipped: number): string {
   const uploaded = result.assets - skipped;
   return skipped > 0
@@ -607,7 +778,7 @@ function appendDeployMetadata(formData: FormData, gitMetadata?: GitDeployMetadat
   }
 }
 
-async function runStaticDeploy(
+export async function runStaticDeploy(
   root: string,
   config: ProjectConfig,
   client: PlatformClient,
@@ -620,6 +791,7 @@ async function runStaticDeploy(
   fallbackRules?: Array<DevRedirectRule>,
   routing?: RoutingConfig,
   cliLog?: CliLogger,
+  legacyUpload?: boolean,
 ): Promise<void> {
   const typeLabel = preset.appType === 'spa' ? 'Static SPA' : 'Static Site';
   log.info(`${typeLabel} deploy`);
@@ -656,10 +828,13 @@ async function runStaticDeploy(
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
 
-  // Preflight: hash assets and check which ones changed
+  // Preflight: hash assets and check which ones changed.
+  // `assetFiles` carries the in-memory buffer cache so the upload step
+  // (direct-to-R2 or legacy multipart) consumes the same bytes that were
+  // hashed — eliminates the chain double-read flagged in design doc 0068.
   s.start('Checking for changes...');
   cliLog?.info('preflight_start', { dir: preset.outputDir });
-  const { assetManifest } = await collectAndHashAssets(preset.outputDir, onProgress);
+  const { assetManifest, assetFiles } = await collectAndHashAssets(preset.outputDir, onProgress);
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest);
   s.stop('Checked for changes');
   cliLog?.info('preflight_end', {
@@ -673,27 +848,56 @@ async function runStaticDeploy(
   }
 
   s.start('Packaging...');
-  cliLog?.info('package_start', { mode: 'static' });
+  cliLog?.info('package_start', { mode: 'static', legacyUpload: legacyUpload === true });
   const packageStartedAt = Date.now();
   const neededSet = skipped > 0 ? new Set(needed) : null;
-  const formData = await packageStaticBuild(
-    preset.outputDir,
-    preset.appType,
-    neededSet,
-    hashedAssetsPrefix ?? 'assets',
-    headerRules,
-    redirectRules,
-    fallbackRules,
-    onProgress,
-  );
-  formData.append('assetManifest', JSON.stringify(assetManifest));
-  appendDeployMetadata(formData, gitMetadata);
-  cliLog?.info('package_end', {
-    mode: 'static',
-    durationMs: Date.now() - packageStartedAt,
-  });
 
-  const result = await streamDeploy(client, config.projectId, formData, s, cliLog);
+  let result: StreamDeployResult;
+  if (legacyUpload) {
+    const formData = await packageStaticBuild(
+      preset.outputDir,
+      preset.appType,
+      neededSet,
+      hashedAssetsPrefix ?? 'assets',
+      headerRules,
+      redirectRules,
+      fallbackRules,
+      onProgress,
+      assetFiles,
+    );
+    formData.append('assetManifest', JSON.stringify(assetManifest));
+    appendDeployMetadata(formData, gitMetadata);
+    cliLog?.info('package_end', {
+      mode: 'static',
+      durationMs: Date.now() - packageStartedAt,
+    });
+    result = await streamDeploy(client, config.projectId, formData, s, cliLog);
+  } else {
+    const manifest = buildStaticManifest({
+      appType: preset.appType,
+      hashedAssetsPrefix: hashedAssetsPrefix ?? 'assets',
+      headerRules,
+      redirectRules,
+      fallbackRules,
+    });
+    cliLog?.info('package_end', {
+      mode: 'static',
+      durationMs: Date.now() - packageStartedAt,
+    });
+    result = await streamDirectR2Deploy(
+      client,
+      config.projectId,
+      manifest,
+      assetManifest,
+      assetFiles,
+      needed,
+      gitMetadata,
+      neededSet !== null,
+      undefined,
+      s,
+      cliLog,
+    );
+  }
 
   const summary = [`${typeLabel} — ${formatKnownAssetSummary(result, skipped)}`];
   note(summary.join('\n'), result.url);
@@ -730,6 +934,7 @@ async function runFrameworkDeploy(
   skipBuild?: boolean,
   gitMetadata?: GitDeployMetadata,
   cliLog?: CliLogger,
+  legacyUpload?: boolean,
 ): Promise<void> {
   log.info(`${detected.name} framework deploy`);
   cliLog?.info('deploy_mode', { mode: 'framework', framework: detected.name });
@@ -924,10 +1129,12 @@ async function runFrameworkDeploy(
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
 
-  // Preflight: hash assets and check which ones changed
+  // Preflight: hash assets and check which ones changed.
+  // `assetFiles` is threaded through to the upload step so each asset is
+  // read from disk once, end-to-end (Codex Finding #2 in design doc 0068).
   s.start('Checking for changes...');
   cliLog?.info('preflight_start', { dir: assetsDir });
-  const { assetManifest } = await collectAndHashAssets(assetsDir, onProgress, {
+  const { assetManifest, assetFiles } = await collectAndHashAssets(assetsDir, onProgress, {
     ignorePatterns: frameworkAssetIgnorePatterns,
   });
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
@@ -943,46 +1150,99 @@ async function runFrameworkDeploy(
   }
 
   s.start('Packaging...');
-  cliLog?.info('package_start', { mode: 'framework', framework: detected.name });
+  cliLog?.info('package_start', {
+    mode: 'framework',
+    framework: detected.name,
+    legacyUpload: legacyUpload === true,
+  });
   const packageStartedAt = Date.now();
   const neededSet = skipped > 0 ? new Set(needed) : null;
-  const formData = await packageFrameworkBuild({
-    frameworkName: detected.name,
-    workerDir: actualWorkerDir,
+  const packageOptions = {
+    bindingNames: resolveBindingNames(voidConfig.inference?.bindings),
     workerMain: actualWorkerMain,
-    assetsDir,
-    bindings,
-    migrations: validatedMigrations,
-    schedules,
-    queues,
-    revalidate,
-    prerender,
-    assetConfig: { not_found_handling: 'none' },
-    vars: envVars,
-    packageOptions: {
-      bindingNames: resolveBindingNames(voidConfig.inference?.bindings),
-      workerMain: actualWorkerMain,
-      compatibilityDate: wranglerCompat.compatibilityDate,
-      compatibilityFlags: wranglerCompat.compatibilityFlags,
-    },
-    revalidateQueryAllowlist: voidConfig.routing?.revalidateQueryAllowlist,
-    neededAssets: neededSet,
-    hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? 'assets',
-    headerRules,
-    redirectRules,
-    fallbackRules,
-    dialect,
-    assetIgnorePatterns: frameworkAssetIgnorePatterns,
-    onProgress,
-  });
-  formData.append('assetManifest', JSON.stringify(assetManifest));
-  appendDeployMetadata(formData, gitMetadata);
-  cliLog?.info('package_end', {
-    mode: 'framework',
-    durationMs: Date.now() - packageStartedAt,
-  });
+    compatibilityDate: wranglerCompat.compatibilityDate,
+    compatibilityFlags: wranglerCompat.compatibilityFlags,
+  };
 
-  const result = await streamDeploy(client, config.projectId, formData, s, cliLog);
+  let result: StreamDeployResult;
+  if (legacyUpload) {
+    const formData = await packageFrameworkBuild({
+      frameworkName: detected.name,
+      workerDir: actualWorkerDir,
+      workerMain: actualWorkerMain,
+      assetsDir,
+      bindings,
+      migrations: validatedMigrations,
+      schedules,
+      queues,
+      revalidate,
+      prerender,
+      assetConfig: { not_found_handling: 'none' },
+      vars: envVars,
+      packageOptions,
+      revalidateQueryAllowlist: voidConfig.routing?.revalidateQueryAllowlist,
+      neededAssets: neededSet,
+      hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? 'assets',
+      headerRules,
+      redirectRules,
+      fallbackRules,
+      dialect,
+      assetIgnorePatterns: frameworkAssetIgnorePatterns,
+      onProgress,
+      assetFiles,
+    });
+    formData.append('assetManifest', JSON.stringify(assetManifest));
+    appendDeployMetadata(formData, gitMetadata);
+    cliLog?.info('package_end', {
+      mode: 'framework',
+      durationMs: Date.now() - packageStartedAt,
+    });
+    result = await streamDeploy(client, config.projectId, formData, s, cliLog);
+  } else {
+    const manifest = buildFrameworkManifest({
+      frameworkName: detected.name,
+      workerMain: actualWorkerMain,
+      bindings,
+      migrations: validatedMigrations,
+      schedules,
+      queues,
+      revalidate,
+      revalidateQueryAllowlist: voidConfig.routing?.revalidateQueryAllowlist,
+      prerender,
+      assetConfig: { not_found_handling: 'none' },
+      vars: envVars,
+      packageOptions,
+      hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? 'assets',
+      headerRules,
+      redirectRules,
+      fallbackRules,
+      dialect,
+    });
+    const workerFiles = collectWorkerFiles(actualWorkerDir);
+    cliLog?.info('package_end', {
+      mode: 'framework',
+      durationMs: Date.now() - packageStartedAt,
+    });
+
+    // Migration SQL bytes ride along inside the worker bundle (compiled in
+    // by the framework via `migration-handler.ts`); the deploy body only
+    // needs `manifest.migrations.pending` so the platform knows to invoke
+    // the worker's `/__void/migrate` endpoint after dispatch. So no special
+    // handling is needed for migrations on the direct-to-R2 path.
+    result = await streamDirectR2Deploy(
+      client,
+      config.projectId,
+      manifest,
+      assetManifest,
+      assetFiles,
+      needed,
+      gitMetadata,
+      neededSet !== null,
+      workerFiles,
+      s,
+      cliLog,
+    );
+  }
 
   const summary = [
     `${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`,
@@ -1024,6 +1284,7 @@ async function runFullDeploy(
   gitMetadata?: GitDeployMetadata,
   detected?: DetectedFramework,
   cliLog?: CliLogger,
+  legacyUpload?: boolean,
 ): Promise<void> {
   cliLog?.info('deploy_mode', {
     mode: 'full',
@@ -1277,6 +1538,7 @@ async function runFullDeploy(
         fallbackRules,
         undefined,
         cliLog,
+        legacyUpload,
       );
     }
   }
@@ -1340,10 +1602,12 @@ async function runFullDeploy(
     authEnabled,
   });
 
-  // Preflight: hash assets and check which ones changed
+  // Preflight: hash assets and check which ones changed.
+  // `assetFiles` carries the in-memory buffer cache through to the upload
+  // step so each asset is read from disk exactly once (Codex Finding #2).
   s.start('Checking for changes...');
   cliLog?.info('preflight_start', { dir: clientDir });
-  const { assetManifest } = await collectAndHashAssets(clientDir, onProgress);
+  const { assetManifest, assetFiles } = await collectAndHashAssets(clientDir, onProgress);
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
   s.stop('Checked for changes');
   cliLog?.info('preflight_end', {
@@ -1365,45 +1629,90 @@ async function runFullDeploy(
     hasWebSockets,
     authEnabled,
     framework: detected?.name,
+    legacyUpload: legacyUpload === true,
   });
   const packageStartedAt = Date.now();
   const neededSet = skipped > 0 ? new Set(needed) : null;
-  const formData = await packageBuild(
-    distDir,
-    workerDirName,
-    effectiveBindings,
-    validatedMigrations,
-    schedules,
-    isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
-    isFrameworkMode ? detected!.name : undefined,
-    revalidate,
-    envVars,
-    queues,
-    uniquePrerenderPaths,
-    assetConfig,
-    {
-      compatibilityDate: wranglerCompat?.compatibilityDate,
-      compatibilityFlags: wranglerCompat?.compatibilityFlags,
-      ...(sandboxConfig && { sandbox: sandboxConfig }),
-      revalidateQueryAllowlist: deployConfig.routing?.revalidateQueryAllowlist,
-    },
-    neededSet,
-    assetsPrefix,
-    headerRules,
-    redirectRules,
-    fallbackRules,
-    dialect,
-    webSockets,
-    onProgress,
-  );
-  formData.append('assetManifest', JSON.stringify(assetManifest));
-  appendDeployMetadata(formData, gitMetadata);
-  cliLog?.info('package_end', {
-    mode: 'full',
-    durationMs: Date.now() - packageStartedAt,
-  });
+  const voidPackageOptions = {
+    compatibilityDate: wranglerCompat?.compatibilityDate,
+    compatibilityFlags: wranglerCompat?.compatibilityFlags,
+    ...(sandboxConfig && { sandbox: sandboxConfig }),
+    revalidateQueryAllowlist: deployConfig.routing?.revalidateQueryAllowlist,
+  };
 
-  const result = await streamDeploy(client, config.projectId, formData, s, cliLog);
+  let result: StreamDeployResult;
+  if (legacyUpload) {
+    const formData = await packageBuild(
+      distDir,
+      workerDirName,
+      effectiveBindings,
+      validatedMigrations,
+      schedules,
+      isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
+      isFrameworkMode ? detected!.name : undefined,
+      revalidate,
+      envVars,
+      queues,
+      uniquePrerenderPaths,
+      assetConfig,
+      voidPackageOptions,
+      neededSet,
+      assetsPrefix,
+      headerRules,
+      redirectRules,
+      fallbackRules,
+      dialect,
+      webSockets,
+      onProgress,
+      assetFiles,
+    );
+    formData.append('assetManifest', JSON.stringify(assetManifest));
+    appendDeployMetadata(formData, gitMetadata);
+    cliLog?.info('package_end', {
+      mode: 'full',
+      durationMs: Date.now() - packageStartedAt,
+    });
+    result = await streamDeploy(client, config.projectId, formData, s, cliLog);
+  } else {
+    const manifest = buildVoidManifest({
+      bindings: effectiveBindings,
+      migrations: validatedMigrations,
+      schedules,
+      ssr: isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
+      framework: isFrameworkMode ? detected!.name : undefined,
+      revalidate,
+      vars: envVars,
+      queues,
+      prerender: uniquePrerenderPaths,
+      assetConfig,
+      options: voidPackageOptions,
+      hashedAssetsPrefix: assetsPrefix,
+      headerRules,
+      redirectRules,
+      fallbackRules,
+      dialect,
+      webSockets,
+      onProgress,
+    });
+    const workerFiles = collectWorkerFiles(join(distDir, workerDirName));
+    cliLog?.info('package_end', {
+      mode: 'full',
+      durationMs: Date.now() - packageStartedAt,
+    });
+    result = await streamDirectR2Deploy(
+      client,
+      config.projectId,
+      manifest,
+      assetManifest,
+      assetFiles,
+      needed,
+      gitMetadata,
+      neededSet !== null,
+      workerFiles,
+      s,
+      cliLog,
+    );
+  }
 
   const summary = [
     `${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`,
