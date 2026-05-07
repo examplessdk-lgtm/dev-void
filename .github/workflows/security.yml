@@ -20,5 +20,9 @@ jobs:
   security:
     name: Security Analysis
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: oxc-project/security-action@781317603d045c3eafc99daef653fcac77e12aa8 # v1.0.3
+      - uses: oxc-project/security-action@d94d8a04d0cfe578a32d61ee2bff7e2891049704 # v1.0.4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
