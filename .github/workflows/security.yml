@@ -23,6 +23,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: oxc-project/security-action@d94d8a04d0cfe578a32d61ee2bff7e2891049704 # v1.0.4
+      - uses: oxc-project/security-action@77e230508eccbb400b23746dab6c573a8ea7483e # v1.0.5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
