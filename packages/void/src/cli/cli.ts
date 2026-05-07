@@ -99,7 +99,6 @@ if (helpPath) {
       spa: deployArgs.spa,
       skipBuild: deployArgs.skipBuild,
       debug: deployArgs.debug,
-      legacyUpload: deployArgs.legacyUpload,
     }).catch((err) => {
       log.error(err.message ?? err);
       process.exit(1);

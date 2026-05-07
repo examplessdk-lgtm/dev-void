@@ -99,7 +99,6 @@ interface MockState {
   uploadUrlsCalls: Array<unknown>;
   r2PutCalls: Array<{ url: string; init: RequestInit }>;
   finalizeCalls: Array<{ url: string; init: RequestInit }>;
-  multipartDeployCalls: Array<{ url: string; init: RequestInit }>;
 }
 
 function installPlatformMocks(opts?: {
@@ -113,7 +112,6 @@ function installPlatformMocks(opts?: {
     uploadUrlsCalls: [],
     r2PutCalls: [],
     finalizeCalls: [],
-    multipartDeployCalls: [],
   };
 
   fetchMock.mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
@@ -163,14 +161,8 @@ function installPlatformMocks(opts?: {
     }
 
     if (url.endsWith('/deploy') && method === 'POST') {
-      const ct = (reqInit.headers as Record<string, string> | undefined)?.['Content-Type'];
-      if (ct === 'application/json') {
-        state.finalizeCalls.push({ url, init: reqInit });
-        return ndjsonResponse(opts?.finalizeEvents ?? defaultDoneEvents());
-      }
-      // Multipart path (legacy).
-      state.multipartDeployCalls.push({ url, init: reqInit });
-      return ndjsonResponse(defaultDoneEvents());
+      state.finalizeCalls.push({ url, init: reqInit });
+      return ndjsonResponse(opts?.finalizeEvents ?? defaultDoneEvents());
     }
 
     throw new Error(`unexpected fetch: ${method} ${url}`);
@@ -244,7 +236,6 @@ describe('direct-to-R2 deploy flow', () => {
       undefined,
       undefined,
       undefined, // cliLog (tested separately)
-      false, // legacyUpload = false → direct-to-R2
     );
 
     // Preflight + upload-urls + R2 PUTs + finalize were called once each.
@@ -252,7 +243,6 @@ describe('direct-to-R2 deploy flow', () => {
     expect(state.uploadUrlsCalls).toHaveLength(1);
     expect(state.r2PutCalls).toHaveLength(4);
     expect(state.finalizeCalls).toHaveLength(1);
-    expect(state.multipartDeployCalls).toHaveLength(0);
 
     // Each R2 PUT carries Content-Md5 and the asset bytes.
     for (const { init } of state.r2PutCalls) {
@@ -299,7 +289,6 @@ describe('direct-to-R2 deploy flow', () => {
       undefined,
       undefined,
       undefined,
-      false,
     );
 
     // Filter to just the fixture files — `.assetsignore` lookup may fire
@@ -352,7 +341,6 @@ describe('direct-to-R2 deploy flow', () => {
       undefined,
       undefined,
       cliLog,
-      false,
     );
 
     await cliLog.close();
@@ -390,7 +378,6 @@ describe('direct-to-R2 deploy flow', () => {
       undefined,
       undefined,
       cliLog,
-      false,
     );
 
     await cliLog.close();
@@ -418,7 +405,6 @@ describe('direct-to-R2 deploy flow', () => {
       undefined,
       undefined,
       undefined,
-      false,
     );
 
     expect(state.uploadUrlsCalls).toHaveLength(0);
@@ -458,7 +444,6 @@ describe('direct-to-R2 deploy flow', () => {
       undefined,
       undefined,
       undefined,
-      false,
     );
 
     // 4 assets but the first one was retried 2 times, so total PUTs = 4 + 2 = 6.
@@ -488,79 +473,8 @@ describe('direct-to-R2 deploy flow', () => {
         undefined,
         undefined,
         undefined,
-        false,
       ),
     ).rejects.toThrow(/R2 PUT failed.+SignatureMismatch/);
-  });
-
-  it('uses legacy multipart path when legacyUpload=true', async () => {
-    const state = installPlatformMocks();
-    const client = makeClient();
-
-    await runStaticDeploy(
-      workdir,
-      { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-      true,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      true, // legacyUpload = true
-    );
-
-    // Direct path NOT used.
-    expect(state.uploadUrlsCalls).toHaveLength(0);
-    expect(state.r2PutCalls).toHaveLength(0);
-    expect(state.finalizeCalls).toHaveLength(0);
-
-    // Multipart was used.
-    expect(state.multipartDeployCalls).toHaveLength(1);
-    const headers = state.multipartDeployCalls[0].init.headers as Record<string, string>;
-    // The fetch body is FormData → CT not set explicitly, fetch handles it.
-    // Just verify the multipart path was hit.
-    expect(headers['Content-Type']).toBeUndefined();
-    expect(state.multipartDeployCalls[0].init.body).toBeInstanceOf(FormData);
-  });
-
-  it('reads each asset file from disk EXACTLY ONCE in legacy multipart path too', async () => {
-    installPlatformMocks();
-    const client = makeClient();
-    readFileSyncMock.mockClear();
-
-    await runStaticDeploy(
-      workdir,
-      { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-      true,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      true,
-    );
-
-    const reads = readFileSyncMock.mock.calls.filter(([p]: Array<unknown>) => {
-      const path = String(p);
-      return (
-        path.endsWith('index.html') ||
-        path.endsWith('style.css') ||
-        path.endsWith('script.js') ||
-        path.endsWith('large.bin')
-      );
-    });
-
-    // The legacy path also threads buffers through via `assetFiles` so the
-    // double-read is eliminated end-to-end.
-    expect(reads).toHaveLength(4);
   });
 
   it('writes presign + r2_put + finalize events to the JSONL log', async () => {
@@ -584,7 +498,6 @@ describe('direct-to-R2 deploy flow', () => {
       undefined,
       undefined,
       cliLog,
-      false,
     );
 
     await cliLog.close();
@@ -633,7 +546,6 @@ describe('direct-to-R2 deploy flow', () => {
       undefined,
       undefined,
       undefined,
-      false,
     );
 
     // 6 paths total but only 5 unique blake3 values (about.html ==
@@ -686,7 +598,6 @@ describe('direct-to-R2 deploy flow', () => {
         undefined,
         undefined,
         cliLog,
-        false,
       ),
     ).rejects.toThrow(new RegExp(escapeRegex(logPath as string)));
 

@@ -71,9 +71,6 @@ import { openDeployLog, type CliLogger } from './log-file.ts';
 import { promptForLoginToken } from './login.ts';
 import { cliTitle, createSpinner, pc } from './output.ts';
 import {
-  packageBuild,
-  packageStaticBuild,
-  packageFrameworkBuild,
   collectAndHashAssets,
   buildVoidManifest,
   buildStaticManifest,
@@ -113,13 +110,6 @@ export interface RunDeployOptions {
   spa?: boolean;
   skipBuild?: boolean;
   debug?: boolean;
-  /**
-   * When true, the CLI uses the legacy multipart `POST /:id/deploy` upload
-   * path instead of the default direct-to-R2 + JSON-mode finalize flow.
-   * Kept as an escape hatch for one release while the new path beds in;
-   * scheduled for removal once direct-to-R2 is proven on production traffic.
-   */
-  legacyUpload?: boolean;
 }
 
 type DeployDoneEvent = Extract<DeployEvent, { event: 'done' }>;
@@ -322,7 +312,6 @@ async function runDeployInner(
             options?.skipBuild,
             gitMetadata,
             cliLog,
-            options?.legacyUpload,
           );
         } else {
           // Class A: preset is optional (e.g. vinext probes at runtime)
@@ -335,7 +324,6 @@ async function runDeployInner(
             gitMetadata,
             detected,
             cliLog,
-            options?.legacyUpload,
           );
         }
         return;
@@ -394,7 +382,6 @@ async function runDeployInner(
           undefined,
           voidConfig.routing,
           cliLog,
-          options?.legacyUpload,
         );
       } else {
         await runFullDeploy(
@@ -406,7 +393,6 @@ async function runDeployInner(
           gitMetadata,
           undefined,
           cliLog,
-          options?.legacyUpload,
         );
       }
       return;
@@ -538,9 +524,7 @@ export function applyDeployEvent(event: DeployEvent, s: SpinnerResult): ApplyDep
 /**
  * Apply a streamed `DeployEvent` iterator to the spinner / cliLog and
  * resolve with the terminal `done` event (or throw on terminal error /
- * connection loss). Path-agnostic: the legacy multipart deploy and the
- * new direct-to-R2 finalize call both produce the same NDJSON event
- * stream, so this loop is shared between them.
+ * connection loss).
  */
 async function streamDeployEvents(
   projectId: string,
@@ -615,22 +599,10 @@ async function streamDeployEvents(
   throw new Error(formatConnectionLostMessage(deploymentId, cliLog?.path ?? null));
 }
 
-async function streamDeploy(
-  client: PlatformClient,
-  projectId: string,
-  formData: FormData,
-  s: SpinnerResult,
-  cliLog?: CliLogger,
-): Promise<StreamDeployResult> {
-  return streamDeployEvents(projectId, client.deploy(projectId, formData), s, cliLog);
-}
-
 /**
  * Direct-to-R2 deploy orchestration. Issues presigned PUT URLs for each
  * needed asset, uploads bytes directly to R2, then calls the manifest-only
- * deploy endpoint to finalize. Returns the same `StreamDeployResult` shape
- * as the legacy multipart `streamDeploy` so callers downstream stay
- * path-agnostic.
+ * deploy endpoint to finalize.
  *
  * Key invariants:
  *   1. No needed assets → skip presign + R2 PUT phase entirely (saves a
@@ -807,22 +779,6 @@ function formatKnownAssetSummary(result: DeployDoneEvent, skipped: number): stri
     : `${result.assets} static asset(s)`;
 }
 
-function appendDeployMetadata(formData: FormData, gitMetadata?: GitDeployMetadata): void {
-  formData.append('source', getTokenSource());
-  if (gitMetadata?.commit) {
-    formData.append('commit', gitMetadata.commit);
-  }
-  if (gitMetadata?.repositoryUrl) {
-    formData.append('repositoryUrl', gitMetadata.repositoryUrl);
-  }
-  if (gitMetadata?.commitUrl) {
-    formData.append('commitUrl', gitMetadata.commitUrl);
-  }
-  if (gitMetadata?.gitRef) {
-    formData.append('gitRef', gitMetadata.gitRef);
-  }
-}
-
 export async function runStaticDeploy(
   root: string,
   config: ProjectConfig,
@@ -836,7 +792,6 @@ export async function runStaticDeploy(
   fallbackRules?: Array<DevRedirectRule>,
   routing?: RoutingConfig,
   cliLog?: CliLogger,
-  legacyUpload?: boolean,
 ): Promise<void> {
   const typeLabel = preset.appType === 'spa' ? 'Static SPA' : 'Static Site';
   log.info(`${typeLabel} deploy`);
@@ -893,56 +848,34 @@ export async function runStaticDeploy(
   }
 
   s.start('Packaging...');
-  cliLog?.info('package_start', { mode: 'static', legacyUpload: legacyUpload === true });
+  cliLog?.info('package_start', { mode: 'static' });
   const packageStartedAt = Date.now();
   const neededSet = skipped > 0 ? new Set(needed) : null;
 
-  let result: StreamDeployResult;
-  if (legacyUpload) {
-    const formData = await packageStaticBuild(
-      preset.outputDir,
-      preset.appType,
-      neededSet,
-      hashedAssetsPrefix ?? 'assets',
-      headerRules,
-      redirectRules,
-      fallbackRules,
-      onProgress,
-      assetFiles,
-    );
-    formData.append('assetManifest', JSON.stringify(assetManifest));
-    appendDeployMetadata(formData, gitMetadata);
-    cliLog?.info('package_end', {
-      mode: 'static',
-      durationMs: Date.now() - packageStartedAt,
-    });
-    result = await streamDeploy(client, config.projectId, formData, s, cliLog);
-  } else {
-    const manifest = buildStaticManifest({
-      appType: preset.appType,
-      hashedAssetsPrefix: hashedAssetsPrefix ?? 'assets',
-      headerRules,
-      redirectRules,
-      fallbackRules,
-    });
-    cliLog?.info('package_end', {
-      mode: 'static',
-      durationMs: Date.now() - packageStartedAt,
-    });
-    result = await streamDirectR2Deploy(
-      client,
-      config.projectId,
-      manifest,
-      assetManifest,
-      assetFiles,
-      needed,
-      gitMetadata,
-      neededSet !== null,
-      undefined,
-      s,
-      cliLog,
-    );
-  }
+  const manifest = buildStaticManifest({
+    appType: preset.appType,
+    hashedAssetsPrefix: hashedAssetsPrefix ?? 'assets',
+    headerRules,
+    redirectRules,
+    fallbackRules,
+  });
+  cliLog?.info('package_end', {
+    mode: 'static',
+    durationMs: Date.now() - packageStartedAt,
+  });
+  const result = await streamDirectR2Deploy(
+    client,
+    config.projectId,
+    manifest,
+    assetManifest,
+    assetFiles,
+    needed,
+    gitMetadata,
+    neededSet !== null,
+    undefined,
+    s,
+    cliLog,
+  );
 
   const summary = [`${typeLabel} — ${formatKnownAssetSummary(result, skipped)}`];
   note(summary.join('\n'), result.url);
@@ -979,7 +912,6 @@ async function runFrameworkDeploy(
   skipBuild?: boolean,
   gitMetadata?: GitDeployMetadata,
   cliLog?: CliLogger,
-  legacyUpload?: boolean,
 ): Promise<void> {
   log.info(`${detected.name} framework deploy`);
   cliLog?.info('deploy_mode', { mode: 'framework', framework: detected.name });
@@ -1198,7 +1130,6 @@ async function runFrameworkDeploy(
   cliLog?.info('package_start', {
     mode: 'framework',
     framework: detected.name,
-    legacyUpload: legacyUpload === true,
   });
   const packageStartedAt = Date.now();
   const neededSet = skipped > 0 ? new Set(needed) : null;
@@ -1209,85 +1140,48 @@ async function runFrameworkDeploy(
     compatibilityFlags: wranglerCompat.compatibilityFlags,
   };
 
-  let result: StreamDeployResult;
-  if (legacyUpload) {
-    const formData = await packageFrameworkBuild({
-      frameworkName: detected.name,
-      workerDir: actualWorkerDir,
-      workerMain: actualWorkerMain,
-      assetsDir,
-      bindings,
-      migrations: validatedMigrations,
-      schedules,
-      queues,
-      revalidate,
-      prerender,
-      assetConfig: { not_found_handling: 'none' },
-      vars: envVars,
-      packageOptions,
-      revalidateQueryAllowlist: voidConfig.routing?.revalidateQueryAllowlist,
-      neededAssets: neededSet,
-      hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? 'assets',
-      headerRules,
-      redirectRules,
-      fallbackRules,
-      dialect,
-      assetIgnorePatterns: frameworkAssetIgnorePatterns,
-      onProgress,
-      assetFiles,
-    });
-    formData.append('assetManifest', JSON.stringify(assetManifest));
-    appendDeployMetadata(formData, gitMetadata);
-    cliLog?.info('package_end', {
-      mode: 'framework',
-      durationMs: Date.now() - packageStartedAt,
-    });
-    result = await streamDeploy(client, config.projectId, formData, s, cliLog);
-  } else {
-    const manifest = buildFrameworkManifest({
-      frameworkName: detected.name,
-      workerMain: actualWorkerMain,
-      bindings,
-      migrations: validatedMigrations,
-      schedules,
-      queues,
-      revalidate,
-      revalidateQueryAllowlist: voidConfig.routing?.revalidateQueryAllowlist,
-      prerender,
-      assetConfig: { not_found_handling: 'none' },
-      vars: envVars,
-      packageOptions,
-      hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? 'assets',
-      headerRules,
-      redirectRules,
-      fallbackRules,
-      dialect,
-    });
-    const workerFiles = collectWorkerFiles(actualWorkerDir);
-    cliLog?.info('package_end', {
-      mode: 'framework',
-      durationMs: Date.now() - packageStartedAt,
-    });
+  const manifest = buildFrameworkManifest({
+    frameworkName: detected.name,
+    workerMain: actualWorkerMain,
+    bindings,
+    migrations: validatedMigrations,
+    schedules,
+    queues,
+    revalidate,
+    revalidateQueryAllowlist: voidConfig.routing?.revalidateQueryAllowlist,
+    prerender,
+    assetConfig: { not_found_handling: 'none' },
+    vars: envVars,
+    packageOptions,
+    hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? 'assets',
+    headerRules,
+    redirectRules,
+    fallbackRules,
+    dialect,
+  });
+  const workerFiles = collectWorkerFiles(actualWorkerDir);
+  cliLog?.info('package_end', {
+    mode: 'framework',
+    durationMs: Date.now() - packageStartedAt,
+  });
 
-    // Migration SQL bytes ride along inside the worker bundle (compiled in
-    // by the framework via `migration-handler.ts`); the deploy body only
-    // needs `manifest.migrations.pending` so the platform knows to invoke
-    // the worker's `/__void/migrate` endpoint after dispatch. So no special
-    // handling is needed for migrations on the direct-to-R2 path.
-    result = await streamDirectR2Deploy(
-      client,
-      config.projectId,
-      manifest,
-      assetManifest,
-      assetFiles,
-      needed,
-      gitMetadata,
-      neededSet !== null,
-      workerFiles,
-      s,
-      cliLog,
-    );
-  }
+  // Migration SQL bytes ride along inside the worker bundle (compiled in
+  // by the framework via `migration-handler.ts`); the deploy body only
+  // needs `manifest.migrations.pending` so the platform knows to invoke
+  // the worker's `/__void/migrate` endpoint after dispatch.
+  const result = await streamDirectR2Deploy(
+    client,
+    config.projectId,
+    manifest,
+    assetManifest,
+    assetFiles,
+    needed,
+    gitMetadata,
+    neededSet !== null,
+    workerFiles,
+    s,
+    cliLog,
+  );
 
   const summary = [
     `${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`,
@@ -1329,7 +1223,6 @@ async function runFullDeploy(
   gitMetadata?: GitDeployMetadata,
   detected?: DetectedFramework,
   cliLog?: CliLogger,
-  legacyUpload?: boolean,
 ): Promise<void> {
   cliLog?.info('deploy_mode', {
     mode: 'full',
@@ -1468,7 +1361,7 @@ async function runFullDeploy(
 
   // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects.
   // Migrations on disk also gate this — even if inference says needsD1: false,
-  // packageBuild will add the hyperdrive binding when migrations are present.
+  // buildVoidManifest will add the hyperdrive binding when migrations are present.
   if (dialect === 'postgresql' && (effectiveBindings.needsD1 || rawMigrations.length > 0)) {
     try {
       const resources = await client.getResources(config.projectId);
@@ -1583,7 +1476,6 @@ async function runFullDeploy(
         fallbackRules,
         undefined,
         cliLog,
-        legacyUpload,
       );
     }
   }
@@ -1674,7 +1566,6 @@ async function runFullDeploy(
     hasWebSockets,
     authEnabled,
     framework: detected?.name,
-    legacyUpload: legacyUpload === true,
   });
   const packageStartedAt = Date.now();
   const neededSet = skipped > 0 ? new Set(needed) : null;
@@ -1685,87 +1576,51 @@ async function runFullDeploy(
     revalidateQueryAllowlist: deployConfig.routing?.revalidateQueryAllowlist,
   };
 
-  let result: StreamDeployResult;
-  if (legacyUpload) {
-    const formData = await packageBuild(
-      distDir,
-      workerDirName,
-      effectiveBindings,
-      validatedMigrations,
-      schedules,
-      isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
-      isFrameworkMode ? detected!.name : undefined,
-      revalidate,
-      envVars,
-      queues,
-      uniquePrerenderPaths,
-      assetConfig,
-      voidPackageOptions,
-      neededSet,
-      assetsPrefix,
-      headerRules,
-      redirectRules,
-      fallbackRules,
-      dialect,
-      webSockets,
-      onProgress,
-      assetFiles,
-    );
-    formData.append('assetManifest', JSON.stringify(assetManifest));
-    appendDeployMetadata(formData, gitMetadata);
-    cliLog?.info('package_end', {
-      mode: 'full',
-      durationMs: Date.now() - packageStartedAt,
-    });
-    result = await streamDeploy(client, config.projectId, formData, s, cliLog);
-  } else {
-    // Surface the non-SPA-fallbacks mismatch (if any) before invoking the
-    // I/O-free manifest builder. Mirrors what `packageBuild` does on the
-    // legacy multipart path so both deploy modes warn identically.
-    const fallbackWarning = detectNonSpaFallbackWarning(assetConfig, fallbackRules);
-    if (fallbackWarning) {
-      onProgress?.(fallbackWarning);
-      console.warn(`[void] ${fallbackWarning}`);
-    }
-
-    const manifest = buildVoidManifest({
-      bindings: effectiveBindings,
-      migrations: validatedMigrations,
-      schedules,
-      ssr: isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
-      framework: isFrameworkMode ? detected!.name : undefined,
-      revalidate,
-      vars: envVars,
-      queues,
-      prerender: uniquePrerenderPaths,
-      assetConfig,
-      options: voidPackageOptions,
-      hashedAssetsPrefix: assetsPrefix,
-      headerRules,
-      redirectRules,
-      fallbackRules,
-      dialect,
-      webSockets,
-    });
-    const workerFiles = collectWorkerFiles(join(distDir, workerDirName));
-    cliLog?.info('package_end', {
-      mode: 'full',
-      durationMs: Date.now() - packageStartedAt,
-    });
-    result = await streamDirectR2Deploy(
-      client,
-      config.projectId,
-      manifest,
-      assetManifest,
-      assetFiles,
-      needed,
-      gitMetadata,
-      neededSet !== null,
-      workerFiles,
-      s,
-      cliLog,
-    );
+  // Surface the non-SPA-fallbacks mismatch (if any) before invoking the
+  // I/O-free manifest builder.
+  const fallbackWarning = detectNonSpaFallbackWarning(assetConfig, fallbackRules);
+  if (fallbackWarning) {
+    onProgress?.(fallbackWarning);
+    console.warn(`[void] ${fallbackWarning}`);
   }
+
+  const manifest = buildVoidManifest({
+    bindings: effectiveBindings,
+    migrations: validatedMigrations,
+    schedules,
+    ssr: isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
+    framework: isFrameworkMode ? detected!.name : undefined,
+    revalidate,
+    vars: envVars,
+    queues,
+    prerender: uniquePrerenderPaths,
+    assetConfig,
+    options: voidPackageOptions,
+    hashedAssetsPrefix: assetsPrefix,
+    headerRules,
+    redirectRules,
+    fallbackRules,
+    dialect,
+    webSockets,
+  });
+  const workerFiles = collectWorkerFiles(join(distDir, workerDirName));
+  cliLog?.info('package_end', {
+    mode: 'full',
+    durationMs: Date.now() - packageStartedAt,
+  });
+  const result = await streamDirectR2Deploy(
+    client,
+    config.projectId,
+    manifest,
+    assetManifest,
+    assetFiles,
+    needed,
+    gitMetadata,
+    neededSet !== null,
+    workerFiles,
+    s,
+    cliLog,
+  );
 
   const summary = [
     `${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`,

@@ -6,7 +6,6 @@ export interface DeployArgs {
   spa?: boolean;
   skipBuild?: boolean;
   debug?: boolean;
-  legacyUpload?: boolean;
 }
 
 export function parseDeployArgs(args: Array<string>): DeployArgs {
@@ -20,7 +19,6 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
         spa: { type: 'boolean' },
         'skip-build': { type: 'boolean' },
         debug: { type: 'boolean' },
-        'legacy-upload': { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true,
@@ -63,7 +61,6 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
   const spa = parsed.values.spa === true ? true : undefined;
   const skipBuild = parsed.values['skip-build'] === true ? true : undefined;
   const debug = parsed.values.debug === true ? true : undefined;
-  const legacyUpload = parsed.values['legacy-upload'] === true ? true : undefined;
 
-  return { projectSlug, dir, spa, skipBuild, debug, legacyUpload };
+  return { projectSlug, dir, spa, skipBuild, debug };
 }

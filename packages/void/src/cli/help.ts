@@ -47,11 +47,6 @@ const HELP_TREE: HelpTree = {
         command: '--debug',
         description: 'Mirror the deploy log to stderr (always written to ~/.void/logs)',
       },
-      {
-        command: '--legacy-upload',
-        description:
-          'Use the legacy multipart upload path. For backward compatibility only; will be removed in a future release.',
-      },
     ],
     examples: [
       { command: 'void deploy', description: 'Deploy the linked project' },

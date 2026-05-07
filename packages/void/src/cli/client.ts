@@ -325,17 +325,6 @@ export class PlatformClient {
     }
   }
 
-  async *deploy(projectId: string, formData: FormData): AsyncGenerator<DeployEvent> {
-    const url = `${this.baseUrl}/projects/${projectId}/deploy`;
-    yield* this.streamDeployRequest(url, {
-      method: 'POST',
-      headers: {
-        ...this.authHeaders,
-      },
-      body: formData,
-    });
-  }
-
   /**
    * Request presigned R2 PUT URLs for a batch of assets. Each entry carries
    * both `blake3` (storage key) and `md5` (wire-level integrity primitive)
@@ -379,9 +368,8 @@ export class PlatformClient {
   /**
    * Manifest-only (direct-to-R2) deploy. POSTs a JSON body containing the
    * deploy manifest, asset manifest (no asset bytes), and any worker module
-   * bytes (base64-encoded). Streams the same NDJSON response shape as the
-   * legacy multipart `deploy(...)` path, so the caller can apply events with
-   * the existing `applyDeployEvent` machinery.
+   * bytes (base64-encoded). Streams an NDJSON response that the caller can
+   * apply with the existing `applyDeployEvent` machinery.
    */
   async *finalizeDeploy(
     projectId: string,
@@ -399,10 +387,8 @@ export class PlatformClient {
   }
 
   /**
-   * Shared POST + NDJSON-stream-reader for the multipart `deploy()` and the
-   * JSON-mode `finalizeDeploy()` paths. Identical wire framing on both, so
-   * the loop is factored here once. Captures `cf-ray` + `cf-cache-status`
-   * for postmortem correlation.
+   * POST + NDJSON-stream-reader used by `finalizeDeploy()`. Captures
+   * `cf-ray` + `cf-cache-status` for postmortem correlation.
    */
   private async *streamDeployRequest(url: string, init: RequestInit): AsyncGenerator<DeployEvent> {
     const cliLog = this.cliLog;
