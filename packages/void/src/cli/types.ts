@@ -132,6 +132,19 @@ export interface SandboxManifestMeta {
 
 export interface DeployManifest {
   version: number;
+  /**
+   * Wire-format version of the per-asset entries in the sibling
+   * `assetManifest` payload (not this manifest object itself):
+   *   - `1` (or omitted): legacy `{ hash, size }` shape.
+   *   - `2`: `{ blake3, md5, size, hash? }` shape — required by the
+   *     direct-to-R2 deploy path (R2 enforces `Content-MD5` on PUT, so
+   *     each asset must declare both hashes up front).
+   *
+   * The CLI emits `2` going forward. The platform's deploy ingest accepts
+   * either shape on the multipart endpoint; the JSON-mode (manifest-only)
+   * deploy endpoint requires `2`.
+   */
+  assetManifestVersion?: 1 | 2;
   auth?: boolean;
   bindings: {
     d1?: Array<string>;

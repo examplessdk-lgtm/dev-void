@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { hash as blake3hash } from 'blake3-jit';
 import ignore from 'ignore';
@@ -152,6 +153,39 @@ export function computeAssetHash(content: Buffer, filePath: string): string {
 }
 
 /**
+ * Compute MD5 of raw content as a 32-char lowercase hex string.
+ *
+ * Used as the wire-level upload-integrity primitive on direct-to-R2 PUTs:
+ * R2's S3 compatibility layer enforces `Content-MD5` (RFC 1864) on PutObject,
+ * so the upload itself fails if uploaded bytes don't match the declared MD5.
+ * MD5 collision resistance is acceptable here because (a) this hash is purely
+ * an upload-integrity primitive (BLAKE3 remains the canonical content key),
+ * and (b) project-scoped storage (`assets/${projectId}/${blake3}`) means any
+ * collision attack is exploitable only against the attacker's own project.
+ */
+export function computeMd5(content: Buffer): string {
+  return createHash('md5').update(content).digest('hex');
+}
+
+/**
+ * Compute both BLAKE3 (CF-compatible asset hash) and MD5 (wire-level R2
+ * upload-integrity checksum) from a single in-memory buffer. Returned in
+ * the v2 manifest entry shape for direct-to-R2 deploys.
+ *
+ * Single-pass: callers read the file once into `content`; this function
+ * then derives both digests from that buffer. The file is never read twice.
+ */
+export function computeAssetHashes(
+  content: Buffer,
+  filePath: string,
+): { blake3: string; md5: string } {
+  return {
+    blake3: computeAssetHash(content, filePath),
+    md5: computeMd5(content),
+  };
+}
+
+/**
  * Create a filter function that excludes .assetsignore, _headers, _redirects,
  * deploy-internal patterns, and any patterns listed in a .assetsignore file.
  * Matches Wrangler's createAssetsIgnoreFunction from workers-shared/utils/helpers.ts.
@@ -202,14 +236,32 @@ function checkWorkerJsAsset(relativePath: string, assetsIgnoreFilePresent: boole
   }
 }
 
+/**
+ * Asset manifest entry — v2 shape. Carries both hashes:
+ *   - `blake3`: 32 hex chars; the canonical content-addressed storage key
+ *     (`assets/${projectId}/${blake3}`). Compatible with Cloudflare's
+ *     Workers Static Assets upload API.
+ *   - `md5`: 32 hex chars; the wire-level upload-integrity primitive used
+ *     by R2's `Content-MD5` (RFC 1864) enforcement on direct PUTs.
+ *
+ * The `hash` field is a deprecated v1 alias kept equal to `blake3` so
+ * existing CLI/test code that reads `entry.hash` keeps working for one
+ * release. Remove in a follow-up PR after consumers migrate to `blake3`.
+ */
 export interface AssetManifestEntry {
-  hash: string;
+  blake3: string;
+  md5: string;
   size: number;
+  /** @deprecated v1 alias of `blake3`; remove in next release. */
+  hash: string;
 }
 
 /**
  * Collect all files in a directory, compute hashes, and return both the
  * manifest (for preflight) and the raw file map (for selective packaging).
+ *
+ * Each file is read from disk exactly once. Both BLAKE3 (storage key) and
+ * MD5 (R2 upload-integrity) digests are derived from that single buffer.
  */
 export async function collectAndHashAssets(
   dir: string,
@@ -237,10 +289,17 @@ export async function collectAndHashAssets(
         continue;
       }
       checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
+      // Single disk read per file; both hashes are derived from the same buffer.
       const content = readFileSync(filePath);
+      const { blake3, md5 } = computeAssetHashes(content, filePath);
       assetManifest[relativePath] = {
-        hash: computeAssetHash(content, filePath),
+        blake3,
+        md5,
         size: content.length,
+        // Deprecated v1 alias — kept equal to blake3 for one release so any
+        // consumer still reading `entry.hash` keeps working. Remove in a
+        // follow-up PR.
+        hash: blake3,
       };
       assetFiles.set(relativePath, content);
     }
@@ -354,7 +413,7 @@ export async function packageBuild(
   const formData = new FormData();
 
   // Build manifest from inferred bindings
-  const manifest: DeployManifest = { version: 3, bindings: {} };
+  const manifest: DeployManifest = { version: 3, assetManifestVersion: 2, bindings: {} };
   if (bindings.needsAuth) {
     manifest.auth = true;
   }
@@ -569,6 +628,7 @@ export async function packageStaticBuild(
 
   const manifest: DeployManifest = {
     version: 3,
+    assetManifestVersion: 2,
     bindings: {},
     type: appType,
     assetConfig,
@@ -654,7 +714,7 @@ export async function packageFrameworkBuild(opts: {
   const po = opts.packageOptions;
 
   // Build manifest
-  const manifest: DeployManifest = { version: 3, bindings: {} };
+  const manifest: DeployManifest = { version: 3, assetManifestVersion: 2, bindings: {} };
   const hasMigrations = opts.migrations && opts.migrations.length > 0;
   if (opts.bindings.needsD1 || opts.bindings.needsAuth || hasMigrations) {
     if (opts.dialect === 'postgresql') {
