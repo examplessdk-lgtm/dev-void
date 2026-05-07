@@ -442,12 +442,40 @@ function toSandboxManifest(sandbox: ResolvedSandboxConfig): SandboxManifestMeta 
 }
 
 /**
+ * If the user configured `routing.fallbacks` on a non-SPA app, the platform
+ * still applies the rules but no `/* -> /index.html` SPA shell is synthesised
+ * — unmatched paths fall through to the platform 404. Returns the warning
+ * message string when that mismatch is detected, or `null` otherwise. Pure
+ * function; callers decide whether/how to surface the message (CLI progress,
+ * `console.warn`, etc.).
+ */
+export function detectNonSpaFallbackWarning(
+  assetConfig: AssetConfig | undefined,
+  fallbackRules: Array<DevRedirectRule> | undefined,
+): string | null {
+  if (assetConfig?.not_found_handling === 'single-page-application') {
+    return null;
+  }
+  if (!fallbackRules || fallbackRules.length === 0) {
+    return null;
+  }
+  return (
+    `routing.fallbacks is set but appType is not "spa"; fallbacks will be applied, ` +
+    `but no "/* -> /index.html" SPA shell fallback is synthesised — unmatched paths fall through to the platform 404.`
+  );
+}
+
+/**
  * Build a Void-app deploy manifest from the inferred bindings + per-feature
  * inputs. Pure shape transformation: reads no files, has no I/O. Both the
  * legacy multipart packager (`packageBuild`) and the direct-to-R2 bundler
  * (`prepareVoidDeployBundle`) call into this so the manifest is computed
  * once per deploy and the wire shape stays bit-for-bit identical between
  * the two paths.
+ *
+ * Note: callers are responsible for surfacing the non-SPA-fallbacks warning
+ * (see `detectNonSpaFallbackWarning`) before invoking this builder. The
+ * builder itself stays I/O-free.
  */
 export function buildVoidManifest(opts: {
   bindings: InferredBindings;
@@ -467,7 +495,6 @@ export function buildVoidManifest(opts: {
   fallbackRules?: Array<DevRedirectRule>;
   dialect?: 'sqlite' | 'postgresql';
   webSockets?: Array<WebSocketRouteDefinition>;
-  onProgress?: ProgressCallback;
 }): DeployManifest {
   const {
     bindings,
@@ -487,7 +514,6 @@ export function buildVoidManifest(opts: {
     fallbackRules,
     dialect,
     webSockets,
-    onProgress,
   } = opts;
 
   const manifest: DeployManifest = { version: 3, assetManifestVersion: 2, bindings: {} };
@@ -566,18 +592,16 @@ export function buildVoidManifest(opts: {
   // platform-level SPA switch and append a synthetic catch-all rule so user
   // fallbacks are evaluated first and the SPA default only fires when none
   // matched.
+  //
+  // The non-SPA-fallbacks mismatch warning that used to live here moved to
+  // the callers (see `detectNonSpaFallbackWarning`); this function stays
+  // I/O-free per its documented contract.
   let resolvedAssetConfig = assetConfig;
   let resolvedFallbackRules = fallbackRules;
   if (assetConfig?.not_found_handling === 'single-page-application') {
     const chain = resolveSpaFallbackChain('spa', fallbackRules);
     resolvedAssetConfig = { ...assetConfig, ...chain.assetConfig };
     resolvedFallbackRules = chain.fallbackRules;
-  } else if (fallbackRules && fallbackRules.length > 0) {
-    const msg =
-      `routing.fallbacks is set but appType is not "spa"; fallbacks will be applied, ` +
-      `but no "/* -> /index.html" SPA shell fallback is synthesised — unmatched paths fall through to the platform 404.`;
-    onProgress?.(msg);
-    console.warn(`[void] ${msg}`);
   }
 
   if (resolvedAssetConfig) {
@@ -685,6 +709,15 @@ export async function packageBuild(
 ): Promise<FormData> {
   const formData = new FormData();
 
+  // Surface the non-SPA-fallbacks mismatch (if any) here, before invoking
+  // the I/O-free manifest builder. Mirrors what `runFullDeploy` does on the
+  // direct-to-R2 path so both deploy modes warn identically.
+  const fallbackWarning = detectNonSpaFallbackWarning(assetConfig, fallbackRules);
+  if (fallbackWarning) {
+    onProgress?.(fallbackWarning);
+    console.warn(`[void] ${fallbackWarning}`);
+  }
+
   const manifest = buildVoidManifest({
     bindings,
     migrations,
@@ -703,7 +736,6 @@ export async function packageBuild(
     fallbackRules,
     dialect,
     webSockets,
-    onProgress,
   });
 
   if (migrations && migrations.length > 0) {

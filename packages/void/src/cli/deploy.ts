@@ -79,6 +79,7 @@ import {
   buildStaticManifest,
   buildFrameworkManifest,
   collectWorkerFiles,
+  detectNonSpaFallbackWarning,
   getAssetContentType,
   type AssetManifestEntry,
 } from './package.ts';
@@ -1718,6 +1719,15 @@ async function runFullDeploy(
     });
     result = await streamDeploy(client, config.projectId, formData, s, cliLog);
   } else {
+    // Surface the non-SPA-fallbacks mismatch (if any) before invoking the
+    // I/O-free manifest builder. Mirrors what `packageBuild` does on the
+    // legacy multipart path so both deploy modes warn identically.
+    const fallbackWarning = detectNonSpaFallbackWarning(assetConfig, fallbackRules);
+    if (fallbackWarning) {
+      onProgress?.(fallbackWarning);
+      console.warn(`[void] ${fallbackWarning}`);
+    }
+
     const manifest = buildVoidManifest({
       bindings: effectiveBindings,
       migrations: validatedMigrations,
@@ -1736,7 +1746,6 @@ async function runFullDeploy(
       fallbackRules,
       dialect,
       webSockets,
-      onProgress,
     });
     const workerFiles = collectWorkerFiles(join(distDir, workerDirName));
     cliLog?.info('package_end', {
