@@ -324,6 +324,83 @@ describe('direct-to-R2 deploy flow', () => {
     expect(uniquePaths.size).toBe(4);
   });
 
+  it('prunes the in-memory assetFiles cache to needed-only after preflight', async () => {
+    // 4 fixture assets, only 1 needed: pruning should drop 3 buffers
+    // immediately after preflight, and the per-PUT cleanup should drop
+    // the last one once R2 acks the upload. We assert via the JSONL log,
+    // which captures both the pre/post-prune sizes (`asset_cache_pruned`)
+    // and the upload events (`r2_put_end`).
+    installPlatformMocks({
+      preflightNeeded: ['/index.html'],
+      preflightSkipped: 3,
+    });
+    const cliLog = openDeployLog();
+    const logPath = cliLog.path;
+    expect(logPath).toBeTruthy();
+    const client = new PlatformClient('test-token', { apiUrl: 'https://api.test', cliLog });
+
+    await runStaticDeploy(
+      workdir,
+      { projectId: 'proj_t', slug: 'test' },
+      client,
+      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
+      true,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      cliLog,
+      false,
+    );
+
+    await cliLog.close();
+    const lines = readFileSync(logPath as string, 'utf-8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { msg: string; before?: number; after?: number });
+    const prune = lines.find((l) => l.msg === 'asset_cache_pruned');
+    expect(prune).toBeDefined();
+    // Before prune: 4 fixture buffers in the cache. After: 1 (the only
+    // needed asset). Per-PUT cleanup runs after this event so the log
+    // value here is the post-prune-but-pre-PUT size.
+    expect(prune?.before).toBe(4);
+    expect(prune?.after).toBe(1);
+  });
+
+  it('does not log asset_cache_pruned when nothing was skipped', async () => {
+    // All 4 needed → prune is a no-op and we suppress the noisy log.
+    installPlatformMocks();
+    const cliLog = openDeployLog();
+    const logPath = cliLog.path;
+    expect(logPath).toBeTruthy();
+    const client = new PlatformClient('test-token', { apiUrl: 'https://api.test', cliLog });
+
+    await runStaticDeploy(
+      workdir,
+      { projectId: 'proj_t', slug: 'test' },
+      client,
+      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
+      true,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      cliLog,
+      false,
+    );
+
+    await cliLog.close();
+    const lines = readFileSync(logPath as string, 'utf-8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { msg: string });
+    expect(lines.find((l) => l.msg === 'asset_cache_pruned')).toBeUndefined();
+  });
+
   it('skips upload-urls + R2 PUT phase when no assets are needed', async () => {
     const state = installPlatformMocks({ preflightNeeded: [], preflightSkipped: 4 });
     const client = makeClient();

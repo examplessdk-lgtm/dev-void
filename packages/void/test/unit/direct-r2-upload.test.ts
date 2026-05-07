@@ -160,4 +160,37 @@ describe('uploadAssetsToR2', () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
+
+  it('clears item.body and invokes onAfterPut after each successful PUT', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    const items = [makeItem('/a.html', 'h1'), makeItem('/b.css', 'h2'), makeItem('/c.js', 'h3')];
+    const seen: Array<string> = [];
+
+    await uploadAssetsToR2(items, cliLog, fetchMock, (item) => {
+      // body must already be cleared by the time the callback runs so the
+      // caller does not have to inspect it.
+      expect(item.body).toBeUndefined();
+      seen.push(item.path);
+    });
+
+    // Every item invoked the callback exactly once, with body cleared.
+    expect(seen.sort()).toEqual(['/a.html', '/b.css', '/c.js']);
+    for (const item of items) {
+      expect(item.body).toBeUndefined();
+    }
+  });
+
+  it('does not invoke onAfterPut when the PUT fails', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('SignatureMismatch', { status: 403 }));
+    const item = makeItem('/oops.html', 'h-oops');
+    const onAfterPut = vi.fn();
+
+    await expect(uploadAssetsToR2([item], cliLog, fetchMock, onAfterPut)).rejects.toBeDefined();
+
+    // Failed upload must not signal "done" via the cleanup hook — callers
+    // depend on this to avoid prematurely dropping refs they may need to
+    // re-presign / retry against in a future iteration.
+    expect(onAfterPut).not.toHaveBeenCalled();
+    expect(item.body).toBeDefined();
+  });
 });

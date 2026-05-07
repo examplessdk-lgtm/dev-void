@@ -47,8 +47,13 @@ export interface DirectR2PutItem {
   path: string;
   /** BLAKE3 storage hash — used for log correlation and R2 key. */
   hash: string;
-  /** Asset bytes. */
-  body: Buffer;
+  /**
+   * Asset bytes. Cleared (set to `undefined`) by `uploadAssetsToR2` after a
+   * successful PUT so the buffer becomes eligible for GC as soon as the
+   * upload is acknowledged. Callers should not read `body` after the upload
+   * completes.
+   */
+  body: Buffer | undefined;
   /** Presigned URL from `requestUploadUrls`. */
   url: string;
   /** Headers the platform required us to send (incl. Content-Md5, Content-Type). */
@@ -63,11 +68,17 @@ export interface DirectR2PutItem {
  *
  * Logs `r2_put_start` / `r2_put_end` per asset, plus `r2_put_retry` on
  * each retry attempt. Per-asset durations help identify slow uploads.
+ *
+ * Memory: each successful PUT clears `item.body` and invokes `onAfterPut`
+ * so the caller can drop its own ref (e.g. delete from the in-memory
+ * `assetFiles` cache). For huge deploys this keeps peak memory bounded by
+ * the upload concurrency rather than the total bundle size.
  */
 export async function uploadAssetsToR2(
   items: Array<DirectR2PutItem>,
   cliLog: CliLogger | undefined,
   fetchImpl: typeof fetch = fetch,
+  onAfterPut?: (item: DirectR2PutItem) => void,
 ): Promise<void> {
   if (items.length === 0) {
     return;
@@ -97,6 +108,12 @@ export async function uploadAssetsToR2(
             }
             return;
           }
+          // Drop refs to the asset bytes now that R2 has them. Both the
+          // local `body` ref on the item and any caller-side ref (via
+          // `onAfterPut`) are released so the buffer becomes eligible
+          // for GC under bounded concurrency.
+          items[i].body = undefined;
+          onAfterPut?.(items[i]);
         }
       })(),
     );
@@ -112,11 +129,18 @@ async function uploadOne(
   cliLog: CliLogger | undefined,
   fetchImpl: typeof fetch,
 ): Promise<void> {
+  // Capture the body up-front. The pool only clears `item.body` AFTER
+  // `uploadOne` returns successfully, so it is guaranteed defined here for
+  // all attempts of this single PUT.
+  if (!item.body) {
+    throw new Error(`internal: uploadOne invoked for ${item.path} with no body`);
+  }
+  const body = item.body;
   const startedAt = Date.now();
   cliLog?.info('r2_put_start', {
     hash: item.hash,
     path: item.path,
-    sizeBytes: item.body.length,
+    sizeBytes: body.length,
   });
 
   let attempt = 0;
@@ -128,7 +152,7 @@ async function uploadOne(
         // Clone the buffer into a fresh Uint8Array view so each retry sees
         // an independent body. Reusing the same Buffer across retries is
         // safe with `fetch` (it consumes once), but explicit here.
-        body: new Uint8Array(item.body) as unknown as BodyInit,
+        body: new Uint8Array(body) as unknown as BodyInit,
         headers: item.headers,
       });
     } catch (err) {

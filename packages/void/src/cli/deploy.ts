@@ -654,6 +654,26 @@ async function streamDirectR2Deploy(
   cliLog?: CliLogger,
 ): Promise<StreamDeployResult> {
   if (needed.length > 0) {
+    // Memory: drop buffers for assets the server already has so peak
+    // memory tracks `needed`, not the full bundle. Skipped entries become
+    // GC-eligible immediately rather than after `finalizeDeploy` returns.
+    // The pre-prune size is captured for the JSONL log only. We materialize
+    // the key list before deleting so the iterator isn't disturbed mid-walk.
+    const neededPaths = new Set(needed);
+    const preBufferCount = assetFiles.size;
+    const allPaths = Array.from(assetFiles.keys());
+    for (const path of allPaths) {
+      if (!neededPaths.has(path)) {
+        assetFiles.delete(path);
+      }
+    }
+    if (assetFiles.size !== preBufferCount) {
+      cliLog?.info('asset_cache_pruned', {
+        before: preBufferCount,
+        after: assetFiles.size,
+      });
+    }
+
     s.message(`Requesting upload URLs for ${needed.length} asset(s)...`);
 
     const assetsToUpload = needed.map((path) => {
@@ -710,7 +730,12 @@ async function streamDirectR2Deploy(
     });
 
     s.message(`Uploading ${items.length} asset(s) to R2...`);
-    await uploadAssetsToR2(items, cliLog);
+    // Per-PUT cleanup: once R2 acks the upload, drop the buffer from the
+    // CLI-side cache so peak memory under the bounded upload pool stays
+    // close to `R2_PUT_CONCURRENCY` × asset size, not the full bundle.
+    await uploadAssetsToR2(items, cliLog, undefined, (item) => {
+      assetFiles.delete(item.path);
+    });
   } else {
     cliLog?.info('presign_skipped', { reason: 'no_needed_assets' });
   }
