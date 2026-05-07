@@ -1,0 +1,242 @@
+import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'pathe';
+
+type Level = 'debug' | 'info' | 'warn' | 'error';
+
+export interface CliLogger {
+  info(msg: string, fields?: Record<string, unknown>): void;
+  warn(msg: string, fields?: Record<string, unknown>): void;
+  error(msg: string, err?: unknown, fields?: Record<string, unknown>): void;
+  debug(msg: string, fields?: Record<string, unknown>): void;
+  /** path to the file backing this logger, or null if unable to open */
+  readonly path: string | null;
+  /** Close stream and return final path. Idempotent. */
+  close(): Promise<void>;
+}
+
+interface ErrChainNode {
+  name?: string;
+  message?: string;
+  code?: string | number;
+  errno?: string | number;
+  cause?: ErrChainNode;
+}
+
+/**
+ * Walk `err.cause` up to 6 levels and return a plain JSON-friendly chain.
+ * Skips stack traces deliberately — keeps output line-oriented and readable.
+ */
+export function describeErrorChain(err: unknown, depth = 0): ErrChainNode | string {
+  if (depth > 5 || err == null) {
+    return String(err);
+  }
+  if (err instanceof Error) {
+    const node: ErrChainNode = {
+      name: err.name,
+      message: err.message,
+    };
+    const code = (err as Error & { code?: string | number }).code;
+    if (code !== undefined) {
+      node.code = code;
+    }
+    const errno = (err as Error & { errno?: string | number }).errno;
+    if (errno !== undefined) {
+      node.errno = errno;
+    }
+    const cause = (err as Error & { cause?: unknown }).cause;
+    if (cause != null) {
+      const sub = describeErrorChain(cause, depth + 1);
+      if (typeof sub === 'object') {
+        node.cause = sub;
+      } else {
+        node.cause = { message: sub };
+      }
+    }
+    return node;
+  }
+  return String(err);
+}
+
+/**
+ * Flatten an error and its `cause` chain to a single inline string suitable
+ * for stderr skimming. Mirrors `describeErrorChain`'s walk (depth cap 6,
+ * same fields, no stack traces) but joins levels with ` -> ` instead of
+ * nesting JSON.
+ */
+function formatErrorChainInline(err: unknown, depth = 0): string {
+  if (depth > 5 || err == null) {
+    return String(err);
+  }
+  if (err instanceof Error) {
+    let head = err.name ? `${err.name}: ${err.message}` : err.message;
+    const code = (err as Error & { code?: string | number }).code;
+    const errno = (err as Error & { errno?: string | number }).errno;
+    const tags: Array<string> = [];
+    if (code !== undefined) {
+      tags.push(`code=${code}`);
+    }
+    if (errno !== undefined) {
+      tags.push(`errno=${errno}`);
+    }
+    if (tags.length > 0) {
+      head = `${head} (${tags.join(' ')})`;
+    }
+    const cause = (err as Error & { cause?: unknown }).cause;
+    if (cause != null) {
+      return `${head} -> ${formatErrorChainInline(cause, depth + 1)}`;
+    }
+    return head;
+  }
+  return String(err);
+}
+
+function formatStderrLine(
+  level: Level,
+  msg: string,
+  err: unknown | undefined,
+  fields?: Record<string, unknown>,
+): string {
+  const parts: Array<string> = [level, msg];
+  if (fields) {
+    for (const [k, v] of Object.entries(fields)) {
+      if (v === undefined) {
+        continue;
+      }
+      let s: string;
+      if (v == null || typeof v === 'number' || typeof v === 'boolean') {
+        s = String(v);
+      } else if (typeof v === 'string') {
+        s = v.length > 200 ? `${v.slice(0, 200)}...` : v;
+      } else {
+        try {
+          s = JSON.stringify(v);
+        } catch {
+          s = String(v);
+        }
+      }
+      parts.push(`${k}=${s}`);
+    }
+  }
+  if (err !== undefined) {
+    parts.push(`-> err=${formatErrorChainInline(err)}`);
+  }
+  return parts.join(' ');
+}
+
+export function openDeployLog(opts?: { mirrorToStderr?: boolean }): CliLogger {
+  const mirror = opts?.mirrorToStderr === true;
+  const startedAt = Date.now();
+
+  let path: string | null = null;
+  let stream: WriteStream | null = null;
+  let broken = false;
+  let closed = false;
+
+  try {
+    const dir = join(homedir(), '.void', 'logs');
+    mkdirSync(dir, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const filePath = join(dir, `deploy-${ts}.jsonl`);
+    stream = createWriteStream(filePath, { flags: 'a', autoClose: true });
+    stream.on('error', () => {
+      // Disable subsequent writes silently. Stream errors should never
+      // bubble up into the deploy pipeline.
+      broken = true;
+    });
+    path = filePath;
+  } catch {
+    broken = true;
+    path = null;
+    stream = null;
+  }
+
+  function write(
+    level: Level,
+    msg: string,
+    err: unknown | undefined,
+    fields?: Record<string, unknown>,
+  ): void {
+    if (mirror) {
+      try {
+        process.stderr.write(`${formatStderrLine(level, msg, err, fields)}\n`);
+      } catch {
+        // Stderr write failures are not actionable.
+      }
+    }
+    if (broken || !stream || closed) {
+      return;
+    }
+    const now = Date.now();
+    const record: Record<string, unknown> = {
+      ts: now,
+      elapsedMs: now - startedAt,
+      lvl: level,
+      msg,
+    };
+    if (fields) {
+      for (const [k, v] of Object.entries(fields)) {
+        if (
+          v !== undefined &&
+          k !== 'ts' &&
+          k !== 'elapsedMs' &&
+          k !== 'lvl' &&
+          k !== 'msg' &&
+          k !== 'err'
+        ) {
+          record[k] = v;
+        }
+      }
+    }
+    if (err !== undefined) {
+      record.err = describeErrorChain(err);
+    }
+    let line: string;
+    try {
+      line = `${JSON.stringify(record)}\n`;
+    } catch {
+      // Non-serializable fields shouldn't crash the logger; fall back to a
+      // minimal record.
+      line = `${JSON.stringify({ ts: now, elapsedMs: now - startedAt, lvl: level, msg, err: 'unserializable fields' })}\n`;
+    }
+    try {
+      stream.write(line);
+    } catch {
+      broken = true;
+    }
+  }
+
+  return {
+    get path() {
+      return path;
+    },
+    info(msg, fields) {
+      write('info', msg, undefined, fields);
+    },
+    warn(msg, fields) {
+      write('warn', msg, undefined, fields);
+    },
+    error(msg, err, fields) {
+      write('error', msg, err, fields);
+    },
+    debug(msg, fields) {
+      write('debug', msg, undefined, fields);
+    },
+    close(): Promise<void> {
+      if (closed) {
+        return Promise.resolve();
+      }
+      closed = true;
+      if (!stream) {
+        return Promise.resolve();
+      }
+      return new Promise((resolveClose) => {
+        try {
+          stream!.end(() => resolveClose());
+        } catch {
+          resolveClose();
+        }
+      });
+    },
+  };
+}

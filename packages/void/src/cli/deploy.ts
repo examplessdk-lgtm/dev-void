@@ -65,6 +65,7 @@ import {
   validateProdEnv,
 } from './env-validation.ts';
 import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers.ts';
+import { openDeployLog, type CliLogger } from './log-file.ts';
 import { promptForLoginToken } from './login.ts';
 import { cliTitle, createSpinner, pc } from './output.ts';
 import {
@@ -96,6 +97,7 @@ export interface RunDeployOptions {
   dir?: string;
   spa?: boolean;
   skipBuild?: boolean;
+  debug?: boolean;
 }
 
 type DeployDoneEvent = Extract<DeployEvent, { event: 'done' }>;
@@ -177,6 +179,36 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
   console.log();
   intro(cliTitle('deploy'));
 
+  const cliLog = openDeployLog({
+    mirrorToStderr: options?.debug === true || process.env.VOID_DEPLOY_DEBUG === '1',
+  });
+  cliLog.info('deploy_start', {
+    cwd: root,
+    projectSlug: options?.projectSlug,
+    dir: options?.dir,
+    spa: options?.spa === true ? true : undefined,
+    skipBuild: options?.skipBuild === true ? true : undefined,
+    nodeVersion: process.version,
+    platform: process.platform,
+    arch: process.arch,
+  });
+
+  try {
+    await runDeployInner(root, options, cliLog);
+    cliLog.info('deploy_end', { ok: true });
+  } catch (err) {
+    cliLog.error('deploy_end', err, { ok: false });
+    throw err;
+  } finally {
+    await cliLog.close().catch(() => {});
+  }
+}
+
+async function runDeployInner(
+  root: string,
+  options: RunDeployOptions | undefined,
+  cliLog: CliLogger,
+): Promise<void> {
   let reauthenticated = false;
   while (true) {
     try {
@@ -187,7 +219,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
         process.exit(1);
       }
 
-      const client = new PlatformClient(token, { root });
+      const client = new PlatformClient(token, { root, cliLog });
 
       // 2. Resolve target project (CLI flag > env var > linked project file)
       const requestedProjectSlug = getRequestedProjectSlug(options);
@@ -200,7 +232,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
         if (!config) {
           if (!process.stdin.isTTY) {
             // CI: auto-create when --project is explicitly specified
-            config = await createProjectFromSlug(root, client, requestedProjectSlug);
+            config = await createProjectFromSlug(root, client, requestedProjectSlug, cliLog);
           } else {
             const shouldCreate = await confirm({
               message: `Project "${requestedProjectSlug}" does not exist. Create it?`,
@@ -210,7 +242,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
               process.exit(0);
             }
 
-            config = await createProjectFromSlug(root, client, requestedProjectSlug);
+            config = await createProjectFromSlug(root, client, requestedProjectSlug, cliLog);
           }
         }
       } else {
@@ -225,15 +257,29 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
       }
 
       if (!config) {
-        config = await promptDeployProjectConfig(root, client);
+        config = await promptDeployProjectConfig(root, client, cliLog);
       }
+
+      cliLog.info('project_resolved', {
+        projectId: config.projectId,
+        slug: config.slug,
+      });
 
       // 3. Resolve deploy app type: void.json > CLI flags > auto-detection
       const voidConfig = readConfig(root);
+      cliLog.info('config_resolved', {
+        target: voidConfig.target,
+        appType: voidConfig.inference?.appType,
+        output: voidConfig.output,
+      });
 
       // Check for known framework first
       const detected = detectFramework(root);
       if (detected) {
+        cliLog.info('framework_detected', {
+          name: detected.name,
+          class: detected.class,
+        });
         const gitCommit = options?.skipBuild ? null : getGitCommit(root);
         const fwPreset = FRAMEWORK_PRESETS[detected.name];
         if (detected.class === 'b' || detected.class === 'c') {
@@ -250,6 +296,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
             voidConfig,
             options?.skipBuild,
             gitCommit,
+            cliLog,
           );
         } else {
           // Class A: preset is optional (e.g. vinext probes at runtime)
@@ -261,6 +308,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
             options?.skipBuild,
             gitCommit,
             detected,
+            cliLog,
           );
         }
         return;
@@ -315,9 +363,19 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
           undefined,
           undefined,
           voidConfig.routing,
+          cliLog,
         );
       } else {
-        await runFullDeploy(root, config, client, undefined, options?.skipBuild, gitCommit);
+        await runFullDeploy(
+          root,
+          config,
+          client,
+          undefined,
+          options?.skipBuild,
+          gitCommit,
+          undefined,
+          cliLog,
+        );
       }
       return;
     } catch (error) {
@@ -344,6 +402,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
 export async function promptDeployProjectConfig(
   root: string,
   client: PlatformClient,
+  cliLog?: CliLogger,
 ): Promise<ProjectConfig> {
   const projects = await client.listProjects();
   const action = await promptProjectSetupAction('Set up a Void project for deploy:', {
@@ -365,6 +424,7 @@ export async function promptDeployProjectConfig(
   const config = { projectId: result.project.id, slug: result.project.slug };
   writeProjectConfig(root, config);
   log.step(`Linked to ${pc.blue(config.slug)}`);
+  cliLog?.info('project_linked', { projectId: config.projectId, slug: config.slug });
   return config;
 }
 
@@ -448,9 +508,12 @@ async function streamDeploy(
   projectId: string,
   formData: FormData,
   s: SpinnerResult,
+  cliLog?: CliLogger,
 ): Promise<StreamDeployResult> {
+  const startedAt = Date.now();
   let deploymentId: string | null = null;
   let interrupted = false;
+  cliLog?.info('stream_start', { projectId });
   const onSigint = () => {
     interrupted = true;
     s.stop('Deploy interrupted');
@@ -459,6 +522,12 @@ async function streamDeploy(
     } else {
       log.info('Deployment id was not received before the interrupt.');
     }
+    cliLog?.warn('stream_interrupted', { deploymentId });
+    // Best-effort flush of the JSONL log before the process exits. The
+    // returned promise is intentionally not awaited — `process.exit(130)`
+    // would race the awaiter, and the OS flushes the page cache for the
+    // line-delimited file regardless.
+    cliLog?.close().catch(() => {});
     process.exit(130);
   };
 
@@ -469,10 +538,24 @@ async function streamDeploy(
       const result = applyDeployEvent(event, s);
       if (result.kind === 'start') {
         deploymentId = result.deploymentId;
+        cliLog?.info('stream_deployment_id', { deploymentId });
       } else if (result.kind === 'done') {
+        cliLog?.info('deploy_success', {
+          deploymentId,
+          url: result.event.url,
+          assets: result.event.assets,
+          workers: result.event.workers,
+          durationMs: Date.now() - startedAt,
+        });
         return result.event;
       } else if (result.kind === 'error') {
-        throw new DeployEventError(formatDeployFailureMessage(result.message, deploymentId));
+        cliLog?.error('deploy_server_error', undefined, {
+          deploymentId,
+          message: result.message,
+        });
+        throw new DeployEventError(
+          formatDeployFailureMessage(result.message, deploymentId, cliLog?.path ?? null),
+        );
       }
     }
   } catch (err) {
@@ -482,14 +565,16 @@ async function streamDeploy(
     if (interrupted) {
       throw err;
     }
+    cliLog?.error('stream_deploy_caught', err, { deploymentId });
     s.stop('Deploy failed');
-    throw formatStreamDeployError(err, deploymentId);
+    throw formatStreamDeployError(err, deploymentId, cliLog?.path ?? null);
   } finally {
     process.removeListener('SIGINT', onSigint);
   }
 
+  cliLog?.warn('stream_no_terminal_event', { deploymentId });
   s.stop('Deploy failed');
-  throw new Error(formatConnectionLostMessage(deploymentId));
+  throw new Error(formatConnectionLostMessage(deploymentId, cliLog?.path ?? null));
 }
 
 function formatKnownAssetSummary(result: DeployDoneEvent, skipped: number): string {
@@ -511,14 +596,21 @@ async function runStaticDeploy(
   redirectRules?: Array<DevRedirectRule>,
   fallbackRules?: Array<DevRedirectRule>,
   routing?: RoutingConfig,
+  cliLog?: CliLogger,
 ): Promise<void> {
   const typeLabel = preset.appType === 'spa' ? 'Static SPA' : 'Static Site';
   log.info(`${typeLabel} deploy`);
+  cliLog?.info('deploy_mode', { mode: 'static', appType: preset.appType });
 
   // Build (if needed)
   if (preset.buildCommand && !skipBuild) {
     log.step('Building...');
+    cliLog?.info('build_start', { command: preset.buildCommand });
+    const buildStartedAt = Date.now();
     execSync(preset.buildCommand, { cwd: root, stdio: 'inherit' });
+    cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
+  } else if (skipBuild) {
+    cliLog?.info('build_skipped', { reason: 'skipBuild' });
   }
 
   if (!existsSync(preset.outputDir)) {
@@ -543,15 +635,23 @@ async function runStaticDeploy(
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
+  cliLog?.info('preflight_start', { dir: preset.outputDir });
   const { assetManifest } = await collectAndHashAssets(preset.outputDir, onProgress);
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest);
   s.stop('Checked for changes');
+  cliLog?.info('preflight_end', {
+    total: Object.keys(assetManifest).length,
+    needed: needed.length,
+    skipped,
+  });
 
   if (skipped > 0) {
     log.info(`Skipping ${skipped} unchanged asset(s)`);
   }
 
   s.start('Packaging...');
+  cliLog?.info('package_start', { mode: 'static' });
+  const packageStartedAt = Date.now();
   const neededSet = skipped > 0 ? new Set(needed) : null;
   const formData = await packageStaticBuild(
     preset.outputDir,
@@ -568,8 +668,12 @@ async function runStaticDeploy(
   if (commit) {
     formData.append('commit', commit);
   }
+  cliLog?.info('package_end', {
+    mode: 'static',
+    durationMs: Date.now() - packageStartedAt,
+  });
 
-  const result = await streamDeploy(client, config.projectId, formData, s);
+  const result = await streamDeploy(client, config.projectId, formData, s, cliLog);
 
   const summary = [`${typeLabel} — ${formatKnownAssetSummary(result, skipped)}`];
   note(summary.join('\n'), result.url);
@@ -605,8 +709,10 @@ async function runFrameworkDeploy(
   voidConfig: VoidConfig,
   skipBuild?: boolean,
   commit?: string | null,
+  cliLog?: CliLogger,
 ): Promise<void> {
   log.info(`${detected.name} framework deploy`);
+  cliLog?.info('deploy_mode', { mode: 'framework', framework: detected.name });
 
   const dialect = getDatabaseDialect(voidConfig);
 
@@ -614,10 +720,15 @@ async function runFrameworkDeploy(
   const buildCmd = voidConfig.inference?.build ?? formatProjectCommand(root, fwPreset.buildCommand);
   if (!skipBuild) {
     log.step(`Building (${buildCmd})...`);
+    cliLog?.info('build_start', { command: buildCmd });
+    const buildStartedAt = Date.now();
     execSync(voidConfig.inference?.build ?? resolveProjectCommand(root, fwPreset.buildCommand), {
       cwd: root,
       stdio: 'inherit',
     });
+    cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
+  } else {
+    cliLog?.info('build_skipped', { reason: 'skipBuild' });
   }
 
   // 2. Verify output paths
@@ -795,17 +906,25 @@ async function runFrameworkDeploy(
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
+  cliLog?.info('preflight_start', { dir: assetsDir });
   const { assetManifest } = await collectAndHashAssets(assetsDir, onProgress, {
     ignorePatterns: frameworkAssetIgnorePatterns,
   });
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
   s.stop('Checked for changes');
+  cliLog?.info('preflight_end', {
+    total: Object.keys(assetManifest).length,
+    needed: needed.length,
+    skipped,
+  });
 
   if (skipped > 0) {
     log.info(`Skipping ${skipped} unchanged asset(s)`);
   }
 
   s.start('Packaging...');
+  cliLog?.info('package_start', { mode: 'framework', framework: detected.name });
+  const packageStartedAt = Date.now();
   const neededSet = skipped > 0 ? new Set(needed) : null;
   const formData = await packageFrameworkBuild({
     frameworkName: detected.name,
@@ -841,8 +960,12 @@ async function runFrameworkDeploy(
   if (commit) {
     formData.append('commit', commit);
   }
+  cliLog?.info('package_end', {
+    mode: 'framework',
+    durationMs: Date.now() - packageStartedAt,
+  });
 
-  const result = await streamDeploy(client, config.projectId, formData, s);
+  const result = await streamDeploy(client, config.projectId, formData, s, cliLog);
 
   const summary = [
     `${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`,
@@ -883,11 +1006,19 @@ async function runFullDeploy(
   skipBuild?: boolean,
   commit?: string | null,
   detected?: DetectedFramework,
+  cliLog?: CliLogger,
 ): Promise<void> {
+  cliLog?.info('deploy_mode', {
+    mode: 'full',
+    framework: detected?.name,
+  });
+
   // 3. Build (child process to avoid Vite API side effects on bundle output)
   if (!skipBuild) {
     const buildCmd = formatProjectCommand(root, 'vite build');
     log.step(`Building (${buildCmd})...`);
+    cliLog?.info('build_start', { command: buildCmd });
+    const buildStartedAt = Date.now();
     try {
       // Pass VOID_DEPLOY_PROJECT_ID so plugin-prerender (running inside this
       // child vite build) can resolve the Void projectId without relying on
@@ -897,9 +1028,13 @@ async function runFullDeploy(
         stdio: 'inherit',
         env: { ...process.env, VOID_DEPLOY_PROJECT_ID: config.projectId },
       });
+      cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
     } catch (err: unknown) {
+      cliLog?.error('build_failed', err, { durationMs: Date.now() - buildStartedAt });
       process.exit(getExitCode(err));
     }
+  } else {
+    cliLog?.info('build_skipped', { reason: 'skipBuild' });
   }
 
   // 4. Resolve build output paths from build artifacts (avoids re-resolving
@@ -1107,6 +1242,7 @@ async function runFullDeploy(
     const hasNonPageBackend = hasRoutes || hasMiddleware || hasWebSockets || authEnabled;
     if (allPrerenderable && !hasNonPageBackend && schedules.length === 0 && queues.length === 0) {
       log.info('All pages prerendered — deploying as static site');
+      cliLog?.info('full_to_static_redirect', { reason: 'all_pages_prerendered' });
       return runStaticDeploy(
         root,
         config,
@@ -1122,6 +1258,8 @@ async function runFullDeploy(
         headerRules,
         redirectRules,
         fallbackRules,
+        undefined,
+        cliLog,
       );
     }
   }
@@ -1187,15 +1325,31 @@ async function runFullDeploy(
 
   // Preflight: hash assets and check which ones changed
   s.start('Checking for changes...');
+  cliLog?.info('preflight_start', { dir: clientDir });
   const { assetManifest } = await collectAndHashAssets(clientDir, onProgress);
   const { needed, skipped } = await client.preflight(config.projectId, assetManifest, true);
   s.stop('Checked for changes');
+  cliLog?.info('preflight_end', {
+    total: Object.keys(assetManifest).length,
+    needed: needed.length,
+    skipped,
+  });
 
   if (skipped > 0) {
     log.info(`Skipping ${skipped} unchanged asset(s)`);
   }
 
   s.start('Packaging...');
+  cliLog?.info('package_start', {
+    mode: 'full',
+    isSsr,
+    hasRoutes,
+    hasMiddleware,
+    hasWebSockets,
+    authEnabled,
+    framework: detected?.name,
+  });
+  const packageStartedAt = Date.now();
   const neededSet = skipped > 0 ? new Set(needed) : null;
   const formData = await packageBuild(
     distDir,
@@ -1230,8 +1384,12 @@ async function runFullDeploy(
   if (commit) {
     formData.append('commit', commit);
   }
+  cliLog?.info('package_end', {
+    mode: 'full',
+    durationMs: Date.now() - packageStartedAt,
+  });
 
-  const result = await streamDeploy(client, config.projectId, formData, s);
+  const result = await streamDeploy(client, config.projectId, formData, s, cliLog);
 
   const summary = [
     `${result.workers} worker module(s), ${formatKnownAssetSummary(result, skipped)}`,
@@ -1270,12 +1428,15 @@ async function createProjectFromSlug(
   root: string,
   client: PlatformClient,
   slug: string,
+  cliLog?: CliLogger,
 ): Promise<ProjectConfig> {
   log.step(`Creating project ${pc.blue(slug)}...`);
+  cliLog?.info('project_create_start', { slug });
   const project = await client.createProject(slug);
   const config = { projectId: project.id, slug: project.slug };
   writeProjectConfig(root, config);
   log.success(`Project created: ${pc.blue(config.slug)}`);
+  cliLog?.info('project_create_success', { projectId: config.projectId, slug: config.slug });
   return config;
 }
 

@@ -1,6 +1,7 @@
 import { cfAccessHeaders } from '../shared/cf-access.ts';
 import { getApiUrl } from './auth.ts';
 import { ensureCloudflaredToken } from './cf-access.ts';
+import type { CliLogger } from './log-file.ts';
 import type { DeployEvent } from './types.ts';
 
 export type PlatformErrorPayload = {
@@ -122,12 +123,17 @@ export interface DomainStatusResponse extends DomainResponse {
 export class PlatformClient {
   private baseUrl: string;
   private authHeaders: Record<string, string>;
+  private cliLog?: CliLogger;
 
-  constructor(token: string, options?: string | { apiUrl?: string; root?: string }) {
+  constructor(
+    token: string,
+    options?: string | { apiUrl?: string; root?: string; cliLog?: CliLogger },
+  ) {
     if (typeof options === 'string') {
       this.baseUrl = options;
     } else {
       this.baseUrl = options?.apiUrl ?? getApiUrl(options?.root);
+      this.cliLog = options?.cliLog;
     }
     ensureCloudflaredToken(this.baseUrl);
     this.authHeaders = {
@@ -282,12 +288,34 @@ export class PlatformClient {
   }
 
   async *deploy(projectId: string, formData: FormData): AsyncGenerator<DeployEvent> {
-    const res = await fetch(`${this.baseUrl}/projects/${projectId}/deploy`, {
-      method: 'POST',
-      headers: {
-        ...this.authHeaders,
-      },
-      body: formData,
+    const cliLog = this.cliLog;
+    const url = `${this.baseUrl}/projects/${projectId}/deploy`;
+    cliLog?.info('deploy_post', { url });
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          ...this.authHeaders,
+        },
+        body: formData,
+      });
+    } catch (err) {
+      cliLog?.error('deploy_fetch_rejected', err, { url });
+      throw err;
+    }
+
+    // `cf-ray` and `cf-cache-status` are the correlation keys that platform
+    // engineers need to look up server-side tail logs. Capture them whenever
+    // the response makes it back.
+    const cfRay = res.headers.get('cf-ray');
+    const cfCacheStatus = res.headers.get('cf-cache-status');
+    cliLog?.info('deploy_response', {
+      status: res.status,
+      cfRay,
+      cfCacheStatus,
+      contentType: res.headers.get('content-type'),
     });
 
     if (!res.ok) {
@@ -297,22 +325,54 @@ export class PlatformClient {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let bytesRead = 0;
+    let firstByteAt: number | null = null;
+    const startedAt = Date.now();
+    let eventCount = 0;
+    let lastEventName = '<none>';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      buffer += decoder.decode(value, { stream: true });
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          cliLog?.info('deploy_stream_eof', {
+            bytesRead,
+            eventCount,
+            lastEvent: lastEventName,
+          });
+          break;
+        }
+        if (firstByteAt === null) {
+          firstByteAt = Date.now() - startedAt;
+          cliLog?.info('deploy_stream_ttfb', { ttfbMs: firstByteAt });
+        }
+        bytesRead += value.byteLength;
+        buffer += decoder.decode(value, { stream: true });
 
-      let newlineIdx;
-      while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, newlineIdx);
-        buffer = buffer.slice(newlineIdx + 1);
-        if (line.trim()) {
-          yield JSON.parse(line) as DeployEvent;
+        let newlineIdx;
+        while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newlineIdx);
+          buffer = buffer.slice(newlineIdx + 1);
+          if (line.trim()) {
+            const event = JSON.parse(line) as DeployEvent;
+            eventCount++;
+            lastEventName = (event as { event?: string }).event ?? '<no-event-field>';
+            cliLog?.info('deploy_event', {
+              eventCount,
+              event: lastEventName,
+              raw: line.slice(0, 200),
+            });
+            yield event;
+          }
         }
       }
+    } catch (err) {
+      cliLog?.error('deploy_stream_error', err, {
+        bytesRead,
+        eventCount,
+        lastEvent: lastEventName,
+      });
+      throw err;
     }
   }
 

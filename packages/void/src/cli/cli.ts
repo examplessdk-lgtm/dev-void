@@ -98,6 +98,7 @@ if (helpPath) {
       dir: deployArgs.dir,
       spa: deployArgs.spa,
       skipBuild: deployArgs.skipBuild,
+      debug: deployArgs.debug,
     }).catch((err) => {
       log.error(err.message ?? err);
       process.exit(1);

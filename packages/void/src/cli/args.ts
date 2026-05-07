@@ -5,6 +5,7 @@ export interface DeployArgs {
   dir?: string;
   spa?: boolean;
   skipBuild?: boolean;
+  debug?: boolean;
 }
 
 export function parseDeployArgs(args: Array<string>): DeployArgs {
@@ -17,6 +18,7 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
         dir: { type: 'string' },
         spa: { type: 'boolean' },
         'skip-build': { type: 'boolean' },
+        debug: { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true,
@@ -58,6 +60,7 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
   const dir = typeof parsed.values.dir === 'string' ? parsed.values.dir : undefined;
   const spa = parsed.values.spa === true ? true : undefined;
   const skipBuild = parsed.values['skip-build'] === true ? true : undefined;
+  const debug = parsed.values.debug === true ? true : undefined;
 
-  return { projectSlug, dir, spa, skipBuild };
+  return { projectSlug, dir, spa, skipBuild, debug };
 }

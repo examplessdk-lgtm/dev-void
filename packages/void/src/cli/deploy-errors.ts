@@ -14,11 +14,27 @@ function appendDeploymentLine(message: string, deploymentId: string | null): str
   return deploymentId ? `${message}\nDeployment: ${deploymentId}` : message;
 }
 
+function appendLogLine(message: string, logPath: string | null | undefined): string {
+  return logPath ? `${message}\nDetailed log: ${logPath}` : message;
+}
+
+function appendTrailingLines(
+  message: string,
+  deploymentId: string | null,
+  logPath: string | null | undefined,
+): string {
+  return appendLogLine(appendDeploymentLine(message, deploymentId), logPath);
+}
+
 /**
  * Format a server-emitted `event: 'error'` payload with an optional deployment id.
  */
-export function formatDeployFailureMessage(message: string, deploymentId: string | null): string {
-  return appendDeploymentLine(message, deploymentId);
+export function formatDeployFailureMessage(
+  message: string,
+  deploymentId: string | null,
+  logPath?: string | null,
+): string {
+  return appendTrailingLines(message, deploymentId, logPath);
 }
 
 /**
@@ -28,8 +44,11 @@ export function formatDeployFailureMessage(message: string, deploymentId: string
  * deploy" message — the server closed the NDJSON stream without emitting
  * `done` or `error`, so there is no underlying error to carry.
  */
-export function formatConnectionLostMessage(deploymentId: string | null): string {
-  return appendDeploymentLine('deploy: Connection lost during deploy.', deploymentId);
+export function formatConnectionLostMessage(
+  deploymentId: string | null,
+  logPath?: string | null,
+): string {
+  return appendTrailingLines('deploy: Connection lost during deploy.', deploymentId, logPath);
 }
 
 /**
@@ -45,7 +64,11 @@ export function formatConnectionLostMessage(deploymentId: string | null): string
  *      during deploy: <original>` prefix so the caller can still tell network,
  *      parse, and transport errors apart.
  */
-export function formatStreamDeployError(err: unknown, deploymentId: string | null): Error {
+export function formatStreamDeployError(
+  err: unknown,
+  deploymentId: string | null,
+  logPath?: string | null,
+): Error {
   if (err instanceof PlatformApiError) {
     const parsed = parsePlatformErrorBody(err.body);
     const parsedError = parsed?.error ?? parsed?.message ?? null;
@@ -54,7 +77,11 @@ export function formatStreamDeployError(err: unknown, deploymentId: string | nul
 
     if (err.status === 409 && parsedError) {
       return new Error(
-        appendDeploymentLine(`deploy: Deploy failed: ${parsedError}`, effectiveDeploymentId),
+        appendTrailingLines(
+          `deploy: Deploy failed: ${parsedError}`,
+          effectiveDeploymentId,
+          logPath,
+        ),
       );
     }
 
@@ -62,11 +89,15 @@ export function formatStreamDeployError(err: unknown, deploymentId: string | nul
     const base = detail
       ? `deploy: Deploy failed (HTTP ${err.status}): ${detail}`
       : `deploy: Deploy failed (HTTP ${err.status}).`;
-    return new Error(appendDeploymentLine(base, effectiveDeploymentId));
+    return new Error(appendTrailingLines(base, effectiveDeploymentId, logPath));
   }
 
   const original = err instanceof Error ? err.message : String(err);
   return new Error(
-    appendDeploymentLine(`deploy: Connection lost during deploy: '${original}'.`, deploymentId),
+    appendTrailingLines(
+      `deploy: Connection lost during deploy: '${original}'.`,
+      deploymentId,
+      logPath,
+    ),
   );
 }

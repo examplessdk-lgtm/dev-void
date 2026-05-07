@@ -8,6 +8,7 @@ describe('parseDeployArgs', () => {
       dir: undefined,
       spa: undefined,
       skipBuild: undefined,
+      debug: undefined,
     });
   });
 
@@ -17,7 +18,13 @@ describe('parseDeployArgs', () => {
       dir: undefined,
       spa: undefined,
       skipBuild: undefined,
+      debug: undefined,
     });
+  });
+
+  it('parses --debug flag', () => {
+    const result = parseDeployArgs(['--debug']);
+    expect(result.debug).toBe(true);
   });
 
   it('parses --dir flag', () => {

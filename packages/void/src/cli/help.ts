@@ -43,6 +43,10 @@ const HELP_TREE: HelpTree = {
       { command: '--dir <path>', description: 'Deploy a static directory and skip build' },
       { command: '--spa', description: 'Use SPA mode for static deploys' },
       { command: '--skip-build', description: 'Skip the build step and use existing output' },
+      {
+        command: '--debug',
+        description: 'Mirror the deploy log to stderr (always written to ~/.void/logs)',
+      },
     ],
     examples: [
       { command: 'void deploy', description: 'Deploy the linked project' },

@@ -203,19 +203,22 @@ If `--project` is provided, purges that project's cache instead of the linked pr
 ### `void deploy`
 
 ```
-void deploy [--project <name>] [--dir <path>] [--spa] [--skip-build]
+void deploy [--project <name>] [--dir <path>] [--spa] [--skip-build] [--debug]
 ```
 
 Auto-detects your project type and chooses the right pipeline. See [Supported App Types](../guide/app-types.md) and [Deployment](../guide/deployment.md) for details.
 
 For Drizzle projects, deploy performs a read-only schema drift check. If a new migration would be generated, deploy stops and tells you to run `void db generate`, review the migration, commit it yourself, and rerun `void deploy`.
 
-| Flag               | Purpose                                           |
-| ------------------ | ------------------------------------------------- |
-| `--project <name>` | Target a specific project by slug                 |
-| `--dir <path>`     | Deploy a pre-built static directory (skips build) |
-| `--spa`            | Use SPA mode instead of SSG for static deploys    |
-| `--skip-build`     | Skip the build step (use existing build output)   |
+| Flag               | Purpose                                                                      |
+| ------------------ | ---------------------------------------------------------------------------- |
+| `--project <name>` | Target a specific project by slug                                            |
+| `--dir <path>`     | Deploy a pre-built static directory (skips build)                            |
+| `--spa`            | Use SPA mode instead of SSG for static deploys                               |
+| `--skip-build`     | Skip the build step (use existing build output)                              |
+| `--debug`          | Mirror the structured deploy log to stderr (also written to `~/.void/logs/`) |
+
+Every deploy writes a structured JSONL trace to `~/.void/logs/deploy-<timestamp>.jsonl` regardless of `--debug`. On failure the path is printed at the end of the error message so you can attach it when reporting platform issues. `VOID_DEPLOY_DEBUG=1` is accepted as an alternate trigger for stderr mirroring.
 
 Project resolution precedence:
 
