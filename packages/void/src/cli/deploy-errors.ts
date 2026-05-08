@@ -1,4 +1,4 @@
-import { parsePlatformErrorBody, PlatformApiError } from './client.ts';
+import { isCliOutdatedError, parsePlatformErrorBody, PlatformApiError } from './client.ts';
 
 const BODY_SNIPPET_MAX = 200;
 
@@ -74,6 +74,14 @@ export function formatStreamDeployError(
     const parsedError = parsed?.error ?? parsed?.message ?? null;
     const parsedDeployment = parsed?.deployment ?? null;
     const effectiveDeploymentId = parsedDeployment ?? deploymentId;
+
+    // cli_outdated: surface the platform's upgrade message verbatim with
+    // no "Deploy failed (HTTP 426)" wrapper. The message already includes
+    // `npm i -g void@latest`, so adding a status prefix would only obscure
+    // the actionable line.
+    if (isCliOutdatedError(err) && parsed?.message) {
+      return new Error(appendTrailingLines(parsed.message, effectiveDeploymentId, logPath));
+    }
 
     if (err.status === 409 && parsedError) {
       return new Error(

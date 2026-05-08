@@ -64,8 +64,13 @@ describe('PlatformClient.requestUploadUrls', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(`${apiUrl}/projects/${projectId}/deploy/upload-urls`);
     expect(init.method).toBe('POST');
-    expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
-    expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${token}`);
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(headers.Authorization).toBe(`Bearer ${token}`);
+    // Version header so the platform's cliVersionGate middleware can refuse
+    // stale CLIs cleanly (HTTP 426 + cli_outdated). Format must look like a
+    // semver triplet — exact value is package.json-driven.
+    expect(headers['X-Void-CLI-Version']).toMatch(/^\d+\.\d+\.\d+/);
 
     const body = JSON.parse(init.body as string);
     expect(body).toEqual({

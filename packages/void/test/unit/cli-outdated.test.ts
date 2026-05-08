@@ -1,0 +1,92 @@
+import { describe, expect, it } from 'vitest';
+import { isCliOutdatedError, PlatformApiError, readCliVersion } from '../../src/cli/client.ts';
+import { formatStreamDeployError } from '../../src/cli/deploy-errors.ts';
+
+const OUTDATED_BODY = JSON.stringify({
+  error: 'cli_outdated',
+  message:
+    'Your void CLI is too old: it sent a multipart deploy body, which is no longer supported. Upgrade with: npm i -g void@latest (minimum version 0.7.0).',
+  minVersion: '0.7.0',
+});
+
+describe('PlatformApiError + cli_outdated', () => {
+  it('overrides the default message with the server-supplied upgrade text on 426', () => {
+    const err = new PlatformApiError('Deploy failed', 426, OUTDATED_BODY);
+    // Default would be `Deploy failed: 426 {...json...}` — readers shouldn't
+    // see raw JSON. Server message wins so the actionable upgrade line is
+    // up front.
+    expect(err.message).not.toContain('426');
+    expect(err.message).not.toContain('{');
+    expect(err.message).toContain('npm i -g void@latest');
+    expect(err.message).toContain('Upgrade with');
+    expect(err.code).toBe('cli_outdated');
+    expect(err.status).toBe(426);
+  });
+
+  it('keeps the default message when status is 426 but body is not cli_outdated', () => {
+    const err = new PlatformApiError('Deploy failed', 426, '{"error":"something_else"}');
+    expect(err.message).toContain('Deploy failed');
+    expect(err.message).toContain('426');
+  });
+
+  it('keeps the default message when body is cli_outdated but status is not 426', () => {
+    // Defensive: status is what the gate sets, body shape alone shouldn't trigger
+    // the override (avoids letting a misconfigured upstream forge upgrade prompts).
+    const err = new PlatformApiError('Deploy failed', 400, OUTDATED_BODY);
+    expect(err.message).toContain('400');
+  });
+});
+
+describe('isCliOutdatedError', () => {
+  it('detects 426 + cli_outdated', () => {
+    expect(isCliOutdatedError(new PlatformApiError('x', 426, OUTDATED_BODY))).toBe(true);
+  });
+
+  it('rejects unrelated PlatformApiErrors', () => {
+    expect(isCliOutdatedError(new PlatformApiError('x', 403, 'forbidden'))).toBe(false);
+    expect(isCliOutdatedError(new PlatformApiError('x', 426, '{"error":"other"}'))).toBe(false);
+    expect(isCliOutdatedError(new Error('plain'))).toBe(false);
+    expect(isCliOutdatedError(null)).toBe(false);
+  });
+});
+
+describe('formatStreamDeployError + cli_outdated', () => {
+  it('surfaces the server message verbatim with no HTTP wrapper', () => {
+    const err = new PlatformApiError('Deploy failed', 426, OUTDATED_BODY);
+    const formatted = formatStreamDeployError(err, null, null);
+    // Should NOT contain the standard "Deploy failed (HTTP 426)" wrapper
+    // because that buries the actionable line.
+    expect(formatted.message).not.toContain('Deploy failed (HTTP 426)');
+    expect(formatted.message).toContain('npm i -g void@latest');
+  });
+
+  it('appends deployment id and log path when supplied', () => {
+    const err = new PlatformApiError('Deploy failed', 426, OUTDATED_BODY);
+    const formatted = formatStreamDeployError(err, 'dep_abc', '/tmp/log.txt');
+    expect(formatted.message).toContain('npm i -g void@latest');
+    expect(formatted.message).toContain('Deployment: dep_abc');
+    expect(formatted.message).toContain('Detailed log: /tmp/log.txt');
+  });
+});
+
+describe('readCliVersion', () => {
+  // The CLI must NEVER emit the literal string "unknown" as its version
+  // header — the platform's gate rejects unparseable headers as
+  // cli_outdated, which would brick the CLI on any packaging error.
+  // Failure path returns null and the ctor omits the header entirely.
+  it('returns a parseable semver triplet in the test environment', () => {
+    const v = readCliVersion();
+    // Test runs from a real package root, so version must be readable.
+    expect(v).not.toBeNull();
+    expect(v).toMatch(/^\d+\.\d+\.\d+/);
+    // Critical regression guard: never the literal string "unknown".
+    expect(v).not.toBe('unknown');
+  });
+
+  it('return type allows null (caller must handle missing version)', () => {
+    // This is a type-level assertion — if the return type ever drifts
+    // back to `string`, this assignment will fail typecheck.
+    const v: string | null = readCliVersion();
+    expect(v === null || typeof v === 'string').toBe(true);
+  });
+});

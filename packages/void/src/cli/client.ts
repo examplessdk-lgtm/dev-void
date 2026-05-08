@@ -1,14 +1,44 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'pathe';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
+import { getPackageDir } from './agents.ts';
 import { getApiUrl } from './auth.ts';
 import { ensureCloudflaredToken } from './cf-access.ts';
 import type { CliLogger } from './log-file.ts';
 import type { AssetManifestEntry } from './package.ts';
 import type { DeployEvent, DeployManifest } from './types.ts';
 
+/**
+ * Current CLI version. Sent as `X-Void-CLI-Version` on every platform
+ * request so the platform's CLI-version gate can refuse stale CLIs
+ * cleanly (HTTP 426 + `cli_outdated`) instead of letting a wire
+ * mismatch surface as an opaque parse error.
+ *
+ * Resolved once per process. Returns `null` when package.json can't be
+ * read or has no `version` string — the ctor then OMITS the header
+ * entirely. We deliberately do NOT send a placeholder string like
+ * "unknown": the platform treats present-but-unparseable headers as a
+ * stale-CLI signal and would 426 the request, bricking the CLI on any
+ * packaging error. Missing-header is the documented pass-through path.
+ */
+export function readCliVersion(): string | null {
+  try {
+    const pkgPath = join(getPackageDir(), 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version?: unknown };
+    return typeof pkg.version === 'string' ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+const VOID_CLI_VERSION = readCliVersion();
+
 export type PlatformErrorPayload = {
   error?: string;
   message?: string;
   deployment?: string;
+  minVersion?: string;
+  clientVersion?: string;
 };
 
 export function parsePlatformErrorBody(body: string): PlatformErrorPayload | null {
@@ -23,17 +53,41 @@ export function parsePlatformErrorBody(body: string): PlatformErrorPayload | nul
   }
 }
 
+/**
+ * Detects the `cli_outdated` 426 response shape emitted by the platform's
+ * `cliVersionGate` middleware. When present, callers should surface the
+ * server's `message` field verbatim — it already includes upgrade
+ * instructions — rather than the default `<action>: <status> <body>`
+ * which would dump raw JSON at the user.
+ */
+export function isCliOutdatedError(err: unknown): err is PlatformApiError {
+  if (!(err instanceof PlatformApiError)) {
+    return false;
+  }
+  if (err.status !== 426) {
+    return false;
+  }
+  return parsePlatformErrorBody(err.body)?.error === 'cli_outdated';
+}
+
 export class PlatformApiError extends Error {
   status: number;
   body: string;
   code?: string;
 
   constructor(action: string, status: number, body: string) {
-    super(`${action}: ${status} ${body}`);
+    const parsed = parsePlatformErrorBody(body);
+    // cli_outdated: surface the server-supplied upgrade message verbatim
+    // instead of the raw `<action>: <status> <body>` default. The message
+    // already includes the `npm i -g void@latest` hint.
+    const message =
+      status === 426 && parsed?.error === 'cli_outdated' && parsed.message
+        ? parsed.message
+        : `${action}: ${status} ${body}`;
+    super(message);
     this.name = 'PlatformApiError';
     this.status = status;
     this.body = body;
-    const parsed = parsePlatformErrorBody(body);
     this.code = parsed?.error ?? parsed?.message;
   }
 }
@@ -176,6 +230,11 @@ export class PlatformClient {
     ensureCloudflaredToken(this.baseUrl);
     this.authHeaders = {
       Authorization: `Bearer ${token}`,
+      // Conditional spread: omit the header entirely if package.json was
+      // unreadable. The platform's gate treats missing as pass-through;
+      // sending a placeholder like "unknown" would trip the fail-closed
+      // 426 path and brick the CLI permanently.
+      ...(VOID_CLI_VERSION !== null && { 'X-Void-CLI-Version': VOID_CLI_VERSION }),
       ...cfAccessHeaders(process.env),
     };
   }
