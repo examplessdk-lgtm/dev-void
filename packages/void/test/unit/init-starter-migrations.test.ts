@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'pathe';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { hasDeploySchemaDrift } from '../../src/cli/deploy.ts';
 import { generateStarterMigration } from '../../src/cli/init.ts';
 import { createPagesStarterTemplate, type ScaffoldStarterMode } from '../../src/cli/template.ts';

@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -20,12 +20,12 @@ describe('playground/node-app dev', () => {
     DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
     child = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        'playground/node-app',
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        './playground/node-app',
+        'dev',
         '--host',
         '127.0.0.1',
         '--port',
@@ -96,7 +96,7 @@ describe('playground/node-app build + production', () => {
 
   beforeAll(async () => {
     rmSync(join(ROOT, 'playground/node-app/dist'), { recursive: true, force: true });
-    execSync('pnpm --dir playground/node-app build', { cwd: ROOT, stdio: 'pipe' });
+    execSync('vp run --filter ./playground/node-app build', { cwd: ROOT, stdio: 'pipe' });
 
     PROD_PORT = await getPort();
     PROD_BASE = `http://127.0.0.1:${PROD_PORT}`;

@@ -1,6 +1,6 @@
 import analog from '@analogjs/platform';
 import { resolve } from 'pathe';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vite-plus';
 import { voidPlugin } from 'void';
 
 export default defineConfig({

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { createVoidRouter, ssrProxy } from '../../src/pages/client.ts';
 import { parseCacheFor } from '../../src/pages/prefetch.ts';
 

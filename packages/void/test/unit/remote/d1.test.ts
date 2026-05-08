@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vite-plus/test';
 import { ProxyClient } from '../../../src/runtime/remote/client.ts';
 import { ProxyD1Database, ProxyD1PreparedStatement } from '../../../src/runtime/remote/d1.ts';
 

@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'pathe';
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
 import { scanRoutes } from '../../src/router/scan.ts';
 
 const TMP = join(import.meta.dirname, '__tmp_scan_test__');

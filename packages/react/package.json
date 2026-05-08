@@ -40,8 +40,8 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsdown",
-    "dev": "tsdown --watch",
+    "build": "vp pack",
+    "dev": "vp pack --watch",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
@@ -54,8 +54,8 @@
     "pathe": "catalog:",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "tsdown": "catalog:",
     "vite": "catalog:",
+    "vite-plus": "catalog:",
     "void": "workspace:*"
   },
   "peerDependencies": {

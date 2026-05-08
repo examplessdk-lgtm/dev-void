@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
 import { chromium, type Browser, type Page } from 'playwright';
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -200,12 +200,12 @@ describe('markdown-blog playground', () => {
       DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
       child = spawn(
-        'pnpm',
+        'vp',
         [
-          '--dir',
-          'playground/markdown-blog',
-          'exec',
-          'vite',
+          'run',
+          '--filter',
+          './playground/markdown-blog',
+          'dev',
           '--host',
           '127.0.0.1',
           '--port',
@@ -298,7 +298,7 @@ describe('markdown-blog playground', () => {
     let stderr = '';
 
     beforeAll(async () => {
-      execSync('pnpm --dir playground/markdown-blog build', {
+      execSync('vp run --filter ./playground/markdown-blog build', {
         cwd: ROOT,
         stdio: 'pipe',
       });
@@ -307,12 +307,11 @@ describe('markdown-blog playground', () => {
       PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
 
       child = spawn(
-        'pnpm',
+        'vp',
         [
-          '--dir',
-          'playground/markdown-blog',
-          'exec',
-          'vite',
+          'run',
+          '--filter',
+          './playground/markdown-blog',
           'preview',
           '--host',
           '127.0.0.1',

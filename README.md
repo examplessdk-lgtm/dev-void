@@ -76,7 +76,7 @@ pnpm void deploy
 
 ## Documentation
 
-Full docs at [void.cloud](https://void.cloud). Run `pnpm dev:docs` in this repo to view the documentation locally.
+Full docs at [void.cloud](https://void.cloud). Run `vp run dev:docs` in this repo to view the documentation locally.
 
 ## Contributing
 
@@ -85,18 +85,18 @@ Full docs at [void.cloud](https://void.cloud). Run `pnpm dev:docs` in this repo 
 ```sh
 git clone https://github.com/nicepkg/void.git
 cd void
-pnpm install
-pnpm -r build
+vp install
+vp run build:all
 ```
 
 ### Development
 
 ```sh
-pnpm test              # run tests
-pnpm lint              # oxlint
-pnpm fmt               # oxfmt
-pnpm check             # typecheck all packages
-pnpm dev:docs          # local docs dev server
+vp test run            # run tests
+vp lint                # oxlint via Vite+
+vp fmt                 # oxfmt via Vite+
+vp run check           # typecheck all packages
+vp run dev:docs        # local docs dev server
 ```
 
 ### Project Structure

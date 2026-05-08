@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { resolveAssetConfig } from '../../src/cli/deploy.ts';
 
 // `not_found_handling: 'none'` → asset binding 404s on unmatched paths,

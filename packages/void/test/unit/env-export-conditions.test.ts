@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'pathe';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 
 /**
  * Regression guard for the `void/env` package export map.

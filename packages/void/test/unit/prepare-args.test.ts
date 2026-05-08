@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { parsePrepareArgs } from '../../src/cli/prepare-args.ts';
 
 describe('parsePrepareArgs', () => {

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { createServer, type Server } from 'node:http';
 import { extname, isAbsolute, join, relative, resolve } from 'pathe';
 import { chromium } from 'playwright';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { collectPrerenderPathsNode } from '../../src/prerender.ts';
 
 declare global {
@@ -77,7 +77,7 @@ describe('playground/node-static build (target: node, output: static)', () => {
     const pg = join(ROOT, PLAYGROUND);
     rmSync(join(pg, 'dist'), { recursive: true, force: true });
     rmSync(join(pg, '.void'), { recursive: true, force: true });
-    execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
+    execSync(`vp run --filter ./${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
 
     const clientDir = join(DIST, 'client');
     staticServer = createServer((req, res) => {
@@ -309,7 +309,7 @@ describe('playground/node-static redirects (target: node, output: static)', () =
     const pg = join(ROOT, PLAYGROUND);
     rmSync(join(pg, 'dist'), { recursive: true, force: true });
     rmSync(join(pg, '.void'), { recursive: true, force: true });
-    execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
+    execSync(`vp run --filter ./${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
     writeFileSync(VOID_CONFIG, originalConfig);
 
     externalServer = createServer((_req, res) => {

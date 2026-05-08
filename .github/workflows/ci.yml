@@ -16,24 +16,6 @@ on:
 permissions: {}
 
 jobs:
-  lint-and-check:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@26f6d4f2c533a43e6b5da0b4a5dd983f98f7b49a # v6.0.4
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm lint
-      - run: pnpm build:all
-      - run: pnpm check
-
   test:
     runs-on: ${{ matrix.os }}
     permissions:
@@ -44,57 +26,27 @@ jobs:
         # Windows runs on main pushes and on PRs labeled "test: windows",
         # unless a reusable workflow caller explicitly disables it.
         os: '${{ (((github.event_name == ''push'' && startsWith(github.ref, ''refs/heads/'')) || contains(github.event.pull_request.labels.*.name, ''test: windows'')) && !(github.event_name == ''workflow_call'' && inputs.skip_windows)) && fromJSON(''["blacksmith-4vcpu-ubuntu-2404","windows-latest"]'') || fromJSON(''["blacksmith-4vcpu-ubuntu-2404"]'') }}'
-        suite: [unit, core-markdown, metaframeworks, pages-react-vue, pages-svelte-solid]
-        include:
-          - suite: unit
-            script: test:unit
-          - suite: core-markdown
-            script: test:integration
-          - suite: metaframeworks
-            script: test:metaframeworks
-            retry: 2
-          - suite: pages-react-vue
-            script: test:pages:react-vue
-            retry: 2
-            prebuild: playground/react-pages playground/vue-pages
-          - suite: pages-svelte-solid
-            script: test:pages:svelte-solid
-            retry: 2
-            prebuild: playground/svelte-pages playground/solid-pages
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@26f6d4f2c533a43e6b5da0b4a5dd983f98f7b49a # v6.0.4
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: voidzero-dev/setup-vp@45e5c098f1095cc6b65fd92534603e7be70386c1 # v1
         with:
           node-version-file: .node-version
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
+          cache: true
 
-      - name: Pre-build playgrounds for preview tests
-        if: matrix.prebuild
-        shell: bash
-        run: |
-          for pg in ${{ matrix.prebuild }}; do
-            pnpm --dir "$pg" build &
-          done
-          wait
+      - run: vp exec playwright install --with-deps chromium
+        if: ${{ !contains(matrix.os, 'windows') }}
 
-      - run: pnpm exec playwright install --with-deps chromium
-        if: matrix.suite != 'unit' && !contains(matrix.os, 'windows')
+      - run: vp exec playwright install chromium
+        if: ${{ contains(matrix.os, 'windows') }}
 
-      - run: pnpm exec playwright install chromium
-        if: matrix.suite != 'unit' && contains(matrix.os, 'windows')
-
-      - run: pnpm ${{ matrix.script }}${{ matrix.retry && format(' --retry {0}', matrix.retry) || '' }}
+      - run: vp run test:all
 
   done:
     runs-on: ubuntu-latest
     if: always()
     needs:
-      - lint-and-check
       - test
     steps:
       - run: exit 1

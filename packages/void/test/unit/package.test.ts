@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { hash as blake3hash } from 'blake3-jit';
 import { join } from 'pathe';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
   computeAssetHash,
   collectAndHashAssets,

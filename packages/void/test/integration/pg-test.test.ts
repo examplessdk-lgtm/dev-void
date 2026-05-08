@@ -4,7 +4,7 @@ import { PGlite } from '@electric-sql/pglite';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
 import { createServer } from 'pglite-server';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -55,12 +55,12 @@ describe('playground/pg-test', () => {
     BASE = `http://127.0.0.1:${devPort}`;
 
     devChild = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        'playground/pg-test',
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        './playground/pg-test',
+        'dev',
         '--host',
         '127.0.0.1',
         '--port',

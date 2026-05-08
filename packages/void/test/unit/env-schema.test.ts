@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vite-plus/test';
 import { boolean, email, json, number, oneOf, string, url } from '../../src/runtime/env-helpers.ts';
 import {
   defineEnv,

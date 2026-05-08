@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build",
-    "dev": "vite dev"
+    "build": "vp build",
+    "dev": "vp dev"
   },
   "dependencies": {
     "react": "^19.2.5",
@@ -16,6 +16,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "vite": "catalog:",
+    "vite-plus": "catalog:",
     "void": "workspace:*"
   }
 }

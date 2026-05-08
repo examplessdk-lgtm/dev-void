@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { runLoginCommand } from '../../src/cli/login.ts';
 
 const mockWarn = vi.fn();

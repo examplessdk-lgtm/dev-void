@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { parseSecretArgs } from '../../src/cli/secret-args.ts';
 
 describe('parseSecretArgs', () => {

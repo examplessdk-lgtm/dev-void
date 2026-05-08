@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'pathe';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'vite-plus/test';
 import { collectMigrations } from '../../src/migrations/collect.ts';
 
 const TMP_DIR = join(import.meta.dirname, '.tmp-collect-test');

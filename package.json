@@ -2,40 +2,31 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "pnpm --filter=./packages/** --parallel build",
-    "build:all": "pnpm build && pnpm --filter=./playground/** --parallel build",
-    "build:core": "pnpm --filter ./packages/void build",
-    "build:docs": "pnpm --filter ./docs build",
-    "check": "pnpm -r --parallel typecheck",
-    "deploy:docs": "pnpm --filter ./docs run deploy --project void-docs",
-    "deploy:staging:docs": "pnpm --filter ./docs run deploy --project void-docs-staging",
-    "dev:docs": "cd docs && pnpm dev",
-    "fmt": "oxfmt --write .",
-    "lint": "oxlint",
-    "prepare": "husky",
-    "test": "vitest --run",
-    "test:all": "pnpm build:all && pnpm check && pnpm lint && pnpm test",
-    "test:integration": "vitest --run --project core-markdown",
-    "test:metaframeworks": "vitest --run --project metaframeworks",
-    "test:pages:react-vue": "vitest --run --project pages-react-vue",
-    "test:pages:svelte-solid": "vitest --run --project pages-svelte-solid",
-    "test:unit": "vitest --run --project unit"
+    "build": "vp run --filter './packages/**' --parallel build",
+    "build:core": "vp run --filter ./packages/void build",
+    "build:docs": "vp run --filter ./docs build",
+    "check": "vp run -r --parallel typecheck",
+    "deploy:docs": "vp run --filter ./docs deploy -- --project void-docs",
+    "deploy:staging:docs": "vp run --filter ./docs deploy -- --project void-docs-staging",
+    "dev:docs": "vp run --filter ./docs dev",
+    "fmt": "vp fmt --write .",
+    "lint": "vp lint",
+    "prepare": "vp config",
+    "test": "vp test run",
+    "test:integration": "vp test run --project core-markdown",
+    "test:metaframeworks": "vp test run --project metaframeworks",
+    "test:pages:react-vue": "vp test run --project pages-react-vue",
+    "test:pages:svelte-solid": "vp test run --project pages-svelte-solid",
+    "test:unit": "vp test run --project unit"
   },
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",
     "@typescript/native-preview": "catalog:",
     "cross-spawn": "^7.0.6",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "husky": "^9.1.7",
-    "lint-staged": "^16.4.0",
-    "oxfmt": "^0.48.0",
-    "oxlint": "^1.63.0",
     "playwright": "^1.59.1",
-    "vitest": "^4.1.5"
-  },
-  "lint-staged": {
-    "*": "oxfmt --no-error-on-unmatched-pattern",
-    "*.{js,jsx,ts,tsx,mjs,cjs}": "oxlint"
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
   },
   "packageManager": "pnpm@10.33.2"
 }

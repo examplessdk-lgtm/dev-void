@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { envClientGuardPlugin } from '../../src/plugin-env-client-guard.ts';
 import { string } from '../../src/runtime/env-helpers.ts';
 import { defineEnv } from '../../src/runtime/env-public.ts';

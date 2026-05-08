@@ -77,13 +77,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: voidzero-dev/setup-vp@v1
         with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install
-      - run: pnpm void deploy
+          node-version: '22'
+          cache: true
+      - run: vp exec void deploy
         env:
           VOID_TOKEN: ${{ secrets.VOID_TOKEN }}
           VOID_PROJECT: my-app

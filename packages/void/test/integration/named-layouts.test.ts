@@ -1,6 +1,6 @@
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -16,12 +16,12 @@ describe('named-layouts integration', () => {
     DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
     child = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        'playground/named-layouts',
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        './playground/named-layouts',
+        'dev',
         '--host',
         '127.0.0.1',
         '--port',

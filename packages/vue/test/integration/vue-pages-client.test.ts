@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
 import { chromium, type Browser, type Page } from 'playwright';
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 declare global {
@@ -591,12 +591,12 @@ describe('vue-pages client (dev)', () => {
       DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
       child = spawn(
-        'pnpm',
+        'vp',
         [
-          '--dir',
-          'playground/vue-pages',
-          'exec',
-          'vite',
+          'run',
+          '--filter',
+          './playground/vue-pages',
+          'dev',
           '--host',
           '127.0.0.1',
           '--port',
@@ -1024,7 +1024,7 @@ describe('vue-pages client (preview)', { retry: 2 }, () => {
 
   beforeAll(async () => {
     if (!existsSync(join(ROOT, 'playground/vue-pages/dist'))) {
-      execSync('pnpm --dir playground/vue-pages build', {
+      execSync('vp run --filter ./playground/vue-pages build', {
         cwd: ROOT,
         stdio: 'pipe',
       });
@@ -1034,12 +1034,11 @@ describe('vue-pages client (preview)', { retry: 2 }, () => {
     PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
 
     child = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        'playground/vue-pages',
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        './playground/vue-pages',
         'preview',
         '--host',
         '127.0.0.1',

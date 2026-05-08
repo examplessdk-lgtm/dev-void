@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build",
-    "dev": "vite dev"
+    "build": "vp build",
+    "dev": "vp dev"
   },
   "dependencies": {
     "@analogjs/router": "^2.5.0",
@@ -26,6 +26,7 @@
     "pathe": "catalog:",
     "typescript": "~6.0.3",
     "vite": "catalog:",
+    "vite-plus": "catalog:",
     "void": "workspace:*",
     "wrangler": "catalog:"
   }

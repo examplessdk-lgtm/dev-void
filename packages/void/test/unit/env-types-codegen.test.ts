@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'vite-plus/test';
 import { generateEnvTypes, findEnvFile } from '../../src/codegen/env-types.ts';
 
 function withTempProject(setup: (root: string) => void): {

@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build",
-    "dev": "vite dev"
+    "build": "vp build",
+    "dev": "vp dev"
   },
   "dependencies": {
     "@tanstack/react-router": "^1.169.2",
@@ -19,6 +19,7 @@
     "@typescript/native-preview": "catalog:",
     "@vitejs/plugin-react": "^6.0.1",
     "vite": "catalog:",
+    "vite-plus": "catalog:",
     "void": "workspace:*"
   }
 }

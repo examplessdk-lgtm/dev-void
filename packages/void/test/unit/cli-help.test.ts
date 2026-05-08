@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { getHelpPath, hasHelpPage } from '../../src/cli/help.ts';
 
 describe('CLI help resolver', () => {

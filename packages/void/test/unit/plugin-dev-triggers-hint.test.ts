@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { devTriggersHintPlugin } from '../../src/plugin-dev-triggers-hint.ts';
 
 const tempDirs: Array<string> = [];

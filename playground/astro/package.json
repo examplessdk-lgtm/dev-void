@@ -13,6 +13,7 @@
   "devDependencies": {
     "@typescript/native-preview": "catalog:",
     "vite": "catalog:",
+    "vite-plus": "catalog:",
     "void": "workspace:*"
   }
 }

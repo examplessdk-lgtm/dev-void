@@ -1,7 +1,7 @@
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
 import { chromium, type Browser, type Page } from 'playwright';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { getPort, killChild, waitForServer } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -60,12 +60,12 @@ describe('playground/websockets', () => {
     base = `http://127.0.0.1:${port}`;
 
     child = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        'playground/websockets',
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        './playground/websockets',
+        'dev',
         '--host',
         '127.0.0.1',
         '--port',

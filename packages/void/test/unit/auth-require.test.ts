@@ -1,5 +1,5 @@
 import { HTTPException } from 'hono/http-exception';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { requireAuth, type AuthUser } from '../../src/runtime/auth.ts';
 
 function mockContext(user: AuthUser | null): Parameters<typeof requireAuth>[0] {

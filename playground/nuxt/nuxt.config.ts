@@ -1,5 +1,5 @@
 import { resolve } from 'pathe';
-import type { PluginOption } from 'vite';
+import type { PluginOption } from 'vite-plus';
 import { voidPlugin } from 'void';
 
 export default defineNuxtConfig({

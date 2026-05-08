@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { parseCacheFor, PrefetchCache } from '../../src/runtime/prefetch.ts';
 
 describe('parseCacheFor', () => {

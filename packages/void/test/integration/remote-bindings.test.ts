@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { ProxyClient } from '../../src/runtime/remote/client.ts';
 import { ProxyD1Database } from '../../src/runtime/remote/d1.ts';
 import { createRemoteEnv } from '../../src/runtime/remote/index.ts';

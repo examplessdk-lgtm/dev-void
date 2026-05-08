@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { integer, sqliteTable, text as sqliteText } from '../../src/runtime/schema-d1.ts';
 import { pgTable, serial, text as pgText, timestamp } from '../../src/runtime/schema-pg.ts';
 import { defineSeed } from '../../src/runtime/seed.ts';

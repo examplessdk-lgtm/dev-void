@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
 import { chromium, type Browser, type Page } from 'playwright';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 declare global {
@@ -590,12 +590,12 @@ describe('solid-pages client (dev)', () => {
     DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
     child = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        'playground/solid-pages',
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        './playground/solid-pages',
+        'dev',
         '--host',
         '127.0.0.1',
         '--port',
@@ -936,7 +936,7 @@ describe('solid-pages client (preview)', { retry: 2 }, () => {
 
   beforeAll(async () => {
     if (!existsSync(join(ROOT, 'playground/solid-pages/dist'))) {
-      execSync('pnpm --dir playground/solid-pages build', {
+      execSync('vp run --filter ./playground/solid-pages build', {
         cwd: ROOT,
         stdio: 'pipe',
       });
@@ -946,12 +946,11 @@ describe('solid-pages client (preview)', { retry: 2 }, () => {
     PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
 
     child = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        'playground/solid-pages',
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        './playground/solid-pages',
         'preview',
         '--host',
         '127.0.0.1',

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { isEqualFormValue } from 'void/pages-client';
 
 // Test the core logic of useForm directly (without Svelte rendering context).

@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
-import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vite-plus/test';
 
 const mockExecFileSync = vi.hoisted(() => vi.fn());
 const mockGetMiniflareDatabasePath = vi.fn();

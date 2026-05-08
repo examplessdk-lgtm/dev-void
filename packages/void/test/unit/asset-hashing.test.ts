@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { hash as blake3hash } from 'blake3-jit';
 import { join } from 'pathe';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 // `vi.mock` is hoisted above all imports — declare the mock before importing
 // `node:fs` consumers so the spy is in place when `package.ts` resolves its

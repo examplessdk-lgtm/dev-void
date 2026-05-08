@@ -36,8 +36,8 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsdown",
-    "dev": "tsdown --watch",
+    "build": "vp pack",
+    "dev": "vp pack --watch",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
@@ -46,8 +46,8 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "pathe": "catalog:",
-    "tsdown": "catalog:",
     "vite": "catalog:",
+    "vite-plus": "catalog:",
     "void": "workspace:*",
     "vue": "^3.5.33"
   },

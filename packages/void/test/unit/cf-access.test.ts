@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { cfAccessHeaders } from '../../src/shared/cf-access.ts';
 
 describe('cfAccessHeaders', () => {

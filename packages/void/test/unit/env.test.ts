@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 import { getRuntimeBinding, getRuntimeEnv, withRuntimeEnv } from '../../src/runtime/env.ts';
 
 const globalScope = globalThis as {

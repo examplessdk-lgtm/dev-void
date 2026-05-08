@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vite-plus/test';
 import { envClientFoldPlugin } from '../../src/plugin-env-client-fold.ts';
 import { number, string } from '../../src/runtime/env-helpers.ts';
 import { defineEnv } from '../../src/runtime/env-public.ts';

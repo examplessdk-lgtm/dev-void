@@ -1,5 +1,5 @@
 import { voidSolid } from '@void/solid/plugin';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vite-plus';
 import { voidPlugin } from 'void';
 
 export default defineConfig({

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { toSlash } from '../../src/shared/utils.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -49,7 +49,7 @@ describe('playground/kitchen-sink build', () => {
       ].join('\n') + '\n',
     );
 
-    const result = spawn.sync('pnpm', ['--dir', PLAYGROUND, 'build'], {
+    const result = spawn.sync('vp', ['run', '--filter', `./${PLAYGROUND}`, 'build'], {
       cwd: ROOT,
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024,

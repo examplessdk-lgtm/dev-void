@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'vite-plus/test';
 import { safeJsonStringify } from '../../src/pages/protocol.ts';
 
 describe('deferred data XSS prevention (real implementation)', () => {

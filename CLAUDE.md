@@ -6,7 +6,7 @@ Full-stack framework for Cloudflare Workers, powered by Vite.
 
 - **Important**: The source of truth for agent instructions is `CLAUDE.md` (this file). `AGENTS.md` is a symlink to this file. `README.md` is a separate public-facing file. When asked to update agent instructions, always update `CLAUDE.md`.
 - Documentation source lives in `docs/`.
-  - Docs is a Vitepress project using our custom theme. When asked to "link the theme", temporarily edit `docs/package.json` so that `@voidzero-dev/vitepress-theme` point to `link:../../../theme`. Rerun `pnpm install` to link it. Revert these when asked to "unlink the theme".
+  - Docs is a Vitepress project using our custom theme. When asked to "link the theme", temporarily edit `docs/package.json` so that `@voidzero-dev/vitepress-theme` point to `link:../../../theme`. Rerun `vp install` to link it. Revert these when asked to "unlink the theme".
 - Packages publish to npm as `void` and `@void/*`. Consumer-facing code, docs examples, playground source, and package manifests should use only those public package names.
 
 ## Important Note for Release Workflows
@@ -20,8 +20,8 @@ The `void` package on npm has these previous versions: '0.0.1', '0.1.0', '0.1.2'
 - Every implementation plan should include the following:
   - During plan generation: ask clarifying questions when necessary, especially around developer-experience defining design decisions.
   - Verification:
-    - Run `pnpm check` for typechecking after completing a batch of tasks.
-    - Run `pnpm test` on tests relevant to the current feature only during feature development. Only run the full test suite when everything is done for final verification.
+    - Run `vp run check` for package typechecking after completing a batch of tasks.
+    - Run `vp test run` on tests relevant to the current feature only during feature development. Only run the full test suite when everything is done for final verification.
     - If there are tests hanging or running particularly slow, investigate right there and attempt to fix. Testing velocity is something that should be maintained or improved at every opportunity.
   - Documentation: after verification, update all docs if relevant and applicable:
     - `README.md` (this file)
@@ -38,19 +38,20 @@ The `void` package on npm has these previous versions: '0.0.1', '0.1.0', '0.1.2'
 ## Quick Reference
 
 ```
-pnpm -r build                       # Build all packages
-pnpm -C packages/void build         # Build only the core plugin
-pnpm test                           # Run vitest (unit + integration tests)
-pnpm test packages/void             # Only test the core plugin
-pnpm lint                           # oxlint
-pnpm fmt                            # oxfmt --write .
-pnpm check                          # Typecheck all packages (tsgo --noEmit)
-pnpm -C packages/vue typecheck      # Typecheck a specific package
+vp run build                        # Build all packages
+vp run build:all                    # Build packages and playgrounds
+vp run build:core                   # Build only the core plugin
+vp test run                         # Run tests (unit + integration tests)
+vp test run packages/void           # Only test the core plugin
+vp lint                             # Oxlint through Vite+
+vp fmt                              # Oxfmt through Vite+
+vp run check                        # Typecheck all packages (tsgo/vue-tsc)
+vp run --filter ./packages/vue typecheck # Typecheck a specific package
 ```
 
 ## Monorepo Structure
 
-pnpm workspaces. Shared dependency versions use the **pnpm catalog** in `pnpm-workspace.yaml` (`@typescript/native-preview`, tsdown, vite, @cloudflare/workers-types, wrangler). Make sure to run `pnpm install` after making package structure changes.
+pnpm workspaces managed through Vite+. Shared dependency versions use the **pnpm catalog** in `pnpm-workspace.yaml` (`@typescript/native-preview`, `vite-plus`, Vite+/Vitest aliases, `@cloudflare/workers-types`, wrangler). Make sure to run `vp install` after making package structure changes.
 
 | Package                                          | npm name       | Purpose                                                        |
 | ------------------------------------------------ | -------------- | -------------------------------------------------------------- |
@@ -128,24 +129,25 @@ See [`packages/solid/README.md`](./packages/solid/README.md) for details.
 
 ## Tooling
 
-| Tool     | Version       | Purpose                                                                                        |
-| -------- | ------------- | ---------------------------------------------------------------------------------------------- |
-| Node.js  | 24.13.1       | Runtime (TS type stripping enabled natively — no `tsx` or `--experimental-strip-types` needed) |
-| pnpm     | 10.x          | Package manager with workspaces + catalog                                                      |
-| tsdown   | 0.20.3        | Build (rolldown-based, ESM, DTS)                                                               |
-| wrangler | 4.x           | CF Worker dev/deploy                                                                           |
-| vitest   | 4.x           | Unit + integration tests                                                                       |
-| oxlint   | 1.47.x        | Linting                                                                                        |
-| oxfmt    | 0.32.x        | Formatting (double quotes, semis)                                                              |
-| vite     | 8.0.0-beta.14 | Dev server + build                                                                             |
+| Tool     | Version   | Purpose                                                                                        |
+| -------- | --------- | ---------------------------------------------------------------------------------------------- |
+| Node.js  | 24.13.1   | Runtime (TS type stripping enabled natively — no `tsx` or `--experimental-strip-types` needed) |
+| Vite+    | 0.1.x     | Unified toolchain (`vp`, Vite, Vitest, Oxlint, Oxfmt, tsdown)                                  |
+| pnpm     | 10.x      | Package manager used by Vite+ for this workspace                                               |
+| tsdown   | via Vite+ | Library packaging through `vp pack`                                                            |
+| wrangler | 4.x       | CF Worker dev/deploy                                                                           |
+| vitest   | via Vite+ | Unit + integration tests via `vp test`                                                         |
+| oxlint   | via Vite+ | Linting via `vp lint` / `vp check`                                                             |
+| oxfmt    | via Vite+ | Formatting via `vp fmt` / `vp check`                                                           |
+| vite     | via Vite+ | Dev server + build                                                                             |
 
 ## Testing
 
-Tests run from root with `pnpm test` (vitest). See each package README for detailed test listings.
+Tests run from root with `vp test run`. See each package README for detailed test listings.
 
 ## Playground
 
-Local apps for testing features end-to-end. Run scripts with `pnpm -C playground/<app> <script>` (e.g. `pnpm -C playground/spa dev`).
+Local apps for testing features end-to-end. Run scripts with `vp run --filter ./playground/<app> <script>` (e.g. `vp run --filter ./playground/spa dev`).
 
 | App                                                       | Description                                                                                           |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { PlatformClient, type ManifestOnlyDeployPayload } from '../../src/cli/client.ts';
 import type { DeployManifest } from '../../src/cli/types.ts';
 

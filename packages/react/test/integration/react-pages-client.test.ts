@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
 import { chromium, type Browser, type Page } from 'playwright';
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 declare global {
@@ -746,12 +746,12 @@ describe('react-pages client (dev)', () => {
       DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
       child = spawn(
-        'pnpm',
+        'vp',
         [
-          '--dir',
-          'playground/react-pages',
-          'exec',
-          'vite',
+          'run',
+          '--filter',
+          './playground/react-pages',
+          'dev',
           '--host',
           '127.0.0.1',
           '--port',
@@ -773,6 +773,10 @@ describe('react-pages client (dev)', () => {
 
       const serverTimeout = process.platform === 'win32' ? 45_000 : 20_000;
       await waitForServer(DEV_BASE, serverTimeout);
+      await waitForServer(`${DEV_BASE}/users`, serverTimeout, {
+        expectBody: 'Alice',
+        isAlive: () => child.exitCode === null,
+      });
     },
     process.platform === 'win32' ? 60_000 : 30_000,
   );
@@ -1121,7 +1125,7 @@ describe('react-pages client (preview)', { retry: 2 }, () => {
 
   beforeAll(async () => {
     if (!existsSync(join(ROOT, 'playground/react-pages/dist'))) {
-      execSync('pnpm --dir playground/react-pages build', {
+      execSync('vp run --filter ./playground/react-pages build', {
         cwd: ROOT,
         stdio: 'pipe',
       });
@@ -1131,12 +1135,11 @@ describe('react-pages client (preview)', { retry: 2 }, () => {
     PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
 
     child = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        'playground/react-pages',
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        './playground/react-pages',
         'preview',
         '--host',
         '127.0.0.1',

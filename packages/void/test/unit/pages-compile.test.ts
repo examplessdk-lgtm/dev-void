@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { compileRouteTable, type PagesCompileOptions } from '../../src/router/compile.ts';
 import type { ScanResult } from '../../src/router/scan.ts';
 

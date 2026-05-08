@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
 import { join } from 'pathe';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vite-plus/test';
 import {
   ensureWranglerCompatibilityDate,
   ensureWranglerNodejsAlsFlag,

@@ -128,7 +128,7 @@ When `voidInternalStaging` is true:
 - **Site domain**: uses `staging.void.app` for generated project URLs
 - **Proxy**: injects staging proxy bindings for local dev AI and prerendering
 
-Build output uses `.mjs` / `.d.mts` extensions (tsdown 0.20.3 default).
+Build output uses `.mjs` / `.d.mts` extensions (`vp pack` / tsdown default).
 
 ### Route Filename Parsing Rules
 

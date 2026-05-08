@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'vite-plus/test';
 import { ProxyD1Database } from '../../../src/runtime/remote/d1.ts';
 import { createRemoteEnv } from '../../../src/runtime/remote/index.ts';
 import { ProxyKVNamespace } from '../../../src/runtime/remote/kv.ts';

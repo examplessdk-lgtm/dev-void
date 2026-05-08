@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'pathe';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vite-plus/test';
 import { collectPrerenderPaths } from '../../src/prerender.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -19,7 +19,7 @@ describe('playground/static-pages build (output: static)', () => {
     rmSync(join(pg, 'dist'), { recursive: true, force: true });
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     removeWranglerConfig(pg);
-    execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
+    execSync(`vp run --filter ./${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
   });
 
   it('emits worker entry and client manifest', () => {

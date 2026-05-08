@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -22,7 +22,7 @@ describe('playground/nuxt build', () => {
     rmSync(join(pg, '.nuxt'), { recursive: true, force: true });
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     removeWranglerConfig(pg);
-    execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
+    execSync(`vp run --filter ./${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
   });
 
   it('produces expected build artifacts', () => {
@@ -51,12 +51,11 @@ describe(
         DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
         child = spawn(
-          'pnpm',
+          'vp',
           [
-            '--dir',
-            PLAYGROUND,
-            'exec',
-            'nuxt',
+            'run',
+            '--filter',
+            `./${PLAYGROUND}`,
             'dev',
             '--host',
             '127.0.0.1',

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { convertReturnValue } from '../../src/runtime/response.ts';
 
 describe('convertReturnValue', () => {

@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'pathe';
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
 import { islandsPlugin } from '../../src/plugin-islands.ts';
 
 const TMP = join(import.meta.dirname, '__tmp_islands_plugin__');

@@ -1,5 +1,5 @@
 import { Hono, type Context } from 'hono';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vite-plus/test';
 import { defer } from '../../src/pages/defer.ts';
 import {
   handlePageGet,

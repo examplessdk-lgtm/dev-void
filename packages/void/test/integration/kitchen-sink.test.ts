@@ -3,7 +3,7 @@ import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
 import { chromium, type Browser, type Page } from 'playwright';
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 declare global {
@@ -51,7 +51,7 @@ describe('playground/kitchen-sink', () => {
     // flaky CI failures (server crashes, hydration timeouts).
     const pg = join(ROOT, 'playground/kitchen-sink');
     rmSync(join(pg, 'dist'), { recursive: true, force: true });
-    execSync('pnpm --dir playground/kitchen-sink build', {
+    execSync('vp run --filter ./playground/kitchen-sink build', {
       cwd: ROOT,
       stdio: 'pipe',
     });
@@ -59,12 +59,11 @@ describe('playground/kitchen-sink', () => {
 
     // Start preview server — pre-built assets, no lazy optimization.
     child = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        'playground/kitchen-sink',
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        './playground/kitchen-sink',
         'preview',
         '--host',
         '127.0.0.1',

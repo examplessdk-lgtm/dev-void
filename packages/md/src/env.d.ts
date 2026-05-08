@@ -11,3 +11,9 @@ declare module 'markdown-it-container' {
   const plugin: (md: unknown, name: string, options: unknown) => void;
   export default plugin;
 }
+
+declare module '*.vue' {
+  import type { DefineComponent } from 'vue';
+  const component: DefineComponent<{}, {}, unknown>;
+  export default component;
+}

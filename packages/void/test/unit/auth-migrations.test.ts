@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import type { VoidAuthMigrationSchema } from '../../src/auth/drizzle.ts';
 import { resolveVoidAuthMigrationSchema } from '../../src/auth/drizzle.ts';
 import {

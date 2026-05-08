@@ -1,7 +1,7 @@
 import { type } from 'arktype';
 import { Hono } from 'hono';
 import * as v from 'valibot';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { z } from 'zod';
 import { defineHandler, type CloudContext, type TypedHandler } from '../../src/runtime/handler.ts';
 import { convertReturnValue } from '../../src/runtime/response.ts';

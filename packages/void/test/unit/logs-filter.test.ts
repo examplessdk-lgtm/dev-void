@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { PlatformClient, type LogEntry } from '../../src/cli/client.ts';
 import { filterLogEntries } from '../../src/cli/logs.ts';
 

@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { parseRouteFilename } from '../../src/router/parse-filename.ts';
 
 describe('parseRouteFilename', () => {

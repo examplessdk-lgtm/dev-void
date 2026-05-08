@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'pathe';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vite-plus/test';
 import { parseHeadersFile } from '../../src/cli/headers.ts';
 
 const tmpDir = join(import.meta.dirname, '.tmp-headers-file-test');

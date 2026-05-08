@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { dirname, join } from 'pathe';
-import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vite-plus/test';
 import { runGenCommand, formatTimestamp } from '../../src/cli/gen.ts';
 
 const mockSelect = vi.fn();

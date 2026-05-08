@@ -1,6 +1,6 @@
 import { resolve } from 'pathe';
 import { normalizePath } from 'vite';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'vite-plus/test';
 import { rewriteCssImportForVirtualModule } from '../../src/pages/islands-plugin.ts';
 
 /** Resolve a POSIX-style absolute path to a platform-correct path with forward slashes. */

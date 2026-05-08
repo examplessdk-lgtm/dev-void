@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -17,7 +17,7 @@ describe('playground/react-router build', () => {
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
     rmSync(join(pg, '.react-router'), { recursive: true, force: true });
-    execSync(`pnpm --dir ${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
+    execSync(`vp run --filter ./${PLAYGROUND} build`, { cwd: ROOT, stdio: 'pipe' });
   });
 
   it('produces expected build artifacts', () => {
@@ -52,8 +52,17 @@ describe('playground/react-router dev', { retry: 2 }, () => {
     DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
     child = spawn(
-      'pnpm',
-      ['--dir', PLAYGROUND, 'exec', 'vite', '--host', '127.0.0.1', '--port', String(DEV_PORT)],
+      'vp',
+      [
+        'run',
+        '--filter',
+        `./${PLAYGROUND}`,
+        'dev',
+        '--host',
+        '127.0.0.1',
+        '--port',
+        String(DEV_PORT),
+      ],
       {
         cwd: ROOT,
         stdio: ['ignore', 'pipe', 'pipe'],

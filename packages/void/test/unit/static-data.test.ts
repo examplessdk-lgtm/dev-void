@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'pathe';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { resolveStaticPageDataBuildOptions } from '../../src/pages/static-data.ts';
 
 const tmpDir = join(import.meta.dirname, '.tmp-static-data-test');

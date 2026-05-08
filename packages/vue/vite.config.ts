@@ -1,0 +1,19 @@
+import { defineConfig } from 'vite-plus';
+
+export default defineConfig({
+  pack: {
+    entry: [
+      'src/index.ts',
+      'src/plugin.ts',
+      'src/runtime/index.ts',
+      'src/runtime/use-deferred.ts',
+      'src/runtime/prefetch.ts',
+    ],
+    format: 'esm',
+    dts: true,
+    clean: true,
+    deps: {
+      neverBundle: ['vue', 'vue/server-renderer', 'vite', 'void', 'void/*', '@vitejs/plugin-vue'],
+    },
+  },
+});

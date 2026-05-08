@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'pathe';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { buildPrerenderBindings, collectPrerenderWorkerModules } from '../../src/prerender.ts';
 import { INTERNAL_ENV_KEYS, stripInternalEnvKeys } from '../../src/shared/env.ts';
 

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'pathe';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'vite-plus/test';
 
 function sendRpc(proc: ChildProcess, request: object): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {

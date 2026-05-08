@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { PlatformApiError } from '../../src/cli/client.ts';
 import { formatStreamDeployError } from '../../src/cli/deploy-errors.ts';
 

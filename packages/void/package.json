@@ -262,8 +262,8 @@
     }
   },
   "scripts": {
-    "build": "node scripts/sync-skill-docs.mjs && tsdown",
-    "dev": "tsdown --watch",
+    "build": "node scripts/sync-skill-docs.mjs && vp pack",
+    "dev": "vp pack --watch",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
@@ -302,9 +302,9 @@
     "pglite-server": "0.1.5",
     "picocolors": "^1.1.1",
     "tinyglobby": "^0.2.16",
-    "tsdown": "catalog:",
     "valibot": "^1.4.0",
     "vite": "catalog:",
+    "vite-plus": "catalog:",
     "zod": "^4.4.3"
   },
   "peerDependencies": {

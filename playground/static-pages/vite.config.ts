@@ -1,5 +1,5 @@
 import { voidVue } from '@void/vue/plugin';
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, type Plugin } from 'vite-plus';
 import { voidPlugin } from 'void';
 
 function virtualTagsPlugin(): Plugin {

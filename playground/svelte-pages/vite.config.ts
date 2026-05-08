@@ -1,5 +1,5 @@
 import { voidSvelte } from '@void/svelte/plugin';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vite-plus';
 import { voidPlugin } from 'void';
 
 export default defineConfig({

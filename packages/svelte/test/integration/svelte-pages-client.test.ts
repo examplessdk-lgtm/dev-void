@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
 import { chromium, type Browser, type Page } from 'playwright';
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 declare global {
@@ -556,12 +556,12 @@ describe('svelte-pages client (dev)', () => {
     DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
     child = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        'playground/svelte-pages',
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        './playground/svelte-pages',
+        'dev',
         '--host',
         '127.0.0.1',
         '--port',
@@ -902,7 +902,7 @@ describe('svelte-pages client (preview)', { retry: 2 }, () => {
 
   beforeAll(async () => {
     if (!existsSync(join(ROOT, 'playground/svelte-pages/dist'))) {
-      execSync('pnpm --dir playground/svelte-pages build', {
+      execSync('vp run --filter ./playground/svelte-pages build', {
         cwd: ROOT,
         stdio: 'pipe',
       });
@@ -912,12 +912,11 @@ describe('svelte-pages client (preview)', { retry: 2 }, () => {
     PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
 
     child = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        'playground/svelte-pages',
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        './playground/svelte-pages',
         'preview',
         '--host',
         '127.0.0.1',

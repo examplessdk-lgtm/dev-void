@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -70,8 +70,8 @@ describe('playground/analog build', () => {
     rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
     removeWranglerConfig(pg);
     // Angular's compiler conflicts with vitest's Node.js module hooks.
-    // Use a clean child environment while letting cross-spawn resolve pnpm.cmd on Windows.
-    const result = spawn.sync('pnpm', ['--dir', PLAYGROUND, 'build'], {
+    // Use a clean child environment while letting cross-spawn resolve vp.cmd on Windows.
+    const result = spawn.sync('vp', ['run', '--filter', `./${PLAYGROUND}`, 'build'], {
       cwd: ROOT,
       stdio: 'pipe',
       env: getCleanEnv(),
@@ -108,12 +108,11 @@ describe('playground/analog dev', () => {
     DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
     child = spawn(
-      'pnpm',
+      'vp',
       [
-        '--dir',
-        PLAYGROUND,
-        'exec',
-        'vite',
+        'run',
+        '--filter',
+        `./${PLAYGROUND}`,
         'dev',
         '--host',
         '127.0.0.1',

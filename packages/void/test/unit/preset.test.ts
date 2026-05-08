@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'pathe';
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
 import { detectPreset, formatProjectCommand, resolveProjectCommand } from '../../src/cli/preset.ts';
 
 const TMP = join(import.meta.dirname, '.tmp-preset');

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { serializePageData } from '../../src/pages/serialize.ts';
 
 const LS = String.fromCharCode(0x2028);

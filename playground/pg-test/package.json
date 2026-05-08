@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build",
-    "dev": "vite",
+    "build": "vp build",
+    "dev": "vp dev",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
@@ -19,6 +19,7 @@
     "@typescript/native-preview": "catalog:",
     "@void/react": "workspace:*",
     "vite": "catalog:",
+    "vite-plus": "catalog:",
     "void": "workspace:*"
   }
 }

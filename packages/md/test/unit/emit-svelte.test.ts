@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import type { CompileResult } from '../../src/compile.ts';
 import { emitSvelteComponent, emitSvelteComponentWithIslands } from '../../src/emit-svelte.ts';
 

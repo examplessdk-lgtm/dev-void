@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vite-plus/test';
 
 const { createAuthClientMock } = vi.hoisted(() => ({
   createAuthClientMock: vi.fn((options?: unknown) => ({ options })),

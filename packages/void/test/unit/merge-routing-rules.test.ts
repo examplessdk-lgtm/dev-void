@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'pathe';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { mergeRoutingRules } from '../../src/cli/headers.ts';
 
 const tmpDir = join(import.meta.dirname, '.tmp-merge-routing-rules');
