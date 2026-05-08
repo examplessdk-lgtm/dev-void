@@ -99,7 +99,10 @@ describe('runProjectsCommand', () => {
     capture.restore();
 
     expect(fetchMock).toHaveBeenCalledWith('https://api.example.test/projects', {
-      headers: { Authorization: 'Bearer test-token' },
+      headers: {
+        Authorization: 'Bearer test-token',
+        'X-Void-CLI-Version': expect.stringMatching(/^\d+\.\d+\.\d+/) as unknown as string,
+      },
     });
     expect(out).toContain('star-tracker');
     expect(out).toContain('https://star-tracker.staging.void.app');

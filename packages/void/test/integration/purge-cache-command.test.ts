@@ -96,6 +96,7 @@ describe('runPurgeCacheCommand', () => {
         headers: {
           'Content-Type': 'application/json',
           Authorization: 'Bearer test-token',
+          'X-Void-CLI-Version': expect.stringMatching(/^\d+\.\d+\.\d+/) as unknown as string,
         },
         body: JSON.stringify({ all: true }),
       },
