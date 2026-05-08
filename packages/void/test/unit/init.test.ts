@@ -35,6 +35,15 @@ const mockIsStagingMode = vi.fn();
 const mockListProjects = vi.fn();
 const mockCreateProject = vi.fn();
 
+function expectPnpmAllowBuilds(root: string): void {
+  const yaml = readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf-8');
+  expect(yaml).toContain('allowBuilds:\n');
+  expect(yaml).toContain('  better-sqlite3: true');
+  expect(yaml).toContain('  esbuild: true');
+  expect(yaml).toContain('  workerd: true');
+  expect(yaml).not.toContain('onlyBuiltDependencies:');
+}
+
 vi.mock('@clack/prompts', () => ({
   intro: vi.fn(),
   outro: (...args: Array<unknown>) => mockOutro(...args),
@@ -1815,9 +1824,7 @@ export default config;
       expect(pkg.devDependencies['@rolldown/plugin-babel']).toBe('^0.2.3');
       expect(pkg.devDependencies['@vitejs/plugin-react']).toBe('^6.0.1');
       expect(pkg.devDependencies['babel-plugin-react-compiler']).toBe('^1.0.0');
-      expect(pkg.pnpm.onlyBuiltDependencies).toEqual(
-        expect.arrayContaining(['better-sqlite3', 'esbuild', 'workerd']),
-      );
+      expectPnpmAllowBuilds(root);
 
       const reactViteConfig = readFileSync(join(root, 'vite.config.ts'), 'utf-8');
       expect(reactViteConfig).toContain('from "@rolldown/plugin-babel"');
@@ -3858,14 +3865,14 @@ export default config;
   });
 
   // Round 44 regression: `scaffoldPagesApp` previously only wrote
-  // `pnpm.onlyBuiltDependencies` when `packageManager === 'pnpm'`. But
+  // pnpm build approvals when `packageManager === 'pnpm'`. But
   // for a workspace subpackage with no local lockfile / Corepack pin,
   // `detectProjectState` returns `'npm'` — the pnpm branch never fires
   // and the subpackage's built-deps allowlist is silently dropped,
   // which suppresses better-sqlite3 / esbuild / workerd postinstalls on
   // the next workspace-root `pnpm install`. Gate the allowlist on the
   // ancestor-aware `isPnpmProject` check instead.
-  it('writes pnpm.onlyBuiltDependencies for a pnpm workspace subpackage (Round 44)', async () => {
+  it('writes pnpm allowBuilds for a pnpm workspace subpackage (Round 44)', async () => {
     const wsroot = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       // Workspace root: pnpm-workspace.yaml with `packages/*`. The root
@@ -3874,7 +3881,7 @@ export default config;
       writeFileSync(
         join(wsroot, 'package.json'),
         JSON.stringify(
-          { name: 'workspace-root', private: true, packageManager: 'pnpm@10.33.0' },
+          { name: 'workspace-root', private: true, packageManager: 'pnpm@11.0.8' },
           null,
           2,
         ) + '\n',
@@ -3895,11 +3902,11 @@ export default config;
 
       const pkg = JSON.parse(readFileSync(join(subpkgRoot, 'package.json'), 'utf-8'));
 
-      // The built-deps allowlist MUST be present — this is the
-      // regression target. Mirrors the standalone-pnpm assertion above.
-      expect(pkg.pnpm?.onlyBuiltDependencies).toEqual(
-        expect.arrayContaining(['better-sqlite3', 'esbuild', 'workerd']),
-      );
+      // The built-deps allowlist MUST be present in the workspace
+      // config — this is the regression target. Mirrors the
+      // standalone-pnpm assertion above.
+      expectPnpmAllowBuilds(wsroot);
+      expect(pkg.pnpm).toBeUndefined();
     } finally {
       rmSync(wsroot, { recursive: true, force: true });
     }
@@ -3916,7 +3923,7 @@ export default config;
       writeFileSync(
         join(wsroot, 'package.json'),
         JSON.stringify(
-          { name: 'workspace-root', private: true, packageManager: 'pnpm@10.33.0' },
+          { name: 'workspace-root', private: true, packageManager: 'pnpm@11.0.8' },
           null,
           2,
         ) + '\n',
@@ -3940,7 +3947,7 @@ export default config;
     }
   });
 
-  it('writes BOTH pnpm.onlyBuiltDependencies AND packageManager pin in a standalone pnpm project (Round 44)', async () => {
+  it('writes BOTH pnpm allowBuilds AND packageManager pin in a standalone pnpm project (Round 44)', async () => {
     // Symmetric proof that the standalone-pnpm path still writes both
     // the allowlist AND the Corepack pin, after the Round 44 split.
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
@@ -3957,10 +3964,8 @@ export default config;
       await runInitCommand(root);
 
       const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-      expect(pkg.pnpm?.onlyBuiltDependencies).toEqual(
-        expect.arrayContaining(['better-sqlite3', 'esbuild', 'workerd']),
-      );
-      expect(pkg.packageManager).toBe('pnpm@10.33.0');
+      expectPnpmAllowBuilds(root);
+      expect(pkg.packageManager).toBe('pnpm@11.0.8');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -115,7 +115,7 @@ const EMPTY_PROJECT_ALLOWED_ENTRIES = new Set([
   '.zencoder',
 ]);
 
-const PNPM_ONLY_BUILT_DEPENDENCIES = ['better-sqlite3', 'esbuild', 'workerd'] as const;
+const PNPM_ALLOWED_BUILDS = ['better-sqlite3', 'esbuild', 'workerd'] as const;
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 
 const EMPTY_PROJECT_ALLOWED_PACKAGES = new Set([
@@ -1801,23 +1801,97 @@ function ensureGitignore(root: string): void {
   log.success('Updated .gitignore with Void defaults');
 }
 
-function ensurePnpmBuiltDependencies(pkg: JsonObject): void {
-  const pnpm = asRecord(pkg.pnpm) ?? {};
-  pkg.pnpm = pnpm;
-
-  const onlyBuiltDependencies = Array.isArray(pnpm.onlyBuiltDependencies)
-    ? pnpm.onlyBuiltDependencies.filter(
-        (value: unknown): value is string => typeof value === 'string',
-      )
-    : [];
-
-  for (const dependency of PNPM_ONLY_BUILT_DEPENDENCIES) {
-    if (!onlyBuiltDependencies.includes(dependency)) {
-      onlyBuiltDependencies.push(dependency);
+function removeTopLevelYamlBlock(yaml: string, key: string): string {
+  const lines = yaml.split(/\r?\n/);
+  const next: Array<string> = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!new RegExp(`^${key}:\\s*(?:#.*)?$`).test(line)) {
+      next.push(line);
+      continue;
     }
+
+    i += 1;
+    while (i < lines.length && (lines[i].trim() === '' || /^\s/.test(lines[i]))) {
+      i += 1;
+    }
+    i -= 1;
+  }
+  return next.join('\n');
+}
+
+function pnpmAllowBuildsYaml(): string {
+  const lines = ['allowBuilds:'];
+  for (const dependency of PNPM_ALLOWED_BUILDS) {
+    lines.push(`  ${dependency}: true`);
+  }
+  return lines.join('\n');
+}
+
+function insertPnpmAllowBuilds(yaml: string): string {
+  const trimmed = yaml.trim();
+  const allowBuilds = pnpmAllowBuildsYaml();
+  if (trimmed === '') {
+    return `${allowBuilds}\n`;
   }
 
-  pnpm.onlyBuiltDependencies = onlyBuiltDependencies;
+  const lines = trimmed.split(/\r?\n/);
+  const packagesIndex = lines.findIndex((line) => /^packages:\s*(?:#.*)?$/.test(line));
+  if (packagesIndex === -1) {
+    return `${trimmed}\n\n${allowBuilds}\n`;
+  }
+
+  let insertIndex = packagesIndex + 1;
+  while (
+    insertIndex < lines.length &&
+    (lines[insertIndex].trim() === '' || /^\s/.test(lines[insertIndex]))
+  ) {
+    insertIndex += 1;
+  }
+  lines.splice(insertIndex, 0, '', ...allowBuilds.split('\n'), '');
+  return `${lines.join('\n').replace(/\n{3,}/g, '\n\n')}\n`;
+}
+
+function resolvePnpmConfigRoot(root: string, pkg: JsonObject): string {
+  if (
+    existsSync(join(root, 'pnpm-workspace.yaml')) ||
+    existsSync(join(root, 'pnpm-lock.yaml')) ||
+    parsePackageManagerField(pkg) === 'pnpm'
+  ) {
+    return root;
+  }
+
+  const workspaceRoot = findWorkspaceRoot(root);
+  if (
+    workspaceRoot !== undefined &&
+    isWorkspaceSubpackage(workspaceRoot, root) &&
+    hasAncestorPnpmMarkers(root)
+  ) {
+    return workspaceRoot;
+  }
+
+  return root;
+}
+
+function ensurePnpmAllowBuilds(root: string, pkg: JsonObject): boolean {
+  const configRoot = resolvePnpmConfigRoot(root, pkg);
+  const workspacePath = join(configRoot, 'pnpm-workspace.yaml');
+  const before = existsSync(workspacePath) ? readFileSync(workspacePath, 'utf-8') : '';
+  const withoutLegacy = removeTopLevelYamlBlock(
+    removeTopLevelYamlBlock(before, 'onlyBuiltDependencies'),
+    'allowBuilds',
+  );
+  const after = insertPnpmAllowBuilds(withoutLegacy);
+  if (after !== before) {
+    writeFileSync(workspacePath, after);
+    log.success(
+      configRoot === root
+        ? 'Updated pnpm-workspace.yaml with approved builds'
+        : `Updated ${relative(root, workspacePath)} with approved builds`,
+    );
+    return true;
+  }
+  return false;
 }
 
 function installProjectDependencies(
@@ -2065,16 +2139,16 @@ function scaffoldPagesApp(
     ensureDependency('devDependencies', name, version);
   }
 
-  // Round 44: `ensurePnpmBuiltDependencies` must run for pnpm workspace
+  // Round 44: the pnpm build approval setup must run for workspace
   // subpackages too. `detectProjectState` only checks LOCAL markers and
   // returns `'npm'` for a subpackage without its own lockfile / pin,
   // but `isPnpmProject(root, pkg)` walks ancestors and (after round 43)
   // verifies membership. Gate the allowlist on the ancestor-aware check
-  // so the subpackage gets `pnpm.onlyBuiltDependencies` and its
+  // so the workspace gets `allowBuilds` and its
   // better-sqlite3 / esbuild / workerd postinstalls run on the next
   // workspace-root `pnpm install`.
   if (isPnpmProject(root, pkg)) {
-    ensurePnpmBuiltDependencies(pkg);
+    ensurePnpmAllowBuilds(root, pkg);
   }
   // The Corepack pin is ONLY for the standalone pnpm case. In a
   // workspace subpackage the pin lives on the workspace root's
@@ -2084,7 +2158,7 @@ function scaffoldPagesApp(
     packageManager === 'pnpm' &&
     (!pkg.packageManager || typeof pkg.packageManager !== 'string')
   ) {
-    pkg.packageManager = 'pnpm@10.33.0';
+    pkg.packageManager = 'pnpm@11.0.8';
   }
 
   writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n');
@@ -2188,14 +2262,7 @@ function ensureExistingProjectPackage(
     dependencyAdded = true;
   }
 
-  if (isPnpmProject(root, pkg)) {
-    const before = JSON.stringify(asRecord(pkg.pnpm)?.onlyBuiltDependencies ?? null);
-    ensurePnpmBuiltDependencies(pkg);
-    const after = JSON.stringify(asRecord(pkg.pnpm)?.onlyBuiltDependencies ?? null);
-    if (before !== after) {
-      changed = true;
-    }
-  }
+  const pnpmConfigChanged = isPnpmProject(root, pkg) ? ensurePnpmAllowBuilds(root, pkg) : false;
 
   if (changed) {
     writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n');
@@ -2210,7 +2277,7 @@ function ensureExistingProjectPackage(
     );
   }
 
-  return { dependencyAdded, packageJsonMutated: changed };
+  return { dependencyAdded, packageJsonMutated: changed || pnpmConfigChanged };
 }
 
 function insertVoidImport(code: string): string {
@@ -2855,9 +2922,8 @@ export function ensureVoidDependency(root: string): boolean {
     changed = true;
   }
 
-  // Mirror `scaffoldPagesApp`'s pnpm built-dep allowlist. pnpm 10 ignores
-  // build scripts unless the package is listed in
-  // `pnpm.onlyBuiltDependencies`; without this, the freshly scaffolded
+  // Mirror `scaffoldPagesApp`'s pnpm build approval config. pnpm requires
+  // build scripts to be approved through `allowBuilds`; without this, the freshly scaffolded
   // demo breaks on first local DB / dev commands because
   // `better-sqlite3`/`esbuild`/`workerd` never run their postinstall
   // build steps. Honor both pnpm signals via `isPnpmProject` — a committed
@@ -2866,14 +2932,7 @@ export function ensureVoidDependency(root: string): boolean {
   // `detectProjectState` and `runInitCommand` already treat as pnpm; the
   // demo would then run `pnpm install` against the project but skip the
   // allowlist, leaving the local DB / dev setup broken on first run.
-  if (isPnpmProject(root, pkg)) {
-    const before = JSON.stringify(asRecord(pkg.pnpm)?.onlyBuiltDependencies ?? null);
-    ensurePnpmBuiltDependencies(pkg);
-    const after = JSON.stringify(asRecord(pkg.pnpm)?.onlyBuiltDependencies ?? null);
-    if (before !== after) {
-      changed = true;
-    }
-  }
+  const pnpmConfigChanged = isPnpmProject(root, pkg) ? ensurePnpmAllowBuilds(root, pkg) : false;
 
   if (changed) {
     writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n');
@@ -2884,7 +2943,7 @@ export function ensureVoidDependency(root: string): boolean {
     );
   }
 
-  return changed;
+  return changed || pnpmConfigChanged;
 }
 
 interface AgentSetupSelection {

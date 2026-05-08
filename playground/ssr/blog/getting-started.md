@@ -5,7 +5,7 @@ This guide walks you through setting up a Void project with SSR and blog support
 ## Prerequisites
 
 - Node.js 22+
-- pnpm 10+
+- pnpm 11+
 
 ## Steps
 
