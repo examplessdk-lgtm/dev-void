@@ -1,10 +1,10 @@
 <script setup>
 import FeatureGrid from '@components/oss/FeatureGrid.vue';
 import Footer from '@components/oss/Footer.vue';
-import Hero from '@components/oss/Hero.vue';
 import Spacer from '@components/shared/Spacer.vue';
 import { useData } from 'vitepress';
 import bg from './hero-bg.jpg';
+import Hero from './Hero.vue';
 
 const { frontmatter } = useData();
 </script>
@@ -47,8 +47,10 @@ const { frontmatter } = useData();
 
 @media (min-width: 1024px) {
   .hero-file-tree :deep(.file-tree) {
-    max-height: 468px;
+    max-height: 362px;
     overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.42) rgba(255, 255, 255, 0.08);
   }
 }
 
@@ -57,5 +59,24 @@ const { frontmatter } = useData();
   background-color: rgba(0, 0, 0, 0.75);
   backdrop-filter: blur(10px);
   border-color: rgba(255, 255, 255, 0.1);
+}
+
+.hero-file-tree :deep(.file-tree::-webkit-scrollbar) {
+  width: 10px;
+}
+
+.hero-file-tree :deep(.file-tree::-webkit-scrollbar-track) {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+}
+
+.hero-file-tree :deep(.file-tree::-webkit-scrollbar-thumb) {
+  background: rgba(255, 255, 255, 0.42);
+  border: 2px solid rgba(0, 0, 0, 0.35);
+  border-radius: 999px;
+}
+
+.hero-file-tree :deep(.file-tree::-webkit-scrollbar-thumb:hover) {
+  background: rgba(255, 255, 255, 0.58);
 }
 </style>
