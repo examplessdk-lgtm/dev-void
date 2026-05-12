@@ -24,9 +24,6 @@ features:
   - iconify: lucide:wand-sparkles
     title: Your Code is Your Infra
     details: Void scans your source code, detects what you use, and automatically provisions every resource. No config files. No dashboard clicks. Locally and in the cloud.
-  # - iconify: lucide:shield-check
-  #   title: End-to-End Type Safety
-  #   details: Types flow from Drizzle schema through route handlers to page component props and the frontend fetch client. One schema validates at runtime and infers types at build time.
   - iconify: lucide:shield-check
     title: Performant and Reliable
     details: Built on Cloudflare's battle tested, global network. Fast, secure, and always available from day one.
