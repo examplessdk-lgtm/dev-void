@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
@@ -59,6 +59,7 @@ describe('inferProjectBindings', () => {
       needsQueues: false,
       needsAI: false,
       needsSandbox: false,
+      needsLive: false,
     });
   });
 
@@ -76,6 +77,30 @@ describe('inferProjectBindings', () => {
 
     const result = inferProjectBindings(root);
     expect(result.needsAuth).toBe(true);
+  });
+
+  it('detects live from the documented src/live.ts module', () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'routes'), { recursive: true });
+    writeFileSync(
+      join(root, 'src', 'live.ts'),
+      `
+      import { defineLiveStream } from "void/live";
+      export const live = defineLiveStream({ id: "app" });
+      `,
+    );
+    writeFileSync(
+      join(root, 'routes', 'live.ts'),
+      `
+      import { defineHandler } from "void";
+      import { live } from "../src/live";
+      export const GET = defineHandler((c) => live.connect(c));
+      export const POST = defineHandler((c) => live.control(c));
+      `,
+    );
+
+    const result = inferProjectBindings(root);
+    expect(result.needsLive).toBe(true);
   });
 
   it('detects auth from void/auth import in routes/', () => {
@@ -283,6 +308,36 @@ describe('detectFramework', () => {
     }
   });
 
+  it('fails client builds that import void/live', () => {
+    const root = createTempRoot();
+    writeCompatConfig(root);
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    try {
+      const plugins = voidPlugin();
+      const stubsPlugin = plugins.find((plugin) => plugin.name === 'void:client-stubs');
+      const resolveId = getHookHandler(stubsPlugin?.resolveId) as (
+        this: { environment?: { name?: string }; error(message: string): never },
+        id: string,
+      ) => string | undefined;
+
+      expect(stubsPlugin).toBeTruthy();
+      expect(() =>
+        resolveId.call(
+          {
+            environment: { name: 'client' },
+            error(message: string): never {
+              throw new Error(message);
+            },
+          },
+          'void/live',
+        ),
+      ).toThrow('void/live is server-only');
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
   it('includes Cloudflare builtin externalization for class A frameworks', () => {
     const root = createTempRoot();
     writeCompatConfig(root);
@@ -362,6 +417,84 @@ describe('detectFramework', () => {
       expect(plugins.some((plugin) => plugin.name === 'void:cloudflare-builtins-external')).toBe(
         false,
       );
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  it('wires void/live for explicit Cloudflare targets', () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'routes'), { recursive: true });
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ target: 'cloudflare' }));
+    writeFileSync(
+      join(root, 'src', 'live.ts'),
+      `
+      import { defineLiveStream } from "void/live";
+      export const live = defineLiveStream({ id: "app" });
+      `,
+    );
+    writeFileSync(
+      join(root, 'routes', 'live.ts'),
+      `
+      import { defineHandler } from "void";
+      import { live } from "../src/live";
+      export const GET = defineHandler((c) => live.connect(c));
+      export const POST = defineHandler((c) => live.control(c));
+      `,
+    );
+
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    try {
+      voidPlugin();
+      const entry = readFileSync(join(root, '.void', 'entry.ts'), 'utf-8');
+      expect(entry).toContain('VoidLiveStreamDurableObject');
+      expect(entry).toContain('export { VoidLiveStreamDurableObject };');
+      expect(entry).toContain('__setLiveBindingName("VOID_LIVE");');
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  it('rejects void/live on non-Cloudflare targets', () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'routes'), { recursive: true });
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ target: 'node' }));
+    writeFileSync(
+      join(root, 'routes', 'live.ts'),
+      `
+      import { defineLiveStream } from "void/live";
+      export const live = defineLiveStream({ id: "app" });
+      `,
+    );
+
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    try {
+      expect(() => voidPlugin()).toThrow('void/live requires target: "cloudflare"');
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  it('rejects void/live in framework adapter mode', () => {
+    const root = createTempRoot();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ dependencies: { '@sveltejs/kit': '^2.0.0' } }),
+    );
+    writeFileSync(
+      join(root, 'src', 'live.ts'),
+      `
+      import { defineLiveStream } from "void/live";
+      export const live = defineLiveStream({ id: "app" });
+      `,
+    );
+
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    try {
+      expect(() => voidPlugin()).toThrow('void/live is currently supported in Void apps only');
     } finally {
       cwd.mockRestore();
     }

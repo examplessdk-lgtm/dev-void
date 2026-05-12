@@ -305,6 +305,53 @@ describe('inferBindingsFromSource', () => {
     const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsAI).toBe(false);
   });
+
+  it("detects non-type imports from 'void/live'", () => {
+    const code = `
+      import { defineLiveStream } from "void/live";
+      export const live = defineLiveStream({ id: "app" });
+    `;
+    const result = inferBindingsFromSource(code, 'live.ts');
+    expect(result.needsLive).toBe(true);
+  });
+
+  it("does not detect live infrastructure from 'void/live/client'", () => {
+    const code = `
+      import { connectLiveStream } from "void/live/client";
+      connectLiveStream("/live");
+    `;
+    const result = inferBindingsFromSource(code, 'client.ts');
+    expect(result.needsLive).toBe(false);
+  });
+
+  it("does not detect live infrastructure from type-only 'void/live' imports", () => {
+    const code = `
+      import type { LiveClientEvent } from "void/live";
+      export type Event = LiveClientEvent<{ value: string }>;
+    `;
+    const result = inferBindingsFromSource(code, 'types.ts');
+    expect(result.needsLive).toBe(false);
+  });
+
+  it("does not detect live infrastructure from inline type-only 'void/live' imports", () => {
+    const code = `
+      import { type LiveStream, type LiveClientEvent } from "void/live";
+      export type Stream = LiveStream;
+      export type Event = LiveClientEvent<{ value: string }>;
+    `;
+    const result = inferBindingsFromSource(code, 'types.ts');
+    expect(result.needsLive).toBe(false);
+  });
+
+  it("detects live infrastructure from mixed inline type and value 'void/live' imports", () => {
+    const code = `
+      import { type LiveStream, defineLiveStream } from "void/live";
+      export type Stream = LiveStream;
+      export const live = defineLiveStream({ id: "app" });
+    `;
+    const result = inferBindingsFromSource(code, 'live.ts');
+    expect(result.needsLive).toBe(true);
+  });
 });
 
 describe('mergeBindings', () => {
@@ -358,6 +405,11 @@ describe('mergeBindings', () => {
   it('merges sandbox flag', () => {
     const result = mergeBindings([empty, { ...empty, needsSandbox: true }]);
     expect(result.needsSandbox).toBe(true);
+  });
+
+  it('merges live flag', () => {
+    const result = mergeBindings([empty, { ...empty, needsLive: true }]);
+    expect(result.needsLive).toBe(true);
   });
 
   it('merges AI with other bindings', () => {

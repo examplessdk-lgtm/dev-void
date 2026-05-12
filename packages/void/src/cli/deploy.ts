@@ -51,7 +51,12 @@ import {
 import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env.ts';
 import { validateSsrEntry } from '../ssr/entry.ts';
 import { getToken, getTokenSource } from './auth.ts';
-import { isExpiredTokenError, PlatformClient, type ManifestOnlyDeployPayload } from './client.ts';
+import {
+  isExpiredTokenError,
+  PlatformClient,
+  type DeploymentResponse,
+  type ManifestOnlyDeployPayload,
+} from './client.ts';
 import { promptAndCreateProject } from './create-project.ts';
 import {
   formatConnectionLostMessage,
@@ -98,7 +103,14 @@ import type {
   DevRedirectRule,
   HeaderRule,
 } from './types.ts';
-import { readWranglerCompat, type WranglerCompat } from './wrangler.ts';
+import {
+  readExistingLiveBindingConfig,
+  readWranglerCompat,
+  resolveLiveBindingConfig,
+  syncWranglerBindings,
+  type LiveBindingConfig,
+  type WranglerCompat,
+} from './wrangler.ts';
 import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper.ts';
 
 class DeployEventError extends Error {}
@@ -119,8 +131,93 @@ interface ResourceSummary {
   type?: string;
 }
 
+const EMPTY_BINDINGS = {
+  needsD1: false,
+  needsKV: false,
+  needsR2: false,
+  needsAuth: false,
+  needsQueues: false,
+  needsAI: false,
+  needsSandbox: false,
+};
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function readLiveBindingConfigFromDeployment(
+  deployment: DeploymentResponse | undefined,
+): LiveBindingConfig | undefined {
+  if (!deployment?.manifest) {
+    return undefined;
+  }
+  let manifest: DeployManifest;
+  try {
+    manifest = JSON.parse(deployment.manifest) as DeployManifest;
+  } catch {
+    return undefined;
+  }
+  if (
+    typeof manifest.live?.bindingName !== 'string' ||
+    typeof manifest.live.className !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    bindingName: manifest.live.bindingName,
+    className: manifest.live.className,
+  };
+}
+
+export async function ensurePreviouslyDeployedLiveBindingConfig(
+  root: string,
+  client: PlatformClient,
+  projectId: string,
+  cliLog?: CliLogger,
+): Promise<boolean> {
+  if (readExistingLiveBindingConfig(root)) {
+    return false;
+  }
+
+  const { deployments, activeDeploymentId } = await client.listDeployments(projectId);
+  const live = readLiveBindingConfigFromDeployment(
+    deployments.find((deployment) => deployment.id === activeDeploymentId),
+  );
+  if (!live) {
+    return false;
+  }
+
+  const synced = syncWranglerBindings(root, { ...EMPTY_BINDINGS, needsLive: true }, { live });
+  if (synced) {
+    cliLog?.info('live_binding_restored', {
+      bindingName: live.bindingName,
+      className: live.className,
+    });
+  }
+  return synced;
+}
+
+export async function resolveDeployLiveBindingConfig(
+  root: string,
+  client: PlatformClient,
+  projectId: string,
+  opts: {
+    isFrameworkMode: boolean;
+    needsLive: boolean | undefined;
+    webSockets: Array<{ bindingName: string; className: string }>;
+    sandboxClassName?: string;
+    cliLog?: CliLogger;
+  },
+): Promise<LiveBindingConfig | undefined> {
+  if (opts.isFrameworkMode || !opts.needsLive) {
+    return undefined;
+  }
+
+  await ensurePreviouslyDeployedLiveBindingConfig(root, client, projectId, opts.cliLog);
+  return resolveLiveBindingConfig(root, {
+    reservedBindings: opts.webSockets.map((route) => route.bindingName),
+    reservedClasses: [...opts.webSockets.map((route) => route.className), opts.sandboxClassName],
+  });
 }
 
 /**
@@ -981,6 +1078,10 @@ async function runFrameworkDeploy(
     );
     process.exit(1);
   }
+  if (bindings.needsLive) {
+    log.error('deploy: void/live is currently supported in Void apps only.');
+    process.exit(1);
+  }
 
   const migrationsDir = join(root, 'db', 'migrations');
 
@@ -1307,6 +1408,10 @@ async function runFullDeploy(
     log.error('deploy: Cloudflare Sandboxes are currently supported in Void apps only.');
     process.exit(1);
   }
+  if (isFrameworkMode && bindings.needsLive) {
+    log.error('deploy: void/live is currently supported in Void apps only.');
+    process.exit(1);
+  }
 
   const sandboxConfig = bindings.needsSandbox
     ? resolveSandboxConfig(deployConfig, root)
@@ -1400,6 +1505,13 @@ async function runFullDeploy(
   );
   const routeScan = await scanRoutes(root, { output: deployConfig.output });
   const webSockets = routeScan.websockets ?? scanWebSocketRoutesSync(root);
+  const liveConfig = await resolveDeployLiveBindingConfig(root, client, config.projectId, {
+    isFrameworkMode,
+    needsLive: effectiveBindings.needsLive,
+    webSockets,
+    sandboxClassName: sandboxConfig?.className,
+    cliLog,
+  });
   const queues = scanQueuesSync(root).map((q) => ({
     name: q.name,
     bindingName: q.bindingName,
@@ -1455,7 +1567,8 @@ async function runFullDeploy(
     const allPrerenderable = pageScan.pages.every(
       (p) => p.prerender && ((p.params.length === 0 && !p.catchAll) || p.hasGetPrerenderPaths),
     );
-    const hasNonPageBackend = hasRoutes || hasMiddleware || hasWebSockets || authEnabled;
+    const hasNonPageBackend =
+      hasRoutes || hasMiddleware || hasWebSockets || authEnabled || liveConfig !== undefined;
     if (allPrerenderable && !hasNonPageBackend && schedules.length === 0 && queues.length === 0) {
       log.info('All pages prerendered — deploying as static site');
       cliLog?.info('full_to_static_redirect', { reason: 'all_pages_prerendered' });
@@ -1573,6 +1686,7 @@ async function runFullDeploy(
     compatibilityDate: wranglerCompat?.compatibilityDate,
     compatibilityFlags: wranglerCompat?.compatibilityFlags,
     ...(sandboxConfig && { sandbox: sandboxConfig }),
+    ...(liveConfig && { live: liveConfig }),
     revalidateQueryAllowlist: deployConfig.routing?.revalidateQueryAllowlist,
   };
 
@@ -1585,7 +1699,7 @@ async function runFullDeploy(
   }
 
   const manifest = buildVoidManifest({
-    bindings: effectiveBindings,
+    bindings: liveConfig ? { ...effectiveBindings, needsLive: true } : effectiveBindings,
     migrations: validatedMigrations,
     schedules,
     ssr: isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,

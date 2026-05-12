@@ -73,6 +73,40 @@ describe('buildVoidManifest migration-binding consistency', () => {
     expect(manifest.migrations).toBeUndefined();
   });
 
+  it('includes live durable object manifest when void/live is used', () => {
+    const manifest = buildVoidManifest({
+      bindings: { ...noBindings, needsLive: true },
+    });
+
+    expect(manifest.live).toEqual({
+      bindingName: 'VOID_LIVE',
+      className: 'VoidLiveStreamDurableObject',
+      storage: 'sqlite',
+      classes: ['VoidLiveStreamDurableObject'],
+      migrations: [{ tag: 'live-v1', newSqliteClasses: ['VoidLiveStreamDurableObject'] }],
+    });
+  });
+
+  it('uses resolved live durable object names in the manifest', () => {
+    const manifest = buildVoidManifest({
+      bindings: { ...noBindings, needsLive: true },
+      options: {
+        live: {
+          bindingName: 'VOID_LIVE_abcd1234',
+          className: 'VoidLiveStreamDurableObject_abcd1234',
+        },
+      },
+    });
+
+    expect(manifest.live).toEqual({
+      bindingName: 'VOID_LIVE_abcd1234',
+      className: 'VoidLiveStreamDurableObject_abcd1234',
+      storage: 'sqlite',
+      classes: ['VoidLiveStreamDurableObject_abcd1234'],
+      migrations: [{ tag: 'live-v1', newSqliteClasses: ['VoidLiveStreamDurableObject_abcd1234'] }],
+    });
+  });
+
   it('has no migrations when migrations array is empty', () => {
     const manifest = buildVoidManifest({ bindings: noBindings, migrations: [] });
 
@@ -217,6 +251,16 @@ describe('buildFrameworkManifest migration-binding consistency', () => {
     expect(manifest.bindings.hyperdrive).toEqual(['HYPERDRIVE']);
     expect(manifest.bindings.d1).toBeUndefined();
     expect(manifest.migrations).toEqual({ dialect: 'postgresql', pending: 1 });
+  });
+
+  it('rejects live bindings because framework workers do not export the live durable object', () => {
+    expect(() =>
+      buildFrameworkManifest({
+        frameworkName: 'nuxt',
+        workerMain: 'index.js',
+        bindings: { ...noBindings, needsLive: true },
+      }),
+    ).toThrow('void/live is currently supported in Void apps only');
   });
 });
 

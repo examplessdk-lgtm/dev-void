@@ -21,6 +21,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           Deferred
         </Link>{' '}
         |{' '}
+        <Link href="/live" prefetch>
+          Live
+        </Link>{' '}
+        |{' '}
         <Link href="/action-error" prefetch>
           Form Lab
         </Link>{' '}

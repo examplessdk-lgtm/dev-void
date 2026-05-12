@@ -673,6 +673,10 @@ export interface CompileOptions {
   explicitPrerenderPaths?: Array<string>;
   /** Absolute path to the internal WebSocket runtime module */
   webSocketRuntimePath?: string;
+  /** Absolute path to the internal Live runtime module */
+  liveRuntimePath?: string;
+  /** Whether the app uses void/live. */
+  hasLive?: boolean;
 }
 
 export interface SsrCompileOptions {
@@ -756,6 +760,11 @@ export function compileRouteTable(
   if (webSockets.length > 0 && options.webSocketRuntimePath) {
     lines.push(
       `import { createWebSocketDurableObject as __createWebSocketDurableObject, handleWebSocketUpgrade as __handleWebSocketUpgrade, forwardWebSocketRequest as __forwardWebSocketRequest } from ${JSON.stringify(options.webSocketRuntimePath)};`,
+    );
+  }
+  if (options.hasLive && options.liveRuntimePath) {
+    lines.push(
+      `import { createLiveDurableObject as __createLiveDurableObject } from ${JSON.stringify(options.liveRuntimePath)};`,
     );
   }
   lines.push('');
@@ -1153,6 +1162,11 @@ export function compileRouteTable(
     lines.push('');
   } else {
     lines.push('export async function __voidHandleWebSocket() { return null; }');
+    lines.push('');
+  }
+
+  if (options.hasLive) {
+    lines.push('export const VoidLiveStreamDurableObject = __createLiveDurableObject();');
     lines.push('');
   }
 
@@ -2153,6 +2167,7 @@ export function compileWorkerEntry(
   envSchemaModule?: { importPath: string; helperPath: string },
   sandbox?: boolean | { bindingName?: string; className?: string; runtimePath?: string },
   serveSpaFallback = false,
+  live?: boolean | { bindingName?: string; className?: string },
 ): string {
   const remotePath = remote?.remotePath;
   const hasSandbox = sandbox === true || typeof sandbox === 'object';
@@ -2169,6 +2184,20 @@ export function compileWorkerEntry(
     ? sandboxClassName === 'Sandbox'
       ? `export { __VoidSandbox as Sandbox };\n__setSandboxBindingName(${JSON.stringify(sandboxBindingName)});\n`
       : `export class ${sandboxClassName} extends __VoidSandbox {}\n__setSandboxBindingName(${JSON.stringify(sandboxBindingName)});\n`
+    : '';
+  const hasLive = live === true || typeof live === 'object';
+  const liveBindingName =
+    typeof live === 'object' ? (live.bindingName ?? 'VOID_LIVE') : 'VOID_LIVE';
+  const liveClassName =
+    typeof live === 'object'
+      ? (live.className ?? 'VoidLiveStreamDurableObject')
+      : 'VoidLiveStreamDurableObject';
+  const liveRouteImport = hasLive ? ', VoidLiveStreamDurableObject' : '';
+  const liveRuntimeImport = hasLive ? `import { __setLiveBindingName } from "void/live";\n` : '';
+  const liveExport = hasLive
+    ? liveClassName === 'VoidLiveStreamDurableObject'
+      ? `export { VoidLiveStreamDurableObject };\n__setLiveBindingName(${JSON.stringify(liveBindingName)});\n`
+      : `export { VoidLiveStreamDurableObject as ${liveClassName} };\n__setLiveBindingName(${JSON.stringify(liveBindingName)});\n`
     : '';
   const runtimeEnvImport = `import { withRuntimeEnv } from ${JSON.stringify(runtimeEnvPath)};\n`;
   const remoteImport = remote
@@ -2323,7 +2352,7 @@ ${envValidateCall}  const userEnv = __filterInternalBindings(env);
 }`;
 
   if (hasQueues) {
-    return `${sandboxImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv, __processQueue${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
+    return `${sandboxImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv, __processQueue${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
 ${runtimeEnvImport}${envSchemaImport}${remoteImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${scheduledHandler}
@@ -2349,14 +2378,16 @@ ${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = createR
 }
 
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
+${liveExport}
 ${sandboxExport}
 export default { fetch: ${fetchHandler}, scheduled: handleScheduled, queue };`;
   }
-  return `${sandboxImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''} } from 'virtual:void-routes';
+  return `${sandboxImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleWebSocket, __withRawEnv${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
 ${runtimeEnvImport}${envSchemaImport}${remoteImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${scheduledHandler}
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
+${liveExport}
 ${sandboxExport}
 export default { fetch: ${fetchHandler}, scheduled: handleScheduled };`;
 }

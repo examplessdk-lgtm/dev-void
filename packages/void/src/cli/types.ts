@@ -130,6 +130,19 @@ export interface SandboxManifestMeta {
   migrations?: Array<SandboxMigrationMeta>;
 }
 
+export interface LiveMigrationMeta {
+  tag: string;
+  newSqliteClasses?: Array<string>;
+}
+
+export interface LiveManifestMeta {
+  bindingName: string;
+  className: string;
+  storage: 'sqlite';
+  classes: Array<string>;
+  migrations?: Array<LiveMigrationMeta>;
+}
+
 export interface DeployManifest {
   version: number;
   /**
@@ -176,6 +189,7 @@ export interface DeployManifest {
   fallbackRules?: Array<RedirectRule>;
   websocket?: WebSocketManifestMeta;
   sandbox?: SandboxManifestMeta;
+  live?: LiveManifestMeta;
 }
 
 export type DeployEvent =

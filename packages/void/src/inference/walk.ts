@@ -11,6 +11,7 @@ export interface InferredBindings {
   needsQueues: boolean;
   needsAI: boolean;
   needsSandbox: boolean;
+  needsLive?: boolean;
 }
 
 const ENV_BINDING_RE = /\benv\s*\.\s*(DB|KV|STORAGE|QUEUE_\w+|AI|SANDBOX)\b/;
@@ -32,6 +33,7 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
     needsQueues: false,
     needsAI: false,
     needsSandbox: false,
+    needsLive: false,
   };
 
   // Tier 1: Fast import detection via es-module-lexer
@@ -64,6 +66,11 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
           break;
         case 'void/sandbox':
           result.needsSandbox = true;
+          break;
+        case 'void/live':
+          if (!isTypeOnlyImportStatement(code.slice(imp.ss, imp.se + 1))) {
+            result.needsLive = true;
+          }
           break;
         case 'void/client': {
           // Check if the `auth` specifier is imported (not just `fetch`)
@@ -98,13 +105,23 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
     if (/\bfrom\s+["']void\/sandbox["']/.test(code)) {
       result.needsSandbox = true;
     }
+    if (hasRuntimeImportFrom(code, 'void/live')) {
+      result.needsLive = true;
+    }
     if (/\bfrom\s+["']void\/client["']/.test(code) && /\bauth\b/.test(code)) {
       result.needsAuth = true;
     }
   }
 
   // If imports resolved all bindings, we're done
-  if (result.needsD1 && result.needsKV && result.needsR2 && result.needsAI && result.needsSandbox) {
+  if (
+    result.needsD1 &&
+    result.needsKV &&
+    result.needsR2 &&
+    result.needsAI &&
+    result.needsSandbox &&
+    result.needsLive
+  ) {
     return result;
   }
 
@@ -175,6 +192,45 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
   return result;
 }
 
+function isTypeOnlyImportStatement(statement: string): boolean {
+  if (/^\s*import\s+type\b/.test(statement)) {
+    return true;
+  }
+
+  const specifierStart = statement.indexOf('{');
+  const specifierEnd = statement.lastIndexOf('}');
+  if (specifierStart === -1 || specifierEnd === -1 || specifierEnd < specifierStart) {
+    return false;
+  }
+
+  const beforeSpecifiers = statement.slice(0, specifierStart);
+  if (!/^\s*import\s*$/.test(beforeSpecifiers)) {
+    return false;
+  }
+
+  const specifiers = statement
+    .slice(specifierStart + 1, specifierEnd)
+    .split(',')
+    .map((specifier) => specifier.trim())
+    .filter(Boolean);
+  return specifiers.length > 0 && specifiers.every((specifier) => specifier.startsWith('type '));
+}
+
+function hasRuntimeImportFrom(code: string, source: string): boolean {
+  const escapedSource = source.replaceAll('/', '\\/');
+  const importRe = new RegExp(
+    `\\bimport\\s+(?:[\\s\\S]*?\\bfrom\\s+)?["']${escapedSource}["']\\s*;?`,
+    'g',
+  );
+  for (const match of code.matchAll(importRe)) {
+    const statement = match[0];
+    if (!isTypeOnlyImportStatement(statement)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Merge multiple InferredBindings into a single result (union).
  */
@@ -187,5 +243,6 @@ export function mergeBindings(bindings: Array<InferredBindings>): InferredBindin
     needsQueues: bindings.some((b) => b.needsQueues),
     needsAI: bindings.some((b) => b.needsAI),
     needsSandbox: bindings.some((b) => b.needsSandbox),
+    needsLive: bindings.some((b) => b.needsLive),
   };
 }

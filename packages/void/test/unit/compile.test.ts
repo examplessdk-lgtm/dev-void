@@ -525,6 +525,27 @@ describe('compileRouteTable', () => {
     expect(code).toContain('__forwardWebSocketRequest');
   });
 
+  it('generates the shared live durable object export when live is enabled', () => {
+    const scan: ScanResult = {
+      routes: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+
+    const code = compileRouteTable(scan, '/routes', '/middleware', '/crons', '/queues', null, {
+      ...testOptions,
+      hasLive: true,
+      liveRuntimePath: '/resolved/void/runtime/live-server.mjs',
+    });
+
+    expect(code).toContain('createLiveDurableObject');
+    expect(code).toContain(
+      'export const VoidLiveStreamDurableObject = __createLiveDurableObject();',
+    );
+  });
+
   it('wires c.rewrite, c.originalUrl, and c.isRewritten to a shared WeakMap', () => {
     // Lightweight anchor that the rewrite middleware is emitted at all —
     // behavioral coverage for the wrapper lives in `c.rewrite runtime wrapper`
@@ -2181,6 +2202,46 @@ describe('compileWorkerEntry', () => {
     expect(code).toContain('ChatRoomWs');
     expect(code).toContain('export { ChatRoomWs };');
     expect(code).toContain('const ws = await __voidHandleWebSocket(request, env);');
+  });
+
+  it('re-exports the live Durable Object class when enabled', () => {
+    const code = compileWorkerEntry(
+      false,
+      undefined,
+      'assets',
+      [],
+      'void/_env',
+      undefined,
+      false,
+      false,
+      true,
+    );
+
+    expect(code).toContain('VoidLiveStreamDurableObject');
+    expect(code).toContain('export { VoidLiveStreamDurableObject };');
+    expect(code).toContain('__setLiveBindingName("VOID_LIVE");');
+  });
+
+  it('re-exports the configured live Durable Object class', () => {
+    const code = compileWorkerEntry(
+      false,
+      undefined,
+      'assets',
+      [],
+      'void/_env',
+      undefined,
+      false,
+      false,
+      {
+        bindingName: 'VOID_LIVE_abcd1234',
+        className: 'VoidLiveStreamDurableObject_abcd1234',
+      },
+    );
+
+    expect(code).toContain(
+      'export { VoidLiveStreamDurableObject as VoidLiveStreamDurableObject_abcd1234 };',
+    );
+    expect(code).toContain('__setLiveBindingName("VOID_LIVE_abcd1234");');
   });
 
   it('re-exports the Cloudflare Sandbox Durable Object class when enabled', () => {

@@ -28,6 +28,16 @@ export const FRAMEWORK_SCAN_DIRS = [
   'queues',
 ] as const;
 
+/** Directories to scan for binding inference in Void app mode. */
+export const DEFAULT_SCAN_DIRS = [
+  'routes',
+  'middleware',
+  'queues',
+  'pages',
+  'crons',
+  'src',
+] as const;
+
 /**
  * Map from npm package name to framework identifier.
  * Only packages that unambiguously indicate framework mode are listed.
@@ -121,10 +131,11 @@ export function inferProjectBindings(
       needsQueues: false,
       needsAI: Boolean(options.bindings.ai),
       needsSandbox: false,
+      needsLive: false,
     };
   }
 
-  const dirs = scanDirs ?? ['routes', 'middleware', 'queues', 'pages', 'crons'];
+  const dirs = scanDirs ?? DEFAULT_SCAN_DIRS;
   const allBindings: Array<InferredBindings> = [];
 
   for (const dir of dirs) {
@@ -149,7 +160,8 @@ export function inferProjectBindings(
     allBindings.push(inferBindingsFromSource(code, filename));
   }
 
-  // Also scan src/ for auth imports (unless src/ is already in scanDirs)
+  // Custom scan directories should still see client/auth helpers and colocated
+  // server-only modules under src/.
   const dirsSet = new Set(dirs);
   if (!dirsSet.has('src')) {
     const srcPath = join(root, 'src');

@@ -33,6 +33,9 @@
     "#self/sandbox": "./dist/runtime/sandbox.mjs",
     "#self/sse": "./dist/runtime/sse.mjs",
     "#self/sse/client": "./dist/runtime/sse-client.mjs",
+    "#self/live": "./dist/runtime/live.mjs",
+    "#self/live/client": "./dist/runtime/live-client.mjs",
+    "#self/runtime/live-server": "./dist/runtime/live-server.mjs",
     "#self/runtime/fetch": "./dist/runtime/fetch.mjs",
     "#self/runtime/fetch-stream": "./dist/runtime/fetch-stream.mjs",
     "#self/runtime/migration-handler": "./dist/runtime/migration-handler.mjs",
@@ -97,6 +100,16 @@
       "types": "./dist/runtime/sse-client.d.mts",
       "import": "./dist/runtime/sse-client.mjs",
       "require": "./dist/runtime/sse-client.mjs"
+    },
+    "./live": {
+      "types": "./dist/runtime/live.d.mts",
+      "import": "./dist/runtime/live.mjs",
+      "require": "./dist/runtime/live.mjs"
+    },
+    "./live/client": {
+      "types": "./dist/runtime/live-client.d.mts",
+      "import": "./dist/runtime/live-client.mjs",
+      "require": "./dist/runtime/live-client.mjs"
     },
     "./ws": {
       "types": "./dist/runtime/ws.d.mts",

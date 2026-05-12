@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { parse, type ParseError } from 'jsonc-parser';
 import { join } from 'pathe';
@@ -14,6 +15,20 @@ import {
 const COMPAT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const NODEJS_ALS_FLAG = 'nodejs_als';
 const VOID_CONFIG_FILE = 'void.json';
+export const DEFAULT_LIVE_BINDING = 'VOID_LIVE';
+export const DEFAULT_LIVE_CLASS = 'VoidLiveStreamDurableObject';
+export const LIVE_MIGRATION_TAG = 'live-v1';
+
+export interface LiveBindingConfig {
+  bindingName: string;
+  className: string;
+}
+
+type DurableObjectMigration = {
+  tag?: string;
+  new_classes?: Array<string>;
+  new_sqlite_classes?: Array<string>;
+};
 
 /** Latest compatibility date the Void test suite is pinned against. */
 export const LATEST_KNOWN_COMPAT_DATE = '2026-02-24';
@@ -22,6 +37,130 @@ export const LATEST_KNOWN_COMPAT_DATE = '2026-02-24';
 export interface WranglerCompat {
   compatibilityDate: string;
   compatibilityFlags?: Array<string>;
+}
+
+export function hasDurableObjectSqliteMigration(
+  migrations: Array<DurableObjectMigration>,
+  className: string,
+): boolean {
+  return migrations.some((migration) => migration.new_sqlite_classes?.includes(className));
+}
+
+export function nextDurableObjectMigrationTag(
+  migrations: Array<DurableObjectMigration>,
+  baseTag: string,
+): string {
+  const existingTags = new Set(migrations.map((migration) => migration.tag).filter(Boolean));
+  if (!existingTags.has(baseTag)) {
+    return baseTag;
+  }
+  let index = 2;
+  while (existingTags.has(`${baseTag}-${index}`)) {
+    index++;
+  }
+  return `${baseTag}-${index}`;
+}
+
+export function resolveLiveBindingConfig(
+  root: string,
+  options?: {
+    existingBindings?: Array<{ name: string; class_name: string }>;
+    reservedBindings?: Array<string | undefined>;
+    reservedClasses?: Array<string | undefined>;
+  },
+): LiveBindingConfig {
+  const durableObjectBindings = [
+    ...readWranglerDurableObjectBindings(root),
+    ...(options?.existingBindings ?? []),
+  ];
+
+  const generated = findGeneratedLiveBinding(durableObjectBindings);
+  if (generated) {
+    return { bindingName: generated.name, className: generated.class_name };
+  }
+
+  const usedBindings = new Set<string>([
+    ...durableObjectBindings.map((binding) => binding.name),
+    ...(options?.reservedBindings ?? []).filter((name): name is string => typeof name === 'string'),
+  ]);
+  const usedClasses = new Set<string>([
+    ...durableObjectBindings.map((binding) => binding.class_name),
+    ...(options?.reservedClasses ?? []).filter((name): name is string => typeof name === 'string'),
+  ]);
+
+  return {
+    bindingName: resolveGeneratedName(DEFAULT_LIVE_BINDING, usedBindings, 'binding'),
+    className: resolveGeneratedName(DEFAULT_LIVE_CLASS, usedClasses, 'class'),
+  };
+}
+
+export function readExistingLiveBindingConfig(root: string): LiveBindingConfig | undefined {
+  const generated = findGeneratedLiveBinding(readWranglerDurableObjectBindings(root));
+  return generated ? { bindingName: generated.name, className: generated.class_name } : undefined;
+}
+
+function readWranglerDurableObjectBindings(
+  root: string,
+): Array<{ name: string; class_name: string }> {
+  for (const name of ['wrangler.jsonc', 'wrangler.json']) {
+    try {
+      const parsed = parseJsonc(readFileSync(join(root, name), 'utf-8'));
+      const bindings = (
+        parsed.durable_objects as
+          | { bindings?: Array<{ name?: unknown; class_name?: unknown }> }
+          | undefined
+      )?.bindings;
+      if (!Array.isArray(bindings)) {
+        return [];
+      }
+      return bindings.filter(
+        (binding): binding is { name: string; class_name: string } =>
+          typeof binding.name === 'string' && typeof binding.class_name === 'string',
+      );
+    } catch {
+      // Try the next wrangler config filename.
+    }
+  }
+  return [];
+}
+
+function isGeneratedLiveName(name: string, base: string): boolean {
+  return name === base || name.match(generatedLiveNamePattern(base)) !== null;
+}
+
+function generatedLiveNamePattern(base: string): RegExp {
+  return new RegExp(`^${escapeRegExp(base)}_[0-9a-f]{8}$`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findGeneratedLiveBinding(
+  bindings: Array<{ name: string; class_name: string }>,
+): { name: string; class_name: string } | undefined {
+  return bindings.find(
+    (binding) =>
+      isGeneratedLiveName(binding.name, DEFAULT_LIVE_BINDING) &&
+      isGeneratedLiveName(binding.class_name, DEFAULT_LIVE_CLASS),
+  );
+}
+
+function resolveGeneratedName(base: string, used: Set<string>, kind: string): string {
+  if (!used.has(base)) {
+    return base;
+  }
+
+  for (let attempt = 0; ; attempt++) {
+    const suffix = createHash('sha256')
+      .update(`void/live:${kind}:${base}:${attempt}`)
+      .digest('hex')
+      .slice(0, 8);
+    const candidate = `${base}_${suffix}`;
+    if (!used.has(candidate)) {
+      return candidate;
+    }
+  }
 }
 
 /**
@@ -183,6 +322,7 @@ export function syncWranglerBindings(
     bindingNames?: { d1?: string; kv?: string; r2?: string; sandbox?: string };
     websockets?: Array<WebSocketRouteDefinition>;
     sandbox?: ResolvedSandboxConfig;
+    live?: boolean | LiveBindingConfig;
   },
 ): boolean {
   // Find the wrangler config file
@@ -330,6 +470,53 @@ export function syncWranglerBindings(
         {
           tag: SANDBOX_MIGRATION_TAG,
           new_sqlite_classes: [className],
+        },
+      ];
+      modified = true;
+    }
+  }
+
+  if (bindings.needsLive || options?.live) {
+    const existingDurableObjectBindings =
+      ((
+        parsed.durable_objects as
+          | { bindings?: Array<{ name: string; class_name: string }> }
+          | undefined
+      )?.bindings as Array<{ name: string; class_name: string }> | undefined) ?? [];
+    const liveConfig =
+      typeof options?.live === 'object'
+        ? options.live
+        : resolveLiveBindingConfig(root, {
+            existingBindings: existingDurableObjectBindings,
+            reservedBindings: options?.websockets?.map((route) => route.bindingName),
+            reservedClasses: [
+              ...(options?.websockets?.map((route) => route.className) ?? []),
+              options?.sandbox?.className,
+            ],
+          });
+    if (!existingDurableObjectBindings.some((binding) => binding.name === liveConfig.bindingName)) {
+      parsed.durable_objects = {
+        bindings: [
+          ...existingDurableObjectBindings,
+          {
+            name: liveConfig.bindingName,
+            class_name: liveConfig.className,
+          },
+        ],
+      };
+      modified = true;
+    }
+
+    const migrations = Array.isArray(parsed.migrations)
+      ? (parsed.migrations as Array<DurableObjectMigration>)
+      : [];
+    const hasMigration = hasDurableObjectSqliteMigration(migrations, liveConfig.className);
+    if (!hasMigration) {
+      parsed.migrations = [
+        ...migrations,
+        {
+          tag: nextDurableObjectMigrationTag(migrations, LIVE_MIGRATION_TAG),
+          new_sqlite_classes: [liveConfig.className],
         },
       ];
       modified = true;

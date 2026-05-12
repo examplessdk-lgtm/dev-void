@@ -18,7 +18,12 @@ import { readProjectConfig } from './cli/project.ts';
 import {
   ensureWranglerCompatibilityDate,
   ensureWranglerNodejsAlsFlag,
+  hasDurableObjectSqliteMigration,
+  LIVE_MIGRATION_TAG,
+  nextDurableObjectMigrationTag,
   readWranglerCompat,
+  readExistingLiveBindingConfig,
+  resolveLiveBindingConfig,
   syncWranglerBindings,
 } from './cli/wrangler.ts';
 import { readConfig, resolveBindingNames, isNodeTarget, getDatabaseDialect } from './config.ts';
@@ -39,6 +44,7 @@ import {
   writeFrameworkTriggersDispatch,
 } from './plugin-framework-triggers.ts';
 import {
+  DEFAULT_SCAN_DIRS,
   inferProjectBindings,
   detectFramework,
   FRAMEWORK_SCAN_DIRS,
@@ -567,6 +573,9 @@ export function voidPlugin(options?: {
   if (detected && bindings.needsSandbox) {
     throw new Error('sandbox: Cloudflare Sandboxes are currently supported in Void apps only.');
   }
+  if (detected && bindings.needsLive) {
+    throw new Error('live: void/live is currently supported in Void apps only.');
+  }
 
   // Server-only void/* imports (db, kv, ai, etc.) must not pull in
   // cloudflare:workers or node: builtins when bundled for the browser.
@@ -580,6 +589,7 @@ export function voidPlugin(options?: {
     'void/storage': 'export const storage = {}; export const createStorage = () => ({});',
     'void/isr': 'export const revalidate = async () => {};',
     'void/sandbox': 'export const sandbox = {}; export const getSandbox = () => ({});',
+    'void/live': '',
   };
   const STUB_RESOLVE_FILTER = new RegExp(
     `^(${Object.keys(SERVER_ONLY_STUBS).join('|').replaceAll('/', '\\/')})$`,
@@ -594,6 +604,11 @@ export function voidPlugin(options?: {
       filter: { id: STUB_RESOLVE_FILTER },
       handler(id) {
         if (this.environment?.name === 'client') {
+          if (id === 'void/live') {
+            this.error(
+              'void/live is server-only and cannot be imported by browser code. Import void/live/client instead.',
+            );
+          }
           return STUB_PREFIX + id;
         }
       },
@@ -610,6 +625,17 @@ export function voidPlugin(options?: {
   // branches can safely close over these bindings.
   const queues = framework ? [] : scanQueuesSync(root);
   const websocketRoutes = framework ? [] : scanWebSocketRoutesSync(root);
+  const liveConfig = !isNodeTarget(config.target)
+    ? bindings.needsLive
+      ? resolveLiveBindingConfig(root, {
+          reservedBindings: websocketRoutes.map((route) => route.bindingName),
+          reservedClasses: [
+            ...websocketRoutes.map((route) => route.className),
+            sandboxConfig?.className,
+          ],
+        })
+      : readExistingLiveBindingConfig(root)
+    : undefined;
 
   // Class B/C: lighter composition — DB types + migrations only.
   // The framework's own adapter handles the CF worker build and dev server.
@@ -655,6 +681,7 @@ export function voidPlugin(options?: {
           bindingNames,
           websockets: websocketRoutes,
           sandbox: sandboxConfig,
+          live: liveConfig,
         });
         if (synced) {
           voidLog('Synced bindings to wrangler.jsonc');
@@ -936,6 +963,53 @@ export function voidPlugin(options?: {
       }
     }
 
+    if (liveConfig) {
+      const currentDurableObjects =
+        ((result as Record<string, unknown>).durable_objects as
+          | { bindings?: Array<{ name: string; class_name: string }> }
+          | undefined) ??
+        ((resolved as Record<string, unknown>).durable_objects as
+          | { bindings?: Array<{ name: string; class_name: string }> }
+          | undefined);
+      const existingDurableObjectBindings =
+        (currentDurableObjects?.bindings as
+          | Array<{ name: string; class_name: string }>
+          | undefined) ?? [];
+      if (
+        !existingDurableObjectBindings.some((binding) => binding.name === liveConfig.bindingName)
+      ) {
+        (result as Record<string, unknown>).durable_objects = {
+          bindings: [
+            ...existingDurableObjectBindings,
+            {
+              name: liveConfig.bindingName,
+              class_name: liveConfig.className,
+            },
+          ],
+        };
+      }
+
+      const currentMigrations =
+        (result as Record<string, unknown>).migrations ??
+        (resolved as Record<string, unknown>).migrations;
+      const existingMigrations = Array.isArray(currentMigrations)
+        ? (currentMigrations as Array<{
+            tag?: string;
+            new_classes?: Array<string>;
+            new_sqlite_classes?: Array<string>;
+          }>)
+        : [];
+      if (!hasDurableObjectSqliteMigration(existingMigrations, liveConfig.className)) {
+        (result as Record<string, unknown>).migrations = [
+          ...existingMigrations,
+          {
+            tag: nextDurableObjectMigrationTag(existingMigrations, LIVE_MIGRATION_TAG),
+            new_sqlite_classes: [liveConfig.className],
+          },
+        ];
+      }
+    }
+
     // AI — in local dev, inject VC credentials for HTTPS proxy path.
     // In production, the platform adds a __VOID_PROXY service binding instead.
     if (viteCommand === 'serve' && bindings.needsAI) {
@@ -1124,7 +1198,7 @@ export function voidPlugin(options?: {
       if (!autoDetectBindings && !autoDetectAuth) {
         return;
       }
-      const effectiveDirs = scanDirs ?? ['routes', 'middleware', 'queues', 'pages', 'crons'];
+      const effectiveDirs = scanDirs ?? DEFAULT_SCAN_DIRS;
       const watchDirs = [...new Set([...effectiveDirs, 'src'])].map((d) => join(root, d));
       let hintShown = false;
       const check = (path: string) => {
@@ -1284,6 +1358,11 @@ export function voidPlugin(options?: {
         `sandbox: Cloudflare Sandboxes require target: "cloudflare". They are not available with target: '${config.target}'.`,
       );
     }
+    if (bindings.needsLive) {
+      throw new Error(
+        `live: void/live requires target: "cloudflare". It is not available with target: '${config.target}'.`,
+      );
+    }
     if (config.routing?.revalidate) {
       voidWarn(
         '"routing.revalidate" in void.json is ignored with target: "' +
@@ -1383,6 +1462,7 @@ export function voidPlugin(options?: {
       hasSandbox: bindings.needsSandbox,
       sandboxBindingName: sandboxConfig?.binding,
       sandboxClassName: sandboxConfig?.className,
+      live: liveConfig,
     }),
     drizzlePlugin(root, true, dialect, { forceVirtualDb: authEnabled }),
     migrationPlugin(root, dialect, 'local', join(root, '.void'), {

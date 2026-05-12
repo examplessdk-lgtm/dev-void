@@ -6,7 +6,9 @@ import {
   ensureWranglerCompatibilityDate,
   ensureWranglerNodejsAlsFlag,
   LATEST_KNOWN_COMPAT_DATE,
+  readExistingLiveBindingConfig,
   readWranglerCompat,
+  resolveLiveBindingConfig,
   syncWranglerBindings,
 } from '../../src/cli/wrangler.ts';
 import type { VoidConfig } from '../../src/config.ts';
@@ -412,6 +414,97 @@ describe('syncWranglerBindings', () => {
     expect(parsed.migrations).toEqual([
       { tag: 'void-sandbox-v1', new_sqlite_classes: ['Sandbox'] },
     ]);
+  });
+
+  it('adds live durable object and SQLite migration metadata', () => {
+    setup('wrangler.jsonc', '{ "name": "test" }');
+    const result = syncWranglerBindings(tmpDir, { ...noBindings, needsLive: true });
+    expect(result).toBe(true);
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.durable_objects.bindings).toEqual([
+      { name: 'VOID_LIVE', class_name: 'VoidLiveStreamDurableObject' },
+    ]);
+    expect(parsed.migrations).toEqual([
+      { tag: 'live-v1', new_sqlite_classes: ['VoidLiveStreamDurableObject'] },
+    ]);
+  });
+
+  it('does not duplicate live durable object bindings or migrations', () => {
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        durable_objects: {
+          bindings: [{ name: 'VOID_LIVE', class_name: 'VoidLiveStreamDurableObject' }],
+        },
+        migrations: [{ tag: 'live-v1', new_sqlite_classes: ['VoidLiveStreamDurableObject'] }],
+      }),
+    );
+    const result = syncWranglerBindings(tmpDir, { ...noBindings, needsLive: true });
+    expect(result).toBe(false);
+    expect(readExistingLiveBindingConfig(tmpDir)).toEqual({
+      bindingName: 'VOID_LIVE',
+      className: 'VoidLiveStreamDurableObject',
+    });
+  });
+
+  it('adds a non-conflicting live migration when live-v1 exists for another class', () => {
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        migrations: [{ tag: 'live-v1', new_sqlite_classes: ['OtherDurableObject'] }],
+      }),
+    );
+    const result = syncWranglerBindings(tmpDir, { ...noBindings, needsLive: true });
+    expect(result).toBe(true);
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.migrations).toEqual([
+      { tag: 'live-v1', new_sqlite_classes: ['OtherDurableObject'] },
+      { tag: 'live-v1-2', new_sqlite_classes: ['VoidLiveStreamDurableObject'] },
+    ]);
+  });
+
+  it('uses deterministic live names when defaults collide', () => {
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        durable_objects: {
+          bindings: [{ name: 'VOID_LIVE', class_name: 'UserLiveDurableObject' }],
+        },
+      }),
+    );
+    const live = resolveLiveBindingConfig(tmpDir);
+    const result = syncWranglerBindings(tmpDir, { ...noBindings, needsLive: true }, { live });
+    expect(result).toBe(true);
+    expect(live.bindingName).toMatch(/^VOID_LIVE_[0-9a-f]{8}$/);
+    expect(live.className).toBe('VoidLiveStreamDurableObject');
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.durable_objects.bindings).toEqual([
+      { name: 'VOID_LIVE', class_name: 'UserLiveDurableObject' },
+      { name: live.bindingName, class_name: live.className },
+    ]);
+    expect(parsed.migrations).toEqual([{ tag: 'live-v1', new_sqlite_classes: [live.className] }]);
+  });
+
+  it('does not treat arbitrary live-like prefixes as generated live names', () => {
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        durable_objects: {
+          bindings: [
+            {
+              name: 'VOID_LIVE_custom',
+              class_name: 'VoidLiveStreamDurableObject_custom',
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(resolveLiveBindingConfig(tmpDir)).toEqual({
+      bindingName: 'VOID_LIVE',
+      className: 'VoidLiveStreamDurableObject',
+    });
+    expect(readExistingLiveBindingConfig(tmpDir)).toBeUndefined();
   });
 
   it('uses custom sandbox config', () => {

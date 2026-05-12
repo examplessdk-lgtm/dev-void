@@ -40,6 +40,8 @@ function injectWorkersTypesReferencePlugin() {
           'runtime/handler.d.mts',
           'runtime/env-public.d.mts',
           'runtime/sandbox.d.mts',
+          'runtime/live.d.mts',
+          'runtime/live-server.d.mts',
         ]);
         if (!targets.has(output.fileName)) {
           continue;
@@ -77,6 +79,8 @@ export default defineConfig({
       'src/runtime/fetch-stream.ts',
       'src/runtime/sse.ts',
       'src/runtime/sse-client.ts',
+      'src/runtime/live.ts',
+      'src/runtime/live-client.ts',
       'src/runtime/auth.ts',
       'src/runtime/auth-client.ts',
       'src/runtime/ws.ts',
@@ -110,6 +114,7 @@ export default defineConfig({
       'src/runtime/migration-handler.ts',
       'src/runtime/migration-handler-pg.ts',
       'src/runtime/ws-server.ts',
+      'src/runtime/live-server.ts',
       'src/sveltekit.ts',
       'src/pages/index.ts',
       'src/pages/protocol.ts',

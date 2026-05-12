@@ -10,7 +10,7 @@ export default function HomePage({ title }: Props) {
         Go to Users
       </Link>{' '}
       <Link href="/link-behavior">Link behavior</Link>{' '}
-      <Link href="/action-error">Form behavior lab</Link>
+      <Link href="/action-error">Form behavior lab</Link> <Link href="/live">Live streams</Link>
     </div>
   );
 }

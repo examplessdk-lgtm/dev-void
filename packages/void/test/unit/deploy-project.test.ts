@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
-import type { ProjectResponse } from '../../src/cli/client.ts';
+import type { PlatformClient, ProjectResponse } from '../../src/cli/client.ts';
 import {
+  ensurePreviouslyDeployedLiveBindingConfig,
+  resolveDeployLiveBindingConfig,
   resolveDistDir,
   resolveDeployWranglerCompat,
   resolveStaticBuildCommand,
@@ -165,6 +167,151 @@ describe('resolveDeployWranglerCompat', () => {
       undefined,
     );
     expect(existsSync(join(root, 'void.json'))).toBe(false);
+  });
+});
+
+describe('ensurePreviouslyDeployedLiveBindingConfig', () => {
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop()!;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('restores the active deployment live binding into wrangler config', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-test-'));
+    tempDirs.push(root);
+    const client = {
+      async listDeployments() {
+        return {
+          activeDeploymentId: 'dpl_live',
+          deployments: [
+            {
+              id: 'dpl_live',
+              status: 'live',
+              source: null,
+              commit: null,
+              manifest: JSON.stringify({
+                version: 3,
+                bindings: {},
+                live: {
+                  bindingName: 'VOID_LIVE_a1b2c3d4',
+                  className: 'VoidLiveStreamDurableObject_a1b2c3d4',
+                  storage: 'sqlite',
+                  classes: ['VoidLiveStreamDurableObject_a1b2c3d4'],
+                },
+              }),
+              error_message: null,
+              retained: true,
+              applied_migrations: null,
+              created_at: '2026-05-12T00:00:00.000Z',
+              deployed_at: '2026-05-12T00:00:00.000Z',
+            },
+          ],
+        };
+      },
+    } as unknown as PlatformClient;
+
+    await expect(ensurePreviouslyDeployedLiveBindingConfig(root, client, 'proj_1')).resolves.toBe(
+      true,
+    );
+
+    const wrangler = JSON.parse(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8'));
+    expect(wrangler.durable_objects.bindings).toContainEqual({
+      name: 'VOID_LIVE_a1b2c3d4',
+      class_name: 'VoidLiveStreamDurableObject_a1b2c3d4',
+    });
+    expect(wrangler.migrations).toContainEqual({
+      tag: 'live-v1',
+      new_sqlite_classes: ['VoidLiveStreamDurableObject_a1b2c3d4'],
+    });
+  });
+});
+
+describe('resolveDeployLiveBindingConfig', () => {
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop()!;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not restore or activate live bindings when current source no longer needs live', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-test-'));
+    tempDirs.push(root);
+    writeFileSync(
+      join(root, 'wrangler.jsonc'),
+      JSON.stringify({
+        durable_objects: {
+          bindings: [
+            {
+              name: 'VOID_LIVE_a1b2c3d4',
+              class_name: 'VoidLiveStreamDurableObject_a1b2c3d4',
+            },
+          ],
+        },
+      }),
+    );
+    const client = {
+      async listDeployments() {
+        throw new Error('listDeployments should not be called');
+      },
+    } as unknown as PlatformClient;
+
+    await expect(
+      resolveDeployLiveBindingConfig(root, client, 'proj_1', {
+        isFrameworkMode: false,
+        needsLive: false,
+        webSockets: [],
+      }),
+    ).resolves.toBeUndefined();
+
+    const wrangler = JSON.parse(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8'));
+    expect(wrangler.migrations).toBeUndefined();
+  });
+
+  it('restores the active deployment live binding only when current source still needs live', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-test-'));
+    tempDirs.push(root);
+    const client = {
+      async listDeployments() {
+        return {
+          activeDeploymentId: 'dpl_live',
+          deployments: [
+            {
+              id: 'dpl_live',
+              status: 'live',
+              source: null,
+              commit: null,
+              manifest: JSON.stringify({
+                version: 3,
+                bindings: {},
+                live: {
+                  bindingName: 'VOID_LIVE_a1b2c3d4',
+                  className: 'VoidLiveStreamDurableObject_a1b2c3d4',
+                },
+              }),
+              error_message: null,
+              retained: true,
+              applied_migrations: null,
+              created_at: '2026-05-12T00:00:00.000Z',
+              deployed_at: '2026-05-12T00:00:00.000Z',
+            },
+          ],
+        };
+      },
+    } as unknown as PlatformClient;
+
+    await expect(
+      resolveDeployLiveBindingConfig(root, client, 'proj_1', {
+        isFrameworkMode: false,
+        needsLive: true,
+        webSockets: [],
+      }),
+    ).resolves.toEqual({
+      bindingName: 'VOID_LIVE_a1b2c3d4',
+      className: 'VoidLiveStreamDurableObject_a1b2c3d4',
+    });
   });
 });
 

@@ -70,6 +70,7 @@ interface RoutingPluginOptions {
   hasSandbox?: boolean;
   sandboxBindingName?: string;
   sandboxClassName?: string;
+  live?: { bindingName: string; className: string };
 }
 
 export function routingPlugin(root: string, options: RoutingPluginOptions): Plugin {
@@ -158,6 +159,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     projectRoot: root,
     homeDir: homedir(),
     webSocketRuntimePath: resolveFile('#self/runtime/ws-server'),
+    liveRuntimePath: resolveFile('#self/runtime/live-server'),
+    hasLive: options.live !== undefined,
     reactRefresh: false,
     dev: false,
     devTriggerToken: options.devTriggerToken,
@@ -338,6 +341,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
               runtimePath: sandboxRuntimePath,
             }
           : false,
+        undefined,
+        options.live,
       ),
     );
   }
@@ -450,6 +455,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
                 }
               : false,
             shouldServeSpaFallback(),
+            options.live,
           ),
         );
       }
@@ -568,6 +574,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
                   }
                 : false,
               shouldServeSpaFallback(),
+              options.live,
             ),
           );
         }

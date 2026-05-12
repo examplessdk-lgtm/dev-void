@@ -19,10 +19,19 @@ import type {
   ScheduleMeta,
   WebSocketManifestMeta,
 } from './types.ts';
+import {
+  DEFAULT_LIVE_BINDING,
+  DEFAULT_LIVE_CLASS,
+  LIVE_MIGRATION_TAG,
+  type LiveBindingConfig,
+} from './wrangler.ts';
 
 const textEncoder = new TextEncoder();
 
 type ProgressCallback = (message: string) => void;
+
+const FRAMEWORK_LIVE_UNSUPPORTED_MESSAGE =
+  'deploy: void/live is currently supported in Void apps only.';
 
 /**
  * Strip dev-only / internal-only fields from each rule before shipping the
@@ -383,6 +392,8 @@ export interface PackageOptions {
   compatibilityFlags?: Array<string>;
   /** Cloudflare Sandbox container metadata for platform deploys. */
   sandbox?: ResolvedSandboxConfig;
+  /** Resolved void/live Durable Object binding and class names. */
+  live?: LiveBindingConfig;
   /** Query params that participate in ISR variant keys for dispatch rewrites. */
   revalidateQueryAllowlist?: Record<string, Array<string>>;
 }
@@ -413,6 +424,18 @@ function toSandboxManifest(sandbox: ResolvedSandboxConfig): SandboxManifestMeta 
     image: sandbox.platformImage,
     ...(sandbox.instanceType && { instanceType: sandbox.instanceType }),
     ...(sandbox.maxInstances != null && { maxInstances: sandbox.maxInstances }),
+  };
+}
+
+function toLiveManifest(live?: LiveBindingConfig): import('./types.ts').LiveManifestMeta {
+  const bindingName = live?.bindingName ?? DEFAULT_LIVE_BINDING;
+  const className = live?.className ?? DEFAULT_LIVE_CLASS;
+  return {
+    bindingName,
+    className,
+    storage: 'sqlite',
+    classes: [className],
+    migrations: [{ tag: LIVE_MIGRATION_TAG, newSqliteClasses: [className] }],
   };
 }
 
@@ -516,6 +539,9 @@ export function buildVoidManifest(opts: {
       ...options.sandbox,
       binding: options.bindingNames?.sandbox ?? options.sandbox.binding,
     });
+  }
+  if (bindings.needsLive) {
+    manifest.live = toLiveManifest(options?.live);
   }
 
   if (migrations && migrations.length > 0) {
@@ -730,6 +756,9 @@ export function buildFrameworkManifest(opts: {
   }
   if (opts.bindings.needsAI) {
     manifest.bindings.ai = true;
+  }
+  if (opts.bindings.needsLive) {
+    throw new Error(FRAMEWORK_LIVE_UNSUPPORTED_MESSAGE);
   }
 
   if (opts.migrations && opts.migrations.length > 0) {
