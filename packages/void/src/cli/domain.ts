@@ -54,7 +54,32 @@ async function domainAdd(
 ): Promise<void> {
   const domain = await client.addDomain(projectId, hostname);
   log.success(`Domain ${hostname} added (status: ${domain.status})`);
-  note(`Add a CNAME record:\n  ${hostname} → ${domain.cname_target}`, 'DNS Setup');
+
+  const sections: Array<string> = [];
+
+  if (domain.cname_target) {
+    sections.push(`CNAME (traffic)\n    ${hostname} → ${domain.cname_target}`);
+  }
+
+  if (domain.ownership_verification) {
+    sections.push(
+      `TXT (ownership verification)\n    ${domain.ownership_verification.name} → ${domain.ownership_verification.value}`,
+    );
+  }
+
+  const sslRecords = (domain.ssl_validation_records ?? []).filter(
+    (r): r is { txt_name: string; txt_value: string; status?: string } =>
+      Boolean(r.txt_name) && Boolean(r.txt_value),
+  );
+  if (sslRecords.length > 0) {
+    const lines = sslRecords.map((r) => `    ${r.txt_name} → ${r.txt_value}`).join('\n');
+    sections.push(`TXT (SSL validation)\n${lines}`);
+  }
+
+  if (sections.length > 0) {
+    note(sections.join('\n\n'), 'DNS Setup');
+  }
+
   log.info('Run `void domain status ' + hostname + '` to check verification progress.');
 }
 
@@ -107,8 +132,44 @@ async function domainStatus(
     `Status:      ${status.status}`,
     `SSL Status:  ${status.ssl_status}`,
   ];
+  if (status.ownership_verification?.status) {
+    lines.push(`Ownership:   ${status.ownership_verification.status}`);
+  }
   if (status.verification_errors && status.verification_errors.length > 0) {
     lines.push(`Errors:      ${status.verification_errors.join(', ')}`);
   }
   note(lines.join('\n'), 'Domain Status');
+
+  // Gate on actual validation states, not the aggregate `status.status`.
+  // Once the DB row is flipped to `active`, the API keeps returning
+  // `status: 'active'` even if CF later reports SSL/ownership re-validation
+  // (cert renewal, ownership re-check). Keying off the per-field states
+  // ensures pending records still surface in that window.
+  const ownershipPending =
+    status.ownership_verification?.status !== undefined &&
+    status.ownership_verification.status !== 'verified';
+  const sslPending = status.ssl_status !== 'active';
+
+  if (ownershipPending || sslPending) {
+    const pendingSections: Array<string> = [];
+
+    if (status.ownership_verification) {
+      pendingSections.push(
+        `TXT (ownership verification)\n    ${status.ownership_verification.name} → ${status.ownership_verification.value}`,
+      );
+    }
+
+    const sslRecords = (status.ssl_validation_records ?? []).filter(
+      (r): r is { txt_name: string; txt_value: string; status?: string } =>
+        Boolean(r.txt_name) && Boolean(r.txt_value),
+    );
+    if (sslRecords.length > 0) {
+      const lines = sslRecords.map((r) => `    ${r.txt_name} → ${r.txt_value}`).join('\n');
+      pendingSections.push(`TXT (SSL validation)\n${lines}`);
+    }
+
+    if (pendingSections.length > 0) {
+      note(pendingSections.join('\n\n'), 'Add these DNS records to your provider');
+    }
+  }
 }

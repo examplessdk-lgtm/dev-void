@@ -165,6 +165,17 @@ export type DomainResponse = {
   status: string;
   created_at: string;
   cname_target?: string;
+  ownership_verification?: {
+    type: 'txt';
+    name: string;
+    value: string;
+    status?: string;
+  };
+  ssl_validation_records?: Array<{
+    txt_name?: string;
+    txt_value?: string;
+    status?: string;
+  }>;
 };
 
 export type DomainStatusResponse = DomainResponse & {
