@@ -132,8 +132,8 @@ async function domainStatus(
     `Status:      ${status.status}`,
     `SSL Status:  ${status.ssl_status}`,
   ];
-  if (status.ownership_verification?.status) {
-    lines.push(`Ownership:   ${status.ownership_verification.status}`);
+  if (status.ownership_verification) {
+    lines.push(`Ownership:   pending`);
   }
   if (status.verification_errors && status.verification_errors.length > 0) {
     lines.push(`Errors:      ${status.verification_errors.join(', ')}`);
@@ -144,28 +144,30 @@ async function domainStatus(
   // Once the DB row is flipped to `active`, the API keeps returning
   // `status: 'active'` even if CF later reports SSL/ownership re-validation
   // (cert renewal, ownership re-check). Keying off the per-field states
-  // ensures pending records still surface in that window.
-  const ownershipPending =
-    status.ownership_verification?.status !== undefined &&
-    status.ownership_verification.status !== 'verified';
+  // ensures pending records still surface in that window. CF stops returning
+  // `ownership_verification` once ownership is verified, so its presence is
+  // itself the pending signal.
+  const ownershipPending = Boolean(status.ownership_verification);
   const sslPending = status.ssl_status !== 'active';
 
   if (ownershipPending || sslPending) {
     const pendingSections: Array<string> = [];
 
-    if (status.ownership_verification) {
+    if (ownershipPending && status.ownership_verification) {
       pendingSections.push(
         `TXT (ownership verification)\n    ${status.ownership_verification.name} → ${status.ownership_verification.value}`,
       );
     }
 
-    const sslRecords = (status.ssl_validation_records ?? []).filter(
-      (r): r is { txt_name: string; txt_value: string; status?: string } =>
-        Boolean(r.txt_name) && Boolean(r.txt_value),
-    );
-    if (sslRecords.length > 0) {
-      const lines = sslRecords.map((r) => `    ${r.txt_name} → ${r.txt_value}`).join('\n');
-      pendingSections.push(`TXT (SSL validation)\n${lines}`);
+    if (sslPending) {
+      const sslRecords = (status.ssl_validation_records ?? []).filter(
+        (r): r is { txt_name: string; txt_value: string; status?: string } =>
+          Boolean(r.txt_name) && Boolean(r.txt_value),
+      );
+      if (sslRecords.length > 0) {
+        const lines = sslRecords.map((r) => `    ${r.txt_name} → ${r.txt_value}`).join('\n');
+        pendingSections.push(`TXT (SSL validation)\n${lines}`);
+      }
     }
 
     if (pendingSections.length > 0) {

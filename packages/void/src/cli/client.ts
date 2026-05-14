@@ -169,7 +169,6 @@ export type DomainResponse = {
     type: 'txt';
     name: string;
     value: string;
-    status?: string;
   };
   ssl_validation_records?: Array<{
     txt_name?: string;
