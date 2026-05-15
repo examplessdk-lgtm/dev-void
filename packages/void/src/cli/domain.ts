@@ -160,9 +160,14 @@ async function domainStatus(
     }
 
     if (sslPending) {
+      // Defensive: drop any per-record entries CF has already marked active.
+      // CF normally clears `ssl.validation_records` once SSL is active, but
+      // during cert renewals or partial states a stale `active` row can sit
+      // alongside a pending one — we only want to surface what the user still
+      // needs to add.
       const sslRecords = (status.ssl_validation_records ?? []).filter(
         (r): r is { txt_name: string; txt_value: string; status?: string } =>
-          Boolean(r.txt_name) && Boolean(r.txt_value),
+          Boolean(r.txt_name) && Boolean(r.txt_value) && r.status !== 'active',
       );
       if (sslRecords.length > 0) {
         const lines = sslRecords.map((r) => `    ${r.txt_name} → ${r.txt_value}`).join('\n');

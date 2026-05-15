@@ -414,6 +414,31 @@ describe('domainStatus', () => {
     expect(pendingNote.match(/TXT \(SSL validation\)/g)).toHaveLength(1);
   });
 
+  it('drops per-record SSL entries already marked active', async () => {
+    mockListDomains.mockResolvedValue([
+      { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
+    ]);
+    mockGetDomainStatus.mockResolvedValue({
+      id: 'dom_1',
+      project_id: 'proj_default',
+      hostname: 'foo.example.com',
+      cf_hostname_id: 'cf_1',
+      status: 'pending',
+      created_at: 'now',
+      ssl_status: 'pending_validation',
+      ssl_validation_records: [
+        { txt_name: 'done', txt_value: 'done-val', status: 'active' },
+        { txt_name: 'pending', txt_value: 'pending-val', status: 'pending_validation' },
+      ],
+    });
+
+    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
+
+    const pendingNote = mockNote.mock.calls[1][0] as string;
+    expect(pendingNote).toContain('pending → pending-val');
+    expect(pendingNote).not.toContain('done → done-val');
+  });
+
   it('exit code stays 0 even when pending', async () => {
     mockListDomains.mockResolvedValue([
       { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
