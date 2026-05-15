@@ -153,6 +153,42 @@ describe('generateWrapper with migrations', () => {
     expect(existsSync(join(workerDir, '__void_migration_handler.mjs'))).toBe(true);
   });
 
+  it('intercepts GET /__void/ready with {ready:true} when wrapper is generated', async () => {
+    // Platform's deploy-time readiness probe (packages/api/src/routes/deploy.ts)
+    // expects a JSON 200 from GET /__void/ready before dispatching migrations.
+    // Without this, the request falls through to the user's framework handler
+    // (e.g. SvelteKit -> env.ASSETS), which returns CF's "Assets have not yet
+    // been deployed to this script." stub during WfP propagation, causing the
+    // probe to retry until exhaustion.
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, 'index.mjs'),
+      'export default { fetch() { return new Response("ok"); } };',
+    );
+
+    mkdirSync(join(projectRoot, 'db', 'migrations'), { recursive: true });
+    writeFileSync(
+      join(projectRoot, 'db', 'migrations', '001_test.sql'),
+      'CREATE TABLE test (id INTEGER PRIMARY KEY);',
+    );
+
+    await generateWrapper(workerDir, 'index.mjs', projectRoot, {
+      ...base,
+      hasMigrations: true,
+      migrationDialect: 'sqlite',
+    });
+
+    const wrapper = readFileSync(join(workerDir, 'index.mjs'), 'utf-8');
+    expect(wrapper).toContain('/__void/ready');
+    expect(wrapper).toMatch(/Response\.json\(\s*\{\s*ready:\s*true\s*\}\s*\)/);
+    // Must be checked before delegating to original.fetch, otherwise the
+    // user's framework handler will see the request.
+    const readyIdx = wrapper.indexOf('/__void/ready');
+    const originalIdx = wrapper.indexOf('original.fetch');
+    expect(readyIdx).toBeGreaterThanOrEqual(0);
+    expect(originalIdx).toBeGreaterThan(readyIdx);
+  });
+
   it('does not generate migration handler when hasMigrations is false', async () => {
     mkdirSync(workerDir, { recursive: true });
     writeFileSync(
