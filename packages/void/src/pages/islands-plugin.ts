@@ -86,18 +86,6 @@ export function needsIslandClientBundle(
   return false;
 }
 
-/** Check if a file has CSS import statements (JS-style imports). */
-export function fileHasCssImports(filePath: string): boolean {
-  try {
-    const code = readFileSync(filePath, 'utf-8');
-    return /import\b[^"']*["'][^"']+\.(?:css|scss|sass|less|styl|stylus|pcss|postcss)["']/.test(
-      code,
-    );
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Rewrite a matched CSS import line so relative specifiers resolve from the
  * virtual module. Absolute and bare specifiers are kept as-is.
@@ -125,36 +113,6 @@ export function extractCssImports(filePath: string): string {
     imports.push(`@import ${JSON.stringify(match[1])};`);
   }
   return imports.join('\n');
-}
-
-/** Rebuild islandCssMap from current file contents. */
-export function rebuildIslandCssMap(
-  pageScan: PageScanResult,
-  pagesDir: string,
-  islandCssMap: Map<string, Array<string>>,
-  fileHasCssFn: (filePath: string) => boolean,
-): void {
-  islandCssMap.clear();
-  for (const page of pageScan.pages) {
-    if (!page.island) {
-      continue;
-    }
-    const cssPaths: Array<string> = [];
-    const layoutChain = resolveEffectiveLayoutChain(page, pageScan.layouts, pageScan.namedLayouts);
-    for (const layout of layoutChain) {
-      const layoutPath = resolve(pagesDir, layout.filePath);
-      if (fileHasCssFn(layoutPath)) {
-        cssPaths.push(layoutPath);
-      }
-    }
-    const pagePath = resolve(pagesDir, page.componentPath);
-    if (fileHasCssFn(pagePath)) {
-      cssPaths.push(pagePath);
-    }
-    if (cssPaths.length > 0) {
-      islandCssMap.set(page.componentId, cssPaths);
-    }
-  }
 }
 
 /** Compute which island pages need client-side JavaScript. */
@@ -213,66 +171,6 @@ export function computePagesNeedingClientJS(
   }
 
   return result;
-}
-
-/**
- * Configure the Vite dev server for island CSS serving.
- * Sets up file watching and a middleware for serving virtual CSS modules.
- */
-export function configureIslandCssServer(
-  server: ViteDevServer,
-  islandCssFiles: Set<string>,
-  viteRoot: string,
-  rebuildCssMap: () => void,
-): void {
-  server.watcher.on('change', (path) => {
-    const normalizedPath = normalizePath(path);
-    if (!islandCssFiles.has(normalizedPath)) {
-      return;
-    }
-    rebuildCssMap();
-    for (const env of Object.values(server.environments)) {
-      const mod = env.moduleGraph.getModuleById('\0' + ISLANDS_RENDERER_ID);
-      if (mod) {
-        env.moduleGraph.invalidateModule(mod);
-      }
-    }
-    const cssMod = server.environments.client?.moduleGraph.getModuleById(normalizedPath + '.css');
-    if (cssMod) {
-      server.environments.client.moduleGraph.invalidateModule(cssMod);
-    }
-  });
-
-  server.middlewares.use(async (req, res, next) => {
-    if (!req.url) {
-      return next();
-    }
-    const url = req.url.split('?')[0];
-    if (!url.endsWith('.css')) {
-      return next();
-    }
-    const srcPath = normalizePath(resolve(viteRoot, url.slice(1, -4)));
-    if (!islandCssFiles.has(srcPath)) {
-      return next();
-    }
-    try {
-      const result = await server.environments.client.transformRequest(url);
-      if (result) {
-        const m =
-          result.code.match(/\b__vite__css\s*=\s*("(?:[^"\\]|\\.)*")/) ||
-          result.code.match(/export\s+default\s+("(?:[^"\\]|\\.)*")/);
-        if (m) {
-          res.setHeader('Content-Type', 'text/css');
-          res.statusCode = 200;
-          res.end(JSON.parse(m[1]));
-          return;
-        }
-      }
-    } catch {
-      // fall through
-    }
-    next();
-  });
 }
 
 /**

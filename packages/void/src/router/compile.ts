@@ -521,6 +521,20 @@ function pushDefaultErrorPageHelpers(lines: Array<string>, options: CompileOptio
   );
   lines.push(`}`);
   lines.push('');
+  lines.push(`function __voidGetErrorAssetCss(error) {`);
+  lines.push(
+    `  const tags = error && (typeof error === "object" || typeof error === "function") ? error.__voidPageAssetTags : null;`,
+  );
+  lines.push(`  return tags && typeof tags.css === "string" ? tags.css : "";`);
+  lines.push(`}`);
+  lines.push('');
+  lines.push(`function __voidInjectErrorAssetCss(html, css) {`);
+  lines.push(`  if (!css) return html;`);
+  lines.push(
+    `  return /<\\/head\\s*>/i.test(html) ? html.replace(/<\\/head\\s*>/i, css + "</head>") : css + html;`,
+  );
+  lines.push(`}`);
+  lines.push('');
   lines.push(`function __voidRenderErrorPage(request, status, title, error) {`);
   lines.push(`  const heading = status + ": " + title;`);
   lines.push(`  const prefix = status + ": ";`);
@@ -533,6 +547,7 @@ function pushDefaultErrorPageHelpers(lines: Array<string>, options: CompileOptio
   lines.push(`    <meta charset="utf-8">`);
   lines.push(`    <meta name="viewport" content="width=device-width, initial-scale=1">`);
   lines.push(`    <title>\${__voidEscapeHtml(heading)}</title>`);
+  lines.push(`    \${__voidGetErrorAssetCss(error)}`);
   lines.push(`    <style>`);
   lines.push(`      :root {`);
   lines.push(`        color-scheme: light dark;`);
@@ -1668,6 +1683,9 @@ function compilePageRoutes(
     `import { renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from ${JSON.stringify(pages.headPath)};`,
   );
   lines.push(`import { renderPage } from "virtual:void-pages-renderer";`);
+  if (options.dev) {
+    lines.push(`import { getVoidPagesDevCss } from "virtual:void-pages-dev-assets";`);
+  }
 
   // Import island renderer if any island pages exist
   const hasIslandPages = scan.pages.pages.some((p) => p.island);
@@ -1701,11 +1719,20 @@ function compilePageRoutes(
   lines.push(`  return { css: "", preloads, body: bodyTag };`);
   lines.push(`}`);
   lines.push('');
+  if (options.dev) {
+    lines.push(`async function collectVoidDevCss(request, env, kind, componentId, rootPhases) {`);
+    lines.push(
+      `  const devCss = await getVoidPagesDevCss(request, env, { kind, componentId, rootPhases });`,
+    );
+    lines.push(`  return Array.isArray(devCss) ? devCss : [];`);
+    lines.push(`}`);
+    lines.push('');
+  }
   lines.push(`function collectPagesManifestFiles(manifest, entryId) {`);
   lines.push(`  const seen = new Set();`);
   lines.push(`  const toVisit = [entryId];`);
-  lines.push(`  while (toVisit.length > 0) {`);
-  lines.push(`    const currentId = toVisit.pop();`);
+  lines.push(`  for (let index = 0; index < toVisit.length; index++) {`);
+  lines.push(`    const currentId = toVisit[index];`);
   lines.push(`    if (seen.has(currentId)) continue;`);
   lines.push(`    seen.add(currentId);`);
   lines.push(`    const chunk = manifest[currentId];`);
@@ -1719,9 +1746,25 @@ function compilePageRoutes(
   // so CSS collection can be scoped to the active route only
   const relPagesDir = pages.pagesDirRelative;
   const pageCssKeys: Record<string, Array<string>> = {};
+  const pageDevRootPhases: Record<string, Array<Array<string>>> = {};
+  const projectRoot = options.projectRoot;
+  const toDevRootUrl = (absolutePath: string): string =>
+    '/' + absolutePath.replaceAll('\\', '/').slice(projectRoot.replaceAll('\\', '/').length + 1);
+  const virtualDevUrl = (id: string): string => '/@id/__x00__' + id;
   for (const page of scan.pages.pages) {
-    const keys = [`${relPagesDir}/${page.componentPath}`];
+    const keys: Array<string> = [];
+    const routeRootPhases: Array<Array<string>> = [
+      [
+        virtualDevUrl(
+          page.island ? (pages.islandClientEntryId ?? pages.clientEntryId) : pages.clientEntryId,
+        ),
+      ],
+    ];
+    if (page.island && pages.mdClientEntryId) {
+      routeRootPhases[0].push(virtualDevUrl(pages.mdClientEntryId));
+    }
     const layoutIds = resolveLayoutIds(page, scan.pages.layouts, scan.pages.namedLayouts);
+    const layoutRoots: Array<string> = [];
     for (const layoutId of layoutIds) {
       // Map layout IDs back to file paths
       const layout = scan.pages.layouts.find(
@@ -1729,6 +1772,7 @@ function compilePageRoutes(
       );
       if (layout) {
         keys.push(`${relPagesDir}/${layout.filePath}`);
+        layoutRoots.push(toDevRootUrl(`${pages.pagesDir}/${layout.filePath}`));
         continue;
       }
       const named = scan.pages.namedLayouts.find((nl) => {
@@ -1737,45 +1781,39 @@ function compilePageRoutes(
       });
       if (named) {
         keys.push(`${relPagesDir}/${named.filePath}`);
+        layoutRoots.push(toDevRootUrl(`${pages.pagesDir}/${named.filePath}`));
       }
     }
+    keys.push(`${relPagesDir}/${page.componentPath}`);
+    routeRootPhases.push(layoutRoots);
+    routeRootPhases.push([toDevRootUrl(`${pages.pagesDir}/${page.componentPath}`)]);
     pageCssKeys[page.componentId] = keys;
+    pageDevRootPhases[page.componentId] = routeRootPhases.filter((phase) => phase.length > 0);
   }
   lines.push(`const PAGE_CSS_KEYS = ${JSON.stringify(pageCssKeys)};`);
+  if (options.dev) {
+    lines.push(`const PAGE_DEV_ROOT_PHASES = ${JSON.stringify(pageDevRootPhases)};`);
+  }
   lines.push('');
 
   lines.push(`function collectRouteCss(manifest, entryId, pageKeys) {`);
   lines.push(`  const cssFiles = new Set();`);
   lines.push(`  const visited = new Set();`);
-  lines.push(`  const toVisit = [entryId];`);
-  lines.push(`  while (toVisit.length > 0) {`);
-  lines.push(`    const id = toVisit.pop();`);
-  lines.push(`    if (visited.has(id)) continue;`);
+  lines.push(`  function visit(id) {`);
+  lines.push(`    if (visited.has(id)) return;`);
   lines.push(`    visited.add(id);`);
   lines.push(`    const chunk = manifest[id];`);
-  lines.push(`    if (!chunk) continue;`);
+  lines.push(`    if (!chunk) return;`);
   lines.push(`    if (Array.isArray(chunk.css)) {`);
   lines.push(`      for (const f of chunk.css) cssFiles.add(f);`);
   lines.push(`    }`);
   lines.push(`    if (Array.isArray(chunk.imports)) {`);
-  lines.push(`      for (const i of chunk.imports) toVisit.push(i);`);
+  lines.push(`      for (const i of chunk.imports) visit(i);`);
   lines.push(`    }`);
   lines.push(`  }`);
+  lines.push(`  visit(entryId);`);
   lines.push(`  for (const key of pageKeys) {`);
-  lines.push(`    const stack = [key];`);
-  lines.push(`    while (stack.length > 0) {`);
-  lines.push(`      const id = stack.pop();`);
-  lines.push(`      if (visited.has(id)) continue;`);
-  lines.push(`      visited.add(id);`);
-  lines.push(`      const chunk = manifest[id];`);
-  lines.push(`      if (!chunk) continue;`);
-  lines.push(`      if (Array.isArray(chunk.css)) {`);
-  lines.push(`        for (const f of chunk.css) cssFiles.add(f);`);
-  lines.push(`      }`);
-  lines.push(`      if (Array.isArray(chunk.imports)) {`);
-  lines.push(`        for (const i of chunk.imports) stack.push(i);`);
-  lines.push(`      }`);
-  lines.push(`    }`);
+  lines.push(`    visit(key);`);
   lines.push(`  }`);
   lines.push(`  return cssFiles;`);
   lines.push(`}`);
@@ -1801,7 +1839,14 @@ function compilePageRoutes(
   lines.push(`  const manifest = await loadPagesManifest(request, env);`);
   lines.push(`  if (!manifest || typeof manifest !== "object") {`);
   lines.push(`    if (!import.meta.env.DEV) return { css: "", preloads: "", body: "" };`);
-  lines.push(`    return getPagesDevClientTags();`);
+  if (options.dev) {
+    lines.push(`    const tags = getPagesDevClientTags();`);
+    lines.push(
+      `    return { ...tags, devCss: await collectVoidDevCss(request, env, "pages", componentId, PAGE_DEV_ROOT_PHASES[componentId] || [[PAGES_CLIENT_ENTRY_URL]]) };`,
+    );
+  } else {
+    lines.push(`    return getPagesDevClientTags();`);
+  }
   lines.push(`  }`);
   lines.push(`  const entry = manifest[PAGES_CLIENT_ENTRY_ID];`);
   lines.push(`  if (!entry || typeof entry !== "object" || typeof entry.file !== "string") {`);
@@ -1870,7 +1915,14 @@ function compilePageRoutes(
     lines.push(`  const manifest = await loadPagesManifest(request, env);`);
     lines.push(`  if (!manifest || typeof manifest !== "object") {`);
     lines.push(`    if (!import.meta.env.DEV) return { css: "", preloads: "", body: "" };`);
-    lines.push(`    return getIslandsDevClientTags();`);
+    if (options.dev) {
+      lines.push(`    const tags = getIslandsDevClientTags();`);
+      lines.push(
+        `    return { ...tags, devCss: await collectVoidDevCss(request, env, "islands", componentId, PAGE_DEV_ROOT_PHASES[componentId] || [[ISLANDS_CLIENT_ENTRY_URL]]) };`,
+      );
+    } else {
+      lines.push(`    return getIslandsDevClientTags();`);
+    }
     lines.push(`  }`);
     lines.push(`  const entry = manifest[ISLANDS_CLIENT_ENTRY_ID];`);
     lines.push(`  if (!entry || typeof entry !== "object" || typeof entry.file !== "string") {`);
@@ -2052,6 +2104,17 @@ function compilePageRoutes(
   lines.push(`      const errReq = new Request(new URL("/" + status + ".html", c.req.url));`);
   lines.push(`      const errRes = await assets.fetch(errReq);`);
   lines.push(`      if (errRes.ok) {`);
+  lines.push(`        const assetCss = __voidGetErrorAssetCss(error);`);
+  lines.push(`        if (assetCss) {`);
+  lines.push(`          const html = __voidInjectErrorAssetCss(await errRes.text(), assetCss);`);
+  lines.push(
+    `          const body = __VOID_DEV && status === 500 && error && __voidShouldServeHtmlErrorPage(c.req.raw) ? __voidInjectDevErrorOverlay(html, __voidRenderDevErrorOverlay(c.req.raw, status, fallbackText, error)) : html;`,
+  );
+  lines.push(`          return new Response(c.req.method === "HEAD" ? null : body, {`);
+  lines.push(`            status,`);
+  lines.push(`            headers: { "content-type": "text/html; charset=utf-8" },`);
+  lines.push(`          });`);
+  lines.push(`        }`);
   lines.push(
     `        if (__VOID_DEV && status === 500 && error && __voidShouldServeHtmlErrorPage(c.req.raw)) {`,
   );

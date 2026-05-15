@@ -32,6 +32,7 @@ import { readConfig, resolveBindingNames, isNodeTarget, getDatabaseDialect } fro
 import { scanJobsSync } from './crons/scan.ts';
 import { inferBindingsFromSource } from './inference/walk.ts';
 import { voidLog, voidWarn, voidError } from './log.ts';
+import { pagesDevCssAssetsPlugin } from './pages/dev-css-assets.ts';
 import { devTriggersHintPlugin } from './plugin-dev-triggers-hint.ts';
 import { drizzlePlugin } from './plugin-drizzle.ts';
 import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
@@ -1407,6 +1408,7 @@ export function voidPlugin(options?: {
       restartPlugin(),
       envPlugin,
       envSchemaPlugin(root),
+      ...pagesDevCssAssetsPlugin(root, devTriggerToken),
       routingPlugin(root, {
         isAuthEnabled: () => false,
         devTriggerToken,
@@ -1478,6 +1480,7 @@ export function voidPlugin(options?: {
     envClientFoldPlugin(),
     clientStubsPlugin,
     ...(bindings.needsSandbox ? [createSandboxSdkResolvePlugin()] : []),
+    ...pagesDevCssAssetsPlugin(root, devTriggerToken),
     routingPlugin(root, {
       isAuthEnabled: () => authEnabled,
       devTriggerToken,

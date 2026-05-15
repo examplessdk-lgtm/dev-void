@@ -2,11 +2,13 @@ import type { CloudBindings, CloudContext } from '../runtime/handler.ts';
 import { isConvertedResponse } from '../runtime/response.ts';
 import { DEFERRED, separateDeferred, type ResolvedDeferredGroup } from './defer.ts';
 import { resolveHead, type HeadDescriptor, type HeadConfig } from './head.ts';
+import type { DevCssAsset } from './types.ts';
 import { ValidationError } from './validation-error.ts';
 
 export { ValidationError };
 
 const POWERED_BY = { 'X-Powered-By': 'Void' } as const;
+const RENDER_ERROR_ASSET_TAGS_KEY = '__voidPageAssetTags';
 
 /** Escape characters that are unsafe inside inline <script> tags to prevent XSS. */
 export function safeJsonStringify(value: unknown): string {
@@ -51,7 +53,13 @@ type PageHandler = ((c: CloudContext) => unknown | Promise<unknown>) | undefined
 type PageHeadHandler =
   | ((c: CloudContext, props: Record<string, unknown>) => HeadDescriptor | undefined)
   | undefined;
-type AssetTags = { css: string; preloads: string; body: string };
+type AssetTags = {
+  css: string;
+  preloads: string;
+  body: string;
+  devCss?: Array<DevCssAsset>;
+  devCssNonce?: string;
+};
 type RenderPage = (pageObj: PageObject, assetTags: AssetTags) => Promise<PageRenderResult>;
 type GetAssetTags = (req: Request, env: CloudBindings, componentId: string) => Promise<AssetTags>;
 
@@ -65,6 +73,125 @@ function pageResponseHeaders(c: CloudContext, headers: Record<string, string>): 
     out.set(key, value);
   }
   return out;
+}
+
+function escapeHtmlAttr(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
+}
+
+function serializeStyleCss(css: string): string {
+  return css.replace(/<\/style/gi, '<\\/style');
+}
+
+function serializeDevCssAssets(assets: Array<DevCssAsset>, nonce: string): string {
+  return assets
+    .map(
+      (asset) =>
+        `<style data-vite-dev-id="${escapeHtmlAttr(asset.id ?? asset.url)}" nonce="${escapeHtmlAttr(nonce)}">${serializeStyleCss(asset.css)}</style>`,
+    )
+    .join('\n');
+}
+
+function hasCompatibleStyleSource(value: string, nonceSource: string): boolean {
+  return value === "'unsafe-inline'" || value === nonceSource;
+}
+
+function adjustCspValue(value: string, nonce: string): string {
+  const nonceSource = `'nonce-${nonce}'`;
+  const directives = value
+    .split(';')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const parsed = directives.map((directive) => {
+    const [name = '', ...sources] = directive.split(/\s+/);
+    return { name: name.toLowerCase(), originalName: name, sources };
+  });
+
+  const styleElem = parsed.find((directive) => directive.name === 'style-src-elem');
+  if (styleElem) {
+    if (!styleElem.sources.some((source) => hasCompatibleStyleSource(source, nonceSource))) {
+      styleElem.sources.push(nonceSource);
+    }
+    return parsed
+      .map((directive) => [directive.originalName, ...directive.sources].join(' '))
+      .join('; ');
+  }
+
+  const style = parsed.find((directive) => directive.name === 'style-src');
+  if (style) {
+    if (!style.sources.some((source) => hasCompatibleStyleSource(source, nonceSource))) {
+      style.sources.push(nonceSource);
+    }
+    return parsed
+      .map((directive) => [directive.originalName, ...directive.sources].join(' '))
+      .join('; ');
+  }
+
+  const defaultSrc = parsed.find((directive) => directive.name === 'default-src');
+  if (defaultSrc) {
+    parsed.push({
+      name: 'style-src',
+      originalName: 'style-src',
+      sources: [...defaultSrc.sources, nonceSource],
+    });
+    return parsed
+      .map((directive) => [directive.originalName, ...directive.sources].join(' '))
+      .join('; ');
+  }
+
+  parsed.push({ name: 'style-src', originalName: 'style-src', sources: [nonceSource] });
+  return parsed
+    .map((directive) => [directive.originalName, ...directive.sources].join(' '))
+    .join('; ');
+}
+
+function adjustDevCssCsp(headers: Headers, nonce: string | undefined): Headers {
+  if (!nonce) {
+    return headers;
+  }
+  const csp = headers.get('content-security-policy');
+  if (csp) {
+    headers.set('content-security-policy', adjustCspValue(csp, nonce));
+  }
+  const cspReportOnly = headers.get('content-security-policy-report-only');
+  if (cspReportOnly) {
+    headers.set('content-security-policy-report-only', adjustCspValue(cspReportOnly, nonce));
+  }
+  return headers;
+}
+
+function prepareAssetTags(assetTags: AssetTags): AssetTags {
+  if (!assetTags.devCss || assetTags.devCss.length === 0) {
+    return assetTags;
+  }
+  const nonce = crypto.randomUUID().replaceAll('-', '');
+  return {
+    ...assetTags,
+    css: [assetTags.css, serializeDevCssAssets(assetTags.devCss, nonce)].filter(Boolean).join('\n'),
+    devCssNonce: nonce,
+  };
+}
+
+function attachRenderErrorAssetTags(error: unknown, assetTags: AssetTags): never {
+  if ((typeof error === 'object' || typeof error === 'function') && error !== null) {
+    Object.defineProperty(error, RENDER_ERROR_ASSET_TAGS_KEY, {
+      configurable: true,
+      value: assetTags,
+    });
+  }
+  throw error;
+}
+
+async function renderWithAssetTags(
+  renderFn: RenderPage,
+  pageObj: PageObject,
+  assetTags: AssetTags,
+): Promise<PageRenderResult> {
+  try {
+    return await renderFn(pageObj, assetTags);
+  } catch (error) {
+    attachRenderErrorAssetTags(error, assetTags);
+  }
 }
 
 function pageJsonResponse(c: CloudContext, pageObj: PageObject): Response {
@@ -152,12 +279,16 @@ function renderedResponse(
   c: CloudContext,
   result: PageRenderResult,
   contentType: string,
+  assetTags?: AssetTags,
 ): Response {
   return new Response(result, {
-    headers: pageResponseHeaders(c, {
-      'content-type': contentType,
-      ...POWERED_BY,
-    }),
+    headers: adjustDevCssCsp(
+      pageResponseHeaders(c, {
+        'content-type': contentType,
+        ...POWERED_BY,
+      }),
+      assetTags?.devCssNonce,
+    ),
   });
 }
 
@@ -169,6 +300,7 @@ function streamDeferredResponse(
   contentType: string,
   formatResolved: (group: string, data: unknown) => string,
   formatRejected: (group: string, error: string) => string,
+  assetTags?: AssetTags,
 ): Response {
   const encoder = new TextEncoder();
   const { readable, writable } = new TransformStream();
@@ -194,7 +326,10 @@ function streamDeferredResponse(
   });
 
   return new Response(readable, {
-    headers: pageResponseHeaders(c, { 'content-type': contentType, ...POWERED_BY }),
+    headers: adjustDevCssCsp(
+      pageResponseHeaders(c, { 'content-type': contentType, ...POWERED_BY }),
+      assetTags?.devCssNonce,
+    ),
   });
 }
 
@@ -311,11 +446,11 @@ export async function handlePageGet(
     );
   }
 
-  const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
-  const html = await renderFn(pageObj, assetTags);
+  const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
+  const html = await renderWithAssetTags(renderFn, pageObj, assetTags);
 
   if (!hasDeferred) {
-    return renderedResponse(c, html, 'text/html; charset=utf-8');
+    return renderedResponse(c, html, 'text/html; charset=utf-8', assetTags);
   }
 
   // Stream HTML followed by deferred <script> tags
@@ -328,6 +463,7 @@ export async function handlePageGet(
       `\n<script>window.__resolveDeferred?window.__resolveDeferred(${safeJsonStringify(group)},${safeJsonStringify(data)}):(window.__deferredQueue??=[]).push([${safeJsonStringify(group)},${safeJsonStringify(data)}])</script>`,
     (group, error) =>
       `\n<script>window.__rejectDeferred?window.__rejectDeferred(${safeJsonStringify(group)},${safeJsonStringify(error)}):(window.__deferredQueue??=[]).push([${safeJsonStringify(group)},0,${safeJsonStringify(error)}])</script>`,
+    assetTags,
   );
 }
 
@@ -377,8 +513,13 @@ export async function handlePageMutation(
       if (isPagesRequest(c)) {
         return pageJsonResponse(c, pageObj);
       }
-      const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
-      return renderedResponse(c, await renderFn(pageObj, assetTags), 'text/html; charset=utf-8');
+      const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
+      return renderedResponse(
+        c,
+        await renderWithAssetTags(renderFn, pageObj, assetTags),
+        'text/html; charset=utf-8',
+        assetTags,
+      );
     }
     throw e;
   }
@@ -403,8 +544,13 @@ export async function handlePageMutation(
       if (isPagesRequest(c)) {
         return pageJsonResponse(c, pageObj);
       }
-      const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
-      return renderedResponse(c, await renderFn(pageObj, assetTags), 'text/html; charset=utf-8');
+      const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
+      return renderedResponse(
+        c,
+        await renderWithAssetTags(renderFn, pageObj, assetTags),
+        'text/html; charset=utf-8',
+        assetTags,
+      );
     }
     // 204 (void from withValidator) — fall through to re-run GET
     if (status !== 204) {
@@ -422,6 +568,11 @@ export async function handlePageMutation(
   if (isPagesRequest(c)) {
     return pageJsonResponse(c, pageObj);
   }
-  const assetTags = await getAssetTags(c.req.raw, c.env, componentId);
-  return renderedResponse(c, await renderFn(pageObj, assetTags), 'text/html; charset=utf-8');
+  const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
+  return renderedResponse(
+    c,
+    await renderWithAssetTags(renderFn, pageObj, assetTags),
+    'text/html; charset=utf-8',
+    assetTags,
+  );
 }

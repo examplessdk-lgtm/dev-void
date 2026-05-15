@@ -7,11 +7,8 @@ import {
   resolveSpecifier,
   needsIslandClientBundle,
   rewriteCssImportForVirtualModule,
-  fileHasCssImports,
   extractCssImports,
-  rebuildIslandCssMap as rebuildIslandCssMapShared,
   computePagesNeedingClientJS as computePagesNeedingClientJSShared,
-  configureIslandCssServer,
   watchPagesForRescan,
   ISLANDS_RENDERER_ID,
   ISLANDS_CLIENT_ENTRY_ID,
@@ -41,16 +38,7 @@ export function islandsPlugin(pagesDir: string): Array<Plugin> {
   const islandCssFiles = new Set<string>();
   let isDev = false;
   let viteRoot = '';
-  const islandCssMap = new Map<string, Array<string>>();
   let resolvedConfig: ResolvedConfig | null = null;
-
-  /** Rebuild islandCssMap from current file contents (re-runs fileHasCssImports). */
-  function rebuildIslandCssMap(): void {
-    if (!pageScan) {
-      return;
-    }
-    rebuildIslandCssMapShared(pageScan, pagesDir, islandCssMap, fileHasCssImports);
-  }
 
   function computePagesNeedingClientJS(): Set<string> {
     if (!pageScan) {
@@ -70,14 +58,9 @@ export function islandsPlugin(pagesDir: string): Array<Plugin> {
         isDev = config.command === 'serve';
       },
 
-      // Serve virtual island CSS as raw text/css in dev. The client transform
-      // produces a JS module with `__vite__css = "..."` for HMR — we extract
-      // the CSS string and serve it directly for render-blocking <link> tags.
       configureServer(server) {
-        configureIslandCssServer(server, islandCssFiles, viteRoot, rebuildIslandCssMap);
         watchPagesForRescan(server, pagesDir, root, (scan: PageScanResult) => {
           pageScan = scan;
-          rebuildIslandCssMap();
         });
       },
 
@@ -139,9 +122,6 @@ export function islandsPlugin(pagesDir: string): Array<Plugin> {
               islandCssFiles.add(normalizePath(resolve(pagesDir, layout.filePath)));
             }
           }
-
-          // Build CSS map for dev FOUC prevention (only files with CSS imports)
-          rebuildIslandCssMap();
         }
       },
 
@@ -192,15 +172,7 @@ export function islandsPlugin(pagesDir: string): Array<Plugin> {
               mdPlugin?.api?.getClientScripts?.()?.keys() ?? [],
             );
             const needsJS = computePagesNeedingClientJS();
-            return generateIslandRenderer(
-              pageScan,
-              pagesDir,
-              isDev,
-              islandCssMap,
-              viteRoot,
-              mdScriptIds,
-              needsJS,
-            );
+            return generateIslandRenderer(pageScan, pagesDir, mdScriptIds, needsJS);
           }
           if (id === '\0' + ISLANDS_CLIENT_ENTRY_ID) {
             if (!pageScan) {
@@ -365,22 +337,9 @@ function generateWrapperComponent(id: string): string {
 function generateIslandRenderer(
   scan: PageScanResult,
   pagesDir: string,
-  isDev: boolean,
-  islandCssMap: Map<string, Array<string>>,
-  viteRoot: string,
   mdScriptIds: Set<string>,
   pagesNeedingClientJS: Set<string>,
 ): string {
-  // Build CSS link map for dev FOUC prevention
-  let cssMapCode = '';
-  if (isDev && islandCssMap.size > 0) {
-    const cssMapObj: Record<string, Array<string>> = {};
-    for (const [compId, paths] of islandCssMap) {
-      cssMapObj[compId] = paths.map((p) => '/' + normalizePath(relative(viteRoot, p)) + '.css');
-    }
-    cssMapCode = `const __cssPaths = ${JSON.stringify(cssMapObj)};`;
-  }
-
   const mdScriptIdsCode = `const __mdClientScriptIds = new Set(${JSON.stringify([...mdScriptIds])});`;
   const needsJSCode = `const __pagesNeedingClientJS = new Set(${JSON.stringify([...pagesNeedingClientJS])});`;
 
@@ -390,7 +349,6 @@ import App from "@void/svelte/App.svelte";
 import { renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from "void/pages-head";
 
 ${generateComponentManifest(scan, pagesDir)}
-${cssMapCode}
 ${mdScriptIdsCode}
 ${needsJSCode}
 
@@ -425,7 +383,7 @@ export async function renderIslandPage(pageObj, assetTags) {
 
   return \`<!doctype html>
 <html\${htmlAttrs}>
-<head>\${headHtml}\${typeof __cssPaths !== "undefined" ? (__cssPaths[pageObj.component] || []).map(url => '<link rel="stylesheet" href="' + url + '">').join("\\n") : ""}\${head}\${assetTags.css}\${__pagesNeedingClientJS.has(pageObj.component) ? assetTags.preloads : ""}</head>
+<head>\${headHtml}\${head}\${assetTags.css}\${__pagesNeedingClientJS.has(pageObj.component) ? assetTags.preloads : ""}</head>
 <body\${bodyAttrs}>
   <div id="app"\${__mdScriptAttr}>\${html}</div>
   \${__pagesNeedingClientJS.has(pageObj.component) ? assetTags.body : ""}
@@ -450,8 +408,8 @@ function generateIslandClientEntry(
 
   lines.push('import { initIslands } from "void/pages-client";');
 
-  // In dev, page/layout CSS is served via render-blocking <link> tags
-  // injected in the SSR HTML. Skip CSS imports here to avoid duplicate injection.
+  // In dev, first-paint CSS is provided by Void's shared dev CSS collector.
+  // Skip CSS imports here to avoid duplicate client injection.
   // In production, the <link> tags aren't used — the imports below ensure
   // the CSS is included in the bundled output.
   if (!isDev) {

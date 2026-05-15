@@ -290,6 +290,127 @@ describe('handlePageGet', () => {
     expect(renderFn).not.toHaveBeenCalled();
   });
 
+  it('serializes dev CSS records with a nonce before rendering HTML', async () => {
+    const c = await createTestContext('GET', '/styled');
+    const renderFn = vi.fn(
+      async (_pageObj: RenderPage, assetTags) => `<html><head>${assetTags.css}</head></html>`,
+    );
+    const response = await handlePageGet(undefined, undefined, c, 'styled', renderFn, async () => ({
+      css: '',
+      preloads: '',
+      body: '',
+      devCss: [{ url: '/pages/styled.tsx?x=1', css: '.x:before{content:"</STYLE>"}' }],
+    }));
+
+    const html = await response.text();
+    expect(html).toContain('data-vite-dev-id="/pages/styled.tsx?x=1"');
+    expect(html).toContain('nonce="');
+    expect(html).toContain('<\\/style>');
+    expect(html).not.toContain('</STYLE>');
+  });
+
+  it('adds a quoted dev CSS nonce source to strict style CSP responses', async () => {
+    const c = await createTestContext('GET', '/styled');
+    const response = await handlePageGet(
+      (ctx: Context) => {
+        ctx.header('Content-Security-Policy', "default-src 'self'; style-src 'self'");
+        return {};
+      },
+      undefined,
+      c,
+      'styled',
+      vi.fn(async (_pageObj: RenderPage, assetTags) => `<html>${assetTags.css}</html>`),
+      async () => ({
+        css: '',
+        preloads: '',
+        body: '',
+        devCss: [{ url: '/pages/styled.css', css: '.x{color:red}' }],
+      }),
+    );
+
+    const csp = response.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain("style-src 'self' 'nonce-");
+    expect(csp).not.toContain("style-src 'self' nonce-");
+  });
+
+  it('adds style-src with a quoted nonce when only default-src is present', async () => {
+    const c = await createTestContext('GET', '/styled');
+    const response = await handlePageGet(
+      (ctx: Context) => {
+        ctx.header('Content-Security-Policy', "default-src 'self'");
+        return {};
+      },
+      undefined,
+      c,
+      'styled',
+      vi.fn(async (_pageObj: RenderPage, assetTags) => `<html>${assetTags.css}</html>`),
+      async () => ({
+        css: '',
+        preloads: '',
+        body: '',
+        devCss: [{ url: '/pages/styled.css', css: '.x{color:red}' }],
+      }),
+    );
+
+    const csp = response.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("style-src 'self' 'nonce-");
+  });
+
+  it('adds the generated dev CSS nonce when CSP already has another nonce', async () => {
+    const c = await createTestContext('GET', '/styled');
+    const response = await handlePageGet(
+      (ctx: Context) => {
+        ctx.header('Content-Security-Policy', "style-src 'self' 'nonce-existing'");
+        return {};
+      },
+      undefined,
+      c,
+      'styled',
+      vi.fn(async (_pageObj: RenderPage, assetTags) => `<html>${assetTags.css}</html>`),
+      async () => ({
+        css: '',
+        preloads: '',
+        body: '',
+        devCss: [{ url: '/pages/styled.css', css: '.x{color:red}' }],
+      }),
+    );
+
+    const html = await response.text();
+    const nonce = html.match(/nonce="([^"]+)"/)?.[1];
+    expect(nonce).toBeTruthy();
+    const csp = response.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain("'nonce-existing'");
+    expect(csp).toContain(`'nonce-${nonce}'`);
+  });
+
+  it('attaches prepared asset tags to render errors for styled 500 pages', async () => {
+    const c = await createTestContext('GET', '/styled');
+    const error = new Error('render failed');
+
+    await expect(
+      handlePageGet(
+        undefined,
+        undefined,
+        c,
+        'styled',
+        vi.fn(async () => {
+          throw error;
+        }),
+        async () => ({
+          css: '',
+          preloads: '',
+          body: '',
+          devCss: [{ url: '/pages/styled.css', id: '/root/pages/styled.css', css: '.x{}' }],
+        }),
+      ),
+    ).rejects.toThrow(error);
+
+    expect(
+      (error as Error & { __voidPageAssetTags?: { css: string } }).__voidPageAssetTags?.css,
+    ).toContain('data-vite-dev-id="/root/pages/styled.css"');
+  });
+
   it('includes shared data from context', async () => {
     const c = await createTestContext('GET', '/', {
       headers: { 'x-voidpages': 'true' },
@@ -432,6 +553,36 @@ describe('handlePageMutation', () => {
     expect(body.props).toEqual({ users: [] });
   });
 
+  it('ValidationError HTML responses include collected dev CSS', async () => {
+    const c = await createTestContext('POST', '/users');
+    const mutationHandler = vi.fn(() => {
+      throw new ValidationError({ name: 'required' });
+    });
+    const getHandler = vi.fn(() => ({ users: [] }));
+    const renderFn = vi.fn(
+      async (_pageObj: RenderPage, assetTags) => `<html><head>${assetTags.css}</head></html>`,
+    );
+
+    const response = await handlePageMutation(
+      mutationHandler,
+      getHandler,
+      undefined,
+      c,
+      'users',
+      renderFn,
+      async () => ({
+        css: '',
+        preloads: '',
+        body: '',
+        devCss: [{ url: '/pages/users.css', css: '.error{color:red}' }],
+      }),
+    );
+
+    const html = await response.text();
+    expect(html).toContain('data-vite-dev-id="/pages/users.css"');
+    expect(html).toContain('.error{color:red}');
+  });
+
   it('Response 400 (withValidator) — extracts errors, re-runs GET', async () => {
     const c = await createTestContext('POST', '/users', {
       headers: { 'x-voidpages': 'true' },
@@ -487,6 +638,32 @@ describe('handlePageMutation', () => {
     const body = await json<PageResponse>(response);
     expect(body.props).toEqual({ users: ['created'] });
     expect(body.errors).toBeNull();
+  });
+
+  it('post-mutation HTML rerenders include collected dev CSS', async () => {
+    const c = await createTestContext('POST', '/users');
+    const renderFn = vi.fn(
+      async (_pageObj: RenderPage, assetTags) => `<html><head>${assetTags.css}</head></html>`,
+    );
+
+    const response = await handlePageMutation(
+      () => undefined,
+      () => ({ users: ['created'] }),
+      undefined,
+      c,
+      'users',
+      renderFn,
+      async () => ({
+        css: '',
+        preloads: '',
+        body: '',
+        devCss: [{ url: '/pages/users.css', css: '.created{color:green}' }],
+      }),
+    );
+
+    const html = await response.text();
+    expect(html).toContain('data-vite-dev-id="/pages/users.css"');
+    expect(html).toContain('.created{color:green}');
   });
 
   it('re-throws non-ValidationError errors', async () => {

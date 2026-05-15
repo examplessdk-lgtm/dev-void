@@ -281,6 +281,9 @@ importers:
       drizzle-zod:
         specifier: ^0.8.3
         version: 0.8.3(drizzle-orm@0.45.2(@cloudflare/workers-types@4.20260508.1)(@electric-sql/pglite@0.4.5)(@opentelemetry/api@1.9.0)(@prisma/client@7.4.2(prisma@7.4.2(@types/react@19.2.14)(better-sqlite3@12.9.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3))(typescript@6.0.3))(@types/better-sqlite3@7.6.13)(@types/pg@8.20.0)(better-sqlite3@12.9.0)(kysely@0.28.17)(mysql2@3.15.3)(pg@8.20.0)(postgres@3.4.7)(prisma@7.4.2(@types/react@19.2.14)(better-sqlite3@12.9.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3)))(zod@4.4.3)
+      es-module-lexer:
+        specifier: ^2.1.0
+        version: 2.1.0
       hono:
         specifier: ^4.12.18
         version: 4.12.18
@@ -321,9 +324,6 @@ importers:
       arktype:
         specifier: ^2.2.0
         version: 2.2.0
-      es-module-lexer:
-        specifier: ^2.1.0
-        version: 2.1.0
       estree-walker:
         specifier: ^3.0.3
         version: 3.0.3

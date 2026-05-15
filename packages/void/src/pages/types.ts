@@ -52,3 +52,12 @@ export interface PageScanResult {
   layouts: Array<LayoutDefinition>;
   namedLayouts: Array<NamedLayoutDefinition>;
 }
+
+export interface DevCssAsset {
+  /** Vite client URL used to request the CSS module. */
+  url: string;
+  /** Vite dev style id used by the client to adopt/update SSR-inlined styles. */
+  id?: string;
+  /** CSS bytes returned by Vite's client environment transform with ?inline. */
+  css: string;
+}

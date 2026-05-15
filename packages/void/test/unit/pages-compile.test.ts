@@ -97,6 +97,109 @@ describe('compileRouteTable with pages', () => {
     expect(code).toContain(`import { renderPage } from "virtual:void-pages-renderer"`);
   });
 
+  it('imports the dev CSS asset bridge in dev builds', () => {
+    const scan = makeScan({
+      pages: [
+        {
+          pattern: '/',
+          params: [],
+          catchAll: false,
+          componentPath: 'index.vue',
+          serverPath: null,
+          methods: [],
+          componentId: 'index',
+        },
+      ],
+      layouts: [],
+      namedLayouts: [],
+    });
+
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+      pagesOptions,
+    );
+
+    expect(code).toContain(`import { getVoidPagesDevCss } from "virtual:void-pages-dev-assets"`);
+    expect(code).toContain('PAGE_DEV_ROOT_PHASES');
+    expect(code).toContain('devCss: await collectVoidDevCss');
+    expect(code).toContain('getVoidPagesDevCss(request, env, { kind, componentId, rootPhases })');
+  });
+
+  it('emits helpers to reuse page CSS on render-error HTML', () => {
+    const scan = makeScan({
+      pages: [
+        {
+          pattern: '/',
+          params: [],
+          catchAll: false,
+          componentPath: 'index.vue',
+          serverPath: null,
+          methods: [],
+          componentId: 'index',
+        },
+      ],
+      layouts: [],
+      namedLayouts: [],
+    });
+
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+      pagesOptions,
+    );
+
+    expect(code).toContain('__voidPageAssetTags');
+    expect(code).toContain('__voidInjectErrorAssetCss');
+    expect(code).toContain('${__voidGetErrorAssetCss(error)}');
+  });
+
+  it('orders route CSS keys from layouts to page for cascade parity', () => {
+    const scan = makeScan({
+      pages: [
+        {
+          pattern: '/blog',
+          params: [],
+          catchAll: false,
+          componentPath: 'blog/post.vue',
+          serverPath: null,
+          methods: [],
+          componentId: 'blog/post',
+        },
+      ],
+      layouts: [
+        { directory: '', filePath: 'layout.vue' },
+        { directory: 'blog', filePath: 'blog/layout.vue' },
+      ],
+      namedLayouts: [],
+    });
+
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+      pagesOptions,
+    );
+
+    expect(code).toContain(
+      `"blog/post":["pages/layout.vue","pages/blog/layout.vue","pages/blog/post.vue"]`,
+    );
+  });
+
   it('registers GET handler for page without server module', () => {
     const scan = makeScan({
       pages: [
