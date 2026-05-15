@@ -250,6 +250,15 @@ function generateWrapperSource(
     lines.push('async function wrappedFetch(request, env, ctx) {');
     lines.push('  const url = new URL(request.url);');
 
+    // Readiness probe — platform polls this to confirm the worker is live
+    // after WfP upload. Handled here (before original.fetch) so the user's
+    // framework handler doesn't route it to env.ASSETS, which returns CF's
+    // "Assets have not yet been deployed" stub during asset propagation
+    // and would trip the platform's probe.
+    lines.push('  if (request.method === "GET" && url.pathname === "/__void/ready") {');
+    lines.push('    return Response.json({ ready: true });');
+    lines.push('  }');
+
     // Migration handler
     if (migrations && migrations.length > 0) {
       lines.push('  if (request.method === "POST" && url.pathname === "/__void/migrate") {');
