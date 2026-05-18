@@ -32,9 +32,20 @@ export async function promptAndCreateProject(
   }
 }
 
-function isRetryableCreateError(error: PlatformApiError): boolean {
-  // 403 covers slug-length plan rejection — re-prompt so the user can pick a longer slug.
-  return (
-    error.status === 400 || error.status === 403 || error.status === 409 || error.status === 422
-  );
+export function isRetryableCreateError(error: PlatformApiError): boolean {
+  if (error.status === 400 || error.status === 409 || error.status === 422) {
+    return true;
+  }
+  // 403 is retryable ONLY when it's the slug-length plan rejection — other
+  // 403s (e.g. account suspended from auth middleware) are not fixable by
+  // choosing a different slug and would cause an infinite re-prompt loop.
+  if (error.status === 403) {
+    return isSlugRelatedError(error);
+  }
+  return false;
+}
+
+function isSlugRelatedError(error: PlatformApiError): boolean {
+  const message = (error.code ?? error.body ?? '').toLowerCase();
+  return message.includes('slug');
 }

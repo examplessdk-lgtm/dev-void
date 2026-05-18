@@ -514,28 +514,42 @@ async function runAiSetupPrompt(
   let slug: string;
 
   if (result === '__create__') {
-    const defaultSlug = inferDefaultSlug(root);
     const { validateProjectSlug } = await import('./cli/project-slug.ts');
-    const slugResult = await text({
-      message: 'Choose a slug for your new Void project:',
-      placeholder: 'my-app',
-      initialValue: defaultSlug,
-      validate: validateProjectSlug,
-    });
-    if (isCancel(slugResult)) {
-      return;
+    const { isRetryableCreateError } = await import('./cli/create-project.ts');
+    const { PlatformApiError } = await import('./cli/client.ts');
+    let defaultSlug = inferDefaultSlug(root);
+    // Retry loop: server-side plan checks (e.g. slug-length on free plan) can
+    // reject after client validation. Re-prompt instead of bailing so users
+    // can pick a different slug without restarting the dev server.
+    let created: { id: string; slug: string } | undefined;
+    while (!created) {
+      const slugResult = await text({
+        message: 'Choose a slug for your new Void project:',
+        placeholder: 'my-app',
+        initialValue: defaultSlug,
+        validate: validateProjectSlug,
+      });
+      if (isCancel(slugResult)) {
+        return;
+      }
+      const trimmed = slugResult.trim();
+      try {
+        created = await client.createProject(trimmed);
+      } catch (err: unknown) {
+        if (err instanceof PlatformApiError && isRetryableCreateError(err)) {
+          const reason = err.code || err.body || `HTTP ${err.status}`;
+          log.error(`project: Could not create project '${trimmed}': ${reason}.`);
+          defaultSlug = trimmed;
+          continue;
+        }
+        voidError(
+          `project: Failed to create project: '${err instanceof Error ? err.message : String(err)}'.`,
+        );
+        return;
+      }
     }
-
-    try {
-      const created = await client.createProject(slugResult.trim());
-      projectId = created.id;
-      slug = created.slug;
-    } catch (err: unknown) {
-      voidError(
-        `project: Failed to create project: '${err instanceof Error ? err.message : String(err)}'.`,
-      );
-      return;
-    }
+    projectId = created.id;
+    slug = created.slug;
     log.success(`Project created: ${pc.blue(slug)}`);
   } else {
     const project = projects.find(

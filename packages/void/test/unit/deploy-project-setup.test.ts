@@ -120,6 +120,23 @@ describe('promptDeployProjectConfig', () => {
     expect(config).toEqual({ projectId: 'proj_new', slug: 'longer-app' });
   });
 
+  it('does not retry on non-slug 403 errors (e.g. account suspended)', async () => {
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
+    const { PlatformApiError } = await import('../../src/cli/client.ts');
+    const client = createClient();
+    client.listProjects.mockResolvedValueOnce([]);
+    client.createProject.mockRejectedValueOnce(
+      new PlatformApiError('createProject', 403, JSON.stringify({ error: 'account suspended' })),
+    );
+    mockSelect.mockResolvedValueOnce('create');
+    mockText.mockResolvedValueOnce('my-app');
+
+    await expect(promptDeployProjectConfig(root, client)).rejects.toThrow(PlatformApiError);
+
+    expect(client.createProject).toHaveBeenCalledTimes(1);
+    expect(mockText).toHaveBeenCalledTimes(1);
+  });
+
   it('does not show project names when creating with existing projects available', async () => {
     const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
     const client = createClient();
