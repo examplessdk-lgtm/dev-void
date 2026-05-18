@@ -574,6 +574,11 @@ describe('computeRollup', () => {
       ],
       ['pending fallback when no signals', {}, 'pending'],
       [
+        'active gated on ssl_status — pre-rollout platform during cert renewal',
+        { status: 'active', ssl_status: 'pending_validation' },
+        'pending',
+      ],
+      [
         'empty verification_errors does NOT trigger error',
         { verification_errors: [], cf_status: 'pending_validation' },
         'verifying_dns',

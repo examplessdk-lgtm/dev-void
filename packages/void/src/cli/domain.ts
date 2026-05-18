@@ -193,7 +193,7 @@ export function computeRollup(status: DomainStatusResponse): RolledUpStatus {
   // (e.g. `issuing_cert` catches `cf_status === 'active' && ssl_status !== 'active'`
   // even when the DB row says active). Reaching this branch means CF and SSL
   // are both healthy.
-  if (status.status === 'active') {
+  if (status.status === 'active' && status.ssl_status === 'active') {
     return { state: 'active', diagnostic: 'Live.' };
   }
 
