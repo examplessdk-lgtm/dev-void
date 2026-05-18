@@ -3,6 +3,11 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'pathe';
 import { loadEnv, type Plugin } from 'vite';
+import {
+  hasDocumentRoutes,
+  resolveAssetRoutingPolicy,
+  type AssetRoutingPolicy,
+} from './asset-routing.ts';
 import { findVoidAuthConfig, loadVoidAuthConfig } from './auth/config.ts';
 import { generateVoidAuthDatabaseModule, generateVoidAuthDrizzleSchema } from './auth/drizzle.ts';
 import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './cli/headers.ts';
@@ -71,6 +76,7 @@ type RoutingPluginOptions = {
   sandboxBindingName?: string;
   sandboxClassName?: string;
   live?: { bindingName: string; className: string };
+  onDevAssetRoutingPolicyChange?: (policy: AssetRoutingPolicy) => boolean;
 };
 
 export function routingPlugin(root: string, options: RoutingPluginOptions): Plugin {
@@ -299,15 +305,33 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   }
 
   function shouldServeSpaFallback(): boolean {
-    return (
-      !!scan &&
-      scan.pages.pages.length === 0 &&
-      !ssr &&
-      (scan.routes.length > 0 ||
-        (scan.websockets?.length ?? 0) > 0 ||
-        scan.middleware.length > 0 ||
-        compileOptions.auth !== null)
-    );
+    if (!scan) {
+      return false;
+    }
+    return resolveCurrentAssetRoutingPolicy().workerSpaFallback;
+  }
+
+  function resolveCurrentAssetRoutingPolicy(): AssetRoutingPolicy {
+    if (!scan) {
+      return resolveAssetRoutingPolicy({
+        isSsr: Boolean(ssr),
+        hasPages: false,
+        hasDocumentRoutes: false,
+        hasMiddleware: false,
+        hasWebSockets: false,
+        authEnabled: compileOptions.auth !== null,
+        liveEnabled: options.live !== undefined,
+      });
+    }
+    return resolveAssetRoutingPolicy({
+      isSsr: Boolean(ssr),
+      hasPages: scan.pages.pages.length > 0,
+      hasDocumentRoutes: hasDocumentRoutes(scan.routes),
+      hasMiddleware: scan.middleware.length > 0,
+      hasWebSockets: (scan.websockets?.length ?? 0) > 0,
+      authEnabled: compileOptions.auth !== null,
+      liveEnabled: options.live !== undefined,
+    });
   }
 
   // Generate the entry file and tsconfig eagerly (at plugin creation time,
@@ -547,6 +571,13 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         // not the client — so we must iterate all environments.
         await rescan();
         resolveAuthCompileOptions();
+        const shouldRestartForAssetRouting =
+          event !== 'change' &&
+          options.onDevAssetRoutingPolicyChange?.(resolveCurrentAssetRoutingPolicy()) === true;
+        if (shouldRestartForAssetRouting) {
+          await devServer.restart();
+          return;
+        }
         await writeAuthDatabaseFiles();
         writeRouteTypes();
         writeQueueTypes();

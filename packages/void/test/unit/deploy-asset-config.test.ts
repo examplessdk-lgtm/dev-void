@@ -1,37 +1,73 @@
 import { describe, expect, it } from 'vite-plus/test';
-import { resolveAssetConfig } from '../../src/cli/deploy.ts';
+import {
+  hasDocumentRoutes,
+  resolveAssetConfig,
+  resolveAssetRoutingPolicy,
+  workerOwnsHtmlRouting,
+} from '../../src/asset-routing.ts';
 
 // `not_found_handling: 'none'` → asset binding 404s on unmatched paths,
 // worker (run_worker_first) owns HTML responses.
 //
 // `not_found_handling: 'single-page-application'` → CF shortcuts browser
-// navigations to the SPA shell before the worker runs. Acceptable only for
-// pure SPAs with no backend code.
+// navigations to the SPA shell before the worker runs. Acceptable when the
+// worker does not need to inspect document navigations.
 describe('resolveAssetConfig', () => {
-  const NONE = { not_found_handling: 'none' as const };
+  const NONE = { not_found_handling: 'none' as const, run_worker_first: ['/**'] };
   const SPA = { not_found_handling: 'single-page-application' as const };
 
   it('uses none when SSR is enabled', () => {
     expect(
-      resolveAssetConfig({ isSsr: true, hasPages: false, hasRoutes: false, hasMiddleware: false }),
+      resolveAssetConfig({
+        isSsr: true,
+        hasPages: false,
+        hasDocumentRoutes: false,
+        hasMiddleware: false,
+      }),
     ).toEqual(NONE);
   });
 
   it('uses none when pages mode is enabled', () => {
     expect(
-      resolveAssetConfig({ isSsr: false, hasPages: true, hasRoutes: false, hasMiddleware: false }),
+      resolveAssetConfig({
+        isSsr: false,
+        hasPages: true,
+        hasDocumentRoutes: false,
+        hasMiddleware: false,
+      }),
     ).toEqual(NONE);
   });
 
-  it('uses none when the project has routes/', () => {
+  it('keeps SPA handling when the project only has API routes', () => {
     expect(
-      resolveAssetConfig({ isSsr: false, hasPages: false, hasRoutes: true, hasMiddleware: false }),
+      resolveAssetConfig({
+        isSsr: false,
+        hasPages: false,
+        hasDocumentRoutes: false,
+        hasMiddleware: false,
+      }),
+    ).toEqual(SPA);
+  });
+
+  it('uses none when the project has document routes', () => {
+    expect(
+      resolveAssetConfig({
+        isSsr: false,
+        hasPages: false,
+        hasDocumentRoutes: true,
+        hasMiddleware: false,
+      }),
     ).toEqual(NONE);
   });
 
   it('uses none when the project has middleware/', () => {
     expect(
-      resolveAssetConfig({ isSsr: false, hasPages: false, hasRoutes: false, hasMiddleware: true }),
+      resolveAssetConfig({
+        isSsr: false,
+        hasPages: false,
+        hasDocumentRoutes: false,
+        hasMiddleware: true,
+      }),
     ).toEqual(NONE);
   });
 
@@ -40,7 +76,7 @@ describe('resolveAssetConfig', () => {
       resolveAssetConfig({
         isSsr: false,
         hasPages: false,
-        hasRoutes: false,
+        hasDocumentRoutes: false,
         hasMiddleware: false,
         hasWebSockets: true,
       }),
@@ -52,7 +88,7 @@ describe('resolveAssetConfig', () => {
       resolveAssetConfig({
         isSsr: false,
         hasPages: false,
-        hasRoutes: false,
+        hasDocumentRoutes: false,
         hasMiddleware: false,
         authEnabled: true,
       }),
@@ -65,13 +101,100 @@ describe('resolveAssetConfig', () => {
     // with Sec-Fetch-Mode: navigate, get the SPA shell, and never reach
     // Better Auth — leaving the user "signed in" without a session cookie.
     expect(
-      resolveAssetConfig({ isSsr: false, hasPages: false, hasRoutes: true, hasMiddleware: true }),
+      resolveAssetConfig({
+        isSsr: false,
+        hasPages: false,
+        hasDocumentRoutes: false,
+        hasMiddleware: true,
+      }),
     ).toEqual(NONE);
   });
 
-  it('uses single-page-application only when no backend code is present', () => {
+  it('uses none when live bindings are enabled', () => {
     expect(
-      resolveAssetConfig({ isSsr: false, hasPages: false, hasRoutes: false, hasMiddleware: false }),
+      resolveAssetConfig({
+        isSsr: false,
+        hasPages: false,
+        hasDocumentRoutes: false,
+        hasMiddleware: false,
+        liveEnabled: true,
+      }),
+    ).toEqual(NONE);
+  });
+
+  it('uses single-page-application when no HTML-owning backend code is present', () => {
+    expect(
+      resolveAssetConfig({
+        isSsr: false,
+        hasPages: false,
+        hasDocumentRoutes: false,
+        hasMiddleware: false,
+      }),
     ).toEqual(SPA);
+  });
+
+  it('classifies /api routes separately from document routes', () => {
+    expect(
+      hasDocumentRoutes([
+        { pattern: '/api' },
+        { pattern: '/api/hello' },
+        { pattern: '/api/users/:id' },
+      ]),
+    ).toBe(false);
+
+    expect(hasDocumentRoutes([{ pattern: '/hello' }])).toBe(true);
+    expect(hasDocumentRoutes([{ pattern: '/apiish' }])).toBe(true);
+  });
+
+  it('uses the same worker-owned HTML decision as the asset config', () => {
+    const inputs = {
+      isSsr: false,
+      hasPages: false,
+      hasDocumentRoutes: true,
+      hasMiddleware: false,
+    };
+    expect(workerOwnsHtmlRouting(inputs)).toBe(true);
+    expect(resolveAssetConfig(inputs)).toEqual(NONE);
+  });
+
+  it('resolves the complete request trigger policy', () => {
+    expect(
+      resolveAssetRoutingPolicy({
+        isSsr: false,
+        hasPages: false,
+        hasDocumentRoutes: false,
+        hasMiddleware: false,
+      }),
+    ).toEqual({
+      assetConfig: SPA,
+      workerFirst: false,
+      workerSpaFallback: false,
+    });
+
+    expect(
+      resolveAssetRoutingPolicy({
+        isSsr: false,
+        hasPages: false,
+        hasDocumentRoutes: false,
+        hasMiddleware: true,
+      }),
+    ).toEqual({
+      assetConfig: NONE,
+      workerFirst: true,
+      workerSpaFallback: true,
+    });
+
+    expect(
+      resolveAssetRoutingPolicy({
+        isSsr: true,
+        hasPages: false,
+        hasDocumentRoutes: false,
+        hasMiddleware: false,
+      }),
+    ).toEqual({
+      assetConfig: NONE,
+      workerFirst: true,
+      workerSpaFallback: false,
+    });
   });
 });

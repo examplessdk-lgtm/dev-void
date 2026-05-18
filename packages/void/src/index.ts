@@ -12,6 +12,11 @@ import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vi
 import { join } from 'pathe';
 import pc from 'picocolors';
 import { loadEnv, type Plugin } from 'vite';
+import {
+  hasDocumentRoutes as routeScanHasDocumentRoutes,
+  resolveAssetRoutingPolicy,
+  type AssetRoutingPolicy,
+} from './asset-routing.ts';
 import { findVoidAuthConfig } from './auth/config.ts';
 import { getToken, isStagingMode } from './cli/auth.ts';
 import { readProjectConfig } from './cli/project.ts';
@@ -59,6 +64,7 @@ import { prerenderPlugin } from './plugin-prerender.ts';
 import { restartPlugin } from './plugin-restart.ts';
 import { routingPlugin } from './plugin-routing.ts';
 import { scanQueuesSync } from './queues/scan.ts';
+import { scanRoutePatternsSync } from './router/scan.ts';
 import { scanWebSocketRoutesSync } from './router/websocket.ts';
 import { SANDBOX_MIGRATION_TAG, isSandboxEnabled, resolveSandboxConfig } from './sandbox/config.ts';
 import { filterLoadedEnv, resolveRemoteMode, stripInternalEnvKeys } from './shared/env.ts';
@@ -848,6 +854,15 @@ export function voidPlugin(options?: {
   function mergeBindings(resolved: WorkerConfig): Partial<WorkerConfig> {
     const result: Record<string, unknown> = { ...workerConfig };
 
+    // Void owns the generated asset routing policy. Replace stale root
+    // wrangler settings instead of letting the Cloudflare plugin concatenate
+    // them with generated rules. This preserves static-first behavior for
+    // API-only apps while avoiding asset-served HTML bypassing middleware.
+    if (workerConfig.assets && resolved.assets) {
+      delete (resolved.assets as Record<string, unknown>).not_found_handling;
+      delete (resolved.assets as Record<string, unknown>).run_worker_first;
+    }
+
     // D1 — auth requires the app DB only for sqlite apps
     const d1: Array<Record<string, unknown>> = [];
     if (
@@ -1460,6 +1475,18 @@ export function voidPlugin(options?: {
   const jobs = scanJobsSync(root);
   const ssrEntry = validateSsrEntry(root);
   const hasPages = existsSync(join(root, 'pages'));
+  const hasMiddleware = existsSync(join(root, 'middleware'));
+  const routePatterns = scanRoutePatternsSync(root);
+  const hasDocumentRoutes = routeScanHasDocumentRoutes(routePatterns);
+  let assetRouting = resolveAssetRoutingPolicy({
+    isSsr: Boolean(ssrEntry),
+    hasPages,
+    hasDocumentRoutes,
+    hasMiddleware,
+    hasWebSockets: websocketRoutes.length > 0,
+    authEnabled,
+    liveEnabled: liveConfig !== undefined,
+  });
 
   workerConfig.main = join(root, '.void', 'entry.ts');
 
@@ -1469,21 +1496,26 @@ export function voidPlugin(options?: {
     };
   }
 
-  if (ssrEntry || hasPages) {
+  function applyAssetRoutingPolicy(policy: AssetRoutingPolicy): void {
     workerConfig.assets = {
       binding: 'ASSETS',
-      // Pages/SSR workers own HTML routing. Asset misses must stay 404s so
-      // module/script/style requests never receive the app shell as text/html.
-      not_found_handling: 'none',
-      // Route all requests through the worker so the entry can set proper
-      // Cache-Control headers on static asset responses (CF's default is
-      // max-age=0 and _headers files don't work for WfP dispatch uploads).
-      // The worker entry falls through to env.ASSETS.fetch() for paths that
-      // don't match any app route. Dev-mode exclusions are handled in
-      // envPlugin's config hook (deletes run_worker_first entirely).
-      run_worker_first: ['/**'],
+      ...policy.assetConfig,
     };
   }
+
+  function updateDevAssetRoutingPolicy(next: AssetRoutingPolicy): boolean {
+    const previous = assetRouting;
+    const requiresRestart =
+      previous.workerFirst !== next.workerFirst ||
+      previous.assetConfig.not_found_handling !== next.assetConfig.not_found_handling;
+    assetRouting = next;
+    if (requiresRestart) {
+      applyAssetRoutingPolicy(next);
+    }
+    return requiresRestart;
+  }
+
+  applyAssetRoutingPolicy(assetRouting);
 
   return [
     createCloudflareBuiltinsExternalPlugin(),
@@ -1515,6 +1547,7 @@ export function voidPlugin(options?: {
       sandboxBindingName: sandboxConfig?.binding,
       sandboxClassName: sandboxConfig?.className,
       live: liveConfig,
+      onDevAssetRoutingPolicyChange: updateDevAssetRoutingPolicy,
     }),
     drizzlePlugin(root, true, dialect, {
       forceVirtualDb: authEnabled,

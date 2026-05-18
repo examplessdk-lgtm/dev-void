@@ -92,6 +92,7 @@ export type DevRedirectRule = RedirectRule & {
 export type AssetConfig = {
   not_found_handling?: 'none' | 'single-page-application' | '404-page';
   html_handling?: 'auto-trailing-slash' | 'force-trailing-slash' | 'drop-trailing-slash' | 'none';
+  run_worker_first?: boolean | Array<string>;
 };
 
 export type WebSocketRouteMeta = {

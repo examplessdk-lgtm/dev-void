@@ -2318,10 +2318,10 @@ function __filterInternalBindings(env) {
   // cache boundary, which the platform's deploy-scoped cache keys (dispatch
   // layer) can't reach once CF's managed edge has cached the response.
   const spaFallbackCode = serveSpaFallback
-    ? `  // SPA fallback: when routes/middleware make assetConfig.not_found_handling
-  // = 'none', the asset binding returns 404 instead of falling back to
-  // index.html itself. Do that fallback here, after user routes/middleware
-  // have run, so auth gates and OAuth callbacks see the request first.
+    ? `  // SPA fallback: when HTML-owning features make
+  // assetConfig.not_found_handling = 'none', the asset binding returns 404
+  // instead of falling back to index.html itself. Do that fallback here, after
+  // user routes/middleware have run, so auth gates and OAuth callbacks see the request first.
   // Pages and SSR apps leave this disabled so intentional HTML 404s stay 404.
   const accept = request.headers.get("accept") ?? "";
   if (accept.includes("text/html")) {

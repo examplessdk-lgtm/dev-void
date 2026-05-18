@@ -1,5 +1,5 @@
 import { join } from 'pathe';
-import { glob } from 'tinyglobby';
+import { glob, globSync } from 'tinyglobby';
 import { scanJobs, type JobDefinition } from '../crons/scan.ts';
 import { scanPages } from '../pages/scan.ts';
 import type { PageScanResult } from '../pages/types.ts';
@@ -29,6 +29,7 @@ export type MiddlewareDefinition = {
 };
 
 const HANDLER_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
+const ROUTE_PATTERN = `**/*.{${HANDLER_EXTENSIONS.join(',')}}`;
 
 /**
  * Scan routes/ and middleware/ directories and return a structured manifest.
@@ -38,12 +39,12 @@ export async function scanRoutes(
   root: string,
   options?: { output?: 'server' | 'static' },
 ): Promise<ScanResult> {
-  const pattern = `**/*.{${HANDLER_EXTENSIONS.join(',')}}`;
-
   const [routeFiles, websockets, middlewareFiles, jobs, queues, pages] = await Promise.all([
-    glob(pattern, { cwd: `${root}/routes`, absolute: false }),
+    glob(ROUTE_PATTERN, { cwd: `${root}/routes`, absolute: false }),
     scanWebSocketRoutes(root),
-    glob(pattern, { cwd: `${root}/middleware`, absolute: false }).catch(() => [] as Array<string>),
+    glob(ROUTE_PATTERN, { cwd: `${root}/middleware`, absolute: false }).catch(
+      () => [] as Array<string>,
+    ),
     scanJobs(root),
     scanQueues(root),
     scanPages(root, { output: options?.output }),
@@ -82,4 +83,24 @@ export async function scanRoutes(
     .sort((a, b) => a.order - b.order);
 
   return { routes, websockets, middleware, jobs, queues, pages };
+}
+
+export function scanRoutePatternsSync(root: string): Array<RouteDefinition> {
+  let routeFiles: Array<string>;
+  try {
+    routeFiles = globSync(ROUTE_PATTERN, { cwd: `${root}/routes`, absolute: false });
+  } catch {
+    routeFiles = [];
+  }
+
+  return routeFiles
+    .filter((f) => !isWebSocketPatternFile(f))
+    .filter((f) => !f.split('/').some((s) => s.startsWith('_')))
+    .map((f) => parseRouteFilename(f))
+    .sort((a, b) => {
+      if (a.catchAll !== b.catchAll) {
+        return a.catchAll ? 1 : -1;
+      }
+      return a.pattern.localeCompare(b.pattern);
+    });
 }

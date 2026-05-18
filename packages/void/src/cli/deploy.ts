@@ -14,6 +14,10 @@ import { join, relative, resolve } from 'pathe';
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
 import { intro, outro, log, note, confirm, isCancel, type SpinnerResult } from '@clack/prompts';
+import {
+  hasDocumentRoutes as routeScanHasDocumentRoutes,
+  resolveAssetConfig,
+} from '../asset-routing.ts';
 import { findVoidAuthConfig } from '../auth/config.ts';
 import { findEnvFile } from '../codegen/env-types.ts';
 import {
@@ -220,40 +224,7 @@ export async function resolveDeployLiveBindingConfig(
   });
 }
 
-/**
- * Resolve the Cloudflare Workers Static Assets `not_found_handling` config.
- *
- * Any worker capable of producing HTML (SSR, pages, file-based routes, or
- * middleware) must use `'none'` so the asset binding returns 404 for
- * unmatched paths and the worker — gated by `run_worker_first` — owns the
- * response. With `'single-page-application'`, CF short-circuits any
- * `Sec-Fetch-Mode: navigate` request straight to the SPA shell *before*
- * `run_worker_first` is consulted, silently bypassing auth middleware and
- * breaking OAuth callbacks (which arrive as navigations from the provider's
- * 302 redirect).
- *
- * Pure-frontend SPAs without any backend code keep the SPA-fallback config
- * because the worker has no responsibility for HTML routing.
- */
-export function resolveAssetConfig(opts: {
-  isSsr: boolean;
-  hasPages: boolean;
-  hasRoutes: boolean;
-  hasMiddleware: boolean;
-  hasWebSockets?: boolean;
-  authEnabled?: boolean;
-}): AssetConfig {
-  const workerHandlesHtml =
-    opts.isSsr ||
-    opts.hasPages ||
-    opts.hasRoutes ||
-    opts.hasMiddleware ||
-    opts.hasWebSockets === true ||
-    opts.authEnabled === true;
-  return workerHandlesHtml
-    ? { not_found_handling: 'none' }
-    : { not_found_handling: 'single-page-application' };
-}
+export { resolveAssetConfig } from '../asset-routing.ts';
 
 function getExitCode(error: unknown): number {
   if (
@@ -1537,6 +1508,7 @@ async function runFullDeploy(
   }));
   const hasPages = existsSync(join(root, 'pages'));
   const hasRoutes = routeScan.routes.length > 0;
+  const hasDocumentRoutes = routeScanHasDocumentRoutes(routeScan.routes);
   const hasMiddleware = routeScan.middleware.length > 0;
   const hasWebSockets = webSockets.length > 0;
   const isSsr = isFrameworkMode
@@ -1668,10 +1640,11 @@ async function runFullDeploy(
   const assetConfig: AssetConfig = resolveAssetConfig({
     isSsr,
     hasPages,
-    hasRoutes,
+    hasDocumentRoutes,
     hasMiddleware,
     hasWebSockets,
     authEnabled,
+    liveEnabled: liveConfig !== undefined,
   });
 
   // Preflight: hash assets and check which ones changed.
