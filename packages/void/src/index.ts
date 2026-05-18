@@ -520,29 +520,41 @@ async function runAiSetupPrompt(
   let slug: string;
 
   if (result === '__create__') {
-    const defaultSlug = inferDefaultSlug(root);
     const { validateProjectSlug } = await import('./cli/project-slug.ts');
-    const slugResult = await text({
-      message: 'Choose a slug for your new Void project:',
-      placeholder: 'my-app',
-      initialValue: defaultSlug,
-      validate: validateProjectSlug,
-    });
-    if (isCancel(slugResult)) {
-      return;
-    }
-
+    const { createProjectWithSlugRetry } = await import('./cli/create-project.ts');
+    let created;
     try {
-      const created = await client.createProject(slugResult.trim());
-      projectId = created.id;
-      slug = created.slug;
+      // Share the slug-retry loop with deploy/link paths so server-side plan
+      // rejections (e.g. free-plan short-slug 403) re-prompt consistently.
+      // The prompt callback returns `undefined` on Ctrl+C so the helper can
+      // exit cleanly instead of calling process.exit().
+      created = await createProjectWithSlugRetry(
+        client,
+        inferDefaultSlug(root),
+        async (defaultSlug) => {
+          const slugResult = await text({
+            message: 'Choose a slug for your new Void project:',
+            placeholder: 'my-app',
+            initialValue: defaultSlug,
+            validate: validateProjectSlug,
+          });
+          if (isCancel(slugResult)) {
+            return undefined;
+          }
+          return slugResult.trim();
+        },
+      );
     } catch (err: unknown) {
       voidError(
         `project: Failed to create project: '${err instanceof Error ? err.message : String(err)}'.`,
       );
       return;
     }
-    log.success(`Project created: ${pc.blue(slug)}`);
+    if (!created) {
+      return;
+    }
+    projectId = created.id;
+    slug = created.slug;
   } else {
     const project = projects.find(
       (p: import('./cli/client.ts').ProjectResponse) => p.id === result,
