@@ -160,7 +160,7 @@ export function computeRollup(status: DomainStatusResponse): RolledUpStatus {
     return {
       state: 'awaiting_dns',
       diagnostic:
-        'Cloudflare has not yet observed your _cf-custom-hostname TXT record. Confirm it is published at the host shown above.',
+        'Cloudflare has not yet observed your _cf-custom-hostname TXT record. Confirm it is published at the host shown below.',
     };
   }
 
