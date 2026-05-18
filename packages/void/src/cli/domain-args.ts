@@ -11,6 +11,7 @@ export type DomainArgs = {
   subcommand: 'add' | 'delete' | 'list' | 'status';
   hostname?: string;
   projectSlug?: string;
+  verbose?: boolean;
 };
 
 export function parseDomainArgs(args: Array<string>): DomainArgs {
@@ -23,11 +24,14 @@ export function parseDomainArgs(args: Array<string>): DomainArgs {
 
   let hostname: string | undefined;
   let projectSlug: string | undefined;
+  let verbose = false;
 
   const rest = args.slice(1);
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === '--project' && rest[i + 1]) {
       projectSlug = rest[++i];
+    } else if (rest[i] === '--verbose') {
+      verbose = true;
     } else if (!hostname) {
       hostname = rest[i];
     }
@@ -37,5 +41,5 @@ export function parseDomainArgs(args: Array<string>): DomainArgs {
     throw new Error(`domain: Usage: void domain ${subcommand} <hostname> [--project <name>].`);
   }
 
-  return { subcommand, hostname, projectSlug };
+  return { subcommand, hostname, projectSlug, verbose };
 }

@@ -172,10 +172,18 @@ const HELP_TREE: HelpTree = {
         'void domain delete <hostname> [options]',
       ),
       list: withProjectOption('List custom domains and status.', 'void domain list [options]'),
-      status: withProjectOption(
-        'Check domain verification status.',
-        'void domain status <hostname> [options]',
-      ),
+      status: {
+        summary:
+          'Check domain verification status. Prints a rolled-up state with a one-line diagnostic.',
+        usage: ['void domain status <hostname> [options]'],
+        options: [
+          { command: '--project <name>', description: 'Project name override' },
+          {
+            command: '--verbose',
+            description: 'Also print the raw multi-line status breakdown',
+          },
+        ],
+      },
     },
   },
   db: {

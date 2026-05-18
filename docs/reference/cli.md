@@ -539,10 +539,12 @@ List all custom domains and their status (active/pending).
 ### `void domain status`
 
 ```
-void domain status <hostname> [--project <name>]
+void domain status <hostname> [--project <name>] [--verbose]
 ```
 
-Check verification and SSL status for a specific domain. Shows hostname, status, SSL status, and any verification errors.
+Check verification and SSL status for a specific domain. Prints a rolled-up state (`awaiting_dns`, `verifying_dns`, `issuing_cert`, `deploying_cert`, `awaiting_deployment`, `active`, `error`, or `pending`) with a one-line diagnostic explaining what Cloudflare is doing and any user action required. When DNS records are still pending, the command also prints the exact TXT records to add at your DNS provider.
+
+Pass `--verbose` to additionally print the raw multi-line status breakdown (DB status, SSL status, ownership state, verification errors) underneath the rollup.
 
 Project resolution for domain commands follows the same order as deploy (`--project`, `VOID_PROJECT`, linked project).
 

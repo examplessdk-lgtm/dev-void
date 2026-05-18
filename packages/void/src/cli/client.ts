@@ -180,6 +180,8 @@ export type DomainResponse = {
 export type DomainStatusResponse = DomainResponse & {
   ssl_status: string;
   verification_errors?: Array<string>;
+  cf_status?: string;
+  awaiting_deployment?: boolean;
 };
 
 /**

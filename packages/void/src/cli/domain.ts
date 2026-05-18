@@ -1,6 +1,6 @@
 import { log, note } from '@clack/prompts';
 import { getToken } from './auth.ts';
-import { PlatformClient } from './client.ts';
+import { type DomainStatusResponse, PlatformClient } from './client.ts';
 import type { DomainArgs } from './domain-args.ts';
 import { pc } from './output.ts';
 import { readProjectConfig } from './project.ts';
@@ -43,7 +43,7 @@ export async function runDomainCommand(root: string, args: DomainArgs): Promise<
     case 'list':
       return domainList(client, projectId!);
     case 'status':
-      return domainStatus(client, projectId!, args.hostname!);
+      return domainStatus(client, projectId!, args.hostname!, args.verbose === true);
   }
 }
 
@@ -55,16 +55,18 @@ async function domainAdd(
   const domain = await client.addDomain(projectId, hostname);
   log.success(`Domain ${hostname} added (status: ${domain.status})`);
 
-  const sections: Array<string> = [];
+  // Named locals make the section order explicit (CNAME -> ownership -> SSL),
+  // rather than relying on the order of conditional pushes onto an array.
+  let cnameSection: string | undefined;
+  let ownershipSection: string | undefined;
+  let sslSection: string | undefined;
 
   if (domain.cname_target) {
-    sections.push(`CNAME (traffic)\n    ${hostname} → ${domain.cname_target}`);
+    cnameSection = `CNAME (traffic)\n    ${hostname} → ${domain.cname_target}`;
   }
 
   if (domain.ownership_verification) {
-    sections.push(
-      `TXT (ownership verification)\n    ${domain.ownership_verification.name} → ${domain.ownership_verification.value}`,
-    );
+    ownershipSection = `TXT (ownership verification)\n    ${domain.ownership_verification.name} → ${domain.ownership_verification.value}`;
   }
 
   const sslRecords = (domain.ssl_validation_records ?? []).filter(
@@ -73,14 +75,23 @@ async function domainAdd(
   );
   if (sslRecords.length > 0) {
     const lines = sslRecords.map((r) => `    ${r.txt_name} → ${r.txt_value}`).join('\n');
-    sections.push(`TXT (SSL validation)\n${lines}`);
+    sslSection = `TXT (SSL validation)\n${lines}`;
+  } else {
+    // Deadline-miss path: API short-poll didn't see SSL records before timeout.
+    // Tell the user they'll surface in `domain status` instead of silently
+    // omitting the section.
+    sslSection = `SSL validation records will appear in \`void domain status\` shortly.`;
   }
+
+  const summary = `Add all three records to your DNS, then run \`void domain status ${hostname}\` to check progress.`;
+
+  const sections = [cnameSection, ownershipSection, sslSection, summary].filter(
+    (s) => s !== undefined,
+  );
 
   if (sections.length > 0) {
     note(sections.join('\n\n'), 'DNS Setup');
   }
-
-  log.info('Run `void domain status ' + hostname + '` to check verification progress.');
 }
 
 async function domainRemove(
@@ -114,10 +125,86 @@ async function domainList(client: PlatformClient, projectId: string): Promise<vo
   note(lines.join('\n'), 'Custom Domains');
 }
 
+export type RolledUpStatus = {
+  state:
+    | 'error'
+    | 'awaiting_deployment'
+    | 'awaiting_dns'
+    | 'verifying_dns'
+    | 'issuing_cert'
+    | 'deploying_cert'
+    | 'active'
+    | 'pending';
+  diagnostic: string;
+};
+
+export function computeRollup(status: DomainStatusResponse): RolledUpStatus {
+  // Priority order matters: `error` and `awaiting_deployment` describe
+  // user-actionable conditions that should override CF's state-machine view.
+  if (status.verification_errors && status.verification_errors.length > 0) {
+    return {
+      state: 'error',
+      diagnostic: `Verification failed: ${status.verification_errors[0]}`,
+    };
+  }
+
+  if (status.awaiting_deployment === true) {
+    return {
+      state: 'awaiting_deployment',
+      diagnostic:
+        'Your project has no live deployment yet. Run `void deploy` to bring the domain online.',
+    };
+  }
+
+  if (status.cf_status === 'pending' && status.ownership_verification) {
+    return {
+      state: 'awaiting_dns',
+      diagnostic:
+        'Cloudflare has not yet observed your _cf-custom-hostname TXT record. Confirm it is published at the host shown above.',
+    };
+  }
+
+  if (status.cf_status === 'pending_validation') {
+    return {
+      state: 'verifying_dns',
+      diagnostic: 'DNS records found, Cloudflare is validating ownership.',
+    };
+  }
+
+  if (
+    status.cf_status === 'pending_issuance' ||
+    (status.cf_status === 'active' && status.ssl_status !== 'active')
+  ) {
+    return {
+      state: 'issuing_cert',
+      diagnostic: 'Cloudflare is issuing the SSL certificate (typically <5 minutes).',
+    };
+  }
+
+  if (status.cf_status === 'pending_deployment') {
+    return {
+      state: 'deploying_cert',
+      diagnostic: 'SSL certificate issued; Cloudflare is propagating it to its edge.',
+    };
+  }
+
+  // `active` is keyed off the DB status, but only reached after the per-field
+  // signals above have already surfaced cert-renewal / re-validation windows
+  // (e.g. `issuing_cert` catches `cf_status === 'active' && ssl_status !== 'active'`
+  // even when the DB row says active). Reaching this branch means CF and SSL
+  // are both healthy.
+  if (status.status === 'active') {
+    return { state: 'active', diagnostic: 'Live.' };
+  }
+
+  return { state: 'pending', diagnostic: 'Verification pending. Cloudflare is processing.' };
+}
+
 async function domainStatus(
   client: PlatformClient,
   projectId: string,
   hostname: string,
+  verbose: boolean,
 ): Promise<void> {
   const domains = await client.listDomains(projectId);
   const domain = domains.find((d) => d.hostname === hostname);
@@ -127,18 +214,29 @@ async function domainStatus(
   }
 
   const status = await client.getDomainStatus(projectId, domain.id);
-  const lines = [
-    `Hostname:    ${status.hostname}`,
-    `Status:      ${status.status}`,
-    `SSL Status:  ${status.ssl_status}`,
+  const rollup = computeRollup(status);
+
+  const rollupLines = [
+    `Hostname: ${status.hostname}`,
+    `Status:   ${rollup.state} — ${rollup.diagnostic}`,
   ];
-  if (status.ownership_verification) {
-    lines.push(`Ownership:   pending`);
+
+  if (verbose) {
+    // Visual separator: blank line + "Details:" header so the raw breakdown
+    // reads as a distinct section under the rollup, not just a continuation.
+    // `Hostname:` is already shown by the rollup above, so it's omitted here.
+    rollupLines.push('', 'Details:');
+    rollupLines.push(`  Status:      ${status.status}`);
+    rollupLines.push(`  SSL Status:  ${status.ssl_status}`);
+    if (status.ownership_verification) {
+      rollupLines.push(`  Ownership:   pending`);
+    }
+    if (status.verification_errors && status.verification_errors.length > 0) {
+      rollupLines.push(`  Errors:      ${status.verification_errors.join(', ')}`);
+    }
   }
-  if (status.verification_errors && status.verification_errors.length > 0) {
-    lines.push(`Errors:      ${status.verification_errors.join(', ')}`);
-  }
-  note(lines.join('\n'), 'Domain Status');
+
+  note(rollupLines.join('\n'), 'Domain Status');
 
   // Gate on actual validation states, not the aggregate `status.status`.
   // Once the DB row is flipped to `active`, the API keeps returning
