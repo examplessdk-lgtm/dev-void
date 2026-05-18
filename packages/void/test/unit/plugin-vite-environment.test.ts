@@ -79,4 +79,36 @@ describe('voidPlugin Vite environments', () => {
       },
     });
   });
+
+  it('clears resolve.external from the worker environment configured by test runners', async () => {
+    const root = createProjectRoot();
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    const config = await resolveConfig(
+      {
+        root,
+        plugins: [voidPlugin()],
+        environments: {
+          void_worker: {
+            resolve: {
+              external: ['node:fs'],
+              conditions: ['workerd'],
+            },
+            build: {
+              emptyOutDir: false,
+            },
+          },
+        },
+      },
+      'serve',
+      'test',
+    );
+
+    expect(config.environments.void_worker.resolve.external).toEqual([]);
+    expect(config.environments.void_worker.resolve.conditions).toContain('workerd');
+    expect(config.environments.void_worker.build).toMatchObject({
+      emptyOutDir: false,
+      outDir: 'dist/ssr',
+    });
+  });
 });

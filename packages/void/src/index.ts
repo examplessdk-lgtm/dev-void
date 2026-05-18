@@ -396,6 +396,22 @@ function createDefaultWorkerEnvironmentPlugin(): Plugin {
   };
 }
 
+function createWorkerEnvironmentSanitizerPlugin(): Plugin {
+  return {
+    name: 'void:worker-environment-sanitizer',
+    enforce: 'pre',
+    configResolved(config) {
+      const resolve = config.environments[DEFAULT_WORKER_ENVIRONMENT_NAME]?.resolve;
+      if (resolve && 'external' in resolve) {
+        // Test runners may seed Node externals into every Vite environment.
+        // Cloudflare Worker environments cannot externalize dependencies, but
+        // Cloudflare's validator expects the normalized array shape to remain.
+        resolve.external = [];
+      }
+    },
+  };
+}
+
 function createSandboxSdkResolvePlugin(): Plugin {
   let resolved: string | undefined;
 
@@ -1488,6 +1504,7 @@ export function voidPlugin(options?: {
   return [
     createCloudflareBuiltinsExternalPlugin(),
     createDefaultWorkerEnvironmentPlugin(),
+    createWorkerEnvironmentSanitizerPlugin(),
     createWranglerCompatPersistPlugin(root, config),
     restartPlugin(),
     bindingWatchPlugin,
