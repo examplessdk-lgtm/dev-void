@@ -243,7 +243,7 @@ describe('domainAdd', () => {
 
     const content = mockNote.mock.calls[0][0] as string;
     expect(content).toContain(
-      'Add all three records to your DNS, then run `void domain status foo.example.com` to check progress.',
+      'Add the records above to your DNS, then run `void domain status foo.example.com` to check progress.',
     );
   });
 

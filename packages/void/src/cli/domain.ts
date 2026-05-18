@@ -83,7 +83,7 @@ async function domainAdd(
     sslSection = `SSL validation records will appear in \`void domain status\` shortly.`;
   }
 
-  const summary = `Add all three records to your DNS, then run \`void domain status ${hostname}\` to check progress.`;
+  const summary = `Add the records above to your DNS, then run \`void domain status ${hostname}\` to check progress.`;
 
   const sections = [cnameSection, ownershipSection, sslSection, summary].filter(
     (s) => s !== undefined,
