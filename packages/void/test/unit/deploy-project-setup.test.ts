@@ -77,7 +77,7 @@ describe('promptDeployProjectConfig', () => {
     expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual(config);
   });
 
-  it('rejects short free-plan project slugs at the prompt', async () => {
+  it('accepts short slugs at the prompt and lets the server enforce plan limits', async () => {
     const { promptProjectSlug } = await import('../../src/cli/prompt.ts');
     mockText.mockResolvedValueOnce('valid-app');
 
@@ -86,11 +86,38 @@ describe('promptDeployProjectConfig', () => {
     const promptConfig = mockText.mock.calls[0]?.[0] as {
       validate: (value: string) => string | undefined;
     };
-    expect(promptConfig.validate('abcde')).toBe(
-      'Slugs of 5 characters or fewer require a paid plan. Use at least 6 characters.',
-    );
+    // Short slugs no longer rejected client-side — plan is checked server-side.
+    expect(promptConfig.validate('abc')).toBeUndefined();
+    expect(promptConfig.validate('abcde')).toBeUndefined();
     expect(promptConfig.validate('abcdef')).toBeUndefined();
+    // Format check still runs locally.
     expect(promptConfig.validate('ABC')).toBe('Slug must be lowercase alphanumeric with dashes.');
+    expect(promptConfig.validate('')).toBe('Project slug is required.');
+  });
+
+  it('re-prompts when the server rejects a short slug for a free-plan user', async () => {
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
+    const { PlatformApiError } = await import('../../src/cli/client.ts');
+    const client = createClient();
+    client.listProjects.mockResolvedValueOnce([]);
+    client.createProject
+      .mockRejectedValueOnce(
+        new PlatformApiError(
+          'createProject',
+          403,
+          JSON.stringify({ error: 'short slugs (5 characters or fewer) require a paid plan' }),
+        ),
+      )
+      .mockResolvedValueOnce({ id: 'proj_new', slug: 'longer-app' });
+    mockSelect.mockResolvedValueOnce('create');
+    mockText.mockResolvedValueOnce('oxc').mockResolvedValueOnce('longer-app');
+
+    const config = await promptDeployProjectConfig(root, client);
+
+    expect(client.createProject).toHaveBeenNthCalledWith(1, 'oxc');
+    expect(client.createProject).toHaveBeenNthCalledWith(2, 'longer-app');
+    expect(mockText).toHaveBeenCalledTimes(2);
+    expect(config).toEqual({ projectId: 'proj_new', slug: 'longer-app' });
   });
 
   it('does not show project names when creating with existing projects available', async () => {

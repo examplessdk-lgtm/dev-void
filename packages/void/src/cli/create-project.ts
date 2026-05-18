@@ -33,5 +33,8 @@ export async function promptAndCreateProject(
 }
 
 function isRetryableCreateError(error: PlatformApiError): boolean {
-  return error.status === 400 || error.status === 409 || error.status === 422;
+  // 403 covers slug-length plan rejection — re-prompt so the user can pick a longer slug.
+  return (
+    error.status === 400 || error.status === 403 || error.status === 409 || error.status === 422
+  );
 }

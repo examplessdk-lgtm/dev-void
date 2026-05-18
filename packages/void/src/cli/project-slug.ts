@@ -10,9 +10,9 @@ export function validateProjectSlug(value: string | undefined): string | undefin
   if (!valid) {
     return 'Slug must be lowercase alphanumeric with dashes.';
   }
-  if (slug.length <= 5) {
-    return 'Slugs of 5 characters or fewer require a paid plan. Use at least 6 characters.';
-  }
 
+  // Plan-based slug-length restrictions are enforced server-side so the check
+  // can read the caller's current plan. The retry loop in create-project.ts
+  // re-prompts when the server rejects.
   return undefined;
 }
