@@ -396,17 +396,20 @@ function createDefaultWorkerEnvironmentPlugin(): Plugin {
   };
 }
 
-function createWorkerEnvironmentSanitizerPlugin(): Plugin {
+function createWorkerEnvironmentSanitizerPlugin(environmentNames: ReadonlyArray<string>): Plugin {
+  const names = new Set(environmentNames);
   return {
     name: 'void:worker-environment-sanitizer',
     enforce: 'pre',
     configResolved(config) {
-      const resolve = config.environments[DEFAULT_WORKER_ENVIRONMENT_NAME]?.resolve;
-      if (resolve && 'external' in resolve) {
-        // Test runners may seed Node externals into every Vite environment.
-        // Cloudflare Worker environments cannot externalize dependencies, but
-        // Cloudflare's validator expects the normalized array shape to remain.
-        resolve.external = [];
+      for (const name of names) {
+        const resolve = config.environments[name]?.resolve;
+        if (resolve && 'external' in resolve) {
+          // Test runners may seed Node externals into every Vite environment.
+          // Cloudflare Worker environments cannot externalize dependencies, but
+          // Cloudflare's validator expects the normalized array shape to remain.
+          resolve.external = [];
+        }
       }
     },
   };
@@ -1386,6 +1389,10 @@ export function voidPlugin(options?: {
 
     return [
       createCloudflareBuiltinsExternalPlugin(),
+      createWorkerEnvironmentSanitizerPlugin([
+        viteEnvironment.name,
+        ...(viteEnvironment.childEnvironments ?? []),
+      ]),
       createWranglerCompatPersistPlugin(root, config),
       restartPlugin(),
       bindingWatchPlugin,
@@ -1516,7 +1523,7 @@ export function voidPlugin(options?: {
   return [
     createCloudflareBuiltinsExternalPlugin(),
     createDefaultWorkerEnvironmentPlugin(),
-    createWorkerEnvironmentSanitizerPlugin(),
+    createWorkerEnvironmentSanitizerPlugin([DEFAULT_WORKER_ENVIRONMENT_NAME]),
     createWranglerCompatPersistPlugin(root, config),
     restartPlugin(),
     bindingWatchPlugin,

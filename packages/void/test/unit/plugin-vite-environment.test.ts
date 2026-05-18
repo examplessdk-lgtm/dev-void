@@ -111,4 +111,38 @@ describe('voidPlugin Vite environments', () => {
       outDir: 'dist/ssr',
     });
   });
+
+  it('clears resolve.external from class A framework worker environments', async () => {
+    const root = createProjectRoot();
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        type: 'module',
+        dependencies: {
+          '@tanstack/react-start': '^1.0.0',
+        },
+      }),
+    );
+
+    const config = await resolveConfig(
+      {
+        root,
+        plugins: [voidPlugin()],
+        environments: {
+          ssr: {
+            resolve: {
+              external: ['node:fs'],
+              conditions: ['workerd'],
+            },
+          },
+        },
+      },
+      'serve',
+      'test',
+    );
+
+    expect(config.environments.ssr.resolve.external).toEqual([]);
+    expect(config.environments.ssr.resolve.conditions).toContain('workerd');
+  });
 });
