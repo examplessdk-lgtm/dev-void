@@ -82,7 +82,7 @@ There is Vinext-specific source in the repo, but it is intentionally on hold and
 
 ## Documentation
 
-Full docs live at [void.cloud/docs](https://void.cloud/docs).
+Full docs live at [void.cloud/guide](https://void.cloud/guide).
 
 ## License
 
