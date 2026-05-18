@@ -515,42 +515,40 @@ async function runAiSetupPrompt(
 
   if (result === '__create__') {
     const { validateProjectSlug } = await import('./cli/project-slug.ts');
-    const { isRetryableCreateError } = await import('./cli/create-project.ts');
-    const { PlatformApiError } = await import('./cli/client.ts');
-    let defaultSlug = inferDefaultSlug(root);
-    // Retry loop: server-side plan checks (e.g. slug-length on free plan) can
-    // reject after client validation. Re-prompt instead of bailing so users
-    // can pick a different slug without restarting the dev server.
-    let created: { id: string; slug: string } | undefined;
-    while (!created) {
-      const slugResult = await text({
-        message: 'Choose a slug for your new Void project:',
-        placeholder: 'my-app',
-        initialValue: defaultSlug,
-        validate: validateProjectSlug,
-      });
-      if (isCancel(slugResult)) {
-        return;
-      }
-      const trimmed = slugResult.trim();
-      try {
-        created = await client.createProject(trimmed);
-      } catch (err: unknown) {
-        if (err instanceof PlatformApiError && isRetryableCreateError(err)) {
-          const reason = err.code || err.body || `HTTP ${err.status}`;
-          log.error(`project: Could not create project '${trimmed}': ${reason}.`);
-          defaultSlug = trimmed;
-          continue;
-        }
-        voidError(
-          `project: Failed to create project: '${err instanceof Error ? err.message : String(err)}'.`,
-        );
-        return;
-      }
+    const { createProjectWithSlugRetry } = await import('./cli/create-project.ts');
+    let created;
+    try {
+      // Share the slug-retry loop with deploy/link paths so server-side plan
+      // rejections (e.g. free-plan short-slug 403) re-prompt consistently.
+      // The prompt callback returns `undefined` on Ctrl+C so the helper can
+      // exit cleanly instead of calling process.exit().
+      created = await createProjectWithSlugRetry(
+        client,
+        inferDefaultSlug(root),
+        async (defaultSlug) => {
+          const slugResult = await text({
+            message: 'Choose a slug for your new Void project:',
+            placeholder: 'my-app',
+            initialValue: defaultSlug,
+            validate: validateProjectSlug,
+          });
+          if (isCancel(slugResult)) {
+            return undefined;
+          }
+          return slugResult.trim();
+        },
+      );
+    } catch (err: unknown) {
+      voidError(
+        `project: Failed to create project: '${err instanceof Error ? err.message : String(err)}'.`,
+      );
+      return;
+    }
+    if (!created) {
+      return;
     }
     projectId = created.id;
     slug = created.slug;
-    log.success(`Project created: ${pc.blue(slug)}`);
   } else {
     const project = projects.find(
       (p: import('./cli/client.ts').ProjectResponse) => p.id === result,

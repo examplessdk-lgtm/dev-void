@@ -120,6 +120,32 @@ describe('promptDeployProjectConfig', () => {
     expect(config).toEqual({ projectId: 'proj_new', slug: 'longer-app' });
   });
 
+  it('retries when 403 body mentions slug but code is generic', async () => {
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
+    const { PlatformApiError } = await import('../../src/cli/client.ts');
+    const client = createClient();
+    client.listProjects.mockResolvedValueOnce([]);
+    // Generic top-level error code with the slug detail only in `message` —
+    // the retry check must inspect both fields, not short-circuit on `code`.
+    client.createProject
+      .mockRejectedValueOnce(
+        new PlatformApiError(
+          'createProject',
+          403,
+          JSON.stringify({ error: 'forbidden', message: 'slug too short for plan' }),
+        ),
+      )
+      .mockResolvedValueOnce({ id: 'proj_new', slug: 'longer-app' });
+    mockSelect.mockResolvedValueOnce('create');
+    mockText.mockResolvedValueOnce('oxc').mockResolvedValueOnce('longer-app');
+
+    const config = await promptDeployProjectConfig(root, client);
+
+    expect(client.createProject).toHaveBeenNthCalledWith(1, 'oxc');
+    expect(client.createProject).toHaveBeenNthCalledWith(2, 'longer-app');
+    expect(config).toEqual({ projectId: 'proj_new', slug: 'longer-app' });
+  });
+
   it('does not retry on non-slug 403 errors (e.g. account suspended)', async () => {
     const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
     const { PlatformApiError } = await import('../../src/cli/client.ts');
