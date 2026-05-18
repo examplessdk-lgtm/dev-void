@@ -64,7 +64,7 @@ import { prerenderPlugin } from './plugin-prerender.ts';
 import { restartPlugin } from './plugin-restart.ts';
 import { routingPlugin } from './plugin-routing.ts';
 import { scanQueuesSync } from './queues/scan.ts';
-import { scanRoutePatternsSync } from './router/scan.ts';
+import { scanMiddlewareSync, scanRoutePatternsSync } from './router/scan.ts';
 import { scanWebSocketRoutesSync } from './router/websocket.ts';
 import { SANDBOX_MIGRATION_TAG, isSandboxEnabled, resolveSandboxConfig } from './sandbox/config.ts';
 import { filterLoadedEnv, resolveRemoteMode, stripInternalEnvKeys } from './shared/env.ts';
@@ -1475,7 +1475,7 @@ export function voidPlugin(options?: {
   const jobs = scanJobsSync(root);
   const ssrEntry = validateSsrEntry(root);
   const hasPages = existsSync(join(root, 'pages'));
-  const hasMiddleware = existsSync(join(root, 'middleware'));
+  const hasMiddleware = scanMiddlewareSync(root).length > 0;
   const routePatterns = scanRoutePatternsSync(root);
   const hasDocumentRoutes = routeScanHasDocumentRoutes(routePatterns);
   let assetRouting = resolveAssetRoutingPolicy({

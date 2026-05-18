@@ -31,6 +31,20 @@ export type MiddlewareDefinition = {
 const HANDLER_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
 const ROUTE_PATTERN = `**/*.{${HANDLER_EXTENSIONS.join(',')}}`;
 
+function parseMiddlewareDefinitions(files: Array<string>): Array<MiddlewareDefinition> {
+  return files
+    .filter((f) => !f.startsWith('_'))
+    .map((f) => {
+      const basename = f.split('/').pop()!;
+      const match = basename.match(/^(\d+)\./);
+      return {
+        order: match ? parseInt(match[1], 10) : Infinity,
+        filePath: f,
+      };
+    })
+    .sort((a, b) => a.order - b.order);
+}
+
 /**
  * Scan routes/ and middleware/ directories and return a structured manifest.
  * Files starting with _ are ignored.
@@ -70,19 +84,20 @@ export async function scanRoutes(
     });
 
   // Parse middleware, sorted by numeric prefix
-  const middleware = middlewareFiles
-    .filter((f) => !f.startsWith('_'))
-    .map((f) => {
-      const basename = f.split('/').pop()!;
-      const match = basename.match(/^(\d+)\./);
-      return {
-        order: match ? parseInt(match[1], 10) : Infinity,
-        filePath: f,
-      };
-    })
-    .sort((a, b) => a.order - b.order);
+  const middleware = parseMiddlewareDefinitions(middlewareFiles);
 
   return { routes, websockets, middleware, jobs, queues, pages };
+}
+
+export function scanMiddlewareSync(root: string): Array<MiddlewareDefinition> {
+  let middlewareFiles: Array<string>;
+  try {
+    middlewareFiles = globSync(ROUTE_PATTERN, { cwd: `${root}/middleware`, absolute: false });
+  } catch {
+    middlewareFiles = [];
+  }
+
+  return parseMiddlewareDefinitions(middlewareFiles);
 }
 
 export function scanRoutePatternsSync(root: string): Array<RouteDefinition> {

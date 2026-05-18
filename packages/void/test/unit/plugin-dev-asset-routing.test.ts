@@ -139,6 +139,17 @@ describe('voidPlugin dev asset routing', () => {
     expect(assets?.run_worker_first).toBeUndefined();
   });
 
+  it('keeps API-only projects static-first when middleware directory has no active files', async () => {
+    const root = createApiOnlyProjectRoot();
+    mkdirSync(join(root, 'middleware'), { recursive: true });
+    writeFileSync(join(root, 'middleware', '_ignored.ts'), 'export default () => undefined;');
+
+    const assets = await resolveVoidPluginAssets(root);
+
+    expect(assets?.not_found_handling).toBe('single-page-application');
+    expect(assets?.run_worker_first).toBeUndefined();
+  });
+
   it('routes document routes through the worker before SPA fallback HTML', async () => {
     const root = createDocumentRouteProjectRoot();
     const assets = await resolveVoidPluginAssets(root);
