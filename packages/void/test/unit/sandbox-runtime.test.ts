@@ -108,6 +108,8 @@ describe('runtime sandbox: getSandbox()', () => {
       {
         SANDBOX: { __ns: true },
         __VOID_PROXY: { fetch: gateFetch },
+        __VOID_PROJECT_ID: 'proj-1',
+        __VOID_PROXY_TOKEN: 'token-1',
       },
       async () => {
         const result = await getSandbox('sb-1');
@@ -121,7 +123,13 @@ describe('runtime sandbox: getSandbox()', () => {
     const init = callArgs[1] as RequestInit;
     expect(url).toBe('https://gate/sandbox/acquire');
     expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body as string)).toEqual({ sandboxId: 'sb-1' });
+    // Body must carry the HMAC-verifiable {projectId, aiToken} pair the
+    // proxy auth middleware requires, alongside the caller's sandboxId.
+    expect(JSON.parse(init.body as string)).toEqual({
+      projectId: 'proj-1',
+      aiToken: 'token-1',
+      sandboxId: 'sb-1',
+    });
   });
 
   it('throws SandboxLimitError(concurrency) when the gate denies with 409', async () => {
@@ -141,6 +149,8 @@ describe('runtime sandbox: getSandbox()', () => {
       {
         SANDBOX: { __ns: true },
         __VOID_PROXY: { fetch: gateFetch },
+        __VOID_PROJECT_ID: 'proj-1',
+        __VOID_PROXY_TOKEN: 'token-1',
       },
       async () => {
         await expect(getSandbox('sb-x')).rejects.toBeInstanceOf(SandboxLimitError);
@@ -166,6 +176,8 @@ describe('runtime sandbox: getSandbox()', () => {
       {
         SANDBOX: { __ns: true },
         __VOID_PROXY: { fetch: gateFetch },
+        __VOID_PROJECT_ID: 'proj-1',
+        __VOID_PROXY_TOKEN: 'token-1',
       },
       async () => {
         const err = await getSandbox('sb-x').catch((e: unknown) => e);
@@ -192,6 +204,8 @@ describe('runtime sandbox: getSandbox()', () => {
       {
         SANDBOX: { __ns: true },
         __VOID_PROXY: { fetch: gateFetch },
+        __VOID_PROJECT_ID: 'proj-1',
+        __VOID_PROXY_TOKEN: 'token-1',
       },
       async () => {
         // Documents the deliberate fail-open behaviour: a broken gate must not
@@ -202,6 +216,40 @@ describe('runtime sandbox: getSandbox()', () => {
     );
 
     expect(gateFetch).toHaveBeenCalledOnce();
+    expect(stubFn).toHaveBeenCalledOnce();
+  });
+
+  it('skips the gate call and returns the DO stub when __VOID_PROXY_TOKEN is missing', async () => {
+    vi.resetModules();
+    const { envContext } = await import('../../src/runtime/env-raw.ts');
+    const { getSandbox } = await import('../../src/runtime/sandbox.ts');
+
+    const stub = { __no_token: true };
+    const stubFn = vi.fn((..._args: ReadonlyArray<unknown>) => stub);
+    getSandboxImpl = stubFn;
+
+    const gateFetch = vi.fn(
+      async (..._args: ReadonlyArray<unknown>) => new Response(null, { status: 200 }),
+    );
+
+    // Mirrors a partial / legacy deploy: the proxy service binding is wired
+    // up but the HMAC identity vars never landed. Without those we can't
+    // form an authenticated request, so we must skip the gate entirely
+    // (same no-op semantics as local dev with no proxy binding).
+    await envContext.run(
+      {
+        SANDBOX: { __ns: true },
+        __VOID_PROXY: { fetch: gateFetch },
+        __VOID_PROJECT_ID: 'proj-1',
+        // __VOID_PROXY_TOKEN intentionally absent
+      },
+      async () => {
+        const result = await getSandbox('sb-skip');
+        expect(result).toBe(stub);
+      },
+    );
+
+    expect(gateFetch).not.toHaveBeenCalled();
     expect(stubFn).toHaveBeenCalledOnce();
   });
 });
@@ -283,7 +331,11 @@ describe('runtime sandbox: VoidPlatformSandbox', () => {
     const gateFetch = vi.fn(
       async (..._args: ReadonlyArray<unknown>) => new Response(null, { status: 204 }),
     );
-    const env = { __VOID_PROXY: { fetch: gateFetch } };
+    const env = {
+      __VOID_PROXY: { fetch: gateFetch },
+      __VOID_PROJECT_ID: 'proj-release',
+      __VOID_PROXY_TOKEN: 'token-release',
+    };
 
     await envContext.run(env, async () => {
       const sandbox = new VoidPlatformSandbox(ctx as never, env as never);
@@ -297,7 +349,16 @@ describe('runtime sandbox: VoidPlatformSandbox', () => {
     // not a timer, so `vi.runAllTimersAsync()` would not advance it.
     await Promise.resolve();
     expect(gateFetch).toHaveBeenCalledOnce();
-    expect(gateFetch.mock.calls[0][0]).toBe('https://gate/sandbox/release');
+    const releaseCall = gateFetch.mock.calls[0];
+    expect(releaseCall[0]).toBe('https://gate/sandbox/release');
+    // Same {projectId, aiToken, sandboxId} contract as /acquire — the shared
+    // proxy auth middleware protects both routes.
+    const releaseInit = releaseCall[1] as RequestInit;
+    expect(JSON.parse(releaseInit.body as string)).toEqual({
+      projectId: 'proj-release',
+      aiToken: 'token-release',
+      sandboxId: 'sandbox-instance-C',
+    });
   });
 
   it('onStart() emits a single reconciliation event when storage holds an orphaned anchor', async () => {

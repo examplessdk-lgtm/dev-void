@@ -112,21 +112,50 @@ async function emitRuntimeSeconds(
 }
 
 /**
+ * Resolve the `{ gate, projectId, aiToken }` triple needed to call a gate
+ * route. Returns `null` when any piece is missing — local dev (no proxy
+ * binding) and partial deploys (binding present but identity vars absent)
+ * both fall through to the no-op path so a missing platform setup never
+ * blocks sandbox acquisition.
+ *
+ * Wire field is named `aiToken` because the shared proxy auth middleware
+ * (packages/proxy/src/index.ts) verifies HMAC against `body.aiToken` for
+ * every route. Naming it `proxyToken` here would diverge from the existing
+ * AI/ISR convention without changing the on-the-wire contract.
+ */
+function resolveGateIdentity(): { gate: Fetcher; projectId: string; aiToken: string } | null {
+  const runtimeEnv = getRawRuntimeEnv();
+  const gate = runtimeEnv[SANDBOX_GATE_BINDING] as Fetcher | undefined;
+  if (!gate) {
+    return null;
+  }
+  const projectId = runtimeEnv.__VOID_PROJECT_ID as string | undefined;
+  const aiToken = runtimeEnv.__VOID_PROXY_TOKEN as string | undefined;
+  if (!projectId || !aiToken) {
+    return null;
+  }
+  return { gate, projectId, aiToken };
+}
+
+/**
  * Fire-and-forget release notification to the gate so it can drop the active
  * lease counter. Failure is silent — the gate maintains its own TTL fallback.
  */
 function notifyGateRelease(ctx: DurableObjectState): void {
-  const runtimeEnv = getRawRuntimeEnv();
-  const gate = runtimeEnv[SANDBOX_GATE_BINDING] as Fetcher | undefined;
-  if (!gate) {
+  const identity = resolveGateIdentity();
+  if (!identity) {
     return;
   }
   const sandboxId = getSandboxInstanceId(ctx);
-  void gate
+  void identity.gate
     .fetch('https://gate/sandbox/release', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sandboxId }),
+      body: JSON.stringify({
+        projectId: identity.projectId,
+        aiToken: identity.aiToken,
+        sandboxId,
+      }),
     })
     .catch(() => {
       // Best-effort — the gate has its own lease-expiry safety net.
@@ -219,15 +248,18 @@ export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
  * coordinating with the platform gate to enforce per-user concurrency and
  * runtime budgets.
  *
- * When the gate binding (`__VOID_PROXY` by default) is present, we POST to
- * `https://gate/sandbox/acquire` first. A `409` response means the user has
- * exceeded a budget — we throw `SandboxLimitError` so the caller can render
- * a clear message. Any other non-OK status is treated as "gate unavailable"
- * and we fall through to returning the stub so a broken gate doesn't break
- * sandbox access entirely.
+ * When the gate binding (`__VOID_PROXY` by default) is present AND the
+ * platform's `__VOID_PROJECT_ID` + `__VOID_PROXY_TOKEN` identity vars are
+ * available, we POST to `https://gate/sandbox/acquire` with the HMAC-signed
+ * body the shared proxy auth middleware expects. A `409` response means the
+ * user has exceeded a budget — we throw `SandboxLimitError` so the caller
+ * can render a clear message. Any other non-OK status is treated as "gate
+ * unavailable" and we fall through to returning the stub so a broken gate
+ * doesn't break sandbox access entirely.
  *
- * When the gate binding is absent (local dev), the gate check is skipped
- * entirely and we return the stub directly.
+ * When the gate binding is absent (local dev) or the identity vars are
+ * missing (partial deploy), the gate check is skipped entirely and we
+ * return the stub directly.
  */
 export async function getSandbox<T extends Sandbox = Sandbox>(
   id: string = DEFAULT_SANDBOX_ID,
@@ -235,13 +267,16 @@ export async function getSandbox<T extends Sandbox = Sandbox>(
 ): Promise<T> {
   const { binding = sandboxBindingName, ...sandboxOptions } = options ?? {};
 
-  const runtimeEnv = getRawRuntimeEnv();
-  const gate = runtimeEnv[SANDBOX_GATE_BINDING] as Fetcher | undefined;
-  if (gate) {
-    const res = await gate.fetch('https://gate/sandbox/acquire', {
+  const identity = resolveGateIdentity();
+  if (identity) {
+    const res = await identity.gate.fetch('https://gate/sandbox/acquire', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sandboxId: id }),
+      body: JSON.stringify({
+        projectId: identity.projectId,
+        aiToken: identity.aiToken,
+        sandboxId: id,
+      }),
     });
     if (res.status === 409) {
       const body = (await res.json().catch(() => ({}))) as { reason?: string };
