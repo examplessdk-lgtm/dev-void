@@ -77,8 +77,17 @@ function createMockCtx(idName?: string) {
           }
         }
       }),
-      delete: vi.fn(async (key: string) => {
-        storage.delete(key);
+      delete: vi.fn(async (keyOrKeys: string | Array<string>) => {
+        if (Array.isArray(keyOrKeys)) {
+          let count = 0;
+          for (const k of keyOrKeys) {
+            if (storage.delete(k)) {
+              count++;
+            }
+          }
+          return count;
+        }
+        return storage.delete(keyOrKeys);
       }),
       setAlarm: vi.fn(async (when: number) => {
         alarms.push(when);
@@ -523,6 +532,58 @@ describe('runtime sandbox: VoidPlatformSandbox', () => {
     // Anchors reset to the new "now".
     expect(ctx._storageMap.get('__voidStartTs')).toBe(now);
     expect(ctx._storageMap.get('__voidLastFlushTs')).toBe(now);
+  });
+
+  it('onStart() clears orphan anchor before super.onStart() so a failed super does not re-bill on retry', async () => {
+    vi.resetModules();
+    const { envContext } = await import('../../src/runtime/env-raw.ts');
+    const { VoidPlatformSandbox } = await import('../../src/runtime/sandbox.ts');
+    const { Sandbox } = await import('@cloudflare/sandbox');
+
+    const ctx = createMockCtx('sandbox-instance-orphan-throw');
+    // Pre-populate an orphan anchor 10s in the past, simulating a previous
+    // instance that crashed without firing onStop.
+    const ORPHAN_LAG_MS = 10_000;
+    const orphanedAnchor = Date.now() - ORPHAN_LAG_MS;
+    ctx._storageMap.set('__voidStartTs', orphanedAnchor);
+    ctx._storageMap.set('__voidLastFlushTs', orphanedAnchor);
+
+    const queueSend = vi.fn(async (..._args: ReadonlyArray<unknown>) => undefined);
+    const env = { USAGE_EVENTS_QUEUE: { send: queueSend } };
+
+    // First onStart(): the orphan reconciliation event must be emitted and
+    // the anchors cleared BEFORE super throws. We assert both pieces so a
+    // future regression that delays the delete after super gets caught.
+    const onStartSpy = vi
+      .spyOn(Sandbox.prototype as { onStart: () => Promise<void> }, 'onStart')
+      .mockRejectedValueOnce(new Error('container failed to start'));
+
+    await envContext.run(env, async () => {
+      const sandbox = new VoidPlatformSandbox(ctx as never, env as never);
+      await expect(sandbox.onStart()).rejects.toThrow('container failed to start');
+    });
+
+    // One reconciliation event for the orphan window.
+    expect(queueSend).toHaveBeenCalledOnce();
+    // Anchors cleared in storage despite super throwing — this is the bug fix.
+    expect(ctx._storageMap.has('__voidStartTs')).toBe(false);
+    expect(ctx._storageMap.has('__voidLastFlushTs')).toBe(false);
+
+    // Second onStart() retry with super now succeeding. There must NOT be a
+    // second reconciliation event because storage no longer holds an orphan
+    // anchor — this is the double-billing the fix prevents.
+    onStartSpy.mockResolvedValueOnce();
+
+    await envContext.run(env, async () => {
+      const sandbox = new VoidPlatformSandbox(ctx as never, env as never);
+      await expect(sandbox.onStart()).resolves.toBeUndefined();
+    });
+
+    // Still just the original single emit — no extra reconciliation.
+    expect(queueSend).toHaveBeenCalledOnce();
+    // Fresh start anchors written by the successful retry.
+    expect(typeof ctx._storageMap.get('__voidStartTs')).toBe('number');
+    expect(typeof ctx._storageMap.get('__voidLastFlushTs')).toBe('number');
   });
 
   it('alarm() emits a heartbeat delta and re-arms the next alarm', async () => {

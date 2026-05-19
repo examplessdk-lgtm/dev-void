@@ -194,6 +194,11 @@ export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
     if (orphanedAnchor !== undefined && orphanedAnchor < now) {
       const sandboxRuntimeSeconds = (now - orphanedAnchor) / 1000;
       await emitRuntimeSeconds(this.ctx, sandboxRuntimeSeconds);
+      // Clear the orphan anchor BEFORE super.onStart() so a failed super
+      // (bad image, platform scheduling error) doesn't leave the same
+      // anchor in storage for the next retry to re-emit, double-counting
+      // runtime that's already been billed.
+      await this.ctx.storage.delete([STORAGE_KEY_START_TS, STORAGE_KEY_LAST_FLUSH_TS]);
     }
 
     await super.onStart();
