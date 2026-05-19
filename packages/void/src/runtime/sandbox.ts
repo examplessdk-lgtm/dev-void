@@ -196,18 +196,25 @@ export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
       await emitRuntimeSeconds(this.ctx, sandboxRuntimeSeconds);
     }
 
-    await this.ctx.storage.put({
-      [STORAGE_KEY_START_TS]: now,
-      [STORAGE_KEY_LAST_FLUSH_TS]: now,
-    });
-
     await super.onStart();
 
-    // Set the heartbeat alarm AFTER super.onStart() because DOs have a single
-    // alarm slot — upstream Sandbox/Container may arm its own alarm (e.g. for
-    // sleepAfter idle management) and clobber ours. Same ordering pattern the
-    // alarm() override uses: defer to super first, then re-arm our heartbeat.
-    await this.ctx.storage.setAlarm(Date.now() + HEARTBEAT_MS);
+    // Persist start/flush timestamps and arm the heartbeat alarm only AFTER
+    // super.onStart() succeeds. If super throws (container failed to start),
+    // we must not leave anchors behind — the next onStart() would treat them
+    // as an orphaned window and bill wall-clock time during which no
+    // container ever ran. Re-read the clock so timestamps reflect the actual
+    // container-ready instant rather than the pre-super entry point.
+    //
+    // Heartbeat alarm is set after super for the same single-alarm-slot
+    // reason the alarm() override relies on: upstream Sandbox/Container may
+    // arm its own alarm (e.g. for sleepAfter idle management) and clobber
+    // ours if we set it first.
+    const startedAt = Date.now();
+    await this.ctx.storage.put({
+      [STORAGE_KEY_START_TS]: startedAt,
+      [STORAGE_KEY_LAST_FLUSH_TS]: startedAt,
+    });
+    await this.ctx.storage.setAlarm(startedAt + HEARTBEAT_MS);
   }
 
   override async alarm(alarmProps?: { isRetry: boolean; retryCount: number }): Promise<void> {

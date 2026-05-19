@@ -1,5 +1,5 @@
 import { defineHandler } from 'void';
-import { getSandbox } from 'void/sandbox';
+import { getSandbox, SandboxLimitError } from 'void/sandbox';
 import { sampleRequests } from '../../lib/sandbox-demo.ts';
 
 const MAX_CODE_LENGTH = 8_000;
@@ -79,6 +79,12 @@ export const POST = defineHandler(async (c) => {
       duration: result.duration,
     });
   } catch (err) {
+    // Quota denials from the platform gate are user-facing 4xx, not server
+    // errors. Reference implementations get copied — surfacing this as a 500
+    // teaches the wrong pattern.
+    if (err instanceof SandboxLimitError) {
+      return c.json({ ok: false, error: err.message, reason: err.reason }, 429);
+    }
     const message = err instanceof Error ? err.message : String(err);
     return c.json({ ok: false, error: message }, 500);
   }
