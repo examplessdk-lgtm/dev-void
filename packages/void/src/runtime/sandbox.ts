@@ -164,6 +164,41 @@ function notifyGateRelease(ctx: DurableObjectState): Promise<void> {
     });
 }
 
+/**
+ * Heartbeat-driven keepalive ping for the gate's concurrency slot. The DO's
+ * `STALE_MS` (1h) sweep would otherwise reap slots for long-running sandbox
+ * sessions whose `acquiredAt` ages past the threshold between acquire and
+ * release, letting new acquires exceed `sandboxMaxConcurrentInstances`. The
+ * 5 min heartbeat sits well inside the sweep window, so each successful
+ * refresh resets the stale clock. Returns the in-flight fetch as a Promise
+ * (errors swallowed) so callers can route it through `ctx.waitUntil()` and
+ * keep the alarm path itself off the critical path — a failed refresh just
+ * means the slot ages out naturally, which matches the pre-existing failure
+ * mode if the gate goes down entirely.
+ */
+function notifyGateRefresh(ctx: DurableObjectState): Promise<void> {
+  const identity = resolveGateIdentity();
+  if (!identity) {
+    return Promise.resolve();
+  }
+  const sandboxId = getSandboxInstanceId(ctx);
+  return identity.gate
+    .fetch('https://gate/sandbox/refresh', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectId: identity.projectId,
+        aiToken: identity.aiToken,
+        sandboxId,
+      }),
+    })
+    .then(() => undefined)
+    .catch(() => {
+      // Best-effort — a failed refresh just means the slot ages out via the
+      // gate's existing STALE_MS sweep. No retry, no surfaced error.
+    });
+}
+
 // --- VoidPlatformSandbox ---
 
 /**
@@ -201,7 +236,20 @@ export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
       await this.ctx.storage.delete([STORAGE_KEY_START_TS, STORAGE_KEY_LAST_FLUSH_TS]);
     }
 
-    await super.onStart();
+    try {
+      await super.onStart();
+    } catch (err) {
+      // super.onStart() failures (bad image, scheduling error) leave the
+      // gate's acquire counter stuck — `getSandbox()` POSTs to /acquire
+      // BEFORE the first method call that triggers onStart, so this is the
+      // first lifecycle hook that runs. Without releasing here, neither
+      // onStop nor onActivityExpired fires for a failed startup, and the
+      // lease leaks until the gate's STALE_MS sweep — surfacing as false
+      // concurrency-denied errors on the user's next retry. Route through
+      // waitUntil because Workers may already be tearing down during throw.
+      this.ctx.waitUntil(notifyGateRelease(this.ctx));
+      throw err;
+    }
 
     // Persist start/flush timestamps and arm the heartbeat alarm only AFTER
     // super.onStart() succeeds. If super throws (container failed to start),
@@ -237,6 +285,12 @@ export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
     const now = Date.now();
     const sandboxRuntimeSeconds = Math.max(0, (now - lastFlush) / 1000);
     await emitRuntimeSeconds(this.ctx, sandboxRuntimeSeconds);
+    // Fire-and-forget keepalive to the gate's concurrency slot so the
+    // STALE_MS sweep doesn't reap long-running sessions. waitUntil keeps
+    // the request alive past this hook without gating heartbeat completion
+    // on the gate's response — heartbeat-emitted metering must always make
+    // forward progress even if the gate is unreachable.
+    this.ctx.waitUntil(notifyGateRefresh(this.ctx));
     await Promise.all([
       this.ctx.storage.put(STORAGE_KEY_LAST_FLUSH_TS, now),
       this.ctx.storage.setAlarm(now + HEARTBEAT_MS),

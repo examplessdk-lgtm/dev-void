@@ -664,7 +664,24 @@ export function voidPlugin(options?: {
     'void/queues': 'export const queues = {};',
     'void/storage': 'export const storage = {}; export const createStorage = () => ({});',
     'void/isr': 'export const revalidate = async () => {};',
-    'void/sandbox': 'export const sandbox = {}; export const getSandbox = () => ({});',
+    // Client stub must mirror the real runtime/sandbox.ts surface so any
+    // client-side `instanceof SandboxLimitError` check doesn't crash with a
+    // TypeError, and async `await getSandbox(...)` callers don't silently
+    // mis-handle a sync return. Throwing here makes accidental client imports
+    // fail loudly rather than returning a misleading bare `{}`.
+    'void/sandbox': `
+      export class SandboxLimitError extends Error {
+        constructor(reason = 'concurrency', message) {
+          super(message ?? 'Sandbox limit reached: ' + reason);
+          this.name = 'SandboxLimitError';
+          this.reason = reason;
+        }
+      }
+      export async function getSandbox() {
+        throw new Error('void/sandbox is server-only and cannot be imported by browser code.');
+      }
+      export const sandbox = { get: getSandbox };
+    `,
     'void/live': '',
   };
   const STUB_RESOLVE_FILTER = new RegExp(

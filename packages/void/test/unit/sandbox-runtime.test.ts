@@ -609,4 +609,95 @@ describe('runtime sandbox: VoidPlatformSandbox', () => {
     // Alarm re-armed: at least one extra setAlarm beyond the onStart() one.
     expect(ctx._alarms.length).toBeGreaterThanOrEqual(2);
   });
+
+  it('alarm() fires a fire-and-forget refresh POST to the gate via waitUntil', async () => {
+    vi.resetModules();
+    const { envContext } = await import('../../src/runtime/env-raw.ts');
+    const { VoidPlatformSandbox, HEARTBEAT_MS } = await import('../../src/runtime/sandbox.ts');
+
+    const ctx = createMockCtx('sandbox-instance-refresh');
+    const gateFetch = vi.fn(
+      async (..._args: ReadonlyArray<unknown>) =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    const env = {
+      __VOID_PROXY: { fetch: gateFetch },
+      __PROJECT_ID: 'proj-refresh',
+      __VOID_PROXY_TOKEN: 'token-refresh',
+    };
+
+    await envContext.run(env, async () => {
+      const sandbox = new VoidPlatformSandbox(ctx as never, env as never);
+      await sandbox.onStart();
+      vi.advanceTimersByTime(HEARTBEAT_MS);
+      await sandbox.alarm();
+    });
+
+    // Refresh is routed through ctx.waitUntil() so it survives the alarm
+    // hook returning. Drain the captured promise before asserting on the
+    // in-flight fetch.
+    expect(ctx._waitUntilTasks.length).toBe(1);
+    await Promise.all(ctx._waitUntilTasks);
+
+    expect(gateFetch).toHaveBeenCalledOnce();
+    const refreshCall = gateFetch.mock.calls[0];
+    expect(refreshCall[0]).toBe('https://gate/sandbox/refresh');
+    const refreshInit = refreshCall[1] as RequestInit;
+    expect(refreshInit.method).toBe('POST');
+    // Same {projectId, aiToken, sandboxId} shape as acquire/release — the
+    // shared HMAC auth middleware protects all three routes.
+    expect(JSON.parse(refreshInit.body as string)).toEqual({
+      projectId: 'proj-refresh',
+      aiToken: 'token-refresh',
+      sandboxId: 'sandbox-instance-refresh',
+    });
+  });
+
+  it('onStart() releases the gate lease via waitUntil when super.onStart() throws', async () => {
+    vi.resetModules();
+    const { envContext } = await import('../../src/runtime/env-raw.ts');
+    const { VoidPlatformSandbox } = await import('../../src/runtime/sandbox.ts');
+    const { Sandbox } = await import('@cloudflare/sandbox');
+
+    const ctx = createMockCtx('sandbox-instance-startup-fail');
+    const gateFetch = vi.fn(
+      async (..._args: ReadonlyArray<unknown>) => new Response(null, { status: 204 }),
+    );
+    const env = {
+      __VOID_PROXY: { fetch: gateFetch },
+      __PROJECT_ID: 'proj-fail',
+      __VOID_PROXY_TOKEN: 'token-fail',
+    };
+
+    // Make super.onStart() reject — getSandbox() already POSTed /acquire
+    // before the first DO method call, so neither onStop nor
+    // onActivityExpired will fire for this instance. Without a release here
+    // the slot leaks until the gate's STALE_MS sweep.
+    vi.spyOn(
+      Sandbox.prototype as { onStart: () => Promise<void> },
+      'onStart',
+    ).mockRejectedValueOnce(new Error('container failed to start'));
+
+    await envContext.run(env, async () => {
+      const sandbox = new VoidPlatformSandbox(ctx as never, env as never);
+      await expect(sandbox.onStart()).rejects.toThrow('container failed to start');
+    });
+
+    // Release routed through waitUntil — drain it and assert on the fetch.
+    expect(ctx._waitUntilTasks.length).toBe(1);
+    await Promise.all(ctx._waitUntilTasks);
+
+    expect(gateFetch).toHaveBeenCalledOnce();
+    const releaseCall = gateFetch.mock.calls[0];
+    expect(releaseCall[0]).toBe('https://gate/sandbox/release');
+    const releaseInit = releaseCall[1] as RequestInit;
+    expect(JSON.parse(releaseInit.body as string)).toEqual({
+      projectId: 'proj-fail',
+      aiToken: 'token-fail',
+      sandboxId: 'sandbox-instance-startup-fail',
+    });
+  });
 });
