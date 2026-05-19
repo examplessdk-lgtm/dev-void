@@ -253,13 +253,23 @@ export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
  * available, we POST to `https://gate/sandbox/acquire` with the HMAC-signed
  * body the shared proxy auth middleware expects. A `409` response means the
  * user has exceeded a budget — we throw `SandboxLimitError` so the caller
- * can render a clear message. Any other non-OK status is treated as "gate
- * unavailable" and we fall through to returning the stub so a broken gate
- * doesn't break sandbox access entirely.
+ * can render a clear message. Any other non-OK status (or a thrown transport
+ * error from the service binding) is treated as "gate unavailable" and we
+ * fall through to returning the stub so a broken gate doesn't break sandbox
+ * access entirely.
  *
  * When the gate binding is absent (local dev) or the identity vars are
  * missing (partial deploy), the gate check is skipped entirely and we
  * return the stub directly.
+ *
+ * The stub is constructed BEFORE calling the gate so we can derive the
+ * normalized DO name (`stub.id.name`) and pass it to the gate as the
+ * `sandboxId`. This keeps acquire and release using the same key — without
+ * it, mixed-case caller ids (e.g. `MyProject-123`) would acquire a lease
+ * under the raw id but release it under the normalized lowercase form that
+ * `ctx.id.name` reports inside the DO, leaking the lease until TTL.
+ * Constructing the stub does NOT start a container — that only happens on
+ * the first method call against the stub.
  */
 export async function getSandbox<T extends Sandbox = Sandbox>(
   id: string = DEFAULT_SANDBOX_ID,
@@ -267,35 +277,57 @@ export async function getSandbox<T extends Sandbox = Sandbox>(
 ): Promise<T> {
   const { binding = sandboxBindingName, ...sandboxOptions } = options ?? {};
 
-  const identity = resolveGateIdentity();
-  if (identity) {
-    const res = await identity.gate.fetch('https://gate/sandbox/acquire', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        projectId: identity.projectId,
-        aiToken: identity.aiToken,
-        sandboxId: id,
-      }),
-    });
-    if (res.status === 409) {
-      const body = (await res.json().catch(() => ({}))) as { reason?: string };
-      const reason =
-        body.reason === 'concurrency' || body.reason === 'runtime_budget'
-          ? body.reason
-          : 'concurrency';
-      throw new SandboxLimitError(reason);
-    }
-    // Non-409 non-OK responses fall through: the gate is best-effort, and
-    // refusing to return a stub on a gate hiccup would be worse than letting
-    // the request proceed. The gate's own lease TTL backstops accounting.
-  }
-
   const namespace = requireRuntimeBinding<DurableObjectNamespace<T>>(binding);
-  return getCloudflareSandbox<T>(namespace, id, {
+  const stub = getCloudflareSandbox<T>(namespace, id, {
     normalizeId: true,
     ...sandboxOptions,
   });
+  // The SDK lowercases the id when normalizeId is true and resolves the DO
+  // via `idFromName(effectiveId)`, so the stub's underlying DO id name
+  // matches what `ctx.id.name` returns inside the DO instance (and what
+  // `notifyGateRelease` posts to the gate). The stub is a Proxy over the
+  // DurableObjectStub, so `.id` is exposed at runtime even though the
+  // public `Sandbox` type doesn't declare it. Fall back to the caller's
+  // id only on the off-chance the underlying DO id has no `name`
+  // (anonymous), which shouldn't happen for sandbox stubs but keeps us safe.
+  const stubId = (stub as unknown as DurableObjectStub).id;
+  const sandboxId = stubId.name ?? id;
+
+  const identity = resolveGateIdentity();
+  if (identity) {
+    try {
+      const res = await identity.gate.fetch('https://gate/sandbox/acquire', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          projectId: identity.projectId,
+          aiToken: identity.aiToken,
+          sandboxId,
+        }),
+      });
+      if (res.status === 409) {
+        const body = (await res.json().catch(() => ({}))) as { reason?: string };
+        const reason =
+          body.reason === 'concurrency' || body.reason === 'runtime_budget'
+            ? body.reason
+            : 'concurrency';
+        throw new SandboxLimitError(reason);
+      }
+      // Non-409 non-OK responses fall through: the gate is best-effort, and
+      // refusing to return a stub on a gate hiccup would be worse than letting
+      // the request proceed. The gate's own lease TTL backstops accounting.
+    } catch (error) {
+      // SandboxLimitError is the one signal the caller wants — re-raise it.
+      // Everything else (service-binding throw, json parse blowup, network
+      // glitch) is treated the same as a non-OK response: fail open so a
+      // broken gate doesn't block sandbox acquisition.
+      if (error instanceof SandboxLimitError) {
+        throw error;
+      }
+    }
+  }
+
+  return stub;
 }
 
 export const sandbox: { get: typeof getSandbox } = {

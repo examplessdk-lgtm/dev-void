@@ -4,7 +4,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 // must be installed before we import the runtime module. We expose a swappable
 // `getSandboxImpl` so individual tests can change its behaviour without
 // re-stubbing the module.
-let getSandboxImpl: (...args: ReadonlyArray<unknown>) => unknown = () => ({});
+//
+// The runtime now reads `stub.id.name` to derive the normalized sandbox id
+// for the gate call, so the default impl returns a stub that mirrors the SDK
+// shape: the id is lowercased when `normalizeId: true` is passed, matching
+// the SDK's `effectiveId = sanitizedId.toLowerCase()` path.
+function makeDefaultStub(...args: ReadonlyArray<unknown>): { id: { name: string | undefined } } {
+  const callerId = args[1] as string | undefined;
+  const options = args[2] as { normalizeId?: boolean } | undefined;
+  const effectiveId = callerId && options?.normalizeId ? callerId.toLowerCase() : callerId;
+  return { id: { name: effectiveId } };
+}
+let getSandboxImpl: (...args: ReadonlyArray<unknown>) => unknown = makeDefaultStub;
 
 vi.mock('@cloudflare/sandbox', () => {
   class FakeSandbox {
@@ -65,7 +76,7 @@ describe('runtime sandbox: getSandbox()', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
-    getSandboxImpl = () => ({});
+    getSandboxImpl = makeDefaultStub;
   });
 
   it('returns the DO stub when no gate binding is present (local dev)', async () => {
@@ -74,7 +85,7 @@ describe('runtime sandbox: getSandbox()', () => {
     const { getSandbox } = await import('../../src/runtime/sandbox.ts');
 
     const namespaceMarker = Symbol('namespace');
-    const stub = { __returned: true };
+    const stub = { __returned: true, id: { name: 'my-id' } };
     const stubFn = vi.fn((..._args: ReadonlyArray<unknown>) => stub);
     getSandboxImpl = stubFn;
 
@@ -96,7 +107,7 @@ describe('runtime sandbox: getSandbox()', () => {
     const { envContext } = await import('../../src/runtime/env-raw.ts');
     const { getSandbox } = await import('../../src/runtime/sandbox.ts');
 
-    const stub = { __with_gate: true };
+    const stub = { __with_gate: true, id: { name: 'sb-1' } };
     const stubFn = vi.fn((..._args: ReadonlyArray<unknown>) => stub);
     getSandboxImpl = stubFn;
 
@@ -192,7 +203,7 @@ describe('runtime sandbox: getSandbox()', () => {
     const { envContext } = await import('../../src/runtime/env-raw.ts');
     const { getSandbox } = await import('../../src/runtime/sandbox.ts');
 
-    const stub = { __fail_open: true };
+    const stub = { __fail_open: true, id: { name: 'sb-any' } };
     const stubFn = vi.fn((..._args: ReadonlyArray<unknown>) => stub);
     getSandboxImpl = stubFn;
 
@@ -219,12 +230,106 @@ describe('runtime sandbox: getSandbox()', () => {
     expect(stubFn).toHaveBeenCalledOnce();
   });
 
+  it('falls through and returns the DO stub when the gate fetch throws (fail-open on transport error)', async () => {
+    vi.resetModules();
+    const { envContext } = await import('../../src/runtime/env-raw.ts');
+    const { getSandbox } = await import('../../src/runtime/sandbox.ts');
+
+    const stub = { __fail_open_throw: true, id: { name: 'sb-throw' } };
+    const stubFn = vi.fn((..._args: ReadonlyArray<unknown>) => stub);
+    getSandboxImpl = stubFn;
+
+    // Service-binding transport errors (proxy unreachable, internal throw)
+    // must NOT block sandbox acquisition — same fail-open intent as a 500
+    // response. Only the explicit 409 → SandboxLimitError signal should
+    // propagate to the caller.
+    const gateFetch = vi.fn(async (..._args: ReadonlyArray<unknown>) => {
+      throw new Error('service binding unreachable');
+    });
+
+    await envContext.run(
+      {
+        SANDBOX: { __ns: true },
+        __VOID_PROXY: { fetch: gateFetch },
+        __VOID_PROJECT_ID: 'proj-1',
+        __VOID_PROXY_TOKEN: 'token-1',
+      },
+      async () => {
+        const result = await getSandbox('sb-throw');
+        expect(result).toBe(stub);
+      },
+    );
+
+    expect(gateFetch).toHaveBeenCalledOnce();
+    expect(stubFn).toHaveBeenCalledOnce();
+  });
+
+  it('uses the normalized DO name (lowercase) as the gate sandboxId so acquire matches release', async () => {
+    vi.resetModules();
+    const { envContext } = await import('../../src/runtime/env-raw.ts');
+    const { getSandbox, VoidPlatformSandbox } = await import('../../src/runtime/sandbox.ts');
+
+    // The SDK lowercases the id when `normalizeId: true`, so the resulting
+    // DO is keyed by `myproject-123`. Inside the DO, `ctx.id.name` reports
+    // the normalized form — `notifyGateRelease()` posts that form back to
+    // the gate. Acquire MUST use the same key, otherwise the lease leaks
+    // until the gate's TTL sweeps it. We assert both halves here.
+    const CALLER_ID = 'MyProject-123';
+    const NORMALIZED_ID = 'myproject-123';
+
+    // Mock the SDK stub so its id.name is the normalized form (matching the
+    // real SDK behaviour). getSandbox() should read that for the gate body.
+    const stub = { __normalized: true, id: { name: NORMALIZED_ID } };
+    getSandboxImpl = (..._args: ReadonlyArray<unknown>) => stub;
+
+    const gateFetch = vi.fn(
+      async (..._args: ReadonlyArray<unknown>) => new Response(null, { status: 200 }),
+    );
+
+    await envContext.run(
+      {
+        SANDBOX: { __ns: true },
+        __VOID_PROXY: { fetch: gateFetch },
+        __VOID_PROJECT_ID: 'proj-norm',
+        __VOID_PROXY_TOKEN: 'token-norm',
+      },
+      async () => {
+        // 1. Acquire with the mixed-case caller id.
+        await getSandbox(CALLER_ID);
+
+        // 2. Release via the DO lifecycle — ctx.id.name is the normalized form.
+        const ctx = createMockCtx(NORMALIZED_ID);
+        const env = {
+          __VOID_PROXY: { fetch: gateFetch },
+          __VOID_PROJECT_ID: 'proj-norm',
+          __VOID_PROXY_TOKEN: 'token-norm',
+        };
+        const sandbox = new VoidPlatformSandbox(ctx as never, env as never);
+        await sandbox.onStop();
+      },
+    );
+
+    // Flush the microtask queue so the fire-and-forget release POST lands.
+    await Promise.resolve();
+
+    expect(gateFetch).toHaveBeenCalledTimes(2);
+    const acquireBody = JSON.parse((gateFetch.mock.calls[0][1] as RequestInit).body as string) as {
+      sandboxId: string;
+    };
+    const releaseBody = JSON.parse((gateFetch.mock.calls[1][1] as RequestInit).body as string) as {
+      sandboxId: string;
+    };
+    expect(acquireBody.sandboxId).toBe(NORMALIZED_ID);
+    expect(releaseBody.sandboxId).toBe(NORMALIZED_ID);
+    expect(acquireBody.sandboxId).toBe(releaseBody.sandboxId);
+  });
+
   it('skips the gate call and returns the DO stub when __VOID_PROXY_TOKEN is missing', async () => {
     vi.resetModules();
     const { envContext } = await import('../../src/runtime/env-raw.ts');
     const { getSandbox } = await import('../../src/runtime/sandbox.ts');
 
-    const stub = { __no_token: true };
+    const stub = { __no_token: true, id: { name: 'sb-skip' } };
     const stubFn = vi.fn((..._args: ReadonlyArray<unknown>) => stub);
     getSandboxImpl = stubFn;
 
