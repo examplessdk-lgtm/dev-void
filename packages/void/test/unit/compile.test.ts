@@ -2244,24 +2244,54 @@ describe('compileWorkerEntry', () => {
     expect(code).toContain('__setLiveBindingName("VOID_LIVE_abcd1234");');
   });
 
-  it('re-exports the Cloudflare Sandbox Durable Object class when enabled', () => {
+  it('re-exports the VoidPlatformSandbox Durable Object class when enabled', () => {
     const code = compileWorkerEntry(false, undefined, 'assets', [], 'void/_env', undefined, true);
 
-    expect(code).toContain('import { Sandbox as __VoidSandbox } from "@cloudflare/sandbox"');
+    // Platform sandbox wraps Cloudflare's Sandbox with metering/gate hooks.
+    // Importing it (instead of the bare Sandbox class) lets user subclasses
+    // inherit those overrides without opting in.
+    expect(code).toContain(
+      'import { VoidPlatformSandbox as __VoidSandbox, __setSandboxBindingName } from "void/sandbox"',
+    );
+    expect(code).not.toContain('from "@cloudflare/sandbox"');
     expect(code).toContain('export { __VoidSandbox as Sandbox };');
     expect(code).toContain('__setSandboxBindingName("SANDBOX");');
   });
 
-  it('exports the configured Cloudflare Sandbox Durable Object class', () => {
+  it('exports the configured Sandbox Durable Object subclass via VoidPlatformSandbox', () => {
     const code = compileWorkerEntry(false, undefined, 'assets', [], 'void/_env', undefined, {
       bindingName: 'CODE',
       className: 'CodeSandbox',
       runtimePath: 'void/sandbox',
     });
 
-    expect(code).toContain('import { Sandbox as __VoidSandbox } from "@cloudflare/sandbox"');
+    expect(code).toContain(
+      'import { VoidPlatformSandbox as __VoidSandbox, __setSandboxBindingName } from "void/sandbox"',
+    );
+    expect(code).not.toContain('from "@cloudflare/sandbox"');
+    // User subclass syntax (`class X extends Sandbox`) stays unchanged because
+    // VoidPlatformSandbox itself extends Sandbox.
     expect(code).toContain('export class CodeSandbox extends __VoidSandbox {}');
     expect(code).toContain('__setSandboxBindingName("CODE");');
+  });
+
+  it('uses the resolved sandbox runtime path when one is provided', () => {
+    const code = compileWorkerEntry(false, undefined, 'assets', [], 'void/_env', undefined, {
+      runtimePath: '/abs/path/to/sandbox.mjs',
+    });
+
+    expect(code).toContain(
+      'import { VoidPlatformSandbox as __VoidSandbox, __setSandboxBindingName } from "/abs/path/to/sandbox.mjs"',
+    );
+  });
+
+  it('omits the sandbox import and export when sandbox is disabled', () => {
+    const code = compileWorkerEntry();
+
+    expect(code).not.toContain('__VoidSandbox');
+    expect(code).not.toContain('VoidPlatformSandbox');
+    expect(code).not.toContain('__setSandboxBindingName');
+    expect(code).not.toContain('from "@cloudflare/sandbox"');
   });
 
   it('generates queue() export in worker entry when hasQueues=true', () => {

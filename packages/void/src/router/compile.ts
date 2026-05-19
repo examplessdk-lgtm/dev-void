@@ -2299,7 +2299,7 @@ export function compileWorkerEntry(
   const sandboxRuntimePath =
     typeof sandbox === 'object' ? (sandbox.runtimePath ?? 'void/sandbox') : 'void/sandbox';
   const sandboxImport = hasSandbox
-    ? `import { Sandbox as __VoidSandbox } from "@cloudflare/sandbox";\nimport { __setSandboxBindingName } from ${JSON.stringify(sandboxRuntimePath)};\n`
+    ? `import { VoidPlatformSandbox as __VoidSandbox, __setSandboxBindingName } from ${JSON.stringify(sandboxRuntimePath)};\n`
     : '';
   const sandboxExport = hasSandbox
     ? sandboxClassName === 'Sandbox'
