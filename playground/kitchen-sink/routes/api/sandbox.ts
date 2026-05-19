@@ -45,9 +45,9 @@ export const POST = defineHandler(async (c) => {
     );
   }
 
-  const sandbox = getSandbox('kitchen-sink-code-lab');
-
   try {
+    const sandbox = await getSandbox('kitchen-sink-code-lab');
+
     await sandbox.mkdir(WORKDIR, { recursive: true });
     await sandbox.writeFile(
       `${WORKDIR}/input.json`,
