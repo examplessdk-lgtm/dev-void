@@ -49,6 +49,7 @@ type StorageMap = Map<string, unknown>;
 function createMockCtx(idName?: string) {
   const storage: StorageMap = new Map();
   const alarms: Array<number> = [];
+  const waitUntilTasks: Array<Promise<unknown>> = [];
   return {
     id: {
       name: idName,
@@ -84,8 +85,15 @@ function createMockCtx(idName?: string) {
       }),
       getAlarm: vi.fn(async () => alarms[alarms.length - 1] ?? null),
     },
+    // Stand-in for `DurableObjectState.waitUntil` — captures the promise so
+    // tests can await it and observe lifecycle-spawned fetches (e.g. the gate
+    // release POST issued from onStop/onActivityExpired).
+    waitUntil: vi.fn((p: Promise<unknown>) => {
+      waitUntilTasks.push(p);
+    }),
     _storageMap: storage,
     _alarms: alarms,
+    _waitUntilTasks: waitUntilTasks,
   };
 }
 
@@ -303,6 +311,7 @@ describe('runtime sandbox: getSandbox()', () => {
       async (..._args: ReadonlyArray<unknown>) => new Response(null, { status: 200 }),
     );
 
+    let releaseCtx: ReturnType<typeof createMockCtx> | undefined;
     await envContext.run(
       {
         SANDBOX: { __ns: true },
@@ -315,19 +324,20 @@ describe('runtime sandbox: getSandbox()', () => {
         await getSandbox(CALLER_ID);
 
         // 2. Release via the DO lifecycle — ctx.id.name is the normalized form.
-        const ctx = createMockCtx(NORMALIZED_ID);
+        releaseCtx = createMockCtx(NORMALIZED_ID);
         const env = {
           __VOID_PROXY: { fetch: gateFetch },
           __PROJECT_ID: 'proj-norm',
           __VOID_PROXY_TOKEN: 'token-norm',
         };
-        const sandbox = new VoidPlatformSandbox(ctx as never, env as never);
+        const sandbox = new VoidPlatformSandbox(releaseCtx as never, env as never);
         await sandbox.onStop();
       },
     );
 
-    // Flush the microtask queue so the fire-and-forget release POST lands.
-    await Promise.resolve();
+    // Release is routed through ctx.waitUntil() — drain the captured promise
+    // so the gate fetch lands before we assert on it.
+    await Promise.all(releaseCtx?._waitUntilTasks ?? []);
 
     expect(gateFetch).toHaveBeenCalledTimes(2);
     const acquireBody = JSON.parse((gateFetch.mock.calls[0][1] as RequestInit).body as string) as {
@@ -466,10 +476,11 @@ describe('runtime sandbox: VoidPlatformSandbox', () => {
       await expect(sandbox.onStop()).resolves.toBeUndefined();
     });
 
-    // Flush the microtask queue so the fire-and-forget POST runs. The release
-    // call is a synchronous `void gate.fetch(...)` — it lands as a microtask,
-    // not a timer, so `vi.runAllTimersAsync()` would not advance it.
-    await Promise.resolve();
+    // The release POST is routed through `ctx.waitUntil()` (so it survives
+    // lifecycle teardown). Awaiting the captured promise both confirms the
+    // hook handed us one and lets us assert on the in-flight fetch.
+    expect(ctx._waitUntilTasks.length).toBe(1);
+    await Promise.all(ctx._waitUntilTasks);
     expect(gateFetch).toHaveBeenCalledOnce();
     const releaseCall = gateFetch.mock.calls[0];
     expect(releaseCall[0]).toBe('https://gate/sandbox/release');

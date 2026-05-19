@@ -137,16 +137,18 @@ function resolveGateIdentity(): { gate: Fetcher; projectId: string; aiToken: str
 }
 
 /**
- * Fire-and-forget release notification to the gate so it can drop the active
- * lease counter. Failure is silent — the gate maintains its own TTL fallback.
+ * Release notification to the gate so it can drop the active lease counter.
+ * Returns the in-flight fetch as a Promise (errors swallowed) so callers can
+ * route it through `ctx.waitUntil()` and keep it alive past lifecycle
+ * teardown. Failure is silent — the gate maintains its own TTL fallback.
  */
-function notifyGateRelease(ctx: DurableObjectState): void {
+function notifyGateRelease(ctx: DurableObjectState): Promise<void> {
   const identity = resolveGateIdentity();
   if (!identity) {
-    return;
+    return Promise.resolve();
   }
   const sandboxId = getSandboxInstanceId(ctx);
-  void identity.gate
+  return identity.gate
     .fetch('https://gate/sandbox/release', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -156,6 +158,7 @@ function notifyGateRelease(ctx: DurableObjectState): void {
         sandboxId,
       }),
     })
+    .then(() => undefined)
     .catch(() => {
       // Best-effort — the gate has its own lease-expiry safety net.
     });
@@ -193,12 +196,18 @@ export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
       await emitRuntimeSeconds(this.ctx, sandboxRuntimeSeconds);
     }
 
-    await Promise.all([
-      this.ctx.storage.put({ [STORAGE_KEY_START_TS]: now, [STORAGE_KEY_LAST_FLUSH_TS]: now }),
-      this.ctx.storage.setAlarm(now + HEARTBEAT_MS),
-    ]);
+    await this.ctx.storage.put({
+      [STORAGE_KEY_START_TS]: now,
+      [STORAGE_KEY_LAST_FLUSH_TS]: now,
+    });
 
     await super.onStart();
+
+    // Set the heartbeat alarm AFTER super.onStart() because DOs have a single
+    // alarm slot — upstream Sandbox/Container may arm its own alarm (e.g. for
+    // sleepAfter idle management) and clobber ours. Same ordering pattern the
+    // alarm() override uses: defer to super first, then re-arm our heartbeat.
+    await this.ctx.storage.setAlarm(Date.now() + HEARTBEAT_MS);
   }
 
   override async alarm(alarmProps?: { isRetry: boolean; retryCount: number }): Promise<void> {
@@ -225,13 +234,17 @@ export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
   // Sandbox narrows Container's `onStop(params)` to zero-arg — exitCode/reason aren't visible here.
   override async onStop(): Promise<void> {
     await this.flushFinal();
-    notifyGateRelease(this.ctx);
+    // Route the release POST through waitUntil so it survives lifecycle
+    // teardown. A bare `void fetch(...)` here can be canceled when the hook
+    // returns, stranding the gate's acquire counter until TTL sweep — the
+    // exact false-concurrency-denial path this metering layer must avoid.
+    this.ctx.waitUntil(notifyGateRelease(this.ctx));
     await super.onStop();
   }
 
   override async onActivityExpired(): Promise<void> {
     await this.flushFinal();
-    notifyGateRelease(this.ctx);
+    this.ctx.waitUntil(notifyGateRelease(this.ctx));
     await super.onActivityExpired();
   }
 
