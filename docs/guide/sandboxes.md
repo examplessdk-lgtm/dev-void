@@ -12,7 +12,7 @@ import { getSandbox } from 'void/sandbox';
 
 export const POST = defineHandler(async (c) => {
   const { command } = await c.req.json<{ command: string }>();
-  const sandbox = getSandbox('default');
+  const sandbox = await getSandbox('default');
   const result = await sandbox.exec(command);
 
   return c.json(result);
@@ -58,7 +58,8 @@ Available fields:
 ```ts
 import { getSandbox } from 'void/sandbox';
 
-const sandbox = getSandbox(`user-${user.id}`);
+// inside an async handler
+const sandbox = await getSandbox(`user-${user.id}`);
 await sandbox.writeFile('/tmp/input.txt', 'hello');
 const result = await sandbox.exec('cat /tmp/input.txt');
 ```
