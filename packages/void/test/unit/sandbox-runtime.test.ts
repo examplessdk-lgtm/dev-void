@@ -55,9 +55,26 @@ function createMockCtx(idName?: string) {
       toString: () => idName ?? 'do-id-stringified',
     },
     storage: {
-      get: vi.fn(async (key: string) => storage.get(key)),
-      put: vi.fn(async (key: string, value: unknown) => {
-        storage.set(key, value);
+      get: vi.fn(async (keyOrKeys: string | Array<string>) => {
+        if (Array.isArray(keyOrKeys)) {
+          const result = new Map<string, unknown>();
+          for (const k of keyOrKeys) {
+            if (storage.has(k)) {
+              result.set(k, storage.get(k));
+            }
+          }
+          return result;
+        }
+        return storage.get(keyOrKeys);
+      }),
+      put: vi.fn(async (keyOrEntries: string | Record<string, unknown>, value?: unknown) => {
+        if (typeof keyOrEntries === 'string') {
+          storage.set(keyOrEntries, value);
+        } else {
+          for (const [k, v] of Object.entries(keyOrEntries)) {
+            storage.set(k, v);
+          }
+        }
       }),
       delete: vi.fn(async (key: string) => {
         storage.delete(key);
@@ -119,7 +136,7 @@ describe('runtime sandbox: getSandbox()', () => {
       {
         SANDBOX: { __ns: true },
         __VOID_PROXY: { fetch: gateFetch },
-        __VOID_PROJECT_ID: 'proj-1',
+        __PROJECT_ID: 'proj-1',
         __VOID_PROXY_TOKEN: 'token-1',
       },
       async () => {
@@ -160,7 +177,7 @@ describe('runtime sandbox: getSandbox()', () => {
       {
         SANDBOX: { __ns: true },
         __VOID_PROXY: { fetch: gateFetch },
-        __VOID_PROJECT_ID: 'proj-1',
+        __PROJECT_ID: 'proj-1',
         __VOID_PROXY_TOKEN: 'token-1',
       },
       async () => {
@@ -187,7 +204,7 @@ describe('runtime sandbox: getSandbox()', () => {
       {
         SANDBOX: { __ns: true },
         __VOID_PROXY: { fetch: gateFetch },
-        __VOID_PROJECT_ID: 'proj-1',
+        __PROJECT_ID: 'proj-1',
         __VOID_PROXY_TOKEN: 'token-1',
       },
       async () => {
@@ -215,7 +232,7 @@ describe('runtime sandbox: getSandbox()', () => {
       {
         SANDBOX: { __ns: true },
         __VOID_PROXY: { fetch: gateFetch },
-        __VOID_PROJECT_ID: 'proj-1',
+        __PROJECT_ID: 'proj-1',
         __VOID_PROXY_TOKEN: 'token-1',
       },
       async () => {
@@ -251,7 +268,7 @@ describe('runtime sandbox: getSandbox()', () => {
       {
         SANDBOX: { __ns: true },
         __VOID_PROXY: { fetch: gateFetch },
-        __VOID_PROJECT_ID: 'proj-1',
+        __PROJECT_ID: 'proj-1',
         __VOID_PROXY_TOKEN: 'token-1',
       },
       async () => {
@@ -290,7 +307,7 @@ describe('runtime sandbox: getSandbox()', () => {
       {
         SANDBOX: { __ns: true },
         __VOID_PROXY: { fetch: gateFetch },
-        __VOID_PROJECT_ID: 'proj-norm',
+        __PROJECT_ID: 'proj-norm',
         __VOID_PROXY_TOKEN: 'token-norm',
       },
       async () => {
@@ -301,7 +318,7 @@ describe('runtime sandbox: getSandbox()', () => {
         const ctx = createMockCtx(NORMALIZED_ID);
         const env = {
           __VOID_PROXY: { fetch: gateFetch },
-          __VOID_PROJECT_ID: 'proj-norm',
+          __PROJECT_ID: 'proj-norm',
           __VOID_PROXY_TOKEN: 'token-norm',
         };
         const sandbox = new VoidPlatformSandbox(ctx as never, env as never);
@@ -345,7 +362,7 @@ describe('runtime sandbox: getSandbox()', () => {
       {
         SANDBOX: { __ns: true },
         __VOID_PROXY: { fetch: gateFetch },
-        __VOID_PROJECT_ID: 'proj-1',
+        __PROJECT_ID: 'proj-1',
         // __VOID_PROXY_TOKEN intentionally absent
       },
       async () => {
@@ -438,7 +455,7 @@ describe('runtime sandbox: VoidPlatformSandbox', () => {
     );
     const env = {
       __VOID_PROXY: { fetch: gateFetch },
-      __VOID_PROJECT_ID: 'proj-release',
+      __PROJECT_ID: 'proj-release',
       __VOID_PROXY_TOKEN: 'token-release',
     };
 

@@ -63,13 +63,12 @@ const STORAGE_KEY_LAST_FLUSH_TS = '__voidLastFlushTs';
 // --- Internal helpers ---
 
 function getUsageContext(): { userId?: string; projectId?: string; slug?: string } {
-  // Resolve the raw env so we can read platform-injected `__VOID_*` bindings
-  // that the public `getRuntimeBinding()` helper intentionally hides from
-  // user code (see env.ts).
+  // Resolve the raw env so we can read platform-injected bindings that the
+  // public `getRuntimeBinding()` helper intentionally hides from user code.
   const runtimeEnv = getRawRuntimeEnv();
   return {
     userId: runtimeEnv.__VOID_USER_ID as string | undefined,
-    projectId: runtimeEnv.__VOID_PROJECT_ID as string | undefined,
+    projectId: runtimeEnv.__PROJECT_ID as string | undefined,
     slug: runtimeEnv.__VOID_PROJECT_SLUG as string | undefined,
   };
 }
@@ -129,7 +128,7 @@ function resolveGateIdentity(): { gate: Fetcher; projectId: string; aiToken: str
   if (!gate) {
     return null;
   }
-  const projectId = runtimeEnv.__VOID_PROJECT_ID as string | undefined;
+  const projectId = runtimeEnv.__PROJECT_ID as string | undefined;
   const aiToken = runtimeEnv.__VOID_PROXY_TOKEN as string | undefined;
   if (!projectId || !aiToken) {
     return null;
@@ -178,22 +177,26 @@ function notifyGateRelease(ctx: DurableObjectState): void {
 export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
   override async onStart(): Promise<void> {
     const now = Date.now();
-    const prevStart = await this.ctx.storage.get<number>(STORAGE_KEY_START_TS);
-    const prevFlush = await this.ctx.storage.get<number>(STORAGE_KEY_LAST_FLUSH_TS);
+    const stored = await this.ctx.storage.get<number>([
+      STORAGE_KEY_START_TS,
+      STORAGE_KEY_LAST_FLUSH_TS,
+    ]);
 
     // Crash recovery: if a stale start timestamp survives in storage, the
     // previous instance died without onStop firing. Emit one reconciliation
     // event covering the orphaned window so usage isn't undercounted, then
     // reset the timestamps for the new run.
-    const orphanedAnchor = prevFlush ?? prevStart;
+    const orphanedAnchor =
+      stored.get(STORAGE_KEY_LAST_FLUSH_TS) ?? stored.get(STORAGE_KEY_START_TS);
     if (orphanedAnchor !== undefined && orphanedAnchor < now) {
       const sandboxRuntimeSeconds = (now - orphanedAnchor) / 1000;
       await emitRuntimeSeconds(this.ctx, sandboxRuntimeSeconds);
     }
 
-    await this.ctx.storage.put(STORAGE_KEY_START_TS, now);
-    await this.ctx.storage.put(STORAGE_KEY_LAST_FLUSH_TS, now);
-    await this.ctx.storage.setAlarm(now + HEARTBEAT_MS);
+    await Promise.all([
+      this.ctx.storage.put({ [STORAGE_KEY_START_TS]: now, [STORAGE_KEY_LAST_FLUSH_TS]: now }),
+      this.ctx.storage.setAlarm(now + HEARTBEAT_MS),
+    ]);
 
     await super.onStart();
   }
@@ -206,15 +209,17 @@ export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
 
     const lastFlush = await this.ctx.storage.get<number>(STORAGE_KEY_LAST_FLUSH_TS);
     if (typeof lastFlush !== 'number') {
-      // Heartbeat fired without an active start window (DO was hibernated
-      // or never onStart'd). Nothing to meter.
+      // Heartbeat fired without an active start window — nothing to meter
+      // and no reason to re-arm (onStart() will set the alarm again).
       return;
     }
     const now = Date.now();
     const sandboxRuntimeSeconds = Math.max(0, (now - lastFlush) / 1000);
     await emitRuntimeSeconds(this.ctx, sandboxRuntimeSeconds);
-    await this.ctx.storage.put(STORAGE_KEY_LAST_FLUSH_TS, now);
-    await this.ctx.storage.setAlarm(now + HEARTBEAT_MS);
+    await Promise.all([
+      this.ctx.storage.put(STORAGE_KEY_LAST_FLUSH_TS, now),
+      this.ctx.storage.setAlarm(now + HEARTBEAT_MS),
+    ]);
   }
 
   // Sandbox narrows Container's `onStop(params)` to zero-arg — exitCode/reason aren't visible here.
@@ -249,7 +254,7 @@ export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
  * runtime budgets.
  *
  * When the gate binding (`__VOID_PROXY` by default) is present AND the
- * platform's `__VOID_PROJECT_ID` + `__VOID_PROXY_TOKEN` identity vars are
+ * platform's `__PROJECT_ID` + `__VOID_PROXY_TOKEN` identity vars are
  * available, we POST to `https://gate/sandbox/acquire` with the HMAC-signed
  * body the shared proxy auth middleware expects. A `409` response means the
  * user has exceeded a budget — we throw `SandboxLimitError` so the caller
@@ -282,16 +287,9 @@ export async function getSandbox<T extends Sandbox = Sandbox>(
     normalizeId: true,
     ...sandboxOptions,
   });
-  // The SDK lowercases the id when normalizeId is true and resolves the DO
-  // via `idFromName(effectiveId)`, so the stub's underlying DO id name
-  // matches what `ctx.id.name` returns inside the DO instance (and what
-  // `notifyGateRelease` posts to the gate). The stub is a Proxy over the
-  // DurableObjectStub, so `.id` is exposed at runtime even though the
-  // public `Sandbox` type doesn't declare it. Fall back to the caller's
-  // id only on the off-chance the underlying DO id has no `name`
-  // (anonymous), which shouldn't happen for sandbox stubs but keeps us safe.
-  const stubId = (stub as unknown as DurableObjectStub).id;
-  const sandboxId = stubId.name ?? id;
+  // Use the stub's normalized DO id (matches what `ctx.id.name` reports
+  // inside the DO) so acquire and release agree on the lease key.
+  const sandboxId = (stub as unknown as DurableObjectStub).id.name ?? id;
 
   const identity = resolveGateIdentity();
   if (identity) {
@@ -313,17 +311,13 @@ export async function getSandbox<T extends Sandbox = Sandbox>(
             : 'concurrency';
         throw new SandboxLimitError(reason);
       }
-      // Non-409 non-OK responses fall through: the gate is best-effort, and
-      // refusing to return a stub on a gate hiccup would be worse than letting
-      // the request proceed. The gate's own lease TTL backstops accounting.
+      // Non-OK non-409 falls through: a broken gate must not block sandbox
+      // acquisition; the gate's lease TTL backstops accounting.
     } catch (error) {
-      // SandboxLimitError is the one signal the caller wants — re-raise it.
-      // Everything else (service-binding throw, json parse blowup, network
-      // glitch) is treated the same as a non-OK response: fail open so a
-      // broken gate doesn't block sandbox acquisition.
       if (error instanceof SandboxLimitError) {
         throw error;
       }
+      // Transport errors get the same fail-open treatment as a non-OK response.
     }
   }
 
