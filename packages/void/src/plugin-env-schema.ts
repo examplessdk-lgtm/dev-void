@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'pathe';
-import { type Plugin } from 'vite';
+import { type Plugin, type ResolvedConfig } from 'vite';
 import { findEnvFile, generateEnvTypes } from './codegen/env-types.ts';
 import { loadUserEnvFile } from './host/load-user-env.ts';
 import { voidLog, voidWarn } from './log.ts';
@@ -57,12 +57,24 @@ async function loadSchemaModule(): Promise<RegisteredSchemaModule> {
 /** Patterns Vite's `define` typically uses for env-shaped constants. */
 const DEFINE_ENV_PATTERN =
   /^(?:globalThis\.)?(?:process\.env|import\.meta\.env)\.([A-Z_][A-Z0-9_]*)$/;
+const DEFAULT_ENV_PREFIXES: ReadonlyArray<string> = ['VITE_'];
+
+function resolveEnvPrefixes(prefix: ResolvedConfig['envPrefix']): ReadonlyArray<string> {
+  if (typeof prefix === 'string') {
+    return [prefix];
+  }
+  if (Array.isArray(prefix) && prefix.length > 0) {
+    return prefix;
+  }
+  return DEFAULT_ENV_PREFIXES;
+}
 
 export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = {}): Plugin {
   const outDir = join(root, '.void');
   let envFile: string | null = null;
   let viteMode = 'development';
   let envDir = root;
+  const appliedClientDefaults = new Map<string, string>();
 
   async function emitDefaults() {
     if (!envFile || !options.onDefaults) {
@@ -152,6 +164,36 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     voidWarn(lines.join('\n'));
   }
 
+  async function applyClientDefaultsToViteEnv(config: ResolvedConfig) {
+    if (!envFile) {
+      return;
+    }
+
+    for (const [key, value] of appliedClientDefaults) {
+      if (config.env[key] === value) {
+        delete config.env[key];
+      }
+    }
+    appliedClientDefaults.clear();
+
+    const { _hasRegisteredSchema, _getSchemaDefaults } = await loadSchemaModule();
+    if (!_hasRegisteredSchema()) {
+      return;
+    }
+
+    const prefixes = resolveEnvPrefixes(config.envPrefix);
+    for (const [key, value] of Object.entries(_getSchemaDefaults())) {
+      if (!prefixes.some((prefix) => key.startsWith(prefix))) {
+        continue;
+      }
+      if (config.env[key] !== undefined) {
+        continue;
+      }
+      config.env[key] = value;
+      appliedClientDefaults.set(key, value);
+    }
+  }
+
   return {
     name: 'void:env-schema',
     async config() {
@@ -170,6 +212,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       // `envDir: false` disables Vite's .env loading entirely — fall back to
       // root so our own validate-against-merged-env still picks up shell vars.
       envDir = typeof config.envDir === 'string' ? config.envDir : root;
+      await applyClientDefaultsToViteEnv(config);
       // Warn when vite `define` shadows a schema key. The two systems coexist
       // — define replaces source literals at build time; defineEnv types and
       // validates the runtime env — but using both for the same name causes
@@ -199,7 +242,9 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
           regenerateTypes();
           await importUserEnv();
           await emitDefaults();
+          await applyClientDefaultsToViteEnv(server.config);
           await validateAndWarn();
+          server.ws.send({ type: 'full-reload' });
         }
       });
     },
