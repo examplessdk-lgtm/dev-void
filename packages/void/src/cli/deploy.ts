@@ -1603,7 +1603,8 @@ async function runFullDeploy(
   // with no backend features, deploy as a static site (no worker needed)
   if (deployConfig.output === 'static' && pageScan && !isSsr) {
     const allPrerenderable = pageScan.pages.every(
-      (p) => p.prerender && ((p.params.length === 0 && !p.catchAll) || p.hasGetPrerenderPaths),
+      (p) =>
+        p.shouldPrerender && ((p.params.length === 0 && !p.catchAll) || p.hasGetPrerenderPaths),
     );
     const hasNonPageBackend =
       hasRoutes || hasMiddleware || hasWebSockets || authEnabled || liveConfig !== undefined;

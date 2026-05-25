@@ -105,6 +105,10 @@ import { defineHandler } from 'void';
 export const loader = defineHandler(() => ({ title: 'Home' }));
 ```
 
+Export `ssr = false` from a page's `.server.ts` file to skip server-rendered
+component HTML for that route while still running its loader on the first
+request.
+
 ## Tests
 
 - `test/unit/use-form.test.ts`

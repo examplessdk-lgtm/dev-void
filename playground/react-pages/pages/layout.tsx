@@ -32,6 +32,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         <Link href="/action-error" prefetch>
           Form Lab
         </Link>{' '}
+        |{' '}
+        <Link href="/client-only" prefetch>
+          Client-only
+        </Link>{' '}
         | <span>{shared.appName}</span>
       </nav>
       <hr />

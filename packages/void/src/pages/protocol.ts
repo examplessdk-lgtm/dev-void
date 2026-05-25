@@ -1,8 +1,16 @@
 import type { CloudBindings, CloudContext } from '../runtime/handler.ts';
 import { isConvertedResponse } from '../runtime/response.ts';
 import { DEFERRED, separateDeferred, type ResolvedDeferredGroup } from './defer.ts';
-import { resolveHead, type HeadDescriptor, type HeadConfig } from './head.ts';
-import type { DevCssAsset } from './types.ts';
+import {
+  resolveHead,
+  renderBodyAttrs,
+  renderHeadToString,
+  renderHtmlAttrs,
+  type HeadDescriptor,
+  type HeadConfig,
+} from './head.ts';
+import { serializePageData } from './serialize.ts';
+import type { DevCssAsset, PageRenderMode } from './types.ts';
 import { ValidationError } from './validation-error.ts';
 
 export { ValidationError };
@@ -53,6 +61,9 @@ type PageHandler = ((c: CloudContext) => unknown | Promise<unknown>) | undefined
 type PageHeadHandler =
   | ((c: CloudContext, props: Record<string, unknown>) => HeadDescriptor | undefined)
   | undefined;
+type PageRenderOptions = {
+  renderMode?: PageRenderMode;
+};
 type AssetTags = {
   css: string;
   preloads: string;
@@ -61,6 +72,9 @@ type AssetTags = {
   devCssNonce?: string;
 };
 type RenderPage = (pageObj: PageObject, assetTags: AssetTags) => Promise<PageRenderResult>;
+type RenderPageWithMetadata = RenderPage & {
+  preambleScript?: string;
+};
 type GetAssetTags = (req: Request, env: CloudBindings, componentId: string) => Promise<AssetTags>;
 
 function isPagesRequest(c: CloudContext): boolean {
@@ -192,6 +206,28 @@ async function renderWithAssetTags(
   } catch (error) {
     attachRenderErrorAssetTags(error, assetTags);
   }
+}
+
+function renderClientOnlyPage(
+  pageObj: PageObject,
+  assetTags: AssetTags,
+  renderFn: RenderPageWithMetadata,
+): string {
+  const pageData = serializePageData(pageObj);
+  const headHtml = pageObj.head ? renderHeadToString(pageObj.head) : '';
+  const htmlAttrs = pageObj.head ? renderHtmlAttrs(pageObj.head) : '';
+  const bodyAttrs = pageObj.head ? renderBodyAttrs(pageObj.head) : '';
+  const preambleScript = typeof renderFn.preambleScript === 'string' ? renderFn.preambleScript : '';
+
+  return `<!doctype html>
+<html${htmlAttrs}>
+<head>${headHtml}${preambleScript}${assetTags.css}${assetTags.preloads}</head>
+<body${bodyAttrs}>
+  <script id="__VOID_PAGE_DATA__" type="application/json">${pageData}</script>
+  <div id="app" data-void-ssr="false"></div>
+  ${assetTags.body}
+</body>
+</html>`;
 }
 
 function pageJsonResponse(c: CloudContext, pageObj: PageObject): Response {
@@ -342,8 +378,9 @@ export async function handlePageGet(
   renderFn: RenderPage,
   getAssetTags: GetAssetTags,
   configHead?: HeadConfig,
-  island?: boolean,
+  options?: PageRenderOptions,
 ): Promise<Response> {
+  const renderMode = options?.renderMode ?? 'server';
   const shared = (c.get('shared') as Record<string, unknown> | undefined) ?? {};
 
   // Run loader and check for redirect/error responses before extracting props
@@ -401,7 +438,7 @@ export async function handlePageGet(
   };
 
   // Island pages always render HTML — no Inertia JSON navigation
-  if (!island && isPagesRequest(c)) {
+  if (renderMode !== 'island' && isPagesRequest(c)) {
     // Prefetch requests: resolve all deferred props inline (plain JSON, no streaming)
     const isPrefetch = c.req.header('purpose') === 'prefetch';
     if (isPrefetch && hasDeferred) {
@@ -447,7 +484,10 @@ export async function handlePageGet(
   }
 
   const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
-  const html = await renderWithAssetTags(renderFn, pageObj, assetTags);
+  const html =
+    renderMode === 'client'
+      ? renderClientOnlyPage(pageObj, assetTags, renderFn)
+      : await renderWithAssetTags(renderFn, pageObj, assetTags);
 
   if (!hasDeferred) {
     return renderedResponse(c, html, 'text/html; charset=utf-8', assetTags);
@@ -477,8 +517,9 @@ export async function handlePageMutation(
   renderFn: RenderPage,
   getAssetTags: GetAssetTags,
   configHead?: HeadConfig,
-  island?: boolean,
+  options?: PageRenderOptions,
 ): Promise<Response> {
+  const renderMode = options?.renderMode ?? 'server';
   const shared = (c.get('shared') as Record<string, unknown> | undefined) ?? {};
   const middlewareHead = c.get('headDefaults') as HeadDescriptor | undefined;
 
@@ -504,7 +545,7 @@ export async function handlePageMutation(
     result = mutationHandler ? await mutationHandler(c) : undefined;
   } catch (e) {
     if (e instanceof ValidationError) {
-      if (island) {
+      if (renderMode === 'island') {
         return Response.json({ errors: e.errors }, { status: 422 });
       }
       const rawProps = getHandler ? await extractProps(await getHandler(c)) : {};
@@ -514,12 +555,11 @@ export async function handlePageMutation(
         return pageJsonResponse(c, pageObj);
       }
       const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
-      return renderedResponse(
-        c,
-        await renderWithAssetTags(renderFn, pageObj, assetTags),
-        'text/html; charset=utf-8',
-        assetTags,
-      );
+      const html =
+        renderMode === 'client'
+          ? renderClientOnlyPage(pageObj, assetTags, renderFn)
+          : await renderWithAssetTags(renderFn, pageObj, assetTags);
+      return renderedResponse(c, html, 'text/html; charset=utf-8', assetTags);
     }
     throw e;
   }
@@ -535,7 +575,7 @@ export async function handlePageMutation(
     if (status === 400) {
       const body = await result.json();
       const errors = flattenValidationErrors(body);
-      if (island) {
+      if (renderMode === 'island') {
         return Response.json({ errors }, { status: 422 });
       }
       const rawProps = getHandler ? await extractProps(await getHandler(c)) : {};
@@ -545,12 +585,11 @@ export async function handlePageMutation(
         return pageJsonResponse(c, pageObj);
       }
       const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
-      return renderedResponse(
-        c,
-        await renderWithAssetTags(renderFn, pageObj, assetTags),
-        'text/html; charset=utf-8',
-        assetTags,
-      );
+      const html =
+        renderMode === 'client'
+          ? renderClientOnlyPage(pageObj, assetTags, renderFn)
+          : await renderWithAssetTags(renderFn, pageObj, assetTags);
+      return renderedResponse(c, html, 'text/html; charset=utf-8', assetTags);
     }
     // 204 (void from withValidator) — fall through to re-run GET
     if (status !== 204) {
@@ -559,7 +598,7 @@ export async function handlePageMutation(
   }
 
   // void — re-run GET with fresh props
-  if (island) {
+  if (renderMode === 'island') {
     return Response.json({ success: true });
   }
   const rawProps = getHandler ? await extractProps(await getHandler(c)) : {};
@@ -569,10 +608,9 @@ export async function handlePageMutation(
     return pageJsonResponse(c, pageObj);
   }
   const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
-  return renderedResponse(
-    c,
-    await renderWithAssetTags(renderFn, pageObj, assetTags),
-    'text/html; charset=utf-8',
-    assetTags,
-  );
+  const html =
+    renderMode === 'client'
+      ? renderClientOnlyPage(pageObj, assetTags, renderFn)
+      : await renderWithAssetTags(renderFn, pageObj, assetTags);
+  return renderedResponse(c, html, 'text/html; charset=utf-8', assetTags);
 }

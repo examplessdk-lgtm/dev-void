@@ -12,7 +12,7 @@ import React, {
   useTransition,
   type ComponentType,
 } from 'react';
-import { hydrateRoot } from 'react-dom/client';
+import { createRoot, hydrateRoot } from 'react-dom/client';
 import {
   createRouterFacade,
   createPageNavigationEngine,
@@ -625,11 +625,17 @@ export async function startReactPages(config: ReactPagesConfig): Promise<ReactPa
     throw new Error('pages: Missing #app element for Void React pages hydration.');
   }
 
+  const app = React.createElement(App, {
+    engine,
+    router,
+    viewTransitions: config.viewTransitions,
+  });
   startTransition(() => {
-    hydrateRoot(
-      appEl,
-      React.createElement(App, { engine, router, viewTransitions: config.viewTransitions }),
-    );
+    if (appEl.getAttribute('data-void-ssr') === 'false') {
+      createRoot(appEl).render(app);
+    } else {
+      hydrateRoot(appEl, app);
+    }
   });
   appEl.setAttribute('data-hydrated', 'true');
   engine.start();

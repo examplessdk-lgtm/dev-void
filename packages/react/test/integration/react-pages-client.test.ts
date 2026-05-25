@@ -333,6 +333,35 @@ function defineClientTests(getBase: () => string) {
     }
   });
 
+  it('client-only page uses the shell on first load and mounts from loader props', async () => {
+    const htmlRes = await fetch(BASE + '/client-only');
+    expect(htmlRes.status).toBe(200);
+    const html = await htmlRes.text();
+    expect(html).toContain('__VOID_PAGE_DATA__');
+    expect(html).toContain('data-void-ssr="false"');
+    expect(html).toContain('<title>Client-only Route | React Pages Demo</title>');
+    expect(html).toContain('React Pages client-only route');
+    expect(html).toContain('Client-only Route');
+    expect(html).not.toContain('Client-only Page');
+    expect(html).not.toContain('client-only page component rendered on the server');
+
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/client-only');
+      await waitForHydration(page);
+      await page.waitForFunction(() =>
+        document.querySelector('h1')?.textContent?.includes('Client-only Page'),
+      );
+
+      expect(await page.textContent('[data-testid="client-only-title"]')).toBe('Client-only Route');
+      expect(await page.textContent('[data-testid="client-only-marker"]')).toBe(
+        'loader-props-available',
+      );
+    } finally {
+      await page.context().close();
+    }
+  });
+
   it('layout persists across navigation', async () => {
     const page = await newPage();
 

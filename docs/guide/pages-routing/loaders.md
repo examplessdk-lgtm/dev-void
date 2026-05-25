@@ -237,7 +237,7 @@ export default function Dashboard(props: Props) {
 
 ### How Streaming Works
 
-On the initial page load (SSR), React uses React 19 streaming SSR and renders the nearest Suspense fallback for deferred props; the other adapters render their loading state. As each deferred function resolves, the server streams an inline `<script>` tag that delivers the data, so no extra HTTP request is needed. On SPA navigation, deferred data streams via NDJSON over the same response.
+On the initial page load (SSR), React uses React 19 streaming SSR and renders the nearest Suspense fallback for deferred props; the other adapters render their loading state. As each deferred function resolves, the server streams an inline `<script>` tag that delivers the data, so no extra HTTP request is needed. Routes with `export const ssr = false` skip server-rendered component HTML but still stream deferred resolution scripts after the client-mounted shell. On SPA navigation, deferred data streams via NDJSON over the same response.
 
 ### Deferred Props After Mutations
 

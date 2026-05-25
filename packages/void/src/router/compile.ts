@@ -1705,11 +1705,13 @@ function compilePrerenderCollector(
   options: CompileOptions,
 ): void {
   const staticPaths = scan.pages.pages
-    .filter((page) => page.prerender && page.params.length === 0 && !page.catchAll)
+    .filter((page) => page.shouldPrerender && page.params.length === 0 && !page.catchAll)
     .map((page) => page.pattern);
   const dynamicPages = scan.pages.pages.filter(
     (page) =>
-      page.prerender && page.hasGetPrerenderPaths && (page.params.length > 0 || page.catchAll),
+      page.shouldPrerender &&
+      page.hasGetPrerenderPaths &&
+      (page.params.length > 0 || page.catchAll),
   );
   const explicitPaths = options.explicitPrerenderPaths ?? [];
 
@@ -1791,16 +1793,21 @@ function compilePageRoutes(
   lines.push(
     `import { renderHeadToString, renderHtmlAttrs, renderBodyAttrs } from ${JSON.stringify(pages.headPath)};`,
   );
-  lines.push(`import { renderPage } from "virtual:void-pages-renderer";`);
+  lines.push(`import * as __voidPagesRenderer from "virtual:void-pages-renderer";`);
   if (options.dev) {
     lines.push(`import { getVoidPagesDevCss } from "virtual:void-pages-dev-assets";`);
   }
 
   // Import island renderer if any island pages exist
-  const hasIslandPages = scan.pages.pages.some((p) => p.island);
+  const hasIslandPages = scan.pages.pages.some((p) => p.renderMode === 'island');
   if (hasIslandPages) {
     lines.push(`import { renderIslandPage } from "virtual:void-islands-renderer";`);
   }
+  lines.push('');
+  lines.push(`const renderPage = __voidPagesRenderer.renderPage;`);
+  lines.push(`if (typeof __voidPagesRenderer.renderPreambleScript === "string") {`);
+  lines.push(`  renderPage.preambleScript = __voidPagesRenderer.renderPreambleScript;`);
+  lines.push(`}`);
   lines.push('');
 
   // Emit head config constant from void.json
@@ -2138,11 +2145,13 @@ function compilePageRoutes(
       mdHeadRef = headVarName;
     }
 
-    // Choose renderer and asset tags based on island flag
-    const renderer = page.island ? 'renderIslandPage' : 'renderPage';
+    // Choose renderer and asset tags based on normalized render mode
+    const renderer = page.renderMode === 'island' ? 'renderIslandPage' : 'renderPage';
     const assetTags =
-      page.island && pages.islandClientEntryId ? 'getIslandsAssetTags' : 'getPagesAssetTags';
-    const islandFlag = page.island ? ', true' : '';
+      page.renderMode === 'island' && pages.islandClientEntryId
+        ? 'getIslandsAssetTags'
+        : 'getPagesAssetTags';
+    const renderOptions = `, ${JSON.stringify({ renderMode: page.renderMode })}`;
 
     // Loader (always registered — pages always handle GET)
     lines.push(`app.get(${JSON.stringify(page.pattern)}, async (c) => {`);
@@ -2150,12 +2159,12 @@ function compilePageRoutes(
       const loaderName = `_pload_${safeId}`;
       lines.push(`  const mod = await ${loaderName}();`);
       lines.push(
-        `  return handlePageGet(mod.loader, mod.head, c, ${JSON.stringify(page.componentId)}, ${renderer}, ${assetTags}, __voidHeadConfig${islandFlag});`,
+        `  return handlePageGet(mod.loader, mod.head, c, ${JSON.stringify(page.componentId)}, ${renderer}, ${assetTags}, __voidHeadConfig${renderOptions});`,
       );
     } else {
       const headArg = mdHeadRef ?? 'undefined';
       lines.push(
-        `  return handlePageGet(undefined, ${headArg}, c, ${JSON.stringify(page.componentId)}, ${renderer}, ${assetTags}, __voidHeadConfig${islandFlag});`,
+        `  return handlePageGet(undefined, ${headArg}, c, ${JSON.stringify(page.componentId)}, ${renderer}, ${assetTags}, __voidHeadConfig${renderOptions});`,
       );
     }
     lines.push(`});`);
@@ -2183,7 +2192,7 @@ function compilePageRoutes(
       }
 
       lines.push(
-        `  return handlePageMutation(handler, mod.loader, mod.head, c, ${JSON.stringify(page.componentId)}, ${renderer}, ${assetTags}, __voidHeadConfig${islandFlag});`,
+        `  return handlePageMutation(handler, mod.loader, mod.head, c, ${JSON.stringify(page.componentId)}, ${renderer}, ${assetTags}, __voidHeadConfig${renderOptions});`,
       );
       lines.push(`});`);
     }

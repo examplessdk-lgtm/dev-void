@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vite-plus/test';
+import type { PageDefinition, PageScanResult } from '../../src/pages/types.ts';
 import { compileRouteTable, type PagesCompileOptions } from '../../src/router/compile.ts';
 import type { ScanResult } from '../../src/router/scan.ts';
 
@@ -22,13 +23,36 @@ const pagesOptions: PagesCompileOptions = {
   clientEntryId: 'virtual:void-pages-client',
 };
 
-function makeScan(pages: ScanResult['pages']): ScanResult {
+type TestPageDefinition = Omit<
+  PageDefinition,
+  'ssrMode' | 'prerenderMode' | 'renderMode' | 'shouldPrerender'
+> &
+  Partial<Pick<PageDefinition, 'ssrMode' | 'prerenderMode' | 'renderMode' | 'shouldPrerender'>>;
+
+function withRenderingDefaults(page: TestPageDefinition): PageDefinition {
+  const renderMode =
+    page.renderMode ?? (page.island ? 'island' : page.ssr === false ? 'client' : 'server');
+  return {
+    ...page,
+    ssrMode:
+      page.ssrMode ?? (page.ssr === true ? 'server' : page.ssr === false ? 'client' : 'auto'),
+    prerenderMode:
+      page.prerenderMode ??
+      (page.prerender === true ? 'force' : page.prerender === false ? 'disabled' : 'auto'),
+    renderMode,
+    shouldPrerender: page.shouldPrerender ?? page.prerender === true,
+  };
+}
+
+function makeScan(
+  pages: Omit<PageScanResult, 'pages'> & { pages: Array<TestPageDefinition> },
+): ScanResult {
   return {
     routes: [],
     middleware: [],
     jobs: [],
     queues: [],
-    pages,
+    pages: { ...pages, pages: pages.pages.map(withRenderingDefaults) },
   };
 }
 
@@ -66,7 +90,7 @@ describe('compileRouteTable with pages', () => {
     );
   });
 
-  it('imports renderPage from virtual module', () => {
+  it('imports renderPage from the virtual module namespace', () => {
     const scan = makeScan({
       pages: [
         {
@@ -94,7 +118,8 @@ describe('compileRouteTable with pages', () => {
       pagesOptions,
     );
 
-    expect(code).toContain(`import { renderPage } from "virtual:void-pages-renderer"`);
+    expect(code).toContain(`import * as __voidPagesRenderer from "virtual:void-pages-renderer"`);
+    expect(code).toContain('const renderPage = __voidPagesRenderer.renderPage');
   });
 
   it('imports the dev CSS asset bridge in dev builds', () => {
@@ -277,6 +302,43 @@ describe('compileRouteTable with pages', () => {
     expect(code).toContain('handlePageMutation(handler, mod.loader, mod.head');
   });
 
+  it('passes normalized client render mode to page handlers', () => {
+    const scan = makeScan({
+      pages: [
+        {
+          pattern: '/analytics',
+          params: [],
+          catchAll: false,
+          componentPath: 'analytics.vue',
+          serverPath: 'analytics.server.ts',
+          methods: ['loader', 'action'],
+          componentId: 'analytics',
+          ssr: false,
+        },
+      ],
+      layouts: [],
+      namedLayouts: [],
+    });
+
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+      pagesOptions,
+    );
+
+    expect(code).toContain(
+      'handlePageGet(mod.loader, mod.head, c, "analytics", renderPage, getPagesAssetTags, __voidHeadConfig, {"renderMode":"client"})',
+    );
+    expect(code).toContain(
+      'handlePageMutation(handler, mod.loader, mod.head, c, "analytics", renderPage, getPagesAssetTags, __voidHeadConfig, {"renderMode":"client"})',
+    );
+  });
+
   it('generates catch-all for SPA navigation', () => {
     const scan = makeScan({
       pages: [
@@ -447,7 +509,7 @@ describe('compileRouteTable with pages', () => {
     expect(code).toContain(`import { renderIslandPage } from "virtual:void-islands-renderer"`);
     expect(code).toContain('renderIslandPage');
     expect(code).toContain('getIslandsAssetTags');
-    expect(code).toContain(', true)');
+    expect(code).toContain('{"renderMode":"island"}');
   });
 
   it('non-island page does not use island renderer', () => {
@@ -526,7 +588,8 @@ describe('compileRouteTable with pages', () => {
       islandPagesOptions,
     );
 
-    expect(code).toContain(`import { renderPage } from "virtual:void-pages-renderer"`);
+    expect(code).toContain(`import * as __voidPagesRenderer from "virtual:void-pages-renderer"`);
+    expect(code).toContain('const renderPage = __voidPagesRenderer.renderPage');
     expect(code).toContain(`import { renderIslandPage } from "virtual:void-islands-renderer"`);
   });
 

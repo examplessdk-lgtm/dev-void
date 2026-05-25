@@ -326,7 +326,7 @@ function generateClientEntry(
   staticPageData?: StaticPageDataBuildOptions,
 ): string {
   return `
-import { createSSRApp, h, reactive, provide, shallowRef, nextTick, ref } from "vue";
+import { createApp, createSSRApp, h, reactive, provide, shallowRef, nextTick, ref } from "vue";
 import { createDeferred, resolveDeferred, rejectDeferred } from "@void/vue/deferred";
 import { setActionRouter } from "@void/vue";
 import { createRouterFacade, createVoidRouter, idleNavigationState } from "void/pages-client";
@@ -398,7 +398,10 @@ currentProps.value = initialPageData.props;
 currentComponent.value = initialComponent;
 currentLayouts.value = initialLayouts;
 
-const app = createSSRApp({
+const appEl = document.getElementById("app");
+if (!appEl) throw new Error("pages: Missing #app element for Void Vue pages hydration.");
+const createVoidApp = appEl?.getAttribute("data-void-ssr") === "false" ? createApp : createSSRApp;
+const app = createVoidApp({
   setup() {
     provide("__void_shared", shared);
     provide("__void_errors", errors);
@@ -419,8 +422,8 @@ const app = createSSRApp({
   }
 });
 
-app.mount("#app");
-document.getElementById("app").setAttribute("data-hydrated", "true");
+app.mount(appEl);
+appEl.setAttribute("data-hydrated", "true");
 export { reactiveRouter as router };
 start();
 `;

@@ -88,6 +88,10 @@ the hydrated client. Put deferred reads behind Suspense, and use a normal React
 error boundary around that Suspense boundary when rejected deferred values need a
 custom error state.
 
+Export `ssr = false` from a page's `.server.ts` file to skip server-rendered
+component HTML for that route. The loader still runs and the browser mounts the
+page with the embedded initial props.
+
 For explicit prop annotations in React pages, import `Deferred` from
 `@void/react`:
 

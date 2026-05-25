@@ -237,6 +237,7 @@ import { renderReactPage } from "@void/react/pages-server";
 ${generateComponentManifest(scan, pagesDir)}
 
 	const PREAMBLE_SCRIPT = ${JSON.stringify(preambleScript)};
+	export const renderPreambleScript = PREAMBLE_SCRIPT;
 	
 	export async function renderPage(pageObj, assetTags) {
 	  return renderReactPage({
@@ -247,6 +248,7 @@ ${generateComponentManifest(scan, pagesDir)}
 	    preambleScript: PREAMBLE_SCRIPT,
 	  });
 }
+renderPage.preambleScript = PREAMBLE_SCRIPT;
 `;
 }
 
