@@ -72,7 +72,11 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
             result.needsLive = true;
           }
           break;
-        case 'void/client': {
+        case 'void/client':
+        case 'void/client/react':
+        case 'void/client/vue':
+        case 'void/client/svelte':
+        case 'void/client/solid': {
           // Check if the `auth` specifier is imported (not just `fetch`)
           const stmt = code.slice(imp.ss, imp.se + 1);
           if (/\bauth\b/.test(stmt)) {
@@ -108,7 +112,10 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
     if (hasRuntimeImportFrom(code, 'void/live')) {
       result.needsLive = true;
     }
-    if (/\bfrom\s+["']void\/client["']/.test(code) && /\bauth\b/.test(code)) {
+    if (
+      /\bfrom\s+["']void\/client(?:\/(?:react|vue|svelte|solid))?["']/.test(code) &&
+      /\bauth\b/.test(code)
+    ) {
       result.needsAuth = true;
     }
   }

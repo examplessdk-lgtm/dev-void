@@ -82,6 +82,26 @@
       "import": "./dist/runtime/client.mjs",
       "require": "./dist/runtime/client.mjs"
     },
+    "./client/react": {
+      "types": "./dist/runtime/client-react.d.mts",
+      "import": "./dist/runtime/client-react.mjs",
+      "require": "./dist/runtime/client-react.mjs"
+    },
+    "./client/vue": {
+      "types": "./dist/runtime/client-vue.d.mts",
+      "import": "./dist/runtime/client-vue.mjs",
+      "require": "./dist/runtime/client-vue.mjs"
+    },
+    "./client/svelte": {
+      "types": "./dist/runtime/client-svelte.d.mts",
+      "import": "./dist/runtime/client-svelte.mjs",
+      "require": "./dist/runtime/client-svelte.mjs"
+    },
+    "./client/solid": {
+      "types": "./dist/runtime/client-solid.d.mts",
+      "import": "./dist/runtime/client-solid.mjs",
+      "require": "./dist/runtime/client-solid.mjs"
+    },
     "./runtime/fetch": {
       "types": "./dist/runtime/fetch.d.mts",
       "import": "./dist/runtime/fetch.mjs",

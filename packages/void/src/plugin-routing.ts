@@ -40,6 +40,10 @@ import {
 const VIRTUAL_ROUTES_ID = 'virtual:void-routes';
 const VIRTUAL_CLIENT_WORKER_ID = 'virtual:void-client-worker';
 const VIRTUAL_CLIENT_BROWSER_ID = 'virtual:void-client-browser';
+const AUTH_CLIENT_FRAMEWORKS = ['react', 'vue', 'svelte', 'solid'] as const;
+type AuthClientFramework = (typeof AUTH_CLIENT_FRAMEWORKS)[number];
+const CLIENT_IMPORT_RE = /^void\/client(?:\/(react|vue|svelte|solid))?$/;
+const VIRTUAL_CLIENT_RE = /^virtual:void-client-(browser|worker)(?::(react|vue|svelte|solid))?$/;
 const PAGE_VIRTUAL_MODULE_IDS = [
   '\0virtual:void-pages-renderer',
   '\0virtual:void-pages-client',
@@ -48,8 +52,9 @@ const PAGE_VIRTUAL_MODULE_IDS = [
 ];
 // Rolldown resolveId hook filters currently require RegExp for `id`.
 const RESOLVE_ID_FILTER =
-  /^(virtual:void-(routes|client-worker|client-browser)|void(\/client|\/queues)?)$/;
-const LOAD_ID_FILTER = /^virtual:void-(routes|client-worker|client-browser)$/;
+  /^(virtual:void-(routes|client-worker(?::(react|vue|svelte|solid))?|client-browser(?::(react|vue|svelte|solid))?)|void(\/client(\/(react|vue|svelte|solid))?|\/queues)?)$/;
+const LOAD_ID_FILTER =
+  /^virtual:void-(routes|client-worker(?::(react|vue|svelte|solid))?|client-browser(?::(react|vue|svelte|solid))?)$/;
 
 /**
  * Vite plugin that provides file-based routing.
@@ -158,6 +163,12 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   const sandboxRuntimePath = resolveFile('#self/sandbox');
   const drizzleAdapterPath = resolveFile('better-auth/adapters/drizzle');
   let authClientPath = join(runtimeDir, 'auth-client.mjs');
+  const explicitAuthClientPaths: Record<AuthClientFramework, string> = {
+    react: join(runtimeDir, 'auth-client-react.mjs'),
+    vue: join(runtimeDir, 'auth-client-vue.mjs'),
+    svelte: join(runtimeDir, 'auth-client-svelte.mjs'),
+    solid: join(runtimeDir, 'auth-client-solid.mjs'),
+  };
   const remote = options.remoteMode
     ? {
         remotePath: resolveFile('#self/remote'),
@@ -279,18 +290,33 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
 
   function resolveAuthClientPath(config: import('vite').ResolvedConfig): string {
     if (config.plugins.some((plugin) => plugin.name === 'void-react:pages')) {
-      return join(runtimeDir, 'auth-client-react.mjs');
+      return explicitAuthClientPaths.react;
     }
     if (config.plugins.some((plugin) => plugin.name === 'void-vue:pages')) {
-      return join(runtimeDir, 'auth-client-vue.mjs');
+      return explicitAuthClientPaths.vue;
     }
     if (config.plugins.some((plugin) => plugin.name === 'void-svelte:pages')) {
-      return join(runtimeDir, 'auth-client-svelte.mjs');
+      return explicitAuthClientPaths.svelte;
     }
     if (config.plugins.some((plugin) => plugin.name === 'void-solid:pages')) {
-      return join(runtimeDir, 'auth-client-solid.mjs');
+      return explicitAuthClientPaths.solid;
     }
     return join(runtimeDir, 'auth-client.mjs');
+  }
+
+  function getClientAuthPath(id: string): string {
+    const framework = VIRTUAL_CLIENT_RE.exec(id)?.[2] as AuthClientFramework | undefined;
+    return framework ? explicitAuthClientPaths[framework] : authClientPath;
+  }
+
+  function resolveVirtualClientId(
+    id: string,
+    environmentName: string | undefined,
+  ): string | undefined {
+    const framework = CLIENT_IMPORT_RE.exec(id)?.[1] as AuthClientFramework | undefined;
+    const base =
+      environmentName === 'client' ? VIRTUAL_CLIENT_BROWSER_ID : VIRTUAL_CLIENT_WORKER_ID;
+    return framework ? `${base}:${framework}` : base;
   }
 
   function isPotentialAuthConfigPath(path: string): boolean {
@@ -534,10 +560,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         if (id === 'void/queues') {
           return resolveFile('#self/queues');
         }
-        if (id === 'void/client') {
-          return this.environment?.name === 'client'
-            ? VIRTUAL_CLIENT_BROWSER_ID
-            : VIRTUAL_CLIENT_WORKER_ID;
+        if (CLIENT_IMPORT_RE.test(id)) {
+          return resolveVirtualClientId(id, this.environment?.name);
         }
       },
     },
@@ -545,14 +569,15 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     load: {
       filter: { id: LOAD_ID_FILTER },
       async handler(id) {
-        if (id === VIRTUAL_CLIENT_BROWSER_ID) {
-          return compileBrowserClient(authClientPath, fetchPath, fetchStreamPath);
+        const virtualClient = VIRTUAL_CLIENT_RE.exec(id);
+        if (virtualClient?.[1] === 'browser') {
+          return compileBrowserClient(getClientAuthPath(id), fetchPath, fetchStreamPath);
         }
-        if (id === VIRTUAL_CLIENT_WORKER_ID) {
+        if (virtualClient?.[1] === 'worker') {
           if (options.target) {
-            return compileNodeClient(authClientPath);
+            return compileNodeClient(getClientAuthPath(id));
           }
-          return compileWorkerClient(authClientPath);
+          return compileWorkerClient(getClientAuthPath(id));
         }
         if (id !== VIRTUAL_ROUTES_ID) {
           return;
