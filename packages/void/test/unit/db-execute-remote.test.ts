@@ -319,9 +319,10 @@ describe('void db execute --remote (D1)', () => {
     expect(mockConfirm).not.toHaveBeenCalled();
   });
 
-  it('skips confirmation for WITH (CTE) statements', async () => {
+  it('prompts for confirmation for WITH (CTE) statements (fail-closed: writable CTEs are indistinguishable without a parser)', async () => {
     const root = createProjectRoot();
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    mockConfirm.mockResolvedValue(true);
     fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
 
     await runDbCommand(root, {
@@ -330,7 +331,7 @@ describe('void db execute --remote (D1)', () => {
       remote: true,
     });
 
-    expect(mockConfirm).not.toHaveBeenCalled();
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
   });
 
   it('includes CF Access service-token headers when env vars are set', async () => {

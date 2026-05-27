@@ -157,6 +157,18 @@ describe('parseDbArgs', () => {
     expect(() => parseDbArgs(['export', 'extra'])).toThrow("db: Unexpected argument 'extra'.");
   });
 
+  it('errors on export with --remote (not yet supported — must not silently fall through to local export)', () => {
+    expect(() => parseDbArgs(['export', '--remote'])).toThrow(
+      '`void db export --remote` is not yet supported. Local export only for now.',
+    );
+  });
+
+  it('errors on export with --remote combined with other flags', () => {
+    expect(() => parseDbArgs(['export', '--remote', '--output', 'dump.sql'])).toThrow(
+      '`void db export --remote` is not yet supported. Local export only for now.',
+    );
+  });
+
   it('parses studio', () => {
     expect(parseDbArgs(['studio'])).toEqual({ action: 'studio', remote: undefined });
   });

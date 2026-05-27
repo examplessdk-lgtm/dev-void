@@ -408,12 +408,28 @@ async function runSeed(
 }
 
 /**
- * Returns true when the SQL is read-only (SELECT / EXPLAIN / WITH).
+ * Returns true when the SQL is read-only (SELECT / EXPLAIN only).
  * Used to skip the destructive-statement safety prompt for safe queries.
- * // Note: leading SQL comments are not stripped; `-- foo\nSELECT 1` will be flagged as destructive. This is a UX nuisance, not a safety hole.
+ *
+ * This is a fail-closed heuristic, not a real SQL parser:
+ * - `WITH` (CTEs) is intentionally excluded: writable CTEs such as
+ *   `WITH deleted AS (DELETE FROM users RETURNING *) SELECT * FROM deleted`
+ *   are destructive but match a naive `WITH` prefix check. Users with
+ *   read-only CTEs will see the safety prompt — minor friction, safe by default.
+ * - Multi-statement SQL (`SELECT 1; DELETE FROM users`) is rejected: any `;`
+ *   followed by non-whitespace content after stripping a trailing semicolon is
+ *   treated as unsafe.
+ * - Leading SQL comments are not stripped; `-- foo\nSELECT 1` will be flagged
+ *   as destructive. This is a UX nuisance, not a safety hole.
  */
 function isSafeStatement(sql: string): boolean {
-  return /^\s*(SELECT|EXPLAIN|WITH)\b/i.test(sql);
+  // Strip a single trailing semicolon/whitespace, then bail if any internal `;` remains.
+  const stripped = sql.replace(/;\s*$/, '');
+  if (stripped.includes(';')) {
+    return false;
+  }
+  // Only SELECT/EXPLAIN prefixes are reliably safe without a parser.
+  return /^\s*(SELECT|EXPLAIN)\b/i.test(stripped);
 }
 
 /**

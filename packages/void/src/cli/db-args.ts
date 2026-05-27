@@ -161,6 +161,9 @@ export function parseDbArgs(args: Array<string>): DbArgs {
   }
 
   if (action === 'export') {
+    if (parsed.values.remote === true) {
+      throw new Error('`void db export --remote` is not yet supported. Local export only for now.');
+    }
     if (rest.length > 0) {
       throw new Error(`db: Unexpected argument '${rest[0]}'.`);
     }
