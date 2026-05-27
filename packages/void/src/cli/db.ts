@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { intro, outro, log } from '@clack/prompts';
+import { confirm, intro, isCancel, outro, log } from '@clack/prompts';
 import { extname, join, relative, resolve } from 'pathe';
 import { readConfig, getDatabaseDialect, type DatabaseDialect } from '../config.ts';
 import {
@@ -18,8 +18,10 @@ import {
 import { detectFramework } from '../plugin-inference.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import type { SeedFn } from '../runtime/seed.ts';
-import { getToken } from './auth.ts';
-import { PlatformClient } from './client.ts';
+import { cfAccessHeaders } from '../shared/cf-access.ts';
+import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from '../shared/proxy.ts';
+import { getToken, isStagingMode } from './auth.ts';
+import { PlatformApiError, PlatformClient } from './client.ts';
 import type { DbArgs } from './db-args.ts';
 import { formatTimestamp } from './gen.ts';
 import { cliTitle, dim, pc } from './output.ts';
@@ -148,7 +150,7 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
   } else if (args.action === 'seed') {
     await runSeed(root, args.file, dialect);
   } else if (args.action === 'execute') {
-    await runExecute(root, args.command, args.file, dialect);
+    await runExecute(root, args.command, args.file, dialect, args.remote);
   } else if (args.action === 'migrate') {
     await runMigrate(root, dialect, args.remote);
   } else if (args.action === 'studio') {
@@ -405,12 +407,153 @@ async function runSeed(
   outro('Done.');
 }
 
+/**
+ * Returns true when the SQL is read-only (SELECT / EXPLAIN / WITH).
+ * Used to skip the destructive-statement safety prompt for safe queries.
+ */
+function isSafeStatement(sql: string): boolean {
+  return /^\s*(SELECT|EXPLAIN|WITH)\b/i.test(sql);
+}
+
+/**
+ * Prompt the user to confirm a destructive remote query when running in a TTY.
+ * Returns true if execution should proceed, false if it was cancelled.
+ */
+async function confirmDestructiveRemote(sql: string): Promise<boolean> {
+  if (isSafeStatement(sql)) {
+    return true;
+  }
+  if (!process.stdin.isTTY) {
+    return true;
+  }
+  const ok = await confirm({
+    message: 'This will run against your deployed database. Continue?',
+  });
+  if (isCancel(ok) || !ok) {
+    return false;
+  }
+  return true;
+}
+
 async function runExecute(
   root: string,
   command: string | undefined,
   file: string | undefined,
   dialect: DatabaseDialect,
+  remote?: boolean,
 ): Promise<void> {
+  if (remote) {
+    const sql = file ? readFileSync(join(root, file), 'utf-8') : command!;
+
+    const token = getToken(root);
+    if (!token) {
+      log.error('Not logged in. Run `void auth login` first.');
+      process.exit(1);
+    }
+
+    const projectConfig = readProjectConfig(root);
+    if (!projectConfig) {
+      log.error('No project linked. Run `void deploy` first or link a project.');
+      process.exit(1);
+    }
+
+    const shouldProceed = await confirmDestructiveRemote(sql);
+    if (!shouldProceed) {
+      log.info('Cancelled.');
+      process.exit(0);
+    }
+
+    if (dialect === 'postgresql') {
+      // PG remote: fetch the connection string from the platform, then connect directly.
+      const client = new PlatformClient(token, { root });
+      let dbUrl: string;
+      try {
+        const result = await client.getDatabaseUrl(projectConfig.projectId);
+        dbUrl = result.url;
+      } catch (err) {
+        if (err instanceof PlatformApiError && err.status === 404) {
+          log.error(
+            "This project's database URL isn't stored on the platform yet. Run `void db set-url` once to populate it, then retry.",
+          );
+          process.exit(1);
+        }
+        throw err;
+      }
+
+      const { Client } = await import('pg');
+      const pgClient: PgClient = new Client({ connectionString: dbUrl });
+      await pgClient.connect();
+      try {
+        const result = await pgClient.query(sql);
+        if (result.rows && result.rows.length > 0) {
+          printTable(result.rows);
+        } else {
+          log.success('Executed successfully.');
+        }
+      } finally {
+        await pgClient.end();
+      }
+      outro('Done.');
+      return;
+    }
+
+    // D1 remote: route through the platform proxy.
+    if (file) {
+      log.error(
+        '--file is not yet supported with --remote D1; pipe statements through stdin or run them one at a time.',
+      );
+      process.exit(1);
+    }
+
+    const platformClient = new PlatformClient(token, { root });
+    let binding = 'DB';
+    try {
+      const resources = await platformClient.getResources(projectConfig.projectId);
+      const d1Resource = resources.find((r) => r.type === 'd1');
+      if (d1Resource) {
+        binding = d1Resource.binding_name;
+      }
+    } catch {
+      // Fall back to default binding 'DB' if resource discovery fails
+    }
+
+    const proxyUrl = isStagingMode(root) ? STAGING_PROXY_URL : DEFAULT_PROXY_URL;
+    const res = await fetch(`${proxyUrl}/d1/query`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        ...cfAccessHeaders(process.env),
+      },
+      body: JSON.stringify({
+        projectId: projectConfig.projectId,
+        binding,
+        sql,
+        params: [],
+        method: 'all',
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      log.error(`db: Proxy request failed with ${res.status}: '${text}'.`);
+      process.exit(1);
+    }
+
+    const data = (await res.json()) as {
+      results?: Array<Record<string, unknown>>;
+      success?: boolean;
+    };
+    const rows = data.results ?? [];
+    if (rows.length > 0) {
+      printTable(rows);
+    } else {
+      log.success('Executed successfully.');
+    }
+    outro('Done.');
+    return;
+  }
+
   if (dialect === 'postgresql') {
     const sql = file ? readFileSync(join(root, file), 'utf-8') : command!;
     await withPgClient(root, async (client) => {

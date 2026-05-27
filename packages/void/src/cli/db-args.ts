@@ -14,8 +14,8 @@ export const dbSubcommands: Array<SubcommandDef> = [
   {
     name: 'execute',
     arg: '<sql>',
-    description: 'Run SQL against the local database',
-    flags: [{ name: '--remote', description: 'Run against the remote database' }],
+    description: 'Run SQL against the database (use --remote for the deployed database)',
+    flags: [{ name: '--remote', description: 'Run against the deployed database' }],
   },
   {
     name: 'migrate',
