@@ -33,6 +33,7 @@ describe('parseDbArgs', () => {
       action: 'execute',
       command: 'SELECT * FROM users',
       file: undefined,
+      remote: undefined,
     });
   });
 
@@ -41,6 +42,16 @@ describe('parseDbArgs', () => {
       action: 'execute',
       command: undefined,
       file: 'query.sql',
+      remote: undefined,
+    });
+  });
+
+  it('parses execute with --remote flag', () => {
+    expect(parseDbArgs(['execute', 'SELECT 1', '--remote'])).toEqual({
+      action: 'execute',
+      command: 'SELECT 1',
+      file: undefined,
+      remote: true,
     });
   });
 
@@ -147,7 +158,11 @@ describe('parseDbArgs', () => {
   });
 
   it('parses studio', () => {
-    expect(parseDbArgs(['studio'])).toEqual({ action: 'studio' });
+    expect(parseDbArgs(['studio'])).toEqual({ action: 'studio', remote: undefined });
+  });
+
+  it('parses studio with --remote flag', () => {
+    expect(parseDbArgs(['studio', '--remote'])).toEqual({ action: 'studio', remote: true });
   });
 
   it('errors on studio with extra positional', () => {

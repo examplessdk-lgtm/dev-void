@@ -789,6 +789,20 @@ export class PlatformClient {
     return res.json();
   }
 
+  async getDatabaseUrl(projectId: string): Promise<{ url: string }> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/database-url`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to fetch database URL', res);
+    }
+
+    return res.json();
+  }
+
   async purgeCache(projectId: string): Promise<{ purged: number }> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/revalidate`, {
       method: 'POST',
