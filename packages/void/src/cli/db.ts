@@ -786,7 +786,7 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
   if (remote) {
     if (dialect !== 'postgresql') {
       log.error(
-        "Remote D1 studio is not yet supported. Use 'void db execute --remote' for ad-hoc queries against your deployed D1 database.",
+        'Remote D1 studio is not yet supported. Use `void db execute --remote` for ad-hoc queries against your deployed D1 database.',
       );
       process.exit(1);
     }

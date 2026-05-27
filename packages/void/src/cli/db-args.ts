@@ -25,7 +25,7 @@ export const dbSubcommands: Array<SubcommandDef> = [
   {
     name: 'studio',
     description:
-      'Open Drizzle Studio against the database (use --remote for the deployed PostgreSQL database; D1 remote not yet supported)',
+      'Open Drizzle Studio against the database (use --remote for the deployed PostgreSQL database)',
     flags: [{ name: '--remote', description: 'Open Studio against the deployed database' }],
   },
   { name: 'set-url', description: 'Update the PostgreSQL connection string for deployment' },

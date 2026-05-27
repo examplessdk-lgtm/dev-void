@@ -10,32 +10,33 @@ Use this page as a command reference. If you are setting up a project for the fi
 
 ## Cheat Sheet
 
-| Command                           | Purpose                                          |
-| --------------------------------- | ------------------------------------------------ |
-| `void deploy`                     | Build and deploy to Void                         |
-| `void prepare`                    | Generate `.void` artifacts without starting Vite |
-| `void gen model <name> [cols...]` | Scaffold migration + CRUD routes                 |
-| `void gen route <path>`           | Create an API route                              |
-| `void db push`                    | Apply schema directly without migration files    |
-| `void db generate`                | Generate SQL migrations from schema changes      |
-| `void db status`                  | Show local/remote migration status               |
-| `void db reset`                   | Drop and re-apply all migrations                 |
-| `void db seed`                    | Reset + seed local database                      |
-| `void db studio`                  | Open Drizzle Studio for local database           |
-| `void secret put <name=value>`    | Set a production secret                          |
-| `void secret list`                | List production secrets                          |
-| `void secret sync .env.local`     | Bulk upload secrets from dotenv file             |
-| `void env check [--remote]`       | Validate env.ts schema                           |
-| `void env types`                  | Regenerate .void/env.d.ts from env.ts            |
-| `void env example`                | Refresh the void-managed block in .env.example   |
-| `void auth login`                 | Authenticate with Void                           |
-| `void project link`               | Link directory to a project                      |
-| `void project logs`               | Show runtime logs from deployed project          |
-| `void project rollback`           | Roll back to a previous deployment               |
-| `void project cancel`             | Cancel an active deployment                      |
-| `void project purge-cache`        | Purge all cached pages                           |
-| `void mcp`                        | Start the Void MCP server                        |
-| `void init`                       | Setup wizard for new or existing projects        |
+| Command                           | Purpose                                                             |
+| --------------------------------- | ------------------------------------------------------------------- |
+| `void deploy`                     | Build and deploy to Void                                            |
+| `void prepare`                    | Generate `.void` artifacts without starting Vite                    |
+| `void gen model <name> [cols...]` | Scaffold migration + CRUD routes                                    |
+| `void gen route <path>`           | Create an API route                                                 |
+| `void db push`                    | Apply schema directly without migration files                       |
+| `void db generate`                | Generate SQL migrations from schema changes                         |
+| `void db status`                  | Show local/remote migration status                                  |
+| `void db reset`                   | Drop and re-apply all migrations                                    |
+| `void db seed`                    | Reset + seed local database                                         |
+| `void db execute <sql>`           | Run SQL against the database (--remote for deployed)                |
+| `void db studio`                  | Open Drizzle Studio (--remote for the deployed PostgreSQL database) |
+| `void secret put <name=value>`    | Set a production secret                                             |
+| `void secret list`                | List production secrets                                             |
+| `void secret sync .env.local`     | Bulk upload secrets from dotenv file                                |
+| `void env check [--remote]`       | Validate env.ts schema                                              |
+| `void env types`                  | Regenerate .void/env.d.ts from env.ts                               |
+| `void env example`                | Refresh the void-managed block in .env.example                      |
+| `void auth login`                 | Authenticate with Void                                              |
+| `void project link`               | Link directory to a project                                         |
+| `void project logs`               | Show runtime logs from deployed project                             |
+| `void project rollback`           | Roll back to a previous deployment                                  |
+| `void project cancel`             | Cancel an active deployment                                         |
+| `void project purge-cache`        | Purge all cached pages                                              |
+| `void mcp`                        | Start the Void MCP server                                           |
+| `void init`                       | Setup wizard for new or existing projects                           |
 
 ## Binary Invocation
 
