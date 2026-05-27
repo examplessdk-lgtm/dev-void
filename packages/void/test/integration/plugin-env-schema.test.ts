@@ -186,4 +186,74 @@ describe('envSchemaPlugin auto-discovery', () => {
     const joined = calls.join('\n');
     expect(joined).not.toContain('shadowing schema env keys');
   });
+
+  it('adds client-exposed schema defaults to Vite env', async () => {
+    const { defineEnv } = await import('../../src/runtime/env-public.ts');
+    const { number, string } = await import('../../src/runtime/env-helpers.ts');
+    const root = createTempRoot();
+    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+
+    const plugin = envSchemaPlugin(root);
+    await runConfig(plugin);
+    defineEnv({ VITE_GIT_SHA: string().default('abc123'), PORT: number().default(3000) });
+
+    const resolved = {
+      mode: 'development',
+      envDir: root,
+      envPrefix: 'VITE_',
+      env: {},
+      define: {},
+    };
+    await runConfigResolved(plugin, resolved);
+
+    expect(resolved.env).toEqual({ VITE_GIT_SHA: 'abc123' });
+    expect('PORT' in resolved.env).toBe(false);
+  });
+
+  it('does not overwrite a Vite env value with a schema default', async () => {
+    const { defineEnv } = await import('../../src/runtime/env-public.ts');
+    const { string } = await import('../../src/runtime/env-helpers.ts');
+    const root = createTempRoot();
+    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+
+    const plugin = envSchemaPlugin(root);
+    await runConfig(plugin);
+    defineEnv({ VITE_TITLE: string().default('Default') });
+
+    const resolved = {
+      mode: 'development',
+      envDir: root,
+      envPrefix: 'VITE_',
+      env: { VITE_TITLE: 'FromEnv' },
+      define: {},
+    };
+    await runConfigResolved(plugin, resolved);
+
+    expect(resolved.env.VITE_TITLE).toBe('FromEnv');
+  });
+
+  it('honours custom envPrefix values when exposing schema defaults', async () => {
+    const { defineEnv } = await import('../../src/runtime/env-public.ts');
+    const { string } = await import('../../src/runtime/env-helpers.ts');
+    const root = createTempRoot();
+    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+
+    const plugin = envSchemaPlugin(root);
+    await runConfig(plugin);
+    defineEnv({
+      PUBLIC_TITLE: string().default('Public'),
+      VITE_TITLE: string().default('Vite'),
+    });
+
+    const resolved = {
+      mode: 'development',
+      envDir: root,
+      envPrefix: ['PUBLIC_'],
+      env: {},
+      define: {},
+    };
+    await runConfigResolved(plugin, resolved);
+
+    expect(resolved.env).toEqual({ PUBLIC_TITLE: 'Public' });
+  });
 });

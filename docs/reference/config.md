@@ -399,7 +399,7 @@ Each binding accepts `true` (use default name), `false` (disable), or a string (
 | `storage` | `STORAGE`       | `R2Bucket`    | `"storage": "MY_BUCKET"` |
 | `ai`      | `AI`            | `Ai`          | Boolean only             |
 
-Custom names are used in the deploy manifest and in wrangler binding sync for local dev.
+Custom names are used in the deploy manifest, Wrangler config generation/sync, remote binding proxying, internal migrations, and generated runtime helpers such as `void/db`, `void/kv`, and `void/storage`.
 
 #### `inference.build`
 

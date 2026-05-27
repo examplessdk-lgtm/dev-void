@@ -518,6 +518,7 @@ export async function promptDeployProjectConfig(
 
   // Project names are only shown after the user opts into linking.
   const result = await promptProjectSelection(projects, 'Select a project to deploy to:', root, {
+    confirmExisting: true,
     includeCreate: false,
   });
 

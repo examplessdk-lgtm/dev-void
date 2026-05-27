@@ -676,6 +676,8 @@ export type CompileOptions = {
   migrationPlanBundle?: MigrationPlanBundle;
   /** Migration dialect (sqlite or postgresql) */
   migrationDialect?: 'sqlite' | 'postgresql';
+  /** Custom binding names configured through inference.bindings. */
+  bindingNames?: { d1?: string; kv?: string; r2?: string };
   /** Header rules from routing.headers config (node/bun/deno targets only) */
   headerRules?: Array<HeaderRule>;
   /** Redirect rules from routing.redirects config (node/bun/deno targets only) */
@@ -1530,6 +1532,7 @@ window.__vite_plugin_react_preamble_installed__ = true;
 
   // /__void/migrate handler — runs bundled DB + auth migrations in-worker
   if (options.migrationHandlerPath && (options.migrations?.length || auth)) {
+    const d1BindingName = options.bindingNames?.d1;
     lines.push(
       `import { createMigrationHandler as __createMigrationHandler } from ${JSON.stringify(options.migrationHandlerPath)};`,
     );
@@ -1538,16 +1541,27 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push(
       `const __migrationDialect = ${JSON.stringify(options.migrationDialect ?? 'sqlite')};`,
     );
+    if (d1BindingName) {
+      lines.push(
+        `function __voidGetMigrationEnv() {
+  const env = __getRawEnv();
+  if (!env || env[${JSON.stringify(d1BindingName)}] == null) return env;
+  return { ...env, DB: env[${JSON.stringify(d1BindingName)}] };
+}`,
+      );
+    } else {
+      lines.push('function __voidGetMigrationEnv() { return __getRawEnv(); }');
+    }
     lines.push(
       'function __voidCreateMigrationRequestHandler(request, includeAuthMigrations, includePlanBundle) {',
     );
     lines.push('  return __createMigrationHandler(');
-    lines.push('    __getRawEnv(),');
+    lines.push('    __voidGetMigrationEnv(),');
     lines.push('    __migrations,');
     lines.push('    __migrationDialect,');
     if (auth) {
       lines.push(
-        `    includeAuthMigrations ? () => runVoidAuthMigrations(new Request(request.url), __getRawEnv(), __voidAuthOptions${
+        `    includeAuthMigrations ? () => runVoidAuthMigrations(new Request(request.url), __voidGetMigrationEnv(), __voidAuthOptions${
           auth.authSchemaPath ? ', __voidAuthMigrationSchema' : ''
         }) : undefined,`,
       );
@@ -1588,12 +1602,12 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('}');
     lines.push('app.post("/__void/migrate", async (c) => {');
     lines.push('  const __voidMigrationHandler = __createMigrationHandler(');
-    lines.push('    __getRawEnv(),');
+    lines.push('    __voidGetMigrationEnv(),');
     lines.push('    __migrations,');
     lines.push('    __migrationDialect,');
     if (auth) {
       lines.push(
-        `    () => runVoidAuthMigrations(new Request(c.req.url), __getRawEnv(), __voidAuthOptions${
+        `    () => runVoidAuthMigrations(new Request(c.req.url), __voidGetMigrationEnv(), __voidAuthOptions${
           auth.authSchemaPath ? ', __voidAuthMigrationSchema' : ''
         }),`,
       );
@@ -1605,12 +1619,12 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('});');
     lines.push('app.get("/__void/migrate/capabilities", async (c) => {');
     lines.push('  const __voidMigrationHandler = __createMigrationHandler(');
-    lines.push('    __getRawEnv(),');
+    lines.push('    __voidGetMigrationEnv(),');
     lines.push('    __migrations,');
     lines.push('    __migrationDialect,');
     if (auth) {
       lines.push(
-        `    () => runVoidAuthMigrations(new Request(c.req.url), __getRawEnv(), __voidAuthOptions${
+        `    () => runVoidAuthMigrations(new Request(c.req.url), __voidGetMigrationEnv(), __voidAuthOptions${
           auth.authSchemaPath ? ', __voidAuthMigrationSchema' : ''
         }),`,
       );
@@ -1623,7 +1637,7 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('});');
     lines.push('app.post("/__void/migrate/app", async (c) => {');
     lines.push('  const __voidMigrationHandler = __createMigrationHandler(');
-    lines.push('    __getRawEnv(),');
+    lines.push('    __voidGetMigrationEnv(),');
     lines.push('    __migrations,');
     lines.push('    __migrationDialect,');
     lines.push('    undefined,');
@@ -1633,7 +1647,7 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('});');
     lines.push('app.get("/__void/migrate/app/attempt/:attemptId", async (c) => {');
     lines.push('  const __voidMigrationHandler = __createMigrationHandler(');
-    lines.push('    __getRawEnv(),');
+    lines.push('    __voidGetMigrationEnv(),');
     lines.push('    __migrations,');
     lines.push('    __migrationDialect,');
     lines.push('    undefined,');
@@ -1644,11 +1658,11 @@ window.__vite_plugin_react_preamble_installed__ = true;
     if (auth) {
       lines.push('app.post("/__void/migrate/auth", async (c) => {');
       lines.push('  const __voidMigrationHandler = __createMigrationHandler(');
-      lines.push('    __getRawEnv(),');
+      lines.push('    __voidGetMigrationEnv(),');
       lines.push('    __migrations,');
       lines.push('    __migrationDialect,');
       lines.push(
-        `    () => runVoidAuthMigrations(new Request(c.req.url), __getRawEnv(), __voidAuthOptions${
+        `    () => runVoidAuthMigrations(new Request(c.req.url), __voidGetMigrationEnv(), __voidAuthOptions${
           auth.authSchemaPath ? ', __voidAuthMigrationSchema' : ''
         }),`,
       );
@@ -2332,7 +2346,11 @@ function compilePageRoutes(
  */
 export function compileWorkerEntry(
   hasQueues = false,
-  remote?: { remotePath: string; envPath: string },
+  remote?: {
+    remotePath: string;
+    envPath: string;
+    bindingNames?: { d1?: string; kv?: string; r2?: string };
+  },
   assetsDir = 'assets',
   webSocketClasses: Array<string> = [],
   runtimeEnvPath = 'void/_env',
@@ -2342,6 +2360,10 @@ export function compileWorkerEntry(
   live?: boolean | { bindingName?: string; className?: string },
 ): string {
   const remotePath = remote?.remotePath;
+  const remoteBindingNames = JSON.stringify(remote?.bindingNames);
+  const createRemoteEnvCall = `createRemoteEnv(env${
+    remote?.bindingNames ? `, ${remoteBindingNames}` : ''
+  })`;
   const hasSandbox = sandbox === true || typeof sandbox === 'object';
   const sandboxClassName =
     typeof sandbox === 'object' ? (sandbox.className ?? 'Sandbox') : 'Sandbox';
@@ -2470,7 +2492,7 @@ ${spaFallbackCode}
     ? `async (request, env, ctx) => {
 ${envValidateCall}  const ws = await __voidHandleWebSocket(request, env);
   if (ws) return ws;
-  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
+  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
   return __withRawEnv(env, () => {
     const userEnv = __filterInternalBindings(env);
     return withRuntimeEnv(env, async () => {
@@ -2516,7 +2538,7 @@ ${envValidateCall}  const ws = await __voidHandleWebSocket(request, env);
 
   const scheduledHandler = remotePath
     ? `async function handleScheduled(controller, env, ctx) {
-${envValidateCall}  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);
+${envValidateCall}  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
   const userEnv = __filterInternalBindings(env);
   return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
 }`
@@ -2531,7 +2553,7 @@ ${runtimeEnvImport}${envSchemaImport}${remoteImport}${filterBindingsHelper}${ass
 ${internalRouteHelper}
 ${scheduledHandler}
 async function queue(batch, env, ctx) {
-${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = createRemoteEnv(env);\n` : ''}  const userEnv = __filterInternalBindings(env);
+${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};\n` : ''}  const userEnv = __filterInternalBindings(env);
   const messages = [...batch.messages].map(m => ({
     id: m.id, timestamp: m.timestamp.toISOString(),
     body: m.body, attempts: m.attempts,

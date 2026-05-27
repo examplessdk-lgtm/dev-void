@@ -19,6 +19,7 @@ const pgResolved = fileURLToPath(import.meta.resolve('pg'));
 const VIRTUAL_DB_ID = '\0virtual:void-db';
 const VIRTUAL_SCHEMA_DB_ID = '\0virtual:void-db-schema';
 type DrizzlePluginOptions = {
+  d1BindingName?: string;
   forceVirtualDb?: boolean;
   localD1DatabaseId?: string;
   localD1PersistRoot?: string;
@@ -45,6 +46,7 @@ export function drizzlePlugin(
   const paths = readProjectPaths(root);
   const schema = discoverSchema(root, paths);
   const hasDbRuntime = schema != null || options.forceVirtualDb === true;
+  const d1BindingName = options.d1BindingName ?? 'DB';
 
   // Always write tsconfig (for routes.d.ts, queues.d.ts, etc.)
   ensureProjectTsconfig(root, hasRouteTypes, hasDbRuntime, schema != null, {
@@ -198,7 +200,7 @@ let _instance;
 
 export const db = new Proxy({}, {
   get(_, prop) {
-    _instance ??= drizzle(requireRuntimeBinding("DB")${drizzleConfig});
+    _instance ??= drizzle(requireRuntimeBinding(${JSON.stringify(d1BindingName)})${drizzleConfig});
     return Reflect.get(_instance, prop);
   },
 });

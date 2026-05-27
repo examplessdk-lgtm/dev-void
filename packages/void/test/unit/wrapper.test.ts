@@ -167,6 +167,8 @@ describe('generateWrapper with migrations', () => {
     expect(bundled).toContain('CloudflareSocket');
     expect(bundled).toContain('cloudflare:sockets');
     expect(bundled).toContain('node:events');
+    expect(bundled).toContain('node:util/types');
+    expect(bundled).toContain('"util/types": __voidNodeUtilTypes');
     expect(bundled).toContain('__voidNodeRequireModules');
     expect(bundled).toContain('__voidPgpassNoop');
   });

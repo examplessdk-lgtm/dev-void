@@ -18,17 +18,17 @@ This runs once before plugins initialize, so the results are available to config
 
 ## Detected Bindings
 
-| Binding   | Type                              | Detected by import                                                        | Detected by env access           |
-| --------- | --------------------------------- | ------------------------------------------------------------------------- | -------------------------------- |
-| `DB`      | `D1Database`                      | `import { db } from "void/db"`                                            | `env.DB` or `c.env.DB`           |
-| `KV`      | `KVNamespace`                     | `import { kv } from "void/kv"`                                            | `env.KV` or `c.env.KV`           |
-| `STORAGE` | `R2Bucket`                        | `import { storage } from "void/storage"`                                  | `env.STORAGE` or `c.env.STORAGE` |
-| `AI`      | `Ai`                              | `import { ai } from "void/ai"`                                            | `env.AI` or `c.env.AI`           |
-| `SANDBOX` | `DurableObjectNamespace<Sandbox>` | `import { getSandbox } from "void/sandbox"`                               | `env.SANDBOX` or `c.env.SANDBOX` |
-| Auth      | none                              | `import { ... } from "void/auth"` or `import { auth } from "void/client"` | none                             |
-| `QUEUE_*` | `Queue`                           | `import { queues } from "void/queues"`                                    | `env.QUEUE_*`                    |
+| Binding   | Type                              | Detected by import                                                                                                                                               | Detected by env access           |
+| --------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| `DB`      | `D1Database`                      | `import { db } from "void/db"`                                                                                                                                   | `env.DB` or `c.env.DB`           |
+| `KV`      | `KVNamespace`                     | `import { kv } from "void/kv"`                                                                                                                                   | `env.KV` or `c.env.KV`           |
+| `STORAGE` | `R2Bucket`                        | `import { storage } from "void/storage"`                                                                                                                         | `env.STORAGE` or `c.env.STORAGE` |
+| `AI`      | `Ai`                              | `import { ai } from "void/ai"`                                                                                                                                   | `env.AI` or `c.env.AI`           |
+| `SANDBOX` | `DurableObjectNamespace<Sandbox>` | `import { getSandbox } from "void/sandbox"`                                                                                                                      | `env.SANDBOX` or `c.env.SANDBOX` |
+| Auth      | none                              | `import { ... } from "void/auth"` or `import { auth } from "void/client"` / `void/client/react` / `void/client/vue` / `void/client/svelte` / `void/client/solid` | none                             |
+| `QUEUE_*` | `Queue`                           | `import { queues } from "void/queues"`                                                                                                                           | `env.QUEUE_*`                    |
 
-Auth detection also triggers when importing the `auth` specifier from `void/client` (but not when importing only `fetch`).
+Auth detection also triggers when importing the `auth` specifier from `void/client` or a framework-specific client subpath such as `void/client/react` (but not when importing only `fetch`).
 
 ## Scanned Directories
 

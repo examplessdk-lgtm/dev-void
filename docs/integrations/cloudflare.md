@@ -244,6 +244,7 @@ Create `wrangler.jsonc` in your project root with the resource IDs from step 1:
       "binding": "DB",
       "database_name": "my-app-db",
       "database_id": "<your-database-id>",
+      "migrations_dir": "./db/migrations",
     },
   ],
   "kv_namespaces": [
@@ -268,10 +269,10 @@ Only include the bindings your app actually uses. You can also add service bindi
 If your app uses D1, apply migrations before deploying:
 
 ```bash
-wrangler d1 migrations apply DB --remote
+wrangler d1 migrations apply my-app-db --remote
 ```
 
-This uses the same `db/migrations/` directory that Void uses locally.
+This uses the same `db/migrations/` directory that Void uses locally. `my-app-db` is the database name from your `wrangler.jsonc`; using the database name avoids accidentally applying migrations to the wrong binding.
 
 ### 4. Build and deploy
 

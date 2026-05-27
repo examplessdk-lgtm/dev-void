@@ -1,6 +1,11 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, resolve } from 'pathe';
 import { readProjectPaths } from '../project-paths.ts';
+import {
+  getPackageDependencies,
+  hasPackageDependency,
+  readPackageJson,
+} from '../shared/package-json.ts';
 import { hasSsrEntry } from '../ssr/entry.ts';
 
 /** Build output conventions for a known SSG (static site generator). */
@@ -175,7 +180,7 @@ export function detectPreset(
   // 2. Known SSG detected
   const pkg = readPackageJson(root);
   if (pkg) {
-    const allDeps = getAllDeps(pkg);
+    const allDeps = getPackageDependencies(pkg);
     for (const preset of Object.values(SSG_PRESETS)) {
       if (preset.dep in allDeps) {
         const overrides = preset.resolve?.(root);
@@ -241,21 +246,6 @@ function resolveCommandBin(root: string, name: string): string {
   return name;
 }
 
-function readPackageJson(root: string): Record<string, unknown> | null {
-  try {
-    return JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-  } catch {
-    return null;
-  }
-}
-
-function getAllDeps(pkg: Record<string, unknown>): Record<string, string> {
-  return {
-    ...((pkg.dependencies as Record<string, string>) ?? {}),
-    ...((pkg.devDependencies as Record<string, string>) ?? {}),
-  };
-}
-
 function detectPackageManager(root: string): 'pnpm' | 'yarn' | 'bun' | 'npm' {
   if (existsSync(join(root, 'pnpm-lock.yaml'))) {
     return 'pnpm';
@@ -292,17 +282,13 @@ function resolveProjectScriptCommand(root: string, scriptName: string): string |
 }
 
 function hasViteLike(pkg: Record<string, unknown>): boolean {
-  const deps = getAllDeps(pkg);
-  return 'vite' in deps || 'vite-plus' in deps;
+  return hasPackageDependency(pkg, 'vite') || hasPackageDependency(pkg, 'vite-plus');
 }
 
 function detectViteBinary(root: string): 'vite' | 'vp' {
   const pkg = readPackageJson(root);
-  if (pkg) {
-    const deps = getAllDeps(pkg);
-    if ('vite-plus' in deps) {
-      return 'vp';
-    }
+  if (pkg && hasPackageDependency(pkg, 'vite-plus')) {
+    return 'vp';
   }
   return 'vite';
 }

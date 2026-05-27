@@ -80,6 +80,22 @@ describe('inferProjectBindings', () => {
     expect(result.needsAuth).toBe(true);
   });
 
+  it('detects auth from framework-specific void/client subpaths in src/', () => {
+    const root = createTempRoot();
+    writeFileSync(
+      join(root, 'src', 'App.tsx'),
+      `
+      import { auth } from "void/client/react";
+      export default function App() {
+        auth.useSession();
+      }
+      `,
+    );
+
+    const result = inferProjectBindings(root);
+    expect(result.needsAuth).toBe(true);
+  });
+
   it('detects live from the documented src/live.ts module', () => {
     const root = createTempRoot();
     mkdirSync(join(root, 'routes'), { recursive: true });

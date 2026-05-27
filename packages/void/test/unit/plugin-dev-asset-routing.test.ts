@@ -55,6 +55,37 @@ function createApiOnlyProjectRoot(): string {
   return root;
 }
 
+function createBindingProjectRoot(): string {
+  const root = createProjectRoot();
+  mkdirSync(join(root, 'routes/api'), { recursive: true });
+  writeFileSync(
+    join(root, 'routes/api/bindings.ts'),
+    `
+import { db } from "void/db";
+import { storage } from "void/storage";
+
+export async function GET() {
+  await db.select();
+  await storage.head("key");
+  return Response.json({});
+}
+`,
+  );
+  return root;
+}
+
+function createCustomBindingProjectRoot(): string {
+  const root = createBindingProjectRoot();
+  writeFileSync(
+    join(root, 'void.json'),
+    JSON.stringify({
+      inference: { bindings: { db: 'myapp_db', kv: 'myapp_kv', storage: 'myapp_storage' } },
+      worker: { compatibility_date: '2026-02-24' },
+    }),
+  );
+  return root;
+}
+
 function createApiWebSocketOnlyProjectRoot(): string {
   const root = createProjectRoot();
   mkdirSync(join(root, 'routes/api'), { recursive: true });
@@ -103,10 +134,10 @@ afterEach(() => {
 });
 
 describe('voidPlugin dev asset routing', () => {
-  async function resolveVoidPluginAssets(
+  async function resolveCloudflareConfig(
     root: string,
     resolved: Record<string, unknown> = {},
-  ): Promise<{ not_found_handling?: string; run_worker_first?: Array<string> }> {
+  ): Promise<Record<string, unknown>> {
     vi.spyOn(process, 'cwd').mockReturnValue(root);
 
     const { voidPlugin } = await import('../../src/index.ts');
@@ -126,7 +157,14 @@ describe('voidPlugin dev asset routing', () => {
       throw new Error('Expected mocked Cloudflare plugin.');
     }
 
-    const merged = cloudflarePlugin.api.pluginConfig.config(resolved);
+    return cloudflarePlugin.api.pluginConfig.config(resolved);
+  }
+
+  async function resolveVoidPluginAssets(
+    root: string,
+    resolved: Record<string, unknown> = {},
+  ): Promise<{ not_found_handling?: string; run_worker_first?: Array<string> }> {
+    const merged = await resolveCloudflareConfig(root, resolved);
     return merged.assets as { not_found_handling?: string; run_worker_first?: Array<string> };
   }
 
@@ -159,6 +197,30 @@ describe('voidPlugin dev asset routing', () => {
 
     expect(assets?.not_found_handling).toBe('single-page-application');
     expect(assets?.run_worker_first).toEqual(['/api', '/api/*']);
+  });
+
+  it('does not return existing D1 or R2 bindings when adding inferred defaults', async () => {
+    const root = createBindingProjectRoot();
+    const config = await resolveCloudflareConfig(root, {
+      d1_databases: [{ binding: 'myapp_db', database_name: 'prod', database_id: 'real-id' }],
+      r2_buckets: [{ binding: 'myapp_storage', bucket_name: 'prod' }],
+    });
+
+    expect(config.d1_databases).toEqual([
+      { binding: 'DB', database_name: 'default', database_id: 'local' },
+    ]);
+    expect(config.r2_buckets).toEqual([{ binding: 'STORAGE', bucket_name: 'default' }]);
+  });
+
+  it('uses custom inference binding names for generated D1 and R2 bindings', async () => {
+    const root = createCustomBindingProjectRoot();
+    const config = await resolveCloudflareConfig(root);
+
+    expect(config.d1_databases).toEqual([
+      { binding: 'myapp_db', database_name: 'default', database_id: 'local' },
+    ]);
+    expect(config.kv_namespaces).toEqual([{ binding: 'myapp_kv', id: 'local' }]);
+    expect(config.r2_buckets).toEqual([{ binding: 'myapp_storage', bucket_name: 'default' }]);
   });
 
   it('keeps projects with only API websocket routes static-first for document requests', async () => {

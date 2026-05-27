@@ -438,6 +438,23 @@ function createVoidTsconfigPatch(root: string, outputBaseDir: string): TsconfigI
   );
 }
 
+function hasTopLevelYamlKey(yaml: string, key: string): boolean {
+  const keyPattern = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`);
+  return yaml.split(/\r?\n/).some((rawLine) => {
+    const line = stripYamlLineComment(rawLine);
+    return keyPattern.test(line);
+  });
+}
+
+function isEmptyProjectAllowedPnpmWorkspaceFile(root: string): boolean {
+  try {
+    const yaml = readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf-8');
+    return !hasTopLevelYamlKey(yaml, 'packages');
+  } catch {
+    return false;
+  }
+}
+
 export function isScaffoldableEmptyProject(root: string): boolean {
   for (const dir of [
     'src',
@@ -464,6 +481,9 @@ export function isScaffoldableEmptyProject(root: string): boolean {
 
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (EMPTY_PROJECT_ALLOWED_ENTRIES.has(entry.name)) {
+      continue;
+    }
+    if (entry.name === 'pnpm-workspace.yaml' && isEmptyProjectAllowedPnpmWorkspaceFile(root)) {
       continue;
     }
     if (entry.name.startsWith('README')) {

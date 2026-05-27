@@ -1,4 +1,4 @@
-import { select, text, confirm, isCancel, cancel } from '@clack/prompts';
+import { select, text, isCancel, cancel, confirm } from '@clack/prompts';
 import { getSiteDomain } from './auth.ts';
 import type { ProjectResponse } from './client.ts';
 import { validateProjectSlug } from './project-slug.ts';

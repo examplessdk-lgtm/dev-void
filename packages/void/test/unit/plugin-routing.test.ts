@@ -89,6 +89,41 @@ describe('routingPlugin', () => {
     expect(entry).not.toContain('accept.includes("text/html")');
   });
 
+  it('resolves explicit framework client subpaths to framework auth clients', async () => {
+    const root = createBareTempRoot();
+    const plugin = routingPlugin(root, { isAuthEnabled: () => false });
+    const configResolved = getHookHandler(plugin.configResolved) as (
+      config: import('vite').ResolvedConfig,
+    ) => void;
+    const resolveId = getHookHandler(plugin.resolveId) as (
+      this: { environment?: { name?: string } },
+      id: string,
+    ) => string | undefined;
+    const load = getHookHandler(plugin.load) as (id: string) => Promise<string | undefined>;
+
+    configResolved({
+      build: { assetsDir: 'assets' },
+      command: 'serve',
+      mode: 'development',
+      plugins: [],
+    } as unknown as import('vite').ResolvedConfig);
+
+    expect(resolveId.call({ environment: { name: 'client' } }, 'void/client/react')).toBe(
+      'virtual:void-client-browser:react',
+    );
+    expect(resolveId.call({ environment: { name: 'void_worker' } }, 'void/client/react')).toBe(
+      'virtual:void-client-worker:react',
+    );
+
+    const browserCode = await load('virtual:void-client-browser:react');
+    expect(browserCode).toContain('auth-client-react.mjs');
+    expect(browserCode).not.toContain('cloudflare:workers');
+
+    const workerCode = await load('virtual:void-client-worker:react');
+    expect(workerCode).toContain('auth-client-react.mjs');
+    expect(workerCode).toContain('cloudflare:workers');
+  });
+
   it('restarts dev when a structural route change changes the asset routing policy', async () => {
     const root = createTempRoot();
     writeFileSync(join(root, 'routes', 'api.ts'), 'export const GET = () => new Response();\n');

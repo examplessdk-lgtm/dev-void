@@ -46,7 +46,9 @@ export async function maybeSetupDeployProject(root: string): Promise<ProjectConf
     return promptAndCreateProject(root, client);
   }
 
-  const result = await promptProjectSelection(projects, 'Select a project to link:', root);
+  const result = await promptProjectSelection(projects, 'Select a project to link:', root, {
+    confirmExisting: true,
+  });
   if (result.action === 'select') {
     const config = { projectId: result.project.id, slug: result.project.slug };
     writeProjectConfig(root, config);

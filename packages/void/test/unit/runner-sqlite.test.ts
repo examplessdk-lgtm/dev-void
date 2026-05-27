@@ -6,6 +6,7 @@ import {
   getAppliedMigrations,
   openSqliteDatabase,
   runMigrations,
+  toBetterSqlite3Error,
 } from '../../src/migrations/runner.ts';
 
 /**
@@ -39,6 +40,61 @@ afterEach(() => {
   for (const root of roots.splice(0, roots.length)) {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+describe('toBetterSqlite3Error', () => {
+  it('suggests vp rebuild for Vite+ projects when the native binding is missing', () => {
+    const root = createDir();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ devDependencies: { 'vite-plus': '^0.1.0' } }),
+      'utf8',
+    );
+
+    const error = toBetterSqlite3Error(
+      new Error('Could not locate the bindings file. Tried:'),
+      root,
+    );
+
+    expect(error.message).toContain('run `vp rebuild`');
+    expect(error.message).toContain('vp exec void <command>');
+    expect(error.message).not.toContain('run `pnpm rebuild better-sqlite3`');
+  });
+
+  it('suggests vp rebuild for Vite+ projects when the native binding has a Node ABI mismatch', () => {
+    const root = createDir();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ devDependencies: { 'vite-plus': '^0.1.0' } }),
+      'utf8',
+    );
+
+    const error = toBetterSqlite3Error(
+      new Error(
+        'The module was compiled against a different Node.js version using NODE_MODULE_VERSION 137.',
+      ),
+      root,
+    );
+
+    expect(error.message).toContain('run `vp rebuild`');
+  });
+
+  it('keeps pnpm rebuild guidance for plain Vite projects', () => {
+    const root = createDir();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ devDependencies: { vite: '^7.0.0' } }),
+      'utf8',
+    );
+
+    const error = toBetterSqlite3Error(
+      new Error('Could not locate the bindings file. Tried:'),
+      root,
+    );
+
+    expect(error.message).toContain('run `pnpm rebuild better-sqlite3`');
+    expect(error.message).not.toContain('run `vp rebuild`');
+  });
 });
 
 describe('runMigrations (local SQLite)', () => {

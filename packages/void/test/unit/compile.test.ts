@@ -2520,6 +2520,24 @@ describe('compileWorkerEntry', () => {
       'return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));',
     );
   });
+
+  it('passes custom binding names to remote env proxying', () => {
+    const code = compileWorkerEntry(
+      true,
+      {
+        bindingNames: { d1: 'myapp_db', kv: 'myapp_kv', r2: 'myapp_storage' },
+        remotePath: '/resolved/remote.mjs',
+        envPath: '/resolved/env-legacy.mjs',
+      },
+      'assets',
+      [],
+      '/resolved/env.mjs',
+    );
+
+    expect(code).toContain(
+      'createRemoteEnv(env, {"d1":"myapp_db","kv":"myapp_kv","r2":"myapp_storage"})',
+    );
+  });
 });
 
 describe('compileNodeApp', () => {

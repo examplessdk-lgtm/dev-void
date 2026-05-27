@@ -150,13 +150,16 @@ Remote secrets count as "present" for deploy validation — `void deploy` checks
 
 ## Defaults
 
-Schema defaults from `defineEnv({ PORT: number().default(3000) })` flow into both:
+Schema defaults from `defineEnv({ PORT: number().default(3000) })` flow into:
 
 - The typed `env` proxy: `env.PORT` returns `3000` when no value is set.
 - Worker bindings (`c.env.PORT`, `process.env.PORT` on Node target): the
   default value is injected as a stringified `var` in dev, in `void deploy`
   manifests, and in prerender bindings, so any code path that reads the raw
   env sees the same fallback.
+- Client-exposed keys (`VITE_*` by default, or your configured `envPrefix`):
+  defaults are added to Vite's client env, so browser code reading
+  `env.VITE_APP_TITLE` sees the same fallback.
 
 User-provided `.env` / shell values always win — defaults only fill gaps.
 

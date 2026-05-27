@@ -6,13 +6,14 @@ import type { PlatformClient } from '../../src/cli/client.ts';
 
 const mockSelect = vi.fn();
 const mockText = vi.fn();
+const mockConfirm = vi.fn();
 const mockStep = vi.fn();
 const mockSuccess = vi.fn();
 const mockWarn = vi.fn();
 
 vi.mock('@clack/prompts', () => ({
   cancel: vi.fn(),
-  confirm: vi.fn(),
+  confirm: (...args: Array<unknown>) => mockConfirm(...args),
   intro: vi.fn(),
   isCancel: () => false,
   isCI: () => false,
@@ -48,6 +49,7 @@ describe('promptDeployProjectConfig', () => {
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'test-app' }));
     mockSelect.mockReset();
     mockText.mockReset();
+    mockConfirm.mockReset();
     mockStep.mockReset();
     mockSuccess.mockReset();
     mockWarn.mockReset();
@@ -209,6 +211,7 @@ describe('promptDeployProjectConfig', () => {
       },
     ]);
     mockSelect.mockResolvedValueOnce('link').mockResolvedValueOnce('proj_1');
+    mockConfirm.mockResolvedValueOnce(true);
 
     const config = await promptDeployProjectConfig(root, client);
 
@@ -229,6 +232,10 @@ describe('promptDeployProjectConfig', () => {
           value: 'proj_1',
         },
       ],
+    });
+    expect(mockConfirm).toHaveBeenCalledWith({
+      message:
+        'Linking to an existing project. Running `void deploy` will overwrite the current deployment of existing-app.void.app. Continue?',
     });
     expect(config).toEqual({ projectId: 'proj_1', slug: 'existing-app' });
     expect(client.createProject).not.toHaveBeenCalled();

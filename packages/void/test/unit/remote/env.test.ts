@@ -51,4 +51,23 @@ describe('createRemoteEnv', () => {
     expect(env.KV).toBeInstanceOf(ProxyKVNamespace);
     expect(env.STORAGE).toBeInstanceOf(ProxyR2Bucket);
   });
+
+  it('replaces custom binding names when configured', () => {
+    const env = createRemoteEnv(
+      {
+        ...BASE_ENV,
+        myapp_db: {},
+        myapp_kv: {},
+        myapp_storage: {},
+      },
+      { d1: 'myapp_db', kv: 'myapp_kv', r2: 'myapp_storage' },
+    );
+
+    expect(env.myapp_db).toBeInstanceOf(ProxyD1Database);
+    expect(env.myapp_kv).toBeInstanceOf(ProxyKVNamespace);
+    expect(env.myapp_storage).toBeInstanceOf(ProxyR2Bucket);
+    expect(env.DB).toBeUndefined();
+    expect(env.KV).toBeUndefined();
+    expect(env.STORAGE).toBeUndefined();
+  });
 });

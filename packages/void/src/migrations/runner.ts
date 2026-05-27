@@ -1,6 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'pathe';
+import { dirname, join } from 'pathe';
+import { hasPackageDependency, readNearestPackageJson } from '../shared/package-json.ts';
 import { collectMigrations } from './collect.ts';
 import { classifyMigration } from './plan.ts';
 
@@ -34,15 +35,33 @@ const SQLITE_INTERNAL_TABLES = new Set([
   '__drizzle_migrations',
 ]);
 
-function toBetterSqlite3Error(error: unknown): Error {
+export function projectUsesVitePlus(startDir: string = process.cwd()): boolean {
+  const nearest = readNearestPackageJson(startDir);
+  return nearest ? hasPackageDependency(nearest.packageJson, 'vite-plus') : false;
+}
+
+export function toBetterSqlite3Error(error: unknown, cwd: string = process.cwd()): Error {
   const message = error instanceof Error ? error.message : String(error);
-  if (!message.includes('Could not locate the bindings file')) {
+  const isMissingBinding = message.includes('Could not locate the bindings file');
+  const isNodeVersionMismatch =
+    message.includes('was compiled against a different Node.js version') ||
+    message.includes('NODE_MODULE_VERSION');
+
+  if (!isMissingBinding && !isNodeVersionMismatch) {
     return error instanceof Error ? error : new Error(message);
   }
 
+  const usesVitePlus = projectUsesVitePlus(cwd);
+  const rebuildCommand = usesVitePlus ? 'vp rebuild' : 'pnpm rebuild better-sqlite3';
+  const commandReason = usesVitePlus
+    ? 'Vite+ uses its managed Node.js runtime for `vp dev`; rebuild native modules with `vp rebuild` and run Void CLI commands through Vite+ as `vp exec void <command>`.'
+    : 'Plain Vite projects use your system Node.js runtime, so `pnpm rebuild better-sqlite3` rebuilds the matching native module.';
+
   return new Error(
     'db: better-sqlite3 is installed but its native binding was not built. ' +
-      'Set `allowBuilds.better-sqlite3` to `true` in pnpm-workspace.yaml and run `pnpm rebuild better-sqlite3`. See https://pnpm.io/settings#allowbuilds',
+      `Set \`allowBuilds.better-sqlite3\` to \`true\` in pnpm-workspace.yaml and run \`${rebuildCommand}\`. ` +
+      `${commandReason} ` +
+      'See https://pnpm.io/settings#allowbuilds',
   );
 }
 

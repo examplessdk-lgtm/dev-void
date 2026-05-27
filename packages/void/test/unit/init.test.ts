@@ -893,6 +893,41 @@ describe('isScaffoldableEmptyProject', () => {
     });
   });
 
+  it('returns true for pnpm add -D void shape with generated pnpm-workspace.yaml', () => {
+    withTempDir((root) => {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            devDependencies: {
+              void: '^0.8.9',
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(join(root, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+      writeFileSync(
+        join(root, 'pnpm-workspace.yaml'),
+        [
+          'allowBuilds:',
+          '  better-sqlite3: set this to true or false',
+          '  esbuild: set this to true or false',
+          '  sharp: set this to true or false',
+          '  workerd: set this to true or false',
+          'minimumReleaseAgeExclude:',
+          '  - void@0.8.9',
+          '',
+        ].join('\n'),
+      );
+      mkdirSync(join(root, 'node_modules', 'void'), { recursive: true });
+      writeFileSync(join(root, 'node_modules', 'void', 'package.json'), '{"name":"void"}\n');
+
+      expect(isScaffoldableEmptyProject(root)).toBe(true);
+    });
+  });
+
   it('returns true when only void and a single Pages adapter are installed', () => {
     withTempDir((root) => {
       writeFileSync(
@@ -912,6 +947,27 @@ describe('isScaffoldableEmptyProject', () => {
       writeFileSync(join(root, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
 
       expect(isScaffoldableEmptyProject(root)).toBe(true);
+    });
+  });
+
+  it('returns false when pnpm-workspace.yaml declares workspace packages', () => {
+    withTempDir((root) => {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            devDependencies: {
+              void: '^0.8.9',
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(join(root, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+      writeFileSync(join(root, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
+
+      expect(isScaffoldableEmptyProject(root)).toBe(false);
     });
   });
 
@@ -1265,6 +1321,63 @@ describe('isScaffoldableEmptyProject', () => {
       expect(pkg.scripts.dev).toBe('vite');
       expect(pkg.scripts.build).toBe('vite build');
       expect(pkg.scripts.preview).toBe('vite preview');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('prompts for the scaffold toolchain after pnpm add -D void creates pnpm-workspace.yaml', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            devDependencies: {
+              void: '^0.8.9',
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeFileSync(join(root, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+      writeFileSync(
+        join(root, 'pnpm-workspace.yaml'),
+        [
+          'allowBuilds:',
+          '  better-sqlite3: set this to true or false',
+          '  esbuild: set this to true or false',
+          '  sharp: set this to true or false',
+          '  workerd: set this to true or false',
+          'minimumReleaseAgeExclude:',
+          '  - void@0.8.9',
+          '',
+        ].join('\n'),
+      );
+      mkdirSync(join(root, 'node_modules', 'void'), { recursive: true });
+      writeFileSync(join(root, 'node_modules', 'void', 'package.json'), '{"name":"void"}\n');
+
+      mockSelect
+        .mockResolvedValueOnce('vite-plus')
+        .mockResolvedValueOnce('react')
+        .mockResolvedValueOnce('static')
+        .mockResolvedValueOnce('generic');
+      mockConfirm.mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+      expect(pkg.scripts.dev).toBe('vp dev');
+      expect(pkg.devDependencies['vite-plus']).toBe('^0.1.21');
+      expect(pkg.devDependencies.void).toBe('^0.8.9');
+      expect(readFileSync(join(root, 'vite.config.ts'), 'utf-8')).toContain('voidReact()');
+      expectPnpmAllowBuilds(root);
+
+      expect(mockSelect.mock.calls[0]?.[0].message).toBe('Choose a Pages scaffold toolchain:');
+      expect(mockSelect.mock.calls[0]?.[0].initialValue).toBe('vite-plus');
+      expect(mockSelect.mock.calls[1]?.[0].message).toBe('Choose a Pages framework to scaffold:');
+      expect(mockSelect.mock.calls[2]?.[0].message).toBe('Choose a Pages starter:');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -2224,12 +2337,19 @@ export default config;
         .mockResolvedValueOnce('sqlite')
         .mockResolvedValueOnce('generic')
         .mockResolvedValueOnce('proj_456');
-      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      mockConfirm
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true);
 
       await runInitCommand(root);
 
       expect(mockConfirm.mock.calls[1]?.[0]).toMatchObject({
         message: 'Link your Void project now?',
+      });
+      expect(mockConfirm.mock.calls[2]?.[0]).toMatchObject({
+        message:
+          'Linking to an existing project. Running `void deploy` will overwrite the current deployment of existing-app.void.app. Continue?',
       });
       expect(mockRunLogin).not.toHaveBeenCalled();
       expect(mockSaveToken).not.toHaveBeenCalled();

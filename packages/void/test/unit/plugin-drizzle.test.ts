@@ -125,6 +125,30 @@ describe('drizzlePlugin db typing generation', () => {
     expect(code).toContain('drizzle(getConnectionString())');
   });
 
+  it('uses a custom D1 binding name in the sqlite virtual module', () => {
+    const root = createProjectRoot({ schema: false });
+    const plugin = drizzlePlugin(root, false, 'sqlite', {
+      d1BindingName: 'myapp_db',
+      forceVirtualDb: true,
+    });
+    const resolveId = getHookHandler(plugin.resolveId) as (
+      this: { environment: { name: string } },
+      source: string,
+      importer: string | undefined,
+      options: { isEntry: boolean },
+    ) => string | undefined;
+    const load = getHookHandler(plugin.load) as (this: object, id: string) => string;
+    const resolved = resolveId.call({ environment: { name: 'ssr' } }, 'void/db', undefined, {
+      isEntry: false,
+    });
+
+    expect(resolved).toBe('\0virtual:void-db');
+
+    const code = load.call({}, '\0virtual:void-db');
+    expect(code).toContain('requireRuntimeBinding("myapp_db")');
+    expect(code).not.toContain('requireRuntimeBinding("DB")');
+  });
+
   it('can keep void/db off tsconfig paths for metaframeworks that materialize aliases', () => {
     const root = createProjectRoot();
 

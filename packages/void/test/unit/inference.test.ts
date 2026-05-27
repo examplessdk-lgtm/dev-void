@@ -172,12 +172,30 @@ describe('inferBindingsFromSource', () => {
     expect(result.needsAuth).toBe(true);
   });
 
+  it("detects auth imports from framework-specific 'void/client' subpaths", () => {
+    const code = `
+      import { auth } from "void/client/react";
+      await auth.useSession();
+    `;
+    const result = inferBindingsFromSource(code, 'test.tsx');
+    expect(result.needsAuth).toBe(true);
+  });
+
   it("does not detect auth from 'void/client' when only fetch is imported", () => {
     const code = `
       import { fetch } from "void/client";
       const data = await fetch("/api/hello");
     `;
     const result = inferBindingsFromSource(code, 'test.ts');
+    expect(result.needsAuth).toBe(false);
+  });
+
+  it("does not detect auth from framework-specific 'void/client' subpaths when only fetch is imported", () => {
+    const code = `
+      import { fetch } from "void/client/react";
+      const data = await fetch("/api/hello");
+    `;
+    const result = inferBindingsFromSource(code, 'test.tsx');
     expect(result.needsAuth).toBe(false);
   });
 

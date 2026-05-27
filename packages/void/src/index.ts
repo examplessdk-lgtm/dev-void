@@ -39,6 +39,7 @@ import { scanJobsSync } from './crons/scan.ts';
 import { inferBindingsFromSource } from './inference/walk.ts';
 import { voidLog, voidWarn, voidError } from './log.ts';
 import { pagesDevCssAssetsPlugin } from './pages/dev-css-assets.ts';
+import { bindingRuntimePlugin } from './plugin-binding-runtime.ts';
 import { devTriggersHintPlugin } from './plugin-dev-triggers-hint.ts';
 import { drizzlePlugin } from './plugin-drizzle.ts';
 import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
@@ -635,6 +636,7 @@ export function voidPlugin(options?: {
   const inferenceOptions = config.inference?.bindings
     ? { bindings: config.inference.bindings }
     : undefined;
+  const bindingNames = resolveBindingNames(config.inference?.bindings);
   const inferredBindings = inferProjectBindings(root, { ...inferenceOptions, paths }, scanDirs);
   const sandboxEnabled = isSandboxEnabled(config);
   const bindings = sandboxEnabled ? { ...inferredBindings, needsSandbox: true } : inferredBindings;
@@ -736,7 +738,6 @@ export function voidPlugin(options?: {
   // voidPlugin() only provides DB type codegen, migration management, and
   // wrangler.jsonc binding sync for local dev.
   if (detected && (detected.class === 'b' || detected.class === 'c')) {
-    const bindingNames = resolveBindingNames(config.inference?.bindings);
     const frameworkPersistRoot = join(root, '.wrangler', 'state');
     const syncFrameworkCompat = (compat: ReturnType<typeof readWranglerCompat>) => {
       const syncedDate = ensureWranglerCompatibilityDate(root, compat.compatibilityDate);
@@ -835,6 +836,7 @@ export function voidPlugin(options?: {
       wranglerSyncPlugin,
       svelteKitHooksInjectPlugin,
       clientStubsPlugin,
+      bindingRuntimePlugin(bindingNames),
       // Framework-agnostic env DX: typegen, client leak guard, and build-time
       // folding all operate on env.ts + the Vite client module graph, so they
       // apply equally to SvelteKit/Nuxt/Analog/Astro. We intentionally omit
@@ -844,7 +846,8 @@ export function voidPlugin(options?: {
       envClientGuardPlugin(root),
       envClientFoldPlugin(),
       drizzlePlugin(root, false, dialect, {
-        forceVirtualDb: authEnabled,
+        d1BindingName: bindingNames?.d1,
+        forceVirtualDb: authEnabled || bindingNames?.d1 !== undefined,
         localD1PersistRoot: frameworkPersistRoot,
       }),
       migrationPlugin(root, dialect, 'local', frameworkPersistRoot, {
@@ -919,31 +922,31 @@ export function voidPlugin(options?: {
     }
 
     // D1 — auth requires the app DB only for sqlite apps
+    const d1Name = bindingNames?.d1 ?? 'DB';
     const d1: Array<Record<string, unknown>> = [];
     if (
       (bindings.needsD1 || (authEnabled && dialect === 'sqlite')) &&
-      !hasBinding(resolved.d1_databases, 'DB')
+      !hasBinding(resolved.d1_databases, d1Name)
     ) {
-      d1.push({ binding: 'DB', database_name: 'default', database_id: 'local' });
+      d1.push({ binding: d1Name, database_name: 'default', database_id: 'local' });
     }
     if (d1.length > 0) {
-      result.d1_databases = [...(resolved.d1_databases ?? []), ...d1];
+      result.d1_databases = d1;
     }
 
+    const kvName = bindingNames?.kv ?? 'KV';
     const kv: Array<{ binding: string; id: string }> = [];
-    if (bindings.needsKV && !hasBinding(resolved.kv_namespaces, 'KV')) {
-      kv.push({ binding: 'KV', id: 'local' });
+    if (bindings.needsKV && !hasBinding(resolved.kv_namespaces, kvName)) {
+      kv.push({ binding: kvName, id: 'local' });
     }
     if (kv.length > 0) {
-      result.kv_namespaces = [...(resolved.kv_namespaces ?? []), ...kv];
+      result.kv_namespaces = kv;
     }
 
     // R2
-    if (bindings.needsR2 && !hasBinding(resolved.r2_buckets, 'STORAGE')) {
-      result.r2_buckets = [
-        ...(resolved.r2_buckets ?? []),
-        { binding: 'STORAGE', bucket_name: 'default' },
-      ];
+    const r2Name = bindingNames?.r2 ?? 'STORAGE';
+    if (bindings.needsR2 && !hasBinding(resolved.r2_buckets, r2Name)) {
+      result.r2_buckets = [{ binding: r2Name, bucket_name: 'default' }];
     }
 
     // Queues — add producer + consumer bindings for local dev
@@ -1440,8 +1443,10 @@ export function voidPlugin(options?: {
       envClientGuardPlugin(root),
       envClientFoldPlugin(),
       clientStubsPlugin,
+      bindingRuntimePlugin(bindingNames),
       drizzlePlugin(root, false, getDatabaseDialect(config), {
-        forceVirtualDb: authEnabled,
+        d1BindingName: bindingNames?.d1,
+        forceVirtualDb: authEnabled || bindingNames?.d1 !== undefined,
         localD1PersistRoot: options?.persistTo ?? outDir,
         redirectDbTypePaths,
       }),
@@ -1594,6 +1599,7 @@ export function voidPlugin(options?: {
     envClientGuardPlugin(root),
     envClientFoldPlugin(),
     clientStubsPlugin,
+    bindingRuntimePlugin(bindingNames),
     ...(bindings.needsSandbox ? [createSandboxSdkResolvePlugin()] : []),
     ...pagesDevCssAssetsPlugin(root, devTriggerToken),
     routingPlugin(root, {
@@ -1609,6 +1615,7 @@ export function voidPlugin(options?: {
       // platform dispatch worker owns the pipeline and the plugin compiles
       // these rules out of the worker bundle.
       routing: config.routing,
+      bindingNames,
       hasSandbox: bindings.needsSandbox,
       sandboxBindingName: sandboxConfig?.binding,
       sandboxClassName: sandboxConfig?.className,
@@ -1616,7 +1623,8 @@ export function voidPlugin(options?: {
       onDevAssetRoutingPolicyChange: updateDevAssetRoutingPolicy,
     }),
     drizzlePlugin(root, true, dialect, {
-      forceVirtualDb: authEnabled,
+      d1BindingName: bindingNames?.d1,
+      forceVirtualDb: authEnabled || bindingNames?.d1 !== undefined,
       localD1PersistRoot: options?.persistTo ?? outDir,
     }),
     migrationPlugin(root, dialect, 'local', join(root, '.void'), {
