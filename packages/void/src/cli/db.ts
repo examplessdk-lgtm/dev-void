@@ -3,7 +3,12 @@ import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSyn
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { confirm, intro, isCancel, outro, log } from '@clack/prompts';
 import { extname, join, relative, resolve } from 'pathe';
-import { readConfig, getDatabaseDialect, type DatabaseDialect } from '../config.ts';
+import {
+  readConfig,
+  getDatabaseDialect,
+  resolveBindingNames,
+  type DatabaseDialect,
+} from '../config.ts';
 import {
   collectMigrations,
   readJournal,
@@ -421,6 +426,10 @@ async function runSeed(
  *   treated as unsafe.
  * - Leading SQL comments are not stripped; `-- foo\nSELECT 1` will be flagged
  *   as destructive. This is a UX nuisance, not a safety hole.
+ * - `EXPLAIN ANALYZE` is explicitly excluded: in PostgreSQL, `EXPLAIN ANALYZE`
+ *   actually executes the underlying statement (including DML) to collect runtime
+ *   statistics. A naive `EXPLAIN` prefix check would treat it as safe when it is
+ *   in fact destructive. Only plain `EXPLAIN` (without `ANALYZE`) is allowed.
  */
 function isSafeStatement(sql: string): boolean {
   // Strip a single trailing semicolon/whitespace, then bail if any internal `;` remains.
@@ -428,8 +437,15 @@ function isSafeStatement(sql: string): boolean {
   if (stripped.includes(';')) {
     return false;
   }
-  // Only SELECT/EXPLAIN prefixes are reliably safe without a parser.
-  return /^\s*(SELECT|EXPLAIN)\b/i.test(stripped);
+  // SELECT is always safe.
+  if (/^\s*SELECT\b/i.test(stripped)) {
+    return true;
+  }
+  // EXPLAIN is safe only when not followed by ANALYZE (which executes the statement).
+  if (/^\s*EXPLAIN\b/i.test(stripped) && !/^\s*EXPLAIN\s+ANALYZE\b/i.test(stripped)) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -525,7 +541,12 @@ async function runExecute(
 
     // D1 remote: route through the platform proxy.
     const platformClient = new PlatformClient(token, { root });
-    let binding = 'DB';
+    // Resolve the locally-configured binding name (inference.bindings.db in void.json) so that
+    // the fallback honours custom names instead of always hardcoding 'DB'.
+    const voidConfig = readConfig(root);
+    const configuredBindingNames = resolveBindingNames(voidConfig.inference?.bindings);
+    const configuredD1Binding = configuredBindingNames?.d1 ?? 'DB';
+    let binding = configuredD1Binding;
     try {
       const resources = await platformClient.getResources(projectConfig.projectId);
       // TODO: support --binding for projects with multiple D1 bindings (currently auto-selects the first).
@@ -534,7 +555,7 @@ async function runExecute(
         binding = d1Resource.binding_name;
       }
     } catch {
-      // Fall back to default binding 'DB' if resource discovery fails
+      // Fall back to the locally-configured binding name (or 'DB' by default) if resource discovery fails.
     }
 
     const proxyUrl = isStagingMode(root) ? STAGING_PROXY_URL : DEFAULT_PROXY_URL;

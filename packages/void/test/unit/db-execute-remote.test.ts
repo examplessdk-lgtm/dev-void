@@ -84,14 +84,17 @@ vi.mock('@clack/prompts', () => ({
 
 const roots: Array<string> = [];
 
-function createProjectRoot(options: { database?: 'pg' } = {}): string {
+function createProjectRoot(options: { database?: 'pg'; d1Binding?: string } = {}): string {
   const root = mkdtempSync(join(tmpdir(), 'void-db-execute-remote-'));
   roots.push(root);
 
   const migrationsDir = join(root, 'db', 'migrations');
   mkdirSync(join(migrationsDir, 'meta'), { recursive: true });
 
-  const voidConfig = options.database === 'pg' ? { database: 'pg' } : {};
+  const voidConfig: Record<string, unknown> = options.database === 'pg' ? { database: 'pg' } : {};
+  if (options.d1Binding) {
+    voidConfig.inference = { bindings: { db: options.d1Binding } };
+  }
   writeFileSync(join(root, 'void.json'), JSON.stringify(voidConfig));
 
   // .void/project.json to satisfy readProjectConfig (the REAL one is mocked,
@@ -206,6 +209,17 @@ describe('void db execute --remote (D1)', () => {
     expect(body.binding).toBe('DB');
   });
 
+  it('uses the configured d1 binding from void.json as fallback when getResources throws', async () => {
+    const root = createProjectRoot({ d1Binding: 'MY_CUSTOM_DB' });
+    mockGetResources.mockRejectedValue(new Error('network error'));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
+
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.binding).toBe('MY_CUSTOM_DB');
+  });
+
   it('renders a table when results are returned', async () => {
     const root = createProjectRoot();
     const rows = [{ id: 1, name: 'Alice' }];
@@ -317,6 +331,21 @@ describe('void db execute --remote (D1)', () => {
     });
 
     expect(mockConfirm).not.toHaveBeenCalled();
+  });
+
+  it('prompts for confirmation for EXPLAIN ANALYZE (executes DML in PostgreSQL)', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    mockConfirm.mockResolvedValue(true);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, {
+      action: 'execute',
+      command: 'EXPLAIN ANALYZE DELETE FROM users',
+      remote: true,
+    });
+
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
   });
 
   it('prompts for confirmation for WITH (CTE) statements (fail-closed: writable CTEs are indistinguishable without a parser)', async () => {
