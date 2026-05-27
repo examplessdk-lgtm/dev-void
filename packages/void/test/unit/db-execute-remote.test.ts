@@ -310,6 +310,50 @@ describe('void db execute --remote (D1)', () => {
     expect(mockConfirm).not.toHaveBeenCalled();
   });
 
+  it('skips confirmation for WITH (CTE) statements', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, {
+      action: 'execute',
+      command: 'WITH cte AS (SELECT 1) SELECT * FROM cte',
+      remote: true,
+    });
+
+    expect(mockConfirm).not.toHaveBeenCalled();
+  });
+
+  it('includes CF Access service-token headers when env vars are set', async () => {
+    const root = createProjectRoot();
+    const originalId = process.env.CF_ACCESS_CLIENT_ID;
+    const originalSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+    process.env.CF_ACCESS_CLIENT_ID = 'test-client-id.access';
+    process.env.CF_ACCESS_CLIENT_SECRET = 'test-client-secret';
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    try {
+      await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
+    } finally {
+      if (originalId === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_ID;
+      } else {
+        process.env.CF_ACCESS_CLIENT_ID = originalId;
+      }
+      if (originalSecret === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_SECRET;
+      } else {
+        process.env.CF_ACCESS_CLIENT_SECRET = originalSecret;
+      }
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers['CF-Access-Client-Id']).toBe('test-client-id.access');
+    expect(headers['CF-Access-Client-Secret']).toBe('test-client-secret');
+  });
+
   it('skips confirmation for UPDATE when not in TTY (non-interactive)', async () => {
     const root = createProjectRoot();
     Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
