@@ -73,7 +73,7 @@ describe('void help (subprocess)', () => {
     const { output, status } = runVoid(root, ['db', 'help', 'execute']);
 
     expect(status).toBe(0);
-    expect(output).toContain('Run SQL against the local database');
+    expect(output).toContain('Run SQL against the database');
     expect(output).toContain('void db execute --file <path>');
   });
 
