@@ -242,13 +242,22 @@ describe('void db execute --remote (D1)', () => {
 
   it('errors when --file is passed with --remote D1', async () => {
     const root = createProjectRoot();
-    // We need a real file for the path to be resolved before we get to the --remote check
-    const sqlFile = join(root, 'query.sql');
-    writeFileSync(sqlFile, 'SELECT 1');
-
+    // The rejection fires before the file is read, so the file does not need to exist.
     await expect(
       runDbCommand(root, { action: 'execute', file: 'query.sql', remote: true }),
     ).rejects.toThrow('process.exit:1');
+  });
+
+  it('rejects --file before prompting for destructive confirmation (ordering regression guard)', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+
+    await expect(
+      runDbCommand(root, { action: 'execute', file: 'delete.sql', remote: true }),
+    ).rejects.toThrow('process.exit:1');
+
+    // The confirmation prompt must NOT have fired — the error comes first.
+    expect(mockConfirm).not.toHaveBeenCalled();
   });
 
   it('errors on proxy non-OK response', async () => {

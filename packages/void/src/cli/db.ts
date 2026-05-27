@@ -410,6 +410,7 @@ async function runSeed(
 /**
  * Returns true when the SQL is read-only (SELECT / EXPLAIN / WITH).
  * Used to skip the destructive-statement safety prompt for safe queries.
+ * // Note: leading SQL comments are not stripped; `-- foo\nSELECT 1` will be flagged as destructive. This is a UX nuisance, not a safety hole.
  */
 function isSafeStatement(sql: string): boolean {
   return /^\s*(SELECT|EXPLAIN|WITH)\b/i.test(sql);
@@ -424,6 +425,7 @@ async function confirmDestructiveRemote(sql: string): Promise<boolean> {
     return true;
   }
   if (!process.stdin.isTTY) {
+    // --yes flag (skip prompt under a TTY) is intentionally not wired here — non-TTY already bypasses; --yes can be added in a follow-up if scripted-TTY callers need it.
     return true;
   }
   const ok = await confirm({
@@ -443,6 +445,14 @@ async function runExecute(
   remote?: boolean,
 ): Promise<void> {
   if (remote) {
+    // Reject --file with --remote D1 before reading the file or prompting.
+    if (dialect !== 'postgresql' && file) {
+      log.error(
+        '--file is not yet supported with --remote D1; pipe statements through stdin or run them one at a time.',
+      );
+      process.exit(1);
+    }
+
     const sql = file ? readFileSync(join(root, file), 'utf-8') : command!;
 
     const token = getToken(root);
@@ -498,17 +508,11 @@ async function runExecute(
     }
 
     // D1 remote: route through the platform proxy.
-    if (file) {
-      log.error(
-        '--file is not yet supported with --remote D1; pipe statements through stdin or run them one at a time.',
-      );
-      process.exit(1);
-    }
-
     const platformClient = new PlatformClient(token, { root });
     let binding = 'DB';
     try {
       const resources = await platformClient.getResources(projectConfig.projectId);
+      // TODO: support --binding for projects with multiple D1 bindings (currently auto-selects the first).
       const d1Resource = resources.find((r) => r.type === 'd1');
       if (d1Resource) {
         binding = d1Resource.binding_name;
