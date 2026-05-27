@@ -1,4 +1,4 @@
-import { select, text, isCancel, cancel } from '@clack/prompts';
+import { select, text, confirm, isCancel, cancel } from '@clack/prompts';
 import { getSiteDomain } from './auth.ts';
 import type { ProjectResponse } from './client.ts';
 import { validateProjectSlug } from './project-slug.ts';
@@ -41,7 +41,7 @@ export async function promptProjectSelection(
   projects: Array<ProjectResponse>,
   message = 'Select a project:',
   root: string = process.cwd(),
-  options: { includeCreate?: boolean } = {},
+  options: { confirmExisting?: boolean; includeCreate?: boolean } = {},
 ): Promise<PromptResult> {
   const choices = [
     ...(options.includeCreate === false
@@ -68,6 +68,17 @@ export async function promptProjectSelection(
   }
 
   const project = projects.find((p) => p.id === result)!;
+  if (options.confirmExisting) {
+    const confirmed = await confirm({
+      message:
+        `Linking to an existing project. Running \`void deploy\` will overwrite the current deployment of ` +
+        `${project.slug}.${getSiteDomain(root)}. Continue?`,
+    });
+    if (isCancel(confirmed) || !confirmed) {
+      cancel('Project link cancelled.');
+      process.exit(0);
+    }
+  }
   return { action: 'select', project };
 }
 

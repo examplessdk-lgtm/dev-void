@@ -5,6 +5,7 @@ import { promptAndCreateProject } from './create-project.ts';
 import { cliTitle, pc } from './output.ts';
 import { readProjectConfig, writeProjectConfig } from './project.ts';
 import { promptProjectSelection } from './prompt.ts';
+import { resolveProjectBySlug } from './resolve-project.ts';
 
 export async function runLink(root: string, slug?: string): Promise<void> {
   console.log();
@@ -30,18 +31,20 @@ export async function runLink(root: string, slug?: string): Promise<void> {
 
   if (slug) {
     // Non-interactive: link by slug
-    const project = projects.find((p) => p.slug === slug);
-    if (!project) {
+    const config = resolveProjectBySlug(projects, slug);
+    if (!config) {
       cancel(`project: No project found with slug '${slug}'.`);
       process.exit(1);
     }
-    writeProjectConfig(root, { projectId: project.id, slug: project.slug });
-    outro(`Linked to ${pc.blue(project.slug)}.${getSiteDomain(root)}`);
+    writeProjectConfig(root, config);
+    outro(`Linked to ${pc.blue(config.slug)}.${getSiteDomain(root)}`);
     return;
   }
 
   // Interactive: prompt user to select or create
-  const result = await promptProjectSelection(projects, 'Select a project:', root);
+  const result = await promptProjectSelection(projects, 'Select a project:', root, {
+    confirmExisting: true,
+  });
 
   if (result.action === 'create') {
     const config = await promptAndCreateProject(root, client);
