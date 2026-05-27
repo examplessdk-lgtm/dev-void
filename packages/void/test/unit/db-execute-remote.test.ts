@@ -61,13 +61,13 @@ vi.mock('pg', () => ({
 const fetchMock = vi.fn();
 let originalFetch: typeof globalThis.fetch | undefined;
 
-const mockConfirm = vi.fn<() => Promise<boolean | symbol>>();
+const mockConfirm = vi.fn<(opts: { message: string }) => Promise<boolean | symbol>>();
 const mockIsCancel = vi.fn<(value: unknown) => boolean>((v) => typeof v === 'symbol');
 
 vi.mock('@clack/prompts', () => ({
   intro: vi.fn(),
   outro: vi.fn(),
-  confirm: (...args: Array<unknown>) => mockConfirm(...args),
+  confirm: (opts: { message: string }) => mockConfirm(opts),
   isCancel: (v: unknown) => mockIsCancel(v),
   log: {
     error: vi.fn(),
