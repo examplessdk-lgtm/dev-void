@@ -154,7 +154,7 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
   } else if (args.action === 'migrate') {
     await runMigrate(root, dialect, args.remote);
   } else if (args.action === 'studio') {
-    await runStudio(root, dialect);
+    await runStudio(root, dialect, args.remote);
   } else if (args.action === 'set-url') {
     await runSetUrl(root);
   } else if (args.action === 'rename-migrations') {
@@ -782,7 +782,55 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
   outro('Done.');
 }
 
-async function runStudio(root: string, dialect: DatabaseDialect): Promise<void> {
+async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolean): Promise<void> {
+  if (remote) {
+    if (dialect !== 'postgresql') {
+      log.error(
+        "Remote D1 studio is not yet supported. Use 'void db execute --remote' for ad-hoc queries against your deployed D1 database.",
+      );
+      process.exit(1);
+    }
+
+    // PG remote: fetch the connection URL from the platform, then open Studio against it.
+    const token = getToken(root);
+    if (!token) {
+      log.error('Not logged in. Run `void auth login` first.');
+      process.exit(1);
+    }
+
+    const projectConfig = readProjectConfig(root);
+    if (!projectConfig) {
+      log.error('No project linked. Run `void deploy` first or link a project.');
+      process.exit(1);
+    }
+
+    const client = new PlatformClient(token, { root });
+    let dbUrl: string;
+    try {
+      const result = await client.getDatabaseUrl(projectConfig.projectId);
+      dbUrl = result.url;
+    } catch (err) {
+      if (err instanceof PlatformApiError && err.status === 404) {
+        log.error(
+          "This project's database URL isn't stored on the platform yet. Run `void db set-url` once to populate it, then retry.",
+        );
+        process.exit(1);
+      }
+      throw err;
+    }
+
+    const { writeDrizzleConfig } = await import('../drizzle/config.ts');
+    const configPath = writeDrizzleConfig(root, dbUrl, 'postgresql');
+
+    log.info('Opening Drizzle Studio (remote)...');
+    try {
+      runDrizzleKit(root, ['studio', '--config', configPath]);
+    } catch {
+      process.exit(1);
+    }
+    return;
+  }
+
   if (dialect === 'postgresql') {
     const { writeDrizzleConfig } = await import('../drizzle/config.ts');
     const url = getPgUrl(root);

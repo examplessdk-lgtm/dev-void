@@ -195,9 +195,12 @@ const HELP_TREE: HelpTree = {
       { command: 'status', description: 'Show migration status (local and remote)' },
       { command: 'reset', description: 'Reset local DB and re-run migrations' },
       { command: 'seed', description: 'Reset local DB, run migrations, and seed' },
-      { command: 'execute <sql>', description: 'Run SQL against the local database' },
+      {
+        command: 'execute <sql>',
+        description: 'Run SQL against the database (--remote for deployed)',
+      },
       { command: 'migrate', description: 'Apply pending migrations' },
-      { command: 'studio', description: 'Open Drizzle Studio for the local database' },
+      { command: 'studio', description: 'Open Drizzle Studio (--remote for deployed PG)' },
       { command: 'export', description: 'Export local database as SQL' },
       { command: 'set-url', description: 'Update the PostgreSQL connection string' },
       { command: 'rename-migrations', description: 'Rename migrations to timestamp format' },
@@ -213,12 +216,24 @@ const HELP_TREE: HelpTree = {
         options: [{ command: '--file <path>', description: 'Seed from a specific file' }],
       },
       execute: {
-        summary: 'Run SQL against the local database.',
+        summary:
+          'Run SQL against the database (local by default; use --remote for the deployed database).',
         usage: ['void db execute <sql>', 'void db execute --file <path>'],
-        options: [{ command: '--file <path>', description: 'Run SQL from a file instead' }],
+        options: [
+          { command: '--file <path>', description: 'Run SQL from a file instead' },
+          {
+            command: '--remote',
+            description:
+              'Run against the deployed database (D1 via proxy; PostgreSQL via direct connection)',
+          },
+        ],
         examples: [
           { command: 'void db execute "select * from users"', description: 'Run inline SQL' },
           { command: 'void db execute --file query.sql', description: 'Run SQL from a file' },
+          {
+            command: 'void db execute --remote "select count(*) from users"',
+            description: 'Query the deployed database',
+          },
         ],
       },
       migrate: {
@@ -226,7 +241,25 @@ const HELP_TREE: HelpTree = {
         usage: ['void db migrate [options]'],
         options: [{ command: '--remote', description: 'Apply to the remote database' }],
       },
-      studio: basicSubcommand('Open Drizzle Studio for the local database.', 'void db studio'),
+      studio: {
+        summary:
+          'Open Drizzle Studio against the database (local by default; use --remote for the deployed PostgreSQL database; D1 remote not yet supported).',
+        usage: ['void db studio [options]'],
+        options: [
+          {
+            command: '--remote',
+            description:
+              'Open Studio against the deployed PostgreSQL database (D1 remote not yet supported)',
+          },
+        ],
+        examples: [
+          { command: 'void db studio', description: 'Open Studio for the local database' },
+          {
+            command: 'void db studio --remote',
+            description: 'Open Studio against the deployed PostgreSQL database',
+          },
+        ],
+      },
       export: {
         summary: 'Export local database contents as SQL.',
         usage: ['void db export [options]'],

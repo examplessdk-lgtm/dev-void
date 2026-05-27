@@ -24,8 +24,9 @@ export const dbSubcommands: Array<SubcommandDef> = [
   },
   {
     name: 'studio',
-    description: 'Open Drizzle Studio for the local database',
-    flags: [{ name: '--remote', description: 'Open Studio against the remote database' }],
+    description:
+      'Open Drizzle Studio against the database (use --remote for the deployed PostgreSQL database; D1 remote not yet supported)',
+    flags: [{ name: '--remote', description: 'Open Studio against the deployed database' }],
   },
   { name: 'set-url', description: 'Update the PostgreSQL connection string for deployment' },
   { name: 'rename-migrations', description: 'Rename migrations to timestamp-based format' },

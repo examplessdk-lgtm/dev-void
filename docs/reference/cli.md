@@ -289,9 +289,17 @@ Programmatic seed modules must export either a default function or a named `seed
 ```
 void db execute <sql>
 void db execute --file <path>
+void db execute --remote <sql>
 ```
 
-Run ad-hoc SQL against the local D1 database. Provide SQL inline or from a file. SELECT queries display results as a formatted table; other statements execute silently.
+Run ad-hoc SQL against the database. Provide SQL inline or from a file. SELECT queries display results as a formatted table; other statements execute silently.
+
+By default, targets the local database. Pass `--remote` to run against the deployed database:
+
+- **D1 projects**: routes the query through the Void proxy (`proxy.void.cloud/d1/query`) using your auth token. No Cloudflare credentials needed.
+- **PostgreSQL projects**: fetches the stored connection string from the platform and connects directly. Requires that `void db set-url` has been run at least once (the platform stores the URL encrypted). If the URL isn't stored yet, you will see: _"Run `void db set-url` once to populate it, then retry."_
+
+For destructive statements (`DELETE`, `UPDATE`, `DROP`, etc.) when running in a TTY, you will be prompted to confirm before the query is sent to the deployed database. Non-TTY environments (CI) skip the prompt.
 
 ### `void db migrate`
 
@@ -305,7 +313,16 @@ Pass `--remote` to apply pending migrations to the remote database instead. Requ
 
 ### `void db studio`
 
-Open [Drizzle Studio](https://orm.drizzle.team/docs/drizzle-kit-studio) for the local database. Launches a web-based GUI for browsing and editing your data.
+```
+void db studio [--remote]
+```
+
+Open [Drizzle Studio](https://orm.drizzle.team/docs/drizzle-kit-studio) for the database. Launches a web-based GUI for browsing and editing your data.
+
+By default, targets the local database. Pass `--remote` to open Studio against the deployed database:
+
+- **PostgreSQL projects**: fetches the stored connection string from the platform and opens Studio against it. Requires being logged in (`void auth login`) with a linked project. If the URL isn't stored yet, run `void db set-url` first.
+- **D1 projects**: remote Studio is not yet supported. Use `void db execute --remote` for ad-hoc queries against your deployed D1 database.
 
 ### `void db rename-migrations`
 
