@@ -407,6 +407,80 @@ describe('void db execute --remote (D1)', () => {
     expect(mockConfirm).not.toHaveBeenCalled();
   });
 
+  it('prompts for confirmation for EXPLAIN /*x*/ ANALYZE (block comment between keywords, PostgreSQL treats it as whitespace)', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    mockConfirm.mockResolvedValue(true);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, {
+      action: 'execute',
+      command: 'EXPLAIN /*x*/ ANALYZE DELETE FROM users',
+      remote: true,
+    });
+
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('prompts for confirmation for EXPLAIN -- comment\\n ANALYZE (line comment between keywords)', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    mockConfirm.mockResolvedValue(true);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, {
+      action: 'execute',
+      command: 'EXPLAIN -- comment\n ANALYZE DELETE FROM users',
+      remote: true,
+    });
+
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('prompts for confirmation for EXPLAIN /*opts*/ (ANALYZE) DELETE (block comment before parenthesized option list)', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    mockConfirm.mockResolvedValue(true);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, {
+      action: 'execute',
+      command: 'EXPLAIN /*opts*/ (ANALYZE) DELETE FROM users',
+      remote: true,
+    });
+
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('prompts for confirmation for /* leading */ EXPLAIN ANALYZE (leading block comment before EXPLAIN)', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    mockConfirm.mockResolvedValue(true);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, {
+      action: 'execute',
+      command: '/* leading */ EXPLAIN ANALYZE DELETE FROM users',
+      remote: true,
+    });
+
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips confirmation for -- header\\nSELECT 1 (leading line comment is stripped, previously a UX nuisance)', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, {
+      action: 'execute',
+      command: '-- header\nSELECT 1',
+      remote: true,
+    });
+
+    expect(mockConfirm).not.toHaveBeenCalled();
+  });
+
   it('prompts for confirmation for WITH (CTE) statements (fail-closed: writable CTEs are indistinguishable without a parser)', async () => {
     const root = createProjectRoot();
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });

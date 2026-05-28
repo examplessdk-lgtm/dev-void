@@ -417,6 +417,16 @@ async function runSeed(
  * Used to skip the destructive-statement safety prompt for safe queries.
  *
  * This is a fail-closed heuristic, not a real SQL parser:
+ * - SQL comments (slash-star block and double-dash line) are stripped first,
+ *   so commented variants like `EXPLAIN <block-comment> ANALYZE DELETE FROM
+ *   users` or `EXPLAIN -- c\n ANALYZE ...` can't bypass the EXPLAIN ANALYZE
+ *   check by hiding the `ANALYZE` keyword behind a comment that PostgreSQL
+ *   treats as whitespace. This also handles leading comments, so
+ *   `-- header\nSELECT 1` is now correctly classified as safe.
+ * - The comment-stripping regex is naive and doesn't understand string
+ *   literals: a string literal containing a block-comment marker will have its
+ *   contents stripped. That's harmless here (still classified as SELECT, still
+ *   safe), but worth knowing if this helper is ever reused.
  * - `WITH` (CTEs) is intentionally excluded: writable CTEs such as
  *   `WITH deleted AS (DELETE FROM users RETURNING *) SELECT * FROM deleted`
  *   are destructive but match a naive `WITH` prefix check. Users with
@@ -424,8 +434,6 @@ async function runSeed(
  * - Multi-statement SQL (`SELECT 1; DELETE FROM users`) is rejected: any `;`
  *   followed by non-whitespace content after stripping a trailing semicolon is
  *   treated as unsafe.
- * - Leading SQL comments are not stripped; `-- foo\nSELECT 1` will be flagged
- *   as destructive. This is a UX nuisance, not a safety hole.
  * - `EXPLAIN ANALYZE` is explicitly excluded: in PostgreSQL, `EXPLAIN ANALYZE`
  *   actually executes the underlying statement (including DML) to collect runtime
  *   statistics. A naive `EXPLAIN` prefix check would treat it as safe when it is
@@ -438,19 +446,14 @@ async function runSeed(
  *   guessing the boolean value of an arbitrary option expression).
  */
 function isSafeStatement(sql: string): boolean {
-  // Strip a single trailing semicolon/whitespace, then bail if any internal `;` remains.
-  const stripped = sql.replace(/;\s*$/, '');
+  const decommented = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+  const stripped = decommented.replace(/;\s*$/, '');
   if (stripped.includes(';')) {
     return false;
   }
-  // SELECT is always safe.
   if (/^\s*SELECT\b/i.test(stripped)) {
     return true;
   }
-  // EXPLAIN is safe only when ANALYZE is not in the picture. PostgreSQL accepts
-  // two shapes: `EXPLAIN ANALYZE ...` (bare keyword) and `EXPLAIN (option, ...)
-  // ...` (parenthesized option list). Both forms with ANALYZE actually execute
-  // the underlying statement, so reject either shape.
   if (/^\s*EXPLAIN\b/i.test(stripped)) {
     if (/^\s*EXPLAIN\s+ANALYZE\b/i.test(stripped)) {
       return false;
