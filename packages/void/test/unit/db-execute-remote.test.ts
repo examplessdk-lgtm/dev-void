@@ -348,6 +348,65 @@ describe('void db execute --remote (D1)', () => {
     expect(mockConfirm).toHaveBeenCalledTimes(1);
   });
 
+  it('prompts for confirmation for EXPLAIN (ANALYZE) DELETE (parenthesized option form)', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    mockConfirm.mockResolvedValue(true);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, {
+      action: 'execute',
+      command: 'EXPLAIN (ANALYZE) DELETE FROM users',
+      remote: true,
+    });
+
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('prompts for confirmation for EXPLAIN (ANALYZE TRUE) UPDATE (option with boolean argument)', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    mockConfirm.mockResolvedValue(true);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, {
+      action: 'execute',
+      command: 'EXPLAIN (ANALYZE TRUE) UPDATE users SET name = $1',
+      remote: true,
+    });
+
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('prompts for confirmation for EXPLAIN (ANALYZE FALSE) (fail-closed: rejects even when ANALYZE is disabled)', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    mockConfirm.mockResolvedValue(true);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, {
+      action: 'execute',
+      command: 'EXPLAIN (ANALYZE FALSE) SELECT 1',
+      remote: true,
+    });
+
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips confirmation for EXPLAIN (VERBOSE) SELECT (option list without ANALYZE is safe)', async () => {
+    const root = createProjectRoot();
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, {
+      action: 'execute',
+      command: 'EXPLAIN (VERBOSE) SELECT 1',
+      remote: true,
+    });
+
+    expect(mockConfirm).not.toHaveBeenCalled();
+  });
+
   it('prompts for confirmation for WITH (CTE) statements (fail-closed: writable CTEs are indistinguishable without a parser)', async () => {
     const root = createProjectRoot();
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });

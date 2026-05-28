@@ -430,6 +430,12 @@ async function runSeed(
  *   actually executes the underlying statement (including DML) to collect runtime
  *   statistics. A naive `EXPLAIN` prefix check would treat it as safe when it is
  *   in fact destructive. Only plain `EXPLAIN` (without `ANALYZE`) is allowed.
+ * - `EXPLAIN (...)` parenthesized option lists (PostgreSQL) are scanned for
+ *   `ANALYZE`. The bare-keyword form `EXPLAIN ANALYZE ...` and the option-list
+ *   form `EXPLAIN (ANALYZE) ...` / `EXPLAIN (ANALYZE TRUE) ...` both execute
+ *   the underlying statement, so either shape is rejected. Even
+ *   `EXPLAIN (ANALYZE FALSE)` is rejected (over-strict, but safer than
+ *   guessing the boolean value of an arbitrary option expression).
  */
 function isSafeStatement(sql: string): boolean {
   // Strip a single trailing semicolon/whitespace, then bail if any internal `;` remains.
@@ -441,11 +447,41 @@ function isSafeStatement(sql: string): boolean {
   if (/^\s*SELECT\b/i.test(stripped)) {
     return true;
   }
-  // EXPLAIN is safe only when not followed by ANALYZE (which executes the statement).
-  if (/^\s*EXPLAIN\b/i.test(stripped) && !/^\s*EXPLAIN\s+ANALYZE\b/i.test(stripped)) {
+  // EXPLAIN is safe only when ANALYZE is not in the picture. PostgreSQL accepts
+  // two shapes: `EXPLAIN ANALYZE ...` (bare keyword) and `EXPLAIN (option, ...)
+  // ...` (parenthesized option list). Both forms with ANALYZE actually execute
+  // the underlying statement, so reject either shape.
+  if (/^\s*EXPLAIN\b/i.test(stripped)) {
+    if (/^\s*EXPLAIN\s+ANALYZE\b/i.test(stripped)) {
+      return false;
+    }
+    const parenMatch = stripped.match(/^\s*EXPLAIN\s*\(([^)]*)\)/i);
+    if (parenMatch && /\bANALYZE\b/i.test(parenMatch[1])) {
+      return false;
+    }
     return true;
   }
   return false;
+}
+
+/**
+ * Fetch a project's remote PostgreSQL connection string from the platform.
+ * Exits with a friendly message when the URL has never been stored (404);
+ * other errors propagate so the caller's top-level handler can report them.
+ */
+async function fetchRemoteDatabaseUrl(client: PlatformClient, projectId: string): Promise<string> {
+  try {
+    const result = await client.getDatabaseUrl(projectId);
+    return result.url;
+  } catch (err) {
+    if (err instanceof PlatformApiError && err.status === 404) {
+      log.error(
+        "This project's database URL isn't stored on the platform yet. Run `void db set-url` once to populate it, then retry.",
+      );
+      process.exit(1);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -508,19 +544,7 @@ async function runExecute(
     if (dialect === 'postgresql') {
       // PG remote: fetch the connection string from the platform, then connect directly.
       const client = new PlatformClient(token, { root });
-      let dbUrl: string;
-      try {
-        const result = await client.getDatabaseUrl(projectConfig.projectId);
-        dbUrl = result.url;
-      } catch (err) {
-        if (err instanceof PlatformApiError && err.status === 404) {
-          log.error(
-            "This project's database URL isn't stored on the platform yet. Run `void db set-url` once to populate it, then retry.",
-          );
-          process.exit(1);
-        }
-        throw err;
-      }
+      const dbUrl = await fetchRemoteDatabaseUrl(client, projectConfig.projectId);
 
       const { Client } = await import('pg');
       const pgClient: PgClient = new Client({ connectionString: dbUrl });
@@ -842,19 +866,7 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
     }
 
     const client = new PlatformClient(token, { root });
-    let dbUrl: string;
-    try {
-      const result = await client.getDatabaseUrl(projectConfig.projectId);
-      dbUrl = result.url;
-    } catch (err) {
-      if (err instanceof PlatformApiError && err.status === 404) {
-        log.error(
-          "This project's database URL isn't stored on the platform yet. Run `void db set-url` once to populate it, then retry.",
-        );
-        process.exit(1);
-      }
-      throw err;
-    }
+    const dbUrl = await fetchRemoteDatabaseUrl(client, projectConfig.projectId);
 
     const { writeDrizzleConfig } = await import('../drizzle/config.ts');
     const configPath = writeDrizzleConfig(root, dbUrl, 'postgresql');
