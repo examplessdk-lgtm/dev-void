@@ -175,6 +175,11 @@ describe('domainAdd', () => {
     expect(content).toContain('CNAME (traffic)');
     expect(content).not.toContain('TXT (ownership verification)');
     expect(content).not.toContain('TXT (SSL validation)');
+    // Only one record rendered: summary is singular and must not claim "both".
+    expect(content).toContain(
+      'Add the record above to your DNS, then run `void domain status foo.example.com` to check progress.',
+    );
+    expect(content).not.toContain('both');
   });
 
   it('appends the summary line to the DNS Setup block', async () => {
@@ -193,7 +198,7 @@ describe('domainAdd', () => {
 
     const content = mockNote.mock.calls[0][0] as string;
     expect(content).toContain(
-      'Add both records above to your DNS, then run `void domain status foo.example.com` to check progress.',
+      'Add the records above to your DNS, then run `void domain status foo.example.com` to check progress.',
     );
   });
 

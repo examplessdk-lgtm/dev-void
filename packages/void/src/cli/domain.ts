@@ -69,12 +69,12 @@ async function domainAdd(
     ownershipSection = `TXT (ownership verification)\n    ${domain.ownership_verification.name} → ${domain.ownership_verification.value}`;
   }
 
-  const summary = `Add both records above to your DNS, then run \`void domain status ${hostname}\` to check progress.`;
+  const recordSections = [cnameSection, ownershipSection].filter((s) => s !== undefined);
 
-  const sections = [cnameSection, ownershipSection, summary].filter((s) => s !== undefined);
-
-  if (sections.length > 0) {
-    note(sections.join('\n\n'), 'DNS Setup');
+  if (recordSections.length > 0) {
+    const recordWord = recordSections.length === 1 ? 'the record above' : 'the records above';
+    const summary = `Add ${recordWord} to your DNS, then run \`void domain status ${hostname}\` to check progress.`;
+    note([...recordSections, summary].join('\n\n'), 'DNS Setup');
   }
 }
 
