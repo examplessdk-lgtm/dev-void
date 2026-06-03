@@ -162,7 +162,7 @@ export function computeRollup(status: DomainStatusResponse): RolledUpStatus {
     return {
       state: 'issuing_cert',
       diagnostic:
-        'Cloudflare is issuing the SSL certificate automatically (typically <5 minutes). No action needed.',
+        'Cloudflare is issuing the SSL certificate automatically (typically <5 minutes). If this persists, confirm the traffic CNAME below is published.',
     };
   }
 
@@ -223,14 +223,30 @@ async function domainStatus(
 
   note(rollupLines.join('\n'), 'Domain Status');
 
-  // Surface the ownership TXT while it's still outstanding. Cert DCV uses
-  // HTTP-DCV, so issuance and renewals are automatic at CF's edge and never
-  // surface user-facing records. CF stops returning `ownership_verification`
-  // once ownership is verified, so its presence is itself the pending signal.
+  // Surface the DNS records the user may still need to publish. The ownership
+  // TXT shows while `ownership_verification` is present (CF drops it once
+  // verified). The traffic CNAME shows whenever the cert is not yet active —
+  // HTTP-DCV cannot validate until the hostname proxies through Cloudflare, so
+  // a missing/misconfigured CNAME silently blocks issuance even after ownership
+  // is verified. Once `ssl_status === 'active'` the domain is live and both
+  // records are correct, so neither is shown.
+  let cnameSection: string | undefined;
+  let ownershipSection: string | undefined;
+
+  if (status.cname_target && status.ssl_status !== 'active') {
+    cnameSection = `CNAME (traffic)\n    ${status.hostname} → ${status.cname_target}`;
+  }
   if (status.ownership_verification) {
+    ownershipSection = `TXT (ownership verification)\n    ${status.ownership_verification.name} → ${status.ownership_verification.value}`;
+  }
+
+  const pendingRecords = [cnameSection, ownershipSection].filter((s) => s !== undefined);
+  if (pendingRecords.length > 0) {
     note(
-      `TXT (ownership verification)\n    ${status.ownership_verification.name} → ${status.ownership_verification.value}`,
-      'Add this DNS record to your provider',
+      pendingRecords.join('\n\n'),
+      pendingRecords.length === 1
+        ? 'Add this DNS record to your provider'
+        : 'Add these DNS records to your provider',
     );
   }
 }

@@ -650,6 +650,91 @@ describe('domainStatus pending records block', () => {
     expect(mockNote.mock.calls[0][1]).toBe('Domain Status');
   });
 
+  it('shows the traffic CNAME while the cert is still pending (ownership already verified)', async () => {
+    mockListDomains.mockResolvedValue([
+      { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
+    ]);
+    mockGetDomainStatus.mockResolvedValue({
+      id: 'dom_1',
+      project_id: 'proj_default',
+      hostname: 'foo.example.com',
+      cf_hostname_id: 'cf_1',
+      status: 'pending',
+      created_at: 'now',
+      ssl_status: 'pending_validation',
+      cf_status: 'pending_issuance',
+      cname_target: 'cname.void.app',
+    });
+
+    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
+
+    expect(mockNote).toHaveBeenCalledTimes(2);
+    const pendingNote = mockNote.mock.calls[1][0] as string;
+    expect(pendingNote).toContain('CNAME (traffic)');
+    expect(pendingNote).toContain('foo.example.com → cname.void.app');
+    // Ownership already verified — CF dropped the TXT, so it must not appear.
+    expect(pendingNote).not.toContain('TXT (ownership verification)');
+    // One record only: singular title.
+    expect(mockNote.mock.calls[1][1]).toBe('Add this DNS record to your provider');
+  });
+
+  it('does NOT show the traffic CNAME once the domain is fully active', async () => {
+    mockListDomains.mockResolvedValue([
+      { id: 'dom_1', hostname: 'foo.example.com', status: 'active' },
+    ]);
+    mockGetDomainStatus.mockResolvedValue({
+      id: 'dom_1',
+      project_id: 'proj_default',
+      hostname: 'foo.example.com',
+      cf_hostname_id: 'cf_1',
+      status: 'active',
+      created_at: 'now',
+      ssl_status: 'active',
+      cf_status: 'active',
+      cname_target: 'cname.void.app',
+    });
+
+    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
+
+    // Only the Domain Status note — the CNAME is correct by definition when live.
+    expect(mockNote).toHaveBeenCalledTimes(1);
+    expect(mockNote.mock.calls[0][1]).toBe('Domain Status');
+    expect(mockNote.mock.calls[0][0] as string).not.toContain('CNAME (traffic)');
+  });
+
+  it('shows both records (CNAME before TXT) with a plural title before activation', async () => {
+    mockListDomains.mockResolvedValue([
+      { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
+    ]);
+    mockGetDomainStatus.mockResolvedValue({
+      id: 'dom_1',
+      project_id: 'proj_default',
+      hostname: 'foo.example.com',
+      cf_hostname_id: 'cf_1',
+      status: 'pending',
+      created_at: 'now',
+      ssl_status: 'pending_validation',
+      cf_status: 'pending',
+      cname_target: 'cname.void.app',
+      ownership_verification: { type: 'txt', name: 'own-name', value: 'own-value' },
+    });
+
+    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
+
+    expect(mockNote).toHaveBeenCalledTimes(2);
+    const pendingNote = mockNote.mock.calls[1][0] as string;
+    expect(pendingNote).toContain('CNAME (traffic)');
+    expect(pendingNote).toContain('foo.example.com → cname.void.app');
+    expect(pendingNote).toContain('TXT (ownership verification)');
+    expect(pendingNote).toContain('own-name → own-value');
+    // CNAME ordered before ownership, matching `domain add`.
+    expect(pendingNote.indexOf('CNAME (traffic)')).toBeLessThan(
+      pendingNote.indexOf('TXT (ownership verification)'),
+    );
+    // Two records: plural title.
+    expect(mockNote.mock.calls[1][1]).toBe('Add these DNS records to your provider');
+  });
+
   it('skips the pending block when status is fully verified', async () => {
     mockListDomains.mockResolvedValue([
       { id: 'dom_1', hostname: 'foo.example.com', status: 'active' },
