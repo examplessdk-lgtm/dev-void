@@ -55,11 +55,11 @@ async function domainAdd(
   const domain = await client.addDomain(projectId, hostname);
   log.success(`Domain ${hostname} added (status: ${domain.status})`);
 
-  // Named locals make the section order explicit (CNAME -> ownership -> SSL),
+  // Named locals make the section order explicit (CNAME -> ownership),
   // rather than relying on the order of conditional pushes onto an array.
+  // Cert DCV uses HTTP-DCV, so no user-facing SSL-validation records exist.
   let cnameSection: string | undefined;
   let ownershipSection: string | undefined;
-  let sslSection: string | undefined;
 
   if (domain.cname_target) {
     cnameSection = `CNAME (traffic)\n    ${hostname} → ${domain.cname_target}`;
@@ -69,25 +69,9 @@ async function domainAdd(
     ownershipSection = `TXT (ownership verification)\n    ${domain.ownership_verification.name} → ${domain.ownership_verification.value}`;
   }
 
-  const sslRecords = (domain.ssl_validation_records ?? []).filter(
-    (r): r is { txt_name: string; txt_value: string; status?: string } =>
-      Boolean(r.txt_name) && Boolean(r.txt_value),
-  );
-  if (sslRecords.length > 0) {
-    const lines = sslRecords.map((r) => `    ${r.txt_name} → ${r.txt_value}`).join('\n');
-    sslSection = `TXT (SSL validation)\n${lines}`;
-  } else {
-    // Deadline-miss path: API short-poll didn't see SSL records before timeout.
-    // Tell the user they'll surface in `domain status` instead of silently
-    // omitting the section.
-    sslSection = `SSL validation records will appear in \`void domain status\` shortly.`;
-  }
+  const summary = `Add both records above to your DNS, then run \`void domain status ${hostname}\` to check progress.`;
 
-  const summary = `Add the records above to your DNS, then run \`void domain status ${hostname}\` to check progress.`;
-
-  const sections = [cnameSection, ownershipSection, sslSection, summary].filter(
-    (s) => s !== undefined,
-  );
+  const sections = [cnameSection, ownershipSection, summary].filter((s) => s !== undefined);
 
   if (sections.length > 0) {
     note(sections.join('\n\n'), 'DNS Setup');
@@ -177,7 +161,8 @@ export function computeRollup(status: DomainStatusResponse): RolledUpStatus {
   ) {
     return {
       state: 'issuing_cert',
-      diagnostic: 'Cloudflare is issuing the SSL certificate (typically <5 minutes).',
+      diagnostic:
+        'Cloudflare is issuing the SSL certificate automatically (typically <5 minutes). No action needed.',
     };
   }
 
@@ -238,43 +223,14 @@ async function domainStatus(
 
   note(rollupLines.join('\n'), 'Domain Status');
 
-  // Gate on actual validation states, not the aggregate `status.status`.
-  // Once the DB row is flipped to `active`, the API keeps returning
-  // `status: 'active'` even if CF later reports SSL/ownership re-validation
-  // (cert renewal, ownership re-check). Keying off the per-field states
-  // ensures pending records still surface in that window. CF stops returning
-  // `ownership_verification` once ownership is verified, so its presence is
-  // itself the pending signal.
-  const ownershipPending = Boolean(status.ownership_verification);
-  const sslPending = status.ssl_status !== 'active';
-
-  if (ownershipPending || sslPending) {
-    const pendingSections: Array<string> = [];
-
-    if (ownershipPending && status.ownership_verification) {
-      pendingSections.push(
-        `TXT (ownership verification)\n    ${status.ownership_verification.name} → ${status.ownership_verification.value}`,
-      );
-    }
-
-    if (sslPending) {
-      // Defensive: drop any per-record entries CF has already marked active.
-      // CF normally clears `ssl.validation_records` once SSL is active, but
-      // during cert renewals or partial states a stale `active` row can sit
-      // alongside a pending one — we only want to surface what the user still
-      // needs to add.
-      const sslRecords = (status.ssl_validation_records ?? []).filter(
-        (r): r is { txt_name: string; txt_value: string; status?: string } =>
-          Boolean(r.txt_name) && Boolean(r.txt_value) && r.status !== 'active',
-      );
-      if (sslRecords.length > 0) {
-        const lines = sslRecords.map((r) => `    ${r.txt_name} → ${r.txt_value}`).join('\n');
-        pendingSections.push(`TXT (SSL validation)\n${lines}`);
-      }
-    }
-
-    if (pendingSections.length > 0) {
-      note(pendingSections.join('\n\n'), 'Add these DNS records to your provider');
-    }
+  // Surface the ownership TXT while it's still outstanding. Cert DCV uses
+  // HTTP-DCV, so issuance and renewals are automatic at CF's edge and never
+  // surface user-facing records. CF stops returning `ownership_verification`
+  // once ownership is verified, so its presence is itself the pending signal.
+  if (status.ownership_verification) {
+    note(
+      `TXT (ownership verification)\n    ${status.ownership_verification.name} → ${status.ownership_verification.value}`,
+      'Add this DNS record to your provider',
+    );
   }
 }

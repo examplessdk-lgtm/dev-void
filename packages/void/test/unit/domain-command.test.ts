@@ -134,7 +134,7 @@ describe('runDomainCommand top-level guards', () => {
 });
 
 describe('domainAdd', () => {
-  it('prints CNAME + ownership TXT + SSL TXT when all three records returned', async () => {
+  it('prints CNAME + ownership TXT when both records returned', async () => {
     mockAddDomain.mockResolvedValue({
       id: 'dom_1',
       project_id: 'proj_default',
@@ -144,7 +144,6 @@ describe('domainAdd', () => {
       created_at: 'now',
       cname_target: 'foo.example.com.cdn.cloudflare.net',
       ownership_verification: { type: 'txt', name: '_cf-custom-hostname.foo', value: 'own-token' },
-      ssl_validation_records: [{ txt_name: '_acme-challenge.foo', txt_value: 'ssl-token' }],
     });
 
     await runDomainCommand(root, args({ subcommand: 'add', hostname: 'foo.example.com' }));
@@ -155,32 +154,8 @@ describe('domainAdd', () => {
     expect(content).toContain('foo.example.com → foo.example.com.cdn.cloudflare.net');
     expect(content).toContain('TXT (ownership verification)');
     expect(content).toContain('_cf-custom-hostname.foo → own-token');
-    expect(content).toContain('TXT (SSL validation)');
-    expect(content).toContain('_acme-challenge.foo → ssl-token');
-  });
-
-  it('prints multiple SSL records as separate lines under one section', async () => {
-    mockAddDomain.mockResolvedValue({
-      id: 'dom_1',
-      project_id: 'proj_default',
-      hostname: 'foo.example.com',
-      cf_hostname_id: 'cf_1',
-      status: 'pending',
-      created_at: 'now',
-      cname_target: 'cname.example',
-      ssl_validation_records: [
-        { txt_name: 'a', txt_value: 'b' },
-        { txt_name: 'c', txt_value: 'd' },
-      ],
-    });
-
-    await runDomainCommand(root, args({ subcommand: 'add', hostname: 'foo.example.com' }));
-
-    const content = mockNote.mock.calls[0][0] as string;
-    expect(content).toContain('a → b');
-    expect(content).toContain('c → d');
-    // Only one SSL section header, despite two records
-    expect(content.match(/TXT \(SSL validation\)/g)).toHaveLength(1);
+    // HTTP-DCV: no user-facing SSL-validation records.
+    expect(content).not.toContain('TXT (SSL validation)');
   });
 
   it('skips ownership section when ownership_verification is missing', async () => {
@@ -192,38 +167,14 @@ describe('domainAdd', () => {
       status: 'pending',
       created_at: 'now',
       cname_target: 'cname.example',
-      ssl_validation_records: [{ txt_name: 'a', txt_value: 'b' }],
     });
 
     await runDomainCommand(root, args({ subcommand: 'add', hostname: 'foo.example.com' }));
 
     const content = mockNote.mock.calls[0][0] as string;
     expect(content).toContain('CNAME (traffic)');
-    expect(content).toContain('TXT (SSL validation)');
     expect(content).not.toContain('TXT (ownership verification)');
-  });
-
-  it('shows hint when SSL records missing (deadline-miss path)', async () => {
-    mockAddDomain.mockResolvedValue({
-      id: 'dom_1',
-      project_id: 'proj_default',
-      hostname: 'foo.example.com',
-      cf_hostname_id: 'cf_1',
-      status: 'pending',
-      created_at: 'now',
-      cname_target: 'cname.example',
-      ownership_verification: { type: 'txt', name: 'own-name', value: 'own-value' },
-      ssl_validation_records: [{ txt_name: 'a' }],
-    });
-
-    await runDomainCommand(root, args({ subcommand: 'add', hostname: 'foo.example.com' }));
-
-    const content = mockNote.mock.calls[0][0] as string;
-    expect(content).toContain('CNAME (traffic)');
     expect(content).not.toContain('TXT (SSL validation)');
-    expect(content).toContain(
-      'SSL validation records will appear in `void domain status` shortly.',
-    );
   });
 
   it('appends the summary line to the DNS Setup block', async () => {
@@ -236,18 +187,17 @@ describe('domainAdd', () => {
       created_at: 'now',
       cname_target: 'cname.example',
       ownership_verification: { type: 'txt', name: 'own-name', value: 'own-value' },
-      ssl_validation_records: [{ txt_name: 'ssl-name', txt_value: 'ssl-value' }],
     });
 
     await runDomainCommand(root, args({ subcommand: 'add', hostname: 'foo.example.com' }));
 
     const content = mockNote.mock.calls[0][0] as string;
     expect(content).toContain(
-      'Add the records above to your DNS, then run `void domain status foo.example.com` to check progress.',
+      'Add both records above to your DNS, then run `void domain status foo.example.com` to check progress.',
     );
   });
 
-  it('orders sections CNAME -> ownership -> SSL', async () => {
+  it('orders sections CNAME -> ownership', async () => {
     mockAddDomain.mockResolvedValue({
       id: 'dom_1',
       project_id: 'proj_default',
@@ -257,7 +207,6 @@ describe('domainAdd', () => {
       created_at: 'now',
       cname_target: 'cname.example',
       ownership_verification: { type: 'txt', name: 'own-name', value: 'own-value' },
-      ssl_validation_records: [{ txt_name: 'ssl-name', txt_value: 'ssl-value' }],
     });
 
     await runDomainCommand(root, args({ subcommand: 'add', hostname: 'foo.example.com' }));
@@ -265,10 +214,8 @@ describe('domainAdd', () => {
     const content = mockNote.mock.calls[0][0] as string;
     const cnameIdx = content.indexOf('CNAME (traffic)');
     const ownershipIdx = content.indexOf('TXT (ownership verification)');
-    const sslIdx = content.indexOf('TXT (SSL validation)');
     expect(cnameIdx).toBeGreaterThanOrEqual(0);
     expect(ownershipIdx).toBeGreaterThan(cnameIdx);
-    expect(sslIdx).toBeGreaterThan(ownershipIdx);
   });
 });
 
@@ -650,7 +597,7 @@ describe('domainStatus --verbose', () => {
 });
 
 describe('domainStatus pending records block', () => {
-  it('shows pending ownership record ONLY when ownership is pending', async () => {
+  it('shows the pending ownership record while ownership_verification is present', async () => {
     mockListDomains.mockResolvedValue([
       { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
     ]);
@@ -661,7 +608,7 @@ describe('domainStatus pending records block', () => {
       cf_hostname_id: 'cf_1',
       status: 'pending',
       created_at: 'now',
-      ssl_status: 'active',
+      ssl_status: 'pending_validation',
       cf_status: 'pending',
       ownership_verification: { type: 'txt', name: 'own-name', value: 'own-value' },
     });
@@ -672,10 +619,12 @@ describe('domainStatus pending records block', () => {
     const pendingNote = mockNote.mock.calls[1][0] as string;
     expect(pendingNote).toContain('TXT (ownership verification)');
     expect(pendingNote).toContain('own-name → own-value');
+    // HTTP-DCV: no SSL-validation records ever surface to the user.
     expect(pendingNote).not.toContain('TXT (SSL validation)');
+    expect(mockNote.mock.calls[1][1]).toBe('Add this DNS record to your provider');
   });
 
-  it('shows pending SSL record ONLY when SSL is pending and ownership is verified', async () => {
+  it('omits the pending block when ownership_verification is absent (SSL is automatic under HTTP-DCV)', async () => {
     mockListDomains.mockResolvedValue([
       { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
     ]);
@@ -688,43 +637,12 @@ describe('domainStatus pending records block', () => {
       created_at: 'now',
       ssl_status: 'pending_validation',
       cf_status: 'pending_validation',
-      ssl_validation_records: [{ txt_name: 'ssl-name', txt_value: 'ssl-value' }],
     });
 
     await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
 
-    expect(mockNote).toHaveBeenCalledTimes(2);
-    const pendingNote = mockNote.mock.calls[1][0] as string;
-    expect(pendingNote).toContain('TXT (SSL validation)');
-    expect(pendingNote).toContain('ssl-name → ssl-value');
-    expect(pendingNote).not.toContain('TXT (ownership verification)');
-  });
-
-  it('shows both records when both pending', async () => {
-    mockListDomains.mockResolvedValue([
-      { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
-    ]);
-    mockGetDomainStatus.mockResolvedValue({
-      id: 'dom_1',
-      project_id: 'proj_default',
-      hostname: 'foo.example.com',
-      cf_hostname_id: 'cf_1',
-      status: 'pending',
-      created_at: 'now',
-      ssl_status: 'pending_validation',
-      cf_status: 'pending',
-      ownership_verification: { type: 'txt', name: 'own-name', value: 'own-value' },
-      ssl_validation_records: [{ txt_name: 'ssl-name', txt_value: 'ssl-value' }],
-    });
-
-    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
-
-    expect(mockNote).toHaveBeenCalledTimes(2);
-    const pendingNote = mockNote.mock.calls[1][0] as string;
-    expect(pendingNote).toContain('TXT (ownership verification)');
-    expect(pendingNote).toContain('own-name → own-value');
-    expect(pendingNote).toContain('TXT (SSL validation)');
-    expect(pendingNote).toContain('ssl-name → ssl-value');
+    expect(mockNote).toHaveBeenCalledTimes(1);
+    expect(mockNote.mock.calls[0][1]).toBe('Domain Status');
   });
 
   it('skips the pending block when status is fully verified', async () => {
@@ -749,59 +667,6 @@ describe('domainStatus pending records block', () => {
     expect(mockNote.mock.calls[0][1]).toBe('Domain Status');
   });
 
-  it('shows multiple SSL records under one section in pending note', async () => {
-    mockListDomains.mockResolvedValue([
-      { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
-    ]);
-    mockGetDomainStatus.mockResolvedValue({
-      id: 'dom_1',
-      project_id: 'proj_default',
-      hostname: 'foo.example.com',
-      cf_hostname_id: 'cf_1',
-      status: 'pending',
-      created_at: 'now',
-      ssl_status: 'pending_validation',
-      cf_status: 'pending_validation',
-      ssl_validation_records: [
-        { txt_name: 'a', txt_value: 'b' },
-        { txt_name: 'c', txt_value: 'd' },
-      ],
-    });
-
-    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
-
-    const pendingNote = mockNote.mock.calls[1][0] as string;
-    expect(pendingNote).toContain('a → b');
-    expect(pendingNote).toContain('c → d');
-    expect(pendingNote.match(/TXT \(SSL validation\)/g)).toHaveLength(1);
-  });
-
-  it('drops per-record SSL entries already marked active', async () => {
-    mockListDomains.mockResolvedValue([
-      { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
-    ]);
-    mockGetDomainStatus.mockResolvedValue({
-      id: 'dom_1',
-      project_id: 'proj_default',
-      hostname: 'foo.example.com',
-      cf_hostname_id: 'cf_1',
-      status: 'pending',
-      created_at: 'now',
-      ssl_status: 'pending_validation',
-      cf_status: 'pending_validation',
-      ssl_validation_records: [
-        { txt_name: 'done', txt_value: 'done-val', status: 'active' },
-        { txt_name: 'pending', txt_value: 'pending-val', status: 'pending_validation' },
-      ],
-    });
-
-    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
-
-    const pendingNote = mockNote.mock.calls[1][0] as string;
-    expect(pendingNote).toContain('pending → pending-val');
-    expect(pendingNote).not.toContain('done → done-val');
-  });
-
   it('exit code stays 0 even when pending', async () => {
     mockListDomains.mockResolvedValue([
       { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
@@ -816,7 +681,6 @@ describe('domainStatus pending records block', () => {
       ssl_status: 'pending_validation',
       cf_status: 'pending',
       ownership_verification: { type: 'txt', name: 'own-name', value: 'own-value' },
-      ssl_validation_records: [{ txt_name: 'ssl-name', txt_value: 'ssl-value' }],
     });
 
     await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
