@@ -391,6 +391,56 @@ describe('domainStatus rollup', () => {
     expect(statusNote).toContain('Status:   issuing_cert —');
   });
 
+  it('issuing_cert cites the traffic CNAME and renders it when cname_target is set', async () => {
+    setupDomain();
+    mockGetDomainStatus.mockResolvedValue({
+      id: 'dom_1',
+      project_id: 'proj_default',
+      hostname: 'foo.example.com',
+      cf_hostname_id: 'cf_1',
+      status: 'pending',
+      created_at: 'now',
+      cf_status: 'pending_issuance',
+      ssl_status: 'pending_validation',
+      cname_target: 'cname.void.app',
+    });
+
+    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
+
+    const statusNote = mockNote.mock.calls[0][0] as string;
+    expect(statusNote).toContain('Status:   issuing_cert —');
+    expect(statusNote).toContain('confirm the traffic CNAME below is published');
+    // The CNAME block it cites is actually rendered.
+    const allNotes = mockNote.mock.calls.map((c) => c[0] as string).join('\n');
+    expect(allNotes).toContain('CNAME (traffic)');
+    expect(allNotes).toContain('foo.example.com → cname.void.app');
+  });
+
+  it('issuing_cert omits the CNAME citation when cname_target is absent', async () => {
+    setupDomain();
+    mockGetDomainStatus.mockResolvedValue({
+      id: 'dom_1',
+      project_id: 'proj_default',
+      hostname: 'foo.example.com',
+      cf_hostname_id: 'cf_1',
+      status: 'pending',
+      created_at: 'now',
+      cf_status: 'pending_issuance',
+      ssl_status: 'pending_validation',
+      // no cname_target (e.g. an older API during the deploy window)
+    });
+
+    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
+
+    const statusNote = mockNote.mock.calls[0][0] as string;
+    expect(statusNote).toContain('Status:   issuing_cert —');
+    expect(statusNote).toContain('Cloudflare is issuing the SSL certificate');
+    // No dangling reference to a CNAME block that isn't shown.
+    const allNotes = mockNote.mock.calls.map((c) => c[0] as string).join('\n');
+    expect(allNotes).not.toContain('confirm the traffic CNAME below');
+    expect(allNotes).not.toContain('CNAME (traffic)');
+  });
+
   it('renders deploying_cert state when cf_status=pending_deployment', async () => {
     setupDomain();
     mockGetDomainStatus.mockResolvedValue({

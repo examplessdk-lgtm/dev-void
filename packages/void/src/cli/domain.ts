@@ -161,8 +161,14 @@ export function computeRollup(status: DomainStatusResponse): RolledUpStatus {
   ) {
     return {
       state: 'issuing_cert',
-      diagnostic:
-        'Cloudflare is issuing the SSL certificate automatically (typically <5 minutes). If this persists, confirm the traffic CNAME below is published.',
+      // Only cite the CNAME "below" when it will actually render. The CNAME block
+      // shows iff `status.cname_target` is set (ssl_status !== 'active' always
+      // holds in this branch), so a status response without a target (e.g. an
+      // older API during the deploy window) no longer points at a record we
+      // don't display.
+      diagnostic: status.cname_target
+        ? 'Cloudflare is issuing the SSL certificate automatically (typically <5 minutes). If this persists, confirm the traffic CNAME below is published.'
+        : 'Cloudflare is issuing the SSL certificate automatically (typically <5 minutes).',
     };
   }
 
