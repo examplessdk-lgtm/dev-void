@@ -572,7 +572,7 @@ See [Environment Variables](../guide/env-vars.md) for the full guide.
 void domain add <hostname> [--project <name>]
 ```
 
-Add a custom domain to a project. Prints the two DNS records to add at your DNS provider: a traffic **CNAME** (`<hostname>` → `cname.void.app`) and a non-rotating `_cf-custom-hostname` ownership **TXT**. Certificates are validated over HTTP at Cloudflare's edge and renew automatically — there are no `_acme-challenge` records to publish, at first issuance or ever. After adding the records the domain activates automatically (no polling required); run `void domain status <hostname>` to check progress.
+Add a custom domain to a project. Prints the two DNS records to add at your DNS provider: a traffic **CNAME** pointing `<hostname>` at the CNAME target shown in the command output, and a non-rotating `_cf-custom-hostname` ownership **TXT**. Certificates are validated over HTTP at Cloudflare's edge and renew automatically — there are no `_acme-challenge` records to publish, at first issuance or ever. After adding the records the domain activates automatically (no polling required); run `void domain status <hostname>` to check progress.
 
 > Wildcard custom hostnames (`*.example.com`) are not supported — register each subdomain individually.
 
