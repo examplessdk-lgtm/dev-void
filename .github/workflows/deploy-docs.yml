@@ -1,18 +1,20 @@
-name: Deploy Docs Production
+name: Deploy void.cloud
 
 on:
   workflow_dispatch:
-  push:
-    branches: [prod]
-    paths:
-      - docs/**
 
 permissions: {}
+
+concurrency:
+  group: deploy-void-cloud
+  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    environment: Docs
+    environment:
+      name: Docs
+      url: https://void.cloud
     permissions:
       contents: read
     steps:
@@ -23,7 +25,6 @@ jobs:
         with:
           node-version-file: .node-version
           cache: true
-      - run: vp run build:core
       - run: vp install
       - run: vp run deploy:docs
         env:

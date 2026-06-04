@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "vitepress build",
-    "deploy": "void deploy",
+    "deploy": "node ../packages/void/dist/cli/cli.mjs deploy --project void-docs",
     "dev": "vitepress dev",
     "preview": "vitepress preview"
   },

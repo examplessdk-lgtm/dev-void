@@ -2330,6 +2330,54 @@ function compilePageRoutes(
 }
 
 /**
+ * Generate the asset fallthrough helper shared by native Void workers and
+ * Class A framework wrappers. If the app returns 404, check ASSETS binding
+ * for static files and set cache headers. Edge caching of hashed assets
+ * happens at the dispatch layer (see design doc 0042).
+ */
+export function compileAssetFallbackHelper(assetsDir = 'assets', serveSpaFallback = false): string {
+  const spaFallbackCode = serveSpaFallback
+    ? `  // SPA fallback: when HTML-owning features make
+  // assetConfig.not_found_handling = 'none', the asset binding returns 404
+  // instead of falling back to index.html itself. Do that fallback here, after
+  // user routes/middleware have run, so auth gates and OAuth callbacks see the request first.
+  // Pages and SSR apps leave this disabled so intentional HTML 404s stay 404.
+  const accept = request.headers.get("accept") ?? "";
+  if (accept.includes("text/html")) {
+    const indexUrl = new URL("/index.html", request.url);
+    const indexAsset = await env.ASSETS.fetch(new Request(indexUrl, { method: request.method }));
+    if (indexAsset.status === 200) {
+      const res = new Response(indexAsset.body, {
+        status: 200,
+        headers: indexAsset.headers,
+      });
+      res.headers.set("Cache-Control", "no-store");
+      res.headers.set("Content-Type", "text/html; charset=utf-8");
+      return res;
+    }
+  }
+  return response;`
+    : `  return response;`;
+
+  return `
+async function serveWithAssets(request, env, response) {
+  if (response.status !== 404 || !env.ASSETS || (request.method !== "GET" && request.method !== "HEAD")) return response;
+  const asset = await env.ASSETS.fetch(new Request(request.url, { method: request.method, headers: request.headers }));
+  if (asset.status !== 404) {
+    const res = new Response(asset.body, asset);
+    if (new URL(request.url).pathname.startsWith(${JSON.stringify('/' + assetsDir + '/')})) {
+      res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    } else {
+      res.headers.set("Cache-Control", "no-store");
+    }
+    return res;
+  }
+${spaFallbackCode}
+}
+`;
+}
+
+/**
  * Generate the Worker entry module code.
  * Re-exports the Hono app from the virtual module with an asset-serving
  * fallthrough: when the app returns 404, the entry tries env.ASSETS.fetch()
@@ -2438,55 +2486,7 @@ function __filterInternalBindings(env) {
 }
 `;
 
-  // Asset fallthrough helper — if the app returns 404, check ASSETS binding
-  // for static files and set cache headers. Edge caching of hashed assets
-  // happens at the dispatch layer (see design doc 0042).
-  // Safe for workers without ASSETS binding (env.ASSETS check short-circuits).
-  //
-  // Hashed assets under assetsDir get long immutable caching (content-addressed).
-  // Non-hashed asset responses are stamped no-store: a stale entry there would
-  // shadow routes that are added or fixed in subsequent deploys across the edge
-  // cache boundary, which the platform's deploy-scoped cache keys (dispatch
-  // layer) can't reach once CF's managed edge has cached the response.
-  const spaFallbackCode = serveSpaFallback
-    ? `  // SPA fallback: when HTML-owning features make
-  // assetConfig.not_found_handling = 'none', the asset binding returns 404
-  // instead of falling back to index.html itself. Do that fallback here, after
-  // user routes/middleware have run, so auth gates and OAuth callbacks see the request first.
-  // Pages and SSR apps leave this disabled so intentional HTML 404s stay 404.
-  const accept = request.headers.get("accept") ?? "";
-  if (accept.includes("text/html")) {
-    const indexUrl = new URL("/index.html", request.url);
-    const indexAsset = await env.ASSETS.fetch(new Request(indexUrl, { method: request.method }));
-    if (indexAsset.status === 200) {
-      const res = new Response(indexAsset.body, {
-        status: 200,
-        headers: indexAsset.headers,
-      });
-      res.headers.set("Cache-Control", "no-store");
-      res.headers.set("Content-Type", "text/html; charset=utf-8");
-      return res;
-    }
-  }
-  return response;`
-    : `  return response;`;
-
-  const assetHelper = `
-async function serveWithAssets(request, env, response) {
-  if (response.status !== 404 || !env.ASSETS || (request.method !== "GET" && request.method !== "HEAD")) return response;
-  const asset = await env.ASSETS.fetch(new Request(request.url, { method: request.method, headers: request.headers }));
-  if (asset.status !== 404) {
-    const res = new Response(asset.body, asset);
-    if (new URL(request.url).pathname.startsWith(${JSON.stringify('/' + assetsDir + '/')})) {
-      res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
-    } else {
-      res.headers.set("Cache-Control", "no-store");
-    }
-    return res;
-  }
-${spaFallbackCode}
-}
-`;
+  const assetHelper = compileAssetFallbackHelper(assetsDir, serveSpaFallback);
 
   const fetchHandler = remotePath
     ? `async (request, env, ctx) => {

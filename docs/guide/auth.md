@@ -229,12 +229,12 @@ Localhost dev uses a built-in fallback secret automatically. Outside the managed
 For advanced configuration, create `auth.ts` at the project root and export `defineAuth(...)`:
 
 ```ts
-import { defineAuth } from "void/auth";
+import { defineAuth } from 'void/auth';
 
 export default defineAuth(({ defaults }) => ({
   ...defaults,
-  trustedOrigins: ["https://example.com"],
-});
+  trustedOrigins: ['https://example.com'],
+}));
 ```
 
 `defaults` already includes Void's conventions. Extend it explicitly instead of expecting a deep merge.
