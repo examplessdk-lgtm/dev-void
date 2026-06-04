@@ -572,7 +572,9 @@ See [Environment Variables](../guide/env-vars.md) for the full guide.
 void domain add <hostname> [--project <name>]
 ```
 
-Add a custom domain to a project. Prints the CNAME target you need to add in your DNS provider.
+Add a custom domain to a project. Prints the two DNS records to add at your DNS provider: a traffic **CNAME** (`<hostname>` → `cname.void.app`) and a non-rotating `_cf-custom-hostname` ownership **TXT**. Certificates are validated over HTTP at Cloudflare's edge and renew automatically — there are no `_acme-challenge` records to publish, at first issuance or ever. After adding the records the domain activates automatically (no polling required); run `void domain status <hostname>` to check progress.
+
+> Wildcard custom hostnames (`*.example.com`) are not supported — register each subdomain individually.
 
 ### `void domain delete`
 
@@ -596,7 +598,7 @@ List all custom domains and their status (active/pending).
 void domain status <hostname> [--project <name>] [--verbose]
 ```
 
-Check verification and SSL status for a specific domain. Prints a rolled-up state (`awaiting_dns`, `verifying_dns`, `issuing_cert`, `deploying_cert`, `awaiting_deployment`, `active`, `error`, or `pending`) with a one-line diagnostic explaining what Cloudflare is doing and any user action required. When DNS records are still pending, the command also prints the exact TXT records to add at your DNS provider.
+Check verification and SSL status for a specific domain. Prints a rolled-up state (`awaiting_dns`, `verifying_dns`, `issuing_cert`, `deploying_cert`, `awaiting_deployment`, `active`, `error`, or `pending`) with a one-line diagnostic explaining what Cloudflare is doing and any user action required. While the certificate is not yet active, the command also surfaces the records to configure — the traffic **CNAME** and the `_cf-custom-hostname` ownership **TXT** — so you can verify them. Activation is automatic: a background job reconciles pending domains (about every 2 minutes for the first 30 minutes after adding, then hourly), so this command is for instant feedback rather than required polling.
 
 Pass `--verbose` to additionally print the raw multi-line status breakdown (DB status, SSL status, ownership state, verification errors) underneath the rollup.
 
