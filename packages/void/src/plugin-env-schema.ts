@@ -1,7 +1,8 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'pathe';
 import { type Plugin, type ResolvedConfig } from 'vite';
 import { findEnvFile, generateEnvTypes } from './codegen/env-types.ts';
+import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import { loadUserEnvFile } from './host/load-user-env.ts';
 import { voidLog, voidWarn } from './log.ts';
 import { filterLoadedEnv } from './shared/env.ts';
@@ -93,7 +94,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     }
     mkdirSync(outDir, { recursive: true });
     const { dts } = generateEnvTypes(envFile, outDir);
-    writeFileSync(join(outDir, 'env.d.ts'), dts);
+    writeFileIfChanged(join(outDir, 'env.d.ts'), dts);
   }
 
   async function importUserEnv() {

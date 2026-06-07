@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
@@ -111,6 +119,21 @@ describe('ensureProjectTsconfig', () => {
     const tsconfig = readTsconfig();
     expect(tsconfig.files).toContain('md.d.ts');
     expect(tsconfig.compilerOptions.paths['@void/md/pages']).toEqual(['./md.d.ts']);
+  });
+
+  it('does not rewrite tsconfig.json when generated content is unchanged', () => {
+    const tsconfigPath = join(root, '.void', 'tsconfig.json');
+    const oldTime = new Date('2024-01-01T00:00:00.000Z');
+
+    ensureProjectTsconfig(root);
+    utimesSync(tsconfigPath, oldTime, oldTime);
+
+    ensureProjectTsconfig(root);
+    expect(statSync(tsconfigPath).mtimeMs).toBe(oldTime.getTime());
+
+    mkdirSync(join(root, 'routes'), { recursive: true });
+    ensureProjectTsconfig(root);
+    expect(statSync(tsconfigPath).mtimeMs).not.toBe(oldTime.getTime());
   });
 
   it('combines routes, queues, and md when all present', () => {

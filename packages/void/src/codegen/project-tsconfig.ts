@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join, relative } from 'pathe';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
+import { writeFileIfChanged } from './write-if-changed.ts';
 
 export type ProjectTsconfigOptions = {
   redirectDbModule?: boolean;
@@ -112,9 +113,12 @@ export function ensureProjectTsconfig(
   hasDb?: boolean,
   hasSchema?: boolean,
   options: ProjectTsconfigOptions = {},
-): void {
+): boolean {
   const outDir = join(root, '.void');
   mkdirSync(outDir, { recursive: true });
   const tsconfig = createProjectTsconfig(root, hasRouteTypes, hasDb, hasSchema, options);
-  writeFileSync(join(outDir, 'tsconfig.json'), JSON.stringify(tsconfig, null, 2) + '\n');
+  return writeFileIfChanged(
+    join(outDir, 'tsconfig.json'),
+    JSON.stringify(tsconfig, null, 2) + '\n',
+  );
 }

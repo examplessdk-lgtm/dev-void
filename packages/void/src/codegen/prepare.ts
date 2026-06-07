@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'pathe';
 import { loadEnv } from 'vite';
@@ -14,6 +14,7 @@ import { findEnvFile, generateEnvTypes } from './env-types.ts';
 import { ensureProjectTsconfig } from './project-tsconfig.ts';
 import { generateQueueTypes } from './queue-types.ts';
 import { generateRouteTypes } from './route-types.ts';
+import { writeFileIfChanged } from './write-if-changed.ts';
 
 export type PrepareProjectResult = {
   written: Array<string>;
@@ -27,8 +28,9 @@ function writeGeneratedFile(
   written: Array<string>,
 ): void {
   mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, fileName), content);
-  written.push(join('.void', fileName));
+  if (writeFileIfChanged(join(outDir, fileName), content)) {
+    written.push(join('.void', fileName));
+  }
 }
 
 function removeGeneratedFile(outDir: string, fileName: string, removed: Array<string>): void {
@@ -88,8 +90,9 @@ export async function prepareProject(root: string): Promise<PrepareProjectResult
   const schema = discoverSchema(root, paths);
   const hasDbRuntime = schema != null || authEnabled;
   if (hasDbRuntime) {
-    generateDbDts(outDir, schema, dialect);
-    written.push(join('.void', 'db.d.ts'));
+    if (generateDbDts(outDir, schema, dialect)) {
+      written.push(join('.void', 'db.d.ts'));
+    }
   } else {
     removeGeneratedFile(outDir, 'db.d.ts', removed);
   }
@@ -105,24 +108,29 @@ export async function prepareProject(root: string): Promise<PrepareProjectResult
     const databasePath = join(outDir, 'better-auth-db.ts');
     const drizzleAdapterPath = fileURLToPath(import.meta.resolve('better-auth/adapters/drizzle'));
 
-    writeFileSync(schemaPath, generateVoidAuthDrizzleSchema(authRuntime, env));
-    writeFileSync(
-      databasePath,
-      generateVoidAuthDatabaseModule({
-        dialect,
-        schemaImportPath: schemaPath,
-        drizzleAdapterPath,
-      }),
-    );
-    written.push(join('.void', 'better-auth-schema.ts'));
-    written.push(join('.void', 'better-auth-db.ts'));
+    if (writeFileIfChanged(schemaPath, generateVoidAuthDrizzleSchema(authRuntime, env))) {
+      written.push(join('.void', 'better-auth-schema.ts'));
+    }
+    if (
+      writeFileIfChanged(
+        databasePath,
+        generateVoidAuthDatabaseModule({
+          dialect,
+          schemaImportPath: schemaPath,
+          drizzleAdapterPath,
+        }),
+      )
+    ) {
+      written.push(join('.void', 'better-auth-db.ts'));
+    }
   } else {
     removeGeneratedFile(outDir, 'better-auth-schema.ts', removed);
     removeGeneratedFile(outDir, 'better-auth-db.ts', removed);
   }
 
-  ensureProjectTsconfig(root, hasRouteTypes, hasDbRuntime, schema != null, { paths });
-  written.push(join('.void', 'tsconfig.json'));
+  if (ensureProjectTsconfig(root, hasRouteTypes, hasDbRuntime, schema != null, { paths })) {
+    written.push(join('.void', 'tsconfig.json'));
+  }
 
   return { written, removed };
 }
