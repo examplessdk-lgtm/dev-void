@@ -122,6 +122,18 @@ export type CloudContext = Context<CloudEnv>;
 
 type HandlerFn = (c: CloudContext) => unknown | Promise<unknown>;
 type MiddlewareFn = MiddlewareHandler<CloudEnv>;
+type BasicAuthOptionValue = string | (() => string);
+
+export interface BasicAuthOptions {
+  /** Username required by the Basic auth challenge. */
+  username: BasicAuthOptionValue;
+  /** Password required by the Basic auth challenge. */
+  password: BasicAuthOptionValue;
+  /** Browser prompt realm. Defaults to "Restricted". */
+  realm?: BasicAuthOptionValue;
+  /** Response body for failed authentication. Defaults to "Authentication required". */
+  message?: BasicAuthOptionValue;
+}
 
 /** Pre-rendered asset tags injected by the SSR build. */
 export type RenderAssetTags = {
@@ -283,6 +295,99 @@ export function defineMiddleware(
   handler: MiddlewareHandler<CloudEnv>,
 ): MiddlewareHandler<CloudEnv> {
   return handler;
+}
+
+const basicAuthEncoder = new TextEncoder();
+const basicAuthDecoder = new TextDecoder('utf-8', { fatal: true });
+
+function parseBasicAuthHeader(authorization: string | null) {
+  if (!authorization?.toLowerCase().startsWith('basic ')) {
+    return null;
+  }
+
+  try {
+    const encoded = authorization.slice(6).trim();
+    const binary = atob(encoded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const decoded = basicAuthDecoder.decode(bytes);
+    const separator = decoded.indexOf(':');
+    if (separator === -1) {
+      return null;
+    }
+
+    return {
+      username: decoded.slice(0, separator),
+      password: decoded.slice(separator + 1),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function timingSafeStringEqual(actual: string, expected: string) {
+  const actualBytes = basicAuthEncoder.encode(actual);
+  const expectedBytes = basicAuthEncoder.encode(expected);
+  let difference = actualBytes.length ^ expectedBytes.length;
+
+  for (let i = 0; i < expectedBytes.length; i++) {
+    difference |= (actualBytes[i] ?? 0) ^ expectedBytes[i];
+  }
+
+  return difference === 0;
+}
+
+function isVoidInternalPath(pathname: string) {
+  return pathname === '/__void' || pathname.startsWith('/__void/');
+}
+
+function basicAuthChallenge(realm: string, message: string) {
+  const escapedRealm = realm.replace(/["\\]/g, '\\$&');
+
+  return new Response(message, {
+    status: 401,
+    headers: {
+      'Cache-Control': 'no-store',
+      'WWW-Authenticate': `Basic realm="${escapedRealm}", charset="UTF-8"`,
+    },
+  });
+}
+
+function resolveBasicAuthOption(value: BasicAuthOptionValue | undefined, fallback: string): string {
+  if (value === undefined) {
+    return fallback;
+  }
+  return typeof value === 'function' ? value() : value;
+}
+
+/**
+ * Create Basic authentication middleware for temporary site gates and
+ * pre-launch protection.
+ *
+ * Void internal endpoints under `/__void` are always excluded so deploy-time
+ * migrations, prerendering, cron/queue dispatch, and remote binding helpers
+ * continue to reach Void's own internal-token checks.
+ */
+export function basicAuth(options: BasicAuthOptions): MiddlewareHandler<CloudEnv> {
+  return defineMiddleware(async (c, next) => {
+    if (isVoidInternalPath(c.req.path)) {
+      await next();
+      return;
+    }
+
+    const username = resolveBasicAuthOption(options.username, '');
+    const password = resolveBasicAuthOption(options.password, '');
+    const credentials = parseBasicAuthHeader(c.req.raw.headers.get('Authorization'));
+    const usernameMatches = credentials && timingSafeStringEqual(credentials.username, username);
+    const passwordMatches = credentials && timingSafeStringEqual(credentials.password, password);
+
+    if (!usernameMatches || !passwordMatches) {
+      const realm = resolveBasicAuthOption(options.realm, 'Restricted');
+      const message = resolveBasicAuthOption(options.message, 'Authentication required');
+      return basicAuthChallenge(realm, message);
+    }
+
+    await next();
+  });
 }
 
 /**

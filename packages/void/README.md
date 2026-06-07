@@ -48,6 +48,7 @@ Runtime helpers include:
 
 - `defineHandler`
 - `defineMiddleware`
+- `basicAuth`
 - `defineScheduled`
 - `defineQueue`
 - `void/db`

@@ -1666,6 +1666,7 @@ export function voidPlugin(options?: {
 export {
   defineHandler,
   defineMiddleware,
+  basicAuth,
   defineScheduled,
   defineRender,
   defineHead,
@@ -1676,6 +1677,7 @@ export type {
   CloudContext,
   CloudContextVariables,
   CloudEnv,
+  BasicAuthOptions,
   RenderAssetTags,
   TypedHandler,
   TypedQueueHandler,

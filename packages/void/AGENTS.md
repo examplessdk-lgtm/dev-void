@@ -23,6 +23,7 @@ Non-CF targets disable CF-only bindings (`void/db`, `void/kv`, `void/auth`, `voi
 - `defineHandler(fn)` — wraps a route handler `(c: CloudContext) => R`, returns `TypedHandler<{}, R>`
 - `defineHandler.withValidator(validators)(fn)` — validates body/query/params via Standard Schema before calling handler, returns `TypedHandler<V, R>` with phantom types for codegen
 - `defineMiddleware(fn)` — wraps Hono middleware `(c, next) => void`
+- `basicAuth(options)` — built-in Basic Auth middleware for temporary site gates; excludes Void internals under `/__void`
 - Handlers can return plain objects/strings (auto-converted via `convertReturnValue`) or use Hono's `c.json()` / `c.text()` directly.
 - Route files use **named HTTP method exports** (`export const GET`, `export const POST`, etc.) — one file per path, multiple methods per file.
 
@@ -90,20 +91,20 @@ src/
 
 ### Package Exports
 
-| Subpath          | What                                                                                                                    |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `void`           | `voidPlugin()` named export + `defineHandler` + `defineMiddleware` + `defineHead` + `defineQueue` + `CloudContext` type |
-| `void/handler`   | `defineHandler()`, `defineHandler.withValidator()`, `defineMiddleware()`, `defineHead()`, types                         |
-| `void/response`  | `convertReturnValue()`                                                                                                  |
-| `void/validator` | `runValidation()`, `ValidatorSlots`, `HandlerInput` types                                                               |
-| `void/routes`    | Empty `RouteMap` + `WebSocketRouteMap` stubs (augmented by generated `routes.d.ts`)                                     |
-| `void/client`    | Typed `fetch()` client + `fetchStream()` SSE consumer + `FetchError`                                                    |
-| `void/ws`        | `defineRoom()`, `defineWebSocket()`, typed `connect()`, and WebSocket context types                                     |
-| `void/db`        | `db` Drizzle D1 instance (auto-wired with user schema) + `createDb()` for custom D1 bindings                            |
-| `void/queues`    | `queues` typed proxy + `QueueMap` stub interface (augmented by generated `queues.d.ts`)                                 |
-| `void/ai`        | `ai` proxy — Cloudflare-native `ai.run()`/`ai.stream()`, provider-native `ai.provider().fetch()`, `ai.models()`         |
-| `void/log`       | `logger.error/warn/info(msg, fields?)` — emits stringified JSON to `console.*` so Cloudflare Tail captures level + msg  |
-| `void/env`       | `defineEnv()`, typed `env` proxy, built-in schema helpers (`string`, `number`, `oneOf`, …) + global Cloudflare types    |
+| Subpath          | What                                                                                                                                  |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `void`           | `voidPlugin()` named export + `defineHandler` + `defineMiddleware` + `basicAuth` + `defineHead` + `defineQueue` + `CloudContext` type |
+| `void/handler`   | `defineHandler()`, `defineHandler.withValidator()`, `defineMiddleware()`, `basicAuth()`, `defineHead()`, types                        |
+| `void/response`  | `convertReturnValue()`                                                                                                                |
+| `void/validator` | `runValidation()`, `ValidatorSlots`, `HandlerInput` types                                                                             |
+| `void/routes`    | Empty `RouteMap` + `WebSocketRouteMap` stubs (augmented by generated `routes.d.ts`)                                                   |
+| `void/client`    | Typed `fetch()` client + `fetchStream()` SSE consumer + `FetchError`                                                                  |
+| `void/ws`        | `defineRoom()`, `defineWebSocket()`, typed `connect()`, and WebSocket context types                                                   |
+| `void/db`        | `db` Drizzle D1 instance (auto-wired with user schema) + `createDb()` for custom D1 bindings                                          |
+| `void/queues`    | `queues` typed proxy + `QueueMap` stub interface (augmented by generated `queues.d.ts`)                                               |
+| `void/ai`        | `ai` proxy — `ai.run()`, `ai.stream()`, `ai.models()` with auto-detected backend (service binding / HTTPS / direct)                   |
+| `void/log`       | `logger.error/warn/info(msg, fields?)` — emits stringified JSON to `console.*` so Cloudflare Tail captures level + msg                |
+| `void/env`       | `defineEnv()`, typed `env` proxy, built-in schema helpers (`string`, `number`, `oneOf`, …) + global Cloudflare types                  |
 
 The CLI binary is at `dist/cli/cli.mjs` (declared in `bin` field of package.json).
 

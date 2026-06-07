@@ -191,6 +191,34 @@ export default defineMiddleware(async (c, next) => {
 
 `defineMiddleware` uses Hono middleware semantics: `(c, next) => Promise<void> | void`.
 
+For a temporary full-site gate, use the built-in `basicAuth()` middleware with credentials from `void/env`. Void internal endpoints under `/__void` are excluded automatically so deploy migrations and dev tooling continue to work. Wrap `void/env` reads in functions so they are resolved per request after Void has bound the runtime env.
+
+```ts
+// env.ts
+import { defineEnv, string } from 'void/env';
+
+export default defineEnv({
+  BASIC_AUTH_USERNAME: string(),
+  BASIC_AUTH_PASSWORD: string(),
+});
+```
+
+```ts
+// middleware/01.basic-auth.ts
+import { basicAuth } from 'void';
+import { env } from 'void/env';
+
+export default basicAuth({
+  username: () => env.BASIC_AUTH_USERNAME,
+  password: () => env.BASIC_AUTH_PASSWORD,
+  realm: 'Preview',
+});
+```
+
+Set `BASIC_AUTH_USERNAME` and `BASIC_AUTH_PASSWORD` as local environment variables for development and production secrets before deploy.
+
+For app-specific bypasses such as health checks or public webhooks, compose that logic in your own middleware before calling `basicAuth()`.
+
 Middleware can set typed context variables using `c.set()`. Augment the `CloudContextVariables` interface so downstream handlers get full type safety:
 
 ```ts
