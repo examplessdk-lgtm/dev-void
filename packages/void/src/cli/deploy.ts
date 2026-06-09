@@ -633,7 +633,17 @@ export function applyDeployEvent(event: DeployEvent, s: SpinnerResult): ApplyDep
       s.message(`Prerendering ${event.pages} pages...`);
       return { kind: 'continue' };
     case 'done':
-      s.stop('Deployed!');
+      if (event.published === false) {
+        // Committed-live in the DB but routing KV was not published. The
+        // deploy succeeded (do NOT throw / return an error kind) but the
+        // project may be unreachable (first deploy) or still serving the
+        // previous deploy (later deploy). Degrade the message accordingly.
+        s.stop(
+          'Deployed, but routing was not published — the project may be unreachable or still serving the previous deploy. Re-run `void deploy` to publish routing.',
+        );
+      } else {
+        s.stop('Deployed!');
+      }
       return { kind: 'done', event };
     case 'error':
       s.stop('Deploy failed');
@@ -647,7 +657,7 @@ export function applyDeployEvent(event: DeployEvent, s: SpinnerResult): ApplyDep
  * resolve with the terminal `done` event (or throw on terminal error /
  * connection loss).
  */
-async function streamDeployEvents(
+export async function streamDeployEvents(
   projectId: string,
   events: AsyncGenerator<DeployEvent>,
   s: SpinnerResult,
@@ -683,12 +693,17 @@ async function streamDeployEvents(
         deploymentId = result.deploymentId;
         cliLog?.info('stream_deployment_id', { deploymentId });
       } else if (result.kind === 'done') {
-        cliLog?.info('deploy_success', {
+        const degraded = result.event.published === false;
+        // Degraded = committed-live but routing KV not published. Still a
+        // `done` outcome (not an error), but logged distinctly so the
+        // degraded result is greppable in the JSONL trace.
+        cliLog?.info(degraded ? 'deploy_degraded' : 'deploy_success', {
           deploymentId,
           url: result.event.url,
           assets: result.event.assets,
           workers: result.event.workers,
           durationMs: Date.now() - startedAt,
+          degraded,
         });
         return result.event;
       } else if (result.kind === 'error') {
@@ -1001,7 +1016,24 @@ export async function runStaticDeploy(
   const summary = [`${typeLabel} — ${formatKnownAssetSummary(result, skipped)}`];
   note(summary.join('\n'), result.url);
 
+  warnUnpublishedRouting(result);
   outro('Done!');
+}
+
+/**
+ * Surface a persistent warning when a deploy committed live but its routing
+ * KV was not published. Uses `log.warn` (not the spinner) so the warning
+ * survives the following `note`/`outro` calls and the user sees it after the
+ * deploy summary. The deploy is still committed — this is a warning, not a
+ * failure, so the process exit code is unaffected.
+ */
+export function warnUnpublishedRouting(result: StreamDeployResult): void {
+  if (result.published !== false) {
+    return;
+  }
+  log.warn(
+    'Routing was not published for this deploy. The project may be unreachable (first deploy) or still serving the previous deploy. Re-run `void deploy` to publish routing.',
+  );
 }
 
 /**
@@ -1340,6 +1372,7 @@ async function runFrameworkDeploy(
   // Clean up generated wrapper files
   cleanupWrapper(root);
 
+  warnUnpublishedRouting(result);
   outro('Done!');
 }
 
@@ -1832,6 +1865,7 @@ async function runFullDeploy(
   }
   note(summary.join('\n'), result.url);
 
+  warnUnpublishedRouting(result);
   outro('Done!');
 }
 
