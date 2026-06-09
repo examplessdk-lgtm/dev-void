@@ -86,7 +86,7 @@ After that, the full interactive flow walks through:
 4. **Skills:** links Void skills using the same detected or selected agent context.
 5. **MCP config:** writes MCP server config using that same agent context.
 6. **Demo code:** for existing non-Pages projects, optionally scaffolds a `db/migrations/` directory plus an API route and typed fetch example.
-7. **GitHub Actions:** optionally creates `.github/workflows/deploy.yml` with the right package manager commands.
+7. **GitHub Actions:** optionally creates `.github/workflows/void-deploy.yml`. The workflow deploys on pushes to `main` and authenticates via [GitHub OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect) — no long-lived `VOID_TOKEN` secret is stored in the repo. The job requests an OIDC token (audience `void`), exchanges it at `POST $VOID_API_URL/auth/github-oidc` for a short-lived project-scoped deploy token, then runs `void deploy --project <slug>` with the right package manager. The project slug is baked in from your linked project (`.void/project.json`) when known; otherwise the workflow reads a `VOID_PROJECT` repository variable.
 8. **`env.ts` scaffold:** if the project has no `env.ts` but has `.env` / `.env.example` / `.env.local` / `.env.development*` files on disk, generates an `env.ts` pre-populated with their keys. Values get conservative type inference (`boolean`/`url`/`number`/`string`) — the file carries a banner nudging you to tighten anything the heuristic got wrong.
 9. **Project setup:** optionally logs you in, lets you select or create a project, and writes `.void/project.json` so your first deploy can just be `void deploy`.
 
@@ -98,9 +98,11 @@ Use flags to run individual steps without prompts:
 | ------------ | ------------------------------------------------- |
 | `--tsconfig` | Only update `tsconfig.json`                       |
 | `--agents`   | Set up agent instructions, skills, and MCP config |
-| `--github`   | Only create GitHub Actions workflow               |
+| `--github`   | Only create the GitHub Actions deploy workflow    |
 
 Flags can be combined. When any flag is provided, only the specified steps run and interactive prompts are skipped.
+
+The `--github` workflow uses GitHub OIDC: you connect the repository to your Void project once (in the dashboard), and pushes to `main` deploy automatically. There is no `VOID_TOKEN` secret to create or rotate. To target staging, set a `VOID_API_URL` repository variable to `https://api.staging.void.cloud`.
 
 For projects that already have `"extends"`, `void init --tsconfig` preserves the existing config and adds `./.void/tsconfig.json`. If the existing config defines `files` or `compilerOptions.paths`, Void also merges its generated declaration files and aliases into the root config because TypeScript replaces those fields across `extends` instead of deeply merging them.
 

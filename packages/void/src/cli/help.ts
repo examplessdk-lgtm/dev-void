@@ -28,11 +28,15 @@ const HELP_TREE: HelpTree = {
     options: [
       { command: '--agents', description: 'Set up agent instructions, skills, and MCP config' },
       { command: '--tsconfig', description: 'Only update tsconfig.json' },
-      { command: '--github', description: 'Only create GitHub Actions workflow' },
+      {
+        command: '--github',
+        description: 'Only create the GitHub Actions deploy workflow (OIDC, no stored token)',
+      },
     ],
     examples: [
       { command: 'void init', description: 'Scaffold or configure the current project' },
       { command: 'void init --agents', description: 'Install agent instructions and MCP config' },
+      { command: 'void init --github', description: 'Scaffold the GitHub Actions deploy workflow' },
     ],
   },
   deploy: {

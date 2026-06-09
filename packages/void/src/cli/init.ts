@@ -31,6 +31,7 @@ import { maybeSetupDeployProject } from './deploy-setup.ts';
 import { maybeScaffoldEnvTs } from './env-scaffold.ts';
 import { cliTitle } from './output.ts';
 import { formatProjectCommand } from './preset.ts';
+import { readProjectConfig } from './project.ts';
 import {
   createPagesStarterTemplate,
   detectScaffoldFrameworkFromDependencies,
@@ -1866,107 +1867,156 @@ function getNodeVersionLine(root: string): string {
   return 'node-version: lts/*';
 }
 
-function getWorkflowYaml(root: string, pm: ProjectState['packageManager']): string {
+// The default Void API endpoint baked into the scaffolded workflow. Users can
+// override it with a `VOID_API_URL` repository variable (see the env block).
+const WORKFLOW_DEFAULT_API_URL = 'https://api.void.cloud';
+
+// Per-package-manager install + setup steps. `void deploy` always runs through
+// the package-manager-appropriate runner in the deploy step below.
+function getWorkflowSetupSteps(
+  root: string,
+  pm: ProjectState['packageManager'],
+): { setup: string; install: string; runner: string } {
   const nodeVersion = getNodeVersionLine(root);
   switch (pm) {
     case 'pnpm':
-      return `name: Deploy
-on:
-  push:
-    branches: [main]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v5
+      return {
+        setup: `      - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v6
         with:
           ${nodeVersion}
-          cache: pnpm
-      - run: pnpm install
-      - run: pnpm void deploy
-        env:
-          VOID_TOKEN: \${{ secrets.VOID_TOKEN }}
-`;
+          cache: pnpm`,
+        install: '      - run: pnpm install',
+        runner: 'pnpm exec void',
+      };
     case 'yarn':
-      return `name: Deploy
-on:
-  push:
-    branches: [main]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      return {
+        setup: `      - uses: actions/setup-node@v6
         with:
           ${nodeVersion}
-          cache: yarn
-      - run: yarn install --immutable
-      - run: yarn void deploy
-        env:
-          VOID_TOKEN: \${{ secrets.VOID_TOKEN }}
-`;
+          cache: yarn`,
+        install: '      - run: yarn install --immutable',
+        runner: 'yarn void',
+      };
     case 'bun':
-      return `name: Deploy
-on:
-  push:
-    branches: [main]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install
-      - run: bunx void deploy
-        env:
-          VOID_TOKEN: \${{ secrets.VOID_TOKEN }}
-`;
+      return {
+        setup: '      - uses: oven-sh/setup-bun@v2',
+        install: '      - run: bun install',
+        runner: 'bunx void',
+      };
     default:
-      return `name: Deploy
-on:
-  push:
-    branches: [main]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      return {
+        setup: `      - uses: actions/setup-node@v6
         with:
           ${nodeVersion}
-          cache: npm
-      - run: npm ci
-      - run: npx void deploy
-        env:
-          VOID_TOKEN: \${{ secrets.VOID_TOKEN }}
-`;
+          cache: npm`,
+        install: '      - run: npm ci',
+        runner: 'npx void',
+      };
   }
 }
 
+/**
+ * Scaffold the GitHub Actions workflow that deploys via GitHub OIDC — no
+ * long-lived secret stored in the repo. The job requests an OIDC token from
+ * GitHub (audience `void`), exchanges it at `POST $VOID_API_URL/auth/github-oidc`
+ * for a short-lived (15-min) project-scoped deploy token, then runs
+ * `void deploy --project <slug>` with that token exported as `VOID_TOKEN`.
+ *
+ * `slug` is the linked project slug when known (from `.void/project.json`);
+ * otherwise a `${{ vars.VOID_PROJECT }}` placeholder is emitted with a comment
+ * telling the user to set the repository variable.
+ */
+function getWorkflowYaml(
+  root: string,
+  pm: ProjectState['packageManager'],
+  slug: string | null,
+): string {
+  const { setup, install, runner } = getWorkflowSetupSteps(root, pm);
+  // When the slug is unknown, fall back to a repository variable and prefix the
+  // `VOID_PROJECT` line with a comment (each comment line indented to 2 spaces
+  // so it stays inside the `env:` mapping and the YAML remains valid).
+  const projectLine = slug
+    ? `VOID_PROJECT: ${slug}`
+    : `# Set a VOID_PROJECT repository variable to your project slug
+  # (Settings → Secrets and variables → Actions → Variables).
+  VOID_PROJECT: \${{ vars.VOID_PROJECT }}`;
+  return `name: Deploy to Void
+on:
+  push:
+    branches: [main]
+
+# Latest push wins: cancel an in-flight deploy for the same repo+branch so a
+# newer commit is never overtaken by an older one. Keyed by repo + ref only —
+# workflow-level concurrency cannot read the \`env\` context, so VOID_PROJECT is
+# not used here (one repo+branch deploys to one project in this scaffold).
+concurrency:
+  group: void-deploy-\${{ github.repository }}-\${{ github.ref }}
+  cancel-in-progress: true
+
+# id-token: write lets the job mint a GitHub OIDC token. No long-lived
+# VOID_TOKEN secret is stored — the token below is exchanged for a
+# short-lived, project-scoped deploy token at deploy time.
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  # Override with a VOID_API_URL repository variable to target staging.
+  VOID_API_URL: \${{ vars.VOID_API_URL || '${WORKFLOW_DEFAULT_API_URL}' }}
+  ${projectLine}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+${setup}
+${install}
+      - name: Exchange GitHub OIDC token for a Void deploy token
+        run: |
+          OIDC_TOKEN="$(curl -sf \\
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \\
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=void" | jq -r '.value')"
+          VOID_TOKEN="$(curl -sf \\
+            -H 'Content-Type: application/json' \\
+            -d "$(jq -n --arg t "$OIDC_TOKEN" --arg p "$VOID_PROJECT" '{oidcToken: $t, project: $p}')" \\
+            "$VOID_API_URL/auth/github-oidc" | jq -r '.token')"
+          echo "::add-mask::$VOID_TOKEN"
+          echo "VOID_TOKEN=$VOID_TOKEN" >> "$GITHUB_ENV"
+      - name: Deploy
+        run: ${runner} deploy --project "$VOID_PROJECT"
+`;
+}
+
 function setupGithubActions(root: string, state: ProjectState): void {
-  const workflowPath = join(root, '.github', 'workflows', 'deploy.yml');
+  const workflowPath = join(root, '.github', 'workflows', 'void-deploy.yml');
 
   if (existsSync(workflowPath)) {
-    log.warn('deploy.yml already exists, skipping');
+    log.warn('void-deploy.yml already exists, skipping');
     return;
   }
 
-  mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
-  writeFileSync(workflowPath, getWorkflowYaml(root, state.packageManager));
-  log.success('Created .github/workflows/deploy.yml');
+  const slug = readProjectConfig(root)?.slug ?? null;
 
-  note(
-    'After init completes, run `npx void auth token` to copy a deploy token.\n' +
-      'Then add it in GitHub under Settings → Secrets and variables → Actions as `VOID_TOKEN`.',
-    'GitHub Actions deploy token',
-  );
+  mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+  writeFileSync(workflowPath, getWorkflowYaml(root, state.packageManager, slug));
+  log.success('Created .github/workflows/void-deploy.yml');
+
+  if (slug) {
+    note(
+      `Pushes to main will build and deploy "${slug}" via GitHub OIDC — no token to store.\n` +
+        'Connect the repo to your project in the Void dashboard to authorize it.',
+      'GitHub Actions OIDC deploy',
+    );
+  } else {
+    note(
+      'Pushes to main will build and deploy via GitHub OIDC — no token to store.\n' +
+        'Set a VOID_PROJECT repository variable (Settings → Secrets and variables → Actions → Variables)\n' +
+        'to your project slug, and connect the repo to your project in the Void dashboard.',
+      'GitHub Actions OIDC deploy',
+    );
+  }
 }
 
 function writeFileIfMissing(root: string, filePath: string, content: string): void {
@@ -3614,15 +3664,15 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   // interactive modes agree.
   const githubStepSkipForSubpackage = isInsideWorkspaceSubpackage(root);
   if ((!targeted || initArgs?.github) && !githubStepSkipForSubpackage) {
-    const deployYmlPath = join(root, '.github', 'workflows', 'deploy.yml');
+    const deployYmlPath = join(root, '.github', 'workflows', 'void-deploy.yml');
     if (existsSync(deployYmlPath)) {
-      log.warn('deploy.yml already exists, skipping');
+      log.warn('void-deploy.yml already exists, skipping');
     } else if (targeted) {
       // --github flag: run directly without prompting
       setupGithubActions(root, state);
     } else {
       const setupGha = await confirm({
-        message: 'Create .github/workflows/deploy.yml to deploy on pushes to main?',
+        message: 'Create .github/workflows/void-deploy.yml to deploy on pushes to main?',
       });
       if (isCancel(setupGha)) {
         cancel('Setup cancelled.');

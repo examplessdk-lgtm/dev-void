@@ -64,30 +64,56 @@ If your CI pipeline runs typechecking or other static analysis before deploy, ru
 
 ## GitHub Actions
 
-You can deploy from a GitHub repo with a simple GitHub Actions workflow. Running `void init --github` will generate this as `.github/workflows/deploy.yml` in your project:
+You can deploy from a GitHub repo on every push to `main`. Running `void init --github` generates `.github/workflows/void-deploy.yml` in your project.
+
+The workflow authenticates with [GitHub OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect) — there is **no long-lived `VOID_TOKEN` secret to store or rotate**. The job requests a short-lived OIDC token from GitHub, exchanges it at `POST $VOID_API_URL/auth/github-oidc` for a project-scoped deploy token (valid ~15 minutes), then runs `void deploy --project <slug>`:
 
 ```yaml
-name: Deploy
+name: Deploy to Void
 on:
   push:
     branches: [main]
+
+# Latest push wins: a newer commit cancels an in-flight deploy for the same
+# repo + branch, so an older commit can never overtake a newer one.
+concurrency:
+  group: void-deploy-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  VOID_API_URL: ${{ vars.VOID_API_URL || 'https://api.void.cloud' }}
+  VOID_PROJECT: my-app
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: voidzero-dev/setup-vp@v1
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: '22'
-          cache: true
-      - run: vp exec void deploy
-        env:
-          VOID_TOKEN: ${{ secrets.VOID_TOKEN }}
-          VOID_PROJECT: my-app
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - name: Exchange GitHub OIDC token for a Void deploy token
+        run: |
+          OIDC_TOKEN="$(curl -sf \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=void" | jq -r '.value')"
+          VOID_TOKEN="$(curl -sf \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg t "$OIDC_TOKEN" --arg p "$VOID_PROJECT" '{oidcToken: $t, project: $p}')" \
+            "$VOID_API_URL/auth/github-oidc" | jq -r '.token')"
+          echo "::add-mask::$VOID_TOKEN"
+          echo "VOID_TOKEN=$VOID_TOKEN" >> "$GITHUB_ENV"
+      - name: Deploy
+        run: npx void deploy --project "$VOID_PROJECT"
 ```
 
-To get a deploy token, run `void auth token` to copy it to your clipboard, then add it as a GitHub Actions secret.
+Connect the repository to your project once in the Void dashboard to authorize it. The exact steps vary by package manager (the scaffold detects pnpm, yarn, bun, or npm). The `VOID_PROJECT` value is baked in from your linked project when known; otherwise the workflow reads a `VOID_PROJECT` repository variable. To target staging, set a `VOID_API_URL` repository variable to `https://api.staging.void.cloud`.
 
 ## Other Targets
 
