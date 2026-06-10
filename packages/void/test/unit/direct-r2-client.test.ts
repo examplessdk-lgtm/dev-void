@@ -269,3 +269,48 @@ describe('PlatformClient.finalizeDeploy', () => {
     });
   });
 });
+
+// The deploy command scrubs the CF Access service-token PAIR from process.env
+// right after constructing the PlatformClient, so the untrusted `vite build`
+// child it later spawns can't read the shared staging credential. That scrub is
+// only safe because the client captures the Access headers AT CONSTRUCTION and
+// reuses them — proven here: delete the env vars after construction, then verify
+// a later API call STILL sends CF-Access-Client-Id / CF-Access-Client-Secret.
+describe('PlatformClient CF Access header capture (survives the post-construct env scrub)', () => {
+  it('keeps sending CF-Access headers after CF_ACCESS_* are deleted from process.env', async () => {
+    const savedId = process.env.CF_ACCESS_CLIENT_ID;
+    const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+    try {
+      process.env.CF_ACCESS_CLIENT_ID = 'svc-id.access';
+      process.env.CF_ACCESS_CLIENT_SECRET = 'svc-secret';
+
+      // Construct the client — cfAccessHeaders(process.env) is read here.
+      const client = makeClient();
+
+      // Simulate deploy.ts's scrub (before any user build spawns).
+      delete process.env.CF_ACCESS_CLIENT_ID;
+      delete process.env.CF_ACCESS_CLIENT_SECRET;
+
+      fetchMock.mockResolvedValueOnce(jsonResponse({ urls: {} }));
+      await client.requestUploadUrls(projectId, [
+        { blake3: 'a'.repeat(32), md5: 'b'.repeat(32), size: 1, contentType: 'text/plain' },
+      ]);
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const headers = init.headers as Record<string, string>;
+      expect(headers['CF-Access-Client-Id']).toBe('svc-id.access');
+      expect(headers['CF-Access-Client-Secret']).toBe('svc-secret');
+    } finally {
+      if (savedId === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_ID;
+      } else {
+        process.env.CF_ACCESS_CLIENT_ID = savedId;
+      }
+      if (savedSecret === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_SECRET;
+      } else {
+        process.env.CF_ACCESS_CLIENT_SECRET = savedSecret;
+      }
+    }
+  });
+});

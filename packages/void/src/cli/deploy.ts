@@ -333,6 +333,20 @@ async function runDeployInner(
 
       const client = new PlatformClient(token, { root, cliLog });
 
+      // Scrub the CF Access service-token pair from the environment now that the
+      // client has captured the Access headers (PlatformClient reads
+      // `cfAccessHeaders(process.env)` once in its constructor and reuses them for
+      // every request). The deploy flow later spawns UNTRUSTED user build code
+      // (`vite build` and framework preset builds) with the inherited
+      // `process.env`; without this, a shared, long-lived Access service token
+      // would leak to arbitrary repo build scripts/plugins. The credentials are
+      // needed only by this CLI's own API calls — never by the build — so deleting
+      // them here keeps every later request authenticated while denying user code
+      // any access to them. Only the service-token PAIR is scrubbed; the
+      // cloudflared `CF_ACCESS_TOKEN` JWT (dev path) is left untouched.
+      delete process.env.CF_ACCESS_CLIENT_ID;
+      delete process.env.CF_ACCESS_CLIENT_SECRET;
+
       // 2. Resolve target project (CLI flag > env var > linked project file)
       const requestedProjectSlug = getRequestedProjectSlug(options);
       let config: ProjectConfig | null = null;

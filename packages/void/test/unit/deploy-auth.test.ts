@@ -102,6 +102,46 @@ describe('runDeploy auth failures', () => {
   });
 });
 
+// The deploy flow spawns untrusted `vite build` with the inherited process.env.
+// A shared CF Access service token (used only by the CLI's own API client, which
+// captures the headers at construction) must NOT survive into that child. runDeploy
+// deletes the CF_ACCESS_* pair from process.env immediately after constructing the
+// PlatformClient — this test proves the scrub runs (it fails if the delete lines
+// are removed). It does NOT touch the cloudflared CF_ACCESS_TOKEN JWT.
+describe('runDeploy scrubs the CF Access service token from process.env', () => {
+  it('deletes CF_ACCESS_CLIENT_ID/SECRET after the API client is constructed', async () => {
+    const savedId = process.env.CF_ACCESS_CLIENT_ID;
+    const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+    const savedToken = process.env.CF_ACCESS_TOKEN;
+    try {
+      process.env.CF_ACCESS_CLIENT_ID = 'svc-id.access';
+      process.env.CF_ACCESS_CLIENT_SECRET = 'svc-secret';
+      process.env.CF_ACCESS_TOKEN = 'jwt-keep-me';
+
+      // Default mocks make listProjects reject with an expired token in non-TTY
+      // mode, so runDeploy throws AFTER the scrub line has run.
+      await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
+
+      // The service-token pair is gone — an inherited-env build child can't read it.
+      expect(process.env.CF_ACCESS_CLIENT_ID).toBeUndefined();
+      expect(process.env.CF_ACCESS_CLIENT_SECRET).toBeUndefined();
+      // The cloudflared JWT (a different var, dev path) is left untouched.
+      expect(process.env.CF_ACCESS_TOKEN).toBe('jwt-keep-me');
+    } finally {
+      const restore = (key: string, value: string | undefined): void => {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      };
+      restore('CF_ACCESS_CLIENT_ID', savedId);
+      restore('CF_ACCESS_CLIENT_SECRET', savedSecret);
+      restore('CF_ACCESS_TOKEN', savedToken);
+    }
+  });
+});
+
 afterEach(() => {
   Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
 });
