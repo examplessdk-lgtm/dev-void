@@ -1886,7 +1886,7 @@ function getWorkflowSetupSteps(
         with:
           ${nodeVersion}
           cache: pnpm`,
-        install: '      - run: pnpm install',
+        install: '      - run: pnpm install --frozen-lockfile',
         runner: 'pnpm exec void',
       };
     case 'yarn':
@@ -1901,7 +1901,7 @@ function getWorkflowSetupSteps(
     case 'bun':
       return {
         setup: '      - uses: oven-sh/setup-bun@v2',
-        install: '      - run: bun install',
+        install: '      - run: bun install --frozen-lockfile',
         runner: 'bunx void',
       };
     default:
