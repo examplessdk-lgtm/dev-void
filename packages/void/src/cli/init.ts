@@ -1990,18 +1990,43 @@ ${install}
 }
 
 function setupGithubActions(root: string, state: ProjectState): void {
-  const workflowPath = join(root, '.github', 'workflows', 'void-deploy.yml');
+  const workflowDir = join(root, '.github', 'workflows');
+  const workflowPath = join(workflowDir, 'void-deploy.yml');
+  // `void@0.9.x` `void init --github` wrote a token-based workflow to
+  // `deploy.yml` (`VOID_TOKEN: ${{ secrets.VOID_TOKEN }}`). This PR renamed the
+  // output to `void-deploy.yml` (OIDC). Detect the legacy file so re-running
+  // init on an upgrade migrates in place instead of leaving two workflows
+  // (which would double-deploy, and the old token workflow would fail once
+  // `VOID_TOKEN` is removed).
+  const legacyPath = join(workflowDir, 'deploy.yml');
 
   if (existsSync(workflowPath)) {
     log.warn('void-deploy.yml already exists, skipping');
+    // If a stale legacy token workflow lingers alongside the current OIDC one,
+    // it would still double-deploy — warn so the user can remove it.
+    if (existsSync(legacyPath)) {
+      log.warn(
+        'Found a legacy .github/workflows/deploy.yml alongside void-deploy.yml. ' +
+          'Remove deploy.yml to avoid duplicate deploys.',
+      );
+    }
     return;
   }
 
   const slug = readProjectConfig(root)?.slug ?? null;
 
-  mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+  const migratingFromLegacy = existsSync(legacyPath);
+
+  mkdirSync(workflowDir, { recursive: true });
   writeFileSync(workflowPath, getWorkflowYaml(root, state.packageManager, slug));
-  log.success('Created .github/workflows/void-deploy.yml');
+  // Replace (not rename) the legacy token workflow: token-based and OIDC
+  // workflows are not interchangeable, so the old content must be removed.
+  if (migratingFromLegacy) {
+    unlinkSync(legacyPath);
+    log.success('Migrated .github/workflows/deploy.yml → void-deploy.yml (token → GitHub OIDC)');
+  } else {
+    log.success('Created .github/workflows/void-deploy.yml');
+  }
 
   if (slug) {
     note(
@@ -2017,6 +2042,37 @@ function setupGithubActions(root: string, state: ProjectState): void {
       'GitHub Actions OIDC deploy',
     );
   }
+}
+
+/**
+ * Bake a resolved project slug into an already-written `void-deploy.yml`.
+ *
+ * Step 8 (GitHub Actions) runs BEFORE Step 9 (project link), so when a user
+ * links a project during the same interactive init the workflow was written
+ * with the `${{ vars.VOID_PROJECT }}` placeholder. Once the link resolves a
+ * slug, rewrite the placeholder `env.VOID_PROJECT` block in place so the user
+ * does not also have to set a repository variable. No-op (returns `false`)
+ * when the workflow is missing or the placeholder is not present (e.g. the
+ * slug was already known at scaffold time, or the user declined linking).
+ */
+function patchWorkflowProjectSlug(root: string, slug: string): boolean {
+  const workflowPath = join(root, '.github', 'workflows', 'void-deploy.yml');
+  if (!existsSync(workflowPath)) {
+    return false;
+  }
+  const yaml = readFileSync(workflowPath, 'utf-8');
+  // The placeholder block emitted by `getWorkflowYaml` is three lines: two
+  // 2-space-indented comment lines followed by the placeholder value line.
+  const placeholderBlock =
+    '  # Set a VOID_PROJECT repository variable to your project slug\n' +
+    '  # (Settings → Secrets and variables → Actions → Variables).\n' +
+    '  VOID_PROJECT: ${{ vars.VOID_PROJECT }}';
+  if (!yaml.includes(placeholderBlock)) {
+    return false;
+  }
+  writeFileSync(workflowPath, yaml.replace(placeholderBlock, `  VOID_PROJECT: ${slug}`));
+  log.success(`Set VOID_PROJECT: ${slug} in .github/workflows/void-deploy.yml`);
+  return true;
 }
 
 function writeFileIfMissing(root: string, filePath: string, content: string): void {
@@ -3664,10 +3720,13 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   // interactive modes agree.
   const githubStepSkipForSubpackage = isInsideWorkspaceSubpackage(root);
   if ((!targeted || initArgs?.github) && !githubStepSkipForSubpackage) {
-    const deployYmlPath = join(root, '.github', 'workflows', 'void-deploy.yml');
-    if (existsSync(deployYmlPath)) {
-      log.warn('void-deploy.yml already exists, skipping');
-    } else if (targeted) {
+    // `setupGithubActions` is the single source of truth for the
+    // existence/migration decision: it skips (with a warning) when
+    // `void-deploy.yml` already exists, and migrates a legacy `deploy.yml`
+    // (token-based, `void@0.9.x`) to the OIDC `void-deploy.yml` in place.
+    // Don't short-circuit here on `void-deploy.yml` alone — that would skip
+    // the legacy migration when only `deploy.yml` exists.
+    if (targeted) {
       // --github flag: run directly without prompting
       setupGithubActions(root, state);
     } else {
@@ -3714,7 +3773,14 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   }
 
   if (!targeted) {
-    await maybeSetupDeployProject(root);
+    const linked = await maybeSetupDeployProject(root);
+    // Step 8 wrote `void-deploy.yml` before the project was linked, so it baked
+    // in the `${{ vars.VOID_PROJECT }}` placeholder. Now that linking resolved a
+    // slug, patch it into the workflow so the user does not also have to set a
+    // repository variable. Declining to link leaves the placeholder intact.
+    if (linked?.slug) {
+      patchWorkflowProjectSlug(root, linked.slug);
+    }
   }
 
   if (workspaceSubpackageSkip) {

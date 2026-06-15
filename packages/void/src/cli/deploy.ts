@@ -316,6 +316,31 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
   }
 }
 
+/**
+ * Build a child-process environment with the CF Access service-token PAIR
+ * removed.
+ *
+ * The deploy flow spawns UNTRUSTED user build code (`vite build`, framework
+ * preset builds, drizzle-kit loading the user schema) which inherits the
+ * spawn env. A shared, long-lived CF Access service token is needed only by
+ * this CLI's own API client (which captures the Access headers once at
+ * construction and reuses them for every request) — never by the build — so it
+ * must not survive into those children, or it would leak to arbitrary repo
+ * build scripts/plugins.
+ *
+ * We scrub it on the CHILD env rather than mutating `process.env`: deleting it
+ * from the parent also breaks interactive expired-token re-auth, which reads
+ * `cfAccessHeaders(process.env)` / the cloudflared pair-guard AFTER the build
+ * step. Only the service-token pair is scrubbed; the cloudflared
+ * `CF_ACCESS_TOKEN` JWT (dev path) is left untouched.
+ */
+export function buildEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  const env = { ...process.env, ...extra };
+  delete env.CF_ACCESS_CLIENT_ID;
+  delete env.CF_ACCESS_CLIENT_SECRET;
+  return env;
+}
+
 async function runDeployInner(
   root: string,
   options: RunDeployOptions | undefined,
@@ -333,19 +358,10 @@ async function runDeployInner(
 
       const client = new PlatformClient(token, { root, cliLog });
 
-      // Scrub the CF Access service-token pair from the environment now that the
-      // client has captured the Access headers (PlatformClient reads
-      // `cfAccessHeaders(process.env)` once in its constructor and reuses them for
-      // every request). The deploy flow later spawns UNTRUSTED user build code
-      // (`vite build` and framework preset builds) with the inherited
-      // `process.env`; without this, a shared, long-lived Access service token
-      // would leak to arbitrary repo build scripts/plugins. The credentials are
-      // needed only by this CLI's own API calls — never by the build — so deleting
-      // them here keeps every later request authenticated while denying user code
-      // any access to them. Only the service-token PAIR is scrubbed; the
-      // cloudflared `CF_ACCESS_TOKEN` JWT (dev path) is left untouched.
-      delete process.env.CF_ACCESS_CLIENT_ID;
-      delete process.env.CF_ACCESS_CLIENT_SECRET;
+      // The CF Access service-token pair is intentionally left in `process.env`
+      // so interactive expired-token re-auth (below) can still read it. It is
+      // kept OUT of every untrusted build child instead, via `buildEnv()` on the
+      // spawn env — see that helper for the full rationale.
 
       // 2. Resolve target project (CLI flag > env var > linked project file)
       const requestedProjectSlug = getRequestedProjectSlug(options);
@@ -952,7 +968,7 @@ export async function runStaticDeploy(
     log.step('Building...');
     cliLog?.info('build_start', { command: preset.buildCommand });
     const buildStartedAt = Date.now();
-    execSync(preset.buildCommand, { cwd: root, stdio: 'inherit' });
+    execSync(preset.buildCommand, { cwd: root, stdio: 'inherit', env: buildEnv() });
     cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
   } else if (skipBuild) {
     cliLog?.info('build_skipped', { reason: 'skipBuild' });
@@ -1094,6 +1110,7 @@ async function runFrameworkDeploy(
     execSync(voidConfig.inference?.build ?? resolveProjectCommand(root, fwPreset.buildCommand), {
       cwd: root,
       stdio: 'inherit',
+      env: buildEnv(),
     });
     cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
   } else {
@@ -1418,7 +1435,7 @@ async function runFullDeploy(
       execSync(resolveProjectCommand(root, 'vite build'), {
         cwd: root,
         stdio: 'inherit',
-        env: { ...process.env, VOID_DEPLOY_PROJECT_ID: config.projectId },
+        env: buildEnv({ VOID_DEPLOY_PROJECT_ID: config.projectId }),
       });
       cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
     } catch (err: unknown) {
@@ -1906,15 +1923,23 @@ function getGitCommit(root: string): string | null {
       return githubSha;
     }
 
+    // `git status` can invoke a repo-configured `core.fsmonitor` hook, so keep
+    // the CF Access service-token pair out of these git children too (matches
+    // the build spawns and the prior global env scrub).
+    const gitEnv = buildEnv();
     // Check if in a git repo
-    execSync('git rev-parse --is-inside-work-tree', { cwd: root, stdio: 'ignore' });
+    execSync('git rev-parse --is-inside-work-tree', { cwd: root, stdio: 'ignore', env: gitEnv });
     // Check if working tree is clean
-    const status = execSync('git status --porcelain', { cwd: root, encoding: 'utf-8' }).trim();
+    const status = execSync('git status --porcelain', {
+      cwd: root,
+      encoding: 'utf-8',
+      env: gitEnv,
+    }).trim();
     if (status !== '') {
       return null;
     }
     // Get current commit hash
-    return execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf-8' }).trim();
+    return execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf-8', env: gitEnv }).trim();
   } catch {
     return null;
   }
@@ -1974,6 +1999,9 @@ function runDrizzleKitGenerate(root: string, configPath: string): string {
   const result = spawnSync(process.execPath, [drizzleKitBin, 'generate', '--config', configPath], {
     cwd: root,
     encoding: 'utf-8',
+    // drizzle-kit loads the user's drizzle config + schema (user code); keep the
+    // CF Access service token out of it, matching the build spawns.
+    env: buildEnv(),
   });
   const stderr = bufferToString(result.stderr);
   const stdout = bufferToString(result.stdout);

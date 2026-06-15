@@ -270,13 +270,14 @@ describe('PlatformClient.finalizeDeploy', () => {
   });
 });
 
-// The deploy command scrubs the CF Access service-token PAIR from process.env
-// right after constructing the PlatformClient, so the untrusted `vite build`
-// child it later spawns can't read the shared staging credential. That scrub is
-// only safe because the client captures the Access headers AT CONSTRUCTION and
-// reuses them — proven here: delete the env vars after construction, then verify
-// a later API call STILL sends CF-Access-Client-Id / CF-Access-Client-Secret.
-describe('PlatformClient CF Access header capture (survives the post-construct env scrub)', () => {
+// The deploy command keeps the CF Access service-token PAIR out of the untrusted
+// build children (via `buildEnv()` on the spawn env) so they can't read the
+// shared staging credential. That is only safe because the client captures the
+// Access headers AT CONSTRUCTION and reuses them — proven here: delete the env
+// vars after construction, then verify a later API call STILL sends
+// CF-Access-Client-Id / CF-Access-Client-Secret. (deploy.ts no longer mutates
+// process.env; this test deletes them itself to assert the capture invariant.)
+describe('PlatformClient CF Access header capture (survives a later env scrub)', () => {
   it('keeps sending CF-Access headers after CF_ACCESS_* are deleted from process.env', async () => {
     const savedId = process.env.CF_ACCESS_CLIENT_ID;
     const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;

@@ -1566,6 +1566,109 @@ describe('isScaffoldableEmptyProject', () => {
     }
   });
 
+  it('bakes the slug into void-deploy.yml when a project is linked during the same interactive init', async () => {
+    // Step 8 (GitHub Actions) runs before Step 9 (project link), so the workflow
+    // is first written with the `${{ vars.VOID_PROJECT }}` placeholder. After the
+    // interactive link resolves a slug it must be patched into the workflow.
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'existing-astro-app',
+            private: true,
+            dependencies: { astro: '^5.0.0' },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      mockGetToken.mockReturnValue('existing_token');
+      mockListProjects.mockResolvedValueOnce([
+        {
+          id: 'proj_789',
+          user_id: 'user_1',
+          slug: 'linked-app',
+          type: 'worker',
+          created_at: '2026-03-27T00:00:00.000Z',
+          custom_domain: null,
+        },
+      ]);
+      // database → none, agent → generic, then the project-selection prompt → proj_789.
+      mockSelect
+        .mockResolvedValueOnce('none')
+        .mockResolvedValueOnce('generic')
+        .mockResolvedValueOnce('proj_789');
+      // GitHub Actions confirm → true; deploy-setup link confirm → true;
+      // overwrite-existing-project confirm → true.
+      mockConfirm
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true);
+
+      await runInitCommand(root);
+
+      // The link was written...
+      expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+        projectId: 'proj_789',
+        slug: 'linked-app',
+      });
+      // ...and the workflow has the resolved slug, not the placeholder.
+      const yaml = readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8');
+      expect(yaml).toContain('VOID_PROJECT: linked-app');
+      expect(yaml).not.toContain('vars.VOID_PROJECT');
+      expect(yaml).not.toContain('Set a VOID_PROJECT repository variable');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('migrates a legacy token-based deploy.yml to the OIDC void-deploy.yml on upgrade', async () => {
+    // `void@0.9.x` `void init --github` wrote a token-based `deploy.yml`.
+    // Re-running after upgrade must MIGRATE it (write the OIDC void-deploy.yml,
+    // remove the legacy file) rather than leave two workflows.
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'existing-app', private: true }, null, 2) + '\n',
+      );
+      mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+      const legacyPath = join(root, '.github', 'workflows', 'deploy.yml');
+      writeFileSync(
+        legacyPath,
+        `name: Deploy to Void
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx void deploy
+        env:
+          VOID_TOKEN: \${{ secrets.VOID_TOKEN }}
+`,
+      );
+
+      await runInitCommand(root, { github: true, tsconfig: false, agents: false });
+
+      // The legacy token workflow is gone.
+      expect(existsSync(legacyPath)).toBe(false);
+      // Exactly one workflow remains, and it is the OIDC one.
+      const workflows = readdirSync(join(root, '.github', 'workflows'));
+      expect(workflows).toEqual(['void-deploy.yml']);
+      const yaml = readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8');
+      expect(yaml).not.toContain('secrets.VOID_TOKEN');
+      expect(yaml).toContain('id-token: write');
+      expect(yaml).toContain('$VOID_API_URL/auth/github-oidc');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('configures an existing class-C framework without plain Vite package setup', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
