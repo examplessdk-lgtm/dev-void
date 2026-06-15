@@ -1624,10 +1624,9 @@ describe('isScaffoldableEmptyProject', () => {
     }
   });
 
-  it('migrates a legacy token-based deploy.yml to the OIDC void-deploy.yml on upgrade', async () => {
-    // `void@0.9.x` `void init --github` wrote a token-based `deploy.yml`.
-    // Re-running after upgrade must MIGRATE it (write the OIDC void-deploy.yml,
-    // remove the legacy file) rather than leave two workflows.
+  it('writes void-deploy.yml and never touches an existing deploy.yml (no migration)', async () => {
+    // `void init --github` does not migrate, rename, or delete any pre-existing
+    // `.github/workflows/deploy.yml` — it only writes `void-deploy.yml`.
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       writeFileSync(
@@ -1635,35 +1634,30 @@ describe('isScaffoldableEmptyProject', () => {
         JSON.stringify({ name: 'existing-app', private: true }, null, 2) + '\n',
       );
       mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
-      const legacyPath = join(root, '.github', 'workflows', 'deploy.yml');
-      writeFileSync(
-        legacyPath,
-        `name: Deploy to Void
+      const existingPath = join(root, '.github', 'workflows', 'deploy.yml');
+      const existing = `name: CI
 on:
   push:
     branches: [main]
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: npx void deploy
-        env:
-          VOID_TOKEN: \${{ secrets.VOID_TOKEN }}
-`,
-      );
+      - run: npm ci && npm test
+`;
+      writeFileSync(existingPath, existing);
 
       await runInitCommand(root, { github: true, tsconfig: false, agents: false });
 
-      // The legacy token workflow is gone.
-      expect(existsSync(legacyPath)).toBe(false);
-      // Exactly one workflow remains, and it is the OIDC one.
-      const workflows = readdirSync(join(root, '.github', 'workflows'));
-      expect(workflows).toEqual(['void-deploy.yml']);
-      const yaml = readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8');
-      expect(yaml).not.toContain('secrets.VOID_TOKEN');
-      expect(yaml).toContain('id-token: write');
-      expect(yaml).toContain('$VOID_API_URL/auth/github-oidc');
+      // The pre-existing workflow is preserved byte-for-byte...
+      expect(existsSync(existingPath)).toBe(true);
+      expect(readFileSync(existingPath, 'utf-8')).toBe(existing);
+      // ...and void-deploy.yml was written alongside it.
+      const workflows = readdirSync(join(root, '.github', 'workflows')).sort();
+      expect(workflows).toEqual(['deploy.yml', 'void-deploy.yml']);
+      const oidc = readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8');
+      expect(oidc).toContain('$VOID_API_URL/auth/github-oidc');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

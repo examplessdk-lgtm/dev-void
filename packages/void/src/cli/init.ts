@@ -1992,41 +1992,17 @@ ${install}
 function setupGithubActions(root: string, state: ProjectState): void {
   const workflowDir = join(root, '.github', 'workflows');
   const workflowPath = join(workflowDir, 'void-deploy.yml');
-  // `void@0.9.x` `void init --github` wrote a token-based workflow to
-  // `deploy.yml` (`VOID_TOKEN: ${{ secrets.VOID_TOKEN }}`). This PR renamed the
-  // output to `void-deploy.yml` (OIDC). Detect the legacy file so re-running
-  // init on an upgrade migrates in place instead of leaving two workflows
-  // (which would double-deploy, and the old token workflow would fail once
-  // `VOID_TOKEN` is removed).
-  const legacyPath = join(workflowDir, 'deploy.yml');
 
   if (existsSync(workflowPath)) {
     log.warn('void-deploy.yml already exists, skipping');
-    // If a stale legacy token workflow lingers alongside the current OIDC one,
-    // it would still double-deploy — warn so the user can remove it.
-    if (existsSync(legacyPath)) {
-      log.warn(
-        'Found a legacy .github/workflows/deploy.yml alongside void-deploy.yml. ' +
-          'Remove deploy.yml to avoid duplicate deploys.',
-      );
-    }
     return;
   }
 
   const slug = readProjectConfig(root)?.slug ?? null;
 
-  const migratingFromLegacy = existsSync(legacyPath);
-
   mkdirSync(workflowDir, { recursive: true });
   writeFileSync(workflowPath, getWorkflowYaml(root, state.packageManager, slug));
-  // Replace (not rename) the legacy token workflow: token-based and OIDC
-  // workflows are not interchangeable, so the old content must be removed.
-  if (migratingFromLegacy) {
-    unlinkSync(legacyPath);
-    log.success('Migrated .github/workflows/deploy.yml → void-deploy.yml (token → GitHub OIDC)');
-  } else {
-    log.success('Created .github/workflows/void-deploy.yml');
-  }
+  log.success('Created .github/workflows/void-deploy.yml');
 
   if (slug) {
     note(
@@ -3720,12 +3696,8 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   // interactive modes agree.
   const githubStepSkipForSubpackage = isInsideWorkspaceSubpackage(root);
   if ((!targeted || initArgs?.github) && !githubStepSkipForSubpackage) {
-    // `setupGithubActions` is the single source of truth for the
-    // existence/migration decision: it skips (with a warning) when
-    // `void-deploy.yml` already exists, and migrates a legacy `deploy.yml`
-    // (token-based, `void@0.9.x`) to the OIDC `void-deploy.yml` in place.
-    // Don't short-circuit here on `void-deploy.yml` alone — that would skip
-    // the legacy migration when only `deploy.yml` exists.
+    // `setupGithubActions` writes `void-deploy.yml` (skipping with a warning if
+    // it already exists). It does not touch any pre-existing `deploy.yml`.
     if (targeted) {
       // --github flag: run directly without prompting
       setupGithubActions(root, state);
