@@ -103,8 +103,7 @@ describe('parseProjectArgs', () => {
   });
 
   describe('unknown-flag rejection', () => {
-    // `delete`/`logs`/`purge-cache` already reject unknown flags; status/link/
-    // rollback/cancel previously captured a leading flag as the positional id.
+    // status/link/rollback/cancel previously captured a leading flag as the positional id.
     it('rejects an unknown flag for status instead of capturing it as the name', () => {
       expect(() => parseProjectArgs(['status', '--foo'])).toThrow("project: Unknown flag '--foo'.");
     });
