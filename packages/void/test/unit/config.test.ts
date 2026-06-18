@@ -629,6 +629,22 @@ describe('readConfig redirects', () => {
     expect(new Set(schemaEnum)).toEqual(VALID_REDIRECT_STATUSES);
   });
 
+  it('schema.json revalidate key pattern matches runtime validation', () => {
+    const schema = JSON.parse(readFileSync(join(import.meta.dirname, '../../schema.json'), 'utf8'));
+    const objectForm = schema.properties.routing.properties.revalidate.oneOf.find(
+      (s: { type?: string }) => s.type === 'object',
+    );
+    const keyPattern = new RegExp(Object.keys(objectForm.patternProperties)[0]);
+
+    // Runtime (config.ts) accepts a key that is exactly "*" or starts with "/".
+    for (const key of ['*', '/x', '/docs/*']) {
+      expect(keyPattern.test(key)).toBe(true);
+    }
+    for (const key of ['*foo', '**', '*/', 'foo']) {
+      expect(keyPattern.test(key)).toBe(false);
+    }
+  });
+
   it('schema.json sourceDir pattern matches runtime validation', () => {
     const schema = JSON.parse(readFileSync(join(import.meta.dirname, '../../schema.json'), 'utf8'));
     const sourceDirPattern = new RegExp(schema.properties.sourceDir.pattern);

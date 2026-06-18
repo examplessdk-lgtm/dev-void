@@ -154,7 +154,7 @@
             {
               "type": "object",
               "patternProperties": {
-                "^(/|\\*)": {
+                "^(\\/|\\*$)": {
                   "type": "number",
                   "minimum": 0
                 }
