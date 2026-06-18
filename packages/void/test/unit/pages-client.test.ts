@@ -155,6 +155,51 @@ describe('createVoidRouter prefetch', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('serves revalidated data after a stale-while-revalidate refresh', async () => {
+    stubClientGlobals();
+    let n = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        n += 1;
+        return Promise.resolve(
+          Response.json(
+            { component: 'users', props: { v: n } },
+            { headers: { 'X-VoidPages': 'true' } },
+          ),
+        );
+      }),
+    );
+
+    const { router } = await createVoidRouter({
+      adapter: {
+        applyUpdate: vi.fn(),
+        createDeferred: vi.fn(() => ({})),
+        isLoading: vi.fn(() => false),
+        rejectDeferred: vi.fn((_ref, error) => error),
+        resolveDeferred: vi.fn((_ref, value) => value),
+      },
+      components: {
+        home: vi.fn(async () => ({ default: {} })),
+        users: vi.fn(async () => ({ default: {} })),
+      },
+      layoutTree: {},
+      matchRoute: vi.fn((url) => (url === '/users' ? 'users' : 'home')),
+      prefetchDefaultCacheFor: parseCacheFor(['5ms', '10s']),
+      prefetchHoverDelay: 75,
+      routeMeta: { users: {} },
+      viewTransitions: false,
+    });
+
+    await expect(router.prefetch('/users')).resolves.toMatchObject({ props: { v: 1 } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Visit while stale: serves v:1 and fires the background revalidate to v:2.
+    await router.visit('/users');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // The next read must return the revalidated v:2, not the discarded-refresh stale v:1.
+    await expect(router.prefetch('/users')).resolves.toMatchObject({ props: { v: 2 } });
+  });
+
   it('does not resolve disposed initial deferred props into a later page', async () => {
     stubClientGlobals();
     const initialPayload = {
