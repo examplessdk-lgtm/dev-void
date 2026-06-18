@@ -1,8 +1,8 @@
 const SCRIPT_RE = /^<script\b[^>]*>([\s\S]*?)<\/script>\s*\n?/;
 const ISLAND_IMPORT_RE =
-  /import\s+(\w+)\s+from\s+("[^"]+"|'[^']+')\s+with\s*\{\s*island\s*:\s*("[^"]+"|'[^']+')\s*\}/g;
+  /import\s+([$_A-Za-z][$_\w]*)\s+from\s+("[^"]+"|'[^']+')\s+with\s*\{\s*island\s*:\s*("[^"]+"|'[^']+')\s*,?\s*\}/g;
 const ISLAND_IMPORT_LINE_RE =
-  /^[ \t]*import\s+\w+\s+from\s+(?:"[^"]+"|'[^']+')\s+with\s*\{\s*island\s*:\s*(?:"[^"]+"|'[^']+')\s*\}\s*;?\s*$/gm;
+  /^[ \t]*import\s+[$_A-Za-z][$_\w]*\s+from\s+(?:"[^"]+"|'[^']+')\s+with\s*\{\s*island\s*:\s*(?:"[^"]+"|'[^']+')\s*,?\s*\}\s*;?\s*$/gm;
 
 export type IslandImport = {
   name: string;
