@@ -145,6 +145,11 @@ function parseMiddlewareArgs(args: Array<string>): GenArgs {
   if (extra) {
     throw new Error(`gen: Unexpected argument '${extra}'.`);
   }
+  if (!/^[a-z_][a-z0-9_-]*$/.test(name)) {
+    throw new Error(
+      'gen: Middleware name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
+    );
+  }
   return { subcommand: 'middleware', name };
 }
 

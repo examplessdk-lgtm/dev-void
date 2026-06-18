@@ -38,6 +38,9 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
 
   if (subcommand === 'status') {
     const [name, extra] = rest;
+    if (name?.startsWith('-')) {
+      throw new Error(`project: Unknown flag '${name}'.`);
+    }
     if (extra) {
       throw new Error(`project: Unexpected argument '${extra}'.`);
     }
@@ -46,6 +49,9 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
 
   if (subcommand === 'link') {
     const [name, extra] = rest;
+    if (name?.startsWith('-')) {
+      throw new Error(`project: Unknown flag '${name}'.`);
+    }
     if (extra) {
       throw new Error(`project: Unexpected argument '${extra}'.`);
     }
@@ -88,6 +94,9 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
 
   if (subcommand === 'rollback') {
     const [deployId, extra] = rest;
+    if (deployId?.startsWith('-')) {
+      throw new Error(`project: Unknown flag '${deployId}'.`);
+    }
     if (extra) {
       throw new Error(`project: Unexpected argument '${extra}'.`);
     }
@@ -96,6 +105,9 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
 
   if (subcommand === 'cancel') {
     const [deployId, extra] = rest;
+    if (deployId?.startsWith('-')) {
+      throw new Error(`project: Unknown flag '${deployId}'.`);
+    }
     if (extra) {
       throw new Error(`project: Unexpected argument '${extra}'.`);
     }

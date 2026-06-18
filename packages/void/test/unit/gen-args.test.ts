@@ -174,6 +174,19 @@ describe('parseGenArgs', () => {
         "gen: Unexpected argument 'extra'.",
       );
     });
+
+    it('rejects an invalid name (e.g. a flag) instead of scaffolding a bogus file', () => {
+      expect(() => parseGenArgs(['middleware', '--foo'])).toThrow(
+        'gen: Middleware name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
+      );
+    });
+
+    it('allows hyphenated middleware names', () => {
+      expect(parseGenArgs(['middleware', 'rate-limit'])).toEqual({
+        subcommand: 'middleware',
+        name: 'rate-limit',
+      });
+    });
   });
 
   describe('ssr', () => {
