@@ -149,7 +149,7 @@ import { useShared, Link } from '@void/solid';
 import type { JSX } from 'solid-js';
 
 export default function Layout(props: { children: JSX.Element }) {
-  const shared = useShared<{ auth: { user: { name: string } | null } }>();
+  const shared = useShared();
   return (
     <>
       <nav>
@@ -307,15 +307,16 @@ Middleware can inject data available on every page via `c.set("shared", {...})`.
 ```ts
 // middleware/01.auth.ts
 import { defineMiddleware } from 'void';
+import { getUser, type AuthUser } from 'void/auth';
 
 declare module 'void' {
   interface CloudContextVariables {
-    shared: { auth: { user: { name: string } | null } };
+    shared: { auth: { user: AuthUser | null } };
   }
 }
 
 export default defineMiddleware(async (c, next) => {
-  const user = await getSessionUser(c);
+  const user = getUser();
   c.set('shared', { auth: { user } });
   await next();
 });
@@ -329,7 +330,7 @@ Access it on the client with `useShared()`. The return type is inferred from you
 import { useShared } from '@void/react';
 
 export default function Page() {
-  const { auth } = useShared(); // { auth: { user: { name: string } | null } }
+  const { auth } = useShared(); // { auth: { user: AuthUser | null } }
   return <p>Hello, {auth?.user?.name}</p>;
 }
 ```
@@ -337,14 +338,14 @@ export default function Page() {
 ```vue [Vue]
 <script setup lang="ts">
 import { useShared } from '@void/vue';
-const { auth } = useShared(); // { auth: { user: { name: string } | null } }
+const { auth } = useShared(); // { auth: { user: AuthUser | null } }
 </script>
 ```
 
 ```svelte [Svelte]
 <script>
   import { useShared } from "@void/svelte";
-  const { auth } = useShared(); // { auth: { user: { name: string } | null } }
+  const { auth } = useShared(); // { auth: { user: AuthUser | null } }
 </script>
 ```
 
@@ -352,7 +353,7 @@ const { auth } = useShared(); // { auth: { user: { name: string } | null } }
 import { useShared } from '@void/solid';
 
 export default function Page() {
-  const shared = useShared(); // { auth: { user: { name: string } | null } }
+  const shared = useShared(); // { auth: { user: AuthUser | null } }
   return <p>Hello, {shared.auth?.user?.name}</p>;
 }
 ```

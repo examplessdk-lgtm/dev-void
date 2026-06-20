@@ -7,6 +7,7 @@ import {
   ensurePreviouslyDeployedLiveBindingConfig,
   generateDeployWrapperIfNeeded,
   resolveDeployLiveBindingConfig,
+  resolveDeployWorkerMain,
   resolveDistDir,
   resolveDeployWranglerCompat,
   resolveStaticDeployPreset,
@@ -199,6 +200,45 @@ describe('resolveDeployWranglerCompat', () => {
       compatibilityDate: '2026-04-01',
       compatibilityFlags: ['custom_flag', 'nodejs_compat'],
     });
+  });
+});
+
+describe('resolveDeployWorkerMain', () => {
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop()!;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the build output wrangler main for non-framework Void deploys', () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-test-'));
+    tempDirs.push(root);
+    const buildDir = join(root, 'dist', 'ssr');
+    mkdirSync(buildDir, { recursive: true });
+    writeFileSync(
+      join(buildDir, 'wrangler.json'),
+      JSON.stringify({
+        main: 'index.mjs',
+      }),
+    );
+
+    expect(resolveDeployWorkerMain({}, buildDir)).toBe('index.mjs');
+  });
+
+  it('does not set a Workers main module for non-Cloudflare deploy targets', () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-test-'));
+    tempDirs.push(root);
+    const buildDir = join(root, 'dist', 'ssr');
+    mkdirSync(buildDir, { recursive: true });
+    writeFileSync(
+      join(buildDir, 'wrangler.json'),
+      JSON.stringify({
+        main: 'index.mjs',
+      }),
+    );
+
+    expect(resolveDeployWorkerMain({ target: 'node' }, buildDir)).toBeUndefined();
   });
 });
 

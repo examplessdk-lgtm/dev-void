@@ -8,7 +8,7 @@ import {
 } from '@shikijs/transformers';
 import matter from 'gray-matter';
 import MarkdownExit from 'markdown-exit';
-import type { Token } from 'markdown-exit';
+import type { RuleCore, Token } from 'markdown-exit';
 import anchor from 'markdown-it-anchor';
 import attrs from 'markdown-it-attrs';
 import { full as emoji } from 'markdown-it-emoji';
@@ -82,12 +82,20 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
         lang = 'text';
       }
     }
+    // `markdown-it-attrs` strips the `{1,3-5}` line-highlight ranges out of
+    // `token.info` at parse time (it treats `{…}` as an attribute block), so by
+    // render time only the language remains. The `stash_fence_info` core rule
+    // preserves the original info string on `token.meta.rawInfo` before that
+    // happens; fall back to `token.info` when it is absent (a fence with no
+    // curly meta). Without this, `transformerMetaHighlight` never sees the
+    // ranges and line highlighting silently no-ops.
+    const rawInfo = (token.meta as { rawInfo?: string } | null)?.rawInfo ?? token.info;
     return highlighter.codeToHtml(code, {
       lang,
       themes,
       defaultColor: 'light',
       transformers: shikiTransformers,
-      meta: { __raw: token.info },
+      meta: { __raw: rawInfo },
     });
   };
 
@@ -108,6 +116,20 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
 
   // GitHub alerts: > [!NOTE], > [!TIP], etc.
   markdown.use(gitHubAlertsPlugin);
+
+  // Preserve the raw fence info string (e.g. `ts {1,3-5}`) on the token before
+  // `markdown-it-attrs` consumes the `{…}` as an attribute block. Anchored
+  // after `block` so fence tokens exist, and before `curly_attributes` (which
+  // runs after `inline`), so the fence renderer can still feed the ranges to
+  // Shiki's `transformerMetaHighlight` via `meta.__raw`.
+  const stashFenceInfo: RuleCore = (state) => {
+    for (const token of state.tokens) {
+      if (token.type === 'fence') {
+        token.meta = { ...token.meta, rawInfo: token.info };
+      }
+    }
+  };
+  markdown.core.ruler.after('block', 'stash_fence_info', stashFenceInfo);
 
   // Attribute syntax: {.class #id}
   markdown.use(attrs);

@@ -3,8 +3,10 @@ import { hash as blake3hash } from 'blake3-jit';
 import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
+  buildVoidManifest,
   computeAssetHash,
   collectAndHashAssets,
+  collectWorkerFiles,
   resolveSpaFallbackChain,
 } from '../../src/cli/package.ts';
 
@@ -17,6 +19,35 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(TMP, { recursive: true, force: true });
   rmSync(join(import.meta.dirname, 'outside-secret.txt'), { force: true });
+});
+
+describe('worker packaging', () => {
+  it('keeps the manifest workerMain aligned with uploaded worker modules', () => {
+    writeFileSync(join(TMP, 'index.mjs'), 'export default { fetch() {} };');
+    writeFileSync(join(TMP, 'index.js.map'), '{}');
+    writeFileSync(join(TMP, 'wrangler.json'), JSON.stringify({ main: 'index.mjs' }));
+
+    const manifest = buildVoidManifest({
+      bindings: {
+        needsD1: false,
+        needsKV: false,
+        needsR2: false,
+        needsAuth: false,
+        needsQueues: false,
+        needsAI: false,
+        needsSandbox: false,
+      },
+      ssr: true,
+      options: {
+        workerMain: 'index.mjs',
+      },
+    });
+    const workerFiles = collectWorkerFiles(TMP);
+
+    expect(manifest.workerMain).toBe('index.mjs');
+    expect(workerFiles.has(manifest.workerMain!)).toBe(true);
+    expect(workerFiles.has('wrangler.json')).toBe(false);
+  });
 });
 
 describe('resolveSpaFallbackChain', () => {

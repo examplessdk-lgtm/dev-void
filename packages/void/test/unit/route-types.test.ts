@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vite-plus/test';
 import { generateRouteTypes } from '../../src/codegen/route-types.ts';
+import type { PageDefinition } from '../../src/pages/types.ts';
 import type { ScanResult } from '../../src/router/scan.ts';
+
+const pageRenderingDefaults = {
+  ssrMode: 'auto',
+  prerenderMode: 'auto',
+  renderMode: 'server',
+  shouldPrerender: false,
+} satisfies Pick<PageDefinition, 'ssrMode' | 'prerenderMode' | 'renderMode' | 'shouldPrerender'>;
 
 describe('generateRouteTypes', () => {
   it('generates route type declarations for single-method routes', () => {
@@ -196,6 +204,7 @@ describe('generateRouteTypes', () => {
       pages: {
         pages: [
           {
+            ...pageRenderingDefaults,
             pattern: '/users',
             params: [],
             catchAll: false,
@@ -227,6 +236,7 @@ describe('generateRouteTypes', () => {
       pages: {
         pages: [
           {
+            ...pageRenderingDefaults,
             pattern: '/users/:id',
             params: ['id'],
             catchAll: false,
@@ -289,6 +299,7 @@ describe('generateRouteTypes', () => {
       pages: {
         pages: [
           {
+            ...pageRenderingDefaults,
             pattern: '/about',
             params: [],
             catchAll: false,
@@ -318,6 +329,7 @@ describe('generateRouteTypes', () => {
       pages: {
         pages: [
           {
+            ...pageRenderingDefaults,
             pattern: '/users',
             params: [],
             catchAll: false,
@@ -350,6 +362,7 @@ describe('generateRouteTypes', () => {
       pages: {
         pages: [
           {
+            ...pageRenderingDefaults,
             pattern: '/users/:id',
             params: ['id'],
             catchAll: false,
@@ -381,6 +394,7 @@ describe('generateRouteTypes', () => {
       pages: {
         pages: [
           {
+            ...pageRenderingDefaults,
             pattern: '/users',
             params: [],
             catchAll: false,
@@ -409,6 +423,7 @@ describe('generateRouteTypes', () => {
       pages: {
         pages: [
           {
+            ...pageRenderingDefaults,
             pattern: '/users',
             params: [],
             catchAll: false,

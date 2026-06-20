@@ -11,6 +11,7 @@ export default function HomePage({ title }: Props) {
       </Link>{' '}
       <Link href="/link-behavior">Link behavior</Link>{' '}
       <Link href="/action-error">Form behavior lab</Link> <Link href="/live">Live streams</Link>
+      <Link href="/client-only">Client-only route</Link>
     </div>
   );
 }

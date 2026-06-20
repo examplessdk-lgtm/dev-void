@@ -118,6 +118,49 @@ export default defineMiddleware(async (c, next) => {
 function defineMiddleware(handler: MiddlewareHandler<CloudEnv>): MiddlewareHandler<CloudEnv>;
 ```
 
+### `basicAuth(options)`
+
+Built-in Basic authentication middleware for temporary site gates and pre-launch protection. Use it from `middleware/` with credentials from `void/env` to protect the whole app, or pass it to `defineHandler()` for a single route.
+
+Void internal endpoints under `/__void` are always excluded so deploy-time migrations, prerendering, cron/queue dispatch, and remote binding helpers still reach Void's own internal-token checks.
+
+When credentials come from `void/env`, wrap the reads in functions so they are resolved per request after Void has bound the runtime env.
+
+For app-specific bypasses such as health checks or public webhooks, compose that logic in your own middleware before calling `basicAuth()`.
+
+```ts
+// env.ts
+import { defineEnv, string } from 'void/env';
+
+export default defineEnv({
+  BASIC_AUTH_USERNAME: string(),
+  BASIC_AUTH_PASSWORD: string(),
+});
+```
+
+```ts
+// middleware/01.basic-auth.ts
+import { basicAuth } from 'void';
+import { env } from 'void/env';
+
+export default basicAuth({
+  username: () => env.BASIC_AUTH_USERNAME,
+  password: () => env.BASIC_AUTH_PASSWORD,
+  realm: 'Preview',
+});
+```
+
+**Signature:**
+
+```ts
+function basicAuth(options: {
+  username: string | (() => string);
+  password: string | (() => string);
+  realm?: string | (() => string);
+  message?: string | (() => string);
+}): MiddlewareHandler<CloudEnv>;
+```
+
 ### `defineScheduled(handler)`
 
 Wraps a Cloudflare [Scheduled handler](https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/) with type inference.
@@ -1105,7 +1148,7 @@ This table lists app-facing imports. Exported implementation subpaths such as `v
 | Import path               | Contents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `void`                    | `voidPlugin`, handler/type re-exports, `defer`, `Deferred`, `DeferredState`, `InferProps`, `HeadDescriptor`                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `void/handler`            | `defineHandler`, `defineMiddleware`, `defineScheduled`, `defineQueue`, `defineRender`, `defineHead`, types                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `void/handler`            | `defineHandler`, `defineMiddleware`, `basicAuth`, `defineScheduled`, `defineQueue`, `defineRender`, `defineHead`, types                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `void/auth`               | `defineAuth`, `getUser`, `getSession`, `requireAuth`, `AuthUser`, `AuthSession`, `AuthState`                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `void/client`             | `fetch`, `fetchStream`, `FetchError`, `auth`, `createAuthClient`, `AuthUser`, `AuthSession`, `AuthState`                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `void/client/{framework}` | Same as `void/client`, with framework-specific Better Auth clients for `react`, `vue`, `svelte`, and `solid`                                                                                                                                                                                                                                                                                                                                                                                                             |

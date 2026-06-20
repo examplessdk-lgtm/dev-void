@@ -257,7 +257,7 @@ function generateClientEntry(
 ): string {
   return `
 import { createSignal, createComponent, batch } from "solid-js";
-import { hydrate } from "solid-js/web";
+import { hydrate, render } from "solid-js/web";
 import { SharedContext, ErrorsContext, ParamsContext, RouterContext, NavigationContext, setActionRouter } from "@void/solid";
 import { createRouterFacade, createVoidRouter, idleNavigationState } from "void/pages-client";
 import { parseCacheFor } from "void/pages-prefetch";
@@ -360,7 +360,12 @@ function App() {
 }
 
 const appEl = document.getElementById("app");
-hydrate(() => createComponent(App, {}), appEl);
+if (!appEl) throw new Error("pages: Missing #app element for Void Solid pages hydration.");
+if (appEl.getAttribute("data-void-ssr") === "false") {
+  render(() => createComponent(App, {}), appEl);
+} else {
+  hydrate(() => createComponent(App, {}), appEl);
+}
 appEl.setAttribute("data-hydrated", "true");
 export { reactiveRouter as router };
 start();

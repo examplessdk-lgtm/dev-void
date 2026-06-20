@@ -278,6 +278,39 @@ export function resolveDeployWranglerCompat(
     : { ...compat, compatibilityFlags };
 }
 
+export function resolveDeployWorkerMain(
+  config: VoidConfig,
+  buildOutputDir: string,
+): string | undefined {
+  if (isNodeTarget(config.target)) {
+    return undefined;
+  }
+  try {
+    const wrangler = JSON.parse(readFileSync(join(buildOutputDir, 'wrangler.json'), 'utf-8')) as {
+      main?: unknown;
+    };
+    return typeof wrangler.main === 'string' && wrangler.main.length > 0
+      ? wrangler.main
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function assertWorkerMainUploaded(
+  workerFiles: Map<string, Buffer>,
+  workerMain: string | undefined,
+): void {
+  if (!workerMain || workerFiles.size === 0) {
+    return;
+  }
+  if (!workerFiles.has(workerMain)) {
+    throw new Error(
+      `deploy: Worker entry '${workerMain}' from wrangler.json was not found in uploaded worker modules.`,
+    );
+  }
+}
+
 /**
  * Run the full deploy pipeline:
  * 1. Check auth
@@ -1668,7 +1701,8 @@ async function runFullDeploy(
   // with no backend features, deploy as a static site (no worker needed)
   if (deployConfig.output === 'static' && pageScan && !isSsr) {
     const allPrerenderable = pageScan.pages.every(
-      (p) => p.prerender && ((p.params.length === 0 && !p.catchAll) || p.hasGetPrerenderPaths),
+      (p) =>
+        p.shouldPrerender && ((p.params.length === 0 && !p.catchAll) || p.hasGetPrerenderPaths),
     );
     const hasNonPageBackend =
       hasRoutes || hasMiddleware || hasWebSockets || authEnabled || liveConfig !== undefined;
@@ -1735,6 +1769,7 @@ async function runFullDeploy(
       needsSandbox: effectiveBindings.needsSandbox,
     },
   );
+  const workerMain = resolveDeployWorkerMain(deployConfig, join(distDir, workerDirName));
 
   // 9. Load .env vars for production (excludes .local files)
   const envVars = loadDeployEnv(root);
@@ -1795,6 +1830,7 @@ async function runFullDeploy(
   const voidPackageOptions = {
     compatibilityDate: wranglerCompat?.compatibilityDate,
     compatibilityFlags: wranglerCompat?.compatibilityFlags,
+    ...(workerMain && { workerMain }),
     ...(sandboxConfig && { sandbox: sandboxConfig }),
     ...(liveConfig && { live: liveConfig }),
     revalidateQueryAllowlist: deployConfig.routing?.revalidateQueryAllowlist,
@@ -1848,6 +1884,7 @@ async function runFullDeploy(
     }
   }
   const workerFiles = collectWorkerFiles(workerDir);
+  assertWorkerMainUploaded(workerFiles, workerMain);
   cliLog?.info('package_end', {
     mode: 'full',
     durationMs: Date.now() - packageStartedAt,

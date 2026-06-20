@@ -1813,9 +1813,9 @@ describe('X-Void-Routing dev trace header', () => {
   it('annotates c.rewrite() downstream response with middleware trace in dev', () => {
     const code = compileWith({ dev: true });
     // The c.rewrite wrapper branches on __VOID_DEV_ROUTING and appends a
-    // "c.rewrite → <path> (middleware)" trace to the returned Response.
+    // "c.rewrite -> <path> (middleware)" trace to the returned Response.
     expect(code).toContain('if (!__VOID_DEV_ROUTING) return __rewritePromise;');
-    expect(code).toContain('c.rewrite \\u2192 " + path + " (middleware)');
+    expect(code).toContain('c.rewrite -> " + path + " (middleware)');
   });
 
   it('keeps c.rewrite passthrough in prod (no annotator call)', () => {
@@ -1828,13 +1828,20 @@ describe('X-Void-Routing dev trace header', () => {
   it('tags redirect match with status, destination and origin', () => {
     const code = compileWith({ dev: true });
     expect(code).toContain(
-      '"redirect[" + matched.rule.source + "] \\u2192 " + dest + " " + matched.rule.status + " (" + (matched.rule.origin || "unknown") + ")"',
+      '"redirect[" + matched.rule.source + "] -> " + dest + " " + matched.rule.status + " (" + (matched.rule.origin || "unknown") + ")"',
     );
   });
 
   it('distinguishes force-rewrite (rewrite[...]) from fallback (fallback[...]) in trace', () => {
     const code = compileWith({ dev: true });
     expect(code).toContain('matched.rule.force === true ? "rewrite" : "fallback"');
+  });
+
+  it('keeps routing trace header values ASCII-compatible', () => {
+    const code = compileWith({ dev: true });
+    expect(code).not.toContain('\\u2192');
+    expect(code).toContain('c.rewrite -> " + path + " (middleware)');
+    expect(code).toContain('__kind + "[" + matched.rule.source + "] -> " + dest');
   });
 
   it('emits a standalone notFound fallback hook on node targets when only fallbackRules are set', () => {
@@ -2146,6 +2153,10 @@ describe('default-target dev parity', () => {
               params: [],
               catchAll: false,
               methods: [],
+              ssrMode: 'auto',
+              prerenderMode: 'auto',
+              renderMode: 'server',
+              shouldPrerender: false,
             },
           ],
           layouts: [],

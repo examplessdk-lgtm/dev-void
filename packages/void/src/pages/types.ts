@@ -1,3 +1,11 @@
+export type ExplicitBoolean = true | false | undefined;
+
+export type SsrMode = 'auto' | 'server' | 'client';
+
+export type PrerenderMode = 'auto' | 'force' | 'disabled';
+
+export type PageRenderMode = 'server' | 'client' | 'island';
+
 export type PageDefinition = {
   /** URL pattern, e.g. "/users/:id" */
   pattern: string;
@@ -15,8 +23,18 @@ export type PageDefinition = {
   componentId: string;
   /** Edge caching revalidate TTL in seconds, from .server.ts export */
   revalidate?: number;
-  /** Whether `export const prerender = true` is set in server handler */
-  prerender?: boolean;
+  /** Whether `export const prerender = true/false` is set in server handler */
+  prerender?: ExplicitBoolean;
+  /** Whether `export const ssr = true/false` is set in server handler */
+  ssr?: ExplicitBoolean;
+  /** Normalized SSR mode from the public `ssr` export */
+  ssrMode: SsrMode;
+  /** Normalized prerender mode from the public `prerender` export */
+  prerenderMode: PrerenderMode;
+  /** Normalized page render mode */
+  renderMode: PageRenderMode;
+  /** Whether this page should participate in prerender collection */
+  shouldPrerender: boolean;
   /** Whether `export function getPrerenderPaths` is defined in server handler */
   hasGetPrerenderPaths?: boolean;
   /** Whether this is an island page (.island.tsx/.island.vue) */

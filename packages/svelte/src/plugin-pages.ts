@@ -239,7 +239,7 @@ function generateClientEntry(
   staticPageData?: StaticPageDataBuildOptions,
 ): string {
   return `
-import { hydrate } from "svelte";
+import { hydrate, mount } from "svelte";
 import { writable } from "svelte/store";
 import App from "@void/svelte/App.svelte";
 import { setActionRouter } from "@void/svelte";
@@ -307,7 +307,8 @@ routeParams = initialPageData.params || {};
 paramsStore.set(routeParams);
 
 const appEl = document.getElementById("app");
-hydrate(App, {
+if (!appEl) throw new Error("pages: Missing #app element for Void Svelte pages hydration.");
+const appOptions = {
   target: appEl,
   props: {
     page: initialComponent,
@@ -330,7 +331,12 @@ hydrate(App, {
       navigation: navigationStore,
     },
   },
-});
+};
+if (appEl.getAttribute("data-void-ssr") === "false") {
+  mount(App, appOptions);
+} else {
+  hydrate(App, appOptions);
+}
 
 appEl.setAttribute("data-hydrated", "true");
 export { reactiveRouter as router };

@@ -332,14 +332,14 @@ If you use [`routing.revalidate`](./revalidation) on a dispatch rewrite (`routin
 During `vite dev`, every response carries an `X-Void-Routing` header that traces how the request was resolved. Open the Network tab in devtools and inspect the response headers:
 
 ```
-X-Void-Routing: redirect[/old] → /new 301 (_redirects:12)
-X-Void-Routing: rewrite[/api/*] → /backend/:splat (void.json#routing.rewrites)
-X-Void-Routing: fallback[/docs/*] → /docs.html (void.json#routing.fallbacks)
-X-Void-Routing: c.rewrite → /new-path (middleware)
+X-Void-Routing: redirect[/old] -> /new 301 (_redirects:12)
+X-Void-Routing: rewrite[/api/*] -> /backend/:splat (void.json#routing.rewrites)
+X-Void-Routing: fallback[/docs/*] -> /docs.html (void.json#routing.fallbacks)
+X-Void-Routing: c.rewrite -> /new-path (middleware)
 X-Void-Routing: pass-through
 ```
 
-Phases are separated by `→`. The parenthesised source hint points at the exact declaration — a line number for `_redirects`, a config path for `void.json`, or `spa-default` for the synthetic SPA catch-all. The header is **only emitted in dev** — production builds strip both the trace code and the per-rule `origin` metadata from the bundle and manifest.
+Phases are separated by `->` so the diagnostic value stays valid as an HTTP header. The parenthesised source hint points at the exact declaration — a line number for `_redirects`, a config path for `void.json`, or `spa-default` for the synthetic SPA catch-all. The header is **only emitted in dev** — production builds strip both the trace code and the per-rule `origin` metadata from the bundle and manifest.
 
 ::: info What fires in `vite dev`
 `vite dev` applies the full static routing pipeline on every target — `node`, `bun`, `deno`, and the default target alike. `void.json` rules (`routing.redirects` / `routing.rewrites` / `routing.fallbacks` / `routing.headers`) and file-based rules (`public/_redirects`, `public/_headers`) are merged at plugin load and compiled into the Hono middleware your worker runs behind. Editing `_redirects` or `_headers` during a dev session re-runs the merge and reloads the page — no restart needed. `c.rewrite()` calls in middleware work everywhere because they live inside the worker itself, and the `X-Void-Routing` dev header reports every decision on every target.

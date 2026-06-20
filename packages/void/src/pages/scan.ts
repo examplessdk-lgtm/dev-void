@@ -5,27 +5,79 @@ import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import { parseRouteFilename } from '../router/parse-filename.ts';
 import { resolveNamedLayout } from './layout-resolution.ts';
 import type {
+  ExplicitBoolean,
   PageDefinition,
+  PageRenderMode,
+  PrerenderMode,
   LayoutDefinition,
   NamedLayoutDefinition,
   PageScanResult,
+  SsrMode,
 } from './types.ts';
 
 const COMPONENT_EXTENSIONS = ['vue', 'tsx', 'jsx', 'svelte', 'md'];
 const SERVER_EXTENSIONS = ['ts', 'tsx', 'js', 'mjs', 'mts'];
 const PAGES_EXPORT_RE = /export\s+(?:const|function|async\s+function)\s+(loader|actions?)\b/g;
-const REVALIDATE_RE = /export\s+const\s+revalidate\s*=\s*(\d+)\s*;/;
-const PRERENDER_RE = /export\s+const\s+prerender\s*=\s*true\s*;/;
-const PRERENDER_FALSE_RE = /export\s+const\s+prerender\s*=\s*false\s*;/;
+const REVALIDATE_RE = /export\s+const\s+revalidate\s*=\s*(\d+)\s*;?/;
+const PRERENDER_RE = /export\s+const\s+prerender\s*=\s*true\s*;?/;
+const PRERENDER_FALSE_RE = /export\s+const\s+prerender\s*=\s*false\s*;?/;
+const SSR_TRUE_RE = /export\s+const\s+ssr\s*=\s*true\s*;?/;
+const SSR_FALSE_RE = /export\s+const\s+ssr\s*=\s*false\s*;?/;
 const GET_PRERENDER_PATHS_RE = /export\s+(?:async\s+)?function\s+getPrerenderPaths\b/;
 const LAYOUT_STRING_RE = /export\s+const\s+layout\s*=\s*["']([^"']+)["']\s*;?/;
 const LAYOUT_FALSE_RE = /export\s+const\s+layout\s*=\s*false\s*;?/;
 export const MAX_REVALIDATE = 31536000; // 1 year in seconds
 
-export async function scanPages(
-  root: string,
-  options?: { output?: 'server' | 'static'; paths?: ProjectPaths; pagesDir?: string },
-): Promise<PageScanResult> {
+type PageRenderingSource = {
+  componentPath: string;
+  island?: boolean;
+  ssr?: ExplicitBoolean;
+  prerender?: ExplicitBoolean;
+  methods: Array<string>;
+  params: Array<string>;
+  catchAll: boolean;
+  hasGetPrerenderPaths?: boolean;
+};
+
+type PageScanOptions = { output?: 'server' | 'static'; paths?: ProjectPaths; pagesDir?: string };
+
+type ResolvedPageRendering = {
+  ssrMode: SsrMode;
+  prerenderMode: PrerenderMode;
+  renderMode: PageRenderMode;
+  shouldPrerender: boolean;
+};
+
+function inferAutoPrerender(page: PageRenderingSource, options?: PageScanOptions): boolean {
+  const isDynamic = page.params.length > 0 || page.catchAll;
+
+  if (options?.output === 'static') {
+    return !isDynamic || page.hasGetPrerenderPaths === true;
+  }
+
+  return page.island === true && !page.methods.includes('loader') && !isDynamic;
+}
+
+function resolvePageRendering(
+  page: PageRenderingSource,
+  options?: PageScanOptions,
+): ResolvedPageRendering {
+  if (page.island && page.ssr === false) {
+    throw new Error(`pages: ssr = false is not valid for island page '${page.componentPath}'.`);
+  }
+
+  const ssrMode: SsrMode = page.ssr === true ? 'server' : page.ssr === false ? 'client' : 'auto';
+  const prerenderMode: PrerenderMode =
+    page.prerender === true ? 'force' : page.prerender === false ? 'disabled' : 'auto';
+  const renderMode: PageRenderMode =
+    page.island === true ? 'island' : ssrMode === 'client' ? 'client' : 'server';
+  const shouldPrerender =
+    prerenderMode === 'force' || (prerenderMode === 'auto' && inferAutoPrerender(page, options));
+
+  return { ssrMode, prerenderMode, renderMode, shouldPrerender };
+}
+
+export async function scanPages(root: string, options?: PageScanOptions): Promise<PageScanResult> {
   const pagesDir = options?.pagesDir ?? options?.paths?.pagesDir ?? readProjectPaths(root).pagesDir;
   if (!existsSync(pagesDir)) {
     return { pages: [], layouts: [], namedLayouts: [] };
@@ -106,8 +158,8 @@ export async function scanPages(
     let serverPath: string | null = null;
     const methods: Array<string> = [];
     let revalidate: number | undefined;
-    let prerender: boolean | undefined;
-    let prerenderExplicitlyFalse = false;
+    let prerender: ExplicitBoolean;
+    let ssr: ExplicitBoolean;
     let hasGetPrerenderPaths: boolean | undefined;
     const serverBase = hasIslandSuffix ? file.replace(`.island${ext}`, '') : file.replace(ext, '');
     for (const serverExt of SERVER_EXTENSIONS) {
@@ -124,9 +176,13 @@ export async function scanPages(
         }
         if (PRERENDER_RE.test(content)) {
           prerender = true;
+        } else if (PRERENDER_FALSE_RE.test(content)) {
+          prerender = false;
         }
-        if (PRERENDER_FALSE_RE.test(content)) {
-          prerenderExplicitlyFalse = true;
+        if (SSR_TRUE_RE.test(content)) {
+          ssr = true;
+        } else if (SSR_FALSE_RE.test(content)) {
+          ssr = false;
         }
         if (GET_PRERENDER_PATHS_RE.test(content)) {
           hasGetPrerenderPaths = true;
@@ -135,31 +191,22 @@ export async function scanPages(
       }
     }
 
-    const isStaticOutput = options?.output === 'static';
-    if (isStaticOutput) {
-      // Static output: default prerender=true for all pages unless explicitly false.
-      // Dynamic pages without getPrerenderPaths stay false (can't prerender without known paths).
-      if (!prerenderExplicitlyFalse && prerender !== true) {
-        const isDynamic = route.params.length > 0 || route.catchAll;
-        if (!isDynamic || hasGetPrerenderPaths) {
-          prerender = true;
-        }
-      }
-    } else {
-      // Auto-static: island page with no loader and no params → prerender
-      if (
-        island &&
-        !methods.includes('loader') &&
-        route.params.length === 0 &&
-        !route.catchAll &&
-        !prerenderExplicitlyFalse
-      ) {
-        prerender = true;
-      }
-    }
+    const rendering = resolvePageRendering(
+      {
+        componentPath: file,
+        island,
+        ssr,
+        prerender,
+        methods,
+        params: route.params,
+        catchAll: route.catchAll,
+        hasGetPrerenderPaths,
+      },
+      options,
+    );
 
     // Prerender → max revalidate (applies to all pages)
-    if (prerender && revalidate === undefined) {
+    if (rendering.shouldPrerender && revalidate === undefined) {
       revalidate = MAX_REVALIDATE;
     }
 
@@ -190,6 +237,8 @@ export async function scanPages(
       componentId,
       revalidate,
       prerender,
+      ssr,
+      ...rendering,
       hasGetPrerenderPaths,
       island,
       metadata,
@@ -246,7 +295,7 @@ export async function scanPages(
     if (name.startsWith('.') || name.startsWith('/')) {
       continue;
     }
-    if (!resolveNamedLayout(name, page.componentId, namedLayouts)) {
+    if (!resolveNamedLayout(name, page.componentId, namedLayouts, page.componentPath)) {
       throw new Error(
         `pages: Page '${page.componentPath}' specifies layout '${page.layout}', but _layouts/${name}.vue was not found in any ancestor directory.`,
       );

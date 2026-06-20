@@ -1,6 +1,7 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'pathe';
 import type { SchemaLocation } from '../drizzle/discover.ts';
+import { writeFileIfChanged } from './write-if-changed.ts';
 
 export const DRIZZLE_OPERATORS =
   'sql, eq, ne, gt, gte, lt, lte, and, or, not, desc, asc, like, ilike, notLike, inArray, notInArray, isNull, isNotNull, between, notBetween, exists, notExists, count, sum, avg, min, max';
@@ -19,7 +20,7 @@ export function generateDbDts(
   outDir: string,
   schema: SchemaLocation | null,
   dialect: 'sqlite' | 'postgresql',
-): void {
+): boolean {
   mkdirSync(outDir, { recursive: true });
 
   const lines =
@@ -69,5 +70,5 @@ export function generateDbDts(
             '',
           ];
 
-  writeFileSync(join(outDir, 'db.d.ts'), lines.join('\n'));
+  return writeFileIfChanged(join(outDir, 'db.d.ts'), lines.join('\n'));
 }

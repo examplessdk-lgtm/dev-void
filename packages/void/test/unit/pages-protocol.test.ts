@@ -262,7 +262,7 @@ describe('handlePageGet', () => {
       renderFn,
       mockGetAssetTags,
       undefined,
-      true,
+      { renderMode: 'island' },
     );
 
     expect(response.headers.get('content-type')).toContain('text/html');
@@ -283,7 +283,7 @@ describe('handlePageGet', () => {
       renderFn,
       mockGetAssetTags,
       undefined,
-      false,
+      { renderMode: 'server' },
     );
 
     expect(response.headers.get('X-VoidPages')).toBe('true');
@@ -704,7 +704,7 @@ describe('handlePageMutation', () => {
       mockRenderFn,
       mockGetAssetTags,
       undefined,
-      true,
+      { renderMode: 'island' },
     );
 
     expect(response.status).toBe(422);
@@ -737,7 +737,7 @@ describe('handlePageMutation', () => {
       mockRenderFn,
       mockGetAssetTags,
       undefined,
-      true,
+      { renderMode: 'island' },
     );
 
     expect(response.status).toBe(422);
@@ -759,7 +759,7 @@ describe('handlePageMutation', () => {
       mockRenderFn,
       mockGetAssetTags,
       undefined,
-      true,
+      { renderMode: 'island' },
     );
 
     expect(response.status).toBe(200);
@@ -785,7 +785,7 @@ describe('handlePageMutation', () => {
       mockRenderFn,
       mockGetAssetTags,
       undefined,
-      true,
+      { renderMode: 'island' },
     );
 
     expect(response.status).toBe(302);
@@ -922,6 +922,62 @@ describe('handlePageGet with deferred props', () => {
     );
 
     expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
+  });
+
+  it('client-only page — returns an empty app shell with initial page data', async () => {
+    const c = await createTestContext('GET', '/analytics');
+
+    const handler = vi.fn(() => ({ title: 'Analytics' }));
+    const renderFn = Object.assign(
+      vi.fn(async () => '<html>server rendered</html>'),
+      {
+        preambleScript: '<script type="module">window.__reactPreamble = true</script>',
+      },
+    );
+    const response = await handlePageGet(
+      handler,
+      () => ({ title: 'Analytics | App' }),
+      c,
+      'analytics',
+      renderFn,
+      mockGetAssetTags,
+      undefined,
+      { renderMode: 'client' },
+    );
+
+    const html = await response.text();
+    expect(renderFn).not.toHaveBeenCalled();
+    expect(html).toContain('<title>Analytics | App</title>');
+    expect(html).toContain('window.__reactPreamble = true');
+    expect(html).toContain('<div id="app" data-void-ssr="false"></div>');
+    expect(html).toContain('__VOID_PAGE_DATA__');
+    expect(html).toContain('"component":"analytics"');
+    expect(html).toContain('"title":"Analytics"');
+    expect(html).not.toContain('server rendered');
+  });
+
+  it('client-only page — streams deferred script tags after the shell', async () => {
+    const c = await createTestContext('GET', '/analytics');
+
+    const response = await handlePageGet(
+      () => ({
+        title: 'Analytics',
+        stats: defer(() => Promise.resolve({ visits: 12 })),
+      }),
+      undefined,
+      c,
+      'analytics',
+      mockRenderFn,
+      mockGetAssetTags,
+      undefined,
+      { renderMode: 'client' },
+    );
+
+    const html = await response.text();
+    expect(html).toContain('<div id="app" data-void-ssr="false"></div>');
+    expect(html).toContain('"deferred":["stats"]');
+    expect(html).toContain('window.__resolveDeferred("stats",');
+    expect(html).toContain('"visits":12');
   });
 
   it('deferred named group — resolves all keys together', async () => {

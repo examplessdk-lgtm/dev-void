@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'pathe';
@@ -15,6 +15,7 @@ import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from '
 import { findEnvFileForPaths } from './codegen/env-types.ts';
 import { generateQueueTypes } from './codegen/queue-types.ts';
 import { generateRouteTypes } from './codegen/route-types.ts';
+import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import { readConfig, getDatabaseDialect } from './config.ts';
 import { readProjectPaths } from './project-paths.ts';
 import {
@@ -127,7 +128,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       return;
     }
     const { dts } = generateRouteTypes(scan, routesDir, outDir, pagesDir);
-    writeFileSync(join(outDir, 'routes.d.ts'), dts);
+    writeFileIfChanged(join(outDir, 'routes.d.ts'), dts);
   }
 
   function writeQueueTypes() {
@@ -135,7 +136,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       return;
     }
     const dts = generateQueueTypes(scan.queues, queuesDir, outDir);
-    writeFileSync(join(outDir, 'queues.d.ts'), dts);
+    writeFileIfChanged(join(outDir, 'queues.d.ts'), dts);
   }
 
   async function rescan() {
@@ -276,8 +277,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     const schemaPath = join(outDir, 'better-auth-schema.ts');
     const databasePath = join(outDir, 'better-auth-db.ts');
 
-    writeFileSync(schemaPath, generateVoidAuthDrizzleSchema(authRuntime, env));
-    writeFileSync(
+    writeFileIfChanged(schemaPath, generateVoidAuthDrizzleSchema(authRuntime, env));
+    writeFileIfChanged(
       databasePath,
       generateVoidAuthDatabaseModule({
         dialect: compileOptions.auth.dialect,
@@ -397,13 +398,13 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   mkdirSync(outDir, { recursive: true });
   // Write initial entry — will be re-written with hasQueues once scan completes
   if (options.target) {
-    writeFileSync(
+    writeFileIfChanged(
       join(outDir, 'app.ts'),
       compileNodeApp(options.target, compileOptions.honoPath, getEnvSchemaModule()),
     );
-    writeFileSync(join(outDir, 'index.ts'), compileNodeServer(options.target));
+    writeFileIfChanged(join(outDir, 'index.ts'), compileNodeServer(options.target));
   } else {
-    writeFileSync(
+    writeFileIfChanged(
       join(outDir, 'entry.ts'),
       compileWorkerEntry(
         false,
@@ -513,13 +514,13 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       }
       // Re-write entry with queue handler if needed
       if (options.target) {
-        writeFileSync(
+        writeFileIfChanged(
           join(outDir, 'app.ts'),
           compileNodeApp(options.target, compileOptions.honoPath, getEnvSchemaModule()),
         );
-        writeFileSync(join(outDir, 'index.ts'), compileNodeServer(options.target));
+        writeFileIfChanged(join(outDir, 'index.ts'), compileNodeServer(options.target));
       } else {
-        writeFileSync(
+        writeFileIfChanged(
           join(outDir, 'entry.ts'),
           compileWorkerEntry(
             scan!.queues.length > 0,
@@ -647,13 +648,13 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         writeRouteTypes();
         writeQueueTypes();
         if (options.target) {
-          writeFileSync(
+          writeFileIfChanged(
             join(outDir, 'app.ts'),
             compileNodeApp(options.target, compileOptions.honoPath, getEnvSchemaModule()),
           );
-          writeFileSync(join(outDir, 'index.ts'), compileNodeServer(options.target));
+          writeFileIfChanged(join(outDir, 'index.ts'), compileNodeServer(options.target));
         } else {
-          writeFileSync(
+          writeFileIfChanged(
             join(outDir, 'entry.ts'),
             compileWorkerEntry(
               scan!.queues.length > 0,

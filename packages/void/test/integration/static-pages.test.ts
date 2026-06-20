@@ -78,6 +78,27 @@ describe('playground/static-pages build (output: static)', () => {
     expect(aboutData.props.content).toBe('About page content');
   });
 
+  it('prerenders client-only pages as shells with static page data', () => {
+    const clientOnlyPath = join(DIST, 'client/client-only.html');
+    expect(existsSync(clientOnlyPath)).toBe(true);
+
+    const html = readFileSync(clientOnlyPath, 'utf-8');
+    expect(html).toContain('<!doctype html>');
+    expect(html).toContain('__VOID_PAGE_DATA__');
+    expect(html).toContain('data-void-ssr="false"');
+    expect(html).toContain('Client-only Static Page');
+    expect(html).not.toContain('data-testid="client-only-title"');
+    expect(html).not.toContain('client-only static page component rendered on the server');
+
+    const pageData = JSON.parse(
+      readFileSync(join(DIST, 'client/_void/pages/client-only.json'), 'utf-8'),
+    ) as { component: string; props: Record<string, unknown>; url: string };
+    expect(pageData.component).toBe('client-only');
+    expect(pageData.url).toBe('/client-only');
+    expect(pageData.props.title).toBe('Client-only Static Page');
+    expect(pageData.props.marker).toBe('static-loader-props');
+  });
+
   it('prerenders dynamic pages with getPrerenderPaths', () => {
     // posts/[slug] exports getPrerenderPaths returning [{slug:"hello"},{slug:"world"}]
     const helloPath = join(DIST, 'client/posts/hello.html');
@@ -102,6 +123,7 @@ describe('playground/static-pages build (output: static)', () => {
       expect.arrayContaining([
         '/',
         '/about',
+        '/client-only',
         '/posts/hello',
         '/posts/world',
         '/tags/vue',

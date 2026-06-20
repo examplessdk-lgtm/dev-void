@@ -100,6 +100,7 @@ Each page can have a companion `.server.ts` file that runs exclusively on the se
 
 - A [**loader**](./loaders), which runs on `GET` and returns the data that becomes the page component's props
 - [**Actions**](./actions-and-forms), which handle mutations from forms and programmatic calls. Export a single `action` or multiple [named actions](./actions-and-forms#named-actions) when a page has several mutations
+- `ssr = false` to opt a route out of server-rendered component HTML while keeping server loaders and client-side routing
 
 File-based routing rules are the same as [server routing](../server-routing.md): `[param]` for dynamic segments, `[...param]` for catch-all, `(group)/` for route groups.
 
@@ -107,13 +108,39 @@ File-based routing rules are the same as [server routing](../server-routing.md):
 
 Pages uses an Inertia-style protocol under the hood:
 
-| Request               | Response                                                              |
-| --------------------- | --------------------------------------------------------------------- |
-| Initial page load     | Full SSR HTML. Client hydrates automatically.                         |
-| Subsequent navigation | JSON with component name + props. Client component swap or re-render. |
-| Form submission       | Runs action, then returns fresh props or a redirect.                  |
+| Request               | Response                                                                                                       |
+| --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Initial page load     | Full SSR HTML. Client hydrates automatically. Routes with `ssr = false` return a client-mounted shell instead. |
+| Subsequent navigation | JSON with component name + props. Client component swap or re-render.                                          |
+| Form submission       | Runs action, then returns fresh props or a redirect.                                                           |
 
 This means the first page load is server-rendered for SEO and performance, while later navigations stay fast without full page reloads.
+
+To opt a specific route out of server-rendered component HTML, export `ssr = false` from its companion `.server.ts` file:
+
+```ts
+// pages/dashboard.server.ts
+import { defineHandler } from 'void';
+
+export const ssr = false;
+
+export const loader = defineHandler(async () => {
+  return { title: 'Dashboard' };
+});
+```
+
+The loader still runs on the first request, and its props are embedded in the HTML shell. The page component mounts in the browser instead of hydrating server-rendered markup.
+
+Render and prerender flags combine like this:
+
+| Page exports                           | Behavior                                                                  |
+| -------------------------------------- | ------------------------------------------------------------------------- |
+| `ssr` unset or `true`                  | Server-render component HTML on request.                                  |
+| `ssr = false`                          | Return a client-mounted shell on request.                                 |
+| `ssr = false` + `prerender = true`     | Prerender a client-mounted shell with embedded loader data.               |
+| `ssr = false` + `prerender = false`    | Return the client-mounted shell only on request; never prerender it.      |
+| Island page + `ssr = false`            | Invalid. Island pages already use the island renderer.                    |
+| `output: "static"` + `prerender` unset | Auto-prerender pages that have known paths, including client-only shells. |
 
 Use the `Link` component for SPA navigation between pages. It renders an `<a>` tag that intercepts clicks and navigates without a full page reload:
 

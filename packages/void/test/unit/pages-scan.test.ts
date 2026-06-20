@@ -200,6 +200,41 @@ describe('scanPages', () => {
     const page = result.pages.find((p) => p.componentId === 'products');
     expect(page).toBeDefined();
     expect(page!.prerender).toBe(true);
+    expect(page!.prerenderMode).toBe('force');
+    expect(page!.shouldPrerender).toBe(true);
+  });
+
+  it('detects ssr = false from .server.ts and resolves client render mode', async () => {
+    writeFile('analytics.vue', '<template><div>Analytics</div></template>');
+    writeFile('analytics.server.ts', 'export const ssr = false;\nexport const loader = () => [];');
+
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === 'analytics');
+    expect(page).toBeDefined();
+    expect(page!.ssr).toBe(false);
+    expect(page!.ssrMode).toBe('client');
+    expect(page!.renderMode).toBe('client');
+  });
+
+  it('detects ssr = true from .server.ts and resolves server render mode', async () => {
+    writeFile('analytics.vue', '<template><div>Analytics</div></template>');
+    writeFile('analytics.server.ts', 'export const ssr = true;\nexport const loader = () => [];');
+
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === 'analytics');
+    expect(page).toBeDefined();
+    expect(page!.ssr).toBe(true);
+    expect(page!.ssrMode).toBe('server');
+    expect(page!.renderMode).toBe('server');
+  });
+
+  it('throws when ssr = false is used on an island page', async () => {
+    writeFile('analytics.island.vue', '<template><div>Analytics</div></template>');
+    writeFile('analytics.server.ts', 'export const ssr = false;');
+
+    await expect(scanPages(TMP)).rejects.toThrow(
+      "pages: ssr = false is not valid for island page 'analytics.island.vue'.",
+    );
   });
 
   it('detects getPrerenderPaths from .server.ts', async () => {
@@ -213,6 +248,8 @@ describe('scanPages', () => {
     const page = result.pages.find((p) => p.componentId === 'blog/[slug]');
     expect(page).toBeDefined();
     expect(page!.prerender).toBe(true);
+    expect(page!.prerenderMode).toBe('force');
+    expect(page!.shouldPrerender).toBe(true);
     expect(page!.hasGetPrerenderPaths).toBe(true);
   });
 
@@ -288,6 +325,8 @@ describe('scanPages', () => {
     const page = result.pages.find((p) => p.componentId === 'about');
     expect(page).toBeDefined();
     expect(page!.prerender).toBeUndefined();
+    expect(page!.prerenderMode).toBe('auto');
+    expect(page!.shouldPrerender).toBe(false);
     expect(page!.hasGetPrerenderPaths).toBeUndefined();
   });
 
@@ -295,7 +334,9 @@ describe('scanPages', () => {
     writeFile('pricing.island.vue', '<template><div>Pricing</div></template>');
     const result = await scanPages(TMP);
     const page = result.pages.find((p) => p.componentId === 'pricing');
-    expect(page!.prerender).toBe(true);
+    expect(page!.prerender).toBeUndefined();
+    expect(page!.prerenderMode).toBe('auto');
+    expect(page!.shouldPrerender).toBe(true);
     expect(page!.revalidate).toBe(MAX_REVALIDATE);
   });
 
@@ -306,7 +347,8 @@ describe('scanPages', () => {
     );
     const result = await scanPages(TMP);
     const page = result.pages.find((p) => p.componentId === 'pricing');
-    expect(page!.prerender).toBe(true);
+    expect(page!.prerender).toBeUndefined();
+    expect(page!.shouldPrerender).toBe(true);
     expect(page!.revalidate).toBe(MAX_REVALIDATE);
   });
 
@@ -316,6 +358,7 @@ describe('scanPages', () => {
     const result = await scanPages(TMP);
     const page = result.pages.find((p) => p.componentId === 'products');
     expect(page!.prerender).toBeUndefined();
+    expect(page!.shouldPrerender).toBe(false);
   });
 
   it('does not auto-prerender dynamic island page', async () => {
@@ -323,6 +366,7 @@ describe('scanPages', () => {
     const result = await scanPages(TMP);
     const page = result.pages.find((p) => p.componentId === 'blog/[slug]');
     expect(page!.prerender).toBeUndefined();
+    expect(page!.shouldPrerender).toBe(false);
   });
 
   it('auto-sets max revalidate for explicit prerender on any page', async () => {
@@ -331,6 +375,8 @@ describe('scanPages', () => {
     const result = await scanPages(TMP);
     const page = result.pages.find((p) => p.componentId === 'about');
     expect(page!.prerender).toBe(true);
+    expect(page!.prerenderMode).toBe('force');
+    expect(page!.shouldPrerender).toBe(true);
     expect(page!.revalidate).toBe(MAX_REVALIDATE);
   });
 
@@ -340,7 +386,35 @@ describe('scanPages', () => {
     const result = await scanPages(TMP);
     const page = result.pages.find((p) => p.componentId === 'about');
     expect(page!.prerender).toBe(true);
+    expect(page!.shouldPrerender).toBe(true);
     expect(page!.revalidate).toBe(3600);
+  });
+
+  it('detects render config exports without semicolons', async () => {
+    writeFile('about.vue', '<template><div>About</div></template>');
+    writeFile(
+      'about.server.ts',
+      'export const ssr = false\nexport const prerender = true\nexport const revalidate = 120',
+    );
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === 'about');
+    expect(page!.ssr).toBe(false);
+    expect(page!.prerender).toBe(true);
+    expect(page!.renderMode).toBe('client');
+    expect(page!.prerenderMode).toBe('force');
+    expect(page!.shouldPrerender).toBe(true);
+    expect(page!.revalidate).toBe(120);
+  });
+
+  it('preserves explicit prerender = false as disabled prerender mode', async () => {
+    writeFile('pricing.island.vue', '<template><div>Pricing</div></template>');
+    writeFile('pricing.server.ts', 'export const prerender = false;');
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === 'pricing');
+    expect(page!.prerender).toBe(false);
+    expect(page!.prerenderMode).toBe('disabled');
+    expect(page!.shouldPrerender).toBe(false);
+    expect(page!.revalidate).toBeUndefined();
   });
 
   it('scans .md files as island pages', async () => {
@@ -358,7 +432,8 @@ describe('scanPages', () => {
     writeFile('docs/guide.md', '# Guide');
     const result = await scanPages(TMP);
     const page = result.pages.find((p) => p.componentId === 'docs/guide');
-    expect(page!.prerender).toBe(true);
+    expect(page!.prerender).toBeUndefined();
+    expect(page!.shouldPrerender).toBe(true);
     expect(page!.revalidate).toBe(MAX_REVALIDATE);
   });
 
@@ -368,6 +443,7 @@ describe('scanPages', () => {
     const page = result.pages.find((p) => p.componentId === 'blog/[slug]');
     expect(page!.island).toBe(true);
     expect(page!.prerender).toBeUndefined();
+    expect(page!.shouldPrerender).toBe(false);
   });
 
   it('picks up companion .server.ts for .md page', async () => {
@@ -379,6 +455,7 @@ describe('scanPages', () => {
     expect(page!.methods).toEqual(['loader']);
     // Has loader → no auto-prerender
     expect(page!.prerender).toBeUndefined();
+    expect(page!.shouldPrerender).toBe(false);
   });
 
   it('scans .md index file correctly', async () => {
@@ -395,7 +472,8 @@ describe('scanPages', () => {
     writeFile('pricing.server.ts', 'export const revalidate = 60;');
     const result = await scanPages(TMP);
     const page = result.pages.find((p) => p.componentId === 'pricing');
-    expect(page!.prerender).toBe(true);
+    expect(page!.prerender).toBeUndefined();
+    expect(page!.shouldPrerender).toBe(true);
     expect(page!.revalidate).toBe(60);
   });
 
@@ -423,6 +501,20 @@ describe('scanPages', () => {
       expect(result.namedLayouts).toHaveLength(1);
       expect(result.namedLayouts[0].name).toBe('api');
       expect(result.namedLayouts[0].directory).toBe('guide');
+    });
+
+    it('resolves nested named layouts for directory index pages', async () => {
+      writeFile('guide/_layouts/api.vue', '<template><slot /></template>');
+      writeFile(
+        'guide/index.vue',
+        '<script>export const layout = "api";</script>\n<template><div /></template>',
+      );
+      const result = await scanPages(TMP);
+      const page = result.pages.find((p) => p.componentId === 'guide');
+      expect(page).toBeDefined();
+      expect(resolveLayoutIds(page!, result.layouts, result.namedLayouts)).toEqual([
+        'guide/_layouts/api',
+      ]);
     });
 
     it('detects island named layouts', async () => {
@@ -567,6 +659,18 @@ describe('resolveLayoutChain', () => {
     expect(chain[0].directory).toBe('');
     expect(chain[1].directory).toBe('users/settings');
   });
+
+  it('includes directory layouts for index page file paths', () => {
+    const layouts = [
+      { directory: '', filePath: 'layout.vue' },
+      { directory: 'users', filePath: 'users/layout.vue' },
+    ];
+
+    const chain = resolveLayoutChain('users', layouts, 'users/index.vue');
+    expect(chain).toHaveLength(2);
+    expect(chain[0].directory).toBe('');
+    expect(chain[1].directory).toBe('users');
+  });
 });
 
 describe('resolveNamedLayout', () => {
@@ -708,9 +812,29 @@ describe('resolveLayoutIds', () => {
     ]);
   });
 
+  it('returns directory layout ids for index page file paths', () => {
+    expect(
+      resolveLayoutIds(
+        { componentId: 'guide', componentPath: 'guide/index.vue' },
+        layouts,
+        namedLayouts,
+      ),
+    ).toEqual(['layout', 'guide/layout']);
+  });
+
   it('replaces the innermost layout id for named layouts', () => {
     expect(
       resolveLayoutIds({ componentId: 'guide/intro', layout: 'api' }, layouts, namedLayouts),
+    ).toEqual(['layout', 'guide/_layouts/api']);
+  });
+
+  it('replaces the innermost layout id for index page named layouts', () => {
+    expect(
+      resolveLayoutIds(
+        { componentId: 'guide', componentPath: 'guide/index.vue', layout: 'api' },
+        layouts,
+        namedLayouts,
+      ),
     ).toEqual(['layout', 'guide/_layouts/api']);
   });
 

@@ -88,14 +88,12 @@ describe('named-layouts integration', () => {
     expect(html).toContain('data-page="exclusive"');
   });
 
-  it('/docs — index page wrapped by root only (docs layout wraps sub-pages)', async () => {
+  it('/docs — index page wrapped by root + docs layout', async () => {
     const res = await fetch(`${DEV_BASE}/docs`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    // docs/index resolves to componentId "docs" — only root is in its chain
-    // docs/layout wraps sub-pages (docs/ref, etc.), not the index itself
     expect(html).toContain('data-layout="root"');
-    expect(html).not.toContain('data-layout="docs"');
+    expect(html).toContain('data-layout="docs"');
     expect(html).toContain('data-page="docs-index"');
   });
 

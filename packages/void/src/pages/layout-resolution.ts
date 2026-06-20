@@ -20,12 +20,23 @@ function toLayoutId(layout: LayoutDefinition | NamedLayoutDefinition): string {
   return layout.directory ? `${layout.directory}/layout` : 'layout';
 }
 
+function resolveLayoutDirectories(componentId: string, componentPath?: string): Array<string> {
+  if (componentPath) {
+    const segments = componentPath.split('/');
+    segments.pop();
+    return segments.map((_, index) => segments.slice(0, index + 1).join('/'));
+  }
+
+  const parts = componentId.split('/');
+  return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join('/'));
+}
+
 /** Resolve the layout chain for a component (innermost last) */
 export function resolveLayoutChain(
   componentId: string,
   layouts: Array<LayoutDefinition>,
+  componentPath?: string,
 ): Array<LayoutDefinition> {
-  const parts = componentId.split('/');
   const chain: Array<LayoutDefinition> = [];
 
   // Check root layout
@@ -35,9 +46,7 @@ export function resolveLayoutChain(
   }
 
   // Check each directory level
-  let dir = '';
-  for (let partIndex = 0; partIndex < parts.length - 1; partIndex++) {
-    dir = dir ? `${dir}/${parts[partIndex]}` : parts[partIndex];
+  for (const dir of resolveLayoutDirectories(componentId, componentPath)) {
     const layout = layouts.find((candidate) => candidate.directory === dir);
     if (layout) {
       chain.push(layout);
@@ -52,16 +61,10 @@ export function resolveNamedLayout(
   name: string,
   componentId: string,
   namedLayouts: Array<NamedLayoutDefinition>,
+  componentPath?: string,
 ): NamedLayoutDefinition | null {
-  const parts = componentId.split('/');
   // Build dirs from closest to root
-  const dirs: Array<string> = [];
-  let dir = '';
-  for (let partIndex = 0; partIndex < parts.length - 1; partIndex++) {
-    dir = dir ? `${dir}/${parts[partIndex]}` : parts[partIndex];
-    dirs.push(dir);
-  }
-  dirs.reverse(); // closest first
+  const dirs = resolveLayoutDirectories(componentId, componentPath).reverse();
   dirs.push(''); // root last
   for (const directory of dirs) {
     const found = namedLayouts.find(
@@ -75,7 +78,7 @@ export function resolveNamedLayout(
 }
 
 export function resolveEffectiveLayoutEntries(
-  page: { componentId: string; layout?: string | false },
+  page: { componentId: string; componentPath?: string; layout?: string | false },
   layouts: Array<LayoutDefinition>,
   namedLayouts: Array<NamedLayoutDefinition>,
 ): Array<ResolvedLayoutEntry> {
@@ -83,10 +86,12 @@ export function resolveEffectiveLayoutEntries(
     return [];
   }
 
-  const defaultChain = resolveLayoutChain(page.componentId, layouts).map((layout) => ({
-    id: toLayoutId(layout),
-    definition: layout,
-  }));
+  const defaultChain = resolveLayoutChain(page.componentId, layouts, page.componentPath).map(
+    (layout) => ({
+      id: toLayoutId(layout),
+      definition: layout,
+    }),
+  );
 
   if (page.layout === undefined) {
     return defaultChain;
@@ -99,7 +104,7 @@ export function resolveEffectiveLayoutEntries(
     return defaultChain;
   }
 
-  const resolved = resolveNamedLayout(name, page.componentId, namedLayouts);
+  const resolved = resolveNamedLayout(name, page.componentId, namedLayouts, page.componentPath);
   if (!resolved) {
     return defaultChain;
   }
@@ -123,7 +128,7 @@ export function resolveEffectiveLayoutEntries(
 
 /** Resolve effective layout chain accounting for named layout selection */
 export function resolveEffectiveLayoutChain(
-  page: { componentId: string; layout?: string | false },
+  page: { componentId: string; componentPath?: string; layout?: string | false },
   layouts: Array<LayoutDefinition>,
   namedLayouts: Array<NamedLayoutDefinition>,
 ): Array<LayoutDefinition | NamedLayoutDefinition> {
@@ -133,7 +138,7 @@ export function resolveEffectiveLayoutChain(
 }
 
 export function resolveLayoutIds(
-  page: { componentId: string; layout?: string | false },
+  page: { componentId: string; componentPath?: string; layout?: string | false },
   layouts: Array<LayoutDefinition>,
   namedLayouts: Array<NamedLayoutDefinition>,
 ): Array<string> {

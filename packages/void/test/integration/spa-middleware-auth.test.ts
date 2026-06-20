@@ -18,20 +18,12 @@ const WRANGLER_CONFIG = join(PLAYGROUND, 'wrangler.jsonc');
 const DIST = join(PLAYGROUND, 'dist');
 const AUTH_HEADER = 'Basic Z3Vlc3Q6d2VkZGluZw==';
 
-const middlewareSource = `import { defineMiddleware } from 'void';
+const middlewareSource = `import { basicAuth } from 'void';
 
-export default defineMiddleware(async (c, next) => {
-  if (c.req.raw.headers.get('Authorization') !== '${AUTH_HEADER}') {
-    return new Response('Authentication required', {
-      status: 401,
-      headers: {
-        'Cache-Control': 'no-store',
-        'WWW-Authenticate': 'Basic realm="Preview", charset="UTF-8"',
-      },
-    });
-  }
-
-  await next();
+export default basicAuth({
+  username: 'guest',
+  password: 'wedding',
+  realm: 'Preview',
 });
 `;
 
