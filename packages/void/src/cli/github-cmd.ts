@@ -272,29 +272,30 @@ async function runConnect(
       repoFullName = picked as string;
     }
   } else {
-    // 'all' — repos not enumerable; fall back to git
-    const gitDefault = parseGithubRepoFullName(collectGitDeployMetadata(root, null).repositoryUrl);
+    // 'all' — repos aren't enumerable. Do NOT infer the repo from git in CI:
+    // GITHUB_REPOSITORY / origin can point at a fork or the wrong checkout and
+    // would silently bind the project to the wrong repo. Require --repo, the
+    // same way --branch is required in non-interactive mode.
     if (!isTTY) {
-      if (!gitDefault) {
-        log.error('connect: Cannot detect repository from git. Pass --repo <owner/repo>.');
-        process.exit(1);
-      }
-      repoFullName = gitDefault;
-    } else {
-      const input = await text({
-        message: 'Repository (owner/repo):',
-        placeholder: gitDefault ?? 'owner/repo',
-        initialValue: gitDefault ?? '',
-      });
-      if (isCancel(input)) {
-        cancel('Cancelled.');
-        process.exit(0);
-      }
-      repoFullName = (input as string).trim();
-      if (!repoFullName) {
-        log.error('connect: Repository is required.');
-        process.exit(1);
-      }
+      log.error(
+        'connect: --repo <owner/repo> is required in non-interactive mode for an all-repositories installation.',
+      );
+      process.exit(1);
+    }
+    const gitDefault = parseGithubRepoFullName(collectGitDeployMetadata(root, null).repositoryUrl);
+    const input = await text({
+      message: 'Repository (owner/repo):',
+      placeholder: gitDefault ?? 'owner/repo',
+      initialValue: gitDefault ?? '',
+    });
+    if (isCancel(input)) {
+      cancel('Cancelled.');
+      process.exit(0);
+    }
+    repoFullName = (input as string).trim();
+    if (!repoFullName) {
+      log.error('connect: Repository is required.');
+      process.exit(1);
     }
   }
 
