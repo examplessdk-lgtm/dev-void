@@ -10,6 +10,7 @@ import { dbSubcommands, parseDbArgs } from './db-args.ts';
 import { domainSubcommands, parseDomainArgs } from './domain-args.ts';
 import { envSubcommands, parseEnvArgs } from './env-args.ts';
 import { genSubcommands, parseGenArgs } from './gen-args.ts';
+import { githubSubcommands, parseGithubArgs } from './github-args.ts';
 import { getHelpPath, printGlobalHelp, printHelpPage, printVoidHeader } from './help.ts';
 import { parsePrepareArgs } from './prepare-args.ts';
 import { projectSubcommands, parseProjectArgs } from './project-args.ts';
@@ -132,6 +133,10 @@ if (helpPath) {
   runSubcommandGroup('gen', genSubcommands, parseGenArgs, (root, parsed) =>
     import('./gen.ts').then(({ runGenCommand }) => runGenCommand(root, parsed)),
   );
+} else if (command === 'github') {
+  runSubcommandGroup('github', githubSubcommands, parseGithubArgs, (root, parsed) =>
+    import('./github-cmd.ts').then(({ runGithubCommand }) => runGithubCommand(root, parsed)),
+  );
 } else if (command === 'prepare') {
   const root = process.cwd();
   let prepareArgs;
@@ -193,6 +198,11 @@ if (helpPath) {
       name: 'domain',
       hint: 'add | delete | list | status',
       description: 'Configure custom domains',
+    },
+    {
+      name: 'github',
+      hint: 'install | installations | connect',
+      description: 'Connect a GitHub repository for automatic deploys',
     },
     {
       name: 'db',
@@ -260,6 +270,10 @@ if (helpPath) {
       case 'domain':
         return runSubcommandGroup('domain', domainSubcommands, parseDomainArgs, (r, p) =>
           import('./domain.ts').then(({ runDomainCommand }) => runDomainCommand(r, p)),
+        );
+      case 'github':
+        return runSubcommandGroup('github', githubSubcommands, parseGithubArgs, (r, p) =>
+          import('./github-cmd.ts').then(({ runGithubCommand }) => runGithubCommand(r, p)),
         );
       case 'db':
         return runSubcommandGroup('db', dbSubcommands, parseDbArgs, (r, p) =>

@@ -190,6 +190,47 @@ const HELP_TREE: HelpTree = {
       },
     },
   },
+  github: {
+    summary: 'Connect a GitHub repository for automatic deploys.',
+    usage: ['void github <command>'],
+    commands: [
+      { command: 'install', description: 'Open the GitHub App install page in your browser' },
+      { command: 'installations', description: 'List your GitHub App installations' },
+      {
+        command: 'connect [project]',
+        description: 'Connect a repository to a project for auto-deploy',
+      },
+    ],
+    children: {
+      install: basicSubcommand(
+        'Open the GitHub App install page in your browser.',
+        'void github install',
+      ),
+      installations: basicSubcommand(
+        'List your GitHub App installations.',
+        'void github installations',
+      ),
+      connect: {
+        summary: 'Connect a repository to a project for automatic deploys.',
+        usage: ['void github connect [project] [options]'],
+        options: [
+          { command: '--installation <id>', description: 'GitHub App installation ID' },
+          { command: '--repo <owner/repo>', description: 'Repository full name (owner/repo)' },
+          { command: '--branch <name>', description: 'Branch to deploy from (default: main)' },
+          {
+            command: '--executor <type>',
+            description: 'Build executor: container (default) | github_actions',
+          },
+        ],
+        examples: [
+          {
+            command: 'void github connect [project]',
+            description: 'Connect a repository to a project',
+          },
+        ],
+      },
+    },
+  },
   db: {
     summary: 'Manage local and remote database state.',
     usage: ['void db <command>'],
@@ -406,6 +447,8 @@ export function printGlobalHelp(): void {
       ...globalCommandLines('secret'),
       '',
       ...globalCommandGroup('domain'),
+      '',
+      ...globalCommandGroup('github'),
       '',
       categoryTitle('database'),
       ...globalCommandLines('db', {
