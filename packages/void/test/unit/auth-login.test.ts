@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { runLogin } from '../../src/cli/auth.ts';
 
-const mockExec = vi.fn();
+const mockExecFile = vi.fn();
 const exchangeRequests: Array<{
   url: string;
   headers: Record<string, string>;
@@ -20,11 +20,11 @@ function codeChallengeFor(verifier: string): string {
 }
 
 vi.mock('node:child_process', () => ({
-  exec: (...args: Array<unknown>) => mockExec(...args),
+  execFile: (...args: Array<unknown>) => mockExecFile(...args),
 }));
 
 beforeEach(() => {
-  mockExec.mockReset();
+  mockExecFile.mockReset();
   exchangeRequests.length = 0;
   process.env.VOID_API_URL = 'https://api.test';
 
