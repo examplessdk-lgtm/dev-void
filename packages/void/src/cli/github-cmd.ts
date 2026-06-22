@@ -178,7 +178,9 @@ async function runConnect(
     if (linked) {
       projectId = linked.projectId;
     } else if (!isTTY) {
-      log.error('connect: No project specified. Pass a project name or --project <name>.');
+      log.error(
+        'connect: No project specified. Pass a project name or --project <name>, set VOID_PROJECT, or link one with `void project link`.',
+      );
       process.exit(1);
     } else {
       // Prompt to pick from list
@@ -253,20 +255,22 @@ async function runConnect(
         'connect: The installation has no accessible repositories. Update the GitHub App install to grant access.',
       );
       process.exit(1);
-    }
-    if (!isTTY) {
+    } else if (installation.repositories.length === 1) {
+      repoFullName = installation.repositories[0]!.full_name;
+    } else if (!isTTY) {
       log.error('connect: Multiple repositories available. Pass --repo <owner/repo>.');
       process.exit(1);
+    } else {
+      const picked = await select({
+        message: 'Select a repository:',
+        options: installation.repositories.map((r) => ({ value: r.full_name, label: r.full_name })),
+      });
+      if (isCancel(picked)) {
+        cancel('Cancelled.');
+        process.exit(0);
+      }
+      repoFullName = picked as string;
     }
-    const picked = await select({
-      message: 'Select a repository:',
-      options: installation.repositories.map((r) => ({ value: r.full_name, label: r.full_name })),
-    });
-    if (isCancel(picked)) {
-      cancel('Cancelled.');
-      process.exit(0);
-    }
-    repoFullName = picked as string;
   } else {
     // 'all' — repos not enumerable; fall back to git
     const gitDefault = parseGithubRepoFullName(collectGitDeployMetadata(root, null).repositoryUrl);
