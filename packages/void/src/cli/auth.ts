@@ -233,7 +233,7 @@ function page(title: string, message: string): string {
 </head><body><div class="card"><h1>${title}</h1><p>${message}</p></div></body></html>`;
 }
 
-function openBrowser(url: string, exec: typeof import('node:child_process').exec): void {
+export function openBrowser(url: string, exec: typeof import('node:child_process').exec): void {
   if (process.platform === 'win32') {
     // `start` treats the first quoted arg as window title, pass empty title
     exec(`start "" "${url}"`);
