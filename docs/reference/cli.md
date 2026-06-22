@@ -594,17 +594,17 @@ Connect a GitHub repository to a Void project for automatic deploys. On every pu
 
 **Options**
 
-| Flag                  | Description                                                                   |
-| --------------------- | ----------------------------------------------------------------------------- |
-| `--project <name>`    | Project name (alias for the positional argument)                              |
-| `--installation <id>` | GitHub App installation ID (required when you have multiple installations)    |
-| `--repo <owner/repo>` | Repository full name — required when the installation has access to all repos |
-| `--branch <name>`     | Branch to deploy from — **required in non-interactive mode**                  |
-| `--executor <type>`   | Build executor: `container` (default) or `github_actions`                     |
+| Flag                  | Description                                                                     |
+| --------------------- | ------------------------------------------------------------------------------- |
+| `--project <name>`    | Project name (alias for the positional argument)                                |
+| `--installation <id>` | GitHub App installation ID (required when you have multiple installations)      |
+| `--repo <owner/repo>` | Repository full name — required unless the installation grants exactly one repo |
+| `--branch <name>`     | Branch to deploy from — **required in non-interactive mode**                    |
+| `--executor <type>`   | Build executor: `container` (default) or `github_actions`                       |
 
 **Non-interactive use (CI)**
 
-All of `--project` (or positional), `--installation`, `--repo`, and `--branch` must be supplied explicitly when stdin is not a TTY. Use `void github installations` to discover the `installation_id`.
+When stdin is not a TTY, `void github connect` never prompts — it fails closed and names any flag it needs. `--branch` is always required. `--project` must be resolvable (positional / `--project` / `VOID_PROJECT` / linked `.void/project.json`). `--installation` is required only when your account has more than one installation; otherwise the sole installation is used. `--repo` is required when the installation grants access to all repos or to more than one selected repo; when it grants exactly one repo that repo is used automatically. Use `void github installations` to discover the `installation_id`.
 
 ```
 void github connect my-app \
