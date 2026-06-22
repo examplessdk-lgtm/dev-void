@@ -78,7 +78,7 @@ export function parseGithubRepoFullName(repositoryUrl: string | null): string | 
 export function formatInstallations(installations: Array<GithubInstallation>): string {
   return installations
     .map((inst) => {
-      const header = `${inst.account_login} (${inst.account_type}) — ${inst.repository_selection}, ${inst.repositories.length} repos, ${inst.status}`;
+      const header = `${inst.account_login} (${inst.account_type}) [id: ${inst.installation_id}] — ${inst.repository_selection}, ${inst.repositories.length} repos, ${inst.status}`;
       if (inst.repository_selection === 'selected' && inst.repositories.length > 0) {
         const repos = inst.repositories.map((r) => `  • ${r.full_name}`).join('\n');
         return `${header}\n${repos}`;
@@ -230,7 +230,7 @@ async function runConnect(
       message: 'Select a GitHub App installation:',
       options: installations.map((i) => ({
         value: i.installation_id,
-        label: `${i.account_login} (${i.account_type})`,
+        label: `${i.account_login} (${i.account_type}) [id: ${i.installation_id}]`,
       })),
     });
     if (isCancel(picked)) {
@@ -303,7 +303,8 @@ async function runConnect(
   if (args.branch) {
     branch = args.branch;
   } else if (!isTTY) {
-    branch = branchDefault;
+    log.error('connect: --branch is required in non-interactive mode. Pass --branch <name>.');
+    process.exit(1);
   } else {
     const input = await text({
       message: 'Branch to deploy from:',

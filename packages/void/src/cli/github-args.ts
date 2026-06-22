@@ -52,22 +52,49 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
         if (i + 1 >= rest.length) {
           throw new Error('github: --installation requires a value.');
         }
-        installationId = rest[++i];
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --installation requires a value.');
+        }
+        installationId = value;
       } else if (arg === '--repo') {
         if (i + 1 >= rest.length) {
           throw new Error('github: --repo requires a value.');
         }
-        repo = rest[++i];
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --repo requires a value.');
+        }
+        repo = value;
       } else if (arg === '--branch') {
         if (i + 1 >= rest.length) {
           throw new Error('github: --branch requires a value.');
         }
-        branch = rest[++i];
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --branch requires a value.');
+        }
+        branch = value;
+      } else if (arg === '--project') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --project requires a value.');
+        }
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --project requires a value.');
+        }
+        if (projectName) {
+          throw new Error(`github: Unexpected argument '${value}'.`);
+        }
+        projectName = value;
       } else if (arg === '--executor') {
         if (i + 1 >= rest.length) {
           throw new Error('github: --executor requires a value.');
         }
-        const value = rest[++i];
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --executor requires a value.');
+        }
         if (value !== 'container' && value !== 'github_actions') {
           throw new Error('github: invalid --executor (expected container|github_actions).');
         }

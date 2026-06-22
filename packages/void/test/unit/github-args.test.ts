@@ -121,10 +121,65 @@ describe('parseGithubArgs', () => {
       });
     });
 
+    it('parses --project flag', () => {
+      const result = parseGithubArgs(['connect', '--project', 'my-project']);
+      expect(result).toEqual({
+        subcommand: 'connect',
+        projectName: 'my-project',
+        installationId: undefined,
+        repo: undefined,
+        branch: undefined,
+        executor: undefined,
+      });
+    });
+
+    it('--project flag is an alias for the positional', () => {
+      const positional = parseGithubArgs(['connect', 'my-project']);
+      const flag = parseGithubArgs(['connect', '--project', 'my-project']);
+      expect(flag).toEqual(positional);
+    });
+
+    it('rejects --project when positional already set', () => {
+      expect(() => parseGithubArgs(['connect', 'my-project', '--project', 'other'])).toThrow(
+        "github: Unexpected argument 'other'.",
+      );
+    });
+
+    it('rejects --project when --project already set', () => {
+      expect(() =>
+        parseGithubArgs(['connect', '--project', 'first', '--project', 'second']),
+      ).toThrow("github: Unexpected argument 'second'.");
+    });
+
     it('parses all flags together with project name', () => {
       expect(
         parseGithubArgs([
           'connect',
+          'my-project',
+          '--installation',
+          '42',
+          '--repo',
+          'owner/repo',
+          '--branch',
+          'main',
+          '--executor',
+          'container',
+        ]),
+      ).toEqual({
+        subcommand: 'connect',
+        projectName: 'my-project',
+        installationId: '42',
+        repo: 'owner/repo',
+        branch: 'main',
+        executor: 'container',
+      });
+    });
+
+    it('parses all flags together with --project flag', () => {
+      expect(
+        parseGithubArgs([
+          'connect',
+          '--project',
           'my-project',
           '--installation',
           '42',
@@ -151,8 +206,26 @@ describe('parseGithubArgs', () => {
       );
     });
 
+    it('rejects --installation with empty value', () => {
+      expect(() => parseGithubArgs(['connect', '--installation', ''])).toThrow(
+        'github: --installation requires a value.',
+      );
+    });
+
+    it('rejects --installation with whitespace-only value', () => {
+      expect(() => parseGithubArgs(['connect', '--installation', '   '])).toThrow(
+        'github: --installation requires a value.',
+      );
+    });
+
     it('rejects --repo with no value', () => {
       expect(() => parseGithubArgs(['connect', '--repo'])).toThrow(
+        'github: --repo requires a value.',
+      );
+    });
+
+    it('rejects --repo with empty value', () => {
+      expect(() => parseGithubArgs(['connect', '--repo', ''])).toThrow(
         'github: --repo requires a value.',
       );
     });
@@ -163,8 +236,32 @@ describe('parseGithubArgs', () => {
       );
     });
 
+    it('rejects --branch with empty value', () => {
+      expect(() => parseGithubArgs(['connect', '--branch', ''])).toThrow(
+        'github: --branch requires a value.',
+      );
+    });
+
+    it('rejects --project with no value', () => {
+      expect(() => parseGithubArgs(['connect', '--project'])).toThrow(
+        'github: --project requires a value.',
+      );
+    });
+
+    it('rejects --project with empty value', () => {
+      expect(() => parseGithubArgs(['connect', '--project', ''])).toThrow(
+        'github: --project requires a value.',
+      );
+    });
+
     it('rejects --executor with no value', () => {
       expect(() => parseGithubArgs(['connect', '--executor'])).toThrow(
+        'github: --executor requires a value.',
+      );
+    });
+
+    it('rejects --executor with empty value', () => {
+      expect(() => parseGithubArgs(['connect', '--executor', ''])).toThrow(
         'github: --executor requires a value.',
       );
     });

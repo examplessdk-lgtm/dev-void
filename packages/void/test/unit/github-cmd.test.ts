@@ -96,10 +96,11 @@ function makeInstall(
 }
 
 describe('formatInstallations', () => {
-  it('includes account_login, account_type, selection, repo count, and status', () => {
+  it('includes account_login, account_type, installation_id, selection, repo count, and status', () => {
     const result = formatInstallations([makeInstall({ account_login: 'acme' })]);
     expect(result).toContain('acme');
     expect(result).toContain('User');
+    expect(result).toContain('[id: 42]');
     expect(result).toContain('all');
     expect(result).toContain('0 repos');
     expect(result).toContain('active');

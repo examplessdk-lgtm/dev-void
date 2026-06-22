@@ -566,6 +566,55 @@ PORT=3000
 
 See [Environment Variables](../guide/env-vars.md) for the full guide.
 
+## GitHub
+
+### `void github install`
+
+```
+void github install
+```
+
+Open the GitHub App install page in your browser. After installing, run `void github connect` to link a repository to your project.
+
+### `void github installations`
+
+```
+void github installations
+```
+
+List all GitHub App installations linked to your account. Each entry includes the `[id: <installation_id>]` needed for `--installation` in non-interactive use.
+
+### `void github connect`
+
+```
+void github connect [project] [options]
+```
+
+Connect a GitHub repository to a Void project for automatic deploys. On every push to the configured branch, Void builds and deploys your project automatically.
+
+**Options**
+
+| Flag                  | Description                                                                   |
+| --------------------- | ----------------------------------------------------------------------------- |
+| `--project <name>`    | Project name (alias for the positional argument)                              |
+| `--installation <id>` | GitHub App installation ID (required when you have multiple installations)    |
+| `--repo <owner/repo>` | Repository full name — required when the installation has access to all repos |
+| `--branch <name>`     | Branch to deploy from — **required in non-interactive mode**                  |
+| `--executor <type>`   | Build executor: `container` (default) or `github_actions`                     |
+
+**Non-interactive use (CI)**
+
+All of `--project` (or positional), `--installation`, `--repo`, and `--branch` must be supplied explicitly when stdin is not a TTY. Use `void github installations` to discover the `installation_id`.
+
+```
+void github connect my-app \
+  --installation 42 \
+  --repo owner/my-app \
+  --branch main
+```
+
+**Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
+
 ## Custom Domains
 
 ### `void domain add`
