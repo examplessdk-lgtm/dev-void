@@ -233,23 +233,33 @@ function page(title: string, message: string): string {
 </head><body><div class="card"><h1>${title}</h1><p>${message}</p></div></body></html>`;
 }
 
-export function openBrowser(url: string, exec: typeof import('node:child_process').exec): void {
+export function openBrowser(
+  url: string,
+  execFile: typeof import('node:child_process').execFile,
+): void {
+  // Launch via argv (execFile), never a shell: the URL is passed as a single
+  // argument so shell metacharacters in it can't be interpreted as commands.
+  const ignore = (): void => {};
   if (process.platform === 'win32') {
-    // `start` treats the first quoted arg as window title, pass empty title
-    exec(`start "" "${url}"`);
+    // `start` is a cmd builtin; the empty "" is the (ignored) window title.
+    execFile('cmd.exe', ['/c', 'start', '', url], ignore);
     return;
   }
   if (process.platform === 'darwin') {
-    exec(`open "${url}"`);
+    execFile('open', [url], ignore);
     return;
   }
   // Linux — including WSL2 where `xdg-open` typically has no usable handler.
-  // Try `wslview` (wslu), then `cmd.exe /c start`, then fall back to `xdg-open`.
+  // Try `wslview` (wslu), then fall back to Windows `start` via cmd.exe.
   if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
-    exec(`wslview "${url}" 2>/dev/null || cmd.exe /c start "" "${url}" 2>/dev/null`);
+    execFile('wslview', [url], (error) => {
+      if (error) {
+        execFile('cmd.exe', ['/c', 'start', '', url], ignore);
+      }
+    });
     return;
   }
-  exec(`xdg-open "${url}"`);
+  execFile('xdg-open', [url], ignore);
 }
 
 /**
@@ -267,7 +277,7 @@ export async function runLogin(
   onUrl?: (url: string) => void,
 ): Promise<string> {
   const http = await import('node:http');
-  const { exec } = await import('node:child_process');
+  const { execFile } = await import('node:child_process');
 
   const apiUrl = getApiUrl(root);
   const state = randomBytes(32).toString('hex');
@@ -372,7 +382,7 @@ export async function runLogin(
       loginUrl.searchParams.set('code_challenge_method', 'S256');
 
       onUrl?.(loginUrl.href);
-      openBrowser(loginUrl.href, exec);
+      openBrowser(loginUrl.href, execFile);
     });
 
     // 5-minute timeout
