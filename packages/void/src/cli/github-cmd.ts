@@ -319,7 +319,7 @@ async function runConnect(
       cancel('Cancelled.');
       process.exit(0);
     }
-    branch = ((input as string) || branchDefault).trim();
+    branch = (input as string).trim() || branchDefault;
   }
 
   // -------------------------------------------------------------------------
