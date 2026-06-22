@@ -1,6 +1,52 @@
 import { describe, expect, it } from 'vite-plus/test';
 import type { GithubInstallation } from '../../src/cli/client.ts';
-import { formatInstallations, parseGithubRepoFullName } from '../../src/cli/github-cmd.ts';
+import {
+  describeConnectError,
+  formatInstallations,
+  parseGithubRepoFullName,
+} from '../../src/cli/github-cmd.ts';
+
+describe('describeConnectError', () => {
+  it('returns already-connected message for 409 / "project already connected"', () => {
+    const msg = describeConnectError(409, 'project already connected');
+    expect(msg).toBe('This project is already connected to a GitHub repository.');
+  });
+
+  it('returns not-active message for 409 / "installation is not active"', () => {
+    const msg = describeConnectError(409, 'installation is not active');
+    expect(msg).toBe('Installation is not active. Re-install the GitHub App and try again.');
+  });
+
+  it('returns not-accessible message for 400 / "repository not accessible by installation"', () => {
+    const msg = describeConnectError(400, 'repository not accessible by installation');
+    expect(msg).toBe(
+      'Repository not accessible by this installation. Check the App has access to it.',
+    );
+  });
+
+  it('returns forbidden message for 403', () => {
+    const msg = describeConnectError(403, 'forbidden');
+    expect(msg).toBe("You don't have access to this project.");
+  });
+
+  it('returns not-found message for 404 / "project not found"', () => {
+    const msg = describeConnectError(404, 'project not found');
+    expect(msg).toBe('Project or installation not found.');
+  });
+
+  it('returns not-found message for 404 / "installation not found"', () => {
+    const msg = describeConnectError(404, 'installation not found');
+    expect(msg).toBe('Project or installation not found.');
+  });
+
+  it('returns null for an unrecognised status / code', () => {
+    expect(describeConnectError(500, undefined)).toBeNull();
+  });
+
+  it('returns null for an unrecognised 409 code', () => {
+    expect(describeConnectError(409, 'some other conflict')).toBeNull();
+  });
+});
 
 describe('parseGithubRepoFullName', () => {
   it('extracts owner/repo from a plain https GitHub URL', () => {

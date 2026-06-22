@@ -17,6 +17,32 @@ import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project
 // ---------------------------------------------------------------------------
 
 /**
+ * Map a PlatformApiError status + error code string to a friendly user message.
+ * Returns null for unrecognised cases (caller should re-throw).
+ */
+export function describeConnectError(status: number, errorCode: string | undefined): string | null {
+  const code = errorCode ?? '';
+  if (status === 409) {
+    if (code.includes('already connected')) {
+      return 'This project is already connected to a GitHub repository.';
+    }
+    if (code.includes('not active')) {
+      return 'Installation is not active. Re-install the GitHub App and try again.';
+    }
+  }
+  if (status === 400 && code.includes('not accessible')) {
+    return 'Repository not accessible by this installation. Check the App has access to it.';
+  }
+  if (status === 403) {
+    return "You don't have access to this project.";
+  }
+  if (status === 404) {
+    return 'Project or installation not found.';
+  }
+  return null;
+}
+
+/**
  * Extract `owner/repo` from a `https://github.com/owner/repo(.git)?` URL.
  * Returns null for non-GitHub URLs or null input.
  */
@@ -310,27 +336,9 @@ async function runConnect(
     if (err instanceof PlatformApiError) {
       const body = parsePlatformErrorBody(err.body);
       const code = body?.error ?? body?.message ?? '';
-
-      if (err.status === 409) {
-        if (code === 'already_connected') {
-          log.error('connect: This project is already connected to a repository.');
-        } else {
-          log.error(
-            'connect: Installation is not active. Re-install the GitHub App and try again.',
-          );
-        }
-        process.exit(1);
-      }
-      if (err.status === 400) {
-        log.error(`connect: Repository '${repoFullName}' is not accessible via this installation.`);
-        process.exit(1);
-      }
-      if (err.status === 403) {
-        log.error('connect: Forbidden. Check that you own the project and the installation.');
-        process.exit(1);
-      }
-      if (err.status === 404) {
-        log.error('connect: Project or installation not found.');
+      const message = describeConnectError(err.status, code);
+      if (message !== null) {
+        log.error(`connect: ${message}`);
         process.exit(1);
       }
       throw err;
