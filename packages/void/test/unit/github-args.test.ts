@@ -145,6 +145,30 @@ describe('parseGithubArgs', () => {
       });
     });
 
+    it('rejects --installation with no value', () => {
+      expect(() => parseGithubArgs(['connect', '--installation'])).toThrow(
+        'github: --installation requires a value.',
+      );
+    });
+
+    it('rejects --repo with no value', () => {
+      expect(() => parseGithubArgs(['connect', '--repo'])).toThrow(
+        'github: --repo requires a value.',
+      );
+    });
+
+    it('rejects --branch with no value', () => {
+      expect(() => parseGithubArgs(['connect', '--branch'])).toThrow(
+        'github: --branch requires a value.',
+      );
+    });
+
+    it('rejects --executor with no value', () => {
+      expect(() => parseGithubArgs(['connect', '--executor'])).toThrow(
+        'github: --executor requires a value.',
+      );
+    });
+
     it('rejects invalid --executor value', () => {
       expect(() => parseGithubArgs(['connect', '--executor', 'docker'])).toThrow(
         'github: invalid --executor (expected container|github_actions).',

@@ -49,12 +49,24 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
     for (let i = 0; i < rest.length; i++) {
       const arg = rest[i];
       if (arg === '--installation') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --installation requires a value.');
+        }
         installationId = rest[++i];
       } else if (arg === '--repo') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --repo requires a value.');
+        }
         repo = rest[++i];
       } else if (arg === '--branch') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --branch requires a value.');
+        }
         branch = rest[++i];
       } else if (arg === '--executor') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --executor requires a value.');
+        }
         const value = rest[++i];
         if (value !== 'container' && value !== 'github_actions') {
           throw new Error('github: invalid --executor (expected container|github_actions).');
