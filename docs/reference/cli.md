@@ -568,6 +568,8 @@ See [Environment Variables](../guide/env-vars.md) for the full guide.
 
 ## GitHub
 
+Deploy-on-GitHub works from **any** Void login — Google, GitHub, or other SSO. The first time you connect GitHub, Void links your GitHub identity to your current account (a one-time step, independent of how you logged in); it never creates a second account.
+
 ### `void github link`
 
 ```
@@ -576,7 +578,7 @@ void github link
 
 Link your current Void account to a GitHub identity. Opens your browser to authorize Void on GitHub (a localhost + PKCE handshake, the same mechanics as `void auth login`), then binds that GitHub identity to the logged-in account. Requires an authenticated CLI (`void auth login` first).
 
-Run this when your account has no linked GitHub identity yet — for example if `void github install` reports that your account has no linked GitHub identity. If the GitHub account is already linked to a different Void account, the command fails and asks you to use a different GitHub account.
+You normally don't need to run this directly — `void github install` runs the link automatically when your account has no GitHub identity yet. Run it on its own to link ahead of time, or to link a GitHub identity without installing the App. If that GitHub account is already linked to a different Void account, the command fails and asks you to use a different GitHub account.
 
 ### `void github install`
 
@@ -584,7 +586,7 @@ Run this when your account has no linked GitHub identity yet — for example if 
 void github install
 ```
 
-Open the GitHub App install page in your browser. After installing, run `void github connect` to link a repository to your project.
+Open the GitHub App install page in your browser. If your account has no linked GitHub identity yet, `void github install` first runs the GitHub link automatically (browser authorize), then continues. After installing, run `void github connect` to link a repository to your project.
 
 ### `void github installations`
 
