@@ -568,6 +568,16 @@ See [Environment Variables](../guide/env-vars.md) for the full guide.
 
 ## GitHub
 
+### `void github link`
+
+```
+void github link
+```
+
+Link your current Void account to a GitHub identity. Opens your browser to authorize Void on GitHub (a localhost + PKCE handshake, the same mechanics as `void auth login`), then binds that GitHub identity to the logged-in account. Requires an authenticated CLI (`void auth login` first).
+
+Run this when your account has no linked GitHub identity yet — for example if `void github install` reports that your account has no linked GitHub identity. If the GitHub account is already linked to a different Void account, the command fails and asks you to use a different GitHub account.
+
 ### `void github install`
 
 ```

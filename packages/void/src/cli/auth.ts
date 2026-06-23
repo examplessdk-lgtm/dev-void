@@ -163,11 +163,11 @@ function base64Url(buffer: Buffer): string {
   return buffer.toString('base64').replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 
-function createCodeVerifier(): string {
+export function createCodeVerifier(): string {
   return base64Url(randomBytes(32));
 }
 
-function createCodeChallenge(verifier: string): string {
+export function createCodeChallenge(verifier: string): string {
   return base64Url(createHash('sha256').update(verifier).digest());
 }
 
@@ -263,28 +263,48 @@ export function openBrowser(
 }
 
 /**
- * Start a local HTTP server, open the browser to the platform login page,
- * and wait for the OAuth callback with a short-lived code. The CLI exchanges
- * the code itself so the localhost callback never accepts bearer tokens.
+ * Start a local HTTP callback server, open the browser to a caller-built
+ * authorize URL, and wait for the redirect back to `http://localhost:PORT/callback`.
  *
- * `onUrl` is invoked with the login URL once the local server is listening,
- * so callers can show the URL to the user as a manual fallback when the
- * browser fails to open (common on WSL2, headless SSH, Docker, etc.).
+ * The server validates the `state` it appended to the callback URL against the
+ * incoming request, renders a success/error HTML page, and resolves with the
+ * callback request's search params (the caller reads `code` / `link_code` etc.).
+ * The server is always closed before settling.
+ *
+ * `onUrl` is invoked with the authorize URL once the local server is listening,
+ * so callers can show the URL to the user as a manual fallback when the browser
+ * fails to open (common on WSL2, headless SSH, Docker, etc.). To match the
+ * login flow it fires immediately before the browser is opened.
+ *
+ * `execFile` is injectable so tests can avoid launching a real browser.
  */
-export async function runLogin(
-  root: string = process.cwd(),
-  provider = 'github',
-  onUrl?: (url: string) => void,
-): Promise<string> {
+export async function awaitBrowserCallback(options: {
+  /** Caller-generated; appended to the callback URL and validated on the incoming request. */
+  state: string;
+  /** Given `http://localhost:PORT/callback?state=…`, return the URL to open. */
+  buildAuthUrl: (callback: URL) => Promise<string> | string;
+  /** Map an `?error=…` query to a user message (return null to ignore). */
+  describeError?: (params: URLSearchParams) => string | null;
+  /**
+   * Reject an otherwise-valid callback request (renders a 400 page) WITHOUT
+   * settling, so the server keeps listening for a subsequent valid callback.
+   * Used by login to reject `?token=` and missing-`code` requests. Return a
+   * message to reject, or null to accept.
+   */
+  validate?: (params: URLSearchParams) => string | null;
+  /** Optional, invoked with the authorize URL before the browser is opened. */
+  onUrl?: (url: string) => void;
+  /** Default 5 minutes. */
+  timeoutMs?: number;
+  /** Injectable for tests; defaults to the real `node:child_process` `execFile`. */
+  execFile?: typeof import('node:child_process').execFile;
+}): Promise<URLSearchParams> {
   const http = await import('node:http');
-  const { execFile } = await import('node:child_process');
+  const { state, buildAuthUrl, describeError, validate, onUrl } = options;
+  const timeoutMs = options.timeoutMs ?? 5 * 60 * 1000;
+  const execFile = options.execFile ?? (await import('node:child_process')).execFile;
 
-  const apiUrl = getApiUrl(root);
-  const state = randomBytes(32).toString('hex');
-  const codeVerifier = createCodeVerifier();
-  const codeChallenge = createCodeChallenge(codeVerifier);
-
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<URLSearchParams>((resolve, reject) => {
     let settled = false;
 
     const fail = (error: Error): void => {
@@ -296,16 +316,16 @@ export async function runLogin(
       reject(error);
     };
 
-    const succeed = (token: string): void => {
+    const succeed = (params: URLSearchParams): void => {
       if (settled) {
         return;
       }
       settled = true;
       server.close();
-      resolve(token);
+      resolve(params);
     };
 
-    const server = http.createServer(async (req, res) => {
+    const server = http.createServer((req, res) => {
       const url = new URL(req.url!, `http://localhost`);
       if (url.pathname !== '/callback') {
         res.writeHead(404);
@@ -319,79 +339,113 @@ export async function runLogin(
         return;
       }
 
-      const error = url.searchParams.get('error');
-      if (error === 'signup_restricted') {
+      const errorMessage = describeError?.(url.searchParams);
+      if (errorMessage) {
         res.writeHead(403, { 'Content-Type': 'text/html' });
-        res.end(
-          page('Signup restricted', 'Your email is not on the approved list for this environment.'),
-        );
-        fail(
-          new Error(
-            'Signup restricted: your email is not on the approved list for this environment.',
-          ),
-        );
+        res.end(page('Login failed', errorMessage));
+        fail(new Error(errorMessage));
         return;
       }
 
-      if (url.searchParams.has('token')) {
+      // Reject-but-keep-listening: invalid request shapes (e.g. a stray
+      // `?token=`, or a redirect that arrived without a code). The server
+      // stays open so the genuine callback can still complete.
+      const invalidMessage = validate?.(url.searchParams);
+      if (invalidMessage) {
         res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end(page('Login failed', 'Invalid login callback. Please try again.'));
-        return;
-      }
-
-      const code = url.searchParams.get('code');
-      if (!code) {
-        res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end(page('Login failed', 'No authorization code received. Please try again.'));
-        return;
-      }
-
-      let token: string;
-      try {
-        token = await exchangeLoginCode(apiUrl, code, state, codeVerifier);
-      } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end(page('Login failed', 'Could not complete login. Please try again.'));
-        fail(err instanceof Error ? err : new Error('auth: Failed to complete login.'));
+        res.end(page('Login failed', invalidMessage));
         return;
       }
 
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(page('Login successful!', 'You can close this tab and return to the terminal.'));
-      succeed(token);
+      succeed(url.searchParams);
     });
 
     // Close immediately after callback — don't wait for keep-alive timeout
     server.on('connection', (socket) => socket.unref());
 
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(0, '127.0.0.1', async () => {
       const addr = server.address();
       if (!addr || typeof addr === 'string') {
-        reject(new Error('auth: Failed to start local callback server.'));
+        fail(new Error('auth: Failed to start local callback server.'));
         return;
       }
 
       const port = addr.port;
-      const redirect = new URL(`http://localhost:${port}/callback`);
-      redirect.searchParams.set('state', state);
+      const callback = new URL(`http://localhost:${port}/callback`);
+      callback.searchParams.set('state', state);
 
+      let authUrl: string;
+      try {
+        authUrl = await buildAuthUrl(callback);
+      } catch (err) {
+        fail(err instanceof Error ? err : new Error('auth: Failed to build authorize URL.'));
+        return;
+      }
+
+      onUrl?.(authUrl);
+      openBrowser(authUrl, execFile);
+    });
+
+    const timeout = setTimeout(() => {
+      fail(new Error('auth: Login timed out after 5 minutes. Try again.'));
+    }, timeoutMs);
+    timeout.unref();
+  });
+}
+
+/**
+ * Start a local HTTP server, open the browser to the platform login page,
+ * and wait for the OAuth callback with a short-lived code. The CLI exchanges
+ * the code itself so the localhost callback never accepts bearer tokens.
+ *
+ * `onUrl` is invoked with the login URL once the local server is listening,
+ * so callers can show the URL to the user as a manual fallback when the
+ * browser fails to open (common on WSL2, headless SSH, Docker, etc.).
+ */
+export async function runLogin(
+  root: string = process.cwd(),
+  provider = 'github',
+  onUrl?: (url: string) => void,
+): Promise<string> {
+  const { execFile } = await import('node:child_process');
+
+  const apiUrl = getApiUrl(root);
+  const state = randomBytes(32).toString('hex');
+  const codeVerifier = createCodeVerifier();
+  const codeChallenge = createCodeChallenge(codeVerifier);
+
+  const params = await awaitBrowserCallback({
+    state,
+    execFile,
+    onUrl,
+    buildAuthUrl: (callback) => {
       const loginUrl = new URL('auth/login', apiUrl.endsWith('/') ? apiUrl : `${apiUrl}/`);
-      loginUrl.searchParams.set('redirect', redirect.href);
+      loginUrl.searchParams.set('redirect', callback.href);
       loginUrl.searchParams.set('provider', provider);
       loginUrl.searchParams.set('code_challenge', codeChallenge);
       loginUrl.searchParams.set('code_challenge_method', 'S256');
-
-      onUrl?.(loginUrl.href);
-      openBrowser(loginUrl.href, execFile);
-    });
-
-    // 5-minute timeout
-    const timeout = setTimeout(
-      () => {
-        fail(new Error('auth: Login timed out after 5 minutes. Try again.'));
-      },
-      5 * 60 * 1000,
-    );
-    timeout.unref();
+      return loginUrl.href;
+    },
+    describeError: (p) =>
+      p.get('error') === 'signup_restricted'
+        ? 'Signup restricted: your email is not on the approved list for this environment.'
+        : null,
+    // Keep listening but reject these request shapes (preserves the original
+    // localhost server behavior): a stray `?token=` is never honored, and a
+    // callback without a `code` is ignored until the real one arrives.
+    validate: (p) => {
+      if (p.has('token')) {
+        return 'Invalid login callback. Please try again.';
+      }
+      if (!p.get('code')) {
+        return 'No authorization code received. Please try again.';
+      }
+      return null;
+    },
   });
+
+  const code = params.get('code')!;
+  return exchangeLoginCode(apiUrl, code, state, codeVerifier);
 }

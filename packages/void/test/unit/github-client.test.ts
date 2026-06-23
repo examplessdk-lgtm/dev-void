@@ -177,3 +177,77 @@ describe('PlatformClient.connectGithub', () => {
     });
   });
 });
+
+describe('PlatformClient.getGithubLinkUrl', () => {
+  it('GETs link-url with redirect + S256 challenge query, auth headers, returns { url }', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ url: 'https://github.com/login/oauth/authorize?client_id=x' }),
+    );
+
+    const client = makeClient();
+    const redirect = 'http://localhost:54321/callback?state=abc';
+    const result = await client.getGithubLinkUrl(redirect, 'challenge-xyz');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const parsed = new URL(url);
+    expect(parsed.origin + parsed.pathname).toBe(`${apiUrl}/github/link-url`);
+    expect(parsed.searchParams.get('redirect')).toBe(redirect);
+    expect(parsed.searchParams.get('code_challenge')).toBe('challenge-xyz');
+    expect(parsed.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(init.method).toBeUndefined();
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe(`Bearer ${token}`);
+    expect(result).toEqual({ url: 'https://github.com/login/oauth/authorize?client_id=x' });
+  });
+
+  it('throws PlatformApiError on non-2xx', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('forbidden', { status: 403 }));
+    const client = makeClient();
+    await expect(client.getGithubLinkUrl('http://localhost:1/callback', 'c')).rejects.toMatchObject(
+      {
+        name: 'PlatformApiError',
+        status: 403,
+      },
+    );
+  });
+});
+
+describe('PlatformClient.completeGithubLink', () => {
+  it('POSTs link/complete with exact JSON body + auth headers, returns { status }', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: 'linked' }));
+
+    const client = makeClient();
+    const result = await client.completeGithubLink('link-code-1', 'verifier-1');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${apiUrl}/github/link/complete`);
+    expect(init.method).toBe('POST');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(headers.Authorization).toBe(`Bearer ${token}`);
+    expect(JSON.parse(init.body as string)).toEqual({
+      link_code: 'link-code-1',
+      code_verifier: 'verifier-1',
+    });
+    expect(result).toEqual({ status: 'linked' });
+  });
+
+  it('returns already_linked status', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: 'already_linked' }));
+    const client = makeClient();
+    const result = await client.completeGithubLink('link-code-2', 'verifier-2');
+    expect(result).toEqual({ status: 'already_linked' });
+  });
+
+  it('throws PlatformApiError with status 409 and code on github_identity_conflict', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'github_identity_conflict' }, 409));
+    const client = makeClient();
+    await expect(client.completeGithubLink('link-code-3', 'verifier-3')).rejects.toMatchObject({
+      name: 'PlatformApiError',
+      status: 409,
+      code: 'github_identity_conflict',
+    });
+  });
+});

@@ -929,4 +929,43 @@ export class PlatformClient {
 
     return res.json();
   }
+
+  async getGithubLinkUrl(redirect: string, codeChallenge: string): Promise<{ url: string }> {
+    const params = new URLSearchParams({
+      redirect,
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
+    });
+    const res = await fetch(`${this.baseUrl}/github/link-url?${params}`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to start GitHub link', res);
+    }
+
+    return res.json();
+  }
+
+  async completeGithubLink(
+    linkCode: string,
+    codeVerifier: string,
+  ): Promise<{ status: 'linked' | 'already_linked' }> {
+    const res = await fetch(`${this.baseUrl}/github/link/complete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.authHeaders,
+      },
+      body: JSON.stringify({ link_code: linkCode, code_verifier: codeVerifier }),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to complete GitHub link', res);
+    }
+
+    return res.json();
+  }
 }

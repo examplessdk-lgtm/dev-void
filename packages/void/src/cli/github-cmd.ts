@@ -1,5 +1,12 @@
+import { randomBytes } from 'node:crypto';
 import { cancel, isCancel, log, select, text } from '@clack/prompts';
-import { openBrowser, getToken } from './auth.ts';
+import {
+  awaitBrowserCallback,
+  createCodeChallenge,
+  createCodeVerifier,
+  openBrowser,
+  getToken,
+} from './auth.ts';
 import {
   PlatformApiError,
   PlatformClient,
@@ -107,6 +114,8 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
       return runInstallations(client);
     case 'connect':
       return runConnect(root, client, args);
+    case 'link':
+      return runGithubLink(root, client);
   }
 }
 
@@ -132,6 +141,63 @@ async function runInstall(root: string, client: PlatformClient): Promise<void> {
   const { execFile } = await import('node:child_process');
   openBrowser(url, execFile);
   log.message('After installing, run `void github connect` to link a repository to your project.');
+}
+
+// ---------------------------------------------------------------------------
+// link
+// ---------------------------------------------------------------------------
+
+/**
+ * Link the current Void account (the logged-in CLI token holder) to a GitHub
+ * identity. Drives the platform's 3-endpoint link flow with a localhost +
+ * PKCE handshake, mirroring `void auth login`.
+ *
+ * Exported so Task 5 can call it (e.g. when `github install` returns 403 for a
+ * GitHub-less account, prompt to link and retry). The success path is
+ * non-exiting so a caller can continue; only error paths exit/throw.
+ */
+export async function runGithubLink(root: string, client: PlatformClient): Promise<void> {
+  void root; // Reserved for the signature Task 5 reuses; routing uses `client`.
+
+  const verifier = createCodeVerifier();
+  const challenge = createCodeChallenge(verifier);
+  const state = randomBytes(32).toString('hex');
+
+  const params = await awaitBrowserCallback({
+    state,
+    buildAuthUrl: async (callback) => {
+      callback.searchParams.set('state', state);
+      const { url } = await client.getGithubLinkUrl(callback.href, challenge);
+      return url;
+    },
+    describeError: (p) => (p.get('error') ? 'GitHub authorization failed.' : null),
+    onUrl: (url) => log.message(`Open this URL to link your GitHub account:\n${pc.cyan(url)}`),
+  });
+
+  const linkCode = params.get('link_code');
+  if (!linkCode) {
+    throw new Error('github: link callback did not return a link code.');
+  }
+
+  let status: 'linked' | 'already_linked';
+  try {
+    ({ status } = await client.completeGithubLink(linkCode, verifier));
+  } catch (err) {
+    if (
+      err instanceof PlatformApiError &&
+      (err.status === 409 || err.code === 'github_identity_conflict')
+    ) {
+      log.error('This GitHub account is already linked to another Void account.');
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  if (status === 'already_linked') {
+    log.success('GitHub account already linked.');
+  } else {
+    log.success('GitHub account linked.');
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -200,6 +200,7 @@ const HELP_TREE: HelpTree = {
         command: 'connect [project]',
         description: 'Connect a repository to a project for auto-deploy',
       },
+      { command: 'link', description: 'Link your GitHub account to Void' },
     ],
     children: {
       install: basicSubcommand(
@@ -210,6 +211,7 @@ const HELP_TREE: HelpTree = {
         'List your GitHub App installations.',
         'void github installations',
       ),
+      link: basicSubcommand('Link your GitHub account to Void.', 'void github link'),
       connect: {
         summary: 'Connect a repository to a project for automatic deploys.',
         usage: ['void github connect [project] [options]'],
