@@ -1,3 +1,4 @@
+import { log } from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { PlatformApiError, type PlatformClient } from '../../src/cli/client.ts';
 import { runGithubLink } from '../../src/cli/github-cmd.ts';
@@ -110,6 +111,36 @@ describe('runGithubLink', () => {
     ).rejects.toThrow('process.exit(1)');
 
     expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it('exits(1) with a distinct message on a 409 github_already_linked', async () => {
+    const errorSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+    const completeGithubLink = vi.fn(async () => {
+      throw new PlatformApiError(
+        'Failed to complete GitHub link',
+        409,
+        JSON.stringify({ error: 'github_already_linked' }),
+      );
+    });
+
+    await expect(
+      drive({
+        completeGithubLink,
+        callbackQuery: (cb) => {
+          const hit = new URL(cb);
+          hit.searchParams.set('link_code', 'lc-already');
+          return hit;
+        },
+      }),
+    ).rejects.toThrow('process.exit(1)');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    // The new code maps to the "your account, different GitHub" message —
+    // distinct from the other-user github_identity_conflict wording.
+    expect(errorSpy).toHaveBeenCalledWith(
+      'Your Void account is already linked to a different GitHub account.',
+    );
+    errorSpy.mockRestore();
   });
 
   it('throws when the callback returns no link code', async () => {

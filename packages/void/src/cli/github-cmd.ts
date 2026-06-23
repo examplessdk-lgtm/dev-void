@@ -209,6 +209,10 @@ export async function runGithubLink(root: string, client: PlatformClient): Promi
   try {
     ({ status } = await client.completeGithubLink(linkCode, verifier));
   } catch (err) {
+    if (err instanceof PlatformApiError && err.code === 'github_already_linked') {
+      log.error('Your Void account is already linked to a different GitHub account.');
+      process.exit(1);
+    }
     if (
       err instanceof PlatformApiError &&
       (err.status === 409 || err.code === 'github_identity_conflict')
