@@ -123,18 +123,44 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
 // install
 // ---------------------------------------------------------------------------
 
-async function runInstall(root: string, client: PlatformClient): Promise<void> {
+/**
+ * `void github install` — print the GitHub App install URL and open it.
+ *
+ * If the account has no linked GitHub identity, the server returns a 403 with
+ * the stable code `github_identity_required` (Task 3). Rather than telling the
+ * user to `void auth login` (which risks forking into a second account), we run
+ * the link flow inline and retry the install URL exactly once.
+ *
+ * `linkIdentity` is injectable so tests can supply a fake linker instead of
+ * starting a real localhost callback server / browser.
+ */
+export async function runInstall(
+  root: string,
+  client: PlatformClient,
+  linkIdentity: (root: string, client: PlatformClient) => Promise<void> = runGithubLink,
+): Promise<void> {
   let url: string;
   try {
     ({ url } = await client.getGithubInstallUrl());
   } catch (err) {
-    if (err instanceof PlatformApiError && err.status === 403) {
-      log.error(
-        'Your account has no linked GitHub identity. Run `void auth login` and choose GitHub.',
-      );
-      process.exit(1);
+    if (
+      err instanceof PlatformApiError &&
+      err.status === 403 &&
+      err.code === 'github_identity_required'
+    ) {
+      log.message('Your Void account needs a linked GitHub identity. Starting the GitHub link…');
+      await linkIdentity(root, client);
+      try {
+        ({ url } = await client.getGithubInstallUrl());
+      } catch {
+        log.error(
+          'Could not start the GitHub App install after linking. Try `void github link`, then `void github install` again.',
+        );
+        process.exit(1);
+      }
+    } else {
+      throw err;
     }
-    throw err;
   }
 
   log.message(`Open this URL to install the Void GitHub App:\n${pc.cyan(url)}`);
