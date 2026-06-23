@@ -152,11 +152,21 @@ export async function runInstall(
       await linkIdentity(root, client);
       try {
         ({ url } = await client.getGithubInstallUrl());
-      } catch {
-        log.error(
-          'Could not start the GitHub App install after linking. Try `void github link`, then `void github install` again.',
-        );
-        process.exit(1);
+      } catch (retryErr) {
+        // Only the SAME identity-required 403 means linking didn't take — show
+        // the actionable link/install guidance. Any other failure (401, 426,
+        // 500, a different 403) is the real error and must surface normally.
+        if (
+          retryErr instanceof PlatformApiError &&
+          retryErr.status === 403 &&
+          retryErr.code === 'github_identity_required'
+        ) {
+          log.error(
+            'Could not start the GitHub App install after linking. Try `void github link`, then `void github install` again.',
+          );
+          process.exit(1);
+        }
+        throw retryErr;
       }
     } else {
       throw err;
@@ -189,25 +199,28 @@ export async function runGithubLink(root: string, client: PlatformClient): Promi
   const challenge = createCodeChallenge(verifier);
   const state = randomBytes(32).toString('hex');
 
-  const params = await awaitBrowserCallback({
-    state,
-    buildAuthUrl: async (callback) => {
-      callback.searchParams.set('state', state);
-      const { url } = await client.getGithubLinkUrl(callback.href, challenge);
-      return url;
-    },
-    describeError: (p) => (p.get('error') ? 'GitHub authorization failed.' : null),
-    onUrl: (url) => log.message(`Open this URL to link your GitHub account:\n${pc.cyan(url)}`),
-  });
-
-  const linkCode = params.get('link_code');
-  if (!linkCode) {
-    throw new Error('github: link callback did not return a link code.');
-  }
-
+  // completeGithubLink runs INSIDE the request handler (via finalize), so the
+  // browser only shows the success page after the link actually succeeds; a 409
+  // conflict rejects out of awaitBrowserCallback and is mapped below.
   let status: 'linked' | 'already_linked';
   try {
-    ({ status } = await client.completeGithubLink(linkCode, verifier));
+    ({ status } = await awaitBrowserCallback<{ status: 'linked' | 'already_linked' }>({
+      state,
+      buildAuthUrl: async (callback) => {
+        callback.searchParams.set('state', state);
+        const { url } = await client.getGithubLinkUrl(callback.href, challenge);
+        return url;
+      },
+      describeError: (p) => (p.get('error') ? 'GitHub authorization failed.' : null),
+      onUrl: (url) => log.message(`Open this URL to link your GitHub account:\n${pc.cyan(url)}`),
+      finalize: async (params) => {
+        const linkCode = params.get('link_code');
+        if (!linkCode) {
+          throw new Error('github: link callback did not return a link code.');
+        }
+        return client.completeGithubLink(linkCode, verifier);
+      },
+    }));
   } catch (err) {
     if (err instanceof PlatformApiError && err.code === 'github_already_linked') {
       log.error('Your Void account is already linked to a different GitHub account.');

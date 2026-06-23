@@ -267,9 +267,12 @@ export function openBrowser(
  * authorize URL, and wait for the redirect back to `http://localhost:PORT/callback`.
  *
  * The server validates the `state` it appended to the callback URL against the
- * incoming request, renders a success/error HTML page, and resolves with the
- * callback request's search params (the caller reads `code` / `link_code` etc.).
- * The server is always closed before settling.
+ * incoming request, then runs the caller's `finalize` hook INSIDE the request
+ * handler (so the browser only ever sees the success page after the underlying
+ * exchange/link actually succeeded). On finalize success it renders the success
+ * HTML and resolves with finalize's return value; on finalize failure it
+ * renders the same "could not complete" failure page the login flow uses and
+ * rejects with the thrown error. The server is always closed before settling.
  *
  * `onUrl` is invoked with the authorize URL once the local server is listening,
  * so callers can show the URL to the user as a manual fallback when the browser
@@ -278,11 +281,18 @@ export function openBrowser(
  *
  * `execFile` is injectable so tests can avoid launching a real browser.
  */
-export async function awaitBrowserCallback(options: {
+export async function awaitBrowserCallback<T>(options: {
   /** Caller-generated; appended to the callback URL and validated on the incoming request. */
   state: string;
   /** Given `http://localhost:PORT/callback?state=…`, return the URL to open. */
   buildAuthUrl: (callback: URL) => Promise<string> | string;
+  /**
+   * Runs INSIDE the request handler, after state/error/validate checks pass and
+   * BEFORE the success page is rendered. Resolve to settle the outer promise
+   * with this value (success page shown); throw to render the failure page and
+   * reject the outer promise with the thrown error.
+   */
+  finalize: (params: URLSearchParams) => Promise<T>;
   /** Map an `?error=…` query to a user message (return null to ignore). */
   describeError?: (params: URLSearchParams) => string | null;
   /**
@@ -298,13 +308,13 @@ export async function awaitBrowserCallback(options: {
   timeoutMs?: number;
   /** Injectable for tests; defaults to the real `node:child_process` `execFile`. */
   execFile?: typeof import('node:child_process').execFile;
-}): Promise<URLSearchParams> {
+}): Promise<T> {
   const http = await import('node:http');
-  const { state, buildAuthUrl, describeError, validate, onUrl } = options;
+  const { state, buildAuthUrl, finalize, describeError, validate, onUrl } = options;
   const timeoutMs = options.timeoutMs ?? 5 * 60 * 1000;
   const execFile = options.execFile ?? (await import('node:child_process')).execFile;
 
-  return new Promise<URLSearchParams>((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     let settled = false;
 
     const fail = (error: Error): void => {
@@ -316,16 +326,16 @@ export async function awaitBrowserCallback(options: {
       reject(error);
     };
 
-    const succeed = (params: URLSearchParams): void => {
+    const succeed = (result: T): void => {
       if (settled) {
         return;
       }
       settled = true;
       server.close();
-      resolve(params);
+      resolve(result);
     };
 
-    const server = http.createServer((req, res) => {
+    const server = http.createServer(async (req, res) => {
       const url = new URL(req.url!, `http://localhost`);
       if (url.pathname !== '/callback') {
         res.writeHead(404);
@@ -357,9 +367,30 @@ export async function awaitBrowserCallback(options: {
         return;
       }
 
+      // Finalize INSIDE the request path so the browser only sees the success
+      // page once the underlying exchange/link succeeds. A finalize failure
+      // (expired code, API error, 409 conflict, etc.) renders the failure page
+      // and rejects — matching the base login flow's exchange-in-request-path
+      // behavior. Guard against the timeout racing the in-flight finalize.
+      let result: T;
+      try {
+        result = await finalize(url.searchParams);
+      } catch (err) {
+        if (settled) {
+          return;
+        }
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end(page('Login failed', 'Could not complete login. Please try again.'));
+        fail(err instanceof Error ? err : new Error('auth: Failed to complete login.'));
+        return;
+      }
+
+      if (settled) {
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(page('Login successful!', 'You can close this tab and return to the terminal.'));
-      succeed(url.searchParams);
+      succeed(result);
     });
 
     // Close immediately after callback — don't wait for keep-alive timeout
@@ -416,7 +447,9 @@ export async function runLogin(
   const codeVerifier = createCodeVerifier();
   const codeChallenge = createCodeChallenge(codeVerifier);
 
-  const params = await awaitBrowserCallback({
+  // The exchange runs INSIDE the request handler (via finalize), so an exchange
+  // failure renders the failure page — exactly as the base login flow did.
+  return awaitBrowserCallback<string>({
     state,
     execFile,
     onUrl,
@@ -444,8 +477,6 @@ export async function runLogin(
       }
       return null;
     },
+    finalize: (params) => exchangeLoginCode(apiUrl, params.get('code')!, state, codeVerifier),
   });
-
-  const code = params.get('code')!;
-  return exchangeLoginCode(apiUrl, code, state, codeVerifier);
 }

@@ -99,4 +99,44 @@ describe('runInstall', () => {
     expect(mockExecFile).not.toHaveBeenCalled();
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
+
+  it('rethrows a non-identity error from the post-link retry (F4)', async () => {
+    // After linking, the install URL fails again — but with a DIFFERENT error
+    // (a 500). The generic "try void github link" guidance must NOT swallow it;
+    // the real error has to surface through normal handling.
+    const retryErr = new PlatformApiError('Failed to get GitHub install URL', 500, 'boom');
+    const getGithubInstallUrl = vi
+      .fn()
+      .mockRejectedValueOnce(identityRequired())
+      .mockRejectedValueOnce(retryErr);
+    const client = { getGithubInstallUrl } as unknown as PlatformClient;
+    const linkIdentity = vi.fn(async () => {});
+
+    await expect(runInstall('/project', client, linkIdentity)).rejects.toBe(retryErr);
+
+    expect(linkIdentity).toHaveBeenCalledTimes(1);
+    expect(getGithubInstallUrl).toHaveBeenCalledTimes(2);
+    expect(mockExecFile).not.toHaveBeenCalled();
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('rethrows a 426 cli_outdated from the post-link retry (F4)', async () => {
+    const retryErr = new PlatformApiError(
+      'Failed to get GitHub install URL',
+      426,
+      JSON.stringify({ error: 'cli_outdated', message: 'Upgrade: npm i -g void@latest' }),
+    );
+    const getGithubInstallUrl = vi
+      .fn()
+      .mockRejectedValueOnce(identityRequired())
+      .mockRejectedValueOnce(retryErr);
+    const client = { getGithubInstallUrl } as unknown as PlatformClient;
+    const linkIdentity = vi.fn(async () => {});
+
+    await expect(runInstall('/project', client, linkIdentity)).rejects.toBe(retryErr);
+
+    expect(linkIdentity).toHaveBeenCalledTimes(1);
+    expect(getGithubInstallUrl).toHaveBeenCalledTimes(2);
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
 });
