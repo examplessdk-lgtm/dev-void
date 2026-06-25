@@ -17,6 +17,7 @@ export type VoidAuthRuntimeOptions = {
   dialect: VoidAuthDialect;
   providers: Array<VoidAuthProvider> | null;
   userConfig?: VoidAuthConfig;
+  dev?: boolean;
 };
 
 export type VoidAuthEnv = Record<string, unknown> & {
@@ -86,11 +87,7 @@ export type VoidAuthRuntimeApi = {
   ): Promise<void>;
 };
 
-function isLocalHost(hostname: string): boolean {
-  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname.endsWith('.local');
-}
-
-function resolveSecret(request: Request, env: VoidAuthEnv): string {
+function resolveSecret(env: VoidAuthEnv, dev: boolean): string {
   const explicit =
     typeof env.BETTER_AUTH_SECRET === 'string' && env.BETTER_AUTH_SECRET.length > 0
       ? env.BETTER_AUTH_SECRET
@@ -99,8 +96,7 @@ function resolveSecret(request: Request, env: VoidAuthEnv): string {
     return explicit;
   }
 
-  const url = new URL(request.url);
-  if (isLocalHost(url.hostname)) {
+  if (dev) {
     return 'void-dev-better-auth-secret-1234567890';
   }
 
@@ -296,7 +292,7 @@ export function createVoidAuthRuntime(
     const defaults: BetterAuthOptions = {
       baseURL: origin,
       basePath: '/api/auth',
-      secret: resolveSecret(request, env),
+      secret: resolveSecret(env, runtime.dev === true),
       database,
       ...(emailAndPassword ? { emailAndPassword } : {}),
       ...(socialProviders ? { socialProviders } : {}),

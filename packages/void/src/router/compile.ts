@@ -802,7 +802,7 @@ export function compileRouteTable(
 
   if (auth) {
     lines.push(
-      `const __voidAuthOptions = { dialect: ${JSON.stringify(auth.dialect)}, providers: ${JSON.stringify(auth.providers)}, userConfig: ${auth.authConfigPath ? '__voidAuthConfig' : 'undefined'} };`,
+      `const __voidAuthOptions = { dialect: ${JSON.stringify(auth.dialect)}, providers: ${JSON.stringify(auth.providers)}, userConfig: ${auth.authConfigPath ? '__voidAuthConfig' : 'undefined'}, dev: ${JSON.stringify(options.dev === true)} };`,
     );
     if (webSockets.length > 0) {
       lines.push(
