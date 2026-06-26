@@ -66,7 +66,7 @@ If your CI pipeline runs typechecking or other static analysis before deploy, ru
 
 You can deploy from a GitHub repo on every push to `main`. Running `void init --github` generates `.github/workflows/void-deploy.yml` in your project.
 
-The workflow authenticates with [GitHub OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect) — there is **no long-lived `VOID_TOKEN` secret to store or rotate**. The job requests a short-lived OIDC token from GitHub, exchanges it at `POST $VOID_API_URL/auth/github-oidc` for a project-scoped deploy token (valid ~15 minutes), then runs `void deploy --project <slug>`:
+The workflow authenticates with [GitHub OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect) — there is **no long-lived `VOID_TOKEN` secret to store or rotate**. The job requests a short-lived OIDC token from GitHub, exchanges it at `POST $VOID_API_URL/auth/github-oidc` for a short-lived project-scoped deploy token (about 15 minutes on the free tier; longer on higher plans, capped at ~60 minutes), then runs `void deploy --project <slug>`:
 
 ```yaml
 name: Deploy to Void
@@ -113,7 +113,7 @@ jobs:
         run: npx void deploy --project "$VOID_PROJECT"
 ```
 
-Connect the repository to your project once in the Void dashboard to authorize it. The exact steps vary by package manager (the scaffold detects pnpm, yarn, bun, or npm). The `VOID_PROJECT` value is baked in from your linked project when known; otherwise the workflow reads a `VOID_PROJECT` repository variable. To target staging, set a `VOID_API_URL` repository variable to `https://api.staging.void.cloud`.
+Connect the repository to your project once with `void github connect <project> --repo <owner/repo> --executor github_actions` to authorize it. This GitHub Actions path requires the `github_actions` build executor — the default `container` executor will not work with this workflow. The exact steps vary by package manager (the scaffold detects pnpm, yarn, bun, or npm). The `VOID_PROJECT` value is baked in from your linked project when known; otherwise the workflow reads a `VOID_PROJECT` repository variable. To target staging, set a `VOID_API_URL` repository variable to `https://api.staging.void.cloud`.
 
 ## Other Targets
 
