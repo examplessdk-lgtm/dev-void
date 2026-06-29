@@ -349,6 +349,31 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
   }
 }
 
+/**
+ * Build a child-process environment with the CF Access service-token PAIR
+ * removed.
+ *
+ * The deploy flow spawns UNTRUSTED user build code (`vite build`, framework
+ * preset builds, drizzle-kit loading the user schema) which inherits the
+ * spawn env. A shared, long-lived CF Access service token is needed only by
+ * this CLI's own API client (which captures the Access headers once at
+ * construction and reuses them for every request) — never by the build — so it
+ * must not survive into those children, or it would leak to arbitrary repo
+ * build scripts/plugins.
+ *
+ * We scrub it on the CHILD env rather than mutating `process.env`: deleting it
+ * from the parent also breaks interactive expired-token re-auth, which reads
+ * `cfAccessHeaders(process.env)` / the cloudflared pair-guard AFTER the build
+ * step. Only the service-token pair is scrubbed; the cloudflared
+ * `CF_ACCESS_TOKEN` JWT (dev path) is left untouched.
+ */
+export function buildEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  const env = { ...process.env, ...extra };
+  delete env.CF_ACCESS_CLIENT_ID;
+  delete env.CF_ACCESS_CLIENT_SECRET;
+  return env;
+}
+
 async function runDeployInner(
   root: string,
   options: RunDeployOptions | undefined,
@@ -365,6 +390,11 @@ async function runDeployInner(
       }
 
       const client = new PlatformClient(token, { root, cliLog });
+
+      // The CF Access service-token pair is intentionally left in `process.env`
+      // so interactive expired-token re-auth (below) can still read it. It is
+      // kept OUT of every untrusted build child instead, via `buildEnv()` on the
+      // spawn env — see that helper for the full rationale.
 
       // 2. Resolve target project (CLI flag > env var > linked project file)
       const requestedProjectSlug = getRequestedProjectSlug(options);
@@ -666,7 +696,17 @@ export function applyDeployEvent(event: DeployEvent, s: SpinnerResult): ApplyDep
       s.message(`Prerendering ${event.pages} pages...`);
       return { kind: 'continue' };
     case 'done':
-      s.stop('Deployed!');
+      if (event.published === false) {
+        // Committed-live in the DB but routing KV was not published. The
+        // deploy succeeded (do NOT throw / return an error kind) but the
+        // project may be unreachable (first deploy) or still serving the
+        // previous deploy (later deploy). Degrade the message accordingly.
+        s.stop(
+          'Deployed, but routing was not published — the project may be unreachable or still serving the previous deploy. Re-run `void deploy` to publish routing.',
+        );
+      } else {
+        s.stop('Deployed!');
+      }
       return { kind: 'done', event };
     case 'error':
       s.stop('Deploy failed');
@@ -680,7 +720,7 @@ export function applyDeployEvent(event: DeployEvent, s: SpinnerResult): ApplyDep
  * resolve with the terminal `done` event (or throw on terminal error /
  * connection loss).
  */
-async function streamDeployEvents(
+export async function streamDeployEvents(
   projectId: string,
   events: AsyncGenerator<DeployEvent>,
   s: SpinnerResult,
@@ -716,12 +756,17 @@ async function streamDeployEvents(
         deploymentId = result.deploymentId;
         cliLog?.info('stream_deployment_id', { deploymentId });
       } else if (result.kind === 'done') {
-        cliLog?.info('deploy_success', {
+        const degraded = result.event.published === false;
+        // Degraded = committed-live but routing KV not published. Still a
+        // `done` outcome (not an error), but logged distinctly so the
+        // degraded result is greppable in the JSONL trace.
+        cliLog?.info(degraded ? 'deploy_degraded' : 'deploy_success', {
           deploymentId,
           url: result.event.url,
           assets: result.event.assets,
           workers: result.event.workers,
           durationMs: Date.now() - startedAt,
+          degraded,
         });
         return result.event;
       } else if (result.kind === 'error') {
@@ -956,7 +1001,7 @@ export async function runStaticDeploy(
     log.step('Building...');
     cliLog?.info('build_start', { command: preset.buildCommand });
     const buildStartedAt = Date.now();
-    execSync(preset.buildCommand, { cwd: root, stdio: 'inherit' });
+    execSync(preset.buildCommand, { cwd: root, stdio: 'inherit', env: buildEnv() });
     cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
   } else if (skipBuild) {
     cliLog?.info('build_skipped', { reason: 'skipBuild' });
@@ -1034,7 +1079,24 @@ export async function runStaticDeploy(
   const summary = [`${typeLabel} — ${formatKnownAssetSummary(result, skipped)}`];
   note(summary.join('\n'), result.url);
 
+  warnUnpublishedRouting(result);
   outro('Done!');
+}
+
+/**
+ * Surface a persistent warning when a deploy committed live but its routing
+ * KV was not published. Uses `log.warn` (not the spinner) so the warning
+ * survives the following `note`/`outro` calls and the user sees it after the
+ * deploy summary. The deploy is still committed — this is a warning, not a
+ * failure, so the process exit code is unaffected.
+ */
+export function warnUnpublishedRouting(result: StreamDeployResult): void {
+  if (result.published !== false) {
+    return;
+  }
+  log.warn(
+    'Routing was not published for this deploy. The project may be unreachable (first deploy) or still serving the previous deploy. Re-run `void deploy` to publish routing.',
+  );
 }
 
 /**
@@ -1081,6 +1143,7 @@ async function runFrameworkDeploy(
     execSync(voidConfig.inference?.build ?? resolveProjectCommand(root, fwPreset.buildCommand), {
       cwd: root,
       stdio: 'inherit',
+      env: buildEnv(),
     });
     cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
   } else {
@@ -1373,6 +1436,7 @@ async function runFrameworkDeploy(
   // Clean up generated wrapper files
   cleanupWrapper(root);
 
+  warnUnpublishedRouting(result);
   outro('Done!');
 }
 
@@ -1404,7 +1468,7 @@ async function runFullDeploy(
       execSync(resolveProjectCommand(root, 'vite build'), {
         cwd: root,
         stdio: 'inherit',
-        env: { ...process.env, VOID_DEPLOY_PROJECT_ID: config.projectId },
+        env: buildEnv({ VOID_DEPLOY_PROJECT_ID: config.projectId }),
       });
       cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
     } catch (err: unknown) {
@@ -1869,6 +1933,7 @@ async function runFullDeploy(
   }
   note(summary.join('\n'), result.url);
 
+  warnUnpublishedRouting(result);
   outro('Done!');
 }
 
@@ -1895,15 +1960,23 @@ function getGitCommit(root: string): string | null {
       return githubSha;
     }
 
+    // `git status` can invoke a repo-configured `core.fsmonitor` hook, so keep
+    // the CF Access service-token pair out of these git children too (matches
+    // the build spawns and the prior global env scrub).
+    const gitEnv = buildEnv();
     // Check if in a git repo
-    execSync('git rev-parse --is-inside-work-tree', { cwd: root, stdio: 'ignore' });
+    execSync('git rev-parse --is-inside-work-tree', { cwd: root, stdio: 'ignore', env: gitEnv });
     // Check if working tree is clean
-    const status = execSync('git status --porcelain', { cwd: root, encoding: 'utf-8' }).trim();
+    const status = execSync('git status --porcelain', {
+      cwd: root,
+      encoding: 'utf-8',
+      env: gitEnv,
+    }).trim();
     if (status !== '') {
       return null;
     }
     // Get current commit hash
-    return execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf-8' }).trim();
+    return execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf-8', env: gitEnv }).trim();
   } catch {
     return null;
   }
@@ -1963,6 +2036,9 @@ function runDrizzleKitGenerate(root: string, configPath: string): string {
   const result = spawnSync(process.execPath, [drizzleKitBin, 'generate', '--config', configPath], {
     cwd: root,
     encoding: 'utf-8',
+    // drizzle-kit loads the user's drizzle config + schema (user code); keep the
+    // CF Access service token out of it, matching the build spawns.
+    env: buildEnv(),
   });
   const stderr = bufferToString(result.stderr);
   const stdout = bufferToString(result.stdout);

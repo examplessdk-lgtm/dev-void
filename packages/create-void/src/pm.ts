@@ -38,7 +38,11 @@ export function pmExec(pm: PM): ReadonlyArray<string> {
 export function run(argv: ReadonlyArray<string>, cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const [cmd, ...args] = argv;
-    const child = spawn(cmd, args, { stdio: 'inherit', cwd });
+    // On Windows the package-manager entry points (npm, npx, pnpm, yarn, bunx)
+    // are .cmd/.ps1 shims that spawn() cannot resolve without a shell, so it
+    // throws ENOENT. Enable a shell only on win32; every arg here is a fixed
+    // literal (no user input reaches argv), so there is no injection surface.
+    const child = spawn(cmd, args, { stdio: 'inherit', cwd, shell: process.platform === 'win32' });
     child.on('close', (code) => {
       if (code === 0) {
         resolve();

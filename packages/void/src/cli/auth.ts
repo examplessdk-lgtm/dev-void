@@ -163,11 +163,11 @@ function base64Url(buffer: Buffer): string {
   return buffer.toString('base64').replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 
-function createCodeVerifier(): string {
+export function createCodeVerifier(): string {
   return base64Url(randomBytes(32));
 }
 
-function createCodeChallenge(verifier: string): string {
+export function createCodeChallenge(verifier: string): string {
   return base64Url(createHash('sha256').update(verifier).digest());
 }
 
@@ -233,48 +233,88 @@ function page(title: string, message: string): string {
 </head><body><div class="card"><h1>${title}</h1><p>${message}</p></div></body></html>`;
 }
 
-function openBrowser(url: string, exec: typeof import('node:child_process').exec): void {
+export function openBrowser(
+  url: string,
+  execFile: typeof import('node:child_process').execFile,
+): void {
+  // Launch via argv (execFile), never a shell: the URL is passed as a single
+  // argument so shell metacharacters in it can't be interpreted as commands.
+  const ignore = (): void => {};
   if (process.platform === 'win32') {
-    // `start` treats the first quoted arg as window title, pass empty title
-    exec(`start "" "${url}"`);
+    // `start` is a cmd builtin; the empty "" is the (ignored) window title.
+    execFile('cmd.exe', ['/c', 'start', '', url], ignore);
     return;
   }
   if (process.platform === 'darwin') {
-    exec(`open "${url}"`);
+    execFile('open', [url], ignore);
     return;
   }
   // Linux — including WSL2 where `xdg-open` typically has no usable handler.
-  // Try `wslview` (wslu), then `cmd.exe /c start`, then fall back to `xdg-open`.
+  // Try `wslview` (wslu), then fall back to Windows `start` via cmd.exe.
   if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
-    exec(`wslview "${url}" 2>/dev/null || cmd.exe /c start "" "${url}" 2>/dev/null`);
+    execFile('wslview', [url], (error) => {
+      if (error) {
+        execFile('cmd.exe', ['/c', 'start', '', url], ignore);
+      }
+    });
     return;
   }
-  exec(`xdg-open "${url}"`);
+  execFile('xdg-open', [url], ignore);
 }
 
 /**
- * Start a local HTTP server, open the browser to the platform login page,
- * and wait for the OAuth callback with a short-lived code. The CLI exchanges
- * the code itself so the localhost callback never accepts bearer tokens.
+ * Start a local HTTP callback server, open the browser to a caller-built
+ * authorize URL, and wait for the redirect back to `http://localhost:PORT/callback`.
  *
- * `onUrl` is invoked with the login URL once the local server is listening,
- * so callers can show the URL to the user as a manual fallback when the
- * browser fails to open (common on WSL2, headless SSH, Docker, etc.).
+ * The server validates the `state` it appended to the callback URL against the
+ * incoming request, then runs the caller's `finalize` hook INSIDE the request
+ * handler (so the browser only ever sees the success page after the underlying
+ * exchange/link actually succeeded). On finalize success it renders the success
+ * HTML and resolves with finalize's return value; on finalize failure it
+ * renders the same "could not complete" failure page the login flow uses and
+ * rejects with the thrown error. The server is always closed before settling.
+ *
+ * `onUrl` is invoked with the authorize URL once the local server is listening,
+ * so callers can show the URL to the user as a manual fallback when the browser
+ * fails to open (common on WSL2, headless SSH, Docker, etc.). To match the
+ * login flow it fires immediately before the browser is opened.
+ *
+ * `execFile` is injectable so tests can avoid launching a real browser.
  */
-export async function runLogin(
-  root: string = process.cwd(),
-  provider = 'github',
-  onUrl?: (url: string) => void,
-): Promise<string> {
+export async function awaitBrowserCallback<T>(options: {
+  /** Caller-generated; appended to the callback URL and validated on the incoming request. */
+  state: string;
+  /** Given `http://localhost:PORT/callback?state=…`, return the URL to open. */
+  buildAuthUrl: (callback: URL) => Promise<string> | string;
+  /**
+   * Runs INSIDE the request handler, after state/error/validate checks pass and
+   * BEFORE the success page is rendered. Resolve to settle the outer promise
+   * with this value (success page shown); throw to render the failure page and
+   * reject the outer promise with the thrown error.
+   */
+  finalize: (params: URLSearchParams) => Promise<T>;
+  /** Map an `?error=…` query to a user message (return null to ignore). */
+  describeError?: (params: URLSearchParams) => string | null;
+  /**
+   * Reject an otherwise-valid callback request (renders a 400 page) WITHOUT
+   * settling, so the server keeps listening for a subsequent valid callback.
+   * Used by login to reject `?token=` and missing-`code` requests. Return a
+   * message to reject, or null to accept.
+   */
+  validate?: (params: URLSearchParams) => string | null;
+  /** Optional, invoked with the authorize URL before the browser is opened. */
+  onUrl?: (url: string) => void;
+  /** Default 5 minutes. */
+  timeoutMs?: number;
+  /** Injectable for tests; defaults to the real `node:child_process` `execFile`. */
+  execFile?: typeof import('node:child_process').execFile;
+}): Promise<T> {
   const http = await import('node:http');
-  const { exec } = await import('node:child_process');
+  const { state, buildAuthUrl, finalize, describeError, validate, onUrl } = options;
+  const timeoutMs = options.timeoutMs ?? 5 * 60 * 1000;
+  const execFile = options.execFile ?? (await import('node:child_process')).execFile;
 
-  const apiUrl = getApiUrl(root);
-  const state = randomBytes(32).toString('hex');
-  const codeVerifier = createCodeVerifier();
-  const codeChallenge = createCodeChallenge(codeVerifier);
-
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     let settled = false;
 
     const fail = (error: Error): void => {
@@ -286,13 +326,13 @@ export async function runLogin(
       reject(error);
     };
 
-    const succeed = (token: string): void => {
+    const succeed = (result: T): void => {
       if (settled) {
         return;
       }
       settled = true;
       server.close();
-      resolve(token);
+      resolve(result);
     };
 
     const server = http.createServer(async (req, res) => {
@@ -309,79 +349,134 @@ export async function runLogin(
         return;
       }
 
-      const error = url.searchParams.get('error');
-      if (error === 'signup_restricted') {
+      const errorMessage = describeError?.(url.searchParams);
+      if (errorMessage) {
         res.writeHead(403, { 'Content-Type': 'text/html' });
-        res.end(
-          page('Signup restricted', 'Your email is not on the approved list for this environment.'),
-        );
-        fail(
-          new Error(
-            'Signup restricted: your email is not on the approved list for this environment.',
-          ),
-        );
+        res.end(page('Login failed', errorMessage));
+        fail(new Error(errorMessage));
         return;
       }
 
-      if (url.searchParams.has('token')) {
+      // Reject-but-keep-listening: invalid request shapes (e.g. a stray
+      // `?token=`, or a redirect that arrived without a code). The server
+      // stays open so the genuine callback can still complete.
+      const invalidMessage = validate?.(url.searchParams);
+      if (invalidMessage) {
         res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end(page('Login failed', 'Invalid login callback. Please try again.'));
+        res.end(page('Login failed', invalidMessage));
         return;
       }
 
-      const code = url.searchParams.get('code');
-      if (!code) {
-        res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end(page('Login failed', 'No authorization code received. Please try again.'));
-        return;
-      }
-
-      let token: string;
+      // Finalize INSIDE the request path so the browser only sees the success
+      // page once the underlying exchange/link succeeds. A finalize failure
+      // (expired code, API error, 409 conflict, etc.) renders the failure page
+      // and rejects — matching the base login flow's exchange-in-request-path
+      // behavior. Guard against the timeout racing the in-flight finalize.
+      let result: T;
       try {
-        token = await exchangeLoginCode(apiUrl, code, state, codeVerifier);
+        result = await finalize(url.searchParams);
       } catch (err) {
+        if (settled) {
+          return;
+        }
         res.writeHead(400, { 'Content-Type': 'text/html' });
         res.end(page('Login failed', 'Could not complete login. Please try again.'));
         fail(err instanceof Error ? err : new Error('auth: Failed to complete login.'));
         return;
       }
 
+      if (settled) {
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(page('Login successful!', 'You can close this tab and return to the terminal.'));
-      succeed(token);
+      succeed(result);
     });
 
     // Close immediately after callback — don't wait for keep-alive timeout
     server.on('connection', (socket) => socket.unref());
 
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(0, '127.0.0.1', async () => {
       const addr = server.address();
       if (!addr || typeof addr === 'string') {
-        reject(new Error('auth: Failed to start local callback server.'));
+        fail(new Error('auth: Failed to start local callback server.'));
         return;
       }
 
       const port = addr.port;
-      const redirect = new URL(`http://localhost:${port}/callback`);
-      redirect.searchParams.set('state', state);
+      const callback = new URL(`http://localhost:${port}/callback`);
+      callback.searchParams.set('state', state);
 
+      let authUrl: string;
+      try {
+        authUrl = await buildAuthUrl(callback);
+      } catch (err) {
+        fail(err instanceof Error ? err : new Error('auth: Failed to build authorize URL.'));
+        return;
+      }
+
+      onUrl?.(authUrl);
+      openBrowser(authUrl, execFile);
+    });
+
+    const timeout = setTimeout(() => {
+      fail(new Error('auth: Login timed out after 5 minutes. Try again.'));
+    }, timeoutMs);
+    timeout.unref();
+  });
+}
+
+/**
+ * Start a local HTTP server, open the browser to the platform login page,
+ * and wait for the OAuth callback with a short-lived code. The CLI exchanges
+ * the code itself so the localhost callback never accepts bearer tokens.
+ *
+ * `onUrl` is invoked with the login URL once the local server is listening,
+ * so callers can show the URL to the user as a manual fallback when the
+ * browser fails to open (common on WSL2, headless SSH, Docker, etc.).
+ */
+export async function runLogin(
+  root: string = process.cwd(),
+  provider = 'github',
+  onUrl?: (url: string) => void,
+): Promise<string> {
+  const { execFile } = await import('node:child_process');
+
+  const apiUrl = getApiUrl(root);
+  const state = randomBytes(32).toString('hex');
+  const codeVerifier = createCodeVerifier();
+  const codeChallenge = createCodeChallenge(codeVerifier);
+
+  // The exchange runs INSIDE the request handler (via finalize), so an exchange
+  // failure renders the failure page — exactly as the base login flow did.
+  return awaitBrowserCallback<string>({
+    state,
+    execFile,
+    onUrl,
+    buildAuthUrl: (callback) => {
       const loginUrl = new URL('auth/login', apiUrl.endsWith('/') ? apiUrl : `${apiUrl}/`);
-      loginUrl.searchParams.set('redirect', redirect.href);
+      loginUrl.searchParams.set('redirect', callback.href);
       loginUrl.searchParams.set('provider', provider);
       loginUrl.searchParams.set('code_challenge', codeChallenge);
       loginUrl.searchParams.set('code_challenge_method', 'S256');
-
-      onUrl?.(loginUrl.href);
-      openBrowser(loginUrl.href, exec);
-    });
-
-    // 5-minute timeout
-    const timeout = setTimeout(
-      () => {
-        fail(new Error('auth: Login timed out after 5 minutes. Try again.'));
-      },
-      5 * 60 * 1000,
-    );
-    timeout.unref();
+      return loginUrl.href;
+    },
+    describeError: (p) =>
+      p.get('error') === 'signup_restricted'
+        ? 'Signup restricted: your email is not on the approved list for this environment.'
+        : null,
+    // Keep listening but reject these request shapes (preserves the original
+    // localhost server behavior): a stray `?token=` is never honored, and a
+    // callback without a `code` is ignored until the real one arrives.
+    validate: (p) => {
+      if (p.has('token')) {
+        return 'Invalid login callback. Please try again.';
+      }
+      if (!p.get('code')) {
+        return 'No authorization code received. Please try again.';
+      }
+      return null;
+    },
+    finalize: (params) => exchangeLoginCode(apiUrl, params.get('code')!, state, codeVerifier),
   });
 }

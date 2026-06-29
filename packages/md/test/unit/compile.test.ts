@@ -38,6 +38,44 @@ describe('compile', () => {
     expect(result.html).toContain('<span');
   });
 
+  // The 0-based indices of code lines that carry the shiki `highlighted` class.
+  // (Shiki emits one `<span class="line">` per line plus a trailing empty line,
+  // so we compare highlighted positions rather than a fixed line count.)
+  const highlightedLineIndices = (html: string): ReadonlyArray<number> =>
+    [...html.matchAll(/<span class="(line[^"]*)"/g)]
+      .map((match, index) => (match[1].includes('highlighted') ? index : -1))
+      .filter((index) => index >= 0);
+
+  it('highlights a single {N} fence line (markdown-it-attrs must not eat it)', async () => {
+    const result = await compile('```ts {2}\nconst a = 1;\nconst b = 2;\nconst c = 3;\n```');
+    expect(highlightedLineIndices(result.html)).toEqual([1]);
+  });
+
+  it('highlights a {N-M} line range and a combined {a,c-d} set', async () => {
+    const range = await compile('```ts {2-3}\nlet a = 1;\nlet b = 2;\nlet c = 3;\nlet d = 4;\n```');
+    expect(highlightedLineIndices(range.html)).toEqual([1, 2]);
+
+    const combined = await compile(
+      '```ts {1,3-4}\nlet a = 1;\nlet b = 2;\nlet c = 3;\nlet d = 4;\n```',
+    );
+    expect(highlightedLineIndices(combined.html)).toEqual([0, 2, 3]);
+  });
+
+  it('highlights {N} even for languages without comment syntax (e.g. text)', async () => {
+    const result = await compile('```text {1}\nalpha\nbeta\n```');
+    expect(highlightedLineIndices(result.html)).toEqual([0]);
+  });
+
+  it('leaves fences without curly meta unhighlighted', async () => {
+    const result = await compile('```ts\nconst a = 1;\nconst b = 2;\n```');
+    expect(result.html).not.toContain('highlighted');
+  });
+
+  it('still applies markdown-it-attrs to non-fence content', async () => {
+    const result = await compile('Hello {.greeting}\n');
+    expect(result.html).toContain('greeting');
+  });
+
   it('converts emoji shortcodes', async () => {
     const result = await compile('Hello :tada:');
     expect(result.html).toContain('\u{1F389}'); // 🎉
