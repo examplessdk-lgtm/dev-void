@@ -32,6 +32,8 @@ export function parseDomainArgs(args: Array<string>): DomainArgs {
       projectSlug = rest[++i];
     } else if (rest[i] === '--verbose') {
       verbose = true;
+    } else if (rest[i].startsWith('-')) {
+      throw new Error(`domain: Unknown flag '${rest[i]}'.`);
     } else if (!hostname) {
       hostname = rest[i];
     }

@@ -102,7 +102,7 @@ Use flags to run individual steps without prompts:
 
 Flags can be combined. When any flag is provided, only the specified steps run and interactive prompts are skipped.
 
-The `--github` workflow uses GitHub OIDC: you connect the repository to your Void project once (in the dashboard), and pushes to `main` deploy automatically. There is no `VOID_TOKEN` secret to create or rotate. To target staging, set a `VOID_API_URL` repository variable to `https://api.staging.void.cloud`.
+The `--github` workflow uses GitHub OIDC: you connect the repository to your Void project once with `void github connect <project> --repo <owner/repo> --executor github_actions` (see the GitHub section below), and pushes to `main` deploy automatically. There is no `VOID_TOKEN` secret to create or rotate. To target staging, set a `VOID_API_URL` repository variable to `https://api.staging.void.cloud`.
 
 For projects that already have `"extends"`, `void init --tsconfig` preserves the existing config and adds `./.void/tsconfig.json`. If the existing config defines `files` or `compilerOptions.paths`, Void also merges its generated declaration files and aliases into the root config because TypeScript replaces those fields across `extends` instead of deeply merging them.
 

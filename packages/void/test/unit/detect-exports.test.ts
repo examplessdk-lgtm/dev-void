@@ -60,6 +60,26 @@ export function transform() {}`,
     expect(detectHttpExports(path)).toEqual(['GET']);
   });
 
+  it('ignores a type-only export statement', () => {
+    // `export type { GET }` erases at runtime, so it must not register a GET route.
+    const path = writeRoute(
+      'hello.ts',
+      `type GET = () => Response;
+export type { GET };`,
+    );
+    expect(detectHttpExports(path)).toEqual([]);
+  });
+
+  it('ignores an inline type-only specifier but keeps value specifiers', () => {
+    const path = writeRoute(
+      'hello.ts',
+      `const POST = () => "ok";
+type GET = () => Response;
+export { POST, type GET };`,
+    );
+    expect(detectHttpExports(path)).toEqual(['POST']);
+  });
+
   it('returns empty array for no HTTP exports', () => {
     const path = writeRoute('hello.ts', 'export default () => "ok";');
     expect(detectHttpExports(path)).toEqual([]);

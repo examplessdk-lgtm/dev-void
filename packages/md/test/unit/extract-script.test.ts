@@ -133,4 +133,33 @@ const count = ref(0)
     const result = extractScript(source);
     expect(result.clientCode).toBe(`import { ref } from "vue"\n\nconst count = ref(0)`);
   });
+
+  it('extracts island imports with a trailing comma in the attributes', () => {
+    const source = `<script>
+import Counter from "./Counter.vue" with { island: "load", }
+</script>
+
+# Hello`;
+    const result = extractScript(source);
+    expect(result.islandImports).toHaveLength(1);
+    expect(result.islandImports[0]).toEqual({
+      name: 'Counter',
+      specifier: './Counter.vue',
+      strategy: 'load',
+    });
+    // the island import line is stripped from client code (not leaked as an orphan import)
+    expect(result.clientCode).toBeNull();
+  });
+
+  it('extracts island imports whose component name starts with $ or _', () => {
+    const source = `<script>
+import $Counter from "./Counter.vue" with { island: "load" }
+</script>
+
+# Hello`;
+    const result = extractScript(source);
+    expect(result.islandImports).toHaveLength(1);
+    expect(result.islandImports[0].name).toBe('$Counter');
+    expect(result.clientCode).toBeNull();
+  });
 });

@@ -101,4 +101,32 @@ describe('parseProjectArgs', () => {
       );
     });
   });
+
+  describe('unknown-flag rejection', () => {
+    // status/link/rollback/cancel previously captured a leading flag as the positional id.
+    it('rejects an unknown flag for status instead of capturing it as the name', () => {
+      expect(() => parseProjectArgs(['status', '--foo'])).toThrow("project: Unknown flag '--foo'.");
+    });
+
+    it('rejects an unknown flag for link', () => {
+      expect(() => parseProjectArgs(['link', '--foo'])).toThrow("project: Unknown flag '--foo'.");
+    });
+
+    it('rejects an unknown flag for rollback', () => {
+      expect(() => parseProjectArgs(['rollback', '--foo'])).toThrow(
+        "project: Unknown flag '--foo'.",
+      );
+    });
+
+    it('rejects an unknown flag for cancel', () => {
+      expect(() => parseProjectArgs(['cancel', '--foo'])).toThrow("project: Unknown flag '--foo'.");
+    });
+
+    it('still accepts a valid positional id', () => {
+      expect(parseProjectArgs(['status', 'my-app'])).toEqual({
+        subcommand: 'status',
+        name: 'my-app',
+      });
+    });
+  });
 });

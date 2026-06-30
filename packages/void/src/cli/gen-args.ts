@@ -57,12 +57,16 @@ const COLUMN_TYPES = new Set(['string', 'text', 'datetime', 'integer', 'boolean'
 
 const VALID_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 
+// Generated-file name validators (hoisted once); *_HYPHENS variant also allows hyphens (cron/queue/middleware).
+const NAME_RE = /^[a-z_][a-z0-9_]*$/;
+const NAME_WITH_HYPHENS_RE = /^[a-z_][a-z0-9_-]*$/;
+
 function parseModelArgs(args: Array<string>): GenArgs {
   const [name, ...rest] = args;
   if (!name) {
     throw new Error('gen: Usage: void gen model <name> [columns...].');
   }
-  if (!/^[a-z_][a-z0-9_]*$/.test(name)) {
+  if (!NAME_RE.test(name)) {
     throw new Error(
       'gen: Model name must be lowercase alphanumeric with underscores and no leading digits.',
     );
@@ -94,7 +98,7 @@ function parseMigrationArgs(args: Array<string>): GenArgs {
   if (extra) {
     throw new Error(`gen: Unexpected argument '${extra}'.`);
   }
-  if (!/^[a-z_][a-z0-9_]*$/.test(name)) {
+  if (!NAME_RE.test(name)) {
     throw new Error(
       'gen: Migration name must be lowercase alphanumeric with underscores and no leading digits.',
     );
@@ -145,6 +149,11 @@ function parseMiddlewareArgs(args: Array<string>): GenArgs {
   if (extra) {
     throw new Error(`gen: Unexpected argument '${extra}'.`);
   }
+  if (!NAME_WITH_HYPHENS_RE.test(name)) {
+    throw new Error(
+      'gen: Middleware name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
+    );
+  }
   return { subcommand: 'middleware', name };
 }
 
@@ -181,7 +190,7 @@ function parseCronArgs(args: Array<string>): GenArgs {
   if (extra) {
     throw new Error(`gen: Unexpected argument '${extra}'.`);
   }
-  if (!/^[a-z_][a-z0-9_-]*$/.test(name)) {
+  if (!NAME_WITH_HYPHENS_RE.test(name)) {
     throw new Error(
       'gen: Cron name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
     );
@@ -197,7 +206,7 @@ function parseQueueArgs(args: Array<string>): GenArgs {
   if (extra) {
     throw new Error(`gen: Unexpected argument '${extra}'.`);
   }
-  if (!/^[a-z_][a-z0-9_-]*$/.test(name)) {
+  if (!NAME_WITH_HYPHENS_RE.test(name)) {
     throw new Error(
       'gen: Queue name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
     );
