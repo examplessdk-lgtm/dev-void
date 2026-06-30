@@ -45,4 +45,25 @@ describe('CLI help resolver', () => {
     expect(hasHelpPage(['missing'])).toBe(false);
     expect(hasHelpPage(['db', 'missing'])).toBe(false);
   });
+
+  it('resolves github command help requests', () => {
+    expect(getHelpPath(['help', 'github'])).toEqual(['github']);
+    expect(getHelpPath(['github', '--help'])).toEqual(['github']);
+    expect(getHelpPath(['github', '-h'])).toEqual(['github']);
+  });
+
+  it('resolves github subcommand help requests', () => {
+    expect(getHelpPath(['help', 'github', 'install'])).toEqual(['github', 'install']);
+    expect(getHelpPath(['help', 'github', 'installations'])).toEqual(['github', 'installations']);
+    expect(getHelpPath(['help', 'github', 'connect'])).toEqual(['github', 'connect']);
+    expect(getHelpPath(['github', 'connect', '--help'])).toEqual(['github', 'connect']);
+  });
+
+  it('tracks known github help pages', () => {
+    expect(hasHelpPage(['github'])).toBe(true);
+    expect(hasHelpPage(['github', 'install'])).toBe(true);
+    expect(hasHelpPage(['github', 'installations'])).toBe(true);
+    expect(hasHelpPage(['github', 'connect'])).toBe(true);
+    expect(hasHelpPage(['github', 'missing'])).toBe(false);
+  });
 });

@@ -651,6 +651,8 @@ export async function createPageNavigationEngine(
             return r.json();
           });
         });
+        // Drop the stale entry so the revalidated data lands (set() won't overwrite a usable one).
+        _prefetchCache.flush(fetchUrl, method);
         _prefetchCache.set(fetchUrl, method, bgFetch, PREFETCH_DEFAULT_CACHE_FOR);
       }
     } else {

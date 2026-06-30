@@ -184,6 +184,31 @@ export type DomainStatusResponse = DomainResponse & {
   awaiting_deployment?: boolean;
 };
 
+export type GithubInstallation = {
+  id: string;
+  installation_id: string;
+  account_login: string;
+  account_id: string;
+  account_type: 'User' | 'Organization';
+  repositories: Array<{ full_name: string; id: number }>;
+  repository_selection: 'all' | 'selected';
+  status: 'active' | 'suspended' | 'deleted';
+  created_at: string;
+  updated_at: string;
+};
+
+export type GithubConnection = {
+  id: string;
+  project_id: string;
+  installation_id: string;
+  repo_full_name: string;
+  repository_id: string | null;
+  branch: string;
+  build_executor: 'container' | 'github_actions';
+  created_at: string;
+  updated_at: string;
+};
+
 /**
  * Asset declaration shape for `POST /:id/deploy/upload-urls`. Each entry
  * carries both hashes the platform needs:
@@ -850,5 +875,97 @@ export class PlatformClient {
 
     const json = (await res.json()) as { data: Array<LogEntry> };
     return json.data;
+  }
+
+  async getGithubInstallUrl(): Promise<{ url: string }> {
+    const res = await fetch(`${this.baseUrl}/github/install-url`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to get GitHub install URL', res);
+    }
+
+    return res.json();
+  }
+
+  async listGithubInstallations(): Promise<Array<GithubInstallation>> {
+    const res = await fetch(`${this.baseUrl}/github/installations`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to list GitHub installations', res);
+    }
+
+    return res.json();
+  }
+
+  async connectGithub(
+    projectId: string,
+    body: {
+      installationId: string;
+      repoFullName: string;
+      branch?: string;
+      buildExecutor?: 'container' | 'github_actions';
+    },
+  ): Promise<GithubConnection> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/github`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.authHeaders,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to connect GitHub repository', res);
+    }
+
+    return res.json();
+  }
+
+  async getGithubLinkUrl(redirect: string, codeChallenge: string): Promise<{ url: string }> {
+    const params = new URLSearchParams({
+      redirect,
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
+    });
+    const res = await fetch(`${this.baseUrl}/github/link-url?${params}`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to start GitHub link', res);
+    }
+
+    return res.json();
+  }
+
+  async completeGithubLink(
+    linkCode: string,
+    codeVerifier: string,
+  ): Promise<{ status: 'linked' | 'already_linked' }> {
+    const res = await fetch(`${this.baseUrl}/github/link/complete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.authHeaders,
+      },
+      body: JSON.stringify({ link_code: linkCode, code_verifier: codeVerifier }),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to complete GitHub link', res);
+    }
+
+    return res.json();
   }
 }
