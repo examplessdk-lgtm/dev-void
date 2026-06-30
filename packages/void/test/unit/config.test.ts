@@ -653,6 +653,22 @@ describe('readConfig redirects', () => {
     }
   });
 
+  it('schema.json rewrite/fallback dest pattern rejects protocol-relative "//"', () => {
+    const schema = JSON.parse(readFileSync(join(import.meta.dirname, '../../schema.json'), 'utf8'));
+    for (const field of ['rewrites', 'fallbacks']) {
+      const destPattern = new RegExp(
+        schema.properties.routing.properties[field].patternProperties['^(/|https://)'].pattern,
+      );
+      // Runtime accepts internal paths and rejects protocol-relative dests + query strings.
+      for (const dest of ['/en/docs', '/', '/index.html']) {
+        expect(destPattern.test(dest)).toBe(true);
+      }
+      for (const dest of ['//evil.com/x', '//', '///x', '/x?a=1', 'en/docs']) {
+        expect(destPattern.test(dest)).toBe(false);
+      }
+    }
+  });
+
   it('publishes schema.json as a package file and subpath export', () => {
     const packageJson = JSON.parse(
       readFileSync(join(import.meta.dirname, '../../package.json'), 'utf8'),

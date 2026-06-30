@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { runLogin } from '../../src/cli/auth.ts';
 
-const mockExec = vi.fn();
+const mockExecFile = vi.fn();
 const exchangeRequests: Array<{
   url: string;
   headers: Record<string, string>;
@@ -20,11 +20,11 @@ function codeChallengeFor(verifier: string): string {
 }
 
 vi.mock('node:child_process', () => ({
-  exec: (...args: Array<unknown>) => mockExec(...args),
+  execFile: (...args: Array<unknown>) => mockExecFile(...args),
 }));
 
 beforeEach(() => {
-  mockExec.mockReset();
+  mockExecFile.mockReset();
   exchangeRequests.length = 0;
   process.env.VOID_API_URL = 'https://api.test';
 
@@ -136,6 +136,46 @@ describe('runLogin', () => {
     const validResponse = await fetch(validUrl);
     expect(validResponse.status).toBe(200);
     await expect(loginPromise).resolves.toBe('real-token');
+  });
+
+  it('shows the failure page and throws when the code exchange fails (F3 regression)', async () => {
+    // Override fetch so the localhost callback still hits the real server, but
+    // the API token exchange returns a non-ok response (expired code, etc.).
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        input instanceof Request ? input.url : input instanceof URL ? input.href : input.toString();
+      if (url.startsWith('http://localhost:')) {
+        return originalFetch(input, init);
+      }
+      return new Response('expired', { status: 400 });
+    });
+
+    let resolveLoginUrl!: (url: string) => void;
+    const loginUrlPromise = new Promise<string>((resolve) => {
+      resolveLoginUrl = resolve;
+    });
+
+    const loginPromise = runLogin('/project', 'github', resolveLoginUrl);
+    // Attach the rejection assertion up front so the exchange failure doesn't
+    // surface as an unhandled rejection.
+    const rejection = expect(loginPromise).rejects.toThrow(/Failed to exchange login code/);
+
+    const loginUrl = new URL(await loginUrlPromise);
+    const redirect = loginUrl.searchParams.get('redirect');
+    expect(redirect).toBeTruthy();
+
+    const validUrl = new URL(redirect!);
+    validUrl.searchParams.set('code', 'real-code');
+
+    const validResponse = await fetch(validUrl);
+    // The exchange ran INSIDE the request handler and failed → failure page,
+    // never the success page.
+    expect(validResponse.status).toBe(400);
+    const body = await validResponse.text();
+    expect(body).not.toContain('successful');
+    expect(body).toContain('Could not complete');
+
+    await rejection;
   });
 
   it('sends Cloudflare Access headers when exchanging the login code', async () => {

@@ -1482,7 +1482,7 @@ describe('isScaffoldableEmptyProject', () => {
       expect(viteConfig).toContain('import { voidPlugin } from "void";');
       expect(viteConfig).toContain('plugins: [voidPlugin()]');
       expect(mockConfirm).toHaveBeenCalledWith({
-        message: 'Create .github/workflows/deploy.yml to deploy on pushes to main?',
+        message: 'Create .github/workflows/void-deploy.yml to deploy on pushes to main?',
       });
       expect(mockSpawnSync).toHaveBeenCalledWith(
         'npm',
@@ -1498,7 +1498,7 @@ describe('isScaffoldableEmptyProject', () => {
     }
   });
 
-  it('explains GitHub Actions token setup as an after-init step', async () => {
+  it('scaffolds an OIDC deploy workflow with a VOID_PROJECT placeholder when no project is linked', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       writeFileSync(
@@ -1508,13 +1508,156 @@ describe('isScaffoldableEmptyProject', () => {
 
       await runInitCommand(root, { github: true, tsconfig: false, agents: false });
 
-      expect(readFileSync(join(root, '.github', 'workflows', 'deploy.yml'), 'utf-8')).toContain(
-        'VOID_TOKEN: ${{ secrets.VOID_TOKEN }}',
-      );
+      const yaml = readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8');
+      // OIDC, not a stored secret.
+      expect(yaml).not.toContain('secrets.VOID_TOKEN');
+      expect(yaml).toContain('id-token: write');
+      expect(yaml).toContain('contents: read');
+      expect(yaml).toContain('$ACTIONS_ID_TOKEN_REQUEST_URL&audience=void');
+      expect(yaml).toContain('$VOID_API_URL/auth/github-oidc');
+      // No linked project → placeholder repository variable.
+      expect(yaml).toContain('VOID_PROJECT: ${{ vars.VOID_PROJECT }}');
+      expect(yaml).toContain("VOID_API_URL: ${{ vars.VOID_API_URL || 'https://api.void.cloud' }}");
+      // npm project → npx runner, deploy passes the project slug.
+      expect(yaml).toContain('npx void deploy --project "$VOID_PROJECT"');
+      // Latest-push-wins concurrency keyed by repo + ref (no env context, which
+      // is unavailable to workflow-level concurrency).
+      expect(yaml).toContain('concurrency:');
+      expect(yaml).toContain('group: void-deploy-${{ github.repository }}-${{ github.ref }}');
+      expect(yaml).toContain('cancel-in-progress: true');
       expect(mockNote).toHaveBeenCalledWith(
-        expect.stringContaining('After init completes, run `npx void auth token`'),
-        'GitHub Actions deploy token',
+        expect.stringContaining('Set a VOID_PROJECT repository variable'),
+        'GitHub Actions OIDC deploy',
       );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('bakes the linked project slug into the OIDC deploy workflow', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'existing-app', private: true }, null, 2) + '\n',
+      );
+      mkdirSync(join(root, '.void'), { recursive: true });
+      writeFileSync(
+        join(root, '.void', 'project.json'),
+        JSON.stringify({ projectId: 'prj_123', slug: 'my-app' }, null, 2) + '\n',
+      );
+
+      await runInitCommand(root, { github: true, tsconfig: false, agents: false });
+
+      const yaml = readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8');
+      expect(yaml).toContain('VOID_PROJECT: my-app');
+      expect(yaml).not.toContain('vars.VOID_PROJECT');
+      // Latest-push-wins concurrency keyed by repo + ref (no env context, which
+      // is unavailable to workflow-level concurrency).
+      expect(yaml).toContain('concurrency:');
+      expect(yaml).toContain('group: void-deploy-${{ github.repository }}-${{ github.ref }}');
+      expect(yaml).toContain('cancel-in-progress: true');
+      expect(mockNote).toHaveBeenCalledWith(
+        expect.stringContaining('"my-app"'),
+        'GitHub Actions OIDC deploy',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('bakes the slug into void-deploy.yml when a project is linked during the same interactive init', async () => {
+    // Step 8 (GitHub Actions) runs before Step 9 (project link), so the workflow
+    // is first written with the `${{ vars.VOID_PROJECT }}` placeholder. After the
+    // interactive link resolves a slug it must be patched into the workflow.
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'existing-astro-app',
+            private: true,
+            dependencies: { astro: '^5.0.0' },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      mockGetToken.mockReturnValue('existing_token');
+      mockListProjects.mockResolvedValueOnce([
+        {
+          id: 'proj_789',
+          user_id: 'user_1',
+          slug: 'linked-app',
+          type: 'worker',
+          created_at: '2026-03-27T00:00:00.000Z',
+          custom_domain: null,
+        },
+      ]);
+      // database → none, agent → generic, then the project-selection prompt → proj_789.
+      mockSelect
+        .mockResolvedValueOnce('none')
+        .mockResolvedValueOnce('generic')
+        .mockResolvedValueOnce('proj_789');
+      // GitHub Actions confirm → true; deploy-setup link confirm → true;
+      // overwrite-existing-project confirm → true.
+      mockConfirm
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true);
+
+      await runInitCommand(root);
+
+      // The link was written...
+      expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+        projectId: 'proj_789',
+        slug: 'linked-app',
+      });
+      // ...and the workflow has the resolved slug, not the placeholder.
+      const yaml = readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8');
+      expect(yaml).toContain('VOID_PROJECT: linked-app');
+      expect(yaml).not.toContain('vars.VOID_PROJECT');
+      expect(yaml).not.toContain('Set a VOID_PROJECT repository variable');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('writes void-deploy.yml and never touches an existing deploy.yml (no migration)', async () => {
+    // `void init --github` does not migrate, rename, or delete any pre-existing
+    // `.github/workflows/deploy.yml` — it only writes `void-deploy.yml`.
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'existing-app', private: true }, null, 2) + '\n',
+      );
+      mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+      const existingPath = join(root, '.github', 'workflows', 'deploy.yml');
+      const existing = `name: CI
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm test
+`;
+      writeFileSync(existingPath, existing);
+
+      await runInitCommand(root, { github: true, tsconfig: false, agents: false });
+
+      // The pre-existing workflow is preserved byte-for-byte...
+      expect(existsSync(existingPath)).toBe(true);
+      expect(readFileSync(existingPath, 'utf-8')).toBe(existing);
+      // ...and void-deploy.yml was written alongside it.
+      const workflows = readdirSync(join(root, '.github', 'workflows')).sort();
+      expect(workflows).toEqual(['deploy.yml', 'void-deploy.yml']);
+      const oidc = readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8');
+      expect(oidc).toContain('$VOID_API_URL/auth/github-oidc');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -3965,7 +4108,7 @@ export default config;
       await runInitCommand(subpkgRoot, { github: true, tsconfig: false, agents: false });
 
       // The deploy.yml MUST NOT have been written under the subpackage.
-      const deployYmlPath = join(subpkgRoot, '.github', 'workflows', 'deploy.yml');
+      const deployYmlPath = join(subpkgRoot, '.github', 'workflows', 'void-deploy.yml');
       expect(existsSync(deployYmlPath)).toBe(false);
     } finally {
       rmSync(wsroot, { recursive: true, force: true });
@@ -4010,7 +4153,7 @@ export default config;
 
         await runInitCommand(subpkgRoot, { github: true, tsconfig: false, agents: false });
 
-        const deployYmlPath = join(subpkgRoot, '.github', 'workflows', 'deploy.yml');
+        const deployYmlPath = join(subpkgRoot, '.github', 'workflows', 'void-deploy.yml');
         expect(existsSync(deployYmlPath)).toBe(false);
       } finally {
         rmSync(wsroot, { recursive: true, force: true });
@@ -4152,7 +4295,7 @@ export default config;
 
       // No `.github/workflows/deploy.yml` was written under the
       // subpackage — that file would never be read by GitHub.
-      const deployYmlPath = join(subpkgRoot, '.github', 'workflows', 'deploy.yml');
+      const deployYmlPath = join(subpkgRoot, '.github', 'workflows', 'void-deploy.yml');
       expect(existsSync(deployYmlPath)).toBe(false);
 
       // The workspace skip note still fired.

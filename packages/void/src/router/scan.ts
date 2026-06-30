@@ -46,6 +46,27 @@ function parseMiddlewareDefinitions(files: Array<string>): Array<MiddlewareDefin
     .sort((a, b) => a.order - b.order);
 }
 
+// Order by specificity (static < dynamic param < catch-all, depth-first); Hono resolves overlap by registration order.
+function compareRouteSpecificity(a: RouteDefinition, b: RouteDefinition): number {
+  if (a.catchAll !== b.catchAll) {
+    return a.catchAll ? 1 : -1;
+  }
+  const aSegments = a.pattern.split('/');
+  const bSegments = b.pattern.split('/');
+  const shared = Math.min(aSegments.length, bSegments.length);
+  for (let i = 0; i < shared; i++) {
+    const aDynamic = aSegments[i].startsWith(':') || aSegments[i] === '*';
+    const bDynamic = bSegments[i].startsWith(':') || bSegments[i] === '*';
+    if (aDynamic !== bDynamic) {
+      return aDynamic ? 1 : -1;
+    }
+    if (aSegments[i] !== bSegments[i]) {
+      return aSegments[i].localeCompare(bSegments[i]);
+    }
+  }
+  return aSegments.length - bSegments.length;
+}
+
 /**
  * Scan routes/ and middleware/ directories and return a structured manifest.
  * Files starting with _ are ignored.
@@ -77,13 +98,8 @@ export async function scanRoutes(
       route.methods = detectHttpExports(join(routesDir, f));
       return route;
     })
-    // Sort: static routes before dynamic, catch-all last
-    .sort((a, b) => {
-      if (a.catchAll !== b.catchAll) {
-        return a.catchAll ? 1 : -1;
-      }
-      return a.pattern.localeCompare(b.pattern);
-    });
+    // Sort by specificity: static routes before dynamic params, catch-all last.
+    .sort(compareRouteSpecificity);
 
   // Parse middleware, sorted by numeric prefix
   const middleware = parseMiddlewareDefinitions(middlewareFiles);
@@ -120,10 +136,5 @@ export function scanRoutePatternsSync(
     .filter((f) => !isWebSocketPatternFile(f))
     .filter((f) => !f.split('/').some((s) => s.startsWith('_')))
     .map((f) => parseRouteFilename(f))
-    .sort((a, b) => {
-      if (a.catchAll !== b.catchAll) {
-        return a.catchAll ? 1 : -1;
-      }
-      return a.pattern.localeCompare(b.pattern);
-    });
+    .sort(compareRouteSpecificity);
 }

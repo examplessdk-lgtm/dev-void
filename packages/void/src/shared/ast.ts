@@ -61,12 +61,16 @@ export type AstFunctionDeclaration = AstNode & {
 export type AstExportSpecifier = AstNode & {
   exported?: AstNode;
   local?: AstNode;
+  /** "type" for `export { type X }`, "value" (or undefined) otherwise. */
+  exportKind?: string;
 };
 
 export type AstExportNamedDeclaration = AstNode & {
   type: 'ExportNamedDeclaration';
   declaration?: AstNode;
   specifiers?: Array<AstExportSpecifier>;
+  /** "type" for `export type { X }`, "value" (or undefined) otherwise. */
+  exportKind?: string;
 };
 
 export type AstExportDefaultDeclaration = AstNode & {
