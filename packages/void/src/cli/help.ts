@@ -28,11 +28,15 @@ const HELP_TREE: HelpTree = {
     options: [
       { command: '--agents', description: 'Set up agent instructions, skills, and MCP config' },
       { command: '--tsconfig', description: 'Only update tsconfig.json' },
-      { command: '--github', description: 'Only create GitHub Actions workflow' },
+      {
+        command: '--github',
+        description: 'Only create the GitHub Actions deploy workflow (OIDC, no stored token)',
+      },
     ],
     examples: [
       { command: 'void init', description: 'Scaffold or configure the current project' },
       { command: 'void init --agents', description: 'Install agent instructions and MCP config' },
+      { command: 'void init --github', description: 'Scaffold the GitHub Actions deploy workflow' },
     ],
   },
   deploy: {
@@ -181,6 +185,57 @@ const HELP_TREE: HelpTree = {
           {
             command: '--verbose',
             description: 'Also print the raw multi-line status breakdown',
+          },
+        ],
+      },
+    },
+  },
+  github: {
+    summary: 'Connect a GitHub repository for automatic deploys.',
+    usage: ['void github <command>'],
+    commands: [
+      { command: 'install', description: 'Open the GitHub App install page in your browser' },
+      { command: 'installations', description: 'List your GitHub App installations' },
+      {
+        command: 'connect [project]',
+        description: 'Connect a repository to a project for auto-deploy',
+      },
+      { command: 'link', description: 'Link your GitHub account to Void' },
+    ],
+    children: {
+      install: basicSubcommand(
+        'Open the GitHub App install page in your browser.',
+        'void github install',
+      ),
+      installations: basicSubcommand(
+        'List your GitHub App installations.',
+        'void github installations',
+      ),
+      link: basicSubcommand('Link your GitHub account to Void.', 'void github link'),
+      connect: {
+        summary: 'Connect a repository to a project for automatic deploys.',
+        usage: ['void github connect [project] [options]'],
+        options: [
+          { command: '--project <name>', description: 'Project name (alias for positional)' },
+          { command: '--installation <id>', description: 'GitHub App installation ID' },
+          { command: '--repo <owner/repo>', description: 'Repository full name (owner/repo)' },
+          {
+            command: '--branch <name>',
+            description: 'Branch to deploy from (required in non-interactive mode)',
+          },
+          {
+            command: '--executor <type>',
+            description: 'Build executor: container (default) | github_actions',
+          },
+        ],
+        examples: [
+          {
+            command: 'void github connect [project]',
+            description: 'Connect a repository to a project',
+          },
+          {
+            command: 'void github connect my-app --installation 42 --repo owner/repo --branch main',
+            description: 'Non-interactive connect (all flags explicit)',
           },
         ],
       },
@@ -402,6 +457,8 @@ export function printGlobalHelp(): void {
       ...globalCommandLines('secret'),
       '',
       ...globalCommandGroup('domain'),
+      '',
+      ...globalCommandGroup('github'),
       '',
       categoryTitle('database'),
       ...globalCommandLines('db', {
