@@ -903,7 +903,8 @@ export function compileRouteTable(
   lines.push('function __voidAnnotateRouting(response, trace) {');
   lines.push('  if (!__VOID_DEV_ROUTING || !response) return response;');
   lines.push('  const headers = new Headers(response.headers);');
-  lines.push('  headers.set("X-Void-Routing", trace);');
+  // Guard the set: a non-ASCII trace value throws, and must not crash the dev response.
+  lines.push('  try { headers.set("X-Void-Routing", trace); } catch { return response; }');
   lines.push(
     '  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });',
   );

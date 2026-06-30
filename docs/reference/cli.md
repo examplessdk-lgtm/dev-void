@@ -86,7 +86,7 @@ After that, the full interactive flow walks through:
 4. **Skills:** links Void skills using the same detected or selected agent context.
 5. **MCP config:** writes MCP server config using that same agent context.
 6. **Demo code:** for existing non-Pages projects, optionally scaffolds a `db/migrations/` directory plus an API route and typed fetch example.
-7. **GitHub Actions:** optionally creates `.github/workflows/deploy.yml` with the right package manager commands.
+7. **GitHub Actions:** optionally creates `.github/workflows/void-deploy.yml`. The workflow deploys on pushes to `main` and authenticates via [GitHub OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect) — no long-lived `VOID_TOKEN` secret is stored in the repo. The job requests an OIDC token (audience `void`), exchanges it at `POST $VOID_API_URL/auth/github-oidc` for a short-lived project-scoped deploy token, then runs `void deploy --project <slug>` with the right package manager. The project slug is baked in from your linked project (`.void/project.json`) when known; otherwise the workflow reads a `VOID_PROJECT` repository variable.
 8. **`env.ts` scaffold:** if the project has no `env.ts` but has `.env` / `.env.example` / `.env.local` / `.env.development*` files on disk, generates an `env.ts` pre-populated with their keys. Values get conservative type inference (`boolean`/`url`/`number`/`string`) — the file carries a banner nudging you to tighten anything the heuristic got wrong.
 9. **Project setup:** optionally logs you in, lets you select or create a project, and writes `.void/project.json` so your first deploy can just be `void deploy`.
 
@@ -98,9 +98,11 @@ Use flags to run individual steps without prompts:
 | ------------ | ------------------------------------------------- |
 | `--tsconfig` | Only update `tsconfig.json`                       |
 | `--agents`   | Set up agent instructions, skills, and MCP config |
-| `--github`   | Only create GitHub Actions workflow               |
+| `--github`   | Only create the GitHub Actions deploy workflow    |
 
 Flags can be combined. When any flag is provided, only the specified steps run and interactive prompts are skipped.
+
+The `--github` workflow uses GitHub OIDC: you connect the repository to your Void project once with `void github connect <project> --repo <owner/repo> --executor github_actions` (see the GitHub section below), and pushes to `main` deploy automatically. There is no `VOID_TOKEN` secret to create or rotate. To target staging, set a `VOID_API_URL` repository variable to `https://api.staging.void.cloud`.
 
 For projects that already have `"extends"`, `void init --tsconfig` preserves the existing config and adds `./.void/tsconfig.json`. If the existing config defines `files` or `compilerOptions.paths`, Void also merges its generated declaration files and aliases into the root config because TypeScript replaces those fields across `extends` instead of deeply merging them.
 
@@ -563,6 +565,67 @@ PORT=3000
 :::
 
 See [Environment Variables](../guide/env-vars.md) for the full guide.
+
+## GitHub
+
+Deploy-on-GitHub works from **any** Void login — Google, GitHub, or other SSO. The first time you connect GitHub, Void links your GitHub identity to your current account (a one-time step, independent of how you logged in); it never creates a second account.
+
+### `void github link`
+
+```
+void github link
+```
+
+Link your current Void account to a GitHub identity. Opens your browser to authorize Void on GitHub (a localhost + PKCE handshake, the same mechanics as `void auth login`), then binds that GitHub identity to the logged-in account. Requires an authenticated CLI (`void auth login` first).
+
+You normally don't need to run this directly — `void github install` runs the link automatically when your account has no GitHub identity yet. Run it on its own to link ahead of time, or to link a GitHub identity without installing the App. If that GitHub account is already linked to a different Void account, the command fails and asks you to use a different GitHub account.
+
+### `void github install`
+
+```
+void github install
+```
+
+Open the GitHub App install page in your browser. If your account has no linked GitHub identity yet, `void github install` first runs the GitHub link automatically (browser authorize), then continues. After installing, run `void github connect` to link a repository to your project.
+
+### `void github installations`
+
+```
+void github installations
+```
+
+List all GitHub App installations linked to your account. Each entry includes the `[id: <installation_id>]` needed for `--installation` in non-interactive use.
+
+### `void github connect`
+
+```
+void github connect [project] [options]
+```
+
+Connect a GitHub repository to a Void project for automatic deploys. On every push to the configured branch, Void builds and deploys your project automatically.
+
+**Options**
+
+| Flag                  | Description                                                                     |
+| --------------------- | ------------------------------------------------------------------------------- |
+| `--project <name>`    | Project name (alias for the positional argument)                                |
+| `--installation <id>` | GitHub App installation ID (required when you have multiple installations)      |
+| `--repo <owner/repo>` | Repository full name — required unless the installation grants exactly one repo |
+| `--branch <name>`     | Branch to deploy from — **required in non-interactive mode**                    |
+| `--executor <type>`   | Build executor: `container` (default) or `github_actions`                       |
+
+**Non-interactive use (CI)**
+
+When stdin is not a TTY, `void github connect` never prompts — it fails closed and names any flag it needs. `--branch` is always required. `--project` must be resolvable (positional / `--project` / `VOID_PROJECT` / linked `.void/project.json`). `--installation` is required only when your account has more than one installation; otherwise the sole installation is used. `--repo` is required when the installation grants access to all repos or to more than one selected repo; when it grants exactly one repo that repo is used automatically. Use `void github installations` to discover the `installation_id`.
+
+```
+void github connect my-app \
+  --installation 42 \
+  --repo owner/my-app \
+  --branch main
+```
+
+**Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
 
 ## Custom Domains
 

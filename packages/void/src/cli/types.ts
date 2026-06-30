@@ -221,5 +221,12 @@ export type DeployEvent =
       assets: number;
       workers: number;
       migrations?: number;
+      // Optional additive field: whether routing KV was published after the
+      // go-live DB commit. Omitted by older servers (treated as published).
+      // `false` means the deploy is committed-live but its routing was not
+      // published — the project may be unreachable or still serving the
+      // previous deploy. The CLI degrades its messaging but does NOT treat
+      // this as an error: the new model never rolls back a committed deploy.
+      published?: boolean;
     }
   | { event: 'error'; message: string; step: string };
