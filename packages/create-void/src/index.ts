@@ -31,10 +31,11 @@ async function main() {
   if (!appName) {
     const name = await p.text({
       message: 'Project name:',
+      defaultValue: 'my-app',
       placeholder: 'my-app',
       validate(value) {
-        if (!value?.trim()) {
-          return 'Project name is required';
+        if (value && !value.trim()) {
+          return 'Project name cannot be blank';
         }
       },
     });

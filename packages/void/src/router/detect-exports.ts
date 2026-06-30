@@ -31,6 +31,10 @@ export function detectHttpExports(absPath: string): Array<string> {
   for (const node of program.body ?? []) {
     if (node.type === 'ExportNamedDeclaration') {
       const declarationNode = node as AstExportNamedDeclaration;
+      // `export type { GET }` exports no runtime value — skip the whole statement.
+      if (declarationNode.exportKind === 'type') {
+        continue;
+      }
       // export const GET = ...; export function POST() { ... }
       const decl = declarationNode.declaration;
       if (decl) {
@@ -50,6 +54,10 @@ export function detectHttpExports(absPath: string): Array<string> {
       // export { GET, POST } (specifiers)
       if (declarationNode.specifiers) {
         for (const spec of declarationNode.specifiers) {
+          // `export { type GET }` re-exports a type, not a runtime handler.
+          if (spec.exportKind === 'type') {
+            continue;
+          }
           const exported = isIdentifier(spec.exported)
             ? spec.exported.name
             : isIdentifier(spec.local)

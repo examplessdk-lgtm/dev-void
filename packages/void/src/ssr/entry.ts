@@ -112,6 +112,10 @@ function validateServerRenderExport(entry: ResolvedEntry): void {
     if (node.type !== 'ExportNamedDeclaration') {
       return false;
     }
+    // `export type { render }` exports no runtime value.
+    if ((node as AstExportNamedDeclaration).exportKind === 'type') {
+      return false;
+    }
 
     const declaration = (node as AstExportNamedDeclaration).declaration;
     if (declaration?.type === 'FunctionDeclaration') {
@@ -126,6 +130,9 @@ function validateServerRenderExport(entry: ResolvedEntry): void {
 
     const specifiers = (node as AstExportNamedDeclaration).specifiers ?? [];
     return specifiers.some((specifier: AstExportSpecifier) => {
+      if (specifier.exportKind === 'type') {
+        return false;
+      }
       const exported = specifier.exported;
       return isIdentifier(exported) && exported.name === 'render';
     });

@@ -12,8 +12,44 @@ vi.mock('@clack/prompts', () => ({
 }));
 
 import type { SpinnerResult } from '@clack/prompts';
-import { applyDeployEvent } from '../../src/cli/deploy.ts';
+import {
+  applyDeployEvent,
+  streamDeployEvents,
+  warnUnpublishedRouting,
+} from '../../src/cli/deploy.ts';
+import type { CliLogger } from '../../src/cli/log-file.ts';
 import type { DeployEvent } from '../../src/cli/types.ts';
+
+type DoneEvent = Extract<DeployEvent, { event: 'done' }>;
+
+function createMockCliLog() {
+  const calls = {
+    info: [] as Array<{ msg: string; fields?: Record<string, unknown> }>,
+    warn: [] as Array<{ msg: string; fields?: Record<string, unknown> }>,
+    error: [] as Array<{ msg: string }>,
+  };
+  const logger: CliLogger = {
+    info: (msg, fields) => {
+      calls.info.push({ msg, fields });
+    },
+    warn: (msg, fields) => {
+      calls.warn.push({ msg, fields });
+    },
+    error: (msg) => {
+      calls.error.push({ msg });
+    },
+    debug: () => {},
+    path: null,
+    close: async () => {},
+  };
+  return { logger, calls };
+}
+
+async function* eventsOf(events: ReadonlyArray<DeployEvent>): AsyncGenerator<DeployEvent> {
+  for (const event of events) {
+    yield event;
+  }
+}
 
 function createMockSpinner() {
   const calls = {
@@ -106,6 +142,41 @@ describe('applyDeployEvent', () => {
     expect(calls.stop[0]).toBe('Deployed!');
   });
 
+  it('keeps the "Deployed!" message when published is true', () => {
+    const { spinner, calls } = createMockSpinner();
+    const done: DoneEvent = {
+      event: 'done',
+      deployment: 'dpl_1',
+      url: 'https://app.void.app',
+      urls: ['https://app.void.app'],
+      assets: 0,
+      workers: 1,
+      published: true,
+    };
+    const result = applyDeployEvent(done, spinner);
+    expect(result).toEqual({ kind: 'done', event: done });
+    expect(calls.stop[0]).toBe('Deployed!');
+  });
+
+  it('degrades the done message when published is false but still resolves as a committed done', () => {
+    const { spinner, calls } = createMockSpinner();
+    const done: DoneEvent = {
+      event: 'done',
+      deployment: 'dpl_1',
+      url: 'https://app.void.app',
+      urls: ['https://app.void.app'],
+      assets: 0,
+      workers: 1,
+      published: false,
+    };
+    const result = applyDeployEvent(done, spinner);
+    // Committed-live: still a `done` kind, NOT an error.
+    expect(result).toEqual({ kind: 'done', event: done });
+    const msg = String(calls.stop[0]);
+    expect(msg).toMatch(/routing was not published/i);
+    expect(msg).not.toBe('Deployed!');
+  });
+
   it('returns {kind:"error"} for error event', () => {
     const { spinner, calls } = createMockSpinner();
     const result = applyDeployEvent(
@@ -114,5 +185,99 @@ describe('applyDeployEvent', () => {
     );
     expect(result).toEqual({ kind: 'error', message: 'bad things' });
     expect(calls.stop[0]).toBe('Deploy failed');
+  });
+});
+
+describe('streamDeployEvents', () => {
+  it('logs deploy_success and returns the done event on a published deploy', async () => {
+    const { spinner } = createMockSpinner();
+    const { logger, calls } = createMockCliLog();
+    const done: DoneEvent = {
+      event: 'done',
+      deployment: 'dpl_1',
+      url: 'https://app.void.app',
+      urls: ['https://app.void.app'],
+      assets: 0,
+      workers: 1,
+    };
+
+    const result = await streamDeployEvents(
+      'proj_1',
+      eventsOf([{ event: 'start', deploymentId: 'dpl_1' }, done]),
+      spinner,
+      logger,
+    );
+
+    expect(result).toEqual(done);
+    const keys = calls.info.map((c) => c.msg);
+    expect(keys).toContain('deploy_success');
+    expect(keys).not.toContain('deploy_degraded');
+    const success = calls.info.find((c) => c.msg === 'deploy_success');
+    expect(success?.fields?.degraded).toBe(false);
+  });
+
+  it('logs deploy_degraded (not deploy_success) and still returns the committed done event when published is false', async () => {
+    const { spinner } = createMockSpinner();
+    const { logger, calls } = createMockCliLog();
+    const done: DoneEvent = {
+      event: 'done',
+      deployment: 'dpl_1',
+      url: 'https://app.void.app',
+      urls: ['https://app.void.app'],
+      assets: 0,
+      workers: 1,
+      published: false,
+    };
+
+    const result = await streamDeployEvents(
+      'proj_1',
+      eventsOf([{ event: 'start', deploymentId: 'dpl_1' }, done]),
+      spinner,
+      logger,
+    );
+
+    // Resolves as a committed deploy — no throw, returns the done event.
+    expect(result).toEqual(done);
+    const keys = calls.info.map((c) => c.msg);
+    expect(keys).toContain('deploy_degraded');
+    expect(keys).not.toContain('deploy_success');
+    const degraded = calls.info.find((c) => c.msg === 'deploy_degraded');
+    expect(degraded?.fields?.degraded).toBe(true);
+  });
+});
+
+describe('warnUnpublishedRouting', () => {
+  function makeDone(published?: boolean): DoneEvent {
+    return {
+      event: 'done',
+      deployment: 'dpl_1',
+      url: 'https://app.void.app',
+      urls: ['https://app.void.app'],
+      assets: 0,
+      workers: 1,
+      ...(published === undefined ? {} : { published }),
+    };
+  }
+
+  it('warns persistently when routing was not published', async () => {
+    const { log } = await import('@clack/prompts');
+    const warnSpy = log.warn as ReturnType<typeof vi.fn>;
+    warnSpy.mockClear();
+
+    warnUnpublishedRouting(makeDone(false));
+
+    expect(warnSpy).toHaveBeenCalledOnce();
+    expect(String(warnSpy.mock.calls[0][0])).toMatch(/routing was not published/i);
+  });
+
+  it('does not warn when published is true or omitted', async () => {
+    const { log } = await import('@clack/prompts');
+    const warnSpy = log.warn as ReturnType<typeof vi.fn>;
+
+    warnSpy.mockClear();
+    warnUnpublishedRouting(makeDone(true));
+    warnUnpublishedRouting(makeDone(undefined));
+
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });

@@ -95,6 +95,26 @@ describe('scanRoutes', () => {
     expect(result.routes[1].pattern).toBe('/*');
   });
 
+  it('sorts a static route before a dynamic sibling', async () => {
+    // Static '/users/new' must register before '/users/:id' (Hono resolves overlap by registration order).
+    createFile('routes/users/[id].ts', 'export const GET = () => {}');
+    createFile('routes/users/new.ts', 'export const GET = () => {}');
+
+    const result = await scanRoutes(TMP);
+    expect(result.routes.map((route) => route.pattern)).toEqual(['/users/new', '/users/:id']);
+  });
+
+  it('prefers a static segment over a dynamic one at the same depth', async () => {
+    createFile('routes/posts/[slug]/edit.ts', 'export const GET = () => {}');
+    createFile('routes/posts/featured/edit.ts', 'export const GET = () => {}');
+
+    const result = await scanRoutes(TMP);
+    expect(result.routes.map((route) => route.pattern)).toEqual([
+      '/posts/featured/edit',
+      '/posts/:slug/edit',
+    ]);
+  });
+
   it('discovers cron jobs from crons directory', async () => {
     createFile('routes/api/hello.ts');
     createFile('crons/sync.ts', 'export const cron = "0 * * * *"\nexport default () => {}');
