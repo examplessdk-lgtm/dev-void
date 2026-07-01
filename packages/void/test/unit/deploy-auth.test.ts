@@ -20,6 +20,7 @@ const mockExchangeOidc = vi.fn();
 const mockMaskSecret = vi.fn();
 
 const originalIsTTY = process.stdin.isTTY;
+let savedVoidToken: string | undefined;
 
 vi.mock('@clack/prompts', () => ({
   intro: vi.fn(),
@@ -92,6 +93,11 @@ beforeEach(() => {
   });
   mockPromptForLoginToken.mockResolvedValue('fresh-token');
   Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+
+  // Isolate process.env.VOID_TOKEN across tests: the OIDC branch now exports
+  // the minted token there, so start each test clean and restore afterwards.
+  savedVoidToken = process.env.VOID_TOKEN;
+  delete process.env.VOID_TOKEN;
 });
 
 describe('runDeploy auth failures', () => {
@@ -148,6 +154,35 @@ describe('runDeploy GitHub Actions OIDC exchange', () => {
 
     expect(mockExchangeOidc).not.toHaveBeenCalled();
     expect(mockMaskSecret).not.toHaveBeenCalled();
+  });
+
+  it('exports the minted token to process.env.VOID_TOKEN so the build/prerender getToken sees it', async () => {
+    mockGetToken.mockReturnValue(null);
+    mockIsOidcAvailable.mockReturnValue(true);
+    mockExchangeOidc.mockResolvedValue('minted-token');
+
+    // The deploy throws later (listProjects rejects), but the OIDC branch runs
+    // first. The minted token must land in process.env.VOID_TOKEN — the
+    // downstream `vite build` child (which inherits process.env) and the
+    // in-process prerender both re-read it via getToken(), which reads
+    // process.env.VOID_TOKEN first. A local variable can't reach either.
+    await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
+
+    expect(process.env.VOID_TOKEN).toBe('minted-token');
+  });
+
+  it('does NOT overwrite an explicit VOID_TOKEN in process.env (no mint)', async () => {
+    // getToken returns a token (explicit VOID_TOKEN / keychain / file), so the
+    // OIDC branch is skipped and the existing process.env.VOID_TOKEN is left
+    // untouched — no re-mint, no clobber.
+    mockGetToken.mockReturnValue('explicit-token');
+    mockIsOidcAvailable.mockReturnValue(true);
+    process.env.VOID_TOKEN = 'explicit-env-token';
+
+    await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
+
+    expect(mockExchangeOidc).not.toHaveBeenCalled();
+    expect(process.env.VOID_TOKEN).toBe('explicit-env-token');
   });
 
   it('errors when in Actions but the project is unknown', async () => {
@@ -297,4 +332,9 @@ describe('buildEnv', () => {
 
 afterEach(() => {
   Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+  if (savedVoidToken === undefined) {
+    delete process.env.VOID_TOKEN;
+  } else {
+    process.env.VOID_TOKEN = savedVoidToken;
+  }
 });

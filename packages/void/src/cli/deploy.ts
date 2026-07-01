@@ -404,6 +404,18 @@ async function runDeployInner(
         cliLog.info('github_oidc_exchange_start', { slug });
         token = await exchangeGithubOidcForDeployToken(getApiUrl(root), slug);
         maskGithubActionsSecret(token);
+        // Export the minted token so the downstream build/prerender can reach
+        // it. Both prerender paths re-read credentials via `getToken()`, which
+        // reads `process.env.VOID_TOKEN` first: the in-process path
+        // (`collectPrerenderPaths` below) and the spawned `vite build` child
+        // (`plugin-prerender`'s closeBundle, which inherits `process.env` via
+        // `buildEnv`). A local variable can't reach either, so without this the
+        // prerender injects no `__VOID_TOKEN`/`__VOID_PROJECT_ID` and renders
+        // against local/empty bindings (AI, remote D1/KV/R2 break). This
+        // restores parity with the removed scaffold step that wrote
+        // `VOID_TOKEN` to `$GITHUB_ENV`. Guarded by the enclosing `!token`
+        // branch, so an explicit `VOID_TOKEN` is never overwritten.
+        process.env.VOID_TOKEN = token;
         cliLog.info('github_oidc_exchange_success', { slug });
       }
       if (!token) {
