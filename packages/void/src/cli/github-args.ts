@@ -146,7 +146,11 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
         if (value.trim() === '') {
           throw new Error('github: --branch requires a value.');
         }
-        branch = value;
+        // Store the trimmed branch so the no-op check and the PATCH both use the
+        // canonical name — a padded value like 'main ' would never match
+        // refs/heads/main at OIDC exchange time and would cancel in-flight builds
+        // for the old branch.
+        branch = value.trim();
       } else if (arg === '--project') {
         if (i + 1 >= rest.length) {
           throw new Error('github: --project requires a value.');

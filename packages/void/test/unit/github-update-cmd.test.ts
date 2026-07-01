@@ -181,8 +181,8 @@ describe('runGithubUpdate (non-TTY)', () => {
     expect(updateGithubConnection).not.toHaveBeenCalled();
   });
 
-  it('exits(1) when no flags are passed (nothing to update)', async () => {
-    const { client, updateGithubConnection } = makeClient();
+  it('exits(1) when no flags are passed (nothing to update) before any API read', async () => {
+    const { client, listProjects, getGithubConnection, updateGithubConnection } = makeClient();
 
     await expect(
       runGithubUpdate('/project', client, {
@@ -195,6 +195,39 @@ describe('runGithubUpdate (non-TTY)', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       'update: Nothing to update. Pass --branch <name> and/or --executor <container|github_actions>.',
     );
+    // The missing-flags guard must run BEFORE project resolution / connection
+    // reads, so this usage error never depends on API state.
+    expect(listProjects).not.toHaveBeenCalled();
+    expect(getGithubConnection).not.toHaveBeenCalled();
+    expect(updateGithubConnection).not.toHaveBeenCalled();
+  });
+
+  it('reports missing flags (not "connect first") for a disconnected project', async () => {
+    // If the guard ran AFTER getGithubConnection, this 404 would surface the
+    // "connect first" message instead of the missing-flags usage error.
+    const { client, listProjects, getGithubConnection, updateGithubConnection } = makeClient({
+      getGithubConnection: vi.fn(async () => {
+        throw new PlatformApiError(
+          'Failed to get GitHub connection',
+          404,
+          JSON.stringify({ error: 'connection not found' }),
+        );
+      }),
+    });
+
+    await expect(
+      runGithubUpdate('/project', client, {
+        subcommand: 'update',
+        projectName: slug,
+      }),
+    ).rejects.toThrow('process.exit(1)');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      'update: Nothing to update. Pass --branch <name> and/or --executor <container|github_actions>.',
+    );
+    expect(listProjects).not.toHaveBeenCalled();
+    expect(getGithubConnection).not.toHaveBeenCalled();
     expect(updateGithubConnection).not.toHaveBeenCalled();
   });
 

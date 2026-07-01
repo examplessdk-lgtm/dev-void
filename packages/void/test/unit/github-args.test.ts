@@ -328,6 +328,21 @@ describe('parseGithubArgs', () => {
       });
     });
 
+    it('trims a whitespace-padded --branch value', () => {
+      expect(parseGithubArgs(['update', '--branch', '  main  '])).toEqual({
+        subcommand: 'update',
+        projectName: '',
+        branch: 'main',
+        executor: undefined,
+      });
+    });
+
+    it('rejects --branch with whitespace-only value', () => {
+      expect(() => parseGithubArgs(['update', '--branch', '   '])).toThrow(
+        'github: --branch requires a value.',
+      );
+    });
+
     it('parses --executor container', () => {
       expect(parseGithubArgs(['update', '--executor', 'container'])).toEqual({
         subcommand: 'update',

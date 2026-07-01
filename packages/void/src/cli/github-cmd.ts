@@ -493,6 +493,17 @@ export async function runGithubUpdate(
 ): Promise<void> {
   const isTTY = process.stdin.isTTY === true;
 
+  // Non-TTY needs at least one flag to act on — there is nothing to prompt for.
+  // Guard BEFORE any project resolution or connection read so this usage error
+  // never depends on API state (e.g. a disconnected project must not surface the
+  // "connect first" 404 message in place of the missing-flags error).
+  if (!isTTY && args.branch === undefined && args.executor === undefined) {
+    log.error(
+      'update: Nothing to update. Pass --branch <name> and/or --executor <container|github_actions>.',
+    );
+    process.exit(1);
+  }
+
   // -------------------------------------------------------------------------
   // 1. Resolve project (identical resolution order to `connect`).
   // -------------------------------------------------------------------------
@@ -597,12 +608,8 @@ export async function runGithubUpdate(
       executor = picked as 'container' | 'github_actions';
     }
   } else {
-    if (args.branch === undefined && args.executor === undefined) {
-      log.error(
-        'update: Nothing to update. Pass --branch <name> and/or --executor <container|github_actions>.',
-      );
-      process.exit(1);
-    }
+    // The missing-flags guard at the top of this function already guaranteed at
+    // least one of --branch / --executor is present in non-TTY mode.
     branch = args.branch ?? current.branch;
     executor = args.executor ?? current.build_executor;
   }
