@@ -387,14 +387,30 @@ async function runDeployInner(
   let reauthenticated = false;
   while (true) {
     try {
-      // 1. Auth
-      let token = getToken(root);
+      // 1. Auth — resolve the deploy token by precedence:
+      //   1. explicit `VOID_TOKEN` env  (deliberate override; wins everywhere)
+      //   2. GitHub Actions OIDC exchange  (in Actions, when no explicit token)
+      //   3. saved keychain / config file  (local dev)
+      //
+      // OIDC MUST beat an AMBIENT saved token here. `getToken()` returns the env
+      // token AND a keychain/config-file token, so calling it first would let a
+      // leftover `void auth login` credential on a self-hosted / reused runner
+      // preempt OIDC — silently deploying with a broad, long-lived `aud:'api'`
+      // user token (or failing outright if it is stale) instead of the
+      // short-lived, project-scoped `aud:'deploy'` token the workflow's
+      // `id-token: write` intends. So we read the EXPLICIT env directly (NOT via
+      // getToken), then OIDC, then the saved token. This matches the old
+      // scaffold, which exported the freshly exchanged token as `VOID_TOKEN`
+      // before `void deploy` so the deploy token always won inside Actions.
+      let token = process.env.VOID_TOKEN ?? null;
       if (!token && isGithubActionsOidcAvailable()) {
         // Running inside GitHub Actions with no explicit VOID_TOKEN: mint a
         // GitHub OIDC token and exchange it for a short-lived, project-scoped
         // deploy token. The slug must resolve WITHOUT a platform client (there
         // is no token yet): --project flag > VOID_PROJECT env > linked
-        // .void/project.json — the same sources the deploy path uses below.
+        // .void/project.json — the same sources the deploy path uses below. A
+        // workflow with `id-token: write` intends OIDC, so an unknown slug is a
+        // hard error — we do NOT silently fall back to a saved token.
         const slug = getRequestedProjectSlug(options) ?? readProjectConfig(root)?.slug;
         if (!slug) {
           throw new Error(
@@ -418,6 +434,10 @@ async function runDeployInner(
         process.env.VOID_TOKEN = token;
         cliLog.info('github_oidc_exchange_success', { slug });
       }
+      // Local dev / non-Actions (or Actions without id-token permission): fall
+      // back to the saved keychain/config token. `getToken()` re-checks
+      // `VOID_TOKEN` first, which is harmlessly unset on this branch.
+      token ??= getToken(root);
       if (!token) {
         log.error('No auth token found. Run `void auth login` first.');
         process.exit(1);

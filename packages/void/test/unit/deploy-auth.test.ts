@@ -18,6 +18,7 @@ const mockPromptForLoginToken = vi.fn();
 const mockIsOidcAvailable = vi.fn();
 const mockExchangeOidc = vi.fn();
 const mockMaskSecret = vi.fn();
+const mockClientCtor = vi.fn();
 
 const originalIsTTY = process.stdin.isTTY;
 let savedVoidToken: string | undefined;
@@ -53,6 +54,9 @@ vi.mock('../../src/cli/github-oidc', () => ({
 
 vi.mock('../../src/cli/client', () => ({
   PlatformClient: class {
+    constructor(...args: Array<unknown>) {
+      mockClientCtor(...args);
+    }
     listProjects(...args: Array<unknown>) {
       return mockListProjects(...args);
     }
@@ -79,6 +83,7 @@ beforeEach(() => {
   mockIsOidcAvailable.mockReset();
   mockExchangeOidc.mockReset();
   mockMaskSecret.mockReset();
+  mockClientCtor.mockReset();
 
   mockGetToken.mockReturnValue('token');
   mockGetTokenSource.mockReturnValue('manual');
@@ -146,14 +151,44 @@ describe('runDeploy GitHub Actions OIDC exchange', () => {
     expect(mockMaskSecret).toHaveBeenCalledWith('minted-token');
   });
 
-  it('does NOT exchange when an explicit token (VOID_TOKEN/keychain) is present', async () => {
-    mockGetToken.mockReturnValue('explicit-token');
+  it('prefers OIDC over an AMBIENT saved keychain/file token in Actions (no VOID_TOKEN env)', async () => {
+    // Regression guard: on a self-hosted / reused runner a leftover
+    // `void auth login` credential lives in the keychain/config file, so
+    // getToken() returns it — but there is NO explicit VOID_TOKEN env. The
+    // deploy MUST still mint a fresh project-scoped OIDC deploy token and use
+    // THAT, not the broad long-lived saved token. (Before the fix, getToken was
+    // consulted first and the ambient token preempted OIDC entirely.)
+    mockGetToken.mockReturnValue('ambient-saved-token');
     mockIsOidcAvailable.mockReturnValue(true);
+    mockExchangeOidc.mockResolvedValue('minted-token');
+
+    await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
+
+    // The OIDC exchange ran...
+    expect(mockExchangeOidc).toHaveBeenCalledTimes(1);
+    expect(mockExchangeOidc).toHaveBeenCalledWith('https://api.test', 'my-app');
+    expect(mockMaskSecret).toHaveBeenCalledWith('minted-token');
+    // ...the minted token was exported for the build/prerender...
+    expect(process.env.VOID_TOKEN).toBe('minted-token');
+    // ...and the PlatformClient was built with the MINTED token, NOT the saved one.
+    expect(mockClientCtor).toHaveBeenCalledTimes(1);
+    expect(mockClientCtor.mock.calls[0][0]).toBe('minted-token');
+  });
+
+  it('uses the saved keychain/file token when NOT in Actions (local dev, no exchange)', async () => {
+    // Local dev: not in GitHub Actions, no VOID_TOKEN env, but a saved token is
+    // present. It must be used directly with no OIDC exchange.
+    mockGetToken.mockReturnValue('ambient-saved-token');
+    mockIsOidcAvailable.mockReturnValue(false);
 
     await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
 
     expect(mockExchangeOidc).not.toHaveBeenCalled();
     expect(mockMaskSecret).not.toHaveBeenCalled();
+    expect(mockClientCtor).toHaveBeenCalledTimes(1);
+    expect(mockClientCtor.mock.calls[0][0]).toBe('ambient-saved-token');
+    // The saved token is never promoted into process.env (still clean here).
+    expect(process.env.VOID_TOKEN).toBeUndefined();
   });
 
   it('exports the minted token to process.env.VOID_TOKEN so the build/prerender getToken sees it', async () => {
