@@ -285,6 +285,134 @@ describe('parseGithubArgs', () => {
     });
   });
 
+  describe('update', () => {
+    it('parses update with no args', () => {
+      expect(parseGithubArgs(['update'])).toEqual({
+        subcommand: 'update',
+        projectName: '',
+        branch: undefined,
+        executor: undefined,
+      });
+    });
+
+    it('parses update with a project name', () => {
+      expect(parseGithubArgs(['update', 'my-project'])).toEqual({
+        subcommand: 'update',
+        projectName: 'my-project',
+        branch: undefined,
+        executor: undefined,
+      });
+    });
+
+    it('parses --project flag', () => {
+      expect(parseGithubArgs(['update', '--project', 'my-project'])).toEqual({
+        subcommand: 'update',
+        projectName: 'my-project',
+        branch: undefined,
+        executor: undefined,
+      });
+    });
+
+    it('--project flag is an alias for the positional', () => {
+      const positional = parseGithubArgs(['update', 'my-project']);
+      const flag = parseGithubArgs(['update', '--project', 'my-project']);
+      expect(flag).toEqual(positional);
+    });
+
+    it('parses --branch flag', () => {
+      expect(parseGithubArgs(['update', '--branch', 'release'])).toEqual({
+        subcommand: 'update',
+        projectName: '',
+        branch: 'release',
+        executor: undefined,
+      });
+    });
+
+    it('parses --executor container', () => {
+      expect(parseGithubArgs(['update', '--executor', 'container'])).toEqual({
+        subcommand: 'update',
+        projectName: '',
+        branch: undefined,
+        executor: 'container',
+      });
+    });
+
+    it('parses --executor github_actions', () => {
+      expect(parseGithubArgs(['update', '--executor', 'github_actions'])).toEqual({
+        subcommand: 'update',
+        projectName: '',
+        branch: undefined,
+        executor: 'github_actions',
+      });
+    });
+
+    it('parses project name with both flags together', () => {
+      expect(
+        parseGithubArgs([
+          'update',
+          'my-project',
+          '--branch',
+          'main',
+          '--executor',
+          'github_actions',
+        ]),
+      ).toEqual({
+        subcommand: 'update',
+        projectName: 'my-project',
+        branch: 'main',
+        executor: 'github_actions',
+      });
+    });
+
+    it('rejects --branch with no value', () => {
+      expect(() => parseGithubArgs(['update', '--branch'])).toThrow(
+        'github: --branch requires a value.',
+      );
+    });
+
+    it('rejects --branch with empty value', () => {
+      expect(() => parseGithubArgs(['update', '--branch', ''])).toThrow(
+        'github: --branch requires a value.',
+      );
+    });
+
+    it('rejects --project with no value', () => {
+      expect(() => parseGithubArgs(['update', '--project'])).toThrow(
+        'github: --project requires a value.',
+      );
+    });
+
+    it('rejects --project when positional already set', () => {
+      expect(() => parseGithubArgs(['update', 'my-project', '--project', 'other'])).toThrow(
+        "github: Unexpected argument 'other'.",
+      );
+    });
+
+    it('rejects --executor with no value', () => {
+      expect(() => parseGithubArgs(['update', '--executor'])).toThrow(
+        'github: --executor requires a value.',
+      );
+    });
+
+    it('rejects invalid --executor value', () => {
+      expect(() => parseGithubArgs(['update', '--executor', 'docker'])).toThrow(
+        'github: invalid --executor (expected container|github_actions).',
+      );
+    });
+
+    it('rejects unknown flag', () => {
+      expect(() => parseGithubArgs(['update', '--unknown'])).toThrow(
+        "github: Unexpected argument '--unknown'.",
+      );
+    });
+
+    it('rejects extra positional after project name', () => {
+      expect(() => parseGithubArgs(['update', 'my-project', 'extra'])).toThrow(
+        "github: Unexpected argument 'extra'.",
+      );
+    });
+  });
+
   describe('link', () => {
     it('parses link with no args', () => {
       expect(parseGithubArgs(['link'])).toEqual({ subcommand: 'link' });
@@ -306,13 +434,13 @@ describe('parseGithubArgs', () => {
   describe('unknown subcommand', () => {
     it('throws on empty args', () => {
       expect(() => parseGithubArgs([])).toThrow(
-        'github: Usage: void github <install|installations|connect|link>.',
+        'github: Usage: void github <install|installations|connect|update|link>.',
       );
     });
 
     it('throws on unknown subcommand', () => {
       expect(() => parseGithubArgs(['unknown'])).toThrow(
-        'github: Usage: void github <install|installations|connect|link>.',
+        'github: Usage: void github <install|installations|connect|update|link>.',
       );
     });
   });

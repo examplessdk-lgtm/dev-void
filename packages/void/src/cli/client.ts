@@ -930,6 +930,43 @@ export class PlatformClient {
     return res.json();
   }
 
+  async getGithubConnection(projectId: string): Promise<GithubConnection> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/github`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to get GitHub connection', res);
+    }
+
+    return res.json();
+  }
+
+  async updateGithubConnection(
+    projectId: string,
+    body: {
+      branch?: string;
+      buildExecutor?: 'container' | 'github_actions';
+    },
+  ): Promise<GithubConnection> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/github`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.authHeaders,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to update GitHub connection', res);
+    }
+
+    return res.json();
+  }
+
   async getGithubLinkUrl(redirect: string, codeChallenge: string): Promise<{ url: string }> {
     const params = new URLSearchParams({
       redirect,

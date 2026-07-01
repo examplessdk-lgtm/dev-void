@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vite-plus/test';
 import type { GithubInstallation } from '../../src/cli/client.ts';
 import {
   describeConnectError,
+  describeUpdateError,
   formatInstallations,
   parseGithubRepoFullName,
 } from '../../src/cli/github-cmd.ts';
@@ -45,6 +46,29 @@ describe('describeConnectError', () => {
 
   it('returns null for an unrecognised 409 code', () => {
     expect(describeConnectError(409, 'some other conflict')).toBeNull();
+  });
+});
+
+describe('describeUpdateError', () => {
+  it('returns a connect-first message for 404 / "connection not found"', () => {
+    const msg = describeUpdateError(404, 'connection not found');
+    expect(msg).toBe(
+      'This project is not connected to a GitHub repository. Run `void github connect` first.',
+    );
+  });
+
+  it('falls back to the connect mapping for other 404 codes', () => {
+    expect(describeUpdateError(404, 'project not found')).toBe(
+      'Project or installation not found.',
+    );
+  });
+
+  it('falls back to the connect mapping for 403', () => {
+    expect(describeUpdateError(403, 'forbidden')).toBe("You don't have access to this project.");
+  });
+
+  it('returns null for an unrecognised status / code', () => {
+    expect(describeUpdateError(500, undefined)).toBeNull();
   });
 });
 

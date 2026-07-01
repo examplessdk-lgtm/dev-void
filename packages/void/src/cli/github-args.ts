@@ -8,6 +8,11 @@ export const githubSubcommands: Array<SubcommandDef> = [
     arg: '[project]',
     description: 'Connect a repository to a project for auto-deploy',
   },
+  {
+    name: 'update',
+    arg: '[project]',
+    description: "Update an existing connection's branch or build executor",
+  },
   { name: 'link', description: 'Link your GitHub account to Void' },
 ];
 
@@ -20,6 +25,12 @@ export type GithubArgs =
       projectName: string;
       installationId?: string;
       repo?: string;
+      branch?: string;
+      executor?: 'container' | 'github_actions';
+    }
+  | {
+      subcommand: 'update';
+      projectName: string;
       branch?: string;
       executor?: 'container' | 'github_actions';
     };
@@ -120,5 +131,57 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
     return { subcommand, projectName, installationId, repo, branch, executor };
   }
 
-  throw new Error('github: Usage: void github <install|installations|connect|link>.');
+  if (subcommand === 'update') {
+    let projectName = '';
+    let branch: string | undefined;
+    let executor: 'container' | 'github_actions' | undefined;
+
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i];
+      if (arg === '--branch') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --branch requires a value.');
+        }
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --branch requires a value.');
+        }
+        branch = value;
+      } else if (arg === '--project') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --project requires a value.');
+        }
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --project requires a value.');
+        }
+        if (projectName) {
+          throw new Error(`github: Unexpected argument '${value}'.`);
+        }
+        projectName = value;
+      } else if (arg === '--executor') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --executor requires a value.');
+        }
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --executor requires a value.');
+        }
+        if (value !== 'container' && value !== 'github_actions') {
+          throw new Error('github: invalid --executor (expected container|github_actions).');
+        }
+        executor = value;
+      } else if (arg.startsWith('-')) {
+        throw new Error(`github: Unexpected argument '${arg}'.`);
+      } else if (projectName) {
+        throw new Error(`github: Unexpected argument '${arg}'.`);
+      } else {
+        projectName = arg;
+      }
+    }
+
+    return { subcommand, projectName, branch, executor };
+  }
+
+  throw new Error('github: Usage: void github <install|installations|connect|update|link>.');
 }

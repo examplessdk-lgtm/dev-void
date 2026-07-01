@@ -200,6 +200,10 @@ const HELP_TREE: HelpTree = {
         command: 'connect [project]',
         description: 'Connect a repository to a project for auto-deploy',
       },
+      {
+        command: 'update [project]',
+        description: "Update an existing connection's branch or build executor",
+      },
       { command: 'link', description: 'Link your GitHub account to Void' },
     ],
     children: {
@@ -236,6 +240,28 @@ const HELP_TREE: HelpTree = {
           {
             command: 'void github connect my-app --installation 42 --repo owner/repo --branch main',
             description: 'Non-interactive connect (all flags explicit)',
+          },
+        ],
+      },
+      update: {
+        summary: "Update an existing connection's branch or build executor.",
+        usage: ['void github update [project] [options]'],
+        options: [
+          { command: '--project <name>', description: 'Project name (alias for positional)' },
+          { command: '--branch <name>', description: 'New branch to deploy from' },
+          {
+            command: '--executor <type>',
+            description: 'New build executor: container | github_actions',
+          },
+        ],
+        examples: [
+          {
+            command: 'void github update my-app --executor github_actions',
+            description: 'Switch an existing connection to the GitHub Actions executor',
+          },
+          {
+            command: 'void github update my-app --branch release',
+            description: 'Change the deploy branch',
           },
         ],
       },

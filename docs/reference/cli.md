@@ -627,6 +627,30 @@ void github connect my-app \
 
 **Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
 
+### `void github update`
+
+```
+void github update [project] [options]
+```
+
+Update an existing connection's deploy **branch** and/or **build executor**. Use this to change settings on a project that is already connected — for example, flipping the executor from `container` to `github_actions` for a monorepo whose Void app lives in a subdirectory, or moving the deploy branch. The project must already be connected (run `void github connect` first); the repository and installation are not changed.
+
+**Options**
+
+| Flag                | Description                                         |
+| ------------------- | --------------------------------------------------- |
+| `--project <name>`  | Project name (alias for the positional argument)    |
+| `--branch <name>`   | New branch to deploy from                           |
+| `--executor <type>` | New build executor: `container` or `github_actions` |
+
+Interactively (TTY), `void github update` shows the current branch and executor and prompts for new values, defaulting each to the current setting. When stdin is not a TTY, it never prompts: pass at least one of `--branch` / `--executor`, or it fails closed. If nothing actually changes, the command reports "no changes" and does not call the API.
+
+```
+void github update my-app --executor github_actions
+```
+
+**Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
+
 ## Custom Domains
 
 ### `void domain add`

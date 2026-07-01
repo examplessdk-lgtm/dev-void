@@ -178,6 +178,115 @@ describe('PlatformClient.connectGithub', () => {
   });
 });
 
+describe('PlatformClient.getGithubConnection', () => {
+  it('GETs the right URL, sends auth headers, returns the parsed connection', async () => {
+    const connection: GithubConnection = {
+      id: 'conn_1',
+      project_id: projectId,
+      installation_id: '123456',
+      repo_full_name: 'octocat/hello-world',
+      repository_id: '9876',
+      branch: 'main',
+      build_executor: 'container',
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(connection));
+
+    const client = makeClient();
+    const result = await client.getGithubConnection(projectId);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${apiUrl}/projects/${projectId}/github`);
+    expect(init.method).toBeUndefined();
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe(`Bearer ${token}`);
+    expect(result).toEqual(connection);
+  });
+
+  it('throws PlatformApiError on non-2xx (e.g. 404 connection not found)', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'connection not found' }, 404));
+    const client = makeClient();
+    await expect(client.getGithubConnection(projectId)).rejects.toMatchObject({
+      name: 'PlatformApiError',
+      status: 404,
+      code: 'connection not found',
+    });
+  });
+});
+
+describe('PlatformClient.updateGithubConnection', () => {
+  it('PATCHes the right URL with Content-Type and exact JSON body, returns parsed connection', async () => {
+    const connection: GithubConnection = {
+      id: 'conn_1',
+      project_id: projectId,
+      installation_id: '123456',
+      repo_full_name: 'octocat/hello-world',
+      repository_id: '9876',
+      branch: 'release',
+      build_executor: 'github_actions',
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-02T00:00:00Z',
+    };
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(connection));
+
+    const client = makeClient();
+    const result = await client.updateGithubConnection(projectId, {
+      branch: 'release',
+      buildExecutor: 'github_actions',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${apiUrl}/projects/${projectId}/github`);
+    expect(init.method).toBe('PATCH');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(headers.Authorization).toBe(`Bearer ${token}`);
+    expect(JSON.parse(init.body as string)).toEqual({
+      branch: 'release',
+      buildExecutor: 'github_actions',
+    });
+    expect(result).toEqual(connection);
+  });
+
+  it('sends only the fields provided (executor only)', async () => {
+    const connection: GithubConnection = {
+      id: 'conn_2',
+      project_id: projectId,
+      installation_id: '123456',
+      repo_full_name: 'octocat/hello-world',
+      repository_id: null,
+      branch: 'main',
+      build_executor: 'github_actions',
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-02T00:00:00Z',
+    };
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(connection));
+
+    const client = makeClient();
+    await client.updateGithubConnection(projectId, { buildExecutor: 'github_actions' });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ buildExecutor: 'github_actions' });
+  });
+
+  it('throws PlatformApiError on non-2xx', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('not found', { status: 404 }));
+    const client = makeClient();
+    await expect(
+      client.updateGithubConnection(projectId, { branch: 'main' }),
+    ).rejects.toMatchObject({
+      name: 'PlatformApiError',
+      status: 404,
+    });
+  });
+});
+
 describe('PlatformClient.getGithubLinkUrl', () => {
   it('GETs link-url with redirect + S256 challenge query, auth headers, returns { url }', async () => {
     fetchMock.mockResolvedValueOnce(

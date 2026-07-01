@@ -11,6 +11,7 @@ import {
   PlatformApiError,
   PlatformClient,
   parsePlatformErrorBody,
+  type GithubConnection,
   type GithubInstallation,
 } from './client.ts';
 import { collectGitDeployMetadata } from './git-metadata.ts';
@@ -47,6 +48,21 @@ export function describeConnectError(status: number, errorCode: string | undefin
     return 'Project or installation not found.';
   }
   return null;
+}
+
+/**
+ * Like {@link describeConnectError}, but for `void github update`. The update
+ * flow starts from an EXISTING connection, so a 404 "connection not found"
+ * (the project has no GitHub connection, or it was disconnected between the
+ * read and the write) is the common case and gets a "connect first" message.
+ * Everything else defers to the shared connect mapping.
+ */
+export function describeUpdateError(status: number, errorCode: string | undefined): string | null {
+  const code = errorCode ?? '';
+  if (status === 404 && code.includes('connection not found')) {
+    return 'This project is not connected to a GitHub repository. Run `void github connect` first.';
+  }
+  return describeConnectError(status, code);
 }
 
 /**
@@ -114,6 +130,8 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
       return runInstallations(client);
     case 'connect':
       return runConnect(root, client, args);
+    case 'update':
+      return runGithubUpdate(root, client, args);
     case 'link':
       return runGithubLink(root, client);
   }
@@ -462,4 +480,175 @@ async function runConnect(
   }
 
   log.success(`Connected ${repoFullName} (${branch}) → project. Push to ${branch} to deploy.`);
+}
+
+// ---------------------------------------------------------------------------
+// update
+// ---------------------------------------------------------------------------
+
+export async function runGithubUpdate(
+  root: string,
+  client: PlatformClient,
+  args: Extract<GithubArgs, { subcommand: 'update' }>,
+): Promise<void> {
+  const isTTY = process.stdin.isTTY === true;
+
+  // -------------------------------------------------------------------------
+  // 1. Resolve project (identical resolution order to `connect`).
+  // -------------------------------------------------------------------------
+  let projectId: string;
+
+  const requestedSlug = getRequestedProjectSlug({ projectSlug: args.projectName || undefined });
+
+  if (requestedSlug) {
+    const projects = await client.listProjects();
+    const resolved = resolveProjectBySlug(projects, requestedSlug);
+    if (!resolved) {
+      log.error(`update: No project found with slug '${requestedSlug}'.`);
+      process.exit(1);
+    }
+    projectId = resolved.projectId;
+  } else {
+    const linked = readProjectConfig(root);
+    if (linked) {
+      projectId = linked.projectId;
+    } else if (!isTTY) {
+      log.error(
+        'update: No project specified. Pass a project name or --project <name>, set VOID_PROJECT, or link one with `void project link`.',
+      );
+      process.exit(1);
+    } else {
+      const projects = await client.listProjects();
+      if (projects.length === 0) {
+        log.error('No projects found. Create one first with `void deploy`.');
+        process.exit(1);
+      }
+      const picked = await select({
+        message: 'Select a project:',
+        options: projects.map((p) => ({ value: p.id, label: p.slug })),
+      });
+      if (isCancel(picked)) {
+        cancel('Cancelled.');
+        process.exit(0);
+      }
+      projectId = picked as string;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 2. Fetch the current connection. A missing connection (404) means the
+  //    project was never connected — mirror the API's 404 semantics and point
+  //    the user at `connect` instead of a raw error.
+  // -------------------------------------------------------------------------
+  let current: GithubConnection;
+  try {
+    current = await client.getGithubConnection(projectId);
+  } catch (err) {
+    if (err instanceof PlatformApiError) {
+      const body = parsePlatformErrorBody(err.body);
+      const code = body?.error ?? body?.message ?? '';
+      const message = describeUpdateError(err.status, code);
+      if (message !== null) {
+        log.error(`update: ${message}`);
+        process.exit(1);
+      }
+    }
+    throw err;
+  }
+
+  // -------------------------------------------------------------------------
+  // 3. Resolve the new branch + executor. TTY defaults to the current value;
+  //    non-TTY requires at least one flag (nothing to prompt for).
+  // -------------------------------------------------------------------------
+  let branch: string;
+  let executor: 'container' | 'github_actions';
+
+  if (isTTY) {
+    if (args.branch !== undefined) {
+      branch = args.branch;
+    } else {
+      const input = await text({
+        message: 'Branch to deploy from:',
+        placeholder: current.branch,
+        initialValue: current.branch,
+      });
+      if (isCancel(input)) {
+        cancel('Cancelled.');
+        process.exit(0);
+      }
+      branch = (input as string).trim() || current.branch;
+    }
+
+    if (args.executor !== undefined) {
+      executor = args.executor;
+    } else {
+      const picked = await select({
+        message: 'Build executor:',
+        options: [
+          { value: 'container', label: 'container' },
+          { value: 'github_actions', label: 'github_actions' },
+        ],
+        initialValue: current.build_executor,
+      });
+      if (isCancel(picked)) {
+        cancel('Cancelled.');
+        process.exit(0);
+      }
+      executor = picked as 'container' | 'github_actions';
+    }
+  } else {
+    if (args.branch === undefined && args.executor === undefined) {
+      log.error(
+        'update: Nothing to update. Pass --branch <name> and/or --executor <container|github_actions>.',
+      );
+      process.exit(1);
+    }
+    branch = args.branch ?? current.branch;
+    executor = args.executor ?? current.build_executor;
+  }
+
+  // -------------------------------------------------------------------------
+  // 4. Build a patch carrying ONLY the fields that actually changed.
+  // -------------------------------------------------------------------------
+  const patch: { branch?: string; buildExecutor?: 'container' | 'github_actions' } = {};
+  if (branch !== current.branch) {
+    patch.branch = branch;
+  }
+  if (executor !== current.build_executor) {
+    patch.buildExecutor = executor;
+  }
+
+  // -------------------------------------------------------------------------
+  // 5. No-op guard — never hit the API when nothing changed.
+  // -------------------------------------------------------------------------
+  if (patch.branch === undefined && patch.buildExecutor === undefined) {
+    log.info(
+      `No changes. ${current.repo_full_name} already deploys from ${current.branch} via ${current.build_executor}.`,
+    );
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // 6. Update.
+  // -------------------------------------------------------------------------
+  let updated: GithubConnection;
+  try {
+    updated = await client.updateGithubConnection(projectId, patch);
+  } catch (err) {
+    if (err instanceof PlatformApiError) {
+      const body = parsePlatformErrorBody(err.body);
+      const code = body?.error ?? body?.message ?? '';
+      const message = describeUpdateError(err.status, code);
+      if (message !== null) {
+        log.error(`update: ${message}`);
+        process.exit(1);
+      }
+      throw err;
+    }
+    throw err;
+  }
+
+  log.success(
+    `Updated ${updated.repo_full_name} → branch ${updated.branch}, executor ${updated.build_executor}.`,
+  );
 }
