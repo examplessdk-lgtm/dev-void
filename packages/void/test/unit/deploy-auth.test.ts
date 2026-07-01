@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { buildEnv, runDeploy } from '../../src/cli/deploy.ts';
 
@@ -8,9 +11,13 @@ const mockWarn = vi.fn();
 const mockSuccess = vi.fn();
 const mockGetToken = vi.fn();
 const mockGetTokenSource = vi.fn();
+const mockGetApiUrl = vi.fn();
 const mockListProjects = vi.fn();
 const mockIsExpiredTokenError = vi.fn();
 const mockPromptForLoginToken = vi.fn();
+const mockIsOidcAvailable = vi.fn();
+const mockExchangeOidc = vi.fn();
+const mockMaskSecret = vi.fn();
 
 const originalIsTTY = process.stdin.isTTY;
 
@@ -34,6 +41,13 @@ vi.mock('@clack/prompts', () => ({
 vi.mock('../../src/cli/auth', () => ({
   getToken: (...args: Array<unknown>) => mockGetToken(...args),
   getTokenSource: (...args: Array<unknown>) => mockGetTokenSource(...args),
+  getApiUrl: (...args: Array<unknown>) => mockGetApiUrl(...args),
+}));
+
+vi.mock('../../src/cli/github-oidc', () => ({
+  isGithubActionsOidcAvailable: (...args: Array<unknown>) => mockIsOidcAvailable(...args),
+  exchangeGithubOidcForDeployToken: (...args: Array<unknown>) => mockExchangeOidc(...args),
+  maskGithubActionsSecret: (...args: Array<unknown>) => mockMaskSecret(...args),
 }));
 
 vi.mock('../../src/cli/client', () => ({
@@ -57,12 +71,21 @@ beforeEach(() => {
   mockSuccess.mockReset();
   mockGetToken.mockReset();
   mockGetTokenSource.mockReset();
+  mockGetApiUrl.mockReset();
   mockListProjects.mockReset();
   mockIsExpiredTokenError.mockReset();
   mockPromptForLoginToken.mockReset();
+  mockIsOidcAvailable.mockReset();
+  mockExchangeOidc.mockReset();
+  mockMaskSecret.mockReset();
 
   mockGetToken.mockReturnValue('token');
   mockGetTokenSource.mockReturnValue('manual');
+  mockGetApiUrl.mockReturnValue('https://api.test');
+  // Default: not running in GitHub Actions, so the OIDC branch is inert and the
+  // existing auth tests are unaffected.
+  mockIsOidcAvailable.mockReturnValue(false);
+  mockExchangeOidc.mockResolvedValue('minted-token');
   mockListProjects.mockRejectedValue(new Error('expired-token'));
   mockIsExpiredTokenError.mockImplementation((error: unknown) => {
     return error instanceof Error && error.message === 'expired-token';
@@ -99,6 +122,55 @@ describe('runDeploy auth failures', () => {
     await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow(
       '`VOID_TOKEN` is invalid or expired. Generate a new token and try again.',
     );
+  });
+});
+
+describe('runDeploy GitHub Actions OIDC exchange', () => {
+  it('exchanges an OIDC token for a deploy token when no VOID_TOKEN and in Actions', async () => {
+    mockGetToken.mockReturnValue(null);
+    mockIsOidcAvailable.mockReturnValue(true);
+    mockExchangeOidc.mockResolvedValue('minted-token');
+
+    // The deploy still fails later (listProjects is mocked to reject), but the
+    // OIDC exchange must run first and mint the token the client is built with.
+    await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
+
+    expect(mockExchangeOidc).toHaveBeenCalledTimes(1);
+    expect(mockExchangeOidc).toHaveBeenCalledWith('https://api.test', 'my-app');
+    expect(mockMaskSecret).toHaveBeenCalledWith('minted-token');
+  });
+
+  it('does NOT exchange when an explicit token (VOID_TOKEN/keychain) is present', async () => {
+    mockGetToken.mockReturnValue('explicit-token');
+    mockIsOidcAvailable.mockReturnValue(true);
+
+    await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
+
+    expect(mockExchangeOidc).not.toHaveBeenCalled();
+    expect(mockMaskSecret).not.toHaveBeenCalled();
+  });
+
+  it('errors when in Actions but the project is unknown', async () => {
+    mockGetToken.mockReturnValue(null);
+    mockIsOidcAvailable.mockReturnValue(true);
+
+    const root = mkdtempSync(join(tmpdir(), 'void-oidc-'));
+    const savedProject = process.env.VOID_PROJECT;
+    delete process.env.VOID_PROJECT;
+    try {
+      // No --project, no VOID_PROJECT, no .void/project.json → slug is unknown.
+      await expect(runDeploy(root)).rejects.toThrow(
+        'running in GitHub Actions but the project is unknown',
+      );
+      expect(mockExchangeOidc).not.toHaveBeenCalled();
+    } finally {
+      if (savedProject === undefined) {
+        delete process.env.VOID_PROJECT;
+      } else {
+        process.env.VOID_PROJECT = savedProject;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

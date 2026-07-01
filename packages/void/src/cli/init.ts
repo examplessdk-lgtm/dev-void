@@ -1918,10 +1918,12 @@ function getWorkflowSetupSteps(
 
 /**
  * Scaffold the GitHub Actions workflow that deploys via GitHub OIDC — no
- * long-lived secret stored in the repo. The job requests an OIDC token from
- * GitHub (audience `void`), exchanges it at `POST $VOID_API_URL/auth/github-oidc`
- * for a short-lived (15-min) project-scoped deploy token, then runs
- * `void deploy --project <slug>` with that token exported as `VOID_TOKEN`.
+ * long-lived secret stored in the repo. `void deploy` itself detects GitHub
+ * Actions, mints an OIDC token (audience `void`), exchanges it at
+ * `POST $VOID_API_URL/auth/github-oidc` for a short-lived, project-scoped deploy
+ * token, and uses it — so the workflow is a single `void deploy` step (no
+ * curl/jq). `permissions: id-token: write` is still required: it is what lets
+ * the job (and thus the CLI) mint the OIDC token.
  *
  * `slug` is the linked project slug when known (from `.void/project.json`);
  * otherwise a `${{ vars.VOID_PROJECT }}` placeholder is emitted with a comment
@@ -1955,8 +1957,8 @@ concurrency:
   cancel-in-progress: true
 
 # id-token: write lets the job mint a GitHub OIDC token. No long-lived
-# VOID_TOKEN secret is stored — the token below is exchanged for a
-# short-lived, project-scoped deploy token at deploy time.
+# VOID_TOKEN secret is stored — \`void deploy\` mints that OIDC token and
+# exchanges it for a short-lived, project-scoped deploy token at deploy time.
 permissions:
   id-token: write
   contents: read
@@ -1973,17 +1975,6 @@ jobs:
       - uses: actions/checkout@v6
 ${setup}
 ${install}
-      - name: Exchange GitHub OIDC token for a Void deploy token
-        run: |
-          OIDC_TOKEN="$(curl -sf \\
-            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \\
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=void" | jq -r '.value')"
-          VOID_TOKEN="$(curl -sf \\
-            -H 'Content-Type: application/json' \\
-            -d "$(jq -n --arg t "$OIDC_TOKEN" --arg p "$VOID_PROJECT" '{oidcToken: $t, project: $p}')" \\
-            "$VOID_API_URL/auth/github-oidc" | jq -r '.token')"
-          echo "::add-mask::$VOID_TOKEN"
-          echo "VOID_TOKEN=$VOID_TOKEN" >> "$GITHUB_ENV"
       - name: Deploy
         run: ${runner} deploy --project "$VOID_PROJECT"
 `;

@@ -1511,15 +1511,23 @@ describe('isScaffoldableEmptyProject', () => {
       const yaml = readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8');
       // OIDC, not a stored secret.
       expect(yaml).not.toContain('secrets.VOID_TOKEN');
+      // `id-token: write` is retained — `void deploy` mints the OIDC token.
       expect(yaml).toContain('id-token: write');
       expect(yaml).toContain('contents: read');
-      expect(yaml).toContain('$ACTIONS_ID_TOKEN_REQUEST_URL&audience=void');
-      expect(yaml).toContain('$VOID_API_URL/auth/github-oidc');
+      // Single-step workflow: the CLI does the exchange, so no curl/jq step and
+      // no OIDC/exchange endpoints appear in the workflow anymore.
+      expect(yaml).not.toContain('Exchange GitHub OIDC token');
+      expect(yaml).not.toContain('$ACTIONS_ID_TOKEN_REQUEST_URL');
+      expect(yaml).not.toContain('$VOID_API_URL/auth/github-oidc');
+      expect(yaml).not.toContain('curl');
+      expect(yaml).not.toContain('jq -r');
       // No linked project → placeholder repository variable.
       expect(yaml).toContain('VOID_PROJECT: ${{ vars.VOID_PROJECT }}');
       expect(yaml).toContain("VOID_API_URL: ${{ vars.VOID_API_URL || 'https://api.void.cloud' }}");
-      // npm project → npx runner, deploy passes the project slug.
+      // npm project → npx runner, deploy passes the project slug (the only step
+      // that runs void).
       expect(yaml).toContain('npx void deploy --project "$VOID_PROJECT"');
+      expect(yaml.match(/deploy --project "\$VOID_PROJECT"/g)).toHaveLength(1);
       // Latest-push-wins concurrency keyed by repo + ref (no env context, which
       // is unavailable to workflow-level concurrency).
       expect(yaml).toContain('concurrency:');
@@ -1657,7 +1665,8 @@ jobs:
       const workflows = readdirSync(join(root, '.github', 'workflows')).sort();
       expect(workflows).toEqual(['deploy.yml', 'void-deploy.yml']);
       const oidc = readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8');
-      expect(oidc).toContain('$VOID_API_URL/auth/github-oidc');
+      expect(oidc).toContain('name: Deploy to Void');
+      expect(oidc).toContain('npx void deploy --project "$VOID_PROJECT"');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

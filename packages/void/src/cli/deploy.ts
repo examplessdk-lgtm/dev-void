@@ -55,7 +55,7 @@ import {
 } from '../sandbox/config.ts';
 import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env.ts';
 import { validateSsrEntry } from '../ssr/entry.ts';
-import { getToken, getTokenSource } from './auth.ts';
+import { getApiUrl, getToken, getTokenSource } from './auth.ts';
 import {
   isExpiredTokenError,
   PlatformClient,
@@ -76,6 +76,11 @@ import {
   validateProdEnv,
 } from './env-validation.ts';
 import { collectGitDeployMetadata, type GitDeployMetadata } from './git-metadata.ts';
+import {
+  exchangeGithubOidcForDeployToken,
+  isGithubActionsOidcAvailable,
+  maskGithubActionsSecret,
+} from './github-oidc.ts';
 import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers.ts';
 import { openDeployLog, type CliLogger } from './log-file.ts';
 import { promptForLoginToken } from './login.ts';
@@ -383,7 +388,24 @@ async function runDeployInner(
   while (true) {
     try {
       // 1. Auth
-      const token = getToken(root);
+      let token = getToken(root);
+      if (!token && isGithubActionsOidcAvailable()) {
+        // Running inside GitHub Actions with no explicit VOID_TOKEN: mint a
+        // GitHub OIDC token and exchange it for a short-lived, project-scoped
+        // deploy token. The slug must resolve WITHOUT a platform client (there
+        // is no token yet): --project flag > VOID_PROJECT env > linked
+        // .void/project.json — the same sources the deploy path uses below.
+        const slug = getRequestedProjectSlug(options) ?? readProjectConfig(root)?.slug;
+        if (!slug) {
+          throw new Error(
+            'deploy: running in GitHub Actions but the project is unknown — pass --project <slug> or link the project.',
+          );
+        }
+        cliLog.info('github_oidc_exchange_start', { slug });
+        token = await exchangeGithubOidcForDeployToken(getApiUrl(root), slug);
+        maskGithubActionsSecret(token);
+        cliLog.info('github_oidc_exchange_success', { slug });
+      }
       if (!token) {
         log.error('No auth token found. Run `void auth login` first.');
         process.exit(1);
