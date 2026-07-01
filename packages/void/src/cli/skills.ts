@@ -8,7 +8,7 @@ import {
 } from 'node:fs';
 import { log } from '@clack/prompts';
 import { join, relative } from 'pathe';
-import { detectAgents, getPackageDir, type AgentConfig } from './agents.ts';
+import { getPackageDir, type AgentConfig } from './agents.ts';
 
 type SkillInfo = {
   dirName: string;
@@ -80,31 +80,6 @@ function linkSkills(
     linked++;
   }
   return linked;
-}
-
-/**
- * Link skills for all detected agents. Returns total number of newly linked skills.
- * Used by `void init` (interactive flow and `--agents` flag).
- */
-export function linkSkillsForAgents(root: string): number {
-  const packageDir = getPackageDir();
-  const skillsDir = join(packageDir, 'skills');
-  const skills = parseSkills(skillsDir);
-  if (skills.length === 0) {
-    return 0;
-  }
-
-  const detected = detectAgents(root);
-  if (detected.length === 0) {
-    return 0;
-  }
-
-  let totalLinked = 0;
-  for (const agent of detected) {
-    log.info(`${agent.displayName} → ${agent.skillsDir}`);
-    totalLinked += linkSkills(root, skillsDir, skills, agent.skillsDir);
-  }
-  return totalLinked;
 }
 
 export function linkSkillsForSpecificAgents(root: string, agents: Array<AgentConfig>): number {
