@@ -12,6 +12,9 @@
  *   response { token: string, projectId, buildId }
  */
 
+import { cfAccessHeaders } from '../shared/cf-access.ts';
+import { ensureCloudflaredToken } from './cf-access.ts';
+
 const OIDC_AUDIENCE = 'void';
 
 /**
@@ -107,11 +110,19 @@ async function exchangeOidcTokenAtApi(
   const base = apiUrl.endsWith('/') ? apiUrl.slice(0, -1) : apiUrl;
   const url = `${base}/auth/github-oidc`;
 
+  // This POST hits the Void API (which may be the Access-gated staging host)
+  // before any PlatformClient exists, so it must carry CF Access credentials
+  // itself — exactly like every other CLI → Void-API call (PlatformClient
+  // ctor, exchangeLoginCode). `ensureCloudflaredToken` no-ops for prod/ungated
+  // hosts and when the service-token pair or CF_ACCESS_TOKEN is already set;
+  // `cfAccessHeaders` returns {} when no CF Access env is present (prod path).
+  ensureCloudflaredToken(apiUrl);
+
   let res: Response;
   try {
     res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...cfAccessHeaders(process.env) },
       body: JSON.stringify({ oidcToken, project }),
     });
   } catch (err) {
