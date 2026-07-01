@@ -3,19 +3,6 @@ import { relative } from 'pathe';
 import { voidWarn } from '../log.ts';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 
-/** Possible source locations for the user env schema, in priority order.
- *  Root-level files win over `src/`-nested ones. */
-export const ENV_FILE_CANDIDATES = [
-  'env.ts',
-  'env.mts',
-  'env.js',
-  'env.mjs',
-  'src/env.ts',
-  'src/env.mts',
-  'src/env.js',
-  'src/env.mjs',
-] as const;
-
 /** Roots already warned about duplicate env.ts files — dedupes noisy repeat calls. */
 const warnedRoots = new Set<string>();
 
