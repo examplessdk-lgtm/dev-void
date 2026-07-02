@@ -35,6 +35,7 @@ Use this page as a command reference. If you are setting up a project for the fi
 | `void project rollback`           | Roll back to a previous deployment                                  |
 | `void project cancel`             | Cancel an active deployment                                         |
 | `void project purge-cache`        | Purge all cached pages                                              |
+| `void build logs`                 | Stream, tail, or download build logs                                |
 | `void mcp`                        | Start the Void MCP server                                           |
 | `void init`                       | Setup wizard for new or existing projects                           |
 
@@ -650,6 +651,40 @@ void github update my-app --executor github_actions
 ```
 
 **Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
+
+## Build
+
+Inspect Deploy-on-GitHub builds.
+
+### `void build logs`
+
+```
+void build logs [build] [--follow] [--output <file>] [--project <slug>]
+```
+
+Stream, tail, or download the build logs for a **container** build. With no
+`[build]` argument, targets the project's most recent build.
+
+| Flag                     | Purpose                                                           | Default |
+| ------------------------ | ----------------------------------------------------------------- | ------- |
+| `--follow`, `-f`         | Live-tail: poll until the build reaches a terminal status.        | off     |
+| `--output <file>`, `-o`  | Write logs to a file instead of stdout (appends while following). | stdout  |
+| `--project <slug>`, `-p` | Target project.                                                   | linked  |
+
+**Project resolution** follows the same order as deploy: positional / `--project`,
+`VOID_PROJECT`, linked project (`.void/project.json`).
+
+Builds run on **GitHub Actions** keep their logs on GitHub — the command prints
+the Actions run URL instead of streaming. Only the last 10,000 log lines of a
+container build are retained.
+
+Examples:
+
+```
+void build logs                     # print the latest build's logs
+void build logs -f                  # follow the latest build until it finishes
+void build logs bld_123 -o build.log  # download a specific build's logs
+```
 
 ## Custom Domains
 
