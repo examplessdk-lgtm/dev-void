@@ -121,17 +121,42 @@ async function runBuildLogsCommand(
     ? (line: string): void => appendFileSync(args.output!, `${line}\n`)
     : (line: string): void => console.log(line);
 
-  // First page (since=0).
+  // Auth/not-found errors are fatal (the build is gone or access was revoked);
+  // everything else is a transient blip we retry through. Hoisted so the SAME
+  // policy governs both the first-page fetch below and the follow loop.
+  const isFatal = (err: unknown): boolean =>
+    err instanceof PlatformApiError &&
+    (err.status === 401 || err.status === 403 || err.status === 404);
+  const onRetry = (err: unknown): void =>
+    log.warn(
+      `build: transient error while following (${err instanceof Error ? err.message : String(err)}); retrying…`,
+    );
+
+  // First page (since=0). A transient failure on the FIRST poll must not kill
+  // `--follow` either: on a fatal error we exit with a friendly message, on a
+  // non-fatal error we exit immediately ONLY for the one-shot (non-follow)
+  // command; under --follow we onRetry + sleep and re-request since=0.
   let first: BuildLogsResponse;
-  try {
-    first = await client.getBuildLogs(projectId, buildId, 0);
-  } catch (err) {
-    if (err instanceof PlatformApiError && err.status === 404) {
-      log.error(`build: Build '${buildId}' not found for this project.`);
-      process.exit(1);
+  for (;;) {
+    try {
+      first = await client.getBuildLogs(projectId, buildId, 0);
+      break;
+    } catch (err) {
+      if (isFatal(err)) {
+        if (err instanceof PlatformApiError && err.status === 404) {
+          log.error(`build: Build '${buildId}' not found for this project.`);
+        } else {
+          log.error(err instanceof Error ? err.message : String(err));
+        }
+        process.exit(1);
+      }
+      if (!args.follow) {
+        log.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      onRetry(err);
+      await sleep(POLL_MS);
     }
-    log.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
   }
 
   // github_actions builds keep their logs on GitHub.
@@ -162,15 +187,8 @@ async function runBuildLogsCommand(
       sleep,
       since: first.lastSeq,
       status,
-      // Auth/not-found errors are fatal (the build is gone or access was
-      // revoked); everything else is a transient blip we retry through.
-      isFatal: (err) =>
-        err instanceof PlatformApiError &&
-        (err.status === 401 || err.status === 403 || err.status === 404),
-      onRetry: (err) =>
-        log.warn(
-          `build: transient error while following (${err instanceof Error ? err.message : String(err)}); retrying…`,
-        ),
+      isFatal,
+      onRetry,
     }));
   }
 
