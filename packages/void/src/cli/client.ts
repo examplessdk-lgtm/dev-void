@@ -157,6 +157,35 @@ export type LogEntry = {
   status: string;
 };
 
+export type BuildSummary = {
+  id: string;
+  status: string;
+  executor: 'container' | 'github_actions';
+  commit_sha: string | null;
+  branch: string | null;
+  exit_code: number | null;
+  error: string | null;
+  logs_url: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+export type BuildLogRow = {
+  seq: number;
+  line: string;
+  stream: 'stdout' | 'stderr';
+  ts: number;
+};
+
+export type BuildLogsResponse = {
+  lines: Array<BuildLogRow>;
+  lastSeq: number;
+  status: string;
+  terminal: boolean;
+  external: string | null;
+};
+
 export type DomainResponse = {
   id: string;
   project_id: string;
@@ -875,6 +904,40 @@ export class PlatformClient {
 
     const json = (await res.json()) as { data: Array<LogEntry> };
     return json.data;
+  }
+
+  async listBuilds(projectId: string, limit = 20): Promise<Array<BuildSummary>> {
+    const params = new URLSearchParams({ limit: String(limit) });
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/builds?${params}`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to list builds', res);
+    }
+
+    const json = (await res.json()) as { builds: Array<BuildSummary> };
+    return json.builds;
+  }
+
+  async getBuildLogs(projectId: string, buildId: string, since = 0): Promise<BuildLogsResponse> {
+    const params = new URLSearchParams({ since: String(since) });
+    const res = await fetch(
+      `${this.baseUrl}/projects/${projectId}/builds/${buildId}/logs?${params}`,
+      {
+        headers: {
+          ...this.authHeaders,
+        },
+      },
+    );
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to fetch build logs', res);
+    }
+
+    return res.json();
   }
 
   async getGithubInstallUrl(): Promise<{ url: string }> {
