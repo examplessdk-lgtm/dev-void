@@ -31,6 +31,7 @@ function makeConnection(overrides: Partial<GithubConnection> = {}): GithubConnec
     repository_id: '9876',
     branch: 'main',
     build_executor: 'container',
+    workflow_path: '.github/workflows/void-deploy.yml',
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
     ...overrides,
@@ -154,6 +155,44 @@ describe('runGithubUpdate (non-TTY)', () => {
     expect(successSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('updates the workflow only, sending just workflowPath', async () => {
+    const { client, updateGithubConnection } = makeClient({
+      getGithubConnection: vi.fn(async () => makeConnection()),
+      updateGithubConnection: vi.fn(async () =>
+        makeConnection({ workflow_path: '.github/workflows/ci.yml' }),
+      ),
+    });
+
+    await runGithubUpdate('/project', client, {
+      subcommand: 'update',
+      projectName: slug,
+      workflowPath: '.github/workflows/ci.yml',
+    });
+
+    expect(updateGithubConnection).toHaveBeenCalledWith(projectId, {
+      workflowPath: '.github/workflows/ci.yml',
+    });
+    expect(successSpy).toHaveBeenCalledTimes(1);
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('makes no API call when --workflow matches the current workflow_path', async () => {
+    const { client, updateGithubConnection } = makeClient({
+      getGithubConnection: vi.fn(async () =>
+        makeConnection({ workflow_path: '.github/workflows/ci.yml' }),
+      ),
+    });
+
+    await runGithubUpdate('/project', client, {
+      subcommand: 'update',
+      projectName: slug,
+      workflowPath: '.github/workflows/ci.yml',
+    });
+
+    expect(updateGithubConnection).not.toHaveBeenCalled();
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
   it('exits(1) with a connect-first message when the project is not connected', async () => {
     const notConnected = new PlatformApiError(
       'Failed to get GitHub connection',
@@ -193,7 +232,7 @@ describe('runGithubUpdate (non-TTY)', () => {
 
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(errorSpy).toHaveBeenCalledWith(
-      'update: Nothing to update. Pass --branch <name> and/or --executor <container|github_actions>.',
+      'update: Nothing to update. Pass --branch <name>, --executor <container|github_actions>, and/or --workflow <.github/workflows/...>.',
     );
     // The missing-flags guard must run BEFORE project resolution / connection
     // reads, so this usage error never depends on API state.
@@ -224,7 +263,7 @@ describe('runGithubUpdate (non-TTY)', () => {
 
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(errorSpy).toHaveBeenCalledWith(
-      'update: Nothing to update. Pass --branch <name> and/or --executor <container|github_actions>.',
+      'update: Nothing to update. Pass --branch <name>, --executor <container|github_actions>, and/or --workflow <.github/workflows/...>.',
     );
     expect(listProjects).not.toHaveBeenCalled();
     expect(getGithubConnection).not.toHaveBeenCalled();

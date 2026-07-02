@@ -105,6 +105,7 @@ describe('PlatformClient.connectGithub', () => {
       repository_id: '9876',
       branch: 'main',
       build_executor: 'container',
+      workflow_path: '.github/workflows/void-deploy.yml',
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-01T00:00:00Z',
     };
@@ -144,6 +145,7 @@ describe('PlatformClient.connectGithub', () => {
       repository_id: null,
       branch: 'main',
       build_executor: 'container',
+      workflow_path: '.github/workflows/void-deploy.yml',
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-01T00:00:00Z',
     };
@@ -188,6 +190,7 @@ describe('PlatformClient.getGithubConnection', () => {
       repository_id: '9876',
       branch: 'main',
       build_executor: 'container',
+      workflow_path: '.github/workflows/void-deploy.yml',
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-01T00:00:00Z',
     };
@@ -227,6 +230,7 @@ describe('PlatformClient.updateGithubConnection', () => {
       repository_id: '9876',
       branch: 'release',
       build_executor: 'github_actions',
+      workflow_path: '.github/workflows/void-deploy.yml',
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-02T00:00:00Z',
     };
@@ -262,6 +266,7 @@ describe('PlatformClient.updateGithubConnection', () => {
       repository_id: null,
       branch: 'main',
       build_executor: 'github_actions',
+      workflow_path: '.github/workflows/void-deploy.yml',
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-02T00:00:00Z',
     };

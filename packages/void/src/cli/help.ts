@@ -202,7 +202,7 @@ const HELP_TREE: HelpTree = {
       },
       {
         command: 'update [project]',
-        description: "Update an existing connection's branch or build executor",
+        description: "Update an existing connection's branch, build executor, or deploy workflow",
       },
       { command: 'link', description: 'Link your GitHub account to Void' },
     ],
@@ -231,6 +231,11 @@ const HELP_TREE: HelpTree = {
             command: '--executor <type>',
             description: 'Build executor: container (default) | github_actions',
           },
+          {
+            command: '--workflow <path>',
+            description:
+              'Authorized deploy workflow file (default .github/workflows/void-deploy.yml)',
+          },
         ],
         examples: [
           {
@@ -244,7 +249,7 @@ const HELP_TREE: HelpTree = {
         ],
       },
       update: {
-        summary: "Update an existing connection's branch or build executor.",
+        summary: "Update an existing connection's branch, build executor, or deploy workflow.",
         usage: ['void github update [project] [options]'],
         options: [
           { command: '--project <name>', description: 'Project name (alias for positional)' },
@@ -252,6 +257,10 @@ const HELP_TREE: HelpTree = {
           {
             command: '--executor <type>',
             description: 'New build executor: container | github_actions',
+          },
+          {
+            command: '--workflow <path>',
+            description: 'New authorized deploy workflow file (under .github/workflows/)',
           },
         ],
         examples: [

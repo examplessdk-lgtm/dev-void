@@ -121,6 +121,25 @@ describe('parseGithubArgs', () => {
       });
     });
 
+    it('parses --workflow', () => {
+      const result = parseGithubArgs(['connect', '--workflow', '.github/workflows/ci.yml']);
+      expect(result).toEqual({
+        subcommand: 'connect',
+        projectName: '',
+        installationId: undefined,
+        repo: undefined,
+        branch: undefined,
+        executor: undefined,
+        workflowPath: '.github/workflows/ci.yml',
+      });
+    });
+
+    it('throws when --workflow has no value', () => {
+      expect(() => parseGithubArgs(['connect', '--workflow'])).toThrow(
+        'github: --workflow requires a value.',
+      );
+    });
+
     it('parses --project flag', () => {
       const result = parseGithubArgs(['connect', '--project', 'my-project']);
       expect(result).toEqual({
@@ -359,6 +378,22 @@ describe('parseGithubArgs', () => {
         branch: undefined,
         executor: 'github_actions',
       });
+    });
+
+    it('parses --workflow', () => {
+      expect(parseGithubArgs(['update', '--workflow', '.github/workflows/ci.yml'])).toEqual({
+        subcommand: 'update',
+        projectName: '',
+        branch: undefined,
+        executor: undefined,
+        workflowPath: '.github/workflows/ci.yml',
+      });
+    });
+
+    it('throws when --workflow has no value', () => {
+      expect(() => parseGithubArgs(['update', '--workflow'])).toThrow(
+        'github: --workflow requires a value.',
+      );
     });
 
     it('parses project name with both flags together', () => {

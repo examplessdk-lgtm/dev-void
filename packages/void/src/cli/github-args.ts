@@ -11,7 +11,7 @@ export const githubSubcommands: Array<SubcommandDef> = [
   {
     name: 'update',
     arg: '[project]',
-    description: "Update an existing connection's branch or build executor",
+    description: "Update an existing connection's branch, build executor, or deploy workflow",
   },
   { name: 'link', description: 'Link your GitHub account to Void' },
 ];
@@ -27,12 +27,14 @@ export type GithubArgs =
       repo?: string;
       branch?: string;
       executor?: 'container' | 'github_actions';
+      workflowPath?: string;
     }
   | {
       subcommand: 'update';
       projectName: string;
       branch?: string;
       executor?: 'container' | 'github_actions';
+      workflowPath?: string;
     };
 
 export function parseGithubArgs(args: Array<string>): GithubArgs {
@@ -65,6 +67,7 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
     let repo: string | undefined;
     let branch: string | undefined;
     let executor: 'container' | 'github_actions' | undefined;
+    let workflowPath: string | undefined;
 
     for (let i = 0; i < rest.length; i++) {
       const arg = rest[i];
@@ -119,6 +122,15 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
           throw new Error('github: invalid --executor (expected container|github_actions).');
         }
         executor = value;
+      } else if (arg === '--workflow') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --workflow requires a value.');
+        }
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --workflow requires a value.');
+        }
+        workflowPath = value.trim();
       } else if (arg.startsWith('-')) {
         throw new Error(`github: Unexpected argument '${arg}'.`);
       } else if (projectName) {
@@ -128,13 +140,14 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
       }
     }
 
-    return { subcommand, projectName, installationId, repo, branch, executor };
+    return { subcommand, projectName, installationId, repo, branch, executor, workflowPath };
   }
 
   if (subcommand === 'update') {
     let projectName = '';
     let branch: string | undefined;
     let executor: 'container' | 'github_actions' | undefined;
+    let workflowPath: string | undefined;
 
     for (let i = 0; i < rest.length; i++) {
       const arg = rest[i];
@@ -175,6 +188,15 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
           throw new Error('github: invalid --executor (expected container|github_actions).');
         }
         executor = value;
+      } else if (arg === '--workflow') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --workflow requires a value.');
+        }
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --workflow requires a value.');
+        }
+        workflowPath = value.trim();
       } else if (arg.startsWith('-')) {
         throw new Error(`github: Unexpected argument '${arg}'.`);
       } else if (projectName) {
@@ -184,7 +206,7 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
       }
     }
 
-    return { subcommand, projectName, branch, executor };
+    return { subcommand, projectName, branch, executor, workflowPath };
   }
 
   throw new Error('github: Usage: void github <install|installations|connect|update|link>.');

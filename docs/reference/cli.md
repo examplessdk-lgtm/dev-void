@@ -607,13 +607,16 @@ Connect a GitHub repository to a Void project for automatic deploys. On every pu
 
 **Options**
 
-| Flag                  | Description                                                                     |
-| --------------------- | ------------------------------------------------------------------------------- |
-| `--project <name>`    | Project name (alias for the positional argument)                                |
-| `--installation <id>` | GitHub App installation ID (required when you have multiple installations)      |
-| `--repo <owner/repo>` | Repository full name — required unless the installation grants exactly one repo |
-| `--branch <name>`     | Branch to deploy from — **required in non-interactive mode**                    |
-| `--executor <type>`   | Build executor: `container` (default) or `github_actions`                       |
+| Flag                  | Description                                                                       |
+| --------------------- | --------------------------------------------------------------------------------- |
+| `--project <name>`    | Project name (alias for the positional argument)                                  |
+| `--installation <id>` | GitHub App installation ID (required when you have multiple installations)        |
+| `--repo <owner/repo>` | Repository full name — required unless the installation grants exactly one repo   |
+| `--branch <name>`     | Branch to deploy from — **required in non-interactive mode**                      |
+| `--executor <type>`   | Build executor: `container` (default) or `github_actions`                         |
+| `--workflow <path>`   | Authorized deploy workflow file — defaults to `.github/workflows/void-deploy.yml` |
+
+The `--workflow` path is the workflow file the GitHub OIDC exchange authorizes to mint this project's deploy token. It defaults to the scaffolded `.github/workflows/void-deploy.yml`; set it only if your deploy step lives in a different workflow file (it must be under `.github/workflows/` and end in `.yml`/`.yaml`). Because the exchange is secretless, **only this one workflow** can mint a deploy token — any other workflow in the repo (including an unsafe `pull_request_target`) is rejected. Pointing it at a broad, multi-purpose workflow widens that trust, so prefer a dedicated file.
 
 **Non-interactive use (CI)**
 
@@ -634,17 +637,18 @@ void github connect my-app \
 void github update [project] [options]
 ```
 
-Update an existing connection's deploy **branch** and/or **build executor**. Use this to change settings on a project that is already connected — for example, flipping the executor from `container` to `github_actions` for a monorepo whose Void app lives in a subdirectory, or moving the deploy branch. The project must already be connected (run `void github connect` first); the repository and installation are not changed.
+Update an existing connection's deploy **branch**, **build executor**, and/or authorized **workflow file**. Use this to change settings on a project that is already connected — for example, flipping the executor from `container` to `github_actions` for a monorepo whose Void app lives in a subdirectory, moving the deploy branch, or pointing the OIDC trust at a different workflow file. The project must already be connected (run `void github connect` first); the repository and installation are not changed.
 
 **Options**
 
-| Flag                | Description                                         |
-| ------------------- | --------------------------------------------------- |
-| `--project <name>`  | Project name (alias for the positional argument)    |
-| `--branch <name>`   | New branch to deploy from                           |
-| `--executor <type>` | New build executor: `container` or `github_actions` |
+| Flag                | Description                                                      |
+| ------------------- | ---------------------------------------------------------------- |
+| `--project <name>`  | Project name (alias for the positional argument)                 |
+| `--branch <name>`   | New branch to deploy from                                        |
+| `--executor <type>` | New build executor: `container` or `github_actions`              |
+| `--workflow <path>` | New authorized deploy workflow file (under `.github/workflows/`) |
 
-Interactively (TTY), `void github update` shows the current branch and executor and prompts for new values, defaulting each to the current setting. When stdin is not a TTY, it never prompts: pass at least one of `--branch` / `--executor`, or it fails closed. If nothing actually changes, the command reports "no changes" and does not call the API.
+Interactively (TTY), `void github update` shows the current branch and executor and prompts for new values, defaulting each to the current setting. `--workflow` is flag-only — it is never prompted for; pass it explicitly to change the authorized workflow file. When stdin is not a TTY, it never prompts: pass at least one of `--branch` / `--executor` / `--workflow`, or it fails closed. If nothing actually changes, the command reports "no changes" and does not call the API.
 
 ```
 void github update my-app --executor github_actions

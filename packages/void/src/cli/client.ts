@@ -234,6 +234,7 @@ export type GithubConnection = {
   repository_id: string | null;
   branch: string;
   build_executor: 'container' | 'github_actions';
+  workflow_path: string;
   created_at: string;
   updated_at: string;
 };
@@ -975,6 +976,7 @@ export class PlatformClient {
       repoFullName: string;
       branch?: string;
       buildExecutor?: 'container' | 'github_actions';
+      workflowPath?: string;
     },
   ): Promise<GithubConnection> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/github`, {
@@ -1012,6 +1014,7 @@ export class PlatformClient {
     body: {
       branch?: string;
       buildExecutor?: 'container' | 'github_actions';
+      workflowPath?: string;
     },
   ): Promise<GithubConnection> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/github`, {
