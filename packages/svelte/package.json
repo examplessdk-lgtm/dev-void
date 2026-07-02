@@ -1,6 +1,6 @@
 {
   "name": "@void/svelte",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/voidzero-dev/void.git",
