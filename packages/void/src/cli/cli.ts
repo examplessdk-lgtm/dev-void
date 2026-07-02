@@ -6,6 +6,7 @@ import { join } from 'pathe';
 import { getPackageDir } from './agents.ts';
 import { parseDeployArgs } from './args.ts';
 import { authSubcommands, parseAuthArgs } from './auth-args.ts';
+import { buildSubcommands, parseBuildArgs } from './build-args.ts';
 import { dbSubcommands, parseDbArgs } from './db-args.ts';
 import { domainSubcommands, parseDomainArgs } from './domain-args.ts';
 import { envSubcommands, parseEnvArgs } from './env-args.ts';
@@ -137,6 +138,10 @@ if (helpPath) {
   runSubcommandGroup('github', githubSubcommands, parseGithubArgs, (root, parsed) =>
     import('./github-cmd.ts').then(({ runGithubCommand }) => runGithubCommand(root, parsed)),
   );
+} else if (command === 'build') {
+  runSubcommandGroup('build', buildSubcommands, parseBuildArgs, (root, parsed) =>
+    import('./build-cmd.ts').then(({ runBuildCommand }) => runBuildCommand(root, parsed)),
+  );
 } else if (command === 'prepare') {
   const root = process.cwd();
   let prepareArgs;
@@ -203,6 +208,11 @@ if (helpPath) {
       name: 'github',
       hint: 'install | installations | connect | update | link',
       description: 'Connect a GitHub repository for automatic deploys',
+    },
+    {
+      name: 'build',
+      hint: 'logs',
+      description: 'Inspect remote builds',
     },
     {
       name: 'db',
@@ -274,6 +284,10 @@ if (helpPath) {
       case 'github':
         return runSubcommandGroup('github', githubSubcommands, parseGithubArgs, (r, p) =>
           import('./github-cmd.ts').then(({ runGithubCommand }) => runGithubCommand(r, p)),
+        );
+      case 'build':
+        return runSubcommandGroup('build', buildSubcommands, parseBuildArgs, (r, p) =>
+          import('./build-cmd.ts').then(({ runBuildCommand }) => runBuildCommand(r, p)),
         );
       case 'db':
         return runSubcommandGroup('db', dbSubcommands, parseDbArgs, (r, p) =>

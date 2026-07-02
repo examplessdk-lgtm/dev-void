@@ -267,6 +267,38 @@ const HELP_TREE: HelpTree = {
       },
     },
   },
+  build: {
+    summary: 'Inspect remote builds.',
+    usage: ['void build <command>'],
+    commands: [
+      { command: 'logs [build]', description: 'Stream, tail, or download logs for a build' },
+    ],
+    children: {
+      logs: {
+        summary: 'Stream, tail, or download logs for a build.',
+        usage: ['void build logs [build] [options]'],
+        options: [
+          { command: '--follow, -f', description: 'Live-tail until the build finishes' },
+          { command: '--output <file>, -o', description: 'Write logs to a file instead of stdout' },
+          {
+            command: '--project <slug>, -p',
+            description: 'Target project (else linked / VOID_PROJECT)',
+          },
+        ],
+        examples: [
+          { command: 'void build logs', description: "Print the latest build's logs" },
+          {
+            command: 'void build logs -f',
+            description: 'Follow the latest build until it finishes',
+          },
+          {
+            command: 'void build logs bld_123 -o build.log',
+            description: "Download a build's logs to a file",
+          },
+        ],
+      },
+    },
+  },
   db: {
     summary: 'Manage local and remote database state.',
     usage: ['void db <command>'],
@@ -485,6 +517,8 @@ export function printGlobalHelp(): void {
       ...globalCommandGroup('domain'),
       '',
       ...globalCommandGroup('github'),
+      '',
+      ...globalCommandGroup('build'),
       '',
       categoryTitle('database'),
       ...globalCommandLines('db', {
