@@ -1,4 +1,4 @@
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { intro, log, outro } from '@clack/prompts';
 import { getToken } from './auth.ts';
 import type { BuildArgs } from './build-args.ts';
@@ -18,6 +18,12 @@ function sleep(ms: number): Promise<void> {
  * line, and stop when the build reaches a terminal status. `fetchPage`,
  * `write`, and `sleep` are injected so this is unit-testable. Returns the
  * final status + terminal flag.
+ *
+ * A transient `fetchPage` failure (502/timeout/DO-read blip) must NOT kill the
+ * live tail: on catch we consult the injected `isFatal` — a fatal error
+ * (e.g. 401/403/404) rethrows, otherwise we call `onRetry` and retry from the
+ * SAME cursor on the next tick (no cursor advance, no write), so the tail
+ * survives blips instead of exiting the CLI.
  */
 export async function followBuildLogs(opts: {
   fetchPage: (since: number) => Promise<BuildLogsResponse>;
@@ -26,13 +32,25 @@ export async function followBuildLogs(opts: {
   since: number;
   status: string;
   pollMs?: number;
+  isFatal?: (err: unknown) => boolean;
+  onRetry?: (err: unknown) => void;
 }): Promise<{ status: string; terminal: boolean }> {
   let cursor = opts.since;
   let status = opts.status;
   const pollMs = opts.pollMs ?? POLL_MS;
   for (;;) {
     await opts.sleep(pollMs);
-    const pageResult = await opts.fetchPage(cursor);
+    let pageResult: BuildLogsResponse;
+    try {
+      pageResult = await opts.fetchPage(cursor);
+    } catch (err) {
+      if (opts.isFatal?.(err)) {
+        throw err;
+      }
+      opts.onRetry?.(err);
+      // Retry from the same cursor after the next sleep; do not advance or write.
+      continue;
+    }
     for (const l of pageResult.lines) {
       opts.write(l.line);
     }
@@ -122,6 +140,14 @@ async function runBuildLogsCommand(
     return;
   }
 
+  // Truncate/create the output file ONCE before the first line. The `write`
+  // writer appends (so follow-mode appends work), but the initial dump must not
+  // concatenate onto a stale file from a previous run. Placed after the external
+  // early-return so an external build never creates an empty file.
+  if (args.output) {
+    writeFileSync(args.output, '');
+  }
+
   for (const l of first.lines) {
     write(l.line);
   }
@@ -136,6 +162,15 @@ async function runBuildLogsCommand(
       sleep,
       since: first.lastSeq,
       status,
+      // Auth/not-found errors are fatal (the build is gone or access was
+      // revoked); everything else is a transient blip we retry through.
+      isFatal: (err) =>
+        err instanceof PlatformApiError &&
+        (err.status === 401 || err.status === 403 || err.status === 404),
+      onRetry: (err) =>
+        log.warn(
+          `build: transient error while following (${err instanceof Error ? err.message : String(err)}); retrying…`,
+        ),
     }));
   }
 
