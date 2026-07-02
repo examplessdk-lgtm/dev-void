@@ -193,6 +193,30 @@ describe('runGithubUpdate (non-TTY)', () => {
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
+  it('fails closed when the server does not apply --workflow (old platform)', async () => {
+    const { client, updateGithubConnection } = makeClient({
+      getGithubConnection: vi.fn(async () => makeConnection()),
+      // An old platform that predates workflow_path ignores the unknown field and
+      // returns the connection still pinned to the default.
+      updateGithubConnection: vi.fn(async () => makeConnection()),
+    });
+
+    await expect(
+      runGithubUpdate('/project', client, {
+        subcommand: 'update',
+        projectName: slug,
+        workflowPath: '.github/workflows/ci.yml',
+      }),
+    ).rejects.toThrow('process.exit(1)');
+
+    expect(updateGithubConnection).toHaveBeenCalledWith(projectId, {
+      workflowPath: '.github/workflows/ci.yml',
+    });
+    expect(errorSpy).toHaveBeenCalled();
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(successSpy).not.toHaveBeenCalled();
+  });
+
   it('exits(1) with a connect-first message when the project is not connected', async () => {
     const notConnected = new PlatformApiError(
       'Failed to get GitHub connection',
