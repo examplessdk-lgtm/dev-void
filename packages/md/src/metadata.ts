@@ -2,6 +2,7 @@ import matter from 'gray-matter';
 import MarkdownExit from 'markdown-exit';
 import type { Token } from 'markdown-exit';
 import anchor from 'markdown-it-anchor';
+import footnote from 'markdown-it-footnote';
 import type { Heading } from './compile.ts';
 
 let metadataCompiler: MarkdownExit | null = null;
@@ -11,6 +12,12 @@ function getMetadataCompiler(): MarkdownExit {
     return metadataCompiler;
   }
   const markdown = new MarkdownExit({ html: true, linkify: true });
+  // Footnotes must run before anchor so a `text[^1]` ref in a heading is turned
+  // into a footnote_ref token (excluded from heading text) rather than staying
+  // literal. Keeps metadata heading text/slug in sync with the rendered anchor
+  // ids from `compile()`; otherwise `@void/md/pages` links break for such
+  // headings. Registration order mirrors `createCompiler` in compile.ts.
+  markdown.use(footnote);
   // @ts-expect-error markdown-it-anchor types reference @types/markdown-it, structurally incompatible with markdown-exit
   markdown.use(anchor, {
     permalink: anchor.permalink.ariaHidden({ placement: 'before' }),
