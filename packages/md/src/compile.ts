@@ -12,6 +12,7 @@ import type { RuleCore, Token } from 'markdown-exit';
 import anchor from 'markdown-it-anchor';
 import attrs from 'markdown-it-attrs';
 import { full as emoji } from 'markdown-it-emoji';
+import footnote from 'markdown-it-footnote';
 import { createHighlighter, bundledLanguages, isSpecialLang, type BundledLanguage } from 'shiki';
 import { containerPlugin } from './plugins/containers.ts';
 import { gitHubAlertsPlugin } from './plugins/github-alerts.ts';
@@ -137,6 +138,11 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
   // Emoji shortcodes
   markdown.use(emoji);
 
+  // Footnotes: `text[^1]` refs with matching `[^1]: definition` blocks.
+  // Registered after emoji and before anchor so footnote back-reference
+  // markers are not themselves treated as heading-anchor targets.
+  markdown.use(footnote);
+
   // Heading anchors
   // @ts-expect-error markdown-it-anchor types reference @types/markdown-it, structurally incompatible with markdown-exit
   markdown.use(anchor, {
@@ -173,10 +179,16 @@ export async function compile(source: string, options?: CompileOptions): Promise
   const { data: frontmatter, content } = matter(source);
   const compiler = await getCompiler(options);
 
-  const env: Record<string, unknown> = {};
-  const tokens = compiler.parse(content, env);
+  // Each markdown-it call gets its OWN fresh env. `renderAsync` re-parses
+  // internally, so sharing one env across `parse` and `renderAsync` makes
+  // stateful plugins double-accumulate — markdown-it-footnote would append its
+  // footnote refs/defs to the same `env.footnotes` twice, producing duplicated
+  // footnote lists and wrong fn/fnref ids. A fresh env per call keeps the two
+  // parses independent. Heading/TOC extraction is unaffected: anchor ids are
+  // derived per-parse from the (identical) content, not from shared env state.
+  const tokens = compiler.parse(content, {});
   const headings = extractHeadings(tokens);
-  const html = await compiler.renderAsync(content, env);
+  const html = await compiler.renderAsync(content, {});
 
   const title =
     (frontmatter.title as string) ?? headings.find((heading) => heading.depth === 1)?.text ?? '';

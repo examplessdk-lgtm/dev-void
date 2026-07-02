@@ -115,6 +115,7 @@ Full VitePress-parity feature set:
 - **Custom containers** — `:::tip`, `:::info`, `:::warning`, `:::danger`, `:::details`
 - **GitHub alerts** — `> [!NOTE]`, `> [!TIP]`, `> [!WARNING]`, `> [!IMPORTANT]`, `> [!CAUTION]`
 - **Emoji** — `:emoji_name:` shortcodes
+- **Footnotes** — `text[^1]` refs with matching `[^1]: definition` blocks
 - **Attributes** — `{.class #id}` on elements via `markdown-it-attrs`
 - **Anchor links** — auto-generated heading anchors
 - **Table of contents** — `[[toc]]` directive
@@ -143,7 +144,7 @@ import '@void/md/theme.css'; // or theme-content.css
 
 ## Tests
 
-- `test/unit/compile.test.ts` — compilation pipeline: basic, frontmatter, title extraction, headings, Shiki, emoji, anchors
+- `test/unit/compile.test.ts` — compilation pipeline: basic, frontmatter, title extraction, headings, Shiki, emoji, footnotes, anchors
 - `test/unit/extract-script.test.ts` — script extraction: island imports, client code, edge cases
 - `test/unit/plugins.test.ts` — markdown-it plugins: containers, GitHub alerts, links, images, line numbers, emoji, TOC
 - `test/unit/emit-vue.test.ts` — Vue component emission with and without islands

@@ -437,6 +437,18 @@ Import code from external files:
 
 Shortcodes convert to unicode: `:tada:` becomes :tada:, `:rocket:` becomes :rocket:.
 
+### Footnotes
+
+Reference a footnote inline and define it anywhere in the document:
+
+```md
+Here is a statement with a footnote.[^1]
+
+[^1]: And here is the footnote body.
+```
+
+The references and definitions render into a linked footnote list at the end of the content.
+
 ### Attributes
 
 Add classes, IDs, or attributes to any element:

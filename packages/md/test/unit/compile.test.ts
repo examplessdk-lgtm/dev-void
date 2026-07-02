@@ -87,6 +87,27 @@ describe('compile', () => {
     expect(result.html).toContain('my-heading');
   });
 
+  it('renders footnotes exactly once (no double-accumulation from shared env)', async () => {
+    const result = await compile('Here is a footnote reference.[^1]\n\n[^1]: The footnote body.');
+    // Ref marker, back-reference target, and the footnote block each appear once.
+    expect(result.html.match(/id="fnref1"/g)).toHaveLength(1);
+    expect(result.html.match(/id="fn1"/g)).toHaveLength(1);
+    expect(result.html.match(/class="footnotes"/g)).toHaveLength(1);
+    expect(result.html.match(/class="footnote-item"/g)).toHaveLength(1);
+    expect(result.html).toContain('The footnote body.');
+  });
+
+  it('keeps heading extraction intact alongside footnotes', async () => {
+    const result = await compile('# Title\n\n## Section\n\nBody with a note.[^n]\n\n[^n]: note');
+    // Fresh-env fix must not regress TOC/heading ids.
+    expect(result.headings).toMatchObject([
+      { depth: 1, text: 'Title' },
+      { depth: 2, text: 'Section', slug: 'section' },
+    ]);
+    expect(result.html).toContain('id="section"');
+    expect(result.html.match(/class="footnotes"/g)).toHaveLength(1);
+  });
+
   it('handles empty source', async () => {
     const result = await compile('');
     expect(result.html).toBe('');
