@@ -14,6 +14,21 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Classifies a `getBuildLogs` failure during a follow/first-page fetch as fatal
+ * (surface + exit) vs transient (retry). A client error (4xx) is permanent —
+ * the build is gone, access was revoked, or the CLI is too old (426
+ * `cli_outdated`) — so retrying can't fix it; it is fatal, matching how the rest
+ * of the CLI surfaces 426 (see `deploy-errors.ts`, `github-cmd.ts`). The sole
+ * exception is 429 (rate limit), which IS transient. Everything else
+ * (5xx/timeout/DO-read blip) is transient and retried through.
+ */
+export function isFatalFollowError(err: unknown): boolean {
+  return (
+    err instanceof PlatformApiError && err.status >= 400 && err.status < 500 && err.status !== 429
+  );
+}
+
+/**
  * Pure follow-loop: repeatedly fetch pages since a cursor, write each new
  * line, and stop when the build reaches a terminal status. `fetchPage`,
  * `write`, and `sleep` are injected so this is unit-testable. Returns the
@@ -121,12 +136,8 @@ async function runBuildLogsCommand(
     ? (line: string): void => appendFileSync(args.output!, `${line}\n`)
     : (line: string): void => console.log(line);
 
-  // Auth/not-found errors are fatal (the build is gone or access was revoked);
-  // everything else is a transient blip we retry through. Hoisted so the SAME
+  // `isFatalFollowError` decides fatal vs transient (see its doc). The SAME
   // policy governs both the first-page fetch below and the follow loop.
-  const isFatal = (err: unknown): boolean =>
-    err instanceof PlatformApiError &&
-    (err.status === 401 || err.status === 403 || err.status === 404);
   const onRetry = (err: unknown): void =>
     log.warn(
       `build: transient error while following (${err instanceof Error ? err.message : String(err)}); retrying…`,
@@ -142,7 +153,7 @@ async function runBuildLogsCommand(
       first = await client.getBuildLogs(projectId, buildId, 0);
       break;
     } catch (err) {
-      if (isFatal(err)) {
+      if (isFatalFollowError(err)) {
         if (err instanceof PlatformApiError && err.status === 404) {
           log.error(`build: Build '${buildId}' not found for this project.`);
         } else {
@@ -187,7 +198,7 @@ async function runBuildLogsCommand(
       sleep,
       since: first.lastSeq,
       status,
-      isFatal,
+      isFatal: isFatalFollowError,
       onRetry,
     }));
   }

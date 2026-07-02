@@ -1,10 +1,35 @@
 import { describe, expect, it } from 'vite-plus/test';
-import { followBuildLogs } from '../../src/cli/build-cmd.ts';
-import type { BuildLogsResponse } from '../../src/cli/client.ts';
+import { followBuildLogs, isFatalFollowError } from '../../src/cli/build-cmd.ts';
+import { PlatformApiError, type BuildLogsResponse } from '../../src/cli/client.ts';
 
 function page(partial: Partial<BuildLogsResponse>): BuildLogsResponse {
   return { lines: [], lastSeq: 0, status: 'building', terminal: false, external: null, ...partial };
 }
+
+function apiError(status: number, body = '{}'): PlatformApiError {
+  return new PlatformApiError('build logs', status, body);
+}
+
+describe('isFatalFollowError', () => {
+  it('treats every 4xx except 429 as fatal (including 426 cli_outdated)', () => {
+    // 426 is the reviewer's case: a too-old CLI must exit, not retry forever.
+    for (const status of [400, 401, 403, 404, 409, 410, 422, 426]) {
+      expect(isFatalFollowError(apiError(status))).toBe(true);
+    }
+  });
+
+  it('treats 429 (rate limit) as transient — the tail must survive it', () => {
+    expect(isFatalFollowError(apiError(429))).toBe(false);
+  });
+
+  it('treats 5xx and non-PlatformApiError failures as transient', () => {
+    expect(isFatalFollowError(apiError(500))).toBe(false);
+    expect(isFatalFollowError(apiError(502))).toBe(false);
+    expect(isFatalFollowError(apiError(503))).toBe(false);
+    expect(isFatalFollowError(new Error('network blip'))).toBe(false);
+    expect(isFatalFollowError('nope')).toBe(false);
+  });
+});
 
 describe('followBuildLogs', () => {
   it('polls from the cursor, writes new lines in order, and stops when terminal', async () => {
@@ -96,5 +121,46 @@ describe('followBuildLogs', () => {
         isFatal: () => true,
       }),
     ).rejects.toThrow('unauthorized');
+  });
+
+  it('under the real predicate, a 426 cli_outdated rethrows (surfacing the upgrade message)', async () => {
+    await expect(
+      followBuildLogs({
+        fetchPage: () =>
+          Promise.reject(
+            apiError(426, '{"error":"cli_outdated","message":"Upgrade: npm i -g void@latest"}'),
+          ),
+        write: () => {},
+        sleep: () => Promise.resolve(),
+        since: 1,
+        status: 'building',
+        pollMs: 0,
+        isFatal: isFatalFollowError,
+      }),
+    ).rejects.toThrow('Upgrade: npm i -g void@latest');
+  });
+
+  it('under the real predicate, a 429 is retried (not fatal)', async () => {
+    let call = 0;
+    const retries: Array<unknown> = [];
+    const result = await followBuildLogs({
+      fetchPage: () => {
+        call += 1;
+        if (call === 1) {
+          return Promise.reject(apiError(429, '{"error":"rate_limited"}'));
+        }
+        return Promise.resolve(page({ lastSeq: 5, status: 'complete', terminal: true }));
+      },
+      write: () => {},
+      sleep: () => Promise.resolve(),
+      since: 4,
+      status: 'building',
+      pollMs: 0,
+      isFatal: isFatalFollowError,
+      onRetry: (err) => retries.push(err),
+    });
+
+    expect(retries).toHaveLength(1); // the 429 was retried, not thrown
+    expect(result).toEqual({ status: 'complete', terminal: true });
   });
 });
