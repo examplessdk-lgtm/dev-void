@@ -229,12 +229,13 @@ const HELP_TREE: HelpTree = {
           },
           {
             command: '--executor <type>',
-            description: 'Build executor: container (default) | github_actions',
+            description:
+              'Build executor: container (default) | github_actions; prompted interactively when omitted',
           },
           {
             command: '--workflow <path>',
             description:
-              'Authorized deploy workflow file (default .github/workflows/void-deploy.yml)',
+              'Authorized deploy workflow file (default .github/workflows/void-deploy.yml); prompted interactively when using github_actions',
           },
         ],
         examples: [
@@ -246,6 +247,11 @@ const HELP_TREE: HelpTree = {
             command: 'void github connect my-app --installation 42 --repo owner/repo --branch main',
             description: 'Non-interactive connect (all flags explicit)',
           },
+          {
+            command:
+              'void github connect my-app --repo owner/repo --branch main --executor github_actions',
+            description: 'Non-interactive connect using the GitHub Actions executor',
+          },
         ],
       },
       update: {
@@ -256,11 +262,13 @@ const HELP_TREE: HelpTree = {
           { command: '--branch <name>', description: 'New branch to deploy from' },
           {
             command: '--executor <type>',
-            description: 'New build executor: container | github_actions',
+            description:
+              'New build executor: container | github_actions; prompted interactively when omitted',
           },
           {
             command: '--workflow <path>',
-            description: 'New authorized deploy workflow file (under .github/workflows/)',
+            description:
+              'New authorized deploy workflow file under .github/workflows/; prompted interactively when using github_actions',
           },
         ],
         examples: [

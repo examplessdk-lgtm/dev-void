@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vite-plus/test';
 import type { GithubInstallation } from '../../src/cli/client.ts';
 import {
+  DEFAULT_WORKFLOW_PATH,
   describeConnectError,
   describeUpdateError,
   formatInstallations,
+  isValidWorkflowPath,
   parseGithubRepoFullName,
 } from '../../src/cli/github-cmd.ts';
 
@@ -69,6 +71,36 @@ describe('describeUpdateError', () => {
 
   it('returns null for an unrecognised status / code', () => {
     expect(describeUpdateError(500, undefined)).toBeNull();
+  });
+});
+
+describe('isValidWorkflowPath', () => {
+  it('accepts the scaffolded default path', () => {
+    expect(isValidWorkflowPath(DEFAULT_WORKFLOW_PATH)).toBe(true);
+  });
+
+  it('accepts a custom .yml path under .github/workflows/', () => {
+    expect(isValidWorkflowPath('.github/workflows/deploy-prod.yml')).toBe(true);
+  });
+
+  it('accepts a .yaml extension', () => {
+    expect(isValidWorkflowPath('.github/workflows/ci.yaml')).toBe(true);
+  });
+
+  it('rejects an empty string', () => {
+    expect(isValidWorkflowPath('')).toBe(false);
+  });
+
+  it('rejects a path outside .github/workflows/', () => {
+    expect(isValidWorkflowPath('scripts/deploy.yml')).toBe(false);
+  });
+
+  it('rejects a non-yaml extension', () => {
+    expect(isValidWorkflowPath('.github/workflows/deploy.txt')).toBe(false);
+  });
+
+  it('rejects a path containing ".."', () => {
+    expect(isValidWorkflowPath('.github/workflows/../../evil.yml')).toBe(false);
   });
 });
 
