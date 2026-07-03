@@ -597,6 +597,16 @@ void github installations
 
 List all GitHub App installations linked to your account. Each entry includes the `[id: <installation_id>]` needed for `--installation` in non-interactive use.
 
+### `void github join`
+
+```
+void github join
+```
+
+Join the GitHub App installations your organization already has. If a teammate installed the Void GitHub App on a shared GitHub organization, run `void github join` to gain access to those installations without re-installing. Void opens your browser to authorize (a localhost + PKCE handshake, the same mechanics as `void github link`), confirms with GitHub which installations you can manage, and records your membership. Afterwards `void github installations` lists them and `void github connect` can connect your own projects to their repositories.
+
+Requires an authenticated CLI (`void auth login` first) and organization-installation sharing enabled on your Void instance; when it is not enabled the command fails closed with a clear message. You can only join installations your GitHub authorization actually returns — you cannot name or join one you cannot access on GitHub.
+
 ### `void github connect`
 
 ```
@@ -630,6 +640,10 @@ void github connect my-app \
 ```
 
 **Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
+
+**Connecting as an organization member**
+
+If you are a member of a GitHub organization but not the person who installed the App, `void github connect` first confirms that you personally have access to the specific repository. When it detects this, it opens your browser once to authorize access to that repo on GitHub (a localhost + PKCE handshake), then completes the connection automatically — no extra flags. Run `void github join` first so the installation appears in `void github installations`. You can only connect repositories you can access on GitHub; one you cannot see is refused with a clear message.
 
 ### `void github update`
 
