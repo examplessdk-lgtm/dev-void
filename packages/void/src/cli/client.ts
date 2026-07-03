@@ -1071,4 +1071,43 @@ export class PlatformClient {
 
     return res.json();
   }
+
+  async getGithubJoinUrl(redirect: string, codeChallenge: string): Promise<{ url: string }> {
+    const params = new URLSearchParams({
+      redirect,
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
+    });
+    const res = await fetch(`${this.baseUrl}/github/join-url?${params}`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to start GitHub join', res);
+    }
+
+    return res.json();
+  }
+
+  async completeGithubJoin(
+    joinCode: string,
+    codeVerifier: string,
+  ): Promise<{ status: 'joined'; count: number }> {
+    const res = await fetch(`${this.baseUrl}/github/join/complete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.authHeaders,
+      },
+      body: JSON.stringify({ join_code: joinCode, code_verifier: codeVerifier }),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to complete GitHub join', res);
+    }
+
+    return res.json();
+  }
 }

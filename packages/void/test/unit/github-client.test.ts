@@ -365,3 +365,77 @@ describe('PlatformClient.completeGithubLink', () => {
     });
   });
 });
+
+describe('PlatformClient.getGithubJoinUrl', () => {
+  it('GETs join-url with redirect + S256 challenge query, auth headers, returns { url }', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ url: 'https://github.com/login/oauth/authorize?client_id=x' }),
+    );
+
+    const client = makeClient();
+    const redirect = 'http://localhost:54321/callback?state=abc';
+    const result = await client.getGithubJoinUrl(redirect, 'challenge-xyz');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const parsed = new URL(url);
+    expect(parsed.origin + parsed.pathname).toBe(`${apiUrl}/github/join-url`);
+    expect(parsed.searchParams.get('redirect')).toBe(redirect);
+    expect(parsed.searchParams.get('code_challenge')).toBe('challenge-xyz');
+    expect(parsed.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(init.method).toBeUndefined();
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe(`Bearer ${token}`);
+    expect(result).toEqual({ url: 'https://github.com/login/oauth/authorize?client_id=x' });
+  });
+
+  it('throws PlatformApiError on non-2xx (503 github_oauth_not_configured)', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'github_oauth_not_configured' }, 503));
+    const client = makeClient();
+    await expect(client.getGithubJoinUrl('http://localhost:1/callback', 'c')).rejects.toMatchObject(
+      {
+        name: 'PlatformApiError',
+        status: 503,
+        code: 'github_oauth_not_configured',
+      },
+    );
+  });
+});
+
+describe('PlatformClient.completeGithubJoin', () => {
+  it('POSTs join/complete with exact JSON body + auth headers, returns { status, count }', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: 'joined', count: 3 }));
+
+    const client = makeClient();
+    const result = await client.completeGithubJoin('join-code-1', 'verifier-1');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${apiUrl}/github/join/complete`);
+    expect(init.method).toBe('POST');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(headers.Authorization).toBe(`Bearer ${token}`);
+    expect(JSON.parse(init.body as string)).toEqual({
+      join_code: 'join-code-1',
+      code_verifier: 'verifier-1',
+    });
+    expect(result).toEqual({ status: 'joined', count: 3 });
+  });
+
+  it('returns a zero count', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: 'joined', count: 0 }));
+    const client = makeClient();
+    const result = await client.completeGithubJoin('join-code-2', 'verifier-2');
+    expect(result).toEqual({ status: 'joined', count: 0 });
+  });
+
+  it('throws PlatformApiError on non-2xx', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('boom', { status: 500 }));
+    const client = makeClient();
+    await expect(client.completeGithubJoin('join-code-3', 'verifier-3')).rejects.toMatchObject({
+      name: 'PlatformApiError',
+      status: 500,
+    });
+  });
+});

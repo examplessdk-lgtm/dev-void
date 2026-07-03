@@ -481,16 +481,32 @@ describe('parseGithubArgs', () => {
     });
   });
 
+  describe('join', () => {
+    it('parses join with no args', () => {
+      expect(parseGithubArgs(['join'])).toEqual({ subcommand: 'join' });
+    });
+
+    it('rejects extra positional', () => {
+      expect(() => parseGithubArgs(['join', 'x'])).toThrow("github: Unexpected argument 'x'.");
+    });
+
+    it('rejects a flag', () => {
+      expect(() => parseGithubArgs(['join', '--flag'])).toThrow(
+        "github: Unexpected argument '--flag'.",
+      );
+    });
+  });
+
   describe('unknown subcommand', () => {
     it('throws on empty args', () => {
       expect(() => parseGithubArgs([])).toThrow(
-        'github: Usage: void github <install|installations|connect|update|link>.',
+        'github: Usage: void github <install|installations|connect|update|link|join>.',
       );
     });
 
     it('throws on unknown subcommand', () => {
       expect(() => parseGithubArgs(['unknown'])).toThrow(
-        'github: Usage: void github <install|installations|connect|update|link>.',
+        'github: Usage: void github <install|installations|connect|update|link|join>.',
       );
     });
   });

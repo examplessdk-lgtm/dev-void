@@ -134,6 +134,8 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
       return runGithubUpdate(root, client, args);
     case 'link':
       return runGithubLink(root, client);
+    case 'join':
+      return runGithubJoin(root, client);
   }
 }
 
@@ -258,6 +260,72 @@ export async function runGithubLink(root: string, client: PlatformClient): Promi
     log.success('GitHub account already linked.');
   } else {
     log.success('GitHub account linked.');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// join
+// ---------------------------------------------------------------------------
+
+/**
+ * Discover and join the shared GitHub App installations owned by the
+ * organizations the logged-in GitHub identity belongs to. Drives the same
+ * 3-endpoint localhost + PKCE handshake as {@link runGithubLink}, but against
+ * the platform's JOIN routes: membership upsert is idempotent, so unlike link
+ * there is no 409/already-linked conflict to map. The only special error is the
+ * fail-closed 503 raised when org-installation sharing is not configured on the
+ * instance.
+ */
+export async function runGithubJoin(root: string, client: PlatformClient): Promise<void> {
+  void root; // Signature parity with runGithubLink; routing uses `client`.
+
+  const verifier = createCodeVerifier();
+  const challenge = createCodeChallenge(verifier);
+  const state = randomBytes(32).toString('hex');
+
+  // completeGithubJoin runs INSIDE the request handler (via finalize), so the
+  // browser only shows the success page after the join actually succeeds.
+  let count: number;
+  try {
+    ({ count } = await awaitBrowserCallback<{ status: 'joined'; count: number }>({
+      state,
+      buildAuthUrl: async (callback) => {
+        callback.searchParams.set('state', state);
+        const { url } = await client.getGithubJoinUrl(callback.href, challenge);
+        return url;
+      },
+      describeError: (p) => (p.get('error') ? 'GitHub authorization failed.' : null),
+      onUrl: (url) =>
+        log.message(
+          `Open this URL to join your organization's shared GitHub App installations:\n${pc.cyan(url)}`,
+        ),
+      finalize: async (params) => {
+        const joinCode = params.get('join_code');
+        if (!joinCode) {
+          throw new Error('github: join callback did not return a join code.');
+        }
+        return client.completeGithubJoin(joinCode, verifier);
+      },
+    }));
+  } catch (err) {
+    // Fail closed: org-installation sharing OAuth is not configured on this
+    // instance. The membership flow has no already-joined conflict to map.
+    if (
+      err instanceof PlatformApiError &&
+      err.status === 503 &&
+      err.code === 'github_oauth_not_configured'
+    ) {
+      log.error('Organization installation sharing is not enabled on this Void instance.');
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  if (count === 0) {
+    log.info('No new installations to join.');
+  } else {
+    log.success(`Joined ${count} installation${count === 1 ? '' : 's'}.`);
+    log.message('Run `void github installations` to see them, then `void github connect`.');
   }
 }
 
