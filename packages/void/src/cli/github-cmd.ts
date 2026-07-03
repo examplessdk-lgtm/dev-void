@@ -346,7 +346,65 @@ async function runInstallations(client: PlatformClient): Promise<void> {
 // connect
 // ---------------------------------------------------------------------------
 
-async function runConnect(
+/**
+ * Per-repo connect authorization round-trip for a non-owner org member.
+ *
+ * When the connect route returns 403 `connect_authorization_required` (Task 8),
+ * the member has no proof they can access the specific repo under the shared
+ * installation. This drives the same localhost + PKCE handshake as
+ * {@link runGithubLink}/{@link runGithubJoin}, but against the platform's
+ * connect-authorize route (Task 7): the callback mints and returns the grant IN
+ * the redirect URL (`?connect_grant=…`), so there is no separate `/complete`
+ * POST — `finalize` just reads the grant out of the callback query. A
+ * `?error=repo_not_accessible` callback is mapped to a friendly per-repo message
+ * by `describeError`, which rejects out of the handshake (no grant, no retry).
+ *
+ * Returns the grant plus the PKCE verifier the caller must echo to the connect
+ * route so the platform can bind the grant to this exchange.
+ */
+async function runGithubConnectAuthorize(
+  client: PlatformClient,
+  installationId: string,
+  repoFullName: string,
+): Promise<{ connectGrant: string; codeVerifier: string }> {
+  const verifier = createCodeVerifier();
+  const challenge = createCodeChallenge(verifier);
+  const state = randomBytes(32).toString('hex');
+
+  const { connectGrant } = await awaitBrowserCallback<{ connectGrant: string }>({
+    state,
+    buildAuthUrl: async (callback) => {
+      callback.searchParams.set('state', state);
+      const { url } = await client.getGithubConnectAuthorizeUrl(
+        callback.href,
+        challenge,
+        installationId,
+        repoFullName,
+      );
+      return url;
+    },
+    describeError: (p) => {
+      const e = p.get('error');
+      if (e === 'repo_not_accessible') {
+        return `You don't have access to ${repoFullName} under this installation on GitHub.`;
+      }
+      return e ? 'GitHub authorization failed.' : null;
+    },
+    onUrl: (url) =>
+      log.message(`Open this URL to authorize access to ${repoFullName}:\n${pc.cyan(url)}`),
+    finalize: async (params) => {
+      const grant = params.get('connect_grant');
+      if (!grant) {
+        throw new Error('github: connect authorization did not return a grant.');
+      }
+      return { connectGrant: grant };
+    },
+  });
+
+  return { connectGrant, codeVerifier: verifier };
+}
+
+export async function runConnect(
   root: string,
   client: PlatformClient,
   args: Extract<GithubArgs, { subcommand: 'connect' }>,
@@ -526,17 +584,51 @@ async function runConnect(
   // -------------------------------------------------------------------------
   // 6. Connect
   // -------------------------------------------------------------------------
-  let connection: GithubConnection;
-  try {
-    connection = await client.connectGithub(projectId, {
+  const attemptConnect = (extra?: { connectGrant: string; codeVerifier: string }) =>
+    client.connectGithub(projectId, {
       installationId: installation.installation_id,
       repoFullName,
       branch,
       buildExecutor: executor,
       workflowPath: args.workflowPath,
+      ...extra,
     });
+
+  let connection: GithubConnection;
+  try {
+    connection = await attemptConnect();
   } catch (err) {
-    if (err instanceof PlatformApiError) {
+    if (!(err instanceof PlatformApiError)) {
+      throw err;
+    }
+    if (err.status === 403 && err.code === 'connect_authorization_required') {
+      // Non-owner org member: prove per-repo access via an authorize round-trip,
+      // then retry the connect EXACTLY ONCE with the resulting grant. This MUST
+      // come before the generic `describeConnectError` branch below, which maps
+      // ANY 403 to "no project access" and would otherwise swallow this signal.
+      const grant = await runGithubConnectAuthorize(
+        client,
+        installation.installation_id,
+        repoFullName,
+      );
+      try {
+        connection = await attemptConnect({
+          connectGrant: grant.connectGrant,
+          codeVerifier: grant.codeVerifier,
+        });
+      } catch (retryErr) {
+        if (retryErr instanceof PlatformApiError && retryErr.status === 403) {
+          // A fresh grant should be accepted; a 403 here means it was rejected
+          // (expired, or the browser identity differs from the linked one). Do
+          // NOT fall through to the generic 403 "no project access" message.
+          log.error(
+            'connect: GitHub authorization failed or expired. Run `void github connect` again.',
+          );
+          process.exit(1);
+        }
+        throw retryErr;
+      }
+    } else {
       const body = parsePlatformErrorBody(err.body);
       const code = body?.error ?? body?.message ?? '';
       const message = describeConnectError(err.status, code);
@@ -546,7 +638,6 @@ async function runConnect(
       }
       throw err;
     }
-    throw err;
   }
 
   // Fail closed when an explicit --workflow was not applied. An older platform

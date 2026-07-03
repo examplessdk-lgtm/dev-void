@@ -165,6 +165,44 @@ describe('PlatformClient.connectGithub', () => {
     });
   });
 
+  it('includes connectGrant + codeVerifier in the JSON body when provided', async () => {
+    const connection: GithubConnection = {
+      id: 'conn_3',
+      project_id: projectId,
+      installation_id: '123456',
+      repo_full_name: 'octocat/hello-world',
+      repository_id: '9876',
+      branch: 'main',
+      build_executor: 'container',
+      workflow_path: '.github/workflows/void-deploy.yml',
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(connection));
+
+    const client = makeClient();
+    const result = await client.connectGithub(projectId, {
+      installationId: '123456',
+      repoFullName: 'octocat/hello-world',
+      branch: 'main',
+      buildExecutor: 'container',
+      connectGrant: 'grant-abc',
+      codeVerifier: 'verifier-abc',
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      installationId: '123456',
+      repoFullName: 'octocat/hello-world',
+      branch: 'main',
+      buildExecutor: 'container',
+      connectGrant: 'grant-abc',
+      codeVerifier: 'verifier-abc',
+    });
+    expect(result).toEqual(connection);
+  });
+
   it('throws PlatformApiError on non-2xx', async () => {
     fetchMock.mockResolvedValueOnce(new Response('not found', { status: 404 }));
     const client = makeClient();
@@ -176,6 +214,49 @@ describe('PlatformClient.connectGithub', () => {
     ).rejects.toMatchObject({
       name: 'PlatformApiError',
       status: 404,
+    });
+  });
+});
+
+describe('PlatformClient.getGithubConnectAuthorizeUrl', () => {
+  it('GETs connect-authorize-url with redirect + S256 challenge + installationId + repoFullName, auth headers, returns { url }', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ url: 'https://github.com/login/oauth/authorize?client_id=x' }),
+    );
+
+    const client = makeClient();
+    const redirect = 'http://localhost:54321/callback?state=abc';
+    const result = await client.getGithubConnectAuthorizeUrl(
+      redirect,
+      'challenge-xyz',
+      '123456',
+      'octocat/hello-world',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const parsed = new URL(url);
+    expect(parsed.origin + parsed.pathname).toBe(`${apiUrl}/github/connect-authorize-url`);
+    expect(parsed.searchParams.get('redirect')).toBe(redirect);
+    expect(parsed.searchParams.get('code_challenge')).toBe('challenge-xyz');
+    expect(parsed.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(parsed.searchParams.get('installationId')).toBe('123456');
+    expect(parsed.searchParams.get('repoFullName')).toBe('octocat/hello-world');
+    expect(init.method).toBeUndefined();
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe(`Bearer ${token}`);
+    expect(result).toEqual({ url: 'https://github.com/login/oauth/authorize?client_id=x' });
+  });
+
+  it('throws PlatformApiError on non-2xx (503 github_oauth_not_configured)', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'github_oauth_not_configured' }, 503));
+    const client = makeClient();
+    await expect(
+      client.getGithubConnectAuthorizeUrl('http://localhost:1/callback', 'c', '1', 'o/r'),
+    ).rejects.toMatchObject({
+      name: 'PlatformApiError',
+      status: 503,
+      code: 'github_oauth_not_configured',
     });
   });
 });
