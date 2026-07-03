@@ -463,6 +463,59 @@ describe('parseGithubArgs', () => {
     });
   });
 
+  describe('status', () => {
+    it('parses status with no args', () => {
+      expect(parseGithubArgs(['status'])).toEqual({
+        subcommand: 'status',
+        projectName: '',
+      });
+    });
+
+    it('parses status with a project name', () => {
+      expect(parseGithubArgs(['status', 'my-project'])).toEqual({
+        subcommand: 'status',
+        projectName: 'my-project',
+      });
+    });
+
+    it('parses --project flag', () => {
+      expect(parseGithubArgs(['status', '--project', 'my-project'])).toEqual({
+        subcommand: 'status',
+        projectName: 'my-project',
+      });
+    });
+
+    it('--project flag is an alias for the positional', () => {
+      const positional = parseGithubArgs(['status', 'my-project']);
+      const flag = parseGithubArgs(['status', '--project', 'my-project']);
+      expect(flag).toEqual(positional);
+    });
+
+    it('rejects --project when positional already set', () => {
+      expect(() => parseGithubArgs(['status', 'my-project', '--project', 'other'])).toThrow(
+        "github: Unexpected argument 'other'.",
+      );
+    });
+
+    it('rejects --project with no value', () => {
+      expect(() => parseGithubArgs(['status', '--project'])).toThrow(
+        'github: --project requires a value.',
+      );
+    });
+
+    it('rejects an unknown flag', () => {
+      expect(() => parseGithubArgs(['status', '--nope'])).toThrow(
+        "github: Unexpected argument '--nope'.",
+      );
+    });
+
+    it('rejects an extra positional after project name', () => {
+      expect(() => parseGithubArgs(['status', 'my-project', 'extra'])).toThrow(
+        "github: Unexpected argument 'extra'.",
+      );
+    });
+  });
+
   describe('link', () => {
     it('parses link with no args', () => {
       expect(parseGithubArgs(['link'])).toEqual({ subcommand: 'link' });
@@ -484,13 +537,13 @@ describe('parseGithubArgs', () => {
   describe('unknown subcommand', () => {
     it('throws on empty args', () => {
       expect(() => parseGithubArgs([])).toThrow(
-        'github: Usage: void github <install|installations|connect|update|link>.',
+        'github: Usage: void github <install|installations|connect|update|status|link>.',
       );
     });
 
     it('throws on unknown subcommand', () => {
       expect(() => parseGithubArgs(['unknown'])).toThrow(
-        'github: Usage: void github <install|installations|connect|update|link>.',
+        'github: Usage: void github <install|installations|connect|update|status|link>.',
       );
     });
   });

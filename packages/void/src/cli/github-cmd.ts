@@ -132,6 +132,26 @@ export function formatInstallations(installations: Array<GithubInstallation>): s
     .join('\n\n');
 }
 
+/**
+ * Render a GitHub connection as an aligned key/value block for `void github
+ * status`. The workflow file is the OIDC deploy pin — it is only read for
+ * github_actions builds (container builds never use it), so it is annotated as
+ * unused when the executor is container to avoid implying it is active.
+ */
+export function formatConnection(connection: GithubConnection): string {
+  const row = (label: string, value: string): string => `  ${label.padEnd(16)}${value}`;
+  const workflow =
+    connection.build_executor === 'github_actions'
+      ? connection.workflow_path
+      : `${connection.workflow_path} (unused for container builds)`;
+  return [
+    row('Repository', connection.repo_full_name),
+    row('Branch', connection.branch),
+    row('Build executor', connection.build_executor),
+    row('Deploy workflow', workflow),
+  ].join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Main command
 // ---------------------------------------------------------------------------
@@ -153,6 +173,8 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
       return runConnect(root, client, args);
     case 'update':
       return runGithubUpdate(root, client, args);
+    case 'status':
+      return runStatus(root, client, args);
     case 'link':
       return runGithubLink(root, client);
   }
@@ -805,4 +827,87 @@ export async function runGithubUpdate(
   log.success(
     `Updated ${updated.repo_full_name} → branch ${updated.branch}, executor ${updated.build_executor}, workflow ${updated.workflow_path}.`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// status
+// ---------------------------------------------------------------------------
+
+/**
+ * `void github status [project]` — print the current GitHub connection (repo,
+ * branch, build executor, deploy workflow). Read-only; never mutates. Project
+ * resolution mirrors connect/update; a 404 means the project was never
+ * connected and points the user at `connect`.
+ */
+export async function runStatus(
+  root: string,
+  client: PlatformClient,
+  args: Extract<GithubArgs, { subcommand: 'status' }>,
+): Promise<void> {
+  const isTTY = process.stdin.isTTY === true;
+
+  // -------------------------------------------------------------------------
+  // 1. Resolve project (identical resolution order to connect/update).
+  // -------------------------------------------------------------------------
+  let projectId: string;
+
+  const requestedSlug = getRequestedProjectSlug({ projectSlug: args.projectName || undefined });
+
+  if (requestedSlug) {
+    const projects = await client.listProjects();
+    const resolved = resolveProjectBySlug(projects, requestedSlug);
+    if (!resolved) {
+      log.error(`status: No project found with slug '${requestedSlug}'.`);
+      process.exit(1);
+    }
+    projectId = resolved.projectId;
+  } else {
+    const linked = readProjectConfig(root);
+    if (linked) {
+      projectId = linked.projectId;
+    } else if (!isTTY) {
+      log.error(
+        'status: No project specified. Pass a project name or --project <name>, set VOID_PROJECT, or link one with `void project link`.',
+      );
+      process.exit(1);
+    } else {
+      const projects = await client.listProjects();
+      if (projects.length === 0) {
+        log.error('No projects found. Create one first with `void deploy`.');
+        process.exit(1);
+      }
+      const picked = await select({
+        message: 'Select a project:',
+        options: projects.map((p) => ({ value: p.id, label: p.slug })),
+      });
+      if (isCancel(picked)) {
+        cancel('Cancelled.');
+        process.exit(0);
+      }
+      projectId = picked as string;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 2. Fetch and display the connection. A missing connection (404) means the
+  //    project was never connected — reuse the update 404 mapping to point the
+  //    user at `connect` instead of a raw error.
+  // -------------------------------------------------------------------------
+  let connection: GithubConnection;
+  try {
+    connection = await client.getGithubConnection(projectId);
+  } catch (err) {
+    if (err instanceof PlatformApiError) {
+      const body = parsePlatformErrorBody(err.body);
+      const code = body?.error ?? body?.message ?? '';
+      const message = describeUpdateError(err.status, code);
+      if (message !== null) {
+        log.error(`status: ${message}`);
+        process.exit(1);
+      }
+    }
+    throw err;
+  }
+
+  log.message(formatConnection(connection));
 }

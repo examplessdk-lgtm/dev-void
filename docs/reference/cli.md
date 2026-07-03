@@ -658,6 +658,26 @@ void github update my-app --executor github_actions
 
 **Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
 
+### `void github status`
+
+```
+void github status [project]
+```
+
+Show a project's current GitHub connection: the connected **repository**, the deploy **branch**, the **build executor** (`container` or `github_actions`), and the authorized **deploy workflow file**. Read-only — it never changes anything. The workflow file is the OIDC pin used only for `github_actions` builds; on a `container` connection it is still shown but marked unused. The project must already be connected (run `void github connect` first, otherwise it reports that and exits).
+
+**Options**
+
+| Flag               | Description                                      |
+| ------------------ | ------------------------------------------------ |
+| `--project <name>` | Project name (alias for the positional argument) |
+
+```
+void github status my-app
+```
+
+**Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
+
 ## Build
 
 Inspect Deploy-on-GitHub builds.

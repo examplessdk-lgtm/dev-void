@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vite-plus/test';
-import type { GithubInstallation } from '../../src/cli/client.ts';
+import type { GithubConnection, GithubInstallation } from '../../src/cli/client.ts';
 import {
   DEFAULT_WORKFLOW_PATH,
   describeConnectError,
   describeUpdateError,
+  formatConnection,
   formatInstallations,
   isValidWorkflowPath,
   parseGithubRepoFullName,
@@ -101,6 +102,50 @@ describe('isValidWorkflowPath', () => {
 
   it('rejects a path containing ".."', () => {
     expect(isValidWorkflowPath('.github/workflows/../../evil.yml')).toBe(false);
+  });
+});
+
+function makeConnection(overrides: Partial<GithubConnection> = {}): GithubConnection {
+  return {
+    id: 'conn_1',
+    project_id: 'proj_1',
+    installation_id: '42',
+    repo_full_name: 'acme/my-app',
+    repository_id: '99',
+    branch: 'main',
+    build_executor: 'github_actions',
+    workflow_path: '.github/workflows/void-deploy.yml',
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    ...overrides,
+  };
+}
+
+describe('formatConnection', () => {
+  it('shows repo, branch, executor, and workflow path', () => {
+    const out = formatConnection(makeConnection());
+    expect(out).toContain('acme/my-app');
+    expect(out).toContain('main');
+    expect(out).toContain('github_actions');
+    expect(out).toContain('.github/workflows/void-deploy.yml');
+  });
+
+  it('does not mark the workflow unused for github_actions', () => {
+    expect(formatConnection(makeConnection())).not.toContain('unused');
+  });
+
+  it('marks the workflow unused for the container executor', () => {
+    const out = formatConnection(makeConnection({ build_executor: 'container' }));
+    expect(out).toContain('container');
+    expect(out).toContain('unused for container builds');
+  });
+
+  it('labels each field', () => {
+    const out = formatConnection(makeConnection());
+    expect(out).toContain('Repository');
+    expect(out).toContain('Branch');
+    expect(out).toContain('Build executor');
+    expect(out).toContain('Deploy workflow');
   });
 });
 

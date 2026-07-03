@@ -204,6 +204,10 @@ const HELP_TREE: HelpTree = {
         command: 'update [project]',
         description: "Update an existing connection's branch, build executor, or deploy workflow",
       },
+      {
+        command: 'status [project]',
+        description: "Show a project's GitHub connection (repo, branch, executor, workflow)",
+      },
       { command: 'link', description: 'Link your GitHub account to Void' },
     ],
     children: {
@@ -279,6 +283,23 @@ const HELP_TREE: HelpTree = {
           {
             command: 'void github update my-app --branch release',
             description: 'Change the deploy branch',
+          },
+        ],
+      },
+      status: {
+        summary: "Show a project's GitHub connection settings.",
+        usage: ['void github status [project] [options]'],
+        options: [
+          { command: '--project <name>', description: 'Project name (alias for positional)' },
+        ],
+        examples: [
+          {
+            command: 'void github status',
+            description: "Show the linked project's connection",
+          },
+          {
+            command: 'void github status my-app',
+            description: 'Show a specific project connection',
           },
         ],
       },

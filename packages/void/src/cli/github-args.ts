@@ -13,6 +13,11 @@ export const githubSubcommands: Array<SubcommandDef> = [
     arg: '[project]',
     description: "Update an existing connection's branch, build executor, or deploy workflow",
   },
+  {
+    name: 'status',
+    arg: '[project]',
+    description: "Show a project's GitHub connection (repo, branch, executor, workflow)",
+  },
   { name: 'link', description: 'Link your GitHub account to Void' },
 ];
 
@@ -35,6 +40,10 @@ export type GithubArgs =
       branch?: string;
       executor?: 'container' | 'github_actions';
       workflowPath?: string;
+    }
+  | {
+      subcommand: 'status';
+      projectName: string;
     };
 
 export function parseGithubArgs(args: Array<string>): GithubArgs {
@@ -209,5 +218,34 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
     return { subcommand, projectName, branch, executor, workflowPath };
   }
 
-  throw new Error('github: Usage: void github <install|installations|connect|update|link>.');
+  if (subcommand === 'status') {
+    let projectName = '';
+
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i];
+      if (arg === '--project') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --project requires a value.');
+        }
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --project requires a value.');
+        }
+        if (projectName) {
+          throw new Error(`github: Unexpected argument '${value}'.`);
+        }
+        projectName = value;
+      } else if (arg.startsWith('-')) {
+        throw new Error(`github: Unexpected argument '${arg}'.`);
+      } else if (projectName) {
+        throw new Error(`github: Unexpected argument '${arg}'.`);
+      } else {
+        projectName = arg;
+      }
+    }
+
+    return { subcommand, projectName };
+  }
+
+  throw new Error('github: Usage: void github <install|installations|connect|update|status|link>.');
 }
