@@ -104,7 +104,7 @@ function resolveTsconfigEntry(baseDir: string, entry: string): string {
 }
 
 function relativeFrom(fromDir: string, target: string): string {
-  const value = relative(fromDir, target).replace(/\\/g, '/');
+  const value = relative(fromDir, target);
   return value.startsWith('.') ? value : `./${value}`;
 }
 

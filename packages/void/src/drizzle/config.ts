@@ -31,14 +31,14 @@ export function writeDrizzleConfig(
       ? {
           dialect: 'postgresql',
           schema: schemaSpecifier(schema, root),
-          out: `./${relative(root, paths.migrationsDir).replace(/\\/g, '/')}`,
+          out: `./${relative(root, paths.migrationsDir)}`,
           migrations: { prefix: 'timestamp' },
           dbCredentials: { url: dbPath },
         }
       : {
           dialect: 'sqlite',
           schema: schemaSpecifier(schema, root),
-          out: `./${relative(root, paths.migrationsDir).replace(/\\/g, '/')}`,
+          out: `./${relative(root, paths.migrationsDir)}`,
           migrations: { prefix: 'timestamp' },
           dbCredentials: { url: dbPath },
         };

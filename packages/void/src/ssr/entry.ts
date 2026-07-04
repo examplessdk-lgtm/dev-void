@@ -39,7 +39,7 @@ function resolveSingleEntry(
 ): ResolvedEntry | null {
   const matches = entries
     .map((entryName) => ({
-      relativePath: relative(root, join(paths.ssrDir, entryName)).replace(/\\/g, '/'),
+      relativePath: relative(root, join(paths.ssrDir, entryName)),
       absolutePath: join(paths.ssrDir, entryName),
     }))
     .filter((entry) => existsSync(entry.absolutePath));

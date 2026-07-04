@@ -81,7 +81,7 @@ describe('collectPrerenderWorkerModules', () => {
 
     expect(
       modules.map(({ path, type }) => ({
-        path: relative(workerDir, path).replace(/\\/g, '/'),
+        path: relative(workerDir, path),
         type,
       })),
     ).toEqual([
