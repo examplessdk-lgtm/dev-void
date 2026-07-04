@@ -56,7 +56,9 @@ export function resolveAssetConfig(inputs: AssetRoutingInputs): AssetConfig {
 // shell — otherwise `not_found_handling: 'single-page-application'` returns
 // index.html for GET /__void/migrate/capabilities and migration capability
 // negotiation fails at deploy time. The worker-first (`/**`) branch already
-// covers it; the SPA-fallback branch must list it explicitly.
+// covers it; both SPA-fallback branches must list it explicitly, since a SPA
+// can advertise migrations without API/auth routes (e.g. a cron/queue-only app
+// with D1 migrations still emits manifest.migrations).
 const VOID_INTERNAL_WORKER_FIRST = ['/__void', '/__void/*'];
 
 export function resolveAssetRoutingPolicy(inputs: AssetRoutingInputs): AssetRoutingPolicy {
@@ -70,7 +72,10 @@ export function resolveAssetRoutingPolicy(inputs: AssetRoutingInputs): AssetRout
           not_found_handling: 'single-page-application',
           run_worker_first: ['/api', '/api/*', ...VOID_INTERNAL_WORKER_FIRST],
         }
-      : { not_found_handling: 'single-page-application' };
+      : {
+          not_found_handling: 'single-page-application',
+          run_worker_first: [...VOID_INTERNAL_WORKER_FIRST],
+        };
   return {
     assetConfig,
     apiWorkerFirst,
