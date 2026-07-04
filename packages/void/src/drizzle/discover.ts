@@ -39,6 +39,6 @@ export function schemaSpecifier(location: SchemaLocation, root?: string): string
   if (!root) {
     return location.type === 'file' ? './db/schema.ts' : './db/schema/*.ts';
   }
-  const rel = relative(root, location.path).replace(/\\/g, '/');
+  const rel = relative(root, location.path);
   return location.type === 'file' ? `./${rel}` : `./${rel}/*.ts`;
 }

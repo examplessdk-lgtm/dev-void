@@ -196,7 +196,7 @@ describe('voidPlugin dev asset routing', () => {
     });
 
     expect(assets?.not_found_handling).toBe('single-page-application');
-    expect(assets?.run_worker_first).toEqual(['/api', '/api/*']);
+    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
   });
 
   it('does not return existing D1 or R2 bindings when adding inferred defaults', async () => {
@@ -228,7 +228,7 @@ describe('voidPlugin dev asset routing', () => {
     const assets = await resolveVoidPluginAssets(root);
 
     expect(assets?.not_found_handling).toBe('single-page-application');
-    expect(assets?.run_worker_first).toEqual(['/api', '/api/*']);
+    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
   });
 
   it('routes managed auth endpoints to the worker without making all documents worker-first', async () => {
@@ -236,7 +236,7 @@ describe('voidPlugin dev asset routing', () => {
     const assets = await resolveVoidPluginAssets(root);
 
     expect(assets?.not_found_handling).toBe('single-page-application');
-    expect(assets?.run_worker_first).toEqual(['/api', '/api/*']);
+    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
   });
 
   it('keeps API-only projects static-first when middleware directory has no active files', async () => {
@@ -247,7 +247,7 @@ describe('voidPlugin dev asset routing', () => {
     const assets = await resolveVoidPluginAssets(root);
 
     expect(assets?.not_found_handling).toBe('single-page-application');
-    expect(assets?.run_worker_first).toEqual(['/api', '/api/*']);
+    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
   });
 
   it('routes document routes through the worker before SPA fallback HTML', async () => {

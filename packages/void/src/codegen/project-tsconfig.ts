@@ -64,8 +64,8 @@ export function createProjectTsconfig(
       const isDir = existsSync(pathsConfig.schemaDir) && !existsSync(pathsConfig.schemaFile);
 
       // Paths are relative to .void/ (where this tsconfig lives), so use ../
-      const schemaRel = relative(outDir, pathsConfig.schemaDir).replace(/\\/g, '/');
-      const schemaFileRel = relative(outDir, pathsConfig.schemaFile).replace(/\\/g, '/');
+      const schemaRel = relative(outDir, pathsConfig.schemaDir);
+      const schemaFileRel = relative(outDir, pathsConfig.schemaFile);
       paths['@schema'] = [isDir ? `${schemaRel}/index.ts` : schemaFileRel];
       paths['@schema/*'] = [`${schemaRel}/*`];
     }

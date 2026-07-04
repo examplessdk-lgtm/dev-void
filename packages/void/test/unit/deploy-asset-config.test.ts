@@ -15,10 +15,13 @@ import {
 // worker does not need to inspect document navigations.
 describe('resolveAssetConfig', () => {
   const NONE = { not_found_handling: 'none' as const, run_worker_first: ['/**'] };
-  const SPA = { not_found_handling: 'single-page-application' as const };
+  const SPA = {
+    not_found_handling: 'single-page-application' as const,
+    run_worker_first: ['/__void', '/__void/*'],
+  };
   const SPA_API = {
     not_found_handling: 'single-page-application' as const,
-    run_worker_first: ['/api', '/api/*'],
+    run_worker_first: ['/api', '/api/*', '/__void', '/__void/*'],
   };
 
   it('uses none when SSR is enabled', () => {
@@ -53,6 +56,56 @@ describe('resolveAssetConfig', () => {
         hasMiddleware: false,
       }),
     ).toEqual(SPA_API);
+  });
+
+  it('routes the /__void internal namespace to the worker for SPA + API apps', () => {
+    // Regression: a SPA app with API routes + D1 migrations lands in the
+    // apiWorkerFirst branch. Without /__void in run_worker_first, CF Static
+    // Assets serves index.html for GET /__void/migrate/capabilities before the
+    // worker runs, so the migration handler is never reached and the deploy
+    // fails with "migration protocol v2 capability negotiation failed".
+    const config = resolveAssetConfig({
+      isSsr: false,
+      hasPages: false,
+      hasApiRoutes: true,
+      hasDocumentRoutes: false,
+      hasMiddleware: false,
+    });
+    expect(config.not_found_handling).toBe('single-page-application');
+    expect(config.run_worker_first).toContain('/__void');
+    expect(config.run_worker_first).toContain('/__void/*');
+  });
+
+  it('routes the /__void internal namespace worker-first for auth-enabled SPA apps', () => {
+    // authEnabled also triggers the apiWorkerFirst branch (auth apps have
+    // migrations for the auth tables), so /__void must reach the worker too.
+    const config = resolveAssetConfig({
+      isSsr: false,
+      hasPages: false,
+      hasApiRoutes: false,
+      hasDocumentRoutes: false,
+      hasMiddleware: false,
+      authEnabled: true,
+    });
+    expect(config.run_worker_first).toContain('/__void/*');
+  });
+
+  it('routes the /__void internal namespace worker-first for a migration-only SPA (cron/queue app, no API/auth/pages)', () => {
+    // A SPA whose only server code is a cron/queue handler still advertises
+    // manifest.migrations (validatedMigrations is passed to buildVoidManifest
+    // independently of routes), but has none of the asset-routing flags, so it
+    // falls to the pure-SPA branch. Without /__void there, CF serves index.html
+    // for GET /__void/migrate/capabilities and negotiation fails. (Codex #250 P2)
+    const config = resolveAssetConfig({
+      isSsr: false,
+      hasPages: false,
+      hasApiRoutes: false,
+      hasDocumentRoutes: false,
+      hasMiddleware: false,
+    });
+    expect(config.not_found_handling).toBe('single-page-application');
+    expect(config.run_worker_first).toContain('/__void');
+    expect(config.run_worker_first).toContain('/__void/*');
   });
 
   it('uses none when the project has document routes', () => {

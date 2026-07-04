@@ -139,8 +139,14 @@ function validatePendingMigrations(
 }
 
 export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
-  console.log();
-  intro(cliTitle('db'));
+  // `db export` streams raw SQL to stdout for piping — keep the banner off it.
+  const exportToStdout = args.action === 'export' && !args.output;
+  if (exportToStdout) {
+    process.stderr.write('\n');
+  } else {
+    console.log();
+  }
+  intro(cliTitle('db'), exportToStdout ? { output: process.stderr } : undefined);
 
   const dialect = getDatabaseDialect(readConfig(root));
 
@@ -1374,6 +1380,7 @@ async function runExport(
   args: { output?: string; noData?: boolean; noSchema?: boolean; table?: string },
   dialect: DatabaseDialect,
 ): Promise<void> {
+  const errOut = { output: process.stderr };
   if (dialect === 'postgresql') {
     const parts: Array<string> = [];
     await withPgClient(root, async (client) => {
@@ -1384,7 +1391,7 @@ async function runExport(
           [args.table],
         );
         if (check.rows.length === 0) {
-          log.error(`db: Table '${args.table}' not found.`);
+          log.error(`db: Table '${args.table}' not found.`, errOut);
           process.exit(1);
         }
         tables = [args.table];
@@ -1452,7 +1459,7 @@ async function runExport(
   const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
 
   if (!existsSync(dbPath)) {
-    log.error('No local database found. Run `void dev` first.');
+    log.error('No local database found. Run `void dev` first.', errOut);
     process.exit(1);
   }
 
@@ -1464,7 +1471,7 @@ async function runExport(
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
         .get(args.table);
       if (!exists) {
-        log.error(`db: Table '${args.table}' not found.`);
+        log.error(`db: Table '${args.table}' not found.`, errOut);
         process.exit(1);
       }
       tables = [args.table];

@@ -53,6 +53,7 @@ import {
   requiresSandboxPlatformImage,
   resolveSandboxConfig,
 } from '../sandbox/config.ts';
+import { mergeAndExpand, parseDotenvFile } from '../shared/dotenv.ts';
 import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env.ts';
 import { validateSsrEntry } from '../ssr/entry.ts';
 import { getApiUrl, getToken, getTokenSource } from './auth.ts';
@@ -2303,36 +2304,12 @@ async function assertEnvSchemaValid(
  * Load env vars for deploy — only .env and .env.production (not .local files).
  * Later files win on conflict.
  */
-function loadDeployEnv(root: string): Record<string, string> {
+export function loadDeployEnv(root: string): Record<string, string> {
+  // Same parse + merge + expand path env validation uses, so the shipped
+  // values match what was validated.
   const files = ['.env', '.env.production'];
-  const env: Record<string, string> = {};
-  for (const file of files) {
-    const filePath = join(root, file);
-    if (!existsSync(filePath)) {
-      continue;
-    }
-    const content = readFileSync(filePath, 'utf-8');
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) {
-        continue;
-      }
-      const eqIndex = trimmed.indexOf('=');
-      if (eqIndex === -1) {
-        continue;
-      }
-      const key = trimmed.slice(0, eqIndex).trim();
-      let value = trimmed.slice(eqIndex + 1).trim();
-      // Strip surrounding quotes
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
-      }
-      env[key] = value;
-    }
-  }
+  const parsed = files.map((file) => parseDotenvFile(join(root, file), { expand: false }));
+  const env = mergeAndExpand(parsed, { onWarn: (msg) => voidWarn(msg) });
   const { sanitized, stripped } = stripInternalEnvKeys(env);
   if (stripped.length > 0) {
     voidWarn(

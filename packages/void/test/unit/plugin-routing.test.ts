@@ -215,7 +215,7 @@ describe('routingPlugin', () => {
         apiWorkerFirst: true,
         assetConfig: expect.objectContaining({
           not_found_handling: 'single-page-application',
-          run_worker_first: ['/api', '/api/*'],
+          run_worker_first: ['/api', '/api/*', '/__void', '/__void/*'],
         }),
         workerFirst: false,
       }),
