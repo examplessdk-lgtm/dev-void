@@ -700,6 +700,16 @@ export async function runConnect(
       throw err;
     }
     if (err.status === 403 && err.code === 'connect_authorization_required') {
+      if (!isTTY) {
+        // The authorize round-trip opens a browser and blocks on a localhost callback
+        // (auth.ts, up to a 5-min timeout). A non-interactive shell (CI) has no browser,
+        // so fail closed immediately with an actionable message instead of hanging until
+        // the callback times out — same posture as the --branch / --repo guards above.
+        log.error(
+          'connect: this installation requires per-repo authorization, which needs an interactive browser sign-in. Run `void github connect` locally to authorize, then retry.',
+        );
+        process.exit(1);
+      }
       // Non-owner org member: prove per-repo access via an authorize round-trip,
       // then retry the connect EXACTLY ONCE with the resulting grant. This MUST
       // come before the generic `describeConnectError` branch below, which maps

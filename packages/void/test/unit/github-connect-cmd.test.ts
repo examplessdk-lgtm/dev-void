@@ -168,6 +168,7 @@ afterEach(() => {
 
 describe('runConnect — non-owner member connect-authorization round-trip', () => {
   it('runs the round-trip and retries connect with the grant + verifier on 403 connect_authorization_required', async () => {
+    (process.stdin as { isTTY?: boolean }).isTTY = true;
     const connectGithub = vi
       .fn()
       .mockRejectedValueOnce(authRequired())
@@ -175,6 +176,7 @@ describe('runConnect — non-owner member connect-authorization round-trip', () 
 
     const { promise, getGithubConnectAuthorizeUrl } = driveConnect({
       connectGithub,
+      args: { executor: 'container' },
       callbackQuery: (cb) => {
         const hit = new URL(cb); // already carries the command's state
         hit.searchParams.set('connect_grant', 'grant-xyz');
@@ -242,6 +244,7 @@ describe('runConnect — non-owner member connect-authorization round-trip', () 
   });
 
   it('exits(1) with the auth-failed message (NOT "no project access") when the retry is rejected with 403', async () => {
+    (process.stdin as { isTTY?: boolean }).isTTY = true;
     const connectGithub = vi
       .fn()
       .mockRejectedValueOnce(authRequired())
@@ -255,6 +258,7 @@ describe('runConnect — non-owner member connect-authorization round-trip', () 
 
     const { promise, getGithubConnectAuthorizeUrl } = driveConnect({
       connectGithub,
+      args: { executor: 'container' },
       callbackQuery: (cb) => {
         const hit = new URL(cb);
         hit.searchParams.set('connect_grant', 'grant-stale');
@@ -276,10 +280,12 @@ describe('runConnect — non-owner member connect-authorization round-trip', () 
   });
 
   it('surfaces the friendly per-repo message and attempts no retry when the callback is repo_not_accessible', async () => {
+    (process.stdin as { isTTY?: boolean }).isTTY = true;
     const connectGithub = vi.fn().mockRejectedValueOnce(authRequired());
 
     const { promise, getGithubConnectAuthorizeUrl } = driveConnect({
       connectGithub,
+      args: { executor: 'container' },
       callbackQuery: (cb) => {
         const hit = new URL(cb);
         hit.searchParams.set('error', 'repo_not_accessible');
@@ -317,6 +323,22 @@ describe('runConnect — non-owner member connect-authorization round-trip', () 
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(errorSpy).toHaveBeenCalledWith(
       'connect: This project is already connected to a GitHub repository.',
+    );
+    expect(successSpy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed in non-interactive mode instead of starting the browser round-trip on 403 connect_authorization_required', async () => {
+    const connectGithub = vi.fn().mockRejectedValueOnce(authRequired());
+
+    const { promise, getGithubConnectAuthorizeUrl } = driveConnect({ connectGithub });
+
+    await expect(promise).rejects.toThrow('process.exit(1)');
+
+    expect(getGithubConnectAuthorizeUrl).not.toHaveBeenCalled();
+    expect(connectGithub).toHaveBeenCalledTimes(1);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      'connect: this installation requires per-repo authorization, which needs an interactive browser sign-in. Run `void github connect` locally to authorize, then retry.',
     );
     expect(successSpy).not.toHaveBeenCalled();
   });
