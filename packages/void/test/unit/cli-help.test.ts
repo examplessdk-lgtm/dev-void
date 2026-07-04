@@ -57,6 +57,7 @@ describe('CLI help resolver', () => {
     expect(getHelpPath(['help', 'github', 'installations'])).toEqual(['github', 'installations']);
     expect(getHelpPath(['help', 'github', 'connect'])).toEqual(['github', 'connect']);
     expect(getHelpPath(['github', 'connect', '--help'])).toEqual(['github', 'connect']);
+    expect(getHelpPath(['github', 'status', '--help'])).toEqual(['github', 'status']);
   });
 
   it('tracks known github help pages', () => {
@@ -64,6 +65,7 @@ describe('CLI help resolver', () => {
     expect(hasHelpPage(['github', 'install'])).toBe(true);
     expect(hasHelpPage(['github', 'installations'])).toBe(true);
     expect(hasHelpPage(['github', 'connect'])).toBe(true);
+    expect(hasHelpPage(['github', 'status'])).toBe(true);
     expect(hasHelpPage(['github', 'missing'])).toBe(false);
   });
 });

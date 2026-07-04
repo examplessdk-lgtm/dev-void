@@ -204,6 +204,10 @@ const HELP_TREE: HelpTree = {
         command: 'update [project]',
         description: "Update an existing connection's branch, build executor, or deploy workflow",
       },
+      {
+        command: 'status [project]',
+        description: "Show a project's GitHub connection (repo, branch, executor, workflow)",
+      },
       { command: 'link', description: 'Link your GitHub account to Void' },
       {
         command: 'join',
@@ -237,12 +241,13 @@ const HELP_TREE: HelpTree = {
           },
           {
             command: '--executor <type>',
-            description: 'Build executor: container (default) | github_actions',
+            description:
+              'Build executor: container (default) | github_actions; prompted interactively when omitted',
           },
           {
             command: '--workflow <path>',
             description:
-              'Authorized deploy workflow file (default .github/workflows/void-deploy.yml)',
+              'Authorized deploy workflow file (default .github/workflows/void-deploy.yml); prompted interactively when using github_actions',
           },
         ],
         examples: [
@@ -254,6 +259,11 @@ const HELP_TREE: HelpTree = {
             command: 'void github connect my-app --installation 42 --repo owner/repo --branch main',
             description: 'Non-interactive connect (all flags explicit)',
           },
+          {
+            command:
+              'void github connect my-app --repo owner/repo --branch main --executor github_actions',
+            description: 'Non-interactive connect using the GitHub Actions executor',
+          },
         ],
       },
       update: {
@@ -264,11 +274,13 @@ const HELP_TREE: HelpTree = {
           { command: '--branch <name>', description: 'New branch to deploy from' },
           {
             command: '--executor <type>',
-            description: 'New build executor: container | github_actions',
+            description:
+              'New build executor: container | github_actions; prompted interactively when omitted',
           },
           {
             command: '--workflow <path>',
-            description: 'New authorized deploy workflow file (under .github/workflows/)',
+            description:
+              'New authorized deploy workflow file under .github/workflows/; prompted interactively when using github_actions',
           },
         ],
         examples: [
@@ -279,6 +291,23 @@ const HELP_TREE: HelpTree = {
           {
             command: 'void github update my-app --branch release',
             description: 'Change the deploy branch',
+          },
+        ],
+      },
+      status: {
+        summary: "Show a project's GitHub connection settings.",
+        usage: ['void github status [project] [options]'],
+        options: [
+          { command: '--project <name>', description: 'Project name (alias for positional)' },
+        ],
+        examples: [
+          {
+            command: 'void github status',
+            description: "Show the linked project's connection",
+          },
+          {
+            command: 'void github status my-app',
+            description: 'Show a specific project connection',
           },
         ],
       },

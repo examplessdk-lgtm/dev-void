@@ -25,6 +25,27 @@ import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project
 // ---------------------------------------------------------------------------
 
 /**
+ * The workflow file `void init --github` scaffolds and the platform default for
+ * a connection's OIDC deploy pin. Kept in sync with the server default
+ * (`github_connections.workflow_path`) and the `init.ts` scaffolder.
+ */
+export const DEFAULT_WORKFLOW_PATH = '.github/workflows/void-deploy.yml';
+
+/**
+ * Client-side mirror of the server's `isValidWorkflowPath` (packages/api
+ * routes/github.ts). Used to reject a bad path at the interactive prompt before
+ * an API round-trip. The server re-validates, so this is DX only, not security.
+ */
+export function isValidWorkflowPath(path: string): boolean {
+  return (
+    path.length > 0 &&
+    path.startsWith('.github/workflows/') &&
+    (path.endsWith('.yml') || path.endsWith('.yaml')) &&
+    !path.includes('..')
+  );
+}
+
+/**
  * Map a PlatformApiError status + error code string to a friendly user message.
  * Returns null for unrecognised cases (caller should re-throw).
  */
@@ -111,6 +132,26 @@ export function formatInstallations(installations: Array<GithubInstallation>): s
     .join('\n\n');
 }
 
+/**
+ * Render a GitHub connection as an aligned key/value block for `void github
+ * status`. The workflow file is the OIDC deploy pin — it is only read for
+ * github_actions builds (container builds never use it), so it is annotated as
+ * unused when the executor is container to avoid implying it is active.
+ */
+export function formatConnection(connection: GithubConnection): string {
+  const row = (label: string, value: string): string => `  ${label.padEnd(16)}${value}`;
+  const workflow =
+    connection.build_executor === 'github_actions'
+      ? connection.workflow_path
+      : `${connection.workflow_path} (unused for container builds)`;
+  return [
+    row('Repository', connection.repo_full_name),
+    row('Branch', connection.branch),
+    row('Build executor', connection.build_executor),
+    row('Deploy workflow', workflow),
+  ].join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Main command
 // ---------------------------------------------------------------------------
@@ -132,6 +173,8 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
       return runConnect(root, client, args);
     case 'update':
       return runGithubUpdate(root, client, args);
+    case 'status':
+      return runStatus(root, client, args);
     case 'link':
       return runGithubLink(root, client);
     case 'join':
@@ -577,12 +620,67 @@ export async function runConnect(
   }
 
   // -------------------------------------------------------------------------
-  // 5. Executor
+  // 5. Executor (build backend). Non-interactive keeps the historical silent
+  //    default of `container`; TTY prompts so a first-time connect is explicit.
   // -------------------------------------------------------------------------
-  const executor = args.executor ?? 'container';
+  let executor: 'container' | 'github_actions';
+  if (args.executor !== undefined) {
+    executor = args.executor;
+  } else if (!isTTY) {
+    executor = 'container';
+  } else {
+    const picked = await select({
+      message: 'Build executor:',
+      options: [
+        { value: 'container', label: 'Cloudflare Container', hint: 'build on Void (default)' },
+        { value: 'github_actions', label: 'GitHub Actions', hint: "build in your repo's runner" },
+      ],
+      initialValue: 'container',
+    });
+    if (isCancel(picked)) {
+      cancel('Cancelled.');
+      process.exit(0);
+    }
+    executor = picked as 'container' | 'github_actions';
+  }
 
   // -------------------------------------------------------------------------
-  // 6. Connect
+  // 6. Workflow file (github_actions only — this is the per-connection OIDC
+  //    deploy pin; container builds never read it). Flag wins; otherwise TTY
+  //    prompts, defaulting to the scaffolded workflow.
+  //
+  //    Only carry a prompted value forward when it DIFFERS from the default, so
+  //    accepting the default leaves `workflowPath` undefined → the field is not
+  //    sent → the server applies its own (identical) default. This keeps the
+  //    fail-closed echo check below from firing against an older platform that
+  //    silently drops the field and returns its default.
+  // -------------------------------------------------------------------------
+  let workflowPath = args.workflowPath;
+  if (executor === 'github_actions' && args.workflowPath === undefined && isTTY) {
+    const input = await text({
+      message: 'Deploy workflow file:',
+      placeholder: DEFAULT_WORKFLOW_PATH,
+      initialValue: DEFAULT_WORKFLOW_PATH,
+      validate(value) {
+        const v = (value ?? '').trim();
+        if (v.length === 0 || isValidWorkflowPath(v)) {
+          return;
+        }
+        return 'Must be under .github/workflows/, end in .yml/.yaml, and not contain "..".';
+      },
+    });
+    if (isCancel(input)) {
+      cancel('Cancelled.');
+      process.exit(0);
+    }
+    const chosen = (input as string).trim() || DEFAULT_WORKFLOW_PATH;
+    if (chosen !== DEFAULT_WORKFLOW_PATH) {
+      workflowPath = chosen;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 7. Connect
   // -------------------------------------------------------------------------
   const attemptConnect = (extra?: { connectGrant: string; codeVerifier: string }) =>
     client.connectGithub(projectId, {
@@ -590,7 +688,7 @@ export async function runConnect(
       repoFullName,
       branch,
       buildExecutor: executor,
-      workflowPath: args.workflowPath,
+      workflowPath,
       ...extra,
     });
 
@@ -640,13 +738,15 @@ export async function runConnect(
     }
   }
 
-  // Fail closed when an explicit --workflow was not applied. An older platform
-  // that predates workflow_path silently drops the field and returns success
-  // while staying pinned to the default, so the user would wrongly believe their
-  // custom workflow is authorized to deploy. Verify the server echoed it back.
-  if (args.workflowPath !== undefined && connection.workflow_path !== args.workflowPath) {
+  // Fail closed when a custom workflow path (from --workflow or the prompt) was
+  // not applied. An older platform that predates workflow_path silently drops
+  // the field and returns success while staying pinned to the default, so the
+  // user would wrongly believe their custom workflow is authorized to deploy.
+  // Verify the server echoed it back. (Accepting the default leaves workflowPath
+  // undefined, so this check is skipped — see step 6.)
+  if (workflowPath !== undefined && connection.workflow_path !== workflowPath) {
     log.error(
-      `connect: server did not apply --workflow ${args.workflowPath} (got ${connection.workflow_path ?? 'none'}). The platform may be too old to support a custom workflow path.`,
+      `connect: server did not apply workflow path ${workflowPath} (got ${connection.workflow_path ?? 'none'}). The platform may be too old to support a custom workflow path.`,
     );
     process.exit(1);
   }
@@ -750,6 +850,9 @@ export async function runGithubUpdate(
   // -------------------------------------------------------------------------
   let branch: string;
   let executor: 'container' | 'github_actions';
+  // Effective workflow path — the flag wins; a github_actions TTY prompt (below)
+  // can override it; otherwise it stays the current value (no change).
+  let workflowPath = args.workflowPath ?? current.workflow_path;
 
   if (isTTY) {
     if (args.branch !== undefined) {
@@ -784,9 +887,32 @@ export async function runGithubUpdate(
       }
       executor = picked as 'container' | 'github_actions';
     }
+
+    // Prompt for the deploy workflow file when the resulting executor is
+    // github_actions and --workflow was not passed. Defaults to the current
+    // path; container builds never read workflow_path so there is nothing to ask.
+    if (executor === 'github_actions' && args.workflowPath === undefined) {
+      const input = await text({
+        message: 'Deploy workflow file:',
+        placeholder: current.workflow_path,
+        initialValue: current.workflow_path,
+        validate(value) {
+          const v = (value ?? '').trim();
+          if (v.length === 0 || isValidWorkflowPath(v)) {
+            return;
+          }
+          return 'Must be under .github/workflows/, end in .yml/.yaml, and not contain "..".';
+        },
+      });
+      if (isCancel(input)) {
+        cancel('Cancelled.');
+        process.exit(0);
+      }
+      workflowPath = (input as string).trim() || current.workflow_path;
+    }
   } else {
     // The missing-flags guard at the top of this function already guaranteed at
-    // least one of --branch / --executor is present in non-TTY mode.
+    // least one of --branch / --executor / --workflow is present in non-TTY mode.
     branch = args.branch ?? current.branch;
     executor = args.executor ?? current.build_executor;
   }
@@ -805,10 +931,11 @@ export async function runGithubUpdate(
   if (executor !== current.build_executor) {
     patch.buildExecutor = executor;
   }
-  // workflow_path is flag-only (no interactive prompt): change it only when
-  // --workflow was passed AND it differs from the stored value.
-  if (args.workflowPath !== undefined && args.workflowPath !== current.workflow_path) {
-    patch.workflowPath = args.workflowPath;
+  // Change workflow_path only when the effective value (from --workflow or the
+  // github_actions prompt above) differs from the stored value. Accepting the
+  // current value at the prompt leaves it unchanged, so nothing is sent.
+  if (workflowPath !== current.workflow_path) {
+    patch.workflowPath = workflowPath;
   }
 
   // -------------------------------------------------------------------------
@@ -845,12 +972,13 @@ export async function runGithubUpdate(
     throw err;
   }
 
-  // Fail closed when an explicit --workflow was not applied — same old-platform
-  // compatibility hazard as connect: the server could return success while
-  // ignoring the unknown field, leaving the workflow pin unchanged.
+  // Fail closed when a custom workflow path (from --workflow or the prompt) was
+  // not applied — same old-platform compatibility hazard as connect: the server
+  // could return success while ignoring the unknown field, leaving the workflow
+  // pin unchanged.
   if (patch.workflowPath !== undefined && updated.workflow_path !== patch.workflowPath) {
     log.error(
-      `update: server did not apply --workflow ${patch.workflowPath} (got ${updated.workflow_path ?? 'none'}). The platform may be too old to support a custom workflow path.`,
+      `update: server did not apply workflow path ${patch.workflowPath} (got ${updated.workflow_path ?? 'none'}). The platform may be too old to support a custom workflow path.`,
     );
     process.exit(1);
   }
@@ -858,4 +986,87 @@ export async function runGithubUpdate(
   log.success(
     `Updated ${updated.repo_full_name} → branch ${updated.branch}, executor ${updated.build_executor}, workflow ${updated.workflow_path}.`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// status
+// ---------------------------------------------------------------------------
+
+/**
+ * `void github status [project]` — print the current GitHub connection (repo,
+ * branch, build executor, deploy workflow). Read-only; never mutates. Project
+ * resolution mirrors connect/update; a 404 means the project was never
+ * connected and points the user at `connect`.
+ */
+export async function runStatus(
+  root: string,
+  client: PlatformClient,
+  args: Extract<GithubArgs, { subcommand: 'status' }>,
+): Promise<void> {
+  const isTTY = process.stdin.isTTY === true;
+
+  // -------------------------------------------------------------------------
+  // 1. Resolve project (identical resolution order to connect/update).
+  // -------------------------------------------------------------------------
+  let projectId: string;
+
+  const requestedSlug = getRequestedProjectSlug({ projectSlug: args.projectName || undefined });
+
+  if (requestedSlug) {
+    const projects = await client.listProjects();
+    const resolved = resolveProjectBySlug(projects, requestedSlug);
+    if (!resolved) {
+      log.error(`status: No project found with slug '${requestedSlug}'.`);
+      process.exit(1);
+    }
+    projectId = resolved.projectId;
+  } else {
+    const linked = readProjectConfig(root);
+    if (linked) {
+      projectId = linked.projectId;
+    } else if (!isTTY) {
+      log.error(
+        'status: No project specified. Pass a project name or --project <name>, set VOID_PROJECT, or link one with `void project link`.',
+      );
+      process.exit(1);
+    } else {
+      const projects = await client.listProjects();
+      if (projects.length === 0) {
+        log.error('No projects found. Create one first with `void deploy`.');
+        process.exit(1);
+      }
+      const picked = await select({
+        message: 'Select a project:',
+        options: projects.map((p) => ({ value: p.id, label: p.slug })),
+      });
+      if (isCancel(picked)) {
+        cancel('Cancelled.');
+        process.exit(0);
+      }
+      projectId = picked as string;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 2. Fetch and display the connection. A missing connection (404) means the
+  //    project was never connected — reuse the update 404 mapping to point the
+  //    user at `connect` instead of a raw error.
+  // -------------------------------------------------------------------------
+  let connection: GithubConnection;
+  try {
+    connection = await client.getGithubConnection(projectId);
+  } catch (err) {
+    if (err instanceof PlatformApiError) {
+      const body = parsePlatformErrorBody(err.body);
+      const code = body?.error ?? body?.message ?? '';
+      const message = describeUpdateError(err.status, code);
+      if (message !== null) {
+        log.error(`status: ${message}`);
+        process.exit(1);
+      }
+    }
+    throw err;
+  }
+
+  log.message(formatConnection(connection));
 }

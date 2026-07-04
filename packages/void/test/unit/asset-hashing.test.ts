@@ -19,8 +19,13 @@ vi.mock('node:fs', async () => {
 const fsModule = await import('node:fs');
 const readFileSyncMock = fsModule.readFileSync as unknown as ReturnType<typeof vi.fn>;
 
-const { collectAndHashAssets, computeAssetHash, computeAssetHashes, computeMd5 } =
-  await import('../../src/cli/package.ts');
+const {
+  collectAndHashAssets,
+  computeAssetHash,
+  computeAssetHashes,
+  computeMd5,
+  getAssetContentType,
+} = await import('../../src/cli/package.ts');
 
 const TMP = join(import.meta.dirname, '.tmp-asset-hashing-test');
 
@@ -133,5 +138,30 @@ describe('collectAndHashAssets — v2 manifest entries', () => {
 
     // Manifest should still be populated correctly (sanity).
     expect(Object.keys(assetManifest).sort()).toEqual(['/a.js', '/b.css', '/c.html']);
+  });
+});
+
+describe('getAssetContentType', () => {
+  it('returns text/markdown for .md files', () => {
+    expect(getAssetContentType('/guide/github-actions-cache.md')).toBe(
+      'text/markdown; charset=utf-8',
+    );
+  });
+
+  it('returns text/markdown for .markdown files', () => {
+    expect(getAssetContentType('/notes.markdown')).toBe('text/markdown; charset=utf-8');
+  });
+
+  it('returns text/yaml for .yaml and .yml files', () => {
+    expect(getAssetContentType('/config.yaml')).toBe('text/yaml; charset=utf-8');
+    expect(getAssetContentType('/config.yml')).toBe('text/yaml; charset=utf-8');
+  });
+
+  it('returns application/toml for .toml files', () => {
+    expect(getAssetContentType('/config.toml')).toBe('application/toml');
+  });
+
+  it('returns application/octet-stream for unknown extensions', () => {
+    expect(getAssetContentType('/file.xyz')).toBe('application/octet-stream');
   });
 });

@@ -628,6 +628,8 @@ Connect a GitHub repository to a Void project for automatic deploys. On every pu
 
 The `--workflow` path is the workflow file the GitHub OIDC exchange authorizes to mint this project's deploy token. It defaults to the scaffolded `.github/workflows/void-deploy.yml`; set it only if your deploy step lives in a different workflow file (it must be under `.github/workflows/` and end in `.yml`/`.yaml`). Because the exchange is secretless, **only this one workflow** can mint a deploy token — any other workflow in the repo (including an unsafe `pull_request_target`) is rejected. Pointing it at a broad, multi-purpose workflow widens that trust, so prefer a dedicated file.
 
+Interactively (TTY), after resolving the repository and branch, `void github connect` prompts for the **build executor** (defaulting to `container`). If you pick `github_actions`, it then prompts for the **deploy workflow file**, defaulting to `.github/workflows/void-deploy.yml` and validated locally before it is sent. Pass `--executor` and/or `--workflow` to skip the respective prompt. The workflow prompt is skipped entirely for the `container` executor, which does not use a workflow file.
+
 **Non-interactive use (CI)**
 
 When stdin is not a TTY, `void github connect` never prompts — it fails closed and names any flag it needs. `--branch` is always required. `--project` must be resolvable (positional / `--project` / `VOID_PROJECT` / linked `.void/project.json`). `--installation` is required only when your account has more than one installation; otherwise the sole installation is used. `--repo` is required when the installation grants access to all repos or to more than one selected repo; when it grants exactly one repo that repo is used automatically. Use `void github installations` to discover the `installation_id`.
@@ -662,10 +664,30 @@ Update an existing connection's deploy **branch**, **build executor**, and/or au
 | `--executor <type>` | New build executor: `container` or `github_actions`              |
 | `--workflow <path>` | New authorized deploy workflow file (under `.github/workflows/`) |
 
-Interactively (TTY), `void github update` shows the current branch and executor and prompts for new values, defaulting each to the current setting. `--workflow` is flag-only — it is never prompted for; pass it explicitly to change the authorized workflow file. When stdin is not a TTY, it never prompts: pass at least one of `--branch` / `--executor` / `--workflow`, or it fails closed. If nothing actually changes, the command reports "no changes" and does not call the API.
+Interactively (TTY), `void github update` shows the current branch and executor and prompts for new values, defaulting each to the current setting. If the resulting executor is `github_actions`, it then prompts for the **deploy workflow file**, defaulting to the current path and validated locally; pass `--workflow` to skip that prompt. The workflow prompt is skipped when the executor is `container`, which does not use a workflow file. When stdin is not a TTY, it never prompts: pass at least one of `--branch` / `--executor` / `--workflow`, or it fails closed. If nothing actually changes, the command reports "no changes" and does not call the API.
 
 ```
 void github update my-app --executor github_actions
+```
+
+**Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
+
+### `void github status`
+
+```
+void github status [project]
+```
+
+Show a project's current GitHub connection: the connected **repository**, the deploy **branch**, the **build executor** (`container` or `github_actions`), and the authorized **deploy workflow file**. Read-only — it never changes anything. The workflow file is the OIDC pin used only for `github_actions` builds; on a `container` connection it is still shown but marked unused. The project must already be connected (run `void github connect` first, otherwise it reports that and exits).
+
+**Options**
+
+| Flag               | Description                                      |
+| ------------------ | ------------------------------------------------ |
+| `--project <name>` | Project name (alias for the positional argument) |
+
+```
+void github status my-app
 ```
 
 **Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
