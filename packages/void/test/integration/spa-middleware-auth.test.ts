@@ -160,7 +160,7 @@ describe('SPA asset routing policy', () => {
 
     const assetConfig = readBuiltAssetConfig();
     expect(assetConfig.not_found_handling).toBe('single-page-application');
-    expect(assetConfig.run_worker_first).toEqual(['/api', '/api/*']);
+    expect(assetConfig.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
   });
 
   it('routes document routes through the worker before SPA fallback HTML', async () => {
