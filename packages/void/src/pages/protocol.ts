@@ -473,6 +473,8 @@ export async function handlePageGet(
       return pageJsonResponse(c, pageObj);
     }
     // Stream NDJSON: first line is PageObject, subsequent lines are deferred groups
+    c.header('X-VoidPages', 'true');
+    c.header('Vary', 'X-VoidPages');
     return streamDeferredResponse(
       JSON.stringify(pageObj) + '\n',
       deferredMap,

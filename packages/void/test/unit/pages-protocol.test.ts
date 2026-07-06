@@ -794,6 +794,26 @@ describe('handlePageMutation', () => {
 });
 
 describe('handlePageGet with deferred props', () => {
+  it('SPA — marks deferred NDJSON responses as Void Pages responses', async () => {
+    const c = await createTestContext('GET', '/dashboard', {
+      headers: { 'x-voidpages': 'true' },
+    });
+
+    const response = await handlePageGet(
+      () => ({
+        usage: defer(() => Promise.resolve({ requests: 100 })),
+      }),
+      undefined,
+      c,
+      'dashboard',
+      mockRenderFn,
+      mockGetAssetTags,
+    );
+
+    expect(response.headers.get('X-VoidPages')).toBe('true');
+    expect(response.headers.get('Vary')).toBe('X-VoidPages');
+  });
+
   it('SPA — streams NDJSON with immediate props first, then deferred', async () => {
     const c = await createTestContext('GET', '/dashboard', {
       headers: { 'x-voidpages': 'true' },
