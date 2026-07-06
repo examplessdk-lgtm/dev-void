@@ -571,13 +571,41 @@ function defineClientTests(getBase: () => string) {
       await page.goto(BASE + '/');
       await waitForHydration(page);
 
-      // SPA navigate to deferred page
-      await page.click('a[href="/deferred"]');
+      await page.evaluate(() => {
+        window.__SPA_MARKER = true;
+      });
+
+      // Avoid hover prefetch so this exercises the deferred NDJSON navigation path.
+      await page.evaluate(() => {
+        document.querySelector<HTMLAnchorElement>('a[href="/deferred"]')?.click();
+      });
       await page.waitForFunction(() => document.querySelector('[data-testid="deferred-resolved"]'));
 
       const text = await page.textContent('[data-testid="deferred-resolved"]');
       expect(text).toBe('Count: 42');
+      expect(await page.evaluate(() => window.__SPA_MARKER)).toBe(true);
       expect(page.url()).toBe(BASE + '/deferred');
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('deferred props: useId hydrates without mismatches', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/deferred');
+      await waitForHydration(page);
+      await page.waitForFunction(() => document.querySelector('[data-testid="deferred-resolved"]'));
+      await page.waitForFunction(
+        () =>
+          document.querySelector<HTMLElement>('[data-testid="deferred-title"]')?.dataset.clientId,
+      );
+
+      const ids = await page.evaluate(() => {
+        const title = document.querySelector<HTMLElement>('[data-testid="deferred-title"]')!;
+        return { server: title.id, client: title.dataset.clientId };
+      });
+      expect(ids.server).toBe(ids.client);
     } finally {
       await page.context().close();
     }

@@ -35,6 +35,7 @@ import {
   RouterContext,
   SharedContext,
 } from './context.ts';
+import { DEFERRED_SHELL_END_ID } from './deferred-shell.ts';
 
 // oxlint-disable-next-line no-explicit-any -- component props are narrowed by generated route types
 type ComponentModule = { default: ComponentType<any> };
@@ -625,13 +626,24 @@ export async function startReactPages(config: ReactPagesConfig): Promise<ReactPa
     throw new Error('pages: Missing #app element for Void React pages hydration.');
   }
 
-  const app = React.createElement(App, {
+  const appRoot = React.createElement(App, {
     engine,
     router,
     viewTransitions: config.viewTransitions,
   });
+  const isSsr = appEl.getAttribute('data-void-ssr') !== 'false';
+  const hasDeferred = Boolean((engine.initialPageData as ReactPageData).deferredKeys);
+  const app =
+    isSsr && hasDeferred
+      ? React.createElement(
+          React.Fragment,
+          null,
+          appRoot,
+          React.createElement('template', { id: DEFERRED_SHELL_END_ID }),
+        )
+      : appRoot;
   startTransition(() => {
-    if (appEl.getAttribute('data-void-ssr') === 'false') {
+    if (!isSsr) {
       createRoot(appEl).render(app);
     } else {
       hydrateRoot(appEl, app);

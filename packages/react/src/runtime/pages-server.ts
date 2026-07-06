@@ -11,12 +11,11 @@ import {
   RouterContext,
   SharedContext,
 } from './context.ts';
+import { DEFERRED_SHELL_END_ID, DEFERRED_SHELL_END_MARKER } from './deferred-shell.ts';
 
 // oxlint-disable-next-line no-explicit-any -- component props are narrowed by generated route types
 type ComponentModule = { default: ComponentType<any> };
 const DEFERRED_SHELL_CANCEL_REASON = 'Void deferred shell complete';
-const DEFERRED_SHELL_END_ID = '__VOID_DEFERRED_SHELL_END__';
-const DEFERRED_SHELL_END_MARKER = `<template id="${DEFERRED_SHELL_END_ID}"></template>`;
 
 export type ReactPagesServerConfig = Readonly<{
   pageObj: PageObject;
@@ -102,7 +101,7 @@ function readDeferredShell(stream: ReadableStream<Uint8Array>): ReadableStream<U
           buffer += decoder.decode(value, { stream: true });
           const markerIndex = buffer.indexOf(DEFERRED_SHELL_END_MARKER);
           if (markerIndex !== -1) {
-            flush(buffer.slice(0, markerIndex));
+            flush(buffer.slice(0, markerIndex + DEFERRED_SHELL_END_MARKER.length));
             await reader.cancel(DEFERRED_SHELL_CANCEL_REASON);
             break;
           }

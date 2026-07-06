@@ -1,4 +1,4 @@
-import { Suspense, use } from 'react';
+import { Suspense, use, useId } from 'react';
 import type { Props } from './deferred.server.ts';
 
 function Stats({ stats }: Pick<Props, 'stats'>) {
@@ -8,9 +8,21 @@ function Stats({ stats }: Pick<Props, 'stats'>) {
 }
 
 export default function DeferredPage({ title, stats }: Props) {
+  const titleId = useId();
+
   return (
     <div>
-      <h1>{title}</h1>
+      <h1
+        id={titleId}
+        data-testid="deferred-title"
+        ref={(element) => {
+          if (element) {
+            element.dataset.clientId = titleId;
+          }
+        }}
+      >
+        {title}
+      </h1>
       <Suspense fallback={<div data-testid="deferred-loading">Loading stats...</div>}>
         <Stats stats={stats} />
       </Suspense>
