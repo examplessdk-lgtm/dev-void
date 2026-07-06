@@ -785,6 +785,41 @@ export function voidPlugin(options?: {
       },
     };
 
+    // Nuxt's SSR Vite server can inherit the client HTTP server while also
+    // receiving its own HMR port. That attaches two upgrade handlers to the
+    // same socket under current Vite, so keep the SSR transport on its
+    // dedicated port. Update both keys for Vite 7 and Vite 8 compatibility.
+    const nuxtVite8WebSocketCompatPlugin: Plugin | undefined =
+      detected.name === 'nuxt'
+        ? {
+            name: 'void:nuxt-vite8-websocket-compat',
+            enforce: 'post',
+            configResolved(resolvedConfig) {
+              if (!resolvedConfig.build.ssr) {
+                return;
+              }
+              if (
+                typeof resolvedConfig.server.hmr === 'object' &&
+                resolvedConfig.server.hmr.port !== undefined
+              ) {
+                resolvedConfig.server.hmr = {
+                  ...resolvedConfig.server.hmr,
+                  server: undefined,
+                };
+              }
+              if (
+                typeof resolvedConfig.server.ws === 'object' &&
+                resolvedConfig.server.ws.port !== undefined
+              ) {
+                resolvedConfig.server.ws = {
+                  ...resolvedConfig.server.ws,
+                  server: undefined,
+                };
+              }
+            },
+          }
+        : undefined;
+
     // SvelteKit hooks injection: transform get_hooks() to wrap `handle` with
     // withRuntimeEnv(event.platform.env, ...). This stores the env in
     // AsyncLocalStorage so void/db resolves it via envContext.getStore(), and
@@ -830,6 +865,7 @@ export function voidPlugin(options?: {
       createCloudflareBuiltinsExternalPlugin(),
       wranglerCompatPlugin,
       wranglerSyncPlugin,
+      ...(nuxtVite8WebSocketCompatPlugin ? [nuxtVite8WebSocketCompatPlugin] : []),
       svelteKitHooksInjectPlugin,
       clientStubsPlugin,
       bindingRuntimePlugin(bindingNames),

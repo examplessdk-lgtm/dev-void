@@ -229,6 +229,10 @@ function patchPgWorkerBundle(outDir: string): void {
       .replace(
         'var __require = /* @__PURE__ */ createRequire(import.meta.url);',
         pgWorkerRequireShim(),
+      )
+      .replace(
+        'var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();',
+        pgWorkerRequireShim(),
       );
     code =
       `const __voidPgpassNoop = Object.assign(function pgpass(_connectionInfo, callback) { callback(undefined); }, { warnTo() {} });\n` +

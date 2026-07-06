@@ -70,6 +70,7 @@ describe('playground/astro dev', () => {
         stdio: ['ignore', 'pipe', 'pipe'],
         env: {
           ...process.env,
+          ASTRO_DEV_BACKGROUND: 'false',
           VOID_INSPECTOR_PORT: 'false',
         },
       },

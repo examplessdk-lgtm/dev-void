@@ -19,3 +19,4 @@ playground/*/.node-version
 .playwright-mcp
 playground-local
 .worktrees
+.svelte-kit/

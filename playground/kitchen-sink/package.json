@@ -10,9 +10,9 @@
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "hono": "^4.12.18",
-    "valibot": "^1.4.0",
-    "vue": "^3.5.34"
+    "hono": "^4.12.27",
+    "valibot": "^1.4.2",
+    "vue": "^3.5.39"
   },
   "devDependencies": {
     "@void/vue": "workspace:*",
@@ -20,6 +20,6 @@
     "vite": "catalog:",
     "vite-plus": "catalog:",
     "void": "workspace:*",
-    "vue-tsc": "^3.2.8"
+    "vue-tsc": "^3.3.6"
   }
 }

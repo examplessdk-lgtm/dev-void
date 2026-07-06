@@ -334,6 +334,40 @@ describe('detectFramework', () => {
     }
   });
 
+  it('keeps Nuxt SSR WebSockets on their dedicated port', () => {
+    const root = createTempRoot();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ type: 'module', dependencies: { nuxt: '^4.0.0' } }),
+    );
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    try {
+      const plugins = voidPlugin();
+      const compatPlugin = plugins.find(
+        (plugin) => plugin.name === 'void:nuxt-vite8-websocket-compat',
+      );
+      const configResolved = getHookHandler(compatPlugin?.configResolved) as (
+        config: import('vite').ResolvedConfig,
+      ) => void;
+      const sharedServer = {};
+      const config = {
+        build: { ssr: true },
+        server: {
+          hmr: { port: 24678, server: sharedServer },
+          ws: { port: 24678, server: sharedServer },
+        },
+      } as unknown as import('vite').ResolvedConfig;
+
+      configResolved(config);
+
+      expect(config.server.hmr).toMatchObject({ port: 24678, server: undefined });
+      expect(config.server.ws).toMatchObject({ port: 24678, server: undefined });
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
   it('persists default void.json compatibility during build startup', () => {
     const root = createTempRoot();
     writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));

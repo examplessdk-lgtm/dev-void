@@ -9,9 +9,9 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "hono": "^4.12.18",
-    "solid-js": "^1.9.12",
-    "valibot": "^1.4.0"
+    "hono": "^4.12.27",
+    "solid-js": "^1.9.14",
+    "valibot": "^1.4.2"
   },
   "devDependencies": {
     "@typescript/native-preview": "catalog:",

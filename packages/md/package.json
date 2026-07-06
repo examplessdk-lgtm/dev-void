@@ -39,25 +39,25 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "@shikijs/engine-javascript": "^4.0.2",
-    "@shikijs/transformers": "^4.0.2",
+    "@shikijs/engine-javascript": "^4.3.1",
+    "@shikijs/transformers": "^4.3.1",
     "gray-matter": "^4.0.3",
-    "markdown-exit": "1.0.0-beta.9",
+    "markdown-exit": "1.1.0-beta.2",
     "markdown-it-anchor": "^9.2.0",
-    "markdown-it-attrs": "^4.3.1",
+    "markdown-it-attrs": "^5.0.0",
     "markdown-it-container": "^4.0.0",
     "markdown-it-emoji": "^3.0.0",
     "markdown-it-footnote": "^4.0.0",
     "pathe": "catalog:",
-    "shiki": "^4.0.2",
-    "tinyglobby": "^0.2.16"
+    "shiki": "^4.3.1",
+    "tinyglobby": "^0.2.17"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:",
     "void": "workspace:*",
-    "vue": "^3.5.34"
+    "vue": "^3.5.39"
   },
   "peerDependencies": {
     "vite": "^8.0.0",

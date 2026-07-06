@@ -270,7 +270,7 @@ export class VoidPlatformSandbox<Env = unknown> extends Sandbox<Env> {
     await this.ctx.storage.setAlarm(startedAt + HEARTBEAT_MS);
   }
 
-  override async alarm(alarmProps?: { isRetry: boolean; retryCount: number }): Promise<void> {
+  override async alarm(alarmProps?: AlarmInvocationInfo): Promise<void> {
     // Container's alarm() dispatches any scheduled() tasks. Run it first so
     // upstream behaviour (idle timeouts, user-scheduled work) is preserved
     // before we layer our metering heartbeat on top.

@@ -43,6 +43,7 @@ export default defineConfig({
       sortScripts: true,
     },
     ignorePatterns: [
+      '.svelte-kit/**',
       'packages/void/docs/**',
       'packages/void/skills/void/docs/**',
       'playground/**/.astro/**',
@@ -54,6 +55,8 @@ export default defineConfig({
       'playground/**/src/routeTree.gen.ts',
       'playground/**/wrangler.json',
       'playground/**/wrangler.jsonc',
+      'playground/vinext-app/.next/**',
+      'playground/vinext-app/next-env.d.ts',
     ],
   },
   lint: {
@@ -156,6 +159,12 @@ export default defineConfig({
         files: ['**/*.vue'],
         rules: {
           'no-undef': 'off',
+        },
+      },
+      {
+        files: ['playground/vinext-app/.next/**/*.ts'],
+        rules: {
+          '@typescript-eslint/array-type': 'off',
         },
       },
     ],
