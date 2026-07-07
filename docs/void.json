@@ -1,6 +1,0 @@
-{
-  "inference": {
-    "appType": "static",
-    "outputDir": ".vitepress/dist"
-  }
-}

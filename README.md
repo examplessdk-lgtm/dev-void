@@ -111,17 +111,24 @@ vp run dev:docs        # local docs dev server
 | `docs`            | Documentation (VitePress)       |
 | `playground/*`    | Test apps for local development |
 
-## GitHub Environments & Secrets
+## GitHub Deployment
 
-Deploy and publish workflows require three GitHub environments:
+The documentation site deploys from `main` through the Void GitHub App using the
+`container` executor. The root [`void.json`](./void.json) configures the monorepo
+as a static project that builds `docs` and publishes `docs/.vitepress/dist`.
+There is no documentation deploy workflow or `VOID_TOKEN` repository secret.
 
-| Environment | Trigger | Secret       | Purpose                                               |
-| ----------- | ------- | ------------ | ----------------------------------------------------- |
-| `Prod`      | `prod`  | `VOID_TOKEN` | Auth token for `void deploy` (production docs)        |
-| `Staging`   | `main`  | `VOID_TOKEN` | Auth token for `void deploy` (staging docs)           |
-| `Release`   | `v*`    | `NPM_TOKEN`  | npm publish token via `.github/workflows/publish.yml` |
+Connect the repository once with:
 
-Note both prod and staging docs are self-hosted on the **production** environment of the platform, so `VOID_TOKEN` for both Prod and Staging envs should be issued from the production API.
+```sh
+void github connect void-docs \
+  --repo voidzero-dev/void \
+  --branch main \
+  --executor container
+```
+
+Release publishing still uses the `Release` GitHub environment with an
+`NPM_TOKEN` secret via `.github/workflows/publish.yml`.
 
 CI (`ci.yml`) runs on PRs to `main` and requires no secrets.
 

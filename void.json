@@ -1,0 +1,7 @@
+{
+  "inference": {
+    "appType": "static",
+    "build": "vp run build:docs",
+    "outputDir": "docs/.vitepress/dist"
+  }
+}
