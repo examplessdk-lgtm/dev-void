@@ -504,19 +504,65 @@ export async function runConnect(
   // -------------------------------------------------------------------------
   // 2. Resolve installation
   // -------------------------------------------------------------------------
-  const installations = (await client.listGithubInstallations()).filter(
-    (i) => i.status === 'active',
-  );
+  const listActiveInstallations = async () =>
+    (await client.listGithubInstallations()).filter((i) => i.status === 'active');
+
+  // Auto-join fallback: an org member whose org already installed the App has
+  // no membership row until a join round-trip records one, so their list is
+  // empty (or missing the shared installation) even though the App is
+  // installed. Run the join flow once instead of telling them to re-install.
+  // Browser round-trips are TTY-only, mirroring every other prompt here. A 503
+  // (sharing not configured) falls through to the install-first error.
+  let autoJoinAttempted = false;
+  const attemptAutoJoin = async (): Promise<number> => {
+    autoJoinAttempted = true;
+    try {
+      return await performGithubJoin(client);
+    } catch (err) {
+      if (
+        err instanceof PlatformApiError &&
+        err.status === 503 &&
+        err.code === 'github_oauth_not_configured'
+      ) {
+        return 0;
+      }
+      throw err;
+    }
+  };
+
+  let installations = await listActiveInstallations();
+
+  if (installations.length === 0 && isTTY) {
+    log.info(
+      'No GitHub App installation is linked to your account yet — checking whether your organization already installed the Void GitHub App…',
+    );
+    if ((await attemptAutoJoin()) > 0) {
+      installations = await listActiveInstallations();
+    }
+  }
 
   if (installations.length === 0) {
-    log.error('No active GitHub App installation. Run `void github install` first.');
+    log.error(
+      isTTY
+        ? 'No GitHub App installation found for your account or your organizations. Run `void github install` first.'
+        : 'No active GitHub App installation. Run `void github install` first, or `void github join` if your organization already installed the Void GitHub App.',
+    );
     process.exit(1);
   }
 
   let installation: GithubInstallation;
 
   if (args.installationId) {
-    const found = installations.find((i) => i.installation_id === args.installationId);
+    let found = installations.find((i) => i.installation_id === args.installationId);
+    if (!found && isTTY && !autoJoinAttempted) {
+      log.info(
+        `Installation '${args.installationId}' is not linked to your account yet — checking whether your organization shares it…`,
+      );
+      if ((await attemptAutoJoin()) > 0) {
+        installations = await listActiveInstallations();
+        found = installations.find((i) => i.installation_id === args.installationId);
+      }
+    }
     if (!found) {
       log.error(`connect: No active installation found with id '${args.installationId}'.`);
       process.exit(1);
