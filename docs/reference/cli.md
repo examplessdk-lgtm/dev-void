@@ -609,7 +609,7 @@ void github join
 
 Join the GitHub App installations your organization already has. If a teammate installed the Void GitHub App on a shared GitHub organization, run `void github join` to gain access to those installations without re-installing. Void opens your browser to authorize (a localhost + PKCE handshake, the same mechanics as `void github link`), confirms with GitHub which installations you can manage, and records your membership. Afterwards `void github installations` lists them and `void github connect` can connect your own projects to their repositories.
 
-You rarely need to run this yourself — `void github connect` runs the same join automatically when your account has no installations yet.
+In an interactive terminal you rarely need to run this yourself — `void github connect` runs the same join automatically when your account has no installations yet. Running `void github join` yourself matters mainly for non-interactive use (without a TTY, `void github connect` never opens a browser), or to link installations ahead of time.
 
 Requires an authenticated CLI (`void auth login` first) and organization-installation sharing enabled on your Void instance; when it is not enabled the command fails closed with a clear message. You can only join installations your GitHub authorization actually returns — you cannot name or join one you cannot access on GitHub.
 
@@ -621,7 +621,7 @@ void github connect [project] [options]
 
 Connect a GitHub repository to a Void project for automatic deploys. On every push to the configured branch, Void builds and deploys your project automatically.
 
-If your account has no installations yet, `void github connect` first runs the same browser authorize as `void github join` automatically — if a teammate already installed the Void GitHub App on your organization, you join it on the spot and the connect continues. Only when no shared installation is found does it ask you to run `void github install`. The same recovery runs when `--installation <id>` names an installation your account is not linked to yet.
+Interactively (TTY), if your account has no installations yet, `void github connect` first runs the same browser authorize as `void github join` automatically — if a teammate already installed the Void GitHub App on your organization, you join it on the spot and the connect continues. Only when no shared installation is found does it ask you to run `void github install`. The same recovery runs when `--installation <id>` names an installation your account is not linked to yet. Without a TTY, connect never opens a browser: it fails closed and tells you to run `void github install`, or `void github join` if your organization already installed the App.
 
 **Options**
 
@@ -653,7 +653,7 @@ void github connect my-app \
 
 **Connecting as an organization member**
 
-If you are a member of a GitHub organization but not the person who installed the App, `void github connect` first confirms that you personally have access to the specific repository. When it detects this, it opens your browser once to authorize access to that repo on GitHub (a localhost + PKCE handshake), then completes the connection automatically — no extra flags. Run `void github join` first so the installation appears in `void github installations`. You can only connect repositories you can access on GitHub; one you cannot see is refused with a clear message.
+If you are a member of a GitHub organization but not the person who installed the App, `void github connect` first confirms that you personally have access to the specific repository. When it detects this, it opens your browser once to authorize access to that repo on GitHub (a localhost + PKCE handshake), then completes the connection automatically — no extra flags. Interactively, connect joins the shared installation automatically when your account has none yet, so running `void github join` first is optional — useful mainly to see the installation in `void github installations` beforehand. You can only connect repositories you can access on GitHub; one you cannot see is refused with a clear message.
 
 ### `void github update`
 
