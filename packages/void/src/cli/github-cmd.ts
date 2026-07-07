@@ -451,6 +451,30 @@ async function runGithubConnectAuthorize(
   return { connectGrant, codeVerifier: verifier };
 }
 
+/**
+ * Free-text repository prompt used when the installation's repository list is
+ * not enumerable client-side: `repository_selection === 'all'`, or a shared
+ * org installation whose list the server redacts for non-owner members. The
+ * server re-verifies actual access on connect, so this is DX, not security.
+ */
+async function promptRepoFullName(root: string): Promise<string> {
+  const gitDefault = parseGithubRepoFullName(collectGitDeployMetadata(root, null).repositoryUrl);
+  const input = await text({
+    message: 'Repository (owner/repo):',
+    placeholder: gitDefault ?? 'owner/repo',
+    initialValue: gitDefault ?? '',
+    validate: (value) =>
+      /^[^/\s]+\/[^/\s]+$/.test((value ?? '').trim())
+        ? undefined
+        : 'Enter the repository as owner/repo.',
+  });
+  if (isCancel(input)) {
+    cancel('Cancelled.');
+    process.exit(0);
+  }
+  return (input as string).trim();
+}
+
 export async function runConnect(
   root: string,
   client: PlatformClient,
@@ -597,10 +621,17 @@ export async function runConnect(
     repoFullName = args.repo;
   } else if (installation.repository_selection === 'selected') {
     if (installation.repositories.length === 0) {
-      log.error(
-        'connect: The installation has no accessible repositories. Update the GitHub App install to grant access.',
-      );
-      process.exit(1);
+      // The server redacts `repositories` to [] for non-owner (member) rows of
+      // shared org installations, and an owner install can genuinely have zero
+      // grants. Either way the list is not enumerable here — take free text
+      // and let the server's access check decide.
+      if (!isTTY) {
+        log.error(
+          'connect: --repo <owner/repo> is required — this installation does not expose a repository list to your account.',
+        );
+        process.exit(1);
+      }
+      repoFullName = await promptRepoFullName(root);
     } else if (installation.repositories.length === 1) {
       repoFullName = installation.repositories[0]!.full_name;
     } else if (!isTTY) {
@@ -628,21 +659,7 @@ export async function runConnect(
       );
       process.exit(1);
     }
-    const gitDefault = parseGithubRepoFullName(collectGitDeployMetadata(root, null).repositoryUrl);
-    const input = await text({
-      message: 'Repository (owner/repo):',
-      placeholder: gitDefault ?? 'owner/repo',
-      initialValue: gitDefault ?? '',
-    });
-    if (isCancel(input)) {
-      cancel('Cancelled.');
-      process.exit(0);
-    }
-    repoFullName = (input as string).trim();
-    if (!repoFullName) {
-      log.error('connect: Repository is required.');
-      process.exit(1);
-    }
+    repoFullName = await promptRepoFullName(root);
   }
 
   // -------------------------------------------------------------------------

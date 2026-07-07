@@ -18,6 +18,15 @@ vi.mock('node:child_process', () => ({
   execFile: (...args: Array<unknown>) => mockExecFile(...args),
 }));
 
+// Partial mock of @clack/prompts: only `text` is replaced (for the repo
+// prompt); everything else — including `log`, which the spies below target —
+// passes through from the actual module.
+const mockText = vi.fn();
+vi.mock('@clack/prompts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@clack/prompts')>();
+  return { ...actual, text: (...args: Array<unknown>) => mockText(...args) };
+});
+
 const originalFetch = globalThis.fetch.bind(globalThis);
 
 const projectId = 'proj_test';
@@ -184,6 +193,7 @@ const originalIsTTY = process.stdin.isTTY;
 
 beforeEach(() => {
   mockExecFile.mockReset();
+  mockText.mockReset();
   // Force the non-interactive (non-TTY) path so tests never hit clack prompts.
   (process.stdin as { isTTY?: boolean }).isTTY = false;
   exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
@@ -513,5 +523,48 @@ describe('runConnect — auto-join fallback', () => {
     expect(getGithubJoinUrl).toHaveBeenCalledTimes(1);
     expect(listGithubInstallations).toHaveBeenCalledTimes(2);
     expect(connectGithub).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('runConnect — member repo prompt (redacted repository list)', () => {
+  const memberInstallation = (): GithubInstallation => ({
+    ...makeInstallation(),
+    repositories: [], // server redacts the list for non-owner (member) rows
+    repository_selection: 'selected',
+  });
+
+  it('prompts for owner/repo on a TTY instead of dead-ending', async () => {
+    (process.stdin as { isTTY?: boolean }).isTTY = true;
+    mockText.mockResolvedValueOnce(repoFullName); // user types octocat/hello-world
+    const connectGithub = vi.fn().mockResolvedValueOnce(makeConnection());
+
+    const { promise } = driveConnect({
+      connectGithub,
+      listGithubInstallations: vi.fn(async () => [memberInstallation()]),
+      args: { executor: 'container', repo: undefined }, // no --repo
+    });
+    await promise;
+
+    expect(mockText).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Repository (owner/repo):' }),
+    );
+    expect(connectGithub).toHaveBeenCalledTimes(1);
+    // client.connectGithub(projectId, body) — body.repoFullName carries the typed repo
+    const body = connectGithub.mock.calls[0]![1] as { repoFullName: string };
+    expect(body.repoFullName).toBe(repoFullName);
+  });
+
+  it('fails closed without a TTY, naming --repo', async () => {
+    const connectGithub = vi.fn();
+    const { promise } = driveConnect({
+      connectGithub,
+      listGithubInstallations: vi.fn(async () => [memberInstallation()]),
+      args: { repo: undefined },
+    });
+    await expect(promise).rejects.toThrow('process.exit(1)');
+    expect(errorSpy).toHaveBeenCalledWith(
+      'connect: --repo <owner/repo> is required — this installation does not expose a repository list to your account.',
+    );
+    expect(mockText).not.toHaveBeenCalled();
   });
 });
