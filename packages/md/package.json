@@ -44,7 +44,7 @@
     "gray-matter": "^4.0.3",
     "markdown-exit": "1.1.0-beta.2",
     "markdown-it-anchor": "^9.2.0",
-    "markdown-it-attrs": "^5.0.0",
+    "markdown-it-attrs": "^4.5.0",
     "markdown-it-container": "^4.0.0",
     "markdown-it-emoji": "^3.0.0",
     "markdown-it-footnote": "^4.0.0",
