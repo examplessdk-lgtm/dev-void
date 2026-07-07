@@ -548,6 +548,14 @@ describe('runConnect — member repo prompt (redacted repository list)', () => {
     expect(mockText).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Repository (owner/repo):' }),
     );
+    // The prompt's validate callback rejects anything that isn't owner/repo.
+    const textOptions = mockText.mock.calls[0]![0] as {
+      validate: (value?: string) => string | undefined;
+    };
+    expect(textOptions.validate('not-a-repo')).toBe('Enter the repository as owner/repo.');
+    expect(textOptions.validate('')).toBe('Enter the repository as owner/repo.');
+    expect(textOptions.validate('octocat/hello-world')).toBeUndefined();
+    expect(textOptions.validate(' octocat/hello-world ')).toBeUndefined();
     expect(connectGithub).toHaveBeenCalledTimes(1);
     // client.connectGithub(projectId, body) — body.repoFullName carries the typed repo
     const body = connectGithub.mock.calls[0]![1] as { repoFullName: string };
