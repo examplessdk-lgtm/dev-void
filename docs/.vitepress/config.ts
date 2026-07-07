@@ -38,6 +38,7 @@ const referenceItems = [
       { text: 'void db', link: '/reference/cli#database' },
       { text: 'void gen', link: '/reference/cli#code-generation' },
       { text: 'void secret', link: '/reference/cli#secrets' },
+      { text: 'void github', link: '/reference/cli#github' },
       { text: 'void domain', link: '/reference/cli#custom-domains' },
       { text: 'void init --agents', link: '/reference/cli#agent' },
     ],
