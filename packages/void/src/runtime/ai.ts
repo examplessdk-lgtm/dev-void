@@ -11,6 +11,10 @@ const PROXY_URL = 'https://proxy.void.cloud/ai';
 const STAGING_PROXY_URL = 'https://proxy.staging.void.cloud/ai';
 const VOID_FILE_MARKER = '__voidFile';
 
+const PROVIDER_AUTH_DEFAULTS: Record<string, { header: string; prefix: string }> = {
+  'google-ai-studio': { header: 'x-goog-api-key', prefix: '' },
+};
+
 type SerializedFileInput = {
   [VOID_FILE_MARKER]: true;
   data: string;
@@ -317,6 +321,62 @@ function getProxyUrl(runtimeEnv: RuntimeEnv): string {
   return runtimeEnv.__VOID_STAGING ? STAGING_PROXY_URL : PROXY_URL;
 }
 
+function providerAuthDefaults(provider: string): { header: string; prefix: string } {
+  return PROVIDER_AUTH_DEFAULTS[provider] ?? { header: 'authorization', prefix: 'Bearer ' };
+}
+
+function gatewayEndpointUrl(baseUrl: string, endpoint: string): string {
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  const normalizedEndpoint = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
+  return `${normalizedBase}/${normalizedEndpoint}`;
+}
+
+function isUnsafeProviderPath(path: string): boolean {
+  if (/^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(path) || path.includes('\\')) {
+    return true;
+  }
+
+  const pathname = path.split(/[?#]/, 1)[0] ?? '';
+  for (const segment of pathname.split('/')) {
+    try {
+      if (decodeURIComponent(segment) === '..') {
+        return true;
+      }
+    } catch {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Build a real outgoing HTTP body for the user's own AI Gateway (P3 self-host).
+ *
+ * Unlike `serializeProviderBody`/`providerRequestBody` (which build the proxy
+ * envelope decoded on the proxy side), this emits an actual `BodyInit` +
+ * content-type for a direct `fetch` to the gateway.
+ */
+function toDirectBody(body: unknown): { body: BodyInit | undefined; contentType?: string } {
+  if (body === undefined || body === null) {
+    return { body: undefined };
+  }
+  if (typeof body === 'string') {
+    return { body };
+  }
+  if (
+    body instanceof ReadableStream ||
+    body instanceof FormData ||
+    body instanceof URLSearchParams ||
+    body instanceof Blob ||
+    body instanceof ArrayBuffer ||
+    isBinaryView(body)
+  ) {
+    return { body: body as BodyInit };
+  }
+  return { body: JSON.stringify(body), contentType: 'application/json' };
+}
+
 function resolveBackend(): AiBackend {
   const runtimeEnv = getRawRuntimeEnv();
 
@@ -336,31 +396,22 @@ function resolveBackend(): AiBackend {
   // Priority 3: Direct AI binding (user's own CF account)
   const directAi = runtimeEnv.AI as Ai | undefined;
   if (directAi) {
-    return {
-      run: directAi.run.bind(directAi),
-      async image(model, inputs, options) {
-        const { runOptions } = splitImageOptions(options);
-        return responseFromResult(
-          await directAi.run(model as keyof AiModels, inputs as never, runOptions as AiOptions),
-        );
-      },
-      providerFetch: unsupportedProviderFetch,
-      models: directAi.models.bind(directAi),
-      toMarkdown: directAi.toMarkdown?.bind(directAi) ?? unsupported('toMarkdown'),
-    };
+    return makeDirectBackend(
+      directAi,
+      runtimeEnv,
+      runtimeEnv.__VOID_AI_GATEWAY as string | undefined,
+    );
   }
 
-  throw new Error('ai: Not available. Run `void auth login` and `void project link` first.');
+  throw new Error(
+    'ai: Not available. Run `void auth login` and `void project link` first, or bind Workers AI (env.AI) for self-hosted deploys.',
+  );
 }
 
 function unsupported(method: string): () => never {
   return () => {
     throw new Error(`ai: ai.${method}() is not supported in this environment.`);
   };
-}
-
-function unsupportedProviderFetch(): Promise<Response> {
-  throw new Error('ai: ai.provider().fetch() is not supported in this environment.');
 }
 
 async function providerRequestBody(
@@ -499,6 +550,71 @@ function makeHttpBackend(token: string, projectId: string, runtimeEnv: RuntimeEn
       const res = await proxyFetch('toMarkdown', { inputs: items, options });
       return res.json();
     },
+  };
+}
+
+function makeDirectBackend(
+  directAi: Ai,
+  runtimeEnv: RuntimeEnv,
+  gatewayId: string | undefined,
+): AiBackend {
+  return {
+    run: directAi.run.bind(directAi),
+    async image(model, inputs, options) {
+      const { runOptions } = splitImageOptions(options);
+      return responseFromResult(
+        await directAi.run(model as keyof AiModels, inputs as never, runOptions as AiOptions),
+      );
+    },
+    async providerFetch(provider, path, init, options) {
+      if (!gatewayId) {
+        return Response.json(
+          {
+            error:
+              'ai: ai.provider().fetch() needs an AI Gateway when self-hosting. Set "ai": { "gateway": "<id>" } in void.json.',
+          },
+          { status: 501 },
+        );
+      }
+      if (isUnsafeProviderPath(path)) {
+        return Response.json(
+          { error: `ai: provider path '${path}' must be relative.` },
+          { status: 400 },
+        );
+      }
+      let providerKey: string;
+      try {
+        providerKey = resolveProviderKey(provider, runtimeEnv, options);
+      } catch (e) {
+        return Response.json({ error: (e as Error).message }, { status: 400 });
+      }
+      let baseUrl: string;
+      try {
+        baseUrl = await directAi.gateway(gatewayId).getUrl(provider);
+      } catch (e) {
+        return Response.json(
+          { error: `ai: gateway '${gatewayId}': ${(e as Error).message}` },
+          { status: 502 },
+        );
+      }
+      const { body, contentType } = toDirectBody(init?.body);
+      const headers = new Headers(init?.headers);
+      const defaults = providerAuthDefaults(provider);
+      headers.set(
+        options?.apiKeyHeader ?? defaults.header,
+        `${options?.apiKeyPrefix ?? defaults.prefix}${providerKey}`,
+      );
+      if (contentType && !headers.has('content-type')) {
+        headers.set('content-type', contentType);
+      }
+      return fetch(gatewayEndpointUrl(baseUrl, path), {
+        method: init?.method ?? 'POST',
+        headers,
+        body,
+      });
+    },
+    models: directAi.models.bind(directAi),
+    toMarkdown: directAi.toMarkdown?.bind(directAi) ?? unsupported('toMarkdown'),
   };
 }
 
