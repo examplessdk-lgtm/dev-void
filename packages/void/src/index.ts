@@ -343,6 +343,26 @@ function hasBinding(list: Array<{ binding: string }> | undefined, name: string):
   return Array.isArray(list) && list.some((b) => b.binding === name);
 }
 
+/**
+ * Decide whether to inject a Workers AI binding into the built wrangler config.
+ *
+ * Build-only: dev/miniflare has no local Workers AI, so serve must never bind
+ * `env.AI` (dev uses the P2 `__VOID_TOKEN` proxy path instead).
+ *
+ * `!resolvedAi` is load-bearing: mergeBindings' return is defu-merged over the
+ * resolved root-wrangler config and wins, so skipping when the user already
+ * declared an `ai` binding avoids clobbering theirs. `!resultAi` is harmless
+ * defense-in-depth (nothing else in mergeBindings sets `result.ai`).
+ */
+export function shouldBindWorkersAi(
+  command: string,
+  needsAI: boolean,
+  resolvedAi: unknown,
+  resultAi: unknown,
+): boolean {
+  return needsAI && command === 'build' && !resultAi && !resolvedAi;
+}
+
 const CLOUDFLARE_BUILTIN_IMPORT = /^cloudflare:/;
 const SANDBOX_SDK_IMPORT = '@cloudflare/sandbox';
 const SANDBOX_SDK_IMPORT_FILTER = /^@cloudflare\/sandbox$/;
@@ -979,6 +999,34 @@ export function voidPlugin(options?: {
     const r2Name = bindingNames?.r2 ?? 'STORAGE';
     if (bindings.needsR2 && !hasBinding(resolved.r2_buckets, r2Name)) {
       result.r2_buckets = [{ binding: r2Name, bucket_name: 'default' }];
+    }
+
+    // Workers AI — self-host only. The managed deploy ignores dist/wrangler.json,
+    // so this binding only takes effect on a real `wrangler deploy`. Build-gated
+    // because dev/miniflare has no local Workers AI (dev uses the P2
+    // __VOID_TOKEN proxy path). The `ai` config is a single object (not an array)
+    // and needs no external id, so it is safe to inject unconditionally here.
+    // Guard rationale: mergeBindings' return is defu-merged over `resolved` and
+    // wins, so `!resolvedAi` is load-bearing (prevents clobbering a user's own
+    // root-wrangler `ai` binding); `!resultAi` is harmless defense-in-depth
+    // (nothing else in mergeBindings ever sets `result.ai`).
+    if (
+      shouldBindWorkersAi(
+        viteCommand,
+        bindings.needsAI,
+        (resolved as { ai?: unknown }).ai,
+        (result as { ai?: unknown }).ai,
+      )
+    ) {
+      (result as Record<string, unknown>).ai = { binding: 'AI' };
+    }
+
+    // AI Gateway id → runtime var (harmless in serve; only read by the P3 direct
+    // backend that routes Workers AI inference through the user's own Gateway).
+    if (config.ai?.gateway) {
+      const vars = (result.vars as Record<string, string>) ?? {};
+      vars.__VOID_AI_GATEWAY = config.ai.gateway;
+      result.vars = vars;
     }
 
     // Queues — add producer + consumer bindings for local dev
