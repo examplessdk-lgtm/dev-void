@@ -211,6 +211,15 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     expect(store.has(isrKey('other_dpl', '/x'))).toBe(true);
     // Cursor loop ran more than once (5 keys / pageSize 2 → 3 list calls).
     expect(list.mock.calls.length).toBeGreaterThan(1);
+    // EVERY list call is scoped to THIS deployment's prefix. An unscoped
+    // `kv.list()` (or a wrong/missing prefix) would enumerate — and therefore
+    // purge — other deployments' keys; assert the prefix on every page.
+    const listPrefix = `void-isr/${DPL}/`;
+    for (const [opts] of list.mock.calls) {
+      expect((opts as { prefix?: string }).prefix).toBe(listPrefix);
+    }
+    // The first page starts with no cursor.
+    expect((list.mock.calls[0][0] as { cursor?: string }).cursor).toBeUndefined();
     // Edge purge issued for a representative path (round-tripped through denormalizeIsrPath).
     expect(edge.delete).toHaveBeenCalledWith(htmlEdgeKey(HOST, '/', DPL));
     expect(edge.delete).toHaveBeenCalledWith(htmlEdgeKey(HOST, '/b/c', DPL));
