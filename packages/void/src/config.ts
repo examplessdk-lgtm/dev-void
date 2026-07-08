@@ -55,7 +55,7 @@ export type AuthConfig = {
   providers?: Array<VoidAuthProvider>;
 };
 
-/** AI configuration — route Workers AI inference through your own Cloudflare AI Gateway. */
+/** AI configuration — the Cloudflare AI Gateway used by `ai.provider().fetch()` on self-hosted deploys (Workers AI `ai.run`/`ai.image` use the `env.AI` binding directly). */
 export type AiConfig = {
   gateway?: string;
 };

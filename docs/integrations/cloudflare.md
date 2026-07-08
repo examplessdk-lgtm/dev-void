@@ -329,7 +329,7 @@ export const POST = defineHandler(async (c) => {
 });
 ```
 
-`ai.gateway` is required for `ai.provider().fetch()` -- without it, that call returns a `501`. The gateway lives in _your_ account and provider keys come from _your_ secrets, so nothing leaves your account.
+`ai.gateway` is required for `ai.provider().fetch()` -- without it, that call returns a `501`. No AI traffic or provider secret passes through Void's shared proxy: requests go directly to _your own_ Cloudflare AI Gateway, authenticated with provider secrets from _your_ Worker's environment. (The request and that secret are of course still sent onward to the AI Gateway and the upstream provider you call.)
 
 Notes:
 

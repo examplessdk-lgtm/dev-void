@@ -366,7 +366,7 @@
     },
     "ai": {
       "type": "object",
-      "description": "AI configuration. Route Workers AI inference through your own Cloudflare AI Gateway.",
+      "description": "AI configuration for self-hosted deploys. Configures the Cloudflare AI Gateway used by ai.provider().fetch() (Workers AI ai.run/ai.image use the env.AI binding directly and are not affected).",
       "properties": {
         "gateway": {
           "type": "string",
