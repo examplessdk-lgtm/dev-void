@@ -38,6 +38,7 @@
     "#self/runtime/live-server": "./dist/runtime/live-server.mjs",
     "#self/runtime/fetch": "./dist/runtime/fetch.mjs",
     "#self/runtime/fetch-stream": "./dist/runtime/fetch-stream.mjs",
+    "#self/runtime/isr-cache": "./dist/runtime/isr-cache.mjs",
     "#self/runtime/migration-handler": "./dist/runtime/migration-handler.mjs",
     "#self/runtime/migration-handler-pg": "./dist/runtime/migration-handler-pg.mjs",
     "#self/runtime/ws-server": "./dist/runtime/ws-server.mjs"
