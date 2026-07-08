@@ -33,6 +33,7 @@ import {
 import { scanJobsSync } from '../crons/scan.ts';
 import { writeDrizzleConfig } from '../drizzle/config.ts';
 import { discoverSchema } from '../drizzle/discover.ts';
+import { collectRevalidate } from '../isr-config.ts';
 import { voidWarn } from '../log.ts';
 import { collectMigrations } from '../migrations/collect.ts';
 import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
@@ -1717,40 +1718,14 @@ async function runFullDeploy(
     ? true
     : Boolean(validateSsrEntry(root, paths)) || (hasPages && deployConfig.output !== 'static');
 
-  // Resolve revalidate config from void.json + per-page .server.ts exports
-  const vcRevalidate = readConfig(root).routing?.revalidate;
-  let revalidate: number | Record<string, number> | undefined;
-  if (vcRevalidate != null) {
-    revalidate = vcRevalidate;
-  }
-  // Merge per-page revalidate exports (pages mode)
+  // Resolve revalidate config from void.json + per-page .server.ts exports.
+  // The page scan is also reused by the fully-static optimization below.
   const pageScan = existsSync(paths.pagesDir)
     ? routeScan.pages.pages.length > 0
       ? routeScan.pages
       : await scanPages(root, { output: deployConfig.output, paths })
     : null;
-  if (pageScan) {
-    const perPageRules: Record<string, number> = {};
-    for (const page of pageScan.pages) {
-      if (page.revalidate != null) {
-        perPageRules[page.pattern] = page.revalidate;
-      }
-    }
-    if (Object.keys(perPageRules).length > 0) {
-      if (typeof revalidate === 'number') {
-        // Global number → pathmap with "*" fallback, per-page entries first
-        revalidate = Object.fromEntries([...Object.entries(perPageRules), ['*', revalidate]]);
-      } else if (typeof revalidate === 'object') {
-        // Per-page entries first (higher precedence in first-match)
-        revalidate = Object.fromEntries([
-          ...Object.entries(perPageRules),
-          ...Object.entries(revalidate),
-        ]);
-      } else {
-        revalidate = perPageRules;
-      }
-    }
-  }
+  const revalidate = collectRevalidate(deployConfig, pageScan);
 
   // Fully-static optimization: if output: "static" and all pages are prerendered
   // with no backend features, deploy as a static site (no worker needed)
