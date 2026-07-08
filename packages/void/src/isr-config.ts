@@ -56,7 +56,15 @@ export function collectRevalidate(
     const perPageRules: Record<string, number> = {};
     for (const page of pageScan.pages) {
       if (page.revalidate != null) {
-        perPageRules[page.pattern] = page.revalidate;
+        // The TTL matcher (`matchLiteralPattern`/`resolvePathTtl`) treats `:` as
+        // a literal and only `*` as a wildcard, so a raw route pattern like
+        // `/blog/:slug` would never match `/blog/hello`. Convert route params
+        // (`:slug`, `:slug{.+}`) to `*` so generated dynamic-page rules match.
+        // This applies ONLY to scanned page patterns — the user's own
+        // `routing.revalidate` keys below are authored literals and pass through
+        // untouched.
+        const key = page.pattern.replace(/:[A-Za-z0-9_]+(?:\{[^}]*\})?/g, '*');
+        perPageRules[key] = page.revalidate;
       }
     }
     if (Object.keys(perPageRules).length > 0) {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vite-plus/test';
 import type { VoidConfig } from '../../src/config.ts';
 import { collectRevalidate, hasRevalidate } from '../../src/isr-config.ts';
 import type { PageDefinition, PageScanResult } from '../../src/pages/types.ts';
+import { resolvePathTtl } from '../../src/runtime/isr-cache.ts';
 
 describe('hasRevalidate', () => {
   it('treats null / undefined / 0 / negative / {} as no ISR', () => {
@@ -63,15 +64,15 @@ describe('collectRevalidate', () => {
 
   it('uses per-page rules alone when config is absent', () => {
     const scan = makeScan([makePage('/blog/:slug', 120), makePage('/about')]);
-    expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/blog/:slug': 120 });
+    expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/blog/*': 120 });
   });
 
   it('turns a numeric config into a path map with the number as the "*" fallback (per-page first)', () => {
     const scan = makeScan([makePage('/blog/:slug', 120)]);
     const result = collectRevalidate(configWith(60), scan);
-    expect(result).toEqual({ '/blog/:slug': 120, '*': 60 });
+    expect(result).toEqual({ '/blog/*': 120, '*': 60 });
     // Per-page entry must precede the fallback (first-match-wins ordering).
-    expect(Object.keys(result as Record<string, number>)).toEqual(['/blog/:slug', '*']);
+    expect(Object.keys(result as Record<string, number>)).toEqual(['/blog/*', '*']);
   });
 
   it('merges per-page rules ahead of an object config (per-page first in match order)', () => {
@@ -80,7 +81,7 @@ describe('collectRevalidate', () => {
     // Per-page entries are emitted before the config entries, so first-match
     // resolution consults the per-page pattern ahead of the config's catch-alls.
     expect(Object.entries(result as Record<string, number>)).toEqual([
-      ['/blog/:slug', 120],
+      ['/blog/*', 120],
       ['/docs/*', 30],
       ['*', 10],
     ]);
@@ -90,5 +91,50 @@ describe('collectRevalidate', () => {
     const scan = makeScan([makePage('/about'), makePage('/contact')]);
     expect(collectRevalidate(configWith(undefined), scan)).toBeUndefined();
     expect(collectRevalidate(configWith(60), scan)).toBe(60);
+  });
+
+  // FIX 4: generated per-page keys convert route params (`:slug`, `:slug{.+}`)
+  // to `*` so the literal TTL matcher (`matchLiteralPattern`) actually matches.
+  describe('route-param → wildcard conversion (generated page keys)', () => {
+    it('converts a single dynamic param `[slug]` (`/blog/:slug`) to `/blog/*`', () => {
+      const scan = makeScan([makePage('/blog/:slug', 120)]);
+      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/blog/*': 120 });
+    });
+
+    it('converts a catch-all param `[...slug]` (`/blog/:slug{.+}`) to `/blog/*`', () => {
+      const scan = makeScan([makePage('/blog/:slug{.+}', 90)]);
+      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/blog/*': 90 });
+    });
+
+    it('converts every param in a multi-param pattern (`/shop/:cat/:id` → `/shop/*/*`)', () => {
+      const scan = makeScan([makePage('/shop/:cat/:id', 45)]);
+      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/shop/*/*': 45 });
+    });
+
+    it('leaves static page patterns untouched', () => {
+      const scan = makeScan([makePage('/about', 300)]);
+      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/about': 300 });
+    });
+
+    it('does NOT convert user `routing.revalidate` literal keys (only generated page keys)', () => {
+      // A user-authored key that happens to contain a `:` must pass through
+      // verbatim — only the scanned page patterns are converted.
+      const scan = makeScan([makePage('/blog/:slug', 120)]);
+      const result = collectRevalidate(configWith({ '/legacy/:kept': 30 }), scan);
+      expect(Object.entries(result as Record<string, number>)).toEqual([
+        ['/blog/*', 120],
+        ['/legacy/:kept', 30],
+      ]);
+    });
+  });
+
+  // FIX 4 end-to-end: the converted key must actually match a concrete path
+  // through the same resolver the runtime uses (mirrors isr-cache resolvePathTtl).
+  it('produces keys that resolvePathTtl matches for a concrete dynamic path', () => {
+    const scan = makeScan([makePage('/blog/:slug', 120)]);
+    const revalidate = collectRevalidate(configWith(undefined), scan);
+    expect(resolvePathTtl(revalidate, '/blog/hello')).toBe(120);
+    // A non-matching path still resolves to 0 (no ISR).
+    expect(resolvePathTtl(revalidate, '/about')).toBe(0);
   });
 });

@@ -2,7 +2,7 @@ import type { VoidAuthProvider } from '../auth/providers.ts';
 import type { DevRedirectRule, HeaderRule } from '../cli/types.ts';
 import type { MigrationPlanBundle } from '../migrations/plan.ts';
 import { resolveLayoutIds } from '../pages/layout-resolution.ts';
-import { INTERNAL_BINDING_PREFIXES } from '../runtime/env-raw.ts';
+import { INTERNAL_BINDING_EXACT_NAMES, INTERNAL_BINDING_PREFIXES } from '../runtime/env-raw.ts';
 import type { ScanResult } from './scan.ts';
 
 /**
@@ -2496,11 +2496,11 @@ export function compileWorkerEntry(
   // from userEnv is safe.
   const prefixCheck = [
     ...INTERNAL_BINDING_PREFIXES.map((p) => `prop.startsWith(${JSON.stringify(p)})`),
-    'prop === "ISR_CACHE"',
+    ...INTERNAL_BINDING_EXACT_NAMES.map((n) => `prop === ${JSON.stringify(n)}`),
   ].join(' || ');
   const prefixCheckNeg = [
     ...INTERNAL_BINDING_PREFIXES.map((p) => `!key.startsWith(${JSON.stringify(p)})`),
-    'key !== "ISR_CACHE"',
+    ...INTERNAL_BINDING_EXACT_NAMES.map((n) => `key !== ${JSON.stringify(n)}`),
   ].join(' && ');
   const filterBindingsHelper = `
 function __filterInternalBindings(env) {
@@ -2539,6 +2539,13 @@ function __filterInternalBindings(env) {
   // even on requests that never hit the ISR render ladder.
   const isrEnvCapture = isr
     ? `  env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;\n  env.__VOID_ISR_HOST ??= new URL(request.url).hostname;\n`
+    : '';
+  // Scheduled/queue handlers have no request, so there is no host to stamp — but
+  // they still need the deployment id on the raw env so an on-demand
+  // `revalidate()` called from a cron or queue consumer can find it and purge KV
+  // (edge-cache deletes are skipped when host is undefined, per runtime/isr.ts).
+  const isrDeploymentStamp = isr
+    ? `  env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;\n`
     : '';
   // Render site: unchanged single line when ISR is off; otherwise the render
   // closure is threaded through the ISR cache ladder (only when ISR_CACHE binds).
@@ -2602,11 +2609,11 @@ ${renderBlock}
   const scheduledHandler = remotePath
     ? `async function handleScheduled(controller, env, ctx) {
 ${envValidateCall}  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
-  const userEnv = __filterInternalBindings(env);
+${isrDeploymentStamp}  const userEnv = __filterInternalBindings(env);
   return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
 }`
     : `async function handleScheduled(controller, env, ctx) {
-${envValidateCall}  const userEnv = __filterInternalBindings(env);
+${envValidateCall}${isrDeploymentStamp}  const userEnv = __filterInternalBindings(env);
   return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
 }`;
 
@@ -2616,7 +2623,7 @@ ${runtimeEnvImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindings
 ${internalRouteHelper}
 ${scheduledHandler}
 async function queue(batch, env, ctx) {
-${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};\n` : ''}  const userEnv = __filterInternalBindings(env);
+${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};\n` : ''}${isrDeploymentStamp}  const userEnv = __filterInternalBindings(env);
   const messages = [...batch.messages].map(m => ({
     id: m.id, timestamp: m.timestamp.toISOString(),
     body: m.body, attempts: m.attempts,

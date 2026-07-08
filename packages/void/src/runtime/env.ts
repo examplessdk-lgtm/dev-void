@@ -9,6 +9,7 @@ import {
   envContext,
   asEnv,
   getRawRuntimeEnv,
+  INTERNAL_BINDING_EXACT_NAMES,
   INTERNAL_BINDING_PREFIXES,
   type RuntimeEnv,
 } from './env-raw.ts';
@@ -24,7 +25,10 @@ export function withRuntimeEnv<T>(env: unknown, fn: () => T): T {
 }
 
 function isInternalBinding(name: string): boolean {
-  return INTERNAL_BINDING_PREFIXES.some((p) => name.startsWith(p));
+  return (
+    INTERNAL_BINDING_PREFIXES.some((p) => name.startsWith(p)) ||
+    (INTERNAL_BINDING_EXACT_NAMES as ReadonlyArray<string>).includes(name)
+  );
 }
 
 function filterEnvProxy(env: RuntimeEnv): RuntimeEnv {

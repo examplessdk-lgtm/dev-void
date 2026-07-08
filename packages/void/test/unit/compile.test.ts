@@ -2880,6 +2880,52 @@ describe('compileWorkerEntry — ISR wiring', () => {
     expect(code).toContain('env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;');
     expect(code).toContain('env.__VOID_ISR_HOST ??= new URL(request.url).hostname;');
   });
+
+  // FIX 1: cron/queue handlers must stamp the deployment id (only — no host,
+  // there is no request) so a self-host `revalidate()` from a scheduled or queue
+  // handler can find it and purge KV instead of no-oping.
+  it('stamps the deployment id at the top of the scheduled + queue handlers when isr is set', () => {
+    const code = compileWorkerEntry(
+      true, // hasQueues — emits the queue() handler too
+      undefined, // remote
+      'assets', // assetsDir
+      [], // webSocketClasses
+      'void/_env', // runtimeEnvPath
+      undefined, // envSchemaModule
+      undefined, // sandbox
+      false, // serveSpaFallback
+      undefined, // live
+      { runtimePath: 'void/isr' },
+    );
+
+    // Scheduled handler stamps the id (deployment id only — no __VOID_ISR_HOST).
+    expect(code).toContain(
+      'async function handleScheduled(controller, env, ctx) {\n' +
+        '  env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;\n' +
+        '  const userEnv = __filterInternalBindings(env);',
+    );
+    // Queue handler stamps the id (deployment id only — no __VOID_ISR_HOST).
+    expect(code).toContain(
+      'async function queue(batch, env, ctx) {\n' +
+        '  env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;\n' +
+        '  const userEnv = __filterInternalBindings(env);',
+    );
+    // No host stamp in cron/queue (there is no request).
+    expect(code).not.toContain('env.__VOID_ISR_HOST ??= new URL(controller');
+  });
+
+  it('does NOT stamp the deployment id in scheduled/queue handlers when isr is absent', () => {
+    const code = compileWorkerEntry(true); // hasQueues, no isr
+    // Byte-identical to today: no deployment-id stamp anywhere.
+    expect(code).not.toContain('__VOID_ISR_DEPLOYMENT_ID ??=');
+    expect(code).toContain(
+      'async function handleScheduled(controller, env, ctx) {\n' +
+        '  const userEnv = __filterInternalBindings(env);',
+    );
+    expect(code).toContain(
+      'async function queue(batch, env, ctx) {\n  const userEnv = __filterInternalBindings(env);',
+    );
+  });
 });
 
 describe('compileRouteTable — baked ISR consts', () => {

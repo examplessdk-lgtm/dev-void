@@ -12,6 +12,16 @@ export type RuntimeEnv = Record<string, unknown>;
 /** Prefixes for platform-internal bindings that must be hidden from user code. */
 export const INTERNAL_BINDING_PREFIXES = ['__VOID_', '__PROJECT_'] as const;
 
+/**
+ * Exact binding names that must be hidden from user code even though they carry
+ * no internal prefix. `ISR_CACHE` (the self-host ISR KV namespace) is a plain
+ * binding name, but it is a framework internal — route handlers read the ISR
+ * cache through `handleIsr`/`revalidate()` on the raw env, never via `c.env` or
+ * the public `void/env` API. Single source of truth shared by the generated
+ * `c.env` filter (`router/compile.ts`) and the runtime `env` filter (`env.ts`).
+ */
+export const INTERNAL_BINDING_EXACT_NAMES = ['ISR_CACHE'] as const;
+
 export const envContext: AsyncLocalStorage<RuntimeEnv> = new AsyncLocalStorage<RuntimeEnv>();
 
 let cloudflareEnv: RuntimeEnv | undefined;
