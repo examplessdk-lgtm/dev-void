@@ -2837,3 +2837,135 @@ describe('emitted __compilePattern / __matchPattern runtime', () => {
     }
   });
 });
+
+describe('compileWorkerEntry — ISR wiring', () => {
+  it('is unchanged without the isr param (single render line, no handleIsr)', () => {
+    const code = compileWorkerEntry();
+    expect(code).toContain(
+      'return serveWithAssets(request, env, await app.fetch(request, userEnv, ctx));',
+    );
+    expect(code).not.toContain('handleIsr');
+    // The `if (env.ISR_CACHE)` render guard is only emitted when ISR is wired.
+    expect(code).not.toContain('if (env.ISR_CACHE)');
+    expect(code).not.toContain('__VOID_ISR_REVALIDATE');
+  });
+
+  it('wires the ISR cache ladder with the two baked imports when the isr param is present', () => {
+    const code = compileWorkerEntry(
+      false, // hasQueues
+      undefined, // remote
+      'assets', // assetsDir
+      [], // webSocketClasses
+      'void/_env', // runtimeEnvPath
+      undefined, // envSchemaModule
+      undefined, // sandbox
+      false, // serveSpaFallback
+      undefined, // live
+      { runtimePath: 'void/isr' },
+    );
+
+    // Baked import #1: handleIsr from the supplied runtime path.
+    expect(code).toContain('import { handleIsr } from "void/isr"');
+    // Baked import #2: the two consts from the compiled route table (single source of truth).
+    expect(code).toContain(
+      "import { __VOID_ISR_REVALIDATE, __VOID_ISR_DEPLOYMENT_ID } from 'virtual:void-routes'",
+    );
+    // Render path threaded through handleIsr, guarded on the ISR_CACHE binding.
+    expect(code).toContain('if (env.ISR_CACHE)');
+    expect(code).toContain(
+      'handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID }, __render)',
+    );
+    // Deployment id + host captured on the raw env so revalidate() can purge even
+    // on requests that never enter the render ladder.
+    expect(code).toContain('env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;');
+    expect(code).toContain('env.__VOID_ISR_HOST ??= new URL(request.url).hostname;');
+  });
+});
+
+describe('compileRouteTable — baked ISR consts', () => {
+  const scan: ScanResult = {
+    routes: [],
+    middleware: [],
+    jobs: [],
+    queues: [],
+    pages: { pages: [], layouts: [], namedLayouts: [] },
+  };
+
+  it('emits __VOID_ISR_DEPLOYMENT_ID as a compile-time string literal (never crypto.randomUUID())', () => {
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+    );
+    // A quoted UUID literal — baked at build time, not a runtime call.
+    expect(code).toMatch(/export const __VOID_ISR_DEPLOYMENT_ID = "[0-9a-f-]{36}";/);
+    expect(code).not.toContain('__VOID_ISR_DEPLOYMENT_ID = crypto.randomUUID()');
+  });
+
+  it('bakes a fresh deployment id per compilation (one shared id per deploy)', () => {
+    const a = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+    );
+    const b = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+    );
+    const idA = a.match(/__VOID_ISR_DEPLOYMENT_ID = "([^"]+)"/)![1];
+    const idB = b.match(/__VOID_ISR_DEPLOYMENT_ID = "([^"]+)"/)![1];
+    expect(idA).not.toBe(idB);
+  });
+
+  it('emits the merged revalidate config verbatim (undefined | number | path map)', () => {
+    const none = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+    );
+    expect(none).toContain('export const __VOID_ISR_REVALIDATE = undefined;');
+
+    const num = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+      null,
+      60,
+    );
+    expect(num).toContain('export const __VOID_ISR_REVALIDATE = 60;');
+
+    const map = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+      null,
+      { '/blog/*': 30 },
+    );
+    expect(map).toContain('export const __VOID_ISR_REVALIDATE = {"/blog/*":30};');
+  });
+});

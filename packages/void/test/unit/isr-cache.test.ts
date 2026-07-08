@@ -1,0 +1,780 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import {
+  deleteIsrCache,
+  denormalizeIsrPath,
+  handleIsr,
+  htmlEdgeKey,
+  isrCacheResponse,
+  isrKey,
+  isStale,
+  jsonEdgeKey,
+  normalizeIsrPath,
+  packIsrValue,
+  readIsrCache,
+  resolveRevalidateTtl,
+  unpackIsrValue,
+  writeIsrCache,
+  type IsrCacheEntry,
+  type IsrCacheEnv,
+  type IsrCacheMetadata,
+  type RenderFn,
+} from '../../src/runtime/isr-cache.ts';
+
+// Collapsed self-host deployment id (baked as a compile-time literal on the real
+// worker). Every key in this suite is scoped by it — `void-isr/<id>/...`.
+const DPL = '11111111-1111-4111-8111-111111111111';
+const HOST = 'app.void.app';
+// A fixed, realistic epoch so `Date.now()` (faked) is deterministic.
+const BASE = 1_700_000_000_000;
+
+// ---------------------------------------------------------------------------
+// In-memory KV mock (getWithMetadata/put/delete/list with cursor pagination).
+// Real behavior: `store` is the authoritative backing map, so assertions read
+// actual cache contents rather than merely "the mock was called".
+// ---------------------------------------------------------------------------
+
+type KvRecord = { value: ArrayBuffer; metadata: IsrCacheMetadata | null };
+
+function createKvMock(opts: { throwOnGet?: boolean } = {}) {
+  const store = new Map<string, KvRecord>();
+  const getWithMetadata = vi.fn(async (key: string, _type: 'arrayBuffer') => {
+    if (opts.throwOnGet) {
+      throw new Error('KV unavailable');
+    }
+    const rec = store.get(key);
+    return rec ? { value: rec.value, metadata: rec.metadata } : { value: null, metadata: null };
+  });
+  const put = vi.fn(
+    async (key: string, value: ArrayBuffer, options?: { metadata?: IsrCacheMetadata }) => {
+      store.set(key, { value, metadata: options?.metadata ?? null });
+    },
+  );
+  const del = vi.fn(async (key: string) => {
+    store.delete(key);
+  });
+  const list = vi.fn(async (o: { prefix?: string; cursor?: string; limit?: number } = {}) => {
+    const prefix = o.prefix ?? '';
+    const all = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
+    const limit = o.limit ?? 1000;
+    const start = o.cursor ? Number.parseInt(o.cursor, 10) : 0;
+    const slice = all.slice(start, start + limit);
+    const complete = start + limit >= all.length;
+    return {
+      keys: slice.map((name) => ({ name })),
+      list_complete: complete,
+      cursor: complete ? '' : String(start + limit),
+    };
+  });
+  const kv = { getWithMetadata, put, delete: del, list } as unknown as KVNamespace;
+  return { store, kv, getWithMetadata, put, delete: del, list };
+}
+
+function makeEnv(kv: KVNamespace): IsrCacheEnv {
+  return { ISR_CACHE: kv, __VOID_ISR_DEPLOYMENT_ID: DPL };
+}
+
+function packEntry(headers: Record<string, string>, body: string): ArrayBuffer {
+  return packIsrValue(headers, new TextEncoder().encode(body).buffer as ArrayBuffer);
+}
+
+function seedEntry(
+  store: Map<string, KvRecord>,
+  path: string,
+  {
+    headers = { 'content-type': 'text/html' },
+    body = '<html>cached</html>',
+    status = 200,
+    createdAt,
+    ttl = 60,
+    value,
+  }: {
+    headers?: Record<string, string>;
+    body?: string;
+    status?: number;
+    createdAt: number;
+    ttl?: number;
+    value?: ArrayBuffer;
+  },
+): void {
+  store.set(isrKey(DPL, path), {
+    value: value ?? packEntry(headers, body),
+    metadata: { s: status, c: createdAt, t: ttl },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Fake per-colo edge cache (caches.default): match/put/delete over string keys.
+// ---------------------------------------------------------------------------
+
+function createEdgeMock() {
+  const store = new Map<string, Response>();
+  const match = vi.fn(async (key: string | Request) => {
+    const k = typeof key === 'string' ? key : (key as Request).url;
+    const res = store.get(k);
+    // Real Cache.match hands back a fresh Response each call.
+    return res ? res.clone() : undefined;
+  });
+  const put = vi.fn(async (key: string | Request, response: Response) => {
+    const k = typeof key === 'string' ? key : (key as Request).url;
+    store.set(k, response);
+  });
+  const del = vi.fn(async (key: string | Request) => {
+    const k = typeof key === 'string' ? key : (key as Request).url;
+    return store.delete(k);
+  });
+  const cache = { match, put, delete: del } as unknown as Cache;
+  return { store, cache, match, put, delete: del };
+}
+
+function createCtx() {
+  const tasks: Array<Promise<unknown>> = [];
+  const ctx = {
+    waitUntil: (p: Promise<unknown>) => {
+      tasks.push(p);
+    },
+    passThroughOnException: () => {},
+  } as unknown as ExecutionContext;
+  return {
+    ctx,
+    tasks,
+    flush: async () => {
+      await Promise.all(tasks);
+    },
+  };
+}
+
+function createRender(makeResponse: (req: Request) => Response) {
+  const requests: Array<Request> = [];
+  const spy = vi.fn(async (req: Request) => {
+    requests.push(req);
+    return makeResponse(req);
+  });
+  return { render: spy as unknown as RenderFn, spy, requests };
+}
+
+// ===========================================================================
+// Pure helpers
+// ===========================================================================
+
+describe('normalizeIsrPath / denormalizeIsrPath', () => {
+  it('maps root to __index__ and back', () => {
+    expect(normalizeIsrPath('/')).toBe('__index__');
+    expect(denormalizeIsrPath('__index__')).toBe('/');
+  });
+
+  it('strips leading and trailing slashes', () => {
+    expect(normalizeIsrPath('/about')).toBe('about');
+    expect(normalizeIsrPath('/about/')).toBe('about');
+    expect(normalizeIsrPath('/blog/hello-world')).toBe('blog/hello-world');
+  });
+
+  it('round-trips non-root paths', () => {
+    for (const p of ['/', '/about', '/blog/hello']) {
+      expect(denormalizeIsrPath(normalizeIsrPath(p))).toBe(p);
+    }
+  });
+});
+
+describe('collapsed self-host cache keys', () => {
+  it('scopes the KV key by deployment id (void-isr/<id>/...), no projectId/isr-v2', () => {
+    expect(isrKey(DPL, '/')).toBe(`void-isr/${DPL}/__index__`);
+    expect(isrKey(DPL, '/blog/x')).toBe(`void-isr/${DPL}/blog/x`);
+    expect(isrKey(DPL, '/about/')).toBe(`void-isr/${DPL}/about`);
+  });
+
+  it('builds HTML edge keys with the deployment id and a canonical pathname', () => {
+    expect(htmlEdgeKey(HOST, '/about', DPL)).toBe(`https://${HOST}/about?__void_isr=${DPL}`);
+    // Trailing slash canonicalized (matches normalizeIsrPath).
+    expect(htmlEdgeKey(HOST, '/about/', DPL)).toBe(`https://${HOST}/about?__void_isr=${DPL}`);
+    // Root keeps its slash.
+    expect(htmlEdgeKey(HOST, '/', DPL)).toBe(`https://${HOST}/?__void_isr=${DPL}`);
+  });
+
+  it('builds JSON edge keys as the HTML key plus the &__void=json marker', () => {
+    expect(jsonEdgeKey(HOST, '/about', DPL)).toBe(
+      `https://${HOST}/about?__void_isr=${DPL}&__void=json`,
+    );
+  });
+});
+
+describe('isStale', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const entry = (createdAt: number, ttl = 60): IsrCacheEntry => ({
+    body: new ReadableStream(),
+    status: 200,
+    headers: {},
+    createdAt,
+    ttl,
+  });
+
+  it('is fresh before the TTL elapses', () => {
+    vi.setSystemTime(BASE);
+    expect(isStale(entry(BASE))).toBe(false);
+  });
+
+  it('is stale past the TTL', () => {
+    vi.setSystemTime(BASE + 61 * 1000);
+    expect(isStale(entry(BASE))).toBe(true);
+  });
+
+  it('is fresh at the exact TTL boundary', () => {
+    vi.setSystemTime(BASE + 60 * 1000);
+    expect(isStale(entry(BASE))).toBe(false);
+  });
+});
+
+describe('resolveRevalidateTtl', () => {
+  it('returns the default when no header is present', () => {
+    expect(resolveRevalidateTtl(new Response('ok'), 60)).toBe(60);
+  });
+
+  it('returns the header value when present', () => {
+    expect(
+      resolveRevalidateTtl(new Response('ok', { headers: { 'x-revalidate': '120' } }), 60),
+    ).toBe(120);
+  });
+
+  it('returns 0 for the opt-out header (x-revalidate: 0 → do not cache)', () => {
+    expect(resolveRevalidateTtl(new Response('ok', { headers: { 'x-revalidate': '0' } }), 60)).toBe(
+      0,
+    );
+  });
+
+  it('falls back to the default for invalid or negative header values', () => {
+    expect(
+      resolveRevalidateTtl(new Response('ok', { headers: { 'x-revalidate': 'abc' } }), 60),
+    ).toBe(60);
+    expect(
+      resolveRevalidateTtl(new Response('ok', { headers: { 'x-revalidate': '-5' } }), 60),
+    ).toBe(60);
+  });
+});
+
+describe('isrCacheResponse', () => {
+  it('serves HIT with an edge-cacheable s-maxage for a fresh entry', () => {
+    const res = isrCacheResponse(
+      {
+        body: new ReadableStream(),
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+        createdAt: Date.now(),
+        ttl: 60,
+      },
+      false,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-isr-cache')).toBe('HIT');
+    expect(res.headers.get('content-type')).toBe('text/html');
+    const cc = res.headers.get('Cache-Control')!;
+    expect(cc).toContain('public');
+    expect(cc).toContain('s-maxage=');
+    expect(cc).toContain('must-revalidate');
+  });
+
+  it('serves STALE with s-maxage=min(10, ttl)', () => {
+    const res = isrCacheResponse(
+      {
+        body: new ReadableStream(),
+        status: 200,
+        headers: {},
+        createdAt: Date.now() - 120000,
+        ttl: 60,
+      },
+      true,
+    );
+    expect(res.headers.get('x-isr-cache')).toBe('STALE');
+    expect(res.headers.get('Cache-Control')).toBe(
+      'public, s-maxage=10, max-age=0, must-revalidate',
+    );
+  });
+
+  it('caps the STALE s-maxage at ttl for short ISR windows', () => {
+    const res = isrCacheResponse(
+      {
+        body: new ReadableStream(),
+        status: 200,
+        headers: {},
+        createdAt: Date.now() - 10000,
+        ttl: 5,
+      },
+      true,
+    );
+    expect(res.headers.get('Cache-Control')).toBe('public, s-maxage=5, max-age=0, must-revalidate');
+  });
+});
+
+describe('packIsrValue / unpackIsrValue', () => {
+  it('round-trips headers and body', () => {
+    const headers = { 'content-type': 'text/html', etag: '"abc"' };
+    const packed = packIsrValue(
+      headers,
+      new TextEncoder().encode('<html>hi</html>').buffer as ArrayBuffer,
+    );
+    const result = unpackIsrValue(packed);
+    expect(result).not.toBeNull();
+    expect(result!.headers).toEqual(headers);
+    expect(new TextDecoder().decode(result!.body)).toBe('<html>hi</html>');
+  });
+
+  it('handles empty body and empty headers', () => {
+    const emptyBody = unpackIsrValue(
+      packIsrValue({ 'content-type': 'text/html' }, new ArrayBuffer(0)),
+    );
+    expect(emptyBody!.body.byteLength).toBe(0);
+    const emptyHeaders = unpackIsrValue(
+      packIsrValue({}, new TextEncoder().encode('x').buffer as ArrayBuffer),
+    );
+    expect(emptyHeaders!.headers).toEqual({});
+  });
+
+  it('returns null for a buffer too small or a truncated header', () => {
+    expect(unpackIsrValue(new ArrayBuffer(2))).toBeNull();
+    const buf = new ArrayBuffer(4);
+    new DataView(buf).setUint32(0, 999, true); // claims 999 header bytes it does not have
+    expect(unpackIsrValue(buf)).toBeNull();
+  });
+});
+
+// ===========================================================================
+// KV cache: write / read round-trip, delete, and corrupt-entry fail-open
+// ===========================================================================
+
+describe('writeIsrCache / readIsrCache / deleteIsrCache', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('writes a packed entry to KV and reads it back with status/headers/ttl/body', async () => {
+    const { store, kv } = createKvMock();
+    const env = makeEnv(kv);
+    await writeIsrCache(
+      env,
+      '/blog/post',
+      new Response('<html>fresh</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html', 'set-cookie': 'sid=secret', 'cache-control': 'no' },
+      }),
+      60,
+    );
+
+    // Real KV contents: exactly one entry under the collapsed key.
+    expect(store.has(isrKey(DPL, '/blog/post'))).toBe(true);
+    const meta = store.get(isrKey(DPL, '/blog/post'))!.metadata!;
+    expect(meta).toEqual({ s: 200, c: BASE, t: 60 });
+
+    const entry = await readIsrCache(env, '/blog/post');
+    expect(entry).not.toBeNull();
+    expect(entry!.status).toBe(200);
+    expect(entry!.ttl).toBe(60);
+    expect(entry!.createdAt).toBe(BASE);
+    expect(entry!.headers['content-type']).toBe('text/html');
+    // serializeHeaders strips cache-control/set-cookie before persisting.
+    expect(entry!.headers['set-cookie']).toBeUndefined();
+    expect(entry!.headers['cache-control']).toBeUndefined();
+    expect(await new Response(entry!.body).text()).toBe('<html>fresh</html>');
+  });
+
+  it('returns null on a cache miss', async () => {
+    const { kv } = createKvMock();
+    expect(await readIsrCache(makeEnv(kv), '/nope')).toBeNull();
+  });
+
+  it('deleteIsrCache removes the entry', async () => {
+    const { store, kv } = createKvMock();
+    const env = makeEnv(kv);
+    seedEntry(store, '/gone', { createdAt: BASE });
+    expect(store.has(isrKey(DPL, '/gone'))).toBe(true);
+    await deleteIsrCache(env, '/gone');
+    expect(store.has(isrKey(DPL, '/gone'))).toBe(false);
+  });
+
+  it('fails open to null when getWithMetadata throws (never surfaces the error)', async () => {
+    const { kv } = createKvMock({ throwOnGet: true });
+    await expect(readIsrCache(makeEnv(kv), '/x')).resolves.toBeNull();
+  });
+
+  // --- Corrupt-KV fail-open (critical) -------------------------------------
+  // A KV entry whose metadata/headers make a Response un-constructible must be
+  // rejected at this choke point so `isrCacheResponse` can never throw.
+  const corruptCases: Array<{ name: string; seed: () => KvRecord }> = [
+    {
+      name: 'status out of range (s: 999)',
+      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 999, c: BASE, t: 60 } }),
+    },
+    {
+      name: 'status out of range (s: 0)',
+      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 0, c: BASE, t: 60 } }),
+    },
+    {
+      name: 'invalid header name',
+      seed: () => ({
+        value: packEntry({ 'Invalid Header Name': 'x' }, 'x'),
+        metadata: { s: 200, c: BASE, t: 60 },
+      }),
+    },
+    {
+      name: 'createdAt NaN',
+      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: NaN, t: 60 } }),
+    },
+    {
+      name: 'createdAt Infinity',
+      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: Infinity, t: 60 } }),
+    },
+    {
+      name: 'createdAt negative',
+      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: -1, t: 60 } }),
+    },
+    {
+      name: 'ttl NaN',
+      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: BASE, t: NaN } }),
+    },
+    {
+      name: 'ttl zero',
+      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: BASE, t: 0 } }),
+    },
+    {
+      name: 'ttl negative',
+      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: BASE, t: -5 } }),
+    },
+    {
+      name: 'malformed packed value',
+      seed: () => ({ value: new ArrayBuffer(2), metadata: { s: 200, c: BASE, t: 60 } }),
+    },
+  ];
+
+  for (const c of corruptCases) {
+    it(`readIsrCache returns null for a corrupt entry: ${c.name}`, async () => {
+      const { store, kv } = createKvMock();
+      store.set(isrKey(DPL, '/p'), c.seed());
+      await expect(readIsrCache(makeEnv(kv), '/p')).resolves.toBeNull();
+    });
+  }
+});
+
+// ===========================================================================
+// handleIsr — the cache ladder end to end
+// ===========================================================================
+
+describe('handleIsr', () => {
+  let edge: ReturnType<typeof createEdgeMock>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE);
+    edge = createEdgeMock();
+    vi.stubGlobal('caches', { default: edge.cache });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  const OPTS = { revalidate: 60, deploymentId: DPL };
+
+  function htmlRequest(path = '/blog/post', headers: Record<string, string> = {}) {
+    return new Request(`https://${HOST}${path}`, { method: 'GET', headers });
+  }
+
+  it('MISS → renders live, returns MISS, and writes KV + HTML edge in the background', async () => {
+    const { store, kv } = createKvMock();
+    const env = makeEnv(kv);
+    const { render, spy } = createRender(
+      () => new Response('<html>live</html>', { headers: { 'content-type': 'text/html' } }),
+    );
+    const { ctx, flush } = createCtx();
+
+    const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(200);
+    expect(res!.headers.get('x-isr-cache')).toBe('MISS');
+    expect(await res!.text()).toBe('<html>live</html>');
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    await flush();
+    // Real KV contents: the live render was persisted under the collapsed key.
+    const entry = await readIsrCache(env, '/blog/post');
+    expect(entry).not.toBeNull();
+    expect(await new Response(entry!.body).text()).toBe('<html>live</html>');
+    // HTML edge variant warmed; plain HTML (no page data) never warms the JSON variant.
+    expect(edge.store.has(htmlEdgeKey(HOST, '/blog/post', DPL))).toBe(true);
+    expect(edge.store.has(jsonEdgeKey(HOST, '/blog/post', DPL))).toBe(false);
+    expect(store.size).toBe(1);
+  });
+
+  it('KV HIT (fresh) → serves HIT from KV without a live render and warms the edge', async () => {
+    const { kv, store } = createKvMock();
+    const env = makeEnv(kv);
+    seedEntry(store, '/blog/post', { body: '<html>kv</html>', createdAt: BASE, ttl: 60 });
+    const { render, spy } = createRender(() => new Response('SHOULD-NOT-RENDER'));
+    const { ctx, flush } = createCtx();
+
+    const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+    expect(res!.status).toBe(200);
+    expect(res!.headers.get('x-isr-cache')).toBe('HIT');
+    // Client response revalidates on every hit.
+    expect(res!.headers.get('Cache-Control')).toBe('public, max-age=0, must-revalidate');
+    expect(await res!.text()).toBe('<html>kv</html>');
+    expect(spy).not.toHaveBeenCalled();
+
+    await flush();
+    // Edge warmed from KV with the fresh (HIT) response — s-maxage tracks remaining freshness.
+    const warmed = edge.store.get(htmlEdgeKey(HOST, '/blog/post', DPL));
+    expect(warmed).toBeDefined();
+    expect(warmed!.headers.get('x-isr-cache')).toBe('HIT');
+    expect(warmed!.headers.get('Cache-Control')).toBe(
+      'public, s-maxage=60, max-age=0, must-revalidate',
+    );
+  });
+
+  it('KV HIT (stale) → serves STALE and queues a background revalidation that re-puts KV with an X-VoidPages-stripped request', async () => {
+    const { kv, store } = createKvMock();
+    const env = makeEnv(kv);
+    // Seed a stale entry: created at BASE, now BASE+200s (> ttl 60s).
+    seedEntry(store, '/blog/post', { body: '<html>stale</html>', createdAt: BASE, ttl: 60 });
+    vi.setSystemTime(BASE + 200_000);
+
+    const { render, spy, requests } = createRender(
+      () => new Response('<html>revalidated</html>', { headers: { 'content-type': 'text/html' } }),
+    );
+    const { ctx, flush } = createCtx();
+
+    // Original request carries a marker header (and NO X-VoidPages — an
+    // X-VoidPages request would take the JSON branch and never reach here).
+    const res = await handleIsr(
+      htmlRequest('/blog/post', { 'X-Test-Marker': 'keep' }),
+      env,
+      ctx,
+      OPTS,
+      render,
+    );
+
+    // Stale content served immediately.
+    expect(res!.headers.get('x-isr-cache')).toBe('STALE');
+    expect(await res!.text()).toBe('<html>stale</html>');
+
+    await flush();
+    // Background re-render ran exactly once (queued via ctx.waitUntil).
+    expect(spy).toHaveBeenCalledTimes(1);
+    const rerender = requests[0]!;
+    // The re-render request is derived from the original (marker preserved, GET,
+    // same URL) but carries NO X-VoidPages, so the background render is HTML.
+    // (On the HTML path the original request never has X-VoidPages; this locks in
+    // that cloneWithoutVoidPages hands the render fn a clean HTML request.)
+    // NOTE: cloneWithoutVoidPages uses `new Request(request, { headers })`, which
+    // preserves `request.cf` on real workerd (verified empirically). These unit
+    // tests run on Node's default vitest pool where `request.cf` does not exist,
+    // so cf preservation is not representable here and is intentionally not asserted.
+    expect(rerender.headers.has('X-VoidPages')).toBe(false);
+    expect(rerender.headers.get('X-Test-Marker')).toBe('keep');
+    expect(rerender.method).toBe('GET');
+    expect(rerender.url).toBe(`https://${HOST}/blog/post`);
+
+    // KV re-put with the fresh render (KV is only written by the background task,
+    // so this is race-free) — createdAt advanced, entry is fresh again.
+    const entry = await readIsrCache(env, '/blog/post');
+    expect(entry!.createdAt).toBe(BASE + 200_000);
+    expect(isStale(entry!)).toBe(false);
+    expect(await new Response(entry!.body).text()).toBe('<html>revalidated</html>');
+  });
+
+  it('HTML edge HIT → serves the edge variant without touching KV or rendering', async () => {
+    const { kv, store, getWithMetadata } = createKvMock();
+    const env = makeEnv(kv);
+    edge.store.set(
+      htmlEdgeKey(HOST, '/blog/post', DPL),
+      new Response('<html>edge</html>', { headers: { 'x-isr-cache': 'HIT' } }),
+    );
+    const { render, spy } = createRender(() => new Response('SHOULD-NOT-RENDER'));
+    const { ctx } = createCtx();
+
+    const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+    expect(await res!.text()).toBe('<html>edge</html>');
+    expect(res!.headers.get('Cache-Control')).toBe('public, max-age=0, must-revalidate');
+    expect(spy).not.toHaveBeenCalled();
+    expect(getWithMetadata).not.toHaveBeenCalled();
+    expect(store.size).toBe(0);
+  });
+
+  it('JSON (X-VoidPages) MISS → renders live JSON and never writes the edge or KV', async () => {
+    const { store, kv } = createKvMock();
+    const env = makeEnv(kv);
+    const { render, spy, requests } = createRender(
+      () =>
+        new Response('{"component":"Blog"}', { headers: { 'content-type': 'application/json' } }),
+    );
+    const { ctx, tasks } = createCtx();
+
+    const res = await handleIsr(
+      htmlRequest('/blog/post', { 'X-VoidPages': '1' }),
+      env,
+      ctx,
+      OPTS,
+      render,
+    );
+
+    expect(res!.status).toBe(200);
+    expect(await res!.text()).toBe('{"component":"Blog"}');
+    // JSON path renders with the ORIGINAL request (X-VoidPages preserved).
+    expect(requests[0]!.headers.has('X-VoidPages')).toBe(true);
+    expect(spy).toHaveBeenCalledTimes(1);
+    // No writes on the JSON path — the JSON variant is warmed only by the HTML render path.
+    expect(tasks).toHaveLength(0);
+    expect(edge.store.size).toBe(0);
+    expect(store.size).toBe(0);
+  });
+
+  it('JSON (X-VoidPages) edge HIT → serves the cached JSON variant, no render', async () => {
+    const { kv } = createKvMock();
+    const env = makeEnv(kv);
+    edge.store.set(jsonEdgeKey(HOST, '/blog/post', DPL), new Response('{"cached":true}'));
+    const { render, spy } = createRender(() => new Response('SHOULD-NOT-RENDER'));
+    const { ctx } = createCtx();
+
+    const res = await handleIsr(
+      htmlRequest('/blog/post', { 'X-VoidPages': '1' }),
+      env,
+      ctx,
+      OPTS,
+      render,
+    );
+    expect(await res!.text()).toBe('{"cached":true}');
+    expect(res!.headers.get('Cache-Control')).toBe('public, max-age=0, must-revalidate');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails open to a LIVE render (not a 500) when getWithMetadata throws', async () => {
+    const { kv } = createKvMock({ throwOnGet: true });
+    const env = makeEnv(kv);
+    const { render, spy } = createRender(
+      () => new Response('<html>live</html>', { headers: { 'content-type': 'text/html' } }),
+    );
+    const { ctx } = createCtx();
+
+    // readIsrCache degrades to null on the throw...
+    await expect(readIsrCache(env, '/blog/post')).resolves.toBeNull();
+    // ...and handleIsr degrades to the live render rather than throwing.
+    const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+    expect(res!.status).toBe(200);
+    expect(res!.headers.get('x-isr-cache')).toBe('MISS');
+    expect(await res!.text()).toBe('<html>live</html>');
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  // Corrupt KV entry on the hit path must degrade to a live render, never throw.
+  const corruptHitCases: Array<{ name: string; record: () => KvRecord }> = [
+    {
+      name: 'status out of range',
+      record: () => ({ value: packEntry({}, 'x'), metadata: { s: 999, c: BASE, t: 60 } }),
+    },
+    {
+      name: 'invalid header name',
+      record: () => ({
+        value: packEntry({ 'Invalid Header Name': 'x' }, 'x'),
+        metadata: { s: 200, c: BASE, t: 60 },
+      }),
+    },
+    {
+      name: 'ttl NaN',
+      record: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: BASE, t: NaN } }),
+    },
+  ];
+
+  for (const c of corruptHitCases) {
+    it(`degrades to a live render on a corrupt KV hit: ${c.name}`, async () => {
+      const { store, kv } = createKvMock();
+      const env = makeEnv(kv);
+      store.set(isrKey(DPL, '/blog/post'), c.record());
+      const { render, spy } = createRender(
+        () => new Response('<html>live</html>', { headers: { 'content-type': 'text/html' } }),
+      );
+      const { ctx, flush } = createCtx();
+
+      const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+      expect(res!.status).toBe(200);
+      expect(res!.headers.get('x-isr-cache')).toBe('MISS');
+      expect(await res!.text()).toBe('<html>live</html>');
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      await flush();
+      // The MISS path overwrote the corrupt entry with a valid, readable one.
+      const entry = await readIsrCache(env, '/blog/post');
+      expect(entry).not.toBeNull();
+      expect(await new Response(entry!.body).text()).toBe('<html>live</html>');
+    });
+  }
+
+  it('background revalidation with x-revalidate: 0 purges the KV entry and both edge variants', async () => {
+    const { store, kv, delete: kvDelete } = createKvMock();
+    const env = makeEnv(kv);
+    seedEntry(store, '/blog/post', { createdAt: BASE, ttl: 60 });
+    vi.setSystemTime(BASE + 200_000); // stale
+
+    // Pre-warm the JSON edge variant so we can watch it get purged. The HTML
+    // edge key is left empty on purpose — pre-warming it would hit L1 and
+    // short-circuit before the KV stale path (which triggers the purge) runs.
+    edge.store.set(jsonEdgeKey(HOST, '/blog/post', DPL), new Response('{"edge":true}'));
+
+    const { render } = createRender(
+      () =>
+        new Response('<html>opt-out</html>', {
+          headers: { 'content-type': 'text/html', 'x-revalidate': '0' },
+        }),
+    );
+    const { ctx, flush } = createCtx();
+
+    await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+    await flush();
+
+    // KV entry is only ever deleted here (never re-put) — deterministic real removal.
+    expect(store.has(isrKey(DPL, '/blog/post'))).toBe(false);
+    expect(kvDelete).toHaveBeenCalledWith(isrKey(DPL, '/blog/post'));
+    // JSON edge variant is only touched by the purge → deterministically removed.
+    expect(edge.store.has(jsonEdgeKey(HOST, '/blog/post', DPL))).toBe(false);
+    expect(edge.delete).toHaveBeenCalledWith(jsonEdgeKey(HOST, '/blog/post', DPL));
+    // HTML edge purge is issued; its final state races the concurrent stale-warm
+    // put, so assert the delete call rather than the (racey) final map state.
+    expect(edge.delete).toHaveBeenCalledWith(htmlEdgeKey(HOST, '/blog/post', DPL));
+  });
+
+  it('returns null (caller renders live) for non-GET, credentialed, and non-ISR paths', async () => {
+    const { kv } = createKvMock();
+    const env = makeEnv(kv);
+    const { render } = createRender(() => new Response('x'));
+    const { ctx } = createCtx();
+
+    // Non-GET.
+    expect(
+      await handleIsr(
+        new Request(`https://${HOST}/blog/post`, { method: 'POST' }),
+        env,
+        ctx,
+        OPTS,
+        render,
+      ),
+    ).toBeNull();
+    // Credentialed (Cookie) requests bypass ISR.
+    expect(
+      await handleIsr(htmlRequest('/blog/post', { Cookie: 'sid=1' }), env, ctx, OPTS, render),
+    ).toBeNull();
+    // Path with no configured TTL.
+    expect(
+      await handleIsr(
+        htmlRequest('/blog/post'),
+        env,
+        ctx,
+        { revalidate: { '/other': 60 }, deploymentId: DPL },
+        render,
+      ),
+    ).toBeNull();
+  });
+});
