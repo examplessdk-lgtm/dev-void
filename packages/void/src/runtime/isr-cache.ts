@@ -256,7 +256,30 @@ export async function readIsrCache(
     return null;
   }
 
-  if (!metadata.c || !metadata.t) {
+  // Validate at this single choke point so `isrCacheResponse` — the only consumer
+  // of the returned entry — can never throw when it builds a Response from it. A
+  // corrupt/tampered/schema-drifted KV entry degrades to a live render, never 500.
+
+  // Status must be an integer in the valid HTTP Response range; otherwise
+  // `new Response(body, { status })` throws.
+  if (!Number.isInteger(metadata.s) || metadata.s < 200 || metadata.s > 599) {
+    return null;
+  }
+  // createdAt (ms) and TTL (s) must be finite positive numbers — rejects
+  // NaN/Infinity/<=0 (tightens the previous truthy-only check).
+  if (
+    !Number.isFinite(metadata.c) ||
+    metadata.c <= 0 ||
+    !Number.isFinite(metadata.t) ||
+    metadata.t <= 0
+  ) {
+    return null;
+  }
+  // Headers must be constructible; an invalid header name/value would otherwise
+  // throw later in `isrCacheResponse`'s `new Headers(entry.headers)`.
+  try {
+    new Headers(unpacked.headers);
+  } catch {
     return null;
   }
 
@@ -718,16 +741,24 @@ export async function handleIsr(
   // L2: KV (global, authoritative). `readIsrCache` fails open to null.
   const cached = await readIsrCache(env, pathname);
   if (cached) {
-    const stale = isStale(cached);
-    if (stale) {
-      ctx.waitUntil(
-        revalidateInBackground(env, request, pathname, isrTtl, { htmlKey, jsonKey }, render),
-      );
+    // Belt-and-suspenders: `readIsrCache` already validates the entry so the
+    // Response constructors below can't throw, but the never-500 fail-open
+    // contract must hold even if a future change slips a throwable past that
+    // choke point. On any throw, fall open (null → caller renders live).
+    try {
+      const stale = isStale(cached);
+      if (stale) {
+        ctx.waitUntil(
+          revalidateInBackground(env, request, pathname, isrTtl, { htmlKey, jsonKey }, render),
+        );
+      }
+      const cacheResponse = isrCacheResponse(cached, stale);
+      // Warm the edge cache from KV; client consumes the original body.
+      ctx.waitUntil(safeCachePut(cache, htmlKey, cacheResponse.clone()));
+      return clientRevalidateResponse(cacheResponse);
+    } catch {
+      return null; // fail open → caller renders live
     }
-    const cacheResponse = isrCacheResponse(cached, stale);
-    // Warm the edge cache from KV; client consumes the original body.
-    ctx.waitUntil(safeCachePut(cache, htmlKey, cacheResponse.clone()));
-    return clientRevalidateResponse(cacheResponse);
   }
 
   // Miss: render live, cache in the background (only when cacheable).
