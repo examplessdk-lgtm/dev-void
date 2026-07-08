@@ -373,6 +373,33 @@ describe('PlatformClient.updateGithubConnection', () => {
   });
 });
 
+describe('PlatformClient.deleteGithubConnection', () => {
+  it('DELETEs the right URL with auth headers and no body, returns parsed { ok }', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+    const client = makeClient();
+    const result = await client.deleteGithubConnection(projectId);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${apiUrl}/projects/${projectId}/github`);
+    expect(init.method).toBe('DELETE');
+    expect(init.body).toBeUndefined();
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe(`Bearer ${token}`);
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('throws PlatformApiError on non-2xx', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('forbidden', { status: 403 }));
+    const client = makeClient();
+    await expect(client.deleteGithubConnection(projectId)).rejects.toMatchObject({
+      name: 'PlatformApiError',
+      status: 403,
+    });
+  });
+});
+
 describe('PlatformClient.getGithubLinkUrl', () => {
   it('GETs link-url with redirect + S256 challenge query, auth headers, returns { url }', async () => {
     fetchMock.mockResolvedValueOnce(
