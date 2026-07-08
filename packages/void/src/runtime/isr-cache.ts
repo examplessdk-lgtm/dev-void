@@ -570,6 +570,10 @@ async function safeCacheDelete(cache: Cache, key: string): Promise<void> {
 function cloneWithoutVoidPages(request: Request): Request {
   const headers = new Headers(request.headers);
   headers.delete('X-VoidPages');
+  // Construct from the Request OBJECT (not a string URL): workerd copies the
+  // `cf` blob from the input Request, so `request.cf` is preserved on the clone.
+  // Do not "simplify" this into `new Request(request.url, { headers })` — the
+  // string-URL form drops `cf`.
   return new Request(request, { headers });
 }
 
@@ -638,7 +642,9 @@ async function revalidateInBackground(
  * Ladder:
  *   - Bail (`null`) if not GET, `shouldBypassIsr`, or the path has no ISR TTL.
  *   - JSON (X-VoidPages) path: edge match → hit serves `clientRevalidateResponse`;
- *     miss renders JSON and populates the JSON edge cache in the background.
+ *     miss renders live JSON and returns it — the JSON path never writes the edge
+ *     cache. The JSON edge variant is warmed only as a side-effect of the HTML
+ *     render path (cold colo re-renders JSON).
  *   - HTML path: L1 edge match → L2 KV. Hit serves `isrCacheResponse`
  *     (stale hits also queue a background revalidation). Miss renders live and,
  *     when cacheable, writes KV + JSON edge + HTML edge in the background.
@@ -687,15 +693,11 @@ export async function handleIsr(
     if (jsonCached) {
       return clientRevalidateResponse(jsonCached);
     }
-    // Miss — render JSON, populate the JSON edge cache in the background.
-    const response = await render(request);
-    if (!isEventStreamResponse(response)) {
-      const ttl = resolveRevalidateTtl(response, isrTtl);
-      if (ttl > 0 && response.ok) {
-        ctx.waitUntil(populateJsonEdgeCache(cache, jsonKey, response, ttl, 'MISS'));
-      }
-    }
-    return response;
+    // Miss — render live JSON and return it. The JSON path never writes the edge
+    // cache: a pages-protocol JSON response carries no embedded page data, so the
+    // JSON edge variant is warmed only as a side-effect of the HTML render path
+    // (cold colo re-renders JSON). Matches the platform dispatch behavior.
+    return render(request);
   }
 
   // HTML path: L1 edge → L2 KV → live render.
