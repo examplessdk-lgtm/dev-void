@@ -17,6 +17,7 @@ import { generateQueueTypes } from './codegen/queue-types.ts';
 import { generateRouteTypes } from './codegen/route-types.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import { readConfig, getDatabaseDialect } from './config.ts';
+import { collectRevalidate, hasRevalidate } from './isr-config.ts';
 import { readProjectPaths } from './project-paths.ts';
 import {
   compileRouteTable,
@@ -292,6 +293,14 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
 
   let resolvedConfig: import('vite').ResolvedConfig | null = null;
 
+  // Merged ISR revalidate map for the CURRENT build, gated by `emitIsr` (see
+  // buildStart). The `load` hook threads this into `compileRouteTable` so the
+  // baked `__VOID_ISR_REVALIDATE` const and the worker entry's `handleIsr`
+  // wiring derive from the SAME decision within one build. `undefined` whenever
+  // ISR is not emitted (dev, managed `void deploy`, non-CF target, or no
+  // revalidate config), keeping today's behavior byte-identical.
+  let isrRevalidate: number | Record<string, number> | undefined;
+
   function resolveAuthClientPath(config: import('vite').ResolvedConfig): string {
     if (config.plugins.some((plugin) => plugin.name === 'void-react:pages')) {
       return explicitAuthClientPaths.react;
@@ -520,6 +529,26 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         );
         writeFileIfChanged(join(outDir, 'index.ts'), compileNodeServer(options.target));
       } else {
+        // ISR gate. Only a real (non-managed) production CF `vite build` bakes
+        // ISR into the worker: managed `void deploy` sets VOID_DEPLOY_PROJECT_ID
+        // (the platform owns ISR then), dev (`command === 'serve'`) never emits
+        // it, and non-CF targets took the branch above. Read the command from
+        // `resolvedConfig` (set in configResolved, available here) — not a stale
+        // captured value.
+        const merged = collectRevalidate(readConfig(root), scan!.pages);
+        const emitIsr =
+          !options.target &&
+          resolvedConfig?.command === 'build' &&
+          !process.env.VOID_DEPLOY_PROJECT_ID &&
+          hasRevalidate(merged);
+        // Route table + worker entry must agree within one build: the load hook
+        // bakes `__VOID_ISR_REVALIDATE`/`__VOID_ISR_DEPLOYMENT_ID` from
+        // `isrRevalidate`, and the entry's `handleIsr` wiring imports those same
+        // consts. Both derive from `emitIsr` so they are present or absent together.
+        isrRevalidate = emitIsr ? merged : undefined;
+        // Resolve the ISR runtime path LAZILY — only when ISR is actually emitted
+        // — so non-ISR/managed/dev builds never depend on it.
+        const isr = emitIsr ? { runtimePath: resolveFile('#self/runtime/isr-cache') } : undefined;
         writeFileIfChanged(
           join(outDir, 'entry.ts'),
           compileWorkerEntry(
@@ -538,6 +567,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
               : false,
             shouldServeSpaFallback(),
             options.live,
+            isr,
           ),
         );
       }
@@ -598,6 +628,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           ssr,
           compileOptions,
           getPagesCompileOptions(),
+          isrRevalidate,
         );
       },
     },
