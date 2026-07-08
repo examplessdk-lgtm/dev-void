@@ -630,9 +630,14 @@ describe('handleIsr', () => {
     // the gate is still closed, yet the client already has its answer.
     expect(res!.headers.get('x-isr-cache')).toBe('STALE');
     expect(await res!.text()).toBe('<html>stale</html>');
-    // (b) A background task was queued via ctx.waitUntil (revalidation + edge
-    // warm). Without waitUntil queuing, nothing would be scheduled here.
-    expect(tasks.length).toBeGreaterThanOrEqual(1);
+    // (b) BOTH background tasks are registered via ctx.waitUntil on the stale
+    // path: the revalidation AND the edge-cache warm. Asserting the EXACT count
+    // (2), not >= 1, is what protects the registration: a regression that fired
+    // `revalidateInBackground` as an untracked floating promise would leave only
+    // the edge-warm tracked, dropping this to 1 and failing here. That matters
+    // because production Workers terminate untracked background work after the
+    // response, so the revalidation MUST go through waitUntil to survive.
+    expect(tasks.length).toBe(2);
     // The revalidation was KICKED OFF (render invoked) but NOT awaited inline:
     // KV still holds the ORIGINAL stale entry because the gate hasn't opened.
     expect(spy).toHaveBeenCalledTimes(1);
