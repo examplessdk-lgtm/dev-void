@@ -47,7 +47,9 @@ function createEdgeMock() {
 
 describe('revalidate — managed (platform proxy)', () => {
   it('forwards { paths } to the proxy /revalidate endpoint (no self-host regression)', async () => {
-    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) => new Response('ok', { status: 200 }),
+    );
     await envContext.run(
       { __VOID_PROXY: { fetch: fetchMock }, __PROJECT_ID: 'proj_1', __VOID_PROXY_TOKEN: 'tok_1' },
       async () => {
@@ -67,7 +69,9 @@ describe('revalidate — managed (platform proxy)', () => {
   });
 
   it('forwards { all: true } to the proxy', async () => {
-    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) => new Response('ok', { status: 200 }),
+    );
     await envContext.run(
       { __VOID_PROXY: { fetch: fetchMock }, __PROJECT_ID: 'proj_1', __VOID_PROXY_TOKEN: 'tok_1' },
       async () => {
