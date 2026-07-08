@@ -38,14 +38,21 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
     if (!kv || !id) {
       return;
     }
-    // Cast because this package has both @types/node and @cloudflare/workers-types
-    // in scope, and Node's ambient CacheStorage (which lacks `.default`) otherwise
-    // shadows the Workers one on the `caches` global — same pattern as isr-cache.ts.
-    const cache = (caches as unknown as { default: Cache }).default;
     const host = rawEnv.__VOID_ISR_HOST as string | undefined;
     const purge = async (path: string): Promise<void> => {
+      // KV first, and unconditionally — the authoritative purge must never
+      // depend on the Cache API. In scheduled/queue handlers the deployment id
+      // is stamped without a host (the F1 fix), so edge purges are skipped and
+      // this KV delete must work even if `caches.default` is degraded.
       await kv.delete(isrKey(id, path));
       if (host) {
+        // Acquire the edge cache lazily — only when there is a host to purge —
+        // so the KV path above never touches (and never throws on) the Cache
+        // API. Cast because this package has both @types/node and
+        // @cloudflare/workers-types in scope, and Node's ambient CacheStorage
+        // (which lacks `.default`) otherwise shadows the Workers one on the
+        // `caches` global — same pattern as isr-cache.ts.
+        const cache = (caches as unknown as { default: Cache }).default;
         await cache.delete(htmlEdgeKey(host, path, id));
         await cache.delete(jsonEdgeKey(host, path, id));
       }

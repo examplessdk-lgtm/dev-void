@@ -24,7 +24,14 @@ export function withRuntimeEnv<T>(env: unknown, fn: () => T): T {
   return envContext.run(resolved, fn);
 }
 
-function isInternalBinding(name: string): boolean {
+/**
+ * Shared internal-binding predicate. A binding is framework-internal — and must
+ * never be exposed to user code — when it carries an internal prefix
+ * (`__VOID_`, `__PROJECT_`) or is an exact-name internal (e.g. `ISR_CACHE`).
+ * Single source of truth for the generated `c.env` filter, the runtime `env`
+ * filter here, and the public `void/env` proxy (`env-public.ts`).
+ */
+export function isInternalBinding(name: string): boolean {
   return (
     INTERNAL_BINDING_PREFIXES.some((p) => name.startsWith(p)) ||
     (INTERNAL_BINDING_EXACT_NAMES as ReadonlyArray<string>).includes(name)

@@ -855,4 +855,59 @@ describe('handleIsr', () => {
       ),
     ).toBeNull();
   });
+
+  // FIX A: the Cache API can be absent/degraded — `edgeCache()` must swallow the
+  // `caches.default` deref (returning undefined) so `handleIsr` never rejects
+  // before its fail-open guards run. A degraded cache renders live, never 500.
+  it('fails open (never throws) when the Cache API is absent — a MISS renders live', async () => {
+    // Degrade the Cache API entirely: reading `caches.default` throws.
+    vi.stubGlobal('caches', undefined);
+
+    const { store, kv } = createKvMock();
+    const env = makeEnv(kv);
+    const { render, spy } = createRender(
+      () => new Response('<html>live</html>', { headers: { 'content-type': 'text/html' } }),
+    );
+    const { ctx, flush } = createCtx();
+
+    // L1 edge is unreachable → treated as a miss → L2 KV miss → live MISS render.
+    const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(200);
+    expect(res!.headers.get('x-isr-cache')).toBe('MISS');
+    expect(await res!.text()).toBe('<html>live</html>');
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    // Background writes (guarded on an undefined edge cache) drain without throwing;
+    // the KV write still lands.
+    await expect(flush()).resolves.toBeUndefined();
+    const entry = await readIsrCache(env, '/blog/post');
+    expect(entry).not.toBeNull();
+    expect(await new Response(entry!.body).text()).toBe('<html>live</html>');
+    expect(store.size).toBe(1);
+  });
+
+  it('serves the L2 KV HIT with no per-colo edge cache (KV ladder independent of caches.default)', async () => {
+    // `caches.default` throws on access — the KV ladder must still serve.
+    vi.stubGlobal('caches', {
+      get default(): Cache {
+        throw new Error('Cache API degraded');
+      },
+    });
+
+    const { kv, store } = createKvMock();
+    const env = makeEnv(kv);
+    seedEntry(store, '/blog/post', { body: '<html>kv</html>', createdAt: BASE, ttl: 60 });
+    const { render, spy } = createRender(() => new Response('SHOULD-NOT-RENDER'));
+    const { ctx, flush } = createCtx();
+
+    const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+    expect(res).not.toBeNull();
+    expect(res!.headers.get('x-isr-cache')).toBe('HIT');
+    expect(await res!.text()).toBe('<html>kv</html>');
+    // Served from KV without a live render, despite no reachable edge cache.
+    expect(spy).not.toHaveBeenCalled();
+    // The edge-warm background task (guarded on undefined cache) drains cleanly.
+    await expect(flush()).resolves.toBeUndefined();
+  });
 });

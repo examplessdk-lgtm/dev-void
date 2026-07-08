@@ -186,6 +186,36 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     expect(edge.delete).not.toHaveBeenCalled();
   });
 
+  // FIX B: cron/queue handlers stamp the deployment id WITHOUT a host (the F1
+  // fix), so `revalidate()` must purge KV without ever dereferencing
+  // `caches.default`. `caches.default` is acquired lazily inside the `if (host)`
+  // branch — with no host, a degraded Cache API is never touched.
+  it('purges KV without dereferencing caches.default when no host is set, even if the Cache API is degraded', async () => {
+    // Degraded Cache API: any access to `caches.default` throws AND is observable.
+    let defaultAccessed = false;
+    vi.stubGlobal('caches', {
+      get default(): Cache {
+        defaultAccessed = true;
+        throw new Error('Cache API unavailable');
+      },
+    });
+
+    const { store, kv, delete: kvDelete } = createKvMock();
+    store.set(isrKey(DPL, '/'), new ArrayBuffer(4));
+
+    // No __VOID_ISR_HOST → KV-only purge; the degraded caches.default must not throw.
+    await expect(
+      envContext.run({ ISR_CACHE: kv, __VOID_ISR_DEPLOYMENT_ID: DPL }, async () => {
+        await revalidate({ paths: ['/'] });
+      }),
+    ).resolves.toBeUndefined();
+
+    // KV delete happened; caches.default was never touched.
+    expect(store.has(isrKey(DPL, '/'))).toBe(false);
+    expect(kvDelete).toHaveBeenCalledWith(isrKey(DPL, '/'));
+    expect(defaultAccessed).toBe(false);
+  });
+
   it('{ all: true } lists and deletes the entire void-isr/<id>/ prefix (cursor-paginated)', async () => {
     // pageSize 2 forces the cursor loop to iterate across multiple pages.
     const { store, kv, list } = createKvMock(2);

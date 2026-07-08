@@ -529,12 +529,15 @@ function jsonCacheResponse(pageData: string, ttl: number, state: 'HIT' | 'MISS')
  * (fail-open) so this is always safe to fire inside `ctx.waitUntil`.
  */
 export async function populateJsonEdgeCache(
-  cache: Cache,
+  cache: Cache | undefined,
   cacheKey: string,
   response: Response,
   ttl: number,
   state: 'HIT' | 'MISS',
 ): Promise<void> {
+  if (!cache) {
+    return;
+  }
   try {
     const fromHeader = response.headers.get('x-void-page-data');
     const pageData = fromHeader
@@ -554,16 +557,34 @@ export async function populateJsonEdgeCache(
 // ---------------------------------------------------------------------------
 
 /**
- * The per-colo edge cache (`caches.default`). Accessed through a cast because
- * this package has both `@types/node` and `@cloudflare/workers-types` in scope,
- * and Node's ambient `CacheStorage` (which lacks `.default`) otherwise shadows
- * the Workers one on the `caches` global.
+ * The per-colo edge cache (`caches.default`), or `undefined` when the Cache API
+ * is absent/degraded. Accessed through a cast because this package has both
+ * `@types/node` and `@cloudflare/workers-types` in scope, and Node's ambient
+ * `CacheStorage` (which lacks `.default`) otherwise shadows the Workers one on
+ * the `caches` global.
+ *
+ * Non-throwing by contract: dereferencing `caches.default` can throw if the
+ * Cache API is missing (e.g. a non-worker runtime) or degraded. We swallow that
+ * here and return `undefined` so `handleIsr` never rejects before its fail-open
+ * guards run — the serving invariant is a degraded cache must render live, never
+ * 500. Every call site guards `undefined` (via `if (!cache)` or `cache?.`).
  */
-function edgeCache(): Cache {
-  return (caches as unknown as { default: Cache }).default;
+function edgeCache(): Cache | undefined {
+  try {
+    return (caches as unknown as { default: Cache }).default;
+  } catch {
+    return undefined;
+  }
 }
 
-async function safeCachePut(cache: Cache, key: string, response: Response): Promise<void> {
+async function safeCachePut(
+  cache: Cache | undefined,
+  key: string,
+  response: Response,
+): Promise<void> {
+  if (!cache) {
+    return;
+  }
   try {
     await cache.put(key, response);
   } catch {
@@ -571,7 +592,10 @@ async function safeCachePut(cache: Cache, key: string, response: Response): Prom
   }
 }
 
-async function safeCacheDelete(cache: Cache, key: string): Promise<void> {
+async function safeCacheDelete(cache: Cache | undefined, key: string): Promise<void> {
+  if (!cache) {
+    return;
+  }
   try {
     await cache.delete(key);
   } catch {
@@ -709,7 +733,9 @@ export async function handleIsr(
     const jsonKey = jsonEdgeKey(host, pathname, deploymentId);
     let jsonCached: Response | undefined;
     try {
-      jsonCached = await cache.match(jsonKey);
+      // `cache?.` — an absent/degraded Cache API (edgeCache() → undefined) is a
+      // miss, not a throw, so we fall through to a live JSON render.
+      jsonCached = await cache?.match(jsonKey);
     } catch {
       return null; // fail open → caller renders live
     }
@@ -730,7 +756,10 @@ export async function handleIsr(
   // L1: edge cache (per-colo, sub-ms).
   let edgeCached: Response | undefined;
   try {
-    edgeCached = await cache.match(htmlKey);
+    // `cache?.` — an absent/degraded Cache API (edgeCache() → undefined) is an
+    // L1 miss, not a throw, so we fall through to the L2 KV read below (KV still
+    // serves cached content even with no per-colo edge cache).
+    edgeCached = await cache?.match(htmlKey);
   } catch {
     return null; // fail open → caller renders live
   }

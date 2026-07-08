@@ -32,7 +32,7 @@ import { isUnmaskActive, redactMessage, type SecretOverride } from '../shared/en
 import type { StandardSchemaV1 } from '../standard-schema.ts';
 import { getSecretOverride } from './env-helpers.ts';
 import { getRawRuntimeEnv } from './env-raw.ts';
-import { getRuntimeEnv } from './env.ts';
+import { getRuntimeEnv, isInternalBinding } from './env.ts';
 
 type AnyValidator = StandardSchemaV1<unknown, unknown>;
 type AnySchema = Record<string, AnyValidator>;
@@ -129,6 +129,15 @@ export async function _validateEnvOnce(envValues: unknown): Promise<void> {
         cacheList.push(cache);
       }
       for (const [key, value] of report.values) {
+        // Never seed internal framework bindings (__VOID_*, __PROJECT_*,
+        // ISR_CACHE) into the sync cache — even when a user's schema declares
+        // one and boot validation resolved its raw value. Exposing it via
+        // `env.X` would leak an internal binding (e.g. the ISR KV namespace).
+        // `readKey` also short-circuits internal names, so this is belt-and-
+        // suspenders that additionally keeps the cache clean.
+        if (isInternalBinding(key)) {
+          continue;
+        }
         if (!cache.has(key)) {
           cache.set(key, value);
         }
@@ -231,6 +240,14 @@ export class EnvValidationError extends Error {
 }
 
 function readKey(key: string): unknown {
+  // Internal framework bindings (__VOID_*, __PROJECT_*, ISR_CACHE) are never
+  // exposed through the public `env` proxy — treat them as absent BEFORE
+  // consulting the schema/cache. This holds even when a user's defineEnv schema
+  // declares one and boot validation seeded its raw value; returning `undefined`
+  // matches the "not in schema / not found" behavior of the filtered env.
+  if (isInternalBinding(key)) {
+    return undefined;
+  }
   // Filtered env hides internal __VOID_*/__PROJECT_* bindings from user code.
   const filtered = getRuntimeEnv() as Record<string, unknown>;
   const rawValue = filtered[key];
