@@ -55,6 +55,11 @@ export type AuthConfig = {
   providers?: Array<VoidAuthProvider>;
 };
 
+/** AI configuration — route Workers AI inference through your own Cloudflare AI Gateway. */
+export type AiConfig = {
+  gateway?: string;
+};
+
 /** Shape of the `void.json` config file. All fields optional. */
 export type VoidConfig = {
   $schema?: string;
@@ -69,6 +74,7 @@ export type VoidConfig = {
   remote?: boolean;
   worker?: WranglerConfig;
   database?: 'pg';
+  ai?: AiConfig;
 };
 
 const CONFIG_FILE = 'void.json';
@@ -878,6 +884,27 @@ export function readConfig(root: string): VoidConfig {
   if (obj.database !== undefined) {
     if (typeof obj.database !== 'string' || !VALID_DATABASE_VALUES.has(obj.database)) {
       throw new Error(`config: "database" in ${CONFIG_FILE} must be "pg".`);
+    }
+  }
+
+  // Validate ai
+  if (obj.ai !== undefined) {
+    if (typeof obj.ai !== 'object' || obj.ai === null || Array.isArray(obj.ai)) {
+      throw new Error(`config: "ai" in ${CONFIG_FILE} must be an object.`);
+    }
+
+    const aiCfg = obj.ai as Record<string, unknown>;
+    for (const key of Object.keys(aiCfg)) {
+      if (key !== 'gateway') {
+        throw new Error(`config: Unknown key 'ai.${key}' in ${CONFIG_FILE}. Valid: gateway.`);
+      }
+    }
+
+    if (
+      aiCfg.gateway !== undefined &&
+      (typeof aiCfg.gateway !== 'string' || aiCfg.gateway.length === 0)
+    ) {
+      throw new Error(`config: "ai.gateway" in ${CONFIG_FILE} must be a non-empty string.`);
     }
   }
 

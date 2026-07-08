@@ -363,6 +363,17 @@
       "type": "string",
       "enum": ["pg"],
       "description": "Database backend. Omit for D1 (SQLite, default). Set to \"pg\" for PostgreSQL via Hyperdrive."
+    },
+    "ai": {
+      "type": "object",
+      "description": "AI configuration. Route Workers AI inference through your own Cloudflare AI Gateway.",
+      "properties": {
+        "gateway": {
+          "type": "string",
+          "description": "Cloudflare AI Gateway name/slug to route ai.provider().fetch() through your own account."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false
