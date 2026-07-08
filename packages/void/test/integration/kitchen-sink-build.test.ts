@@ -97,8 +97,23 @@ describe('playground/kitchen-sink build', () => {
   it('does not leak __VOID_* credentials into dist/ssr/wrangler.json', () => {
     const wranglerConfig = JSON.parse(readFileSync(join(DIST, 'ssr', 'wrangler.json'), 'utf-8'));
     const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
-    const leakedKeys = Object.keys(vars).filter((key) => key.startsWith('__VOID_'));
+    // `__VOID_AI_GATEWAY` is a legitimate, non-credential runtime var emitted from
+    // `ai.gateway` in void.json (asserted below) — exclude it from the leak filter.
+    const leakedKeys = Object.keys(vars).filter(
+      (key) => key.startsWith('__VOID_') && key !== '__VOID_AI_GATEWAY',
+    );
     expect(leakedKeys).toEqual([]);
+  });
+
+  it('binds Workers AI and emits the AI Gateway var for self-host deploys', () => {
+    const wranglerConfig = JSON.parse(readFileSync(join(DIST, 'ssr', 'wrangler.json'), 'utf-8'));
+    // kitchen-sink imports `void/ai` at request time, so the build infers
+    // `needsAI` and injects the Workers AI binding on `command === 'build'`.
+    expect(wranglerConfig.ai).toEqual({ binding: 'AI' });
+    // `ai.gateway` in playground/kitchen-sink/void.json becomes the runtime var
+    // read by the P3 direct backend.
+    const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
+    expect(vars.__VOID_AI_GATEWAY).toBe('kitchen-sink-gw');
   });
 
   it('keeps non-internal .env.production vars in dist/ssr/wrangler.json', () => {

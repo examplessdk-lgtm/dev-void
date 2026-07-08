@@ -1,6 +1,29 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vite-plus/test';
 import type { ai } from '../../src/runtime/ai.ts';
 
+/**
+ * Build a fake Workers AI binding (`env.AI`) for the P3 self-host backend.
+ *
+ * `gateway(id)` returns an object whose `getUrl(provider)` mock resolves to a
+ * realistic AI Gateway URL derived from BOTH the gateway id and provider, so
+ * the appended provider path can be asserted end-to-end.
+ */
+function makeDirectAi(
+  opts: { getUrl?: (id: string, provider: string) => Promise<string>; run?: () => unknown } = {},
+) {
+  const getUrlImpl =
+    opts.getUrl ??
+    (async (id: string, provider: string) =>
+      `https://gateway.ai.cloudflare.com/v1/acct123/${id}/${provider}`);
+  const run = vi.fn(async (..._args: Array<unknown>) => (opts.run ? opts.run() : { ok: true }));
+  const models = vi.fn(async () => ['@cf/meta/llama']);
+  const toMarkdown = vi.fn(async () => []);
+  const gateway = vi.fn((id: string) => ({
+    getUrl: vi.fn((provider: string) => getUrlImpl(id, provider)),
+  }));
+  return { AI: { run, gateway, models, toMarkdown }, run, gateway };
+}
+
 describe('runtime ai', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -326,5 +349,268 @@ describe('runtime ai', () => {
         expect(await (result as Blob).text()).toBe('png-bytes');
       },
     );
+  });
+
+  // P3 self-host backend: only `env.AI` is bound (no Void proxy/token). Inference
+  // runs directly against the user's Workers AI binding, and `ai.provider().fetch`
+  // routes through the user's OWN AI Gateway using a project provider secret.
+  describe('direct AI backend (self-host, env.AI only)', () => {
+    it('selects the direct backend when only env.AI is present (ai.run → directAi.run)', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+
+      // Any accidental fall-through to the Void proxy would hit fetch — assert it doesn't.
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) =>
+          new Response('proxy-should-not-be-used', { status: 500 }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const direct = makeDirectAi();
+
+      await envContext.run({ AI: direct.AI }, async () => {
+        const result = await ai.run('@cf/meta/llama', { prompt: 'Hi' });
+        expect(result).toEqual({ ok: true });
+      });
+
+      expect(direct.run).toHaveBeenCalledWith('@cf/meta/llama', { prompt: 'Hi' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('provider().fetch hits the user gateway with provider auth and no metering header', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) =>
+          new Response(JSON.stringify({ id: 'chatcmpl_direct' }), {
+            headers: { 'content-type': 'application/json' },
+          }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const direct = makeDirectAi();
+
+      await envContext.run(
+        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', OPENAI_API_KEY: 'sk-test' },
+        async () => {
+          const response = await ai.provider('openai').fetch('/chat/completions', {
+            body: { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
+          });
+          // Gateway response passes through untouched.
+          expect(await response.json()).toEqual({ id: 'chatcmpl_direct' });
+        },
+      );
+
+      // Resolved the URL from the user's OWN gateway (awaited getUrl), not the Void proxy.
+      expect(direct.gateway).toHaveBeenCalledWith('my-gw');
+      expect(direct.gateway.mock.results[0].value.getUrl).toHaveBeenCalledWith('openai');
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const url = fetchMock.mock.calls[0][0];
+      const init = fetchMock.mock.calls[0][1]!;
+      expect(String(url).endsWith('/my-gw/openai/chat/completions')).toBe(true);
+      expect(init.method).toBe('POST');
+
+      const headers = new Headers(init.headers);
+      expect(headers.get('authorization')).toBe('Bearer sk-test');
+      expect(headers.get('content-type')).toBe('application/json');
+      // Self-host path must NOT attach managed metering / projectId headers.
+      expect(headers.get('cf-aig-metadata-projectId')).toBeNull();
+      expect(headers.get('cf-aig-metadata')).toBeNull();
+
+      // Real provider payload — NOT the proxy envelope ({ action, provider, providerKey, ... }).
+      const sent = JSON.parse(init.body as string);
+      expect(sent).toEqual({ model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] });
+      expect(sent).not.toHaveProperty('action');
+      expect(sent).not.toHaveProperty('provider');
+      expect(sent).not.toHaveProperty('providerKey');
+    });
+
+    it('resolves to 501 when no AI gateway is configured', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) => new Response('ok'),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const direct = makeDirectAi();
+
+      await envContext.run({ AI: direct.AI, OPENAI_API_KEY: 'sk-test' }, async () => {
+        const response = await ai.provider('openai').fetch('/chat/completions', {
+          body: { model: 'gpt-4o' },
+        });
+        expect(response.status).toBe(501);
+        const body = (await response.json()) as { error: string };
+        expect(body.error).toMatch(/gateway/i);
+        expect(body.error).toContain('void.json');
+      });
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(direct.gateway).not.toHaveBeenCalled();
+    });
+
+    it('resolves to 400 naming the missing provider secret', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) => new Response('ok'),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const direct = makeDirectAi();
+
+      // Gateway present + safe path, but OPENAI_API_KEY is absent.
+      await envContext.run({ AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw' }, async () => {
+        const response = await ai.provider('openai').fetch('/chat/completions', {
+          body: { model: 'gpt-4o' },
+        });
+        expect(response.status).toBe(400);
+        const body = (await response.json()) as { error: string };
+        expect(body.error).toContain('OPENAI_API_KEY');
+      });
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      // Key check happens before the gateway lookup.
+      expect(direct.gateway).not.toHaveBeenCalled();
+    });
+
+    it('resolves to 502 when the gateway getUrl lookup rejects', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) => new Response('ok'),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const direct = makeDirectAi({
+        getUrl: async () => {
+          throw new Error('gateway 404 not found');
+        },
+      });
+
+      await envContext.run(
+        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', OPENAI_API_KEY: 'sk-test' },
+        async () => {
+          const response = await ai.provider('openai').fetch('/chat/completions', {
+            body: { model: 'gpt-4o' },
+          });
+          expect(response.status).toBe(502);
+          const body = (await response.json()) as { error: string };
+          expect(body.error).toContain('my-gw');
+        },
+      );
+
+      expect(direct.gateway).toHaveBeenCalledWith('my-gw');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('resolves to 400 for an unsafe absolute provider path', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) => new Response('ok'),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const direct = makeDirectAi();
+
+      await envContext.run(
+        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', OPENAI_API_KEY: 'sk-test' },
+        async () => {
+          const response = await ai
+            .provider('openai')
+            .fetch('https://evil.example.com/v1/chat', { body: { model: 'gpt-4o' } });
+          expect(response.status).toBe(400);
+          const body = (await response.json()) as { error: string };
+          expect(body.error).toMatch(/must be relative/);
+        },
+      );
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      // Path is rejected before any gateway lookup or network call.
+      expect(direct.gateway).not.toHaveBeenCalled();
+    });
+
+    it('serializes a direct JSON body as real application/json (not the proxy envelope)', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) => new Response('ok'),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const direct = makeDirectAi();
+
+      await envContext.run(
+        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', OPENAI_API_KEY: 'sk-test' },
+        async () => {
+          await ai.provider('openai').fetch('/chat/completions', {
+            body: { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
+          });
+        },
+      );
+
+      const init = fetchMock.mock.calls[0][1]!;
+      expect(typeof init.body).toBe('string');
+      expect(new Headers(init.headers).get('content-type')).toBe('application/json');
+      expect(JSON.parse(init.body as string)).toEqual({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+    });
+
+    it('forwards a direct multipart/form-data body untouched (fetch sets the boundary)', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) => new Response('ok'),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const direct = makeDirectAi();
+
+      await envContext.run(
+        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', OPENAI_API_KEY: 'sk-test' },
+        async () => {
+          const form = new FormData();
+          form.set('model', 'gpt-image-1.5');
+          form.set('prompt', 'change the background');
+          form.set('image', new Blob(['png-bytes'], { type: 'image/png' }), 'source.png');
+
+          await ai.provider('openai').fetch('/images/edits', { body: form });
+        },
+      );
+
+      const init = fetchMock.mock.calls[0][1]!;
+      // The self-host path passes FormData straight through — fetch itself sets
+      // the multipart content-type + boundary, so we must NOT force content-type
+      // and must NOT base64-envelope the parts like the managed proxy does.
+      expect(init.body).toBeInstanceOf(FormData);
+      expect(new Headers(init.headers).get('content-type')).toBeNull();
+      expect(new Headers(init.headers).get('authorization')).toBe('Bearer sk-test');
+
+      const sentForm = init.body as FormData;
+      expect(sentForm.get('model')).toBe('gpt-image-1.5');
+      expect(sentForm.get('prompt')).toBe('change the background');
+      const image = sentForm.get('image');
+      expect(image).toBeInstanceOf(Blob);
+      expect(await (image as Blob).text()).toBe('png-bytes');
+    });
   });
 });

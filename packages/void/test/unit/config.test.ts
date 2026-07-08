@@ -444,6 +444,69 @@ describe('readConfig', () => {
   });
 });
 
+describe('top-level ai config validation', () => {
+  it('accepts an ai.gateway string', () => {
+    setup(JSON.stringify({ ai: { gateway: 'my-gateway' } }));
+    const config = readConfig(tmpDir);
+    expect(config.ai?.gateway).toBe('my-gateway');
+    cleanup();
+  });
+
+  it('accepts an empty top-level ai object', () => {
+    setup(JSON.stringify({ ai: {} }));
+    const config = readConfig(tmpDir);
+    expect(config.ai).toEqual({});
+    cleanup();
+  });
+
+  it('throws when ai is not an object (string)', () => {
+    setup(JSON.stringify({ ai: 'my-gateway' }));
+    expect(() => readConfig(tmpDir)).toThrow('"ai" in void.json must be an object');
+    cleanup();
+  });
+
+  it('throws when ai is an array', () => {
+    setup(JSON.stringify({ ai: ['my-gateway'] }));
+    expect(() => readConfig(tmpDir)).toThrow('"ai" in void.json must be an object');
+    cleanup();
+  });
+
+  it('throws when ai.gateway is not a string', () => {
+    setup(JSON.stringify({ ai: { gateway: 123 } }));
+    expect(() => readConfig(tmpDir)).toThrow(
+      '"ai.gateway" in void.json must be a non-empty string',
+    );
+    cleanup();
+  });
+
+  it('throws when ai.gateway is an empty string', () => {
+    setup(JSON.stringify({ ai: { gateway: '' } }));
+    expect(() => readConfig(tmpDir)).toThrow(
+      '"ai.gateway" in void.json must be a non-empty string',
+    );
+    cleanup();
+  });
+
+  it('rejects an unknown ai.* key', () => {
+    setup(JSON.stringify({ ai: { gateway: 'gw', provider: 'openai' } }));
+    expect(() => readConfig(tmpDir)).toThrow("Unknown key 'ai.provider'");
+    cleanup();
+  });
+
+  it('allows ai.gateway and inference.bindings.ai to coexist', () => {
+    setup(
+      JSON.stringify({
+        ai: { gateway: 'my-gw' },
+        inference: { bindings: { ai: true } },
+      }),
+    );
+    const config = readConfig(tmpDir);
+    expect(config.ai?.gateway).toBe('my-gw');
+    expect(config.inference?.bindings?.ai).toBe(true);
+    cleanup();
+  });
+});
+
 describe('readConfig migration errors', () => {
   it('throws when auth is not an object', () => {
     setup(JSON.stringify({ auth: ['github'] }));
