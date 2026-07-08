@@ -516,6 +516,63 @@ describe('parseGithubArgs', () => {
     });
   });
 
+  describe('disconnect', () => {
+    it('parses with no args (defaults)', () => {
+      expect(parseGithubArgs(['disconnect'])).toEqual({
+        subcommand: 'disconnect',
+        projectName: '',
+        yes: false,
+      });
+    });
+
+    it('parses a positional project', () => {
+      expect(parseGithubArgs(['disconnect', 'my-app'])).toEqual({
+        subcommand: 'disconnect',
+        projectName: 'my-app',
+        yes: false,
+      });
+    });
+
+    it('parses --project', () => {
+      expect(parseGithubArgs(['disconnect', '--project', 'my-app'])).toEqual({
+        subcommand: 'disconnect',
+        projectName: 'my-app',
+        yes: false,
+      });
+    });
+
+    it('parses --yes and -y', () => {
+      expect(parseGithubArgs(['disconnect', 'my-app', '--yes'])).toEqual({
+        subcommand: 'disconnect',
+        projectName: 'my-app',
+        yes: true,
+      });
+      expect(parseGithubArgs(['disconnect', '-y', 'my-app'])).toEqual({
+        subcommand: 'disconnect',
+        projectName: 'my-app',
+        yes: true,
+      });
+    });
+
+    it('throws on a second positional', () => {
+      expect(() => parseGithubArgs(['disconnect', 'a', 'b'])).toThrow(
+        "github: Unexpected argument 'b'.",
+      );
+    });
+
+    it('throws on an unknown flag', () => {
+      expect(() => parseGithubArgs(['disconnect', '--nope'])).toThrow(
+        "github: Unexpected argument '--nope'.",
+      );
+    });
+
+    it('throws when --project has no value', () => {
+      expect(() => parseGithubArgs(['disconnect', '--project'])).toThrow(
+        'github: --project requires a value.',
+      );
+    });
+  });
+
   describe('link', () => {
     it('parses link with no args', () => {
       expect(parseGithubArgs(['link'])).toEqual({ subcommand: 'link' });
@@ -553,13 +610,13 @@ describe('parseGithubArgs', () => {
   describe('unknown subcommand', () => {
     it('throws on empty args', () => {
       expect(() => parseGithubArgs([])).toThrow(
-        'github: Usage: void github <install|installations|connect|update|status|link|join>.',
+        'github: Usage: void github <install|installations|connect|update|status|disconnect|link|join>.',
       );
     });
 
     it('throws on unknown subcommand', () => {
       expect(() => parseGithubArgs(['unknown'])).toThrow(
-        'github: Usage: void github <install|installations|connect|update|status|link|join>.',
+        'github: Usage: void github <install|installations|connect|update|status|disconnect|link|join>.',
       );
     });
   });
