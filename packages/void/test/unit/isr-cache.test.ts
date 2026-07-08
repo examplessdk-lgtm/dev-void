@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
+  cloneWithoutVoidPages,
   deleteIsrCache,
   denormalizeIsrPath,
   handleIsr,
@@ -151,6 +152,59 @@ function createRender(makeResponse: (req: Request) => Response) {
   });
   return { render: spy as unknown as RenderFn, spy, requests };
 }
+
+// ---------------------------------------------------------------------------
+// Corrupt-KV fail-open table (critical). A KV entry whose metadata/headers make
+// a Response un-constructible must be rejected at the `readIsrCache` choke point
+// so `isrCacheResponse` can never throw. Shared by two suites: the low-level
+// `readIsrCache` fail-open tests AND the end-to-end `handleIsr` live-render
+// path (every corrupt shape must degrade to a live render, never a 500).
+// ---------------------------------------------------------------------------
+const corruptCases: Array<{ name: string; seed: () => KvRecord }> = [
+  {
+    name: 'status out of range (s: 999)',
+    seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 999, c: BASE, t: 60 } }),
+  },
+  {
+    name: 'status out of range (s: 0)',
+    seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 0, c: BASE, t: 60 } }),
+  },
+  {
+    name: 'invalid header name',
+    seed: () => ({
+      value: packEntry({ 'Invalid Header Name': 'x' }, 'x'),
+      metadata: { s: 200, c: BASE, t: 60 },
+    }),
+  },
+  {
+    name: 'createdAt NaN',
+    seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: NaN, t: 60 } }),
+  },
+  {
+    name: 'createdAt Infinity',
+    seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: Infinity, t: 60 } }),
+  },
+  {
+    name: 'createdAt negative',
+    seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: -1, t: 60 } }),
+  },
+  {
+    name: 'ttl NaN',
+    seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: BASE, t: NaN } }),
+  },
+  {
+    name: 'ttl zero',
+    seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: BASE, t: 0 } }),
+  },
+  {
+    name: 'ttl negative',
+    seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: BASE, t: -5 } }),
+  },
+  {
+    name: 'malformed packed value',
+    seed: () => ({ value: new ArrayBuffer(2), metadata: { s: 200, c: BASE, t: 60 } }),
+  },
+];
 
 // ===========================================================================
 // Pure helpers
@@ -403,55 +457,8 @@ describe('writeIsrCache / readIsrCache / deleteIsrCache', () => {
     await expect(readIsrCache(makeEnv(kv), '/x')).resolves.toBeNull();
   });
 
-  // --- Corrupt-KV fail-open (critical) -------------------------------------
-  // A KV entry whose metadata/headers make a Response un-constructible must be
-  // rejected at this choke point so `isrCacheResponse` can never throw.
-  const corruptCases: Array<{ name: string; seed: () => KvRecord }> = [
-    {
-      name: 'status out of range (s: 999)',
-      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 999, c: BASE, t: 60 } }),
-    },
-    {
-      name: 'status out of range (s: 0)',
-      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 0, c: BASE, t: 60 } }),
-    },
-    {
-      name: 'invalid header name',
-      seed: () => ({
-        value: packEntry({ 'Invalid Header Name': 'x' }, 'x'),
-        metadata: { s: 200, c: BASE, t: 60 },
-      }),
-    },
-    {
-      name: 'createdAt NaN',
-      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: NaN, t: 60 } }),
-    },
-    {
-      name: 'createdAt Infinity',
-      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: Infinity, t: 60 } }),
-    },
-    {
-      name: 'createdAt negative',
-      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: -1, t: 60 } }),
-    },
-    {
-      name: 'ttl NaN',
-      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: BASE, t: NaN } }),
-    },
-    {
-      name: 'ttl zero',
-      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: BASE, t: 0 } }),
-    },
-    {
-      name: 'ttl negative',
-      seed: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: BASE, t: -5 } }),
-    },
-    {
-      name: 'malformed packed value',
-      seed: () => ({ value: new ArrayBuffer(2), metadata: { s: 200, c: BASE, t: 60 } }),
-    },
-  ];
-
+  // Corrupt-KV fail-open: the `corruptCases` table is module-scoped (shared with
+  // the `handleIsr` live-render suite). readIsrCache must reject every shape.
   for (const c of corruptCases) {
     it(`readIsrCache returns null for a corrupt entry: ${c.name}`, async () => {
       const { store, kv } = createKvMock();
@@ -459,6 +466,51 @@ describe('writeIsrCache / readIsrCache / deleteIsrCache', () => {
       await expect(readIsrCache(makeEnv(kv), '/p')).resolves.toBeNull();
     });
   }
+});
+
+// ===========================================================================
+// cloneWithoutVoidPages — the background-render request stripper
+// ===========================================================================
+// A request that carries `X-VoidPages` takes the JSON branch in `handleIsr` and
+// returns before ever reaching the HTML stale path where the stripper runs, so
+// the public API cannot deliver an X-VoidPages request to it. Test it directly
+// so the mandated stripping is actually exercised (the stale-path test can only
+// ever hand it a request that already lacks the header — a tautology otherwise).
+
+describe('cloneWithoutVoidPages', () => {
+  it('removes X-VoidPages while preserving method, url, and every other header', () => {
+    const original = new Request(`https://${HOST}/blog/post`, {
+      method: 'GET',
+      headers: {
+        'X-VoidPages': '1',
+        'X-Test-Marker': 'keep',
+        Accept: 'text/html',
+      },
+    });
+    // Precondition: the input genuinely carries the header we expect stripped.
+    expect(original.headers.has('X-VoidPages')).toBe(true);
+
+    const cleaned = cloneWithoutVoidPages(original);
+
+    // Only X-VoidPages is dropped; everything else is preserved verbatim. This
+    // fails if `cloneWithoutVoidPages` stops deleting the header (regression).
+    expect(cleaned.headers.has('X-VoidPages')).toBe(false);
+    expect(cleaned.headers.get('X-Test-Marker')).toBe('keep');
+    expect(cleaned.headers.get('Accept')).toBe('text/html');
+    expect(cleaned.method).toBe('GET');
+    expect(cleaned.url).toBe(`https://${HOST}/blog/post`);
+  });
+
+  it('is a no-op on the header set when X-VoidPages is absent', () => {
+    const original = new Request(`https://${HOST}/blog/post`, {
+      method: 'GET',
+      headers: { 'X-Test-Marker': 'keep' },
+    });
+    const cleaned = cloneWithoutVoidPages(original);
+    expect(cleaned.headers.has('X-VoidPages')).toBe(false);
+    expect(cleaned.headers.get('X-Test-Marker')).toBe('keep');
+    expect(cleaned.url).toBe(`https://${HOST}/blog/post`);
+  });
 });
 
 // ===========================================================================
@@ -536,17 +588,33 @@ describe('handleIsr', () => {
     );
   });
 
-  it('KV HIT (stale) → serves STALE and queues a background revalidation that re-puts KV with an X-VoidPages-stripped request', async () => {
+  it('KV HIT (stale) → serves STALE BEFORE revalidation runs, queues it via ctx.waitUntil (background, not inline), then re-puts KV', async () => {
     const { kv, store } = createKvMock();
     const env = makeEnv(kv);
     // Seed a stale entry: created at BASE, now BASE+200s (> ttl 60s).
     seedEntry(store, '/blog/post', { body: '<html>stale</html>', createdAt: BASE, ttl: 60 });
     vi.setSystemTime(BASE + 200_000);
 
-    const { render, spy, requests } = createRender(
-      () => new Response('<html>revalidated</html>', { headers: { 'content-type': 'text/html' } }),
-    );
-    const { ctx, flush } = createCtx();
+    // A DEFERRED render we control: the background revalidation cannot produce a
+    // response until we call `release()`. This is the crux of proving background
+    // vs. inline — if `handleIsr` awaited the revalidation INLINE (instead of
+    // `ctx.waitUntil`), the `await handleIsr(...)` below would deadlock on this
+    // gate and the test would time out. It resolves only because the stale
+    // response is served WITHOUT waiting on the re-render.
+    const requests: Array<Request> = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const spy = vi.fn(async (req: Request) => {
+      requests.push(req);
+      await gate; // block until the test explicitly releases the render
+      return new Response('<html>revalidated</html>', {
+        headers: { 'content-type': 'text/html' },
+      });
+    });
+    const render = spy as unknown as RenderFn;
+    const { ctx, tasks, flush } = createCtx();
 
     // Original request carries a marker header (and NO X-VoidPages — an
     // X-VoidPages request would take the JSON branch and never reach here).
@@ -558,18 +626,32 @@ describe('handleIsr', () => {
       render,
     );
 
-    // Stale content served immediately.
+    // (a) Resolves to the STALE response BEFORE the deferred render resolves —
+    // the gate is still closed, yet the client already has its answer.
     expect(res!.headers.get('x-isr-cache')).toBe('STALE');
     expect(await res!.text()).toBe('<html>stale</html>');
+    // (b) A background task was queued via ctx.waitUntil (revalidation + edge
+    // warm). Without waitUntil queuing, nothing would be scheduled here.
+    expect(tasks.length).toBeGreaterThanOrEqual(1);
+    // The revalidation was KICKED OFF (render invoked) but NOT awaited inline:
+    // KV still holds the ORIGINAL stale entry because the gate hasn't opened.
+    expect(spy).toHaveBeenCalledTimes(1);
+    const midEntry = await readIsrCache(env, '/blog/post');
+    expect(midEntry!.createdAt).toBe(BASE);
+    expect(isStale(midEntry!)).toBe(true);
+    expect(await new Response(midEntry!.body).text()).toBe('<html>stale</html>');
 
+    // Now release the deferred render and drain the queued background task.
+    release();
     await flush();
+
     // Background re-render ran exactly once (queued via ctx.waitUntil).
     expect(spy).toHaveBeenCalledTimes(1);
     const rerender = requests[0]!;
     // The re-render request is derived from the original (marker preserved, GET,
-    // same URL) but carries NO X-VoidPages, so the background render is HTML.
-    // (On the HTML path the original request never has X-VoidPages; this locks in
-    // that cloneWithoutVoidPages hands the render fn a clean HTML request.)
+    // same URL). X-VoidPages stripping itself is proven directly by the
+    // `cloneWithoutVoidPages` suite above (an X-VoidPages request cannot reach
+    // this HTML stale path through the public `handleIsr` API).
     // NOTE: cloneWithoutVoidPages uses `new Request(request, { headers })`, which
     // preserves `request.cf` on real workerd (verified empirically). These unit
     // tests run on Node's default vitest pool where `request.cf` does not exist,
@@ -670,35 +752,26 @@ describe('handleIsr', () => {
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  // Corrupt KV entry on the hit path must degrade to a live render, never throw.
-  const corruptHitCases: Array<{ name: string; record: () => KvRecord }> = [
-    {
-      name: 'status out of range',
-      record: () => ({ value: packEntry({}, 'x'), metadata: { s: 999, c: BASE, t: 60 } }),
-    },
-    {
-      name: 'invalid header name',
-      record: () => ({
-        value: packEntry({ 'Invalid Header Name': 'x' }, 'x'),
-        metadata: { s: 200, c: BASE, t: 60 },
-      }),
-    },
-    {
-      name: 'ttl NaN',
-      record: () => ({ value: packEntry({}, 'x'), metadata: { s: 200, c: BASE, t: NaN } }),
-    },
-  ];
-
-  for (const c of corruptHitCases) {
-    it(`degrades to a live render on a corrupt KV hit: ${c.name}`, async () => {
+  // A corrupt KV entry on the hit path must degrade to a live render, never 500
+  // and never throw — proven through the PUBLIC `handleIsr` API for EVERY corrupt
+  // shape (the full module-scoped `corruptCases` table, including createdAt
+  // NaN/Infinity/negative and ttl zero/negative), not just a hand-picked subset.
+  for (const c of corruptCases) {
+    it(`degrades to a live render on a corrupt KV hit (never 500): ${c.name}`, async () => {
       const { store, kv } = createKvMock();
       const env = makeEnv(kv);
-      store.set(isrKey(DPL, '/blog/post'), c.record());
+      store.set(isrKey(DPL, '/blog/post'), c.seed());
+
+      // Choke point: the corrupt entry is rejected at `readIsrCache` (→ null),
+      // so `isrCacheResponse` never sees an un-constructible entry.
+      await expect(readIsrCache(env, '/blog/post')).resolves.toBeNull();
+
       const { render, spy } = createRender(
         () => new Response('<html>live</html>', { headers: { 'content-type': 'text/html' } }),
       );
       const { ctx, flush } = createCtx();
 
+      // handleIsr returns the LIVE render (MISS), never a 500 and never a throw.
       const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
       expect(res!.status).toBe(200);
       expect(res!.headers.get('x-isr-cache')).toBe('MISS');

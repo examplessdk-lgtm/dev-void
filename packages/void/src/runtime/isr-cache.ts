@@ -590,7 +590,7 @@ async function safeCacheDelete(cache: Cache, key: string): Promise<void> {
  * existing Request are immutable, so we must clone into a fresh Request. ISR
  * only runs for GET, so there is no body to preserve.
  */
-function cloneWithoutVoidPages(request: Request): Request {
+export function cloneWithoutVoidPages(request: Request): Request {
   const headers = new Headers(request.headers);
   headers.delete('X-VoidPages');
   // Construct from the Request OBJECT (not a string URL): workerd copies the

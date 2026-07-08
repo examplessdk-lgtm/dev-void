@@ -115,15 +115,21 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     vi.unstubAllGlobals();
   });
 
-  it('deletes exactly the requested paths from KV and both edge variants', async () => {
+  it('deletes EXACTLY the requested paths from KV and both edge variants — no over-purge of unrelated entries', async () => {
     const { store, kv, delete: kvDelete } = createKvMock();
     store.set(isrKey(DPL, '/'), new ArrayBuffer(4));
     store.set(isrKey(DPL, '/blog/x'), new ArrayBuffer(4));
     store.set(isrKey(DPL, '/keepme'), new ArrayBuffer(4));
+    // Target edge variants (both should be purged).
     edge.store.set(htmlEdgeKey(HOST, '/', DPL), new Response('x'));
     edge.store.set(jsonEdgeKey(HOST, '/', DPL), new Response('x'));
     edge.store.set(htmlEdgeKey(HOST, '/blog/x', DPL), new Response('x'));
     edge.store.set(jsonEdgeKey(HOST, '/blog/x', DPL), new Response('x'));
+    // UNRELATED edge variants for a path NOT being revalidated — an over-purging
+    // implementation (e.g. deleting sibling variants, or purging by prefix) would
+    // wrongly remove these. They MUST survive.
+    edge.store.set(htmlEdgeKey(HOST, '/keepme', DPL), new Response('x'));
+    edge.store.set(jsonEdgeKey(HOST, '/keepme', DPL), new Response('x'));
 
     await envContext.run(
       { ISR_CACHE: kv, __VOID_ISR_DEPLOYMENT_ID: DPL, __VOID_ISR_HOST: HOST },
@@ -136,14 +142,32 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     expect(store.has(isrKey(DPL, '/'))).toBe(false);
     expect(store.has(isrKey(DPL, '/blog/x'))).toBe(false);
     expect(store.has(isrKey(DPL, '/keepme'))).toBe(true);
-    expect(kvDelete).toHaveBeenCalledWith(isrKey(DPL, '/'));
-    expect(kvDelete).toHaveBeenCalledWith(isrKey(DPL, '/blog/x'));
 
-    // Both edge variants purged for each path.
+    // Both edge variants purged for each requested path; unrelated ones survive.
     expect(edge.store.has(htmlEdgeKey(HOST, '/', DPL))).toBe(false);
     expect(edge.store.has(jsonEdgeKey(HOST, '/', DPL))).toBe(false);
     expect(edge.store.has(htmlEdgeKey(HOST, '/blog/x', DPL))).toBe(false);
     expect(edge.store.has(jsonEdgeKey(HOST, '/blog/x', DPL))).toBe(false);
+    expect(edge.store.has(htmlEdgeKey(HOST, '/keepme', DPL))).toBe(true);
+    expect(edge.store.has(jsonEdgeKey(HOST, '/keepme', DPL))).toBe(true);
+
+    // EXACT KV delete calls: precisely the two requested keys (correct id), no
+    // extras. An over-purge (e.g. also deleting `/keepme`) would fail here.
+    expect(kvDelete).toHaveBeenCalledTimes(2);
+    expect(kvDelete.mock.calls.map((c) => c[0])).toEqual([
+      isrKey(DPL, '/'),
+      isrKey(DPL, '/blog/x'),
+    ]);
+
+    // EXACT edge delete calls: html + json for each requested path (correct
+    // host/id), in purge order, with no unrelated deletes.
+    expect(edge.delete).toHaveBeenCalledTimes(4);
+    expect(edge.delete.mock.calls.map((c) => c[0])).toEqual([
+      htmlEdgeKey(HOST, '/', DPL),
+      jsonEdgeKey(HOST, '/', DPL),
+      htmlEdgeKey(HOST, '/blog/x', DPL),
+      jsonEdgeKey(HOST, '/blog/x', DPL),
+    ]);
   });
 
   it('skips edge purges when no host is configured (KV only)', async () => {
