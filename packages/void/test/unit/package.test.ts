@@ -9,6 +9,10 @@ import {
   collectWorkerFiles,
   resolveSpaFallbackChain,
 } from '../../src/cli/package.ts';
+import type { VoidConfig } from '../../src/config.ts';
+import type { InferredBindings } from '../../src/inference/walk.ts';
+import { collectRevalidate } from '../../src/isr-config.ts';
+import type { PageDefinition, PageScanResult } from '../../src/pages/types.ts';
 
 const TMP = join(import.meta.dirname, '.tmp-package-test');
 
@@ -47,6 +51,101 @@ describe('worker packaging', () => {
     expect(manifest.workerMain).toBe('index.mjs');
     expect(workerFiles.has(manifest.workerMain!)).toBe(true);
     expect(workerFiles.has('wrangler.json')).toBe(false);
+  });
+});
+
+// Non-regression: the managed `void deploy` manifest must stay byte-identical
+// after the self-host AI + ISR refactors (Tasks 2 & 5). These assert the manifest
+// builder still sets `bindings.ai` from `needsAI` and still carries the exact
+// `collectRevalidate` output the deploy path feeds it.
+describe('buildVoidManifest — self-host non-regression', () => {
+  function makeBindings(overrides: Partial<InferredBindings> = {}): InferredBindings {
+    return {
+      needsD1: false,
+      needsKV: false,
+      needsR2: false,
+      needsAuth: false,
+      needsQueues: false,
+      needsAI: false,
+      needsSandbox: false,
+      ...overrides,
+    };
+  }
+
+  function makePage(pattern: string, revalidate?: number): PageDefinition {
+    return {
+      pattern,
+      params: [],
+      catchAll: false,
+      componentPath: `${pattern}.vue`,
+      serverPath: `${pattern}.server.ts`,
+      methods: ['GET'],
+      componentId: pattern.replace(/^\//, ''),
+      revalidate,
+      ssrMode: 'auto',
+      prerenderMode: 'auto',
+      renderMode: 'server',
+      shouldPrerender: false,
+    };
+  }
+
+  function makeScan(pages: Array<PageDefinition>): PageScanResult {
+    return { pages, layouts: [], namedLayouts: [] };
+  }
+
+  function configWith(revalidate: number | Record<string, number> | undefined): VoidConfig {
+    return (revalidate === undefined ? {} : { routing: { revalidate } }) as VoidConfig;
+  }
+
+  it('sets bindings.ai === true when the app needs Workers AI', () => {
+    const manifest = buildVoidManifest({ bindings: makeBindings({ needsAI: true }) });
+    expect(manifest.bindings.ai).toBe(true);
+  });
+
+  it('omits bindings.ai when the app does not use Workers AI', () => {
+    const manifest = buildVoidManifest({ bindings: makeBindings({ needsAI: false }) });
+    expect(manifest.bindings.ai).toBeUndefined();
+  });
+
+  it('carries collectRevalidate output verbatim into manifest.revalidate (numeric config + per-page)', () => {
+    // Same inputs the deploy path feeds: void.json config + page-scan per-page rules.
+    const config = configWith(60);
+    const scan = makeScan([makePage('/blog/:slug', 120)]);
+    const revalidate = collectRevalidate(config, scan);
+
+    const manifest = buildVoidManifest({ bindings: makeBindings(), revalidate });
+
+    // Merge must be non-trivial (numeric config → path map with "*" fallback)…
+    expect(revalidate).toEqual({ '/blog/:slug': 120, '*': 60 });
+    // …and it must land in the manifest byte-for-byte.
+    expect(manifest.revalidate).toEqual(revalidate);
+    expect(Object.keys(manifest.revalidate as Record<string, number>)).toEqual([
+      '/blog/:slug',
+      '*',
+    ]);
+  });
+
+  it('carries collectRevalidate output verbatim into manifest.revalidate (object config + per-page order)', () => {
+    const config = configWith({ '/docs/*': 30, '*': 10 });
+    const scan = makeScan([makePage('/blog/:slug', 120)]);
+    const revalidate = collectRevalidate(config, scan);
+
+    const manifest = buildVoidManifest({ bindings: makeBindings(), revalidate });
+
+    expect(manifest.revalidate).toEqual(revalidate);
+    // Per-page entries precede config entries (first-match-wins ordering preserved).
+    expect(Object.entries(manifest.revalidate as Record<string, number>)).toEqual([
+      ['/blog/:slug', 120],
+      ['/docs/*', 30],
+      ['*', 10],
+    ]);
+  });
+
+  it('leaves manifest.revalidate unset when collectRevalidate yields nothing', () => {
+    const revalidate = collectRevalidate(configWith(undefined), makeScan([]));
+    const manifest = buildVoidManifest({ bindings: makeBindings(), revalidate });
+    expect(revalidate).toBeUndefined();
+    expect(manifest.revalidate).toBeUndefined();
   });
 });
 
