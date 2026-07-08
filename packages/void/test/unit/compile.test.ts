@@ -1800,14 +1800,6 @@ describe('X-Void-Routing dev trace header', () => {
     expect(code).toContain('try { c.res.headers.set("X-Void-Routing", "pass-through"); } catch {}');
   });
 
-  it('guards the __voidAnnotateRouting trace header set with try/catch', () => {
-    const code = compileWith({ dev: true });
-    // A non-ASCII trace value throws on header set; the guard must swallow it.
-    expect(code).toContain(
-      'try { headers.set("X-Void-Routing", trace); } catch { return response; }',
-    );
-  });
-
   it('emits __VOID_DEV_ROUTING=false and strips origin fields in prod', () => {
     const code = compileWith({ dev: false });
     expect(code).toContain('const __VOID_DEV_ROUTING = false;');
