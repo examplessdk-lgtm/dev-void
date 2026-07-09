@@ -31,7 +31,7 @@
 import { isUnmaskActive, redactMessage, type SecretOverride } from '../shared/env-mask.ts';
 import type { StandardSchemaV1 } from '../standard-schema.ts';
 import { getSecretOverride } from './env-helpers.ts';
-import { getRawRuntimeEnv } from './env-raw.ts';
+import { getRawRuntimeEnv, type RuntimeEnv } from './env-raw.ts';
 import { getRuntimeEnv, isInternalBinding } from './env.ts';
 
 type AnyValidator = StandardSchemaV1<unknown, unknown>;
@@ -129,13 +129,15 @@ export async function _validateEnvOnce(envValues: unknown): Promise<void> {
         cacheList.push(cache);
       }
       for (const [key, value] of report.values) {
-        // Never seed internal framework bindings (__VOID_*, __PROJECT_*,
-        // ISR_CACHE) into the sync cache — even when a user's schema declares
-        // one and boot validation resolved its raw value. Exposing it via
-        // `env.X` would leak an internal binding (e.g. the ISR KV namespace).
-        // `readKey` also short-circuits internal names, so this is belt-and-
-        // suspenders that additionally keeps the cache clean.
-        if (isInternalBinding(key)) {
+        // Never seed internal framework bindings (__VOID_*, __PROJECT_*, and —
+        // while ISR is active — ISR_CACHE) into the sync cache, even when a
+        // user's schema declares one and boot validation resolved its raw
+        // value. Exposing it via `env.X` would leak an internal binding (e.g.
+        // the ISR KV namespace). `readKey` also short-circuits internal names,
+        // so this is belt-and-suspenders that additionally keeps the cache
+        // clean. `cacheKey` is the raw runtime env — the same object the
+        // exact-name (ISR_CACHE) gate consults for the ISR-active check.
+        if (isInternalBinding(key, cacheKey as RuntimeEnv)) {
           continue;
         }
         if (!cache.has(key)) {
@@ -240,12 +242,15 @@ export class EnvValidationError extends Error {
 }
 
 function readKey(key: string): unknown {
-  // Internal framework bindings (__VOID_*, __PROJECT_*, ISR_CACHE) are never
-  // exposed through the public `env` proxy — treat them as absent BEFORE
-  // consulting the schema/cache. This holds even when a user's defineEnv schema
-  // declares one and boot validation seeded its raw value; returning `undefined`
-  // matches the "not in schema / not found" behavior of the filtered env.
-  if (isInternalBinding(key)) {
+  // Internal framework bindings (__VOID_*, __PROJECT_*, and — while ISR is
+  // active — ISR_CACHE) are never exposed through the public `env` proxy —
+  // treat them as absent BEFORE consulting the schema/cache. This holds even
+  // when a user's defineEnv schema declares one and boot validation seeded its
+  // raw value; returning `undefined` matches the "not in schema / not found"
+  // behavior of the filtered env. The exact-name (ISR_CACHE) gate needs the raw
+  // env, so resolve it up front and reuse it as the cache key below.
+  const rawEnv = getRawRuntimeEnv();
+  if (isInternalBinding(key, rawEnv)) {
     return undefined;
   }
   // Filtered env hides internal __VOID_*/__PROJECT_* bindings from user code.
@@ -260,7 +265,7 @@ function readKey(key: string): unknown {
   }
   // Cache identity must be the underlying env object. `getRuntimeEnv()`
   // returns a fresh Proxy on every call, so keying by it would miss.
-  const cacheKey = getRawRuntimeEnv() as object;
+  const cacheKey = rawEnv as object;
   let cache = validatedCache.get(cacheKey);
   if (!cache) {
     cache = new Map();
