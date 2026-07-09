@@ -2876,7 +2876,11 @@ describe('compileWorkerEntry — ISR wiring', () => {
     // Deployment id + host captured on the raw env so revalidate() can purge even
     // on requests that never enter the render ladder.
     expect(code).toContain('env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;');
-    expect(code).toContain('env.__VOID_ISR_HOST ??= new URL(request.url).hostname;');
+    // Host is assigned every fetch (NOT `??=`) so a warm env reused across
+    // hostnames does not freeze it to the first host; the id stays `??=`.
+    expect(code).toContain('env.__VOID_ISR_HOST = new URL(request.url).hostname;');
+    expect(code).not.toContain('env.__VOID_ISR_HOST ??= new URL(request.url).hostname;');
+    expect(code).toContain('env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;');
     // When ISR is emitted the c.env internal-binding filter gains the ISR_CACHE
     // exact-name checks so the self-host ISR KV binding cannot leak into route
     // handlers' c.env (matches the managed platform; handleIsr reads raw env).

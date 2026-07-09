@@ -374,12 +374,17 @@ async function registerIsrHost(kv: KVNamespace, deploymentId: string, host: stri
     return;
   }
   // Mark BEFORE the await so concurrent page writes in this isolate don't all
-  // fire the registry put; a rare transient failure simply retries next isolate.
+  // fire the registry put. On failure, CLEAR the guard so a later write in this
+  // same (possibly long-lived) isolate retries — otherwise one transient error
+  // would permanently drop this host from `listIsrHosts()`, and a cron/queue
+  // `revalidate()` (which has no request host) could never purge it.
   registeredHosts.add(guardKey);
   try {
     await kv.put(hostRegistryKey(deploymentId, host), '');
   } catch {
-    // Fail open — a registry write failure must never 500 a page render.
+    // Fail open — a registry write failure must never 500 a page render — but
+    // allow a retry on a subsequent write instead of skipping this host forever.
+    registeredHosts.delete(guardKey);
   }
 }
 

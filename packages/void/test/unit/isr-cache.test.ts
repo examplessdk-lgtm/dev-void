@@ -1228,6 +1228,45 @@ describe('host-scoped KV cache + host registry', () => {
     expect(store.has(hostRegistryKey(DPL, host))).toBe(true);
   });
 
+  it('retries host registration on a later write after a transient registry-put failure', async () => {
+    // Unique host so the module-level in-isolate registration guard does not pre-skip it.
+    const host = 'registry-retry.example';
+    const store = new Map<string, KvRecord>();
+    let registryPuts = 0;
+    const put = vi.fn(
+      async (key: string, value: ArrayBuffer, options?: { metadata?: IsrCacheMetadata }) => {
+        if (key.startsWith('void-isr-hosts/')) {
+          registryPuts++;
+          if (registryPuts === 1) {
+            throw new Error('transient registry failure');
+          }
+        }
+        store.set(key, { value, metadata: options?.metadata ?? null });
+      },
+    );
+    const list = vi.fn(async (o: { prefix?: string } = {}) => ({
+      keys: [...store.keys()]
+        .filter((k) => k.startsWith(o.prefix ?? ''))
+        .sort()
+        .map((name) => ({ name })),
+      list_complete: true,
+      cursor: '',
+    }));
+    const kv = { put, list, getWithMetadata: vi.fn(), delete: vi.fn() } as unknown as KVNamespace;
+    const env = makeEnv(kv);
+    const res = () => new Response('<html>x</html>', { headers: { 'content-type': 'text/html' } });
+
+    // First write: content put succeeds, registry put throws → guard cleared, host unregistered.
+    await writeIsrCache(env, host, '/p', res(), 60);
+    expect(store.has(hostRegistryKey(DPL, host))).toBe(false);
+
+    // Second write: the guard was cleared, so the registry put is retried and succeeds.
+    await writeIsrCache(env, host, '/p', res(), 60);
+    expect(registryPuts).toBe(2);
+    expect(store.has(hostRegistryKey(DPL, host))).toBe(true);
+    expect(await listIsrHosts(kv, DPL)).toContain(host);
+  });
+
   it('listIsrHosts returns the registered hosts for a deployment, scoped by id', async () => {
     const { store, kv } = createKvMock();
     store.set(hostRegistryKey(DPL, 'a.example'), { value: new ArrayBuffer(0), metadata: null });

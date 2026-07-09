@@ -2537,9 +2537,13 @@ function __filterInternalBindings(env) {
     : '';
   // Capture deployment id + host on the raw env at the top of fetch(), before
   // dispatch — always, so `revalidate()` (which reads the raw env) can see them
-  // even on requests that never hit the ISR render ladder.
+  // even on requests that never hit the ISR render ladder. The deployment id is
+  // invariant (`??=`), but the host MUST track the CURRENT request: a warm env
+  // object can be reused across hostnames, so `??=` would freeze it to the first
+  // host ever seen and make `revalidate()` from a second custom domain read the
+  // wrong host. Assign it every fetch.
   const isrEnvCapture = isr
-    ? `  env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;\n  env.__VOID_ISR_HOST ??= new URL(request.url).hostname;\n`
+    ? `  env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;\n  env.__VOID_ISR_HOST = new URL(request.url).hostname;\n`
     : '';
   // Scheduled/queue handlers have no request, so there is no host to stamp — but
   // they still need the deployment id on the raw env so an on-demand
