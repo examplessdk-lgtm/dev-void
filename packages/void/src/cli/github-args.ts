@@ -18,6 +18,11 @@ export const githubSubcommands: Array<SubcommandDef> = [
     arg: '[project]',
     description: "Show a project's GitHub connection (repo, branch, executor, workflow)",
   },
+  {
+    name: 'disconnect',
+    arg: '[project]',
+    description: 'Disconnect a project from its GitHub repository',
+  },
   { name: 'link', description: 'Link your GitHub account to Void' },
   { name: 'join', description: "Join your organization's shared GitHub App installations" },
 ];
@@ -46,6 +51,11 @@ export type GithubArgs =
   | {
       subcommand: 'status';
       projectName: string;
+    }
+  | {
+      subcommand: 'disconnect';
+      projectName: string;
+      yes?: boolean;
     };
 
 export function parseGithubArgs(args: Array<string>): GithubArgs {
@@ -256,7 +266,39 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
     return { subcommand, projectName };
   }
 
+  if (subcommand === 'disconnect') {
+    let projectName = '';
+    let yes = false;
+
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i];
+      if (arg === '--yes' || arg === '-y') {
+        yes = true;
+      } else if (arg === '--project') {
+        if (i + 1 >= rest.length) {
+          throw new Error('github: --project requires a value.');
+        }
+        const value = rest[++i]!;
+        if (value.trim() === '') {
+          throw new Error('github: --project requires a value.');
+        }
+        if (projectName) {
+          throw new Error(`github: Unexpected argument '${value}'.`);
+        }
+        projectName = value;
+      } else if (arg.startsWith('-')) {
+        throw new Error(`github: Unexpected argument '${arg}'.`);
+      } else if (projectName) {
+        throw new Error(`github: Unexpected argument '${arg}'.`);
+      } else {
+        projectName = arg;
+      }
+    }
+
+    return { subcommand, projectName, yes };
+  }
+
   throw new Error(
-    'github: Usage: void github <install|installations|connect|update|status|link|join>.',
+    'github: Usage: void github <install|installations|connect|update|status|disconnect|link|join>.',
   );
 }

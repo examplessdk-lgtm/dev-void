@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { cancel, isCancel, log, select, text } from '@clack/prompts';
+import { cancel, confirm, isCancel, log, select, text } from '@clack/prompts';
 import {
   awaitBrowserCallback,
   createCodeChallenge,
@@ -175,6 +175,8 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
       return runGithubUpdate(root, client, args);
     case 'status':
       return runStatus(root, client, args);
+    case 'disconnect':
+      return runGithubDisconnect(root, client, args);
     case 'link':
       return runGithubLink(root, client);
     case 'join':
@@ -1146,4 +1148,138 @@ export async function runStatus(
   }
 
   log.message(formatConnection(connection));
+}
+
+// ---------------------------------------------------------------------------
+// disconnect
+// ---------------------------------------------------------------------------
+
+/**
+ * `void github disconnect [project]` — remove a project's GitHub connection so
+ * pushes no longer auto-deploy. The server (DELETE /projects/:id/github)
+ * terminalizes any in-flight builds (revoking their deploy tokens) before
+ * dropping the connection row. Destructive, so a TTY run confirms first; --yes
+ * skips the prompt and is REQUIRED in a non-interactive shell. A project with no
+ * connection is already in the goal state — report it and exit 0.
+ */
+export async function runGithubDisconnect(
+  root: string,
+  client: PlatformClient,
+  args: Extract<GithubArgs, { subcommand: 'disconnect' }>,
+): Promise<void> {
+  const isTTY = process.stdin.isTTY === true;
+
+  // -------------------------------------------------------------------------
+  // 1. Resolve project (identical resolution order to connect/update/status).
+  // -------------------------------------------------------------------------
+  let projectId: string;
+
+  const requestedSlug = getRequestedProjectSlug({ projectSlug: args.projectName || undefined });
+
+  if (requestedSlug) {
+    const projects = await client.listProjects();
+    const resolved = resolveProjectBySlug(projects, requestedSlug);
+    if (!resolved) {
+      log.error(`disconnect: No project found with slug '${requestedSlug}'.`);
+      process.exit(1);
+    }
+    projectId = resolved.projectId;
+  } else {
+    const linked = readProjectConfig(root);
+    if (linked) {
+      projectId = linked.projectId;
+    } else if (!isTTY) {
+      log.error(
+        'disconnect: No project specified. Pass a project name or --project <name>, set VOID_PROJECT, or link one with `void project link`.',
+      );
+      process.exit(1);
+    } else {
+      const projects = await client.listProjects();
+      if (projects.length === 0) {
+        log.error('No projects found. Create one first with `void deploy`.');
+        process.exit(1);
+      }
+      const picked = await select({
+        message: 'Select a project:',
+        options: projects.map((p) => ({ value: p.id, label: p.slug })),
+      });
+      if (isCancel(picked)) {
+        cancel('Cancelled.');
+        process.exit(0);
+      }
+      projectId = picked as string;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 2. Fetch the current connection. A 404 "connection not found" means the
+  //    project already has no connection — disconnect's goal state — so report
+  //    success and stop. Other errors (403 forbidden, 404 project not found)
+  //    map through the shared connect error strings and exit 1.
+  // -------------------------------------------------------------------------
+  let connection: GithubConnection;
+  try {
+    connection = await client.getGithubConnection(projectId);
+  } catch (err) {
+    if (err instanceof PlatformApiError) {
+      const body = parsePlatformErrorBody(err.body);
+      const code = body?.error ?? body?.message ?? '';
+      if (err.status === 404 && code.includes('connection not found')) {
+        log.info('This project is not connected to a GitHub repository. Nothing to disconnect.');
+        return;
+      }
+      const message = describeConnectError(err.status, code);
+      if (message !== null) {
+        log.error(`disconnect: ${message}`);
+        process.exit(1);
+      }
+    }
+    throw err;
+  }
+
+  // -------------------------------------------------------------------------
+  // 3. Confirm — this cancels in-flight builds and drops the connection. --yes
+  //    skips the prompt; a non-interactive shell has nothing to prompt, so it
+  //    must pass --yes (fail closed, same posture as connect/update).
+  // -------------------------------------------------------------------------
+  if (!args.yes) {
+    if (!isTTY) {
+      log.error(
+        'disconnect: Refusing to disconnect without confirmation in a non-interactive shell. Re-run with --yes.',
+      );
+      process.exit(1);
+    }
+    const ok = await confirm({
+      message: `Disconnect ${connection.repo_full_name} from this project? This cancels any in-flight builds.`,
+      initialValue: false,
+    });
+    if (isCancel(ok)) {
+      cancel('Cancelled.');
+      process.exit(0);
+    }
+    if (!ok) {
+      log.info('Disconnect cancelled.');
+      return;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 4. Disconnect.
+  // -------------------------------------------------------------------------
+  try {
+    await client.deleteGithubConnection(projectId);
+  } catch (err) {
+    if (err instanceof PlatformApiError) {
+      const body = parsePlatformErrorBody(err.body);
+      const code = body?.error ?? body?.message ?? '';
+      const message = describeConnectError(err.status, code);
+      if (message !== null) {
+        log.error(`disconnect: ${message}`);
+        process.exit(1);
+      }
+    }
+    throw err;
+  }
+
+  log.success(`Disconnected ${connection.repo_full_name}.`);
 }

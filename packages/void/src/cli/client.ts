@@ -1068,6 +1068,21 @@ export class PlatformClient {
     return res.json();
   }
 
+  async deleteGithubConnection(projectId: string): Promise<{ ok: boolean }> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/github`, {
+      method: 'DELETE',
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to disconnect GitHub repository', res);
+    }
+
+    return res.json();
+  }
+
   async getGithubLinkUrl(redirect: string, codeChallenge: string): Promise<{ url: string }> {
     const params = new URLSearchParams({
       redirect,

@@ -66,6 +66,7 @@ describe('CLI help resolver', () => {
     expect(hasHelpPage(['github', 'installations'])).toBe(true);
     expect(hasHelpPage(['github', 'connect'])).toBe(true);
     expect(hasHelpPage(['github', 'status'])).toBe(true);
+    expect(hasHelpPage(['github', 'disconnect'])).toBe(true);
     expect(hasHelpPage(['github', 'missing'])).toBe(false);
   });
 });

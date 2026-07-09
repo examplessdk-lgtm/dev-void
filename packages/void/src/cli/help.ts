@@ -208,6 +208,10 @@ const HELP_TREE: HelpTree = {
         command: 'status [project]',
         description: "Show a project's GitHub connection (repo, branch, executor, workflow)",
       },
+      {
+        command: 'disconnect [project]',
+        description: 'Disconnect a project from its GitHub repository',
+      },
       { command: 'link', description: 'Link your GitHub account to Void' },
       {
         command: 'join',
@@ -308,6 +312,27 @@ const HELP_TREE: HelpTree = {
           {
             command: 'void github status my-app',
             description: 'Show a specific project connection',
+          },
+        ],
+      },
+      disconnect: {
+        summary: 'Disconnect a project from its GitHub repository.',
+        usage: ['void github disconnect [project] [options]'],
+        options: [
+          { command: '--project <name>', description: 'Project name (alias for positional)' },
+          {
+            command: '--yes',
+            description: 'Skip the confirmation prompt (required in non-interactive shells)',
+          },
+        ],
+        examples: [
+          {
+            command: 'void github disconnect',
+            description: "Disconnect the linked project's repository",
+          },
+          {
+            command: 'void github disconnect my-app --yes',
+            description: 'Disconnect a specific project without confirmation',
           },
         ],
       },
