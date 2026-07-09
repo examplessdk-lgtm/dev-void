@@ -1021,6 +1021,110 @@ describe('handleIsr', () => {
     // The edge-warm background task (guarded on undefined cache) drains cleanly.
     await expect(flush()).resolves.toBeUndefined();
   });
+
+  // =========================================================================
+  // Range bypass + full-200-only cache gate
+  // A Range GET on an ISR path (e.g. a byte-range media route under a global
+  // `revalidate: "*"`) must render LIVE so the origin emits a correct `206
+  // Partial Content`. It must never read the shared (host,path) entry (a full
+  // body for a partial request) nor write it (a truncated 206 that a later full
+  // request would then be served). Defense-in-depth: the write gate is tightened
+  // from `response.ok` (200–299, INCLUDING 206) to `status === 200`, so even a
+  // non-range render that returns 206/204/etc. never lands in the shared cache.
+  // =========================================================================
+  describe('Range bypass + full-200-only cache gate', () => {
+    it('bypasses ISR for a Range request → null before any cache read, render, or write', async () => {
+      const { store, kv, getWithMetadata, put } = createKvMock();
+      const env = makeEnv(kv);
+      const { render, spy } = createRender(
+        () => new Response('SHOULD-NOT-RENDER', { status: 206 }),
+      );
+      const { ctx, tasks } = createCtx();
+
+      const res = await handleIsr(
+        htmlRequest('/blog/post', { Range: 'bytes=0-1023' }),
+        env,
+        ctx,
+        OPTS,
+        render,
+      );
+
+      // Range requests render live (the caller handles them) — handleIsr bails.
+      expect(res).toBeNull();
+      // No cache READ: neither the L1 edge nor the L2 KV was consulted.
+      expect(edge.match).not.toHaveBeenCalled();
+      expect(getWithMetadata).not.toHaveBeenCalled();
+      // No render kicked off inside handleIsr, and no cache WRITE scheduled.
+      expect(spy).not.toHaveBeenCalled();
+      expect(edge.put).not.toHaveBeenCalled();
+      expect(put).not.toHaveBeenCalled();
+      expect(tasks).toHaveLength(0);
+      expect(store.size).toBe(0);
+      expect(edge.store.size).toBe(0);
+    });
+
+    it('does NOT cache a forced 206 render (non-range) — only full 200 responses are written', async () => {
+      const { store, kv, put } = createKvMock();
+      const env = makeEnv(kv);
+      // No Range header on the request, yet the render returns 206 — the tightened
+      // write gate (status === 200, not response.ok) must still refuse to persist it.
+      const { render, spy } = createRender(
+        () =>
+          new Response('<html>partial</html>', {
+            status: 206,
+            headers: { 'content-type': 'text/html', 'content-range': 'bytes 0-9/100' },
+          }),
+      );
+      const { ctx, tasks, flush } = createCtx();
+
+      const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+
+      // The live 206 is returned to the client verbatim (never rewritten to 200).
+      expect(res).not.toBeNull();
+      expect(res!.status).toBe(206);
+      expect(await res!.text()).toBe('<html>partial</html>');
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      await flush();
+      // Nothing persisted: a 206 partial body must never enter a shared full-
+      // response cache (KV or edge), and no write was even scheduled.
+      expect(tasks).toHaveLength(0);
+      expect(put).not.toHaveBeenCalled();
+      expect(edge.put).not.toHaveBeenCalled();
+      expect([...store.keys()].filter((k) => k.startsWith('void-isr/')).length).toBe(0);
+      expect(edge.store.size).toBe(0);
+      expect(await readIsrCache(env, HOST, '/blog/post')).toBeNull();
+    });
+
+    it('still writes + serves a full 200 render (the tightened gate does not block 200)', async () => {
+      const { store, kv, put } = createKvMock();
+      const env = makeEnv(kv);
+      const { render, spy } = createRender(
+        () =>
+          new Response('<html>ok-200</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          }),
+      );
+      const { ctx, flush } = createCtx();
+
+      const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+      expect(res!.status).toBe(200);
+      expect(res!.headers.get('x-isr-cache')).toBe('MISS');
+      expect(await res!.text()).toBe('<html>ok-200</html>');
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      await flush();
+      // The 200 render lands in KV + the HTML edge variant, exactly as before.
+      expect(put).toHaveBeenCalled();
+      const entry = await readIsrCache(env, HOST, '/blog/post');
+      expect(entry).not.toBeNull();
+      expect(entry!.status).toBe(200);
+      expect(await new Response(entry!.body).text()).toBe('<html>ok-200</html>');
+      expect(edge.store.has(htmlEdgeKey(HOST, '/blog/post', DPL))).toBe(true);
+      expect([...store.keys()].filter((k) => k.startsWith('void-isr/')).length).toBe(1);
+    });
+  });
 });
 
 // ===========================================================================

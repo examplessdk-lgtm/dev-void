@@ -732,7 +732,7 @@ async function revalidateInBackground(
     }
     const ttl = resolveRevalidateTtl(response, defaultTtl);
     const cache = edgeCache();
-    if (ttl > 0 && response.ok) {
+    if (ttl > 0 && response.status === 200) {
       await writeIsrCache(env, host, pathname, response, ttl);
       // Update HTML edge cache with the fresh response.
       const headers = new Headers(response.headers);
@@ -772,7 +772,9 @@ async function revalidateInBackground(
  * cache op failed open).
  *
  * Ladder:
- *   - Bail (`null`) if not GET, `shouldBypassIsr`, or the path has no ISR TTL.
+ *   - Bail (`null`) if not GET, a Range request, `shouldBypassIsr`, or the path
+ *     has no ISR TTL. Range requests bail BEFORE any cache read/write so they
+ *     render live (correct 206) and never touch the shared full-response entry.
  *   - JSON (X-VoidPages) path: edge match → hit serves `clientRevalidateResponse`;
  *     miss renders live JSON and returns it — the JSON path never writes the edge
  *     cache. The JSON edge variant is warmed only as a side-effect of the HTML
@@ -791,6 +793,15 @@ export async function handleIsr(
   const { revalidate, deploymentId } = options;
 
   if (request.method !== 'GET') {
+    return null;
+  }
+  // Range requests must render LIVE so the origin produces a correct partial
+  // response (`206 Partial Content`) for the requested byte range. They must
+  // never read or write the shared ISR entry: reading would serve a full-body
+  // entry for a partial request, and writing would poison the shared (host,path)
+  // key with a truncated 206 that a later full request would then be served.
+  // Return null here (→ caller renders live) BEFORE any cache read or write.
+  if (request.headers.has('range')) {
     return null;
   }
   if (shouldBypassIsr(request)) {
@@ -889,7 +900,7 @@ export async function handleIsr(
     return response;
   }
   const ttl = resolveRevalidateTtl(response, isrTtl);
-  if (ttl > 0 && response.ok) {
+  if (ttl > 0 && response.status === 200) {
     // Every clone below is taken synchronously (before `response.body` is read
     // for the client) so no consumer races the body away.
     ctx.waitUntil(writeIsrCache(env, host, pathname, response, ttl));
