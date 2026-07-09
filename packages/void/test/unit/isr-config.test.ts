@@ -64,15 +64,15 @@ describe('collectRevalidate', () => {
 
   it('uses per-page rules alone when config is absent', () => {
     const scan = makeScan([makePage('/blog/:slug', 120), makePage('/about')]);
-    expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/blog/*': 120 });
+    expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/blog/:slug': 120 });
   });
 
   it('turns a numeric config into a path map with the number as the "*" fallback (per-page first)', () => {
     const scan = makeScan([makePage('/blog/:slug', 120)]);
     const result = collectRevalidate(configWith(60), scan);
-    expect(result).toEqual({ '/blog/*': 120, '*': 60 });
+    expect(result).toEqual({ '/blog/:slug': 120, '*': 60 });
     // Per-page entry must precede the fallback (first-match-wins ordering).
-    expect(Object.keys(result as Record<string, number>)).toEqual(['/blog/*', '*']);
+    expect(Object.keys(result as Record<string, number>)).toEqual(['/blog/:slug', '*']);
   });
 
   it('merges per-page rules ahead of an object config (per-page first in match order)', () => {
@@ -81,7 +81,7 @@ describe('collectRevalidate', () => {
     // Per-page entries are emitted before the config entries, so first-match
     // resolution consults the per-page pattern ahead of the config's catch-alls.
     expect(Object.entries(result as Record<string, number>)).toEqual([
-      ['/blog/*', 120],
+      ['/blog/:slug', 120],
       ['/docs/*', 30],
       ['*', 10],
     ]);
@@ -93,12 +93,13 @@ describe('collectRevalidate', () => {
     expect(collectRevalidate(configWith(60), scan)).toBe(60);
   });
 
-  // FIX 4: generated per-page keys convert route params (`:slug`, `:slug{.+}`)
-  // to `*` so the literal TTL matcher (`matchLiteralPattern`) actually matches.
-  describe('route-param → wildcard conversion (generated page keys)', () => {
-    it('converts a single dynamic param `[slug]` (`/blog/:slug`) to `/blog/*`', () => {
+  // FIX 3: single-segment params (`:slug`) stay as `:slug` so the matcher can
+  // anchor them to ONE path segment (`[^/]+`); only named catch-alls (`:slug{.+}`)
+  // and anonymous catch-alls (`*`) collapse to `*` (a splat that crosses `/`).
+  describe('route-param → key conversion (generated page keys)', () => {
+    it('keeps a single dynamic param `[slug]` (`/blog/:slug`) as `/blog/:slug`', () => {
       const scan = makeScan([makePage('/blog/:slug', 120)]);
-      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/blog/*': 120 });
+      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/blog/:slug': 120 });
     });
 
     it('converts a catch-all param `[...slug]` (`/blog/:slug{.+}`) to `/blog/*`', () => {
@@ -106,9 +107,14 @@ describe('collectRevalidate', () => {
       expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/blog/*': 90 });
     });
 
-    it('converts every param in a multi-param pattern (`/shop/:cat/:id` → `/shop/*/*`)', () => {
+    it('converts a root catch-all (`/:all{.+}`) to `/*`', () => {
+      const scan = makeScan([makePage('/:all{.+}', 15)]);
+      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/*': 15 });
+    });
+
+    it('keeps every single-segment param in a multi-param pattern (`/shop/:cat/:id`)', () => {
       const scan = makeScan([makePage('/shop/:cat/:id', 45)]);
-      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/shop/*/*': 45 });
+      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/shop/:cat/:id': 45 });
     });
 
     it('leaves static page patterns untouched', () => {
@@ -122,19 +128,23 @@ describe('collectRevalidate', () => {
       const scan = makeScan([makePage('/blog/:slug', 120)]);
       const result = collectRevalidate(configWith({ '/legacy/:kept': 30 }), scan);
       expect(Object.entries(result as Record<string, number>)).toEqual([
-        ['/blog/*', 120],
+        ['/blog/:slug', 120],
         ['/legacy/:kept', 30],
       ]);
     });
   });
 
-  // FIX 4 end-to-end: the converted key must actually match a concrete path
-  // through the same resolver the runtime uses (mirrors isr-cache resolvePathTtl).
-  it('produces keys that resolvePathTtl matches for a concrete dynamic path', () => {
+  // FIX 3 end-to-end: the emitted `:slug` key must anchor to ONE segment through
+  // the same resolver the runtime uses (mirrors isr-cache resolvePathTtl).
+  it('produces keys that resolvePathTtl anchors to a single dynamic path segment', () => {
     const scan = makeScan([makePage('/blog/:slug', 120)]);
     const revalidate = collectRevalidate(configWith(undefined), scan);
+    // Single dynamic segment matches.
     expect(resolvePathTtl(revalidate, '/blog/hello')).toBe(120);
-    // A non-matching path still resolves to 0 (no ISR).
+    // A DEEPER path must NOT match the single-segment `:slug` key (would have
+    // matched the old `/blog/*` wildcard) — proves the segment anchoring.
+    expect(resolvePathTtl(revalidate, '/blog/a/b')).toBe(0);
+    // An unrelated path still resolves to 0 (no ISR).
     expect(resolvePathTtl(revalidate, '/about')).toBe(0);
   });
 });

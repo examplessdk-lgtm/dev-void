@@ -116,12 +116,15 @@ describe('buildVoidManifest — self-host non-regression', () => {
     const manifest = buildVoidManifest({ bindings: makeBindings(), revalidate });
 
     // Merge must be non-trivial (numeric config → path map with "*" fallback).
-    // The dynamic page pattern `/blog/:slug` is converted to a literal-matcher
-    // wildcard (`/blog/*`) by collectRevalidate so it actually matches at runtime.
-    expect(revalidate).toEqual({ '/blog/*': 120, '*': 60 });
+    // The single-segment page pattern `/blog/:slug` stays as `/blog/:slug` so the
+    // matcher anchors it to ONE path segment (`[^/]+`) at runtime.
+    expect(revalidate).toEqual({ '/blog/:slug': 120, '*': 60 });
     // …and it must land in the manifest byte-for-byte.
     expect(manifest.revalidate).toEqual(revalidate);
-    expect(Object.keys(manifest.revalidate as Record<string, number>)).toEqual(['/blog/*', '*']);
+    expect(Object.keys(manifest.revalidate as Record<string, number>)).toEqual([
+      '/blog/:slug',
+      '*',
+    ]);
   });
 
   it('carries collectRevalidate output verbatim into manifest.revalidate (object config + per-page order)', () => {
@@ -133,10 +136,10 @@ describe('buildVoidManifest — self-host non-regression', () => {
 
     expect(manifest.revalidate).toEqual(revalidate);
     // Per-page entries precede config entries (first-match-wins ordering preserved).
-    // The per-page `/blog/:slug` pattern is converted to `/blog/*`; the user's own
-    // `routing.revalidate` literal keys (`/docs/*`, `*`) pass through untouched.
+    // The per-page `/blog/:slug` pattern stays `/blog/:slug` (single-segment); the
+    // user's own `routing.revalidate` literal keys (`/docs/*`, `*`) pass untouched.
     expect(Object.entries(manifest.revalidate as Record<string, number>)).toEqual([
-      ['/blog/*', 120],
+      ['/blog/:slug', 120],
       ['/docs/*', 30],
       ['*', 10],
     ]);

@@ -1,5 +1,5 @@
 import { getRawRuntimeEnv } from './env-raw.ts';
-import { denormalizeIsrPath, htmlEdgeKey, isrKey, jsonEdgeKey } from './isr-cache.ts';
+import { denormalizeIsrPath, htmlEdgeKey, isrKey, jsonEdgeKey, listIsrHosts } from './isr-cache.ts';
 
 export type RevalidateOptions = {
   paths?: Array<string>;
@@ -38,38 +38,61 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
     if (!kv || !id) {
       return;
     }
-    const host = rawEnv.__VOID_ISR_HOST as string | undefined;
-    const purge = async (path: string): Promise<void> => {
-      // KV first, and unconditionally — the authoritative purge must never
-      // depend on the Cache API. In scheduled/queue handlers the deployment id
-      // is stamped without a host (the F1 fix), so edge purges are skipped and
-      // this KV delete must work even if `caches.default` is degraded.
-      await kv.delete(isrKey(id, path));
-      if (host) {
-        // Acquire the edge cache lazily — only when there is a host to purge —
-        // so the KV path above never touches (and never throws on) the Cache
-        // API. Cast because this package has both @types/node and
-        // @cloudflare/workers-types in scope, and Node's ambient CacheStorage
-        // (which lacks `.default`) otherwise shadows the Workers one on the
-        // `caches` global — same pattern as isr-cache.ts.
+    const requestHost = rawEnv.__VOID_ISR_HOST as string | undefined;
+    // Cache keys are host-scoped (`void-isr/<id>/<host>/<path>`), so a purge must
+    // target a concrete (host, path). Delete KV first and unconditionally — the
+    // authoritative purge must never depend on the Cache API — then best-effort
+    // purge the per-host edge variants, guarded so a degraded `caches.default`
+    // (scheduled/queue handlers, or no Cache API) cannot fail the KV delete.
+    const purge = async (host: string, path: string): Promise<void> => {
+      await kv.delete(isrKey(id, host, path));
+      try {
+        // Cast because this package has both @types/node and @cloudflare/workers-types
+        // in scope, and Node's ambient CacheStorage (which lacks `.default`)
+        // otherwise shadows the Workers one — same pattern as isr-cache.ts.
         const cache = (caches as unknown as { default: Cache }).default;
         await cache.delete(htmlEdgeKey(host, path, id));
         await cache.delete(jsonEdgeKey(host, path, id));
+      } catch {
+        // Fail open — a degraded Cache API must not fail the authoritative KV purge.
       }
     };
     if (options.all) {
+      // Enumerate the actual host-scoped cache keys (registry-independent, so it
+      // is complete even for a host that was never registered). Split the host
+      // off the key tail BEFORE denormalizing: `void-isr/<id>/<host>/<path>`.
       const prefix = `void-isr/${id}/`;
       let cursor: string | undefined;
       do {
         const list = await kv.list({ prefix, cursor });
         for (const key of list.keys) {
-          await purge(denormalizeIsrPath(key.name.slice(prefix.length)));
+          const tail = key.name.slice(prefix.length);
+          const slash = tail.indexOf('/');
+          if (slash < 0) {
+            continue;
+          }
+          const host = tail.slice(0, slash);
+          const path = denormalizeIsrPath(tail.slice(slash + 1));
+          await purge(host, path);
         }
         cursor = list.list_complete ? undefined : list.cursor;
       } while (cursor);
     } else {
-      for (const path of options.paths ?? []) {
-        await purge(path);
+      const paths = options.paths ?? [];
+      if (paths.length === 0) {
+        return;
+      }
+      // No request host is guaranteed here (cron / queue handlers stamp the id
+      // WITHOUT a host — the F1 fix), so enumerate every registered host, union
+      // the request host when present. An empty host set is a silent no-op.
+      const hosts = new Set(await listIsrHosts(kv, id));
+      if (requestHost) {
+        hosts.add(requestHost);
+      }
+      for (const host of hosts) {
+        for (const path of paths) {
+          await purge(host, path);
+        }
       }
     }
     return;

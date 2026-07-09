@@ -110,12 +110,24 @@ export function canonicalIsrPathname(pathname: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * KV cache key for an ISR-cached page. Deployment-scoped so cached HTML cannot
- * outlive the hashed assets referenced by the deployment that produced it
- * (a fresh `wrangler deploy` mints a new deployment id → cold cache).
+ * KV cache key for an ISR-cached page. Deployment- AND host-scoped: cached HTML
+ * cannot outlive the hashed assets of the deployment that produced it (a fresh
+ * `wrangler deploy` mints a new deployment id → cold cache), and one host's
+ * cached content never bleeds into another host served by the same worker
+ * (custom domain + workers.dev, apex + www, etc.).
  */
-export function isrKey(deploymentId: string, pathname: string): string {
-  return `void-isr/${deploymentId}/${normalizeIsrPath(pathname)}`;
+export function isrKey(deploymentId: string, host: string, pathname: string): string {
+  return `void-isr/${deploymentId}/${host}/${normalizeIsrPath(pathname)}`;
+}
+
+/**
+ * Host-registry key. Every host that has written cached content registers itself
+ * under `void-isr-hosts/<id>/<host>` (value `''`) so a purge with no request host
+ * (cron / queue `revalidate({ paths })`) can enumerate the hosts to purge.
+ * Scoped by deployment id so registrations from an old deploy do not leak.
+ */
+export function hostRegistryKey(deploymentId: string, host: string): string {
+  return `void-isr-hosts/${deploymentId}/${host}`;
 }
 
 /**
@@ -144,9 +156,12 @@ const literalRegexCache = new Map<string, RegExp>();
 
 /**
  * Match a pattern against a pathname using LITERAL semantics — no named
- * captures. Only `*` is special (matches any characters including `/`); every
- * other character (including `:`) is treated as a literal. Malformed patterns
- * yield `false` rather than throwing.
+ * captures. Two wildcards are special: `*` matches any characters INCLUDING `/`
+ * (a splat), and a WHOLE-segment `:name` (preceded by `/` or start, followed by
+ * `/` or end) matches exactly ONE path segment (`[^/]+`). A mid-segment literal
+ * `:` (e.g. `/api/v1:health`) is left alone. This is a strict SUPERSET of the
+ * old `*`-only matcher (old `*`-only manifests match identically). Malformed
+ * patterns yield `false` rather than throwing.
  */
 export function matchLiteralPattern(pattern: string, pathname: string): boolean {
   let regex = literalRegexCache.get(pattern);
@@ -156,7 +171,11 @@ export function matchLiteralPattern(pattern: string, pathname: string): boolean 
     literalRegexCache.set(pattern, regex);
   } else {
     try {
-      const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*');
+      const escaped = pattern
+        .replace(/(^|\/):[A-Za-z0-9_]+(?=\/|$)/g, '$1') // whole-segment :name -> sentinel
+        .replace(/[.+?^${}()|[\]\\]/g, '\\$&') // escape regex specials
+        .replaceAll('*', '.*') // catch-all crosses '/'
+        .replaceAll('', '[^/]+'); // sentinel -> single segment
       regex = new RegExp(`^${escaped}$`);
     } catch {
       return false;
@@ -226,17 +245,19 @@ export function unpackIsrValue(
 /**
  * Read an ISR cache entry from KV. Returns null on cache miss, malformed
  * metadata, or ANY KV error (fail-open → caller renders live). The KV key is
- * deployment-scoped via `env.__VOID_ISR_DEPLOYMENT_ID` (see module header).
+ * deployment-scoped via `env.__VOID_ISR_DEPLOYMENT_ID` (see module header) and
+ * host-scoped via `host` so one host never reads another host's cached bytes.
  */
 export async function readIsrCache(
   env: IsrCacheEnv,
+  host: string,
   pathname: string,
 ): Promise<IsrCacheEntry | null> {
   const kv = env.ISR_CACHE;
   if (!kv) {
     return null;
   }
-  const key = isrKey(env.__VOID_ISR_DEPLOYMENT_ID ?? '', pathname);
+  const key = isrKey(env.__VOID_ISR_DEPLOYMENT_ID ?? '', host, pathname);
   let value: ArrayBuffer | null;
   let metadata: IsrCacheMetadata | null;
   try {
@@ -305,6 +326,7 @@ export async function readIsrCache(
  */
 export async function writeIsrCache(
   env: IsrCacheEnv,
+  host: string,
   pathname: string,
   response: Response,
   ttl: number,
@@ -319,10 +341,11 @@ export async function writeIsrCache(
   const headers = serializeHeaders(responseClone);
   const status = responseClone.status;
 
+  const id = env.__VOID_ISR_DEPLOYMENT_ID ?? '';
   try {
     const body = await responseClone.arrayBuffer();
     const packed = packIsrValue(headers, body);
-    await kv.put(isrKey(env.__VOID_ISR_DEPLOYMENT_ID ?? '', pathname), packed, {
+    await kv.put(isrKey(id, host, pathname), packed, {
       metadata: {
         s: status,
         c: Date.now(),
@@ -332,19 +355,73 @@ export async function writeIsrCache(
   } catch {
     // Fail open — swallow write errors so a broken ISR_CACHE never 500s.
   }
+  // Register this host so a host-less purge (cron / queue) can find it. Guarded
+  // by an in-isolate Set so it costs one KV write per (isolate, id, host), not
+  // one per page write. Fail-open — a registry write error never 500s a render.
+  await registerIsrHost(kv, id, host);
+}
+
+/**
+ * In-isolate guard: `${id}/${host}` values whose host-registry key this isolate
+ * has already written (or attempted). Bounds host registration to ~one KV write
+ * per (isolate, deployment, host) instead of one per page write.
+ */
+const registeredHosts = new Set<string>();
+
+async function registerIsrHost(kv: KVNamespace, deploymentId: string, host: string): Promise<void> {
+  const guardKey = `${deploymentId}/${host}`;
+  if (registeredHosts.has(guardKey)) {
+    return;
+  }
+  // Mark BEFORE the await so concurrent page writes in this isolate don't all
+  // fire the registry put; a rare transient failure simply retries next isolate.
+  registeredHosts.add(guardKey);
+  try {
+    await kv.put(hostRegistryKey(deploymentId, host), '');
+  } catch {
+    // Fail open — a registry write failure must never 500 a page render.
+  }
+}
+
+/**
+ * List every host that has registered cached content for a deployment. Used by
+ * the on-demand `revalidate({ paths })` purge when there is no request host
+ * (cron / queue). Fail-open: a registry read error yields the hosts collected so
+ * far (or none) rather than throwing — degraded purge coverage, never a 500.
+ */
+export async function listIsrHosts(kv: KVNamespace, deploymentId: string): Promise<Array<string>> {
+  const prefix = `void-isr-hosts/${deploymentId}/`;
+  const hosts: Array<string> = [];
+  try {
+    let cursor: string | undefined;
+    do {
+      const list = await kv.list({ prefix, cursor });
+      for (const key of list.keys) {
+        hosts.push(key.name.slice(prefix.length));
+      }
+      cursor = list.list_complete ? undefined : list.cursor;
+    } while (cursor);
+  } catch {
+    // Fail open — a broken registry degrades purge coverage, never throws.
+  }
+  return hosts;
 }
 
 /**
  * Delete an ISR cache entry from KV. Used when a worker permanently opts out
  * via `x-revalidate: 0`. Any KV error is swallowed (fail-open).
  */
-export async function deleteIsrCache(env: IsrCacheEnv, pathname: string): Promise<void> {
+export async function deleteIsrCache(
+  env: IsrCacheEnv,
+  host: string,
+  pathname: string,
+): Promise<void> {
   const kv = env.ISR_CACHE;
   if (!kv) {
     return;
   }
   try {
-    await kv.delete(isrKey(env.__VOID_ISR_DEPLOYMENT_ID ?? '', pathname));
+    await kv.delete(isrKey(env.__VOID_ISR_DEPLOYMENT_ID ?? '', host, pathname));
   } catch {
     // Fail open.
   }
@@ -641,6 +718,7 @@ export function cloneWithoutVoidPages(request: Request): Request {
 async function revalidateInBackground(
   env: IsrCacheEnv,
   request: Request,
+  host: string,
   pathname: string,
   defaultTtl: number,
   keys: { htmlKey: string; jsonKey: string },
@@ -655,7 +733,7 @@ async function revalidateInBackground(
     const ttl = resolveRevalidateTtl(response, defaultTtl);
     const cache = edgeCache();
     if (ttl > 0 && response.ok) {
-      await writeIsrCache(env, pathname, response, ttl);
+      await writeIsrCache(env, host, pathname, response, ttl);
       // Update HTML edge cache with the fresh response.
       const headers = new Headers(response.headers);
       headers.set('x-isr-cache', 'HIT');
@@ -673,7 +751,7 @@ async function revalidateInBackground(
       await populateJsonEdgeCache(cache, keys.jsonKey, response, ttl, 'HIT');
     } else if (ttl === 0) {
       // Worker permanently opted out — remove KV + both edge variants.
-      await deleteIsrCache(env, pathname);
+      await deleteIsrCache(env, host, pathname);
       await safeCacheDelete(cache, keys.htmlKey);
       await safeCacheDelete(cache, keys.jsonKey);
     }
@@ -775,7 +853,7 @@ export async function handleIsr(
   }
 
   // L2: KV (global, authoritative). `readIsrCache` fails open to null.
-  const cached = await readIsrCache(env, pathname);
+  const cached = await readIsrCache(env, host, pathname);
   if (cached) {
     // Belt-and-suspenders: `readIsrCache` already validates the entry so the
     // Response constructors below can't throw, but the never-500 fail-open
@@ -785,7 +863,15 @@ export async function handleIsr(
       const stale = isStale(cached);
       if (stale) {
         ctx.waitUntil(
-          revalidateInBackground(env, request, pathname, isrTtl, { htmlKey, jsonKey }, render),
+          revalidateInBackground(
+            env,
+            request,
+            host,
+            pathname,
+            isrTtl,
+            { htmlKey, jsonKey },
+            render,
+          ),
         );
       }
       const cacheResponse = isrCacheResponse(cached, stale);
@@ -806,7 +892,7 @@ export async function handleIsr(
   if (ttl > 0 && response.ok) {
     // Every clone below is taken synchronously (before `response.body` is read
     // for the client) so no consumer races the body away.
-    ctx.waitUntil(writeIsrCache(env, pathname, response, ttl));
+    ctx.waitUntil(writeIsrCache(env, host, pathname, response, ttl));
     ctx.waitUntil(populateJsonEdgeCache(cache, jsonKey, response, ttl, 'MISS'));
 
     const cacheHeaders = new Headers(response.headers);

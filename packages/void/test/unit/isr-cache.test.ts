@@ -4,14 +4,18 @@ import {
   deleteIsrCache,
   denormalizeIsrPath,
   handleIsr,
+  hostRegistryKey,
   htmlEdgeKey,
   isrCacheResponse,
   isrKey,
   isStale,
   jsonEdgeKey,
+  listIsrHosts,
+  matchLiteralPattern,
   normalizeIsrPath,
   packIsrValue,
   readIsrCache,
+  resolvePathTtl,
   resolveRevalidateTtl,
   unpackIsrValue,
   writeIsrCache,
@@ -97,7 +101,7 @@ function seedEntry(
     value?: ArrayBuffer;
   },
 ): void {
-  store.set(isrKey(DPL, path), {
+  store.set(isrKey(DPL, HOST, path), {
     value: value ?? packEntry(headers, body),
     metadata: { s: status, c: createdAt, t: ttl },
   });
@@ -230,10 +234,22 @@ describe('normalizeIsrPath / denormalizeIsrPath', () => {
 });
 
 describe('collapsed self-host cache keys', () => {
-  it('scopes the KV key by deployment id (void-isr/<id>/...), no projectId/isr-v2', () => {
-    expect(isrKey(DPL, '/')).toBe(`void-isr/${DPL}/__index__`);
-    expect(isrKey(DPL, '/blog/x')).toBe(`void-isr/${DPL}/blog/x`);
-    expect(isrKey(DPL, '/about/')).toBe(`void-isr/${DPL}/about`);
+  it('scopes the KV key by deployment id AND host (void-isr/<id>/<host>/...), no projectId/isr-v2', () => {
+    expect(isrKey(DPL, HOST, '/')).toBe(`void-isr/${DPL}/${HOST}/__index__`);
+    expect(isrKey(DPL, HOST, '/blog/x')).toBe(`void-isr/${DPL}/${HOST}/blog/x`);
+    expect(isrKey(DPL, HOST, '/about/')).toBe(`void-isr/${DPL}/${HOST}/about`);
+  });
+
+  it('host-scopes the KV key: different hosts never share a cache key', () => {
+    expect(isrKey(DPL, 'foo.example', '/x')).not.toBe(isrKey(DPL, 'bar.example', '/x'));
+    expect(isrKey(DPL, 'foo.example', '/x')).toBe(`void-isr/${DPL}/foo.example/x`);
+  });
+
+  it('builds the host-registry key (void-isr-hosts/<id>/<host>), distinct from the cache prefix', () => {
+    expect(hostRegistryKey(DPL, HOST)).toBe(`void-isr-hosts/${DPL}/${HOST}`);
+    // The registry prefix must NOT collide with the cache prefix, or an `{ all }`
+    // list (prefix `void-isr/<id>/`) would enumerate registry keys as cache keys.
+    expect(hostRegistryKey(DPL, HOST).startsWith(`void-isr/${DPL}/`)).toBe(false);
   });
 
   it('builds HTML edge keys with the deployment id and a canonical pathname', () => {
@@ -413,6 +429,7 @@ describe('writeIsrCache / readIsrCache / deleteIsrCache', () => {
     const env = makeEnv(kv);
     await writeIsrCache(
       env,
+      HOST,
       '/blog/post',
       new Response('<html>fresh</html>', {
         status: 200,
@@ -422,11 +439,11 @@ describe('writeIsrCache / readIsrCache / deleteIsrCache', () => {
     );
 
     // Real KV contents: exactly one entry under the collapsed key.
-    expect(store.has(isrKey(DPL, '/blog/post'))).toBe(true);
-    const meta = store.get(isrKey(DPL, '/blog/post'))!.metadata!;
+    expect(store.has(isrKey(DPL, HOST, '/blog/post'))).toBe(true);
+    const meta = store.get(isrKey(DPL, HOST, '/blog/post'))!.metadata!;
     expect(meta).toEqual({ s: 200, c: BASE, t: 60 });
 
-    const entry = await readIsrCache(env, '/blog/post');
+    const entry = await readIsrCache(env, HOST, '/blog/post');
     expect(entry).not.toBeNull();
     expect(entry!.status).toBe(200);
     expect(entry!.ttl).toBe(60);
@@ -440,21 +457,21 @@ describe('writeIsrCache / readIsrCache / deleteIsrCache', () => {
 
   it('returns null on a cache miss', async () => {
     const { kv } = createKvMock();
-    expect(await readIsrCache(makeEnv(kv), '/nope')).toBeNull();
+    expect(await readIsrCache(makeEnv(kv), HOST, '/nope')).toBeNull();
   });
 
   it('deleteIsrCache removes the entry', async () => {
     const { store, kv } = createKvMock();
     const env = makeEnv(kv);
     seedEntry(store, '/gone', { createdAt: BASE });
-    expect(store.has(isrKey(DPL, '/gone'))).toBe(true);
-    await deleteIsrCache(env, '/gone');
-    expect(store.has(isrKey(DPL, '/gone'))).toBe(false);
+    expect(store.has(isrKey(DPL, HOST, '/gone'))).toBe(true);
+    await deleteIsrCache(env, HOST, '/gone');
+    expect(store.has(isrKey(DPL, HOST, '/gone'))).toBe(false);
   });
 
   it('fails open to null when getWithMetadata throws (never surfaces the error)', async () => {
     const { kv } = createKvMock({ throwOnGet: true });
-    await expect(readIsrCache(makeEnv(kv), '/x')).resolves.toBeNull();
+    await expect(readIsrCache(makeEnv(kv), HOST, '/x')).resolves.toBeNull();
   });
 
   // Corrupt-KV fail-open: the `corruptCases` table is module-scoped (shared with
@@ -462,8 +479,8 @@ describe('writeIsrCache / readIsrCache / deleteIsrCache', () => {
   for (const c of corruptCases) {
     it(`readIsrCache returns null for a corrupt entry: ${c.name}`, async () => {
       const { store, kv } = createKvMock();
-      store.set(isrKey(DPL, '/p'), c.seed());
-      await expect(readIsrCache(makeEnv(kv), '/p')).resolves.toBeNull();
+      store.set(isrKey(DPL, HOST, '/p'), c.seed());
+      await expect(readIsrCache(makeEnv(kv), HOST, '/p')).resolves.toBeNull();
     });
   }
 });
@@ -554,13 +571,15 @@ describe('handleIsr', () => {
 
     await flush();
     // Real KV contents: the live render was persisted under the collapsed key.
-    const entry = await readIsrCache(env, '/blog/post');
+    const entry = await readIsrCache(env, HOST, '/blog/post');
     expect(entry).not.toBeNull();
     expect(await new Response(entry!.body).text()).toBe('<html>live</html>');
     // HTML edge variant warmed; plain HTML (no page data) never warms the JSON variant.
     expect(edge.store.has(htmlEdgeKey(HOST, '/blog/post', DPL))).toBe(true);
     expect(edge.store.has(jsonEdgeKey(HOST, '/blog/post', DPL))).toBe(false);
-    expect(store.size).toBe(1);
+    // Exactly one PAGE-cache entry persisted (`void-isr/…`); the host-registry
+    // bookkeeping key (`void-isr-hosts/…`) is separate and excluded here.
+    expect([...store.keys()].filter((k) => k.startsWith('void-isr/')).length).toBe(1);
   });
 
   it('KV HIT (fresh) → serves HIT from KV without a live render and warms the edge', async () => {
@@ -641,7 +660,7 @@ describe('handleIsr', () => {
     // The revalidation was KICKED OFF (render invoked) but NOT awaited inline:
     // KV still holds the ORIGINAL stale entry because the gate hasn't opened.
     expect(spy).toHaveBeenCalledTimes(1);
-    const midEntry = await readIsrCache(env, '/blog/post');
+    const midEntry = await readIsrCache(env, HOST, '/blog/post');
     expect(midEntry!.createdAt).toBe(BASE);
     expect(isStale(midEntry!)).toBe(true);
     expect(await new Response(midEntry!.body).text()).toBe('<html>stale</html>');
@@ -668,7 +687,7 @@ describe('handleIsr', () => {
 
     // KV re-put with the fresh render (KV is only written by the background task,
     // so this is race-free) — createdAt advanced, entry is fresh again.
-    const entry = await readIsrCache(env, '/blog/post');
+    const entry = await readIsrCache(env, HOST, '/blog/post');
     expect(entry!.createdAt).toBe(BASE + 200_000);
     expect(isStale(entry!)).toBe(false);
     expect(await new Response(entry!.body).text()).toBe('<html>revalidated</html>');
@@ -795,7 +814,7 @@ describe('handleIsr', () => {
     const { ctx } = createCtx();
 
     // readIsrCache degrades to null on the throw...
-    await expect(readIsrCache(env, '/blog/post')).resolves.toBeNull();
+    await expect(readIsrCache(env, HOST, '/blog/post')).resolves.toBeNull();
     // ...and handleIsr degrades to the live render rather than throwing.
     const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
     expect(res!.status).toBe(200);
@@ -812,11 +831,11 @@ describe('handleIsr', () => {
     it(`degrades to a live render on a corrupt KV hit (never 500): ${c.name}`, async () => {
       const { store, kv } = createKvMock();
       const env = makeEnv(kv);
-      store.set(isrKey(DPL, '/blog/post'), c.seed());
+      store.set(isrKey(DPL, HOST, '/blog/post'), c.seed());
 
       // Choke point: the corrupt entry is rejected at `readIsrCache` (→ null),
       // so `isrCacheResponse` never sees an un-constructible entry.
-      await expect(readIsrCache(env, '/blog/post')).resolves.toBeNull();
+      await expect(readIsrCache(env, HOST, '/blog/post')).resolves.toBeNull();
 
       const { render, spy } = createRender(
         () => new Response('<html>live</html>', { headers: { 'content-type': 'text/html' } }),
@@ -832,7 +851,7 @@ describe('handleIsr', () => {
 
       await flush();
       // The MISS path overwrote the corrupt entry with a valid, readable one.
-      const entry = await readIsrCache(env, '/blog/post');
+      const entry = await readIsrCache(env, HOST, '/blog/post');
       expect(entry).not.toBeNull();
       expect(await new Response(entry!.body).text()).toBe('<html>live</html>');
     });
@@ -861,8 +880,8 @@ describe('handleIsr', () => {
     await flush();
 
     // KV entry is only ever deleted here (never re-put) — deterministic real removal.
-    expect(store.has(isrKey(DPL, '/blog/post'))).toBe(false);
-    expect(kvDelete).toHaveBeenCalledWith(isrKey(DPL, '/blog/post'));
+    expect(store.has(isrKey(DPL, HOST, '/blog/post'))).toBe(false);
+    expect(kvDelete).toHaveBeenCalledWith(isrKey(DPL, HOST, '/blog/post'));
     // JSON edge variant is only touched by the purge → deterministically removed.
     expect(edge.store.has(jsonEdgeKey(HOST, '/blog/post', DPL))).toBe(false);
     expect(edge.delete).toHaveBeenCalledWith(jsonEdgeKey(HOST, '/blog/post', DPL));
@@ -928,10 +947,11 @@ describe('handleIsr', () => {
     // Background writes (guarded on an undefined edge cache) drain without throwing;
     // the KV write still lands.
     await expect(flush()).resolves.toBeUndefined();
-    const entry = await readIsrCache(env, '/blog/post');
+    const entry = await readIsrCache(env, HOST, '/blog/post');
     expect(entry).not.toBeNull();
     expect(await new Response(entry!.body).text()).toBe('<html>live</html>');
-    expect(store.size).toBe(1);
+    // Exactly one PAGE-cache entry (`void-isr/…`); the registry key is separate.
+    expect([...store.keys()].filter((k) => k.startsWith('void-isr/')).length).toBe(1);
   });
 
   it('serves the L2 KV HIT with no per-colo edge cache (KV ladder independent of caches.default)', async () => {
@@ -956,5 +976,129 @@ describe('handleIsr', () => {
     expect(spy).not.toHaveBeenCalled();
     // The edge-warm background task (guarded on undefined cache) drains cleanly.
     await expect(flush()).resolves.toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// matchLiteralPattern — segment-anchored matching (FIX 3)
+// ===========================================================================
+
+describe('matchLiteralPattern — segment-anchored matching', () => {
+  it('anchors a WHOLE-segment `:name` to exactly ONE path segment', () => {
+    expect(matchLiteralPattern('/blog/:slug', '/blog/hello')).toBe(true);
+    // Deeper path — `:slug` must NOT cross a `/`.
+    expect(matchLiteralPattern('/blog/:slug', '/blog/a/b')).toBe(false);
+    // Empty segment — `[^/]+` requires at least one char.
+    expect(matchLiteralPattern('/blog/:slug', '/blog/')).toBe(false);
+    expect(matchLiteralPattern('/blog/:slug', '/blog')).toBe(false);
+  });
+
+  it('lets `*` cross `/` (catch-all splat)', () => {
+    expect(matchLiteralPattern('/blog/*', '/blog/a/b')).toBe(true);
+    expect(matchLiteralPattern('/blog/*', '/blog/hello')).toBe(true);
+  });
+
+  it('matches a root catch-all `/*` against any path (including root)', () => {
+    expect(matchLiteralPattern('/*', '/')).toBe(true);
+    expect(matchLiteralPattern('/*', '/x/y')).toBe(true);
+  });
+
+  it('anchors EACH param in a multi-segment `:cat/:id` pattern to one segment', () => {
+    expect(matchLiteralPattern('/shop/:cat/:id', '/shop/shoes/42')).toBe(true);
+    expect(matchLiteralPattern('/shop/:cat/:id', '/shop/shoes')).toBe(false);
+    expect(matchLiteralPattern('/shop/:cat/:id', '/shop/shoes/42/extra')).toBe(false);
+  });
+
+  it('preserves a MID-segment literal `:` — only whole-segment `:name` is a wildcard', () => {
+    // A user literal key `/api/v1:health` must match ONLY itself: the `:health`
+    // is mid-segment (preceded by `1`, not `/`), so it stays a literal.
+    expect(matchLiteralPattern('/api/v1:health', '/api/v1:health')).toBe(true);
+    expect(matchLiteralPattern('/api/v1:health', '/api/v1:other')).toBe(false);
+    expect(matchLiteralPattern('/api/v1:health', '/api/v1/health')).toBe(false);
+  });
+
+  it('is a strict SUPERSET of the old matcher — old `*`-only manifests match identically', () => {
+    // The OLD emitter produced `/blog/*` for `[slug]`; that manifest must keep
+    // matching the same paths under the new matcher (rollout safety).
+    expect(matchLiteralPattern('/blog/*', '/blog/hello')).toBe(true);
+    expect(matchLiteralPattern('/blog/*', '/blog/a/b')).toBe(true);
+  });
+});
+
+describe('resolvePathTtl — single-segment anchoring', () => {
+  it('resolves the single-segment TTL for a one-segment path but NOT a deeper one', () => {
+    // The FIX-3 emitter keeps `/blog/:slug` as-is; the matcher anchors it to one
+    // segment, so `/blog/hello` gets the TTL while `/blog/a/b` does not.
+    const revalidate = { '/blog/:slug': 120 };
+    expect(resolvePathTtl(revalidate, '/blog/hello')).toBe(120);
+    expect(resolvePathTtl(revalidate, '/blog/a/b')).toBe(0);
+  });
+});
+
+// ===========================================================================
+// Host-scoped KV cache + host registry (FIX 4)
+// ===========================================================================
+
+describe('host-scoped KV cache + host registry', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('does not bleed across hosts: write under one host, read under another → null', async () => {
+    const { kv } = createKvMock();
+    const env = makeEnv(kv);
+    await writeIsrCache(
+      env,
+      'foo.example',
+      '/x',
+      new Response('<html>foo</html>', { headers: { 'content-type': 'text/html' } }),
+      60,
+    );
+    // Same path, different host → miss (keys are host-scoped).
+    expect(await readIsrCache(env, 'bar.example', '/x')).toBeNull();
+    // Same host → hit.
+    expect(await readIsrCache(env, 'foo.example', '/x')).not.toBeNull();
+  });
+
+  it('registers the host in the registry on write (void-isr-hosts/<id>/<host>)', async () => {
+    const { store, kv } = createKvMock();
+    const env = makeEnv(kv);
+    // Unique host so the module-level in-isolate registration guard (shared across
+    // this file's tests) does not skip the registry write here.
+    const host = 'registry-write.example';
+    await writeIsrCache(
+      env,
+      host,
+      '/p',
+      new Response('<html>x</html>', { headers: { 'content-type': 'text/html' } }),
+      60,
+    );
+    expect(store.has(hostRegistryKey(DPL, host))).toBe(true);
+  });
+
+  it('listIsrHosts returns the registered hosts for a deployment, scoped by id', async () => {
+    const { store, kv } = createKvMock();
+    store.set(hostRegistryKey(DPL, 'a.example'), { value: new ArrayBuffer(0), metadata: null });
+    store.set(hostRegistryKey(DPL, 'b.example'), { value: new ArrayBuffer(0), metadata: null });
+    // A different deployment's registration must NOT leak into this list.
+    store.set(hostRegistryKey('other_dpl', 'c.example'), {
+      value: new ArrayBuffer(0),
+      metadata: null,
+    });
+    const hosts = await listIsrHosts(kv, DPL);
+    expect([...hosts].sort()).toEqual(['a.example', 'b.example']);
+  });
+
+  it('listIsrHosts fails open to [] on a broken registry (never throws)', async () => {
+    const brokenKv = {
+      list: vi.fn(async () => {
+        throw new Error('KV unavailable');
+      }),
+    } as unknown as KVNamespace;
+    await expect(listIsrHosts(brokenKv, DPL)).resolves.toEqual([]);
   });
 });
