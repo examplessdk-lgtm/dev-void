@@ -2848,6 +2848,12 @@ describe('compileWorkerEntry — ISR wiring', () => {
     // The `if (env.ISR_CACHE)` render guard is only emitted when ISR is wired.
     expect(code).not.toContain('if (env.ISR_CACHE)');
     expect(code).not.toContain('__VOID_ISR_REVALIDATE');
+    // The c.env internal-binding filter is prefix-only when ISR is absent —
+    // byte-identical to the pre-ISR base entry. The ISR_CACHE exact-name checks
+    // must NOT appear (ISR_CACHE the internal binding only exists when ISR is
+    // emitted; a user's own binding named ISR_CACHE must not be hidden here).
+    expect(code).not.toContain('prop === "ISR_CACHE"');
+    expect(code).not.toContain('key !== "ISR_CACHE"');
   });
 
   it('wires the ISR cache ladder with the two baked imports when the isr param is present', () => {
@@ -2879,6 +2885,11 @@ describe('compileWorkerEntry — ISR wiring', () => {
     // on requests that never enter the render ladder.
     expect(code).toContain('env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;');
     expect(code).toContain('env.__VOID_ISR_HOST ??= new URL(request.url).hostname;');
+    // When ISR is emitted the c.env internal-binding filter gains the ISR_CACHE
+    // exact-name checks so the self-host ISR KV binding cannot leak into route
+    // handlers' c.env (matches the managed platform; handleIsr reads raw env).
+    expect(code).toContain('prop === "ISR_CACHE"');
+    expect(code).toContain('key !== "ISR_CACHE"');
   });
 
   // FIX 1: cron/queue handlers must stamp the deployment id (only — no host,

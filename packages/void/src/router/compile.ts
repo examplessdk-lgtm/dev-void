@@ -2490,17 +2490,19 @@ export function compileWorkerEntry(
   // Filter internal platform bindings so user code cannot access them via c.env.
   // The original env is preserved for framework internals (withRuntimeEnv, etc.).
   // Prefixes derived from INTERNAL_BINDING_PREFIXES (shared with env.ts).
-  // `ISR_CACHE` (the self-host ISR KV binding) is hidden by exact name too — it
-  // carries no user-facing prefix but must not leak into route handlers' c.env
-  // (matches the managed platform). `handleIsr` reads the raw env, so hiding it
-  // from userEnv is safe.
+  // ISR_CACHE (the self-host ISR KV binding) is hidden by exact name ONLY when
+  // ISR is emitted — it exists only then (the emitIsr gate). When ISR is absent
+  // the filter stays prefix-only, byte-identical to the pre-ISR base entry, and
+  // a user's own binding named ISR_CACHE (if any) is preserved. `handleIsr`
+  // reads the raw env, so hiding ISR_CACHE from userEnv is safe.
+  const exactNames = isr ? INTERNAL_BINDING_EXACT_NAMES : [];
   const prefixCheck = [
     ...INTERNAL_BINDING_PREFIXES.map((p) => `prop.startsWith(${JSON.stringify(p)})`),
-    ...INTERNAL_BINDING_EXACT_NAMES.map((n) => `prop === ${JSON.stringify(n)}`),
+    ...exactNames.map((n) => `prop === ${JSON.stringify(n)}`),
   ].join(' || ');
   const prefixCheckNeg = [
     ...INTERNAL_BINDING_PREFIXES.map((p) => `!key.startsWith(${JSON.stringify(p)})`),
-    ...INTERNAL_BINDING_EXACT_NAMES.map((n) => `key !== ${JSON.stringify(n)}`),
+    ...exactNames.map((n) => `key !== ${JSON.stringify(n)}`),
   ].join(' && ');
   const filterBindingsHelper = `
 function __filterInternalBindings(env) {
