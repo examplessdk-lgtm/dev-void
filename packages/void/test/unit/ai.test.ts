@@ -462,6 +462,39 @@ describe('runtime ai', () => {
       expect(headers.get('authorization')).toBeNull();
     });
 
+    it('sends the provider-native auth header for parallel (x-api-key, no Bearer)', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) =>
+          new Response(JSON.stringify({ id: 'task_run_direct' }), {
+            headers: { 'content-type': 'application/json' },
+          }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const direct = makeDirectAi();
+
+      await envContext.run(
+        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', PARALLEL_API_KEY: 'pk-test' },
+        async () => {
+          await ai.provider('parallel').fetch('/v1/tasks/runs', {
+            body: { input: 'What is the capital of France?' },
+          });
+        },
+      );
+
+      expect(direct.gateway.mock.results[0].value.getUrl).toHaveBeenCalledWith('parallel');
+      const init = fetchMock.mock.calls[0][1]!;
+      const headers = new Headers(init.headers);
+      // Parallel's AI Gateway authenticates with `x-api-key` and NO prefix —
+      // sending `Authorization: Bearer <key>` 401s at the gateway pass-through.
+      expect(headers.get('x-api-key')).toBe('pk-test');
+      expect(headers.get('authorization')).toBeNull();
+    });
+
     it('sends a prefixed non-Bearer auth header (deepgram → Authorization: Token)', async () => {
       vi.resetModules();
       const { envContext } = await import('../../src/runtime/env-raw.ts');

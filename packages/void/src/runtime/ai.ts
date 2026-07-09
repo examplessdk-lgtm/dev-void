@@ -26,6 +26,7 @@ const PROVIDER_AUTH_DEFAULTS: Record<string, { header: string; prefix: string }>
   cartesia: { header: 'x-api-key', prefix: '' },
   baseten: { header: 'authorization', prefix: 'Api-Key ' },
   ideogram: { header: 'Api-Key', prefix: '' },
+  parallel: { header: 'x-api-key', prefix: '' },
 };
 
 type SerializedFileInput = {
