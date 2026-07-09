@@ -55,7 +55,7 @@ describe('playground/kitchen-sink', () => {
       cwd: ROOT,
       stdio: 'pipe',
     });
-    disablePreviewContainers(pg);
+    preparePreviewWranglerConfig(pg);
 
     // Start preview server — pre-built assets, no lazy optimization.
     child = spawn(
@@ -539,14 +539,23 @@ describe('playground/kitchen-sink', () => {
   // Cron: skipped — __scheduled endpoint is only available via wrangler, not Vite dev/preview
 });
 
-function disablePreviewContainers(pg: string): void {
+// Preview runs the built worker in miniflare with no Cloudflare credentials.
+// Two bindings can't run in that environment, so strip them before preview.
+// Neither is exercised by this smoke test — both have dedicated coverage:
+//   - containers (SANDBOX) need a local Docker build.
+//   - ai (Workers AI) is remote-only, so its presence forces a remote-proxy
+//     session that needs a CF account/login. The build-time AI binding is
+//     covered directly by kitchen-sink-build.test.ts.
+function preparePreviewWranglerConfig(pg: string): void {
   const wranglerPath = join(pg, 'dist', 'ssr', 'wrangler.json');
   const wranglerConfig = JSON.parse(readFileSync(wranglerPath, 'utf-8')) as {
     dev?: Record<string, unknown>;
+    ai?: unknown;
   };
   wranglerConfig.dev = {
     ...(wranglerConfig.dev ?? {}),
     enable_containers: false,
   };
+  delete wranglerConfig.ai;
   writeFileSync(wranglerPath, `${JSON.stringify(wranglerConfig, null, 2)}\n`);
 }
