@@ -582,6 +582,50 @@ describe('handleIsr', () => {
     expect([...store.keys()].filter((k) => k.startsWith('void-isr/')).length).toBe(1);
   });
 
+  it('MISS whose render sets Set-Cookie → client keeps EVERY cookie; KV + edge copies stay stripped', async () => {
+    const { store, kv } = createKvMock();
+    const env = makeEnv(kv);
+    // The live render emits TWO DISTINCT Set-Cookie headers (session + CSRF).
+    // A `Headers` folds duplicates, so an array init is the only way to seed both.
+    const { render, spy } = createRender(
+      () =>
+        new Response('<html>live</html>', {
+          headers: [
+            ['content-type', 'text/html'],
+            ['set-cookie', 'sid=secret; Path=/; HttpOnly'],
+            ['set-cookie', 'csrf=tok; Path=/'],
+          ],
+        }),
+    );
+    const { ctx, flush } = createCtx();
+
+    const res = await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+    expect(res).not.toBeNull();
+    expect(res!.headers.get('x-isr-cache')).toBe('MISS');
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    // (1) The CLIENT response carries BOTH Set-Cookie headers, verbatim. Without
+    // the fix the client headers are cloned from the already-stripped cache copy,
+    // so `getSetCookie()` would be empty here and this assertion would fail.
+    expect(res!.headers.getSetCookie()).toEqual([
+      'sid=secret; Path=/; HttpOnly',
+      'csrf=tok; Path=/',
+    ]);
+
+    await flush();
+    // (2) The shared KV copy is stripped — a shared cache must never store cookies.
+    const entry = await readIsrCache(env, HOST, '/blog/post');
+    expect(entry).not.toBeNull();
+    expect(entry!.headers['set-cookie']).toBeUndefined();
+    expect(await new Response(entry!.body).text()).toBe('<html>live</html>');
+    expect([...store.keys()].filter((k) => k.startsWith('void-isr/')).length).toBe(1);
+    // (3) The edge (caches.default) copy is stripped too.
+    const warmed = edge.store.get(htmlEdgeKey(HOST, '/blog/post', DPL));
+    expect(warmed).toBeDefined();
+    expect(warmed!.headers.getSetCookie()).toEqual([]);
+    expect(warmed!.headers.has('set-cookie')).toBe(false);
+  });
+
   it('KV HIT (fresh) → serves HIT from KV without a live render and warms the edge', async () => {
     const { kv, store } = createKvMock();
     const env = makeEnv(kv);
