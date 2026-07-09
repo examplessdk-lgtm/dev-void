@@ -739,6 +739,53 @@ describe('handleIsr', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  // Regression: when an HTML render warms the JSON edge variant, the STORED JSON
+  // response must mirror the live responder `pageJsonResponse` (pages/protocol.ts)
+  // by carrying `X-VoidPages: true` + `Vary: X-VoidPages`. The Pages client gates
+  // JSON parsing on `X-VoidPages` (navigation-engine.ts) — a cached JSON variant
+  // served on a later navigation WITHOUT it is treated as non-JSON and triggers a
+  // full-page hard reload. Prove the served header end to end (warm → HIT serve).
+  it('cached JSON variant (warmed by an HTML render) carries X-VoidPages + Vary on a later navigation HIT', async () => {
+    const { kv } = createKvMock();
+    const env = makeEnv(kv);
+    // HTML MISS render exposes embedded page data via the x-void-page-data header,
+    // which `populateJsonEdgeCache` stores as the JSON edge variant.
+    const { render } = createRender(
+      () =>
+        new Response('<html>live</html>', {
+          headers: {
+            'content-type': 'text/html',
+            'x-void-page-data': '{"component":"Blog","props":{}}',
+          },
+        }),
+    );
+    const { ctx, flush } = createCtx();
+
+    // 1) HTML navigation MISS → warms the JSON edge variant in the background.
+    await handleIsr(htmlRequest(), env, ctx, OPTS, render);
+    await flush();
+    expect(edge.store.has(jsonEdgeKey(HOST, '/blog/post', DPL))).toBe(true);
+
+    // 2) A subsequent Pages (X-VoidPages) navigation hits the warmed JSON variant.
+    const { render: render2, spy: spy2 } = createRender(() => new Response('SHOULD-NOT-RENDER'));
+    const { ctx: ctx2 } = createCtx();
+    const res = await handleIsr(
+      htmlRequest('/blog/post', { 'X-VoidPages': '1' }),
+      env,
+      ctx2,
+      OPTS,
+      render2,
+    );
+
+    // Served from the cached JSON variant (no live render).
+    expect(spy2).not.toHaveBeenCalled();
+    // The header the client gates on — missing it means a hard reload.
+    expect(res!.headers.get('X-VoidPages')).toBe('true');
+    expect(res!.headers.get('Vary')).toBe('X-VoidPages');
+    expect(res!.headers.get('content-type')).toBe('application/json');
+    expect(await res!.text()).toBe('{"component":"Blog","props":{}}');
+  });
+
   it('fails open to a LIVE render (not a 500) when getWithMetadata throws', async () => {
     const { kv } = createKvMock({ throwOnGet: true });
     const env = makeEnv(kv);

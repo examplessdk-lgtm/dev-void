@@ -429,6 +429,69 @@ describe('runtime ai', () => {
       expect(sent).not.toHaveProperty('providerKey');
     });
 
+    it('sends the provider-native auth header for a non-Bearer provider (anthropic → x-api-key, no Bearer)', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) =>
+          new Response(JSON.stringify({ id: 'msg_direct' }), {
+            headers: { 'content-type': 'application/json' },
+          }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const direct = makeDirectAi();
+
+      await envContext.run(
+        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', ANTHROPIC_API_KEY: 'sk-ant-test' },
+        async () => {
+          await ai.provider('anthropic').fetch('/v1/messages', {
+            body: { model: 'claude-3-5-sonnet', messages: [{ role: 'user', content: 'Hi' }] },
+          });
+        },
+      );
+
+      expect(direct.gateway.mock.results[0].value.getUrl).toHaveBeenCalledWith('anthropic');
+      const init = fetchMock.mock.calls[0][1]!;
+      const headers = new Headers(init.headers);
+      // Anthropic authenticates with `x-api-key` and NO prefix — sending
+      // `Authorization: Bearer <key>` 401s at the gateway pass-through.
+      expect(headers.get('x-api-key')).toBe('sk-ant-test');
+      expect(headers.get('authorization')).toBeNull();
+    });
+
+    it('sends a prefixed non-Bearer auth header (deepgram → Authorization: Token)', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) =>
+          new Response(JSON.stringify({ ok: true }), {
+            headers: { 'content-type': 'application/json' },
+          }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const direct = makeDirectAi();
+
+      await envContext.run(
+        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', DEEPGRAM_API_KEY: 'dg-test' },
+        async () => {
+          await ai
+            .provider('deepgram')
+            .fetch('/v1/listen', { body: { url: 'https://example.com/a.wav' } });
+        },
+      );
+
+      const init = fetchMock.mock.calls[0][1]!;
+      const headers = new Headers(init.headers);
+      // Deepgram uses the `Token ` scheme, not `Bearer `.
+      expect(headers.get('authorization')).toBe('Token dg-test');
+    });
+
     it('resolves to 501 when no AI gateway is configured', async () => {
       vi.resetModules();
       const { envContext } = await import('../../src/runtime/env-raw.ts');

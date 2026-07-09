@@ -516,6 +516,13 @@ function jsonCacheResponse(pageData: string, ttl: number, state: 'HIT' | 'MISS')
   return new Response(pageData, {
     headers: {
       'content-type': 'application/json',
+      // Mirror the live JSON responder `pageJsonResponse` (pages/protocol.ts):
+      // it stamps `X-VoidPages: true` + `Vary: X-VoidPages`. The Pages client
+      // gates JSON parsing on `X-VoidPages` (navigation-engine.ts) — a cached
+      // JSON variant served on a later navigation without it is treated as
+      // non-JSON and hard-reloads the whole page. Keep name/value/casing exact.
+      'X-VoidPages': 'true',
+      Vary: 'X-VoidPages',
       'Cache-Control': `public, s-maxage=${ttl}, max-age=0, must-revalidate`,
       'x-isr-cache': state,
     },

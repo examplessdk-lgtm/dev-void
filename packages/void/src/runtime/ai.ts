@@ -11,8 +11,21 @@ const PROXY_URL = 'https://proxy.void.cloud/ai';
 const STAGING_PROXY_URL = 'https://proxy.staging.void.cloud/ai';
 const VOID_FILE_MARKER = '__voidFile';
 
+// Per-provider auth header/prefix for the self-host direct gateway path. The
+// gateway passes provider auth through unchanged, so each entry mirrors the
+// provider's documented native auth convention. Providers NOT listed here fall
+// back to `Authorization: Bearer <key>` (correct for openai, groq, mistral,
+// grok, deepseek, openrouter, perplexity, cohere, cerebras, huggingface,
+// replicate). A caller's `apiKeyHeader`/`apiKeyPrefix` override still wins.
 const PROVIDER_AUTH_DEFAULTS: Record<string, { header: string; prefix: string }> = {
   'google-ai-studio': { header: 'x-goog-api-key', prefix: '' },
+  anthropic: { header: 'x-api-key', prefix: '' },
+  elevenlabs: { header: 'xi-api-key', prefix: '' },
+  deepgram: { header: 'authorization', prefix: 'Token ' },
+  fal: { header: 'authorization', prefix: 'Key ' },
+  cartesia: { header: 'x-api-key', prefix: '' },
+  baseten: { header: 'authorization', prefix: 'Api-Key ' },
+  ideogram: { header: 'Api-Key', prefix: '' },
 };
 
 type SerializedFileInput = {
