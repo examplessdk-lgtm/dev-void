@@ -2,6 +2,11 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
+import { buildVoidManifest } from '../../src/cli/package.ts';
+import { readConfig } from '../../src/config.ts';
+import { collectPages } from '../../src/isr-config.ts';
+import { scanPages } from '../../src/pages/scan.ts';
+import { resolveProjectPaths } from '../../src/project-paths.ts';
 import { toSlash } from '../../src/shared/utils.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -120,6 +125,41 @@ describe('playground/kitchen-sink build', () => {
     const wranglerConfig = JSON.parse(readFileSync(join(DIST, 'ssr', 'wrangler.json'), 'utf-8'));
     const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
     expect(vars.LEGIT_USER_VAR).toBe('kept');
+  });
+
+  it('emits manifest.pages for the Void pages app (scan order, RAW patterns)', async () => {
+    // The deploy manifest (carrying `pages`) is a `void deploy` artifact, not a
+    // `vite build` output — the `vp build` above never writes it to `dist`. Drive
+    // the SAME deploy-side chain `runFullDeploy` uses (scanPages → collectPages →
+    // buildVoidManifest) against the real kitchen-sink pages to prove the A3 wiring
+    // emits `manifest.pages` for a Void pages app (which includes an ISR page).
+    const pg = join(ROOT, PLAYGROUND);
+    const deployConfig = readConfig(pg);
+    const paths = resolveProjectPaths(pg, deployConfig);
+    const pageScan = await scanPages(pg, { output: deployConfig.output, paths });
+    const pages = collectPages(pageScan);
+    const manifest = buildVoidManifest({
+      bindings: {
+        needsD1: false,
+        needsKV: false,
+        needsR2: false,
+        needsAuth: false,
+        needsQueues: false,
+        needsAI: false,
+        needsSandbox: false,
+      },
+      pages,
+    });
+
+    // kitchen-sink is a Void pages app → manifest.pages is emitted, in scan order.
+    expect(Array.isArray(manifest.pages)).toBe(true);
+    expect(manifest.pages!.length).toBeGreaterThan(0);
+    // every entry has a string pattern; catch-alls are RAW (`{.+}`/`*`), not normalized away
+    for (const p of manifest.pages!) {
+      expect(typeof p.pattern).toBe('string');
+    }
+    // the /revalidate page (export const revalidate = 60) surfaces as an ISR entry
+    expect(manifest.pages!.some((p) => p.revalidate != null)).toBe(true);
   });
 
   it('includes sandbox bindings and container metadata', () => {

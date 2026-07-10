@@ -33,7 +33,7 @@ import {
 import { scanJobsSync } from '../crons/scan.ts';
 import { writeDrizzleConfig } from '../drizzle/config.ts';
 import { discoverSchema } from '../drizzle/discover.ts';
-import { collectRevalidate } from '../isr-config.ts';
+import { collectRevalidate, collectPages } from '../isr-config.ts';
 import { voidWarn } from '../log.ts';
 import { collectMigrations } from '../migrations/collect.ts';
 import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
@@ -1726,6 +1726,7 @@ async function runFullDeploy(
       : await scanPages(root, { output: deployConfig.output, paths })
     : null;
   const revalidate = collectRevalidate(deployConfig, pageScan);
+  const pages = collectPages(pageScan);
 
   // Fully-static optimization: if output: "static" and all pages are prerendered
   // with no backend features, deploy as a static site (no worker needed)
@@ -1881,6 +1882,7 @@ async function runFullDeploy(
     ssr: isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
     framework: isFrameworkMode ? detected!.name : undefined,
     revalidate,
+    pages,
     vars: envVars,
     queues,
     prerender: uniquePrerenderPaths,
