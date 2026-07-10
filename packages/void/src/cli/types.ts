@@ -182,6 +182,8 @@ export type DeployManifest = {
   type?: 'void' | 'spa' | 'static' | 'framework';
   revalidate?: number | Record<string, number>;
   revalidateQueryAllowlist?: Record<string, Array<string>>;
+  /** Ordered page-route table for route-aware ISR resolution (pages mode). */
+  pages?: Array<{ pattern: string; revalidate?: number }>;
   prerender?: Array<string>;
   assetConfig?: AssetConfig;
   vars?: Record<string, string>;

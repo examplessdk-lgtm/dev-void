@@ -492,6 +492,7 @@ export function buildVoidManifest(opts: {
   ssr?: boolean;
   framework?: string;
   revalidate?: number | Record<string, number>;
+  pages?: Array<{ pattern: string; revalidate?: number }>;
   vars?: Record<string, string>;
   queues?: Array<QueueMeta>;
   prerender?: Array<string>;
@@ -511,6 +512,7 @@ export function buildVoidManifest(opts: {
     ssr,
     framework,
     revalidate,
+    pages,
     vars,
     queues,
     prerender,
@@ -602,6 +604,10 @@ export function buildVoidManifest(opts: {
     Object.keys(options.revalidateQueryAllowlist).length > 0
   ) {
     manifest.revalidateQueryAllowlist = options.revalidateQueryAllowlist;
+  }
+
+  if (pages && pages.length > 0) {
+    manifest.pages = pages;
   }
 
   if (prerender && prerender.length > 0) {

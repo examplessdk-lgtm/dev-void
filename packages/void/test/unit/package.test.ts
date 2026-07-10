@@ -151,6 +151,20 @@ describe('buildVoidManifest — self-host non-regression', () => {
     expect(revalidate).toBeUndefined();
     expect(manifest.revalidate).toBeUndefined();
   });
+
+  it('carries a pages array verbatim into manifest.pages', () => {
+    const pages = [
+      { pattern: '/docs/setup/install' },
+      { pattern: '/docs/:path{.+}', revalidate: 3600 },
+    ];
+    const manifest = buildVoidManifest({ bindings: makeBindings(), pages });
+    expect(manifest.pages).toEqual(pages);
+  });
+
+  it('omits manifest.pages when the pages array is empty or missing', () => {
+    expect(buildVoidManifest({ bindings: makeBindings(), pages: [] }).pages).toBeUndefined();
+    expect(buildVoidManifest({ bindings: makeBindings() }).pages).toBeUndefined();
+  });
 });
 
 describe('resolveSpaFallbackChain', () => {
