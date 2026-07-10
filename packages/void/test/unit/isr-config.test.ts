@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vite-plus/test';
 import type { VoidConfig } from '../../src/config.ts';
-import { collectRevalidate, hasRevalidate } from '../../src/isr-config.ts';
+import { collectPages, collectRevalidate, hasRevalidate } from '../../src/isr-config.ts';
 import type { PageDefinition, PageScanResult } from '../../src/pages/types.ts';
 import { resolvePathTtl } from '../../src/runtime/isr-cache.ts';
 
@@ -146,5 +146,29 @@ describe('collectRevalidate', () => {
     expect(resolvePathTtl(revalidate, '/blog/a/b')).toBe(0);
     // An unrelated path still resolves to 0 (no ISR).
     expect(resolvePathTtl(revalidate, '/about')).toBe(0);
+  });
+});
+
+describe('collectPages', () => {
+  it('returns undefined when there is no page scan', () => {
+    expect(collectPages(null)).toBeUndefined();
+  });
+
+  it('returns undefined when the scan has no pages', () => {
+    expect(collectPages(makeScan([]))).toBeUndefined();
+  });
+
+  it('emits every page in scan order with raw patterns; revalidate only when set', () => {
+    // makeScan preserves array order; a real scan is pre-sorted static→dynamic→catch-all.
+    const scan = makeScan([
+      makePage('/docs/setup/install'), // specific, no revalidate (opt-out)
+      makePage('/blog/:slug', 120), // single-segment dynamic
+      makePage('/docs/:path{.+}', 3600), // named catch-all — RAW pattern, not `*`
+    ]);
+    expect(collectPages(scan)).toEqual([
+      { pattern: '/docs/setup/install' },
+      { pattern: '/blog/:slug', revalidate: 120 },
+      { pattern: '/docs/:path{.+}', revalidate: 3600 },
+    ]);
   });
 });

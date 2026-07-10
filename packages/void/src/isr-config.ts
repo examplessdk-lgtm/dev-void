@@ -83,3 +83,28 @@ export function collectRevalidate(
   }
   return revalidate;
 }
+
+/**
+ * Build the ordered page-route table shipped in the deploy manifest as
+ * `pages`. Emits EVERY page route (with or without a TTL) in `pageScan.pages`
+ * order — which is already specificity-sorted (static → dynamic → catch-all)
+ * and is the exact order the framework's own `matchRoute` (pages/manifest.ts)
+ * resolves in. Patterns are emitted RAW (`:slug`, `:path{.+}`, `*`); the edge
+ * matcher (`matchSegmentPattern`) handles `:name{.+}` natively, so — unlike the
+ * flat `revalidate` map — catch-alls are NOT collapsed to `*`.
+ *
+ * Consumers (dispatch, deploy prewarm) first-match over this list to pick the
+ * winning route, then apply that route's `revalidate` (0/absent = not ISR).
+ */
+export function collectPages(
+  pageScan: PageScanResult | null,
+): Array<{ pattern: string; revalidate?: number }> | undefined {
+  if (!pageScan || pageScan.pages.length === 0) {
+    return undefined;
+  }
+  return pageScan.pages.map((page) =>
+    page.revalidate != null
+      ? { pattern: page.pattern, revalidate: page.revalidate }
+      : { pattern: page.pattern },
+  );
+}
