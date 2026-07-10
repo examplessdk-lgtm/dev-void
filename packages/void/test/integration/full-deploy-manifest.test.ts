@@ -1,0 +1,233 @@
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import spawn from 'cross-spawn';
+import { join } from 'pathe';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vite-plus/test';
+
+// @clack/prompts + the output-spinner wrapper are TTY-bound; noop them (same as
+// direct-r2-deploy.test.ts) so runDeploy's interactive UI doesn't render here.
+const noopSpinner = {
+  start: vi.fn(),
+  stop: vi.fn(),
+  message: vi.fn(),
+};
+vi.mock('@clack/prompts', async () => {
+  const actual = await vi.importActual<typeof import('@clack/prompts')>('@clack/prompts');
+  return {
+    ...actual,
+    intro: vi.fn(),
+    outro: vi.fn(),
+    note: vi.fn(),
+    log: {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      step: vi.fn(),
+      success: vi.fn(),
+    },
+    spinner: () => noopSpinner,
+  };
+});
+vi.mock('../../src/cli/output.ts', async () => {
+  const actual =
+    await vi.importActual<typeof import('../../src/cli/output.ts')>('../../src/cli/output.ts');
+  return { ...actual, createSpinner: () => noopSpinner };
+});
+
+// Prerender path discovery spins Miniflare/workerd in-process. It feeds
+// `manifest.prerender`, NOT `manifest.pages`, so it is orthogonal to the seam
+// under test. Stub it to [] to keep this test offline, fast and deterministic —
+// everything else in runFullDeploy (including assembleVoidManifest) runs for
+// real. (For a non-`output:static` Void app this is the only in-process CF
+// runtime the deploy path would otherwise start; all network I/O is mocked
+// below.)
+vi.mock('../../src/prerender.ts', async () => {
+  const actual =
+    await vi.importActual<typeof import('../../src/prerender.ts')>('../../src/prerender.ts');
+  return {
+    ...actual,
+    collectPrerenderPaths: vi.fn(async () => [] as Array<string>),
+  };
+});
+
+const { runDeploy } = await import('../../src/cli/deploy.ts');
+
+const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
+const PLAYGROUND = 'playground/named-layouts';
+const FIXTURE = join(ROOT, PLAYGROUND);
+const PROJECT_JSON = join(FIXTURE, '.void', 'project.json');
+
+const fetchMock = vi.fn();
+let originalFetch: typeof globalThis.fetch | undefined;
+let savedToken: string | undefined;
+let savedProject: string | undefined;
+let projectJsonSnapshot: string | undefined;
+let projectJsonSnapshotTaken = false;
+
+type Captured = { finalizeBody: { manifest?: { pages?: unknown } } | null };
+
+// Minimal platform mock: report every asset as already-present so the
+// upload-urls + R2 PUT phase is skipped and runFullDeploy goes straight to the
+// finalize POST, whose JSON body we capture.
+function installPlatformMocks(): Captured {
+  const captured: Captured = { finalizeBody: null };
+
+  fetchMock.mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : (input as Request).url;
+    const reqInit = init ?? {};
+    const method = (reqInit.method ?? 'GET').toUpperCase();
+
+    if (url.endsWith('/deploy/preflight') && method === 'POST') {
+      const body = JSON.parse(reqInit.body as string) as {
+        assetManifest?: Record<string, unknown>;
+      };
+      const total = Object.keys(body.assetManifest ?? {}).length;
+      return json({ needed: [], total, skipped: total });
+    }
+
+    if (url.endsWith('/deploy') && method === 'POST') {
+      captured.finalizeBody = JSON.parse(reqInit.body as string);
+      return ndjson([
+        { event: 'start', deploymentId: 'dep_test' },
+        {
+          event: 'done',
+          deployment: 'dep_test',
+          url: 'https://named-layouts.test.void.app',
+          urls: ['https://named-layouts.test.void.app'],
+          assets: 0,
+          workers: 1,
+        },
+      ]);
+    }
+
+    throw new Error(`unexpected fetch in test: ${method} ${url}`);
+  });
+
+  return captured;
+}
+
+function json(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function ndjson(events: Array<unknown>): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const e of events) {
+        controller.enqueue(encoder.encode(`${JSON.stringify(e)}\n`));
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { 'content-type': 'application/x-ndjson' },
+  });
+}
+
+// End-to-end guard for the `assembleVoidManifest` seam: drives the REAL exported
+// runDeploy → runDeployInner → runFullDeploy (Void/SSR path) against a
+// pre-built minimal Void pages fixture, with only network + prompts + prerender
+// stubbed, and asserts the finalize manifest carries `pages`. Reverting
+// runFullDeploy's `assembleVoidManifest(pageScan, …)` back to
+// `buildVoidManifest({ … })` drops `pages` and turns this RED.
+describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () => {
+  beforeAll(() => {
+    // Real build of the minimal React pages fixture so runDeploy(skipBuild:true)
+    // finds dist/client/.vite/manifest.json + dist/ssr/{index.js,wrangler.json}.
+    const result = spawn.sync('vp', ['run', '--filter', `./${PLAYGROUND}`, 'build'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      maxBuffer: 10 * 1024 * 1024,
+      env: { ...process.env, VOID_TOKEN: 'test-token-do-not-use' },
+    });
+    expect(result.status, `${result.stdout ?? ''}${result.stderr ?? ''}`).toBe(0);
+
+    // Link the fixture to a fake project (snapshot any real link first so we
+    // restore developer-local state exactly on teardown).
+    projectJsonSnapshot = existsSync(PROJECT_JSON)
+      ? readFileSync(PROJECT_JSON, 'utf-8')
+      : undefined;
+    projectJsonSnapshotTaken = true;
+    mkdirSync(join(FIXTURE, '.void'), { recursive: true });
+    writeFileSync(
+      PROJECT_JSON,
+      JSON.stringify({ projectId: 'proj_named_layouts_test', slug: 'named-layouts-test' }),
+    );
+  }, 180_000);
+
+  afterAll(() => {
+    if (!projectJsonSnapshotTaken) {
+      return;
+    }
+    if (projectJsonSnapshot === undefined) {
+      rmSync(PROJECT_JSON, { force: true });
+    } else {
+      writeFileSync(PROJECT_JSON, projectJsonSnapshot);
+    }
+  });
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    fetchMock.mockReset();
+
+    savedToken = process.env.VOID_TOKEN;
+    savedProject = process.env.VOID_PROJECT;
+    // Explicit token bypasses getToken() + the GitHub-Actions OIDC branch.
+    process.env.VOID_TOKEN = 'test-token-do-not-use';
+    // Force resolution via .void/project.json (avoid the listProjects() path).
+    delete process.env.VOID_PROJECT;
+  });
+
+  afterEach(() => {
+    if (originalFetch) {
+      globalThis.fetch = originalFetch;
+    }
+    if (savedToken === undefined) {
+      delete process.env.VOID_TOKEN;
+    } else {
+      process.env.VOID_TOKEN = savedToken;
+    }
+    if (savedProject === undefined) {
+      delete process.env.VOID_PROJECT;
+    } else {
+      process.env.VOID_PROJECT = savedProject;
+    }
+  });
+
+  it('forwards the page scan into the finalize manifest.pages (incl. the ISR page)', async () => {
+    const captured = installPlatformMocks();
+
+    await runDeploy(FIXTURE, { skipBuild: true });
+
+    expect(captured.finalizeBody).not.toBeNull();
+    const pages = captured.finalizeBody!.manifest?.pages as
+      | Array<{ pattern: string; revalidate?: number }>
+      | undefined;
+
+    // manifest.pages must be a non-empty array — this is exactly what dropping
+    // the assembleVoidManifest seam (reverting to buildVoidManifest) removes.
+    expect(Array.isArray(pages)).toBe(true);
+    expect(pages!.length).toBeGreaterThan(0);
+    // Every entry carries a string pattern (raw, route-shaped).
+    for (const p of pages!) {
+      expect(typeof p.pattern).toBe('string');
+    }
+    // The /isr page (pages/isr.server.ts → `export const revalidate = 60`) must
+    // survive into the real deploy manifest with its exact TTL.
+    expect(pages).toContainEqual({ pattern: '/isr', revalidate: 60 });
+  });
+});
