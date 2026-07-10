@@ -2,9 +2,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import spawn from 'cross-spawn';
 import { join } from 'pathe';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { buildVoidManifest } from '../../src/cli/package.ts';
+import { assembleVoidManifest } from '../../src/cli/deploy.ts';
 import { readConfig } from '../../src/config.ts';
-import { collectPages } from '../../src/isr-config.ts';
 import { scanPages } from '../../src/pages/scan.ts';
 import { resolveProjectPaths } from '../../src/project-paths.ts';
 import { toSlash } from '../../src/shared/utils.ts';
@@ -130,15 +129,15 @@ describe('playground/kitchen-sink build', () => {
   it('emits manifest.pages for the Void pages app (scan order, RAW patterns)', async () => {
     // The deploy manifest (carrying `pages`) is a `void deploy` artifact, not a
     // `vite build` output — the `vp build` above never writes it to `dist`. Drive
-    // the SAME deploy-side chain `runFullDeploy` uses (scanPages → collectPages →
-    // buildVoidManifest) against the real kitchen-sink pages to prove the A3 wiring
-    // emits `manifest.pages` for a Void pages app (which includes an ISR page).
+    // the SAME production seam `runFullDeploy` uses (`assembleVoidManifest`, which
+    // owns `scanPages` result → collectPages → manifest.pages) against the real
+    // kitchen-sink pages to prove the A3 wiring emits `manifest.pages` for a Void
+    // pages app (which includes an ISR page).
     const pg = join(ROOT, PLAYGROUND);
     const deployConfig = readConfig(pg);
     const paths = resolveProjectPaths(pg, deployConfig);
     const pageScan = await scanPages(pg, { output: deployConfig.output, paths });
-    const pages = collectPages(pageScan);
-    const manifest = buildVoidManifest({
+    const manifest = assembleVoidManifest(pageScan, {
       bindings: {
         needsD1: false,
         needsKV: false,
@@ -148,7 +147,6 @@ describe('playground/kitchen-sink build', () => {
         needsAI: false,
         needsSandbox: false,
       },
-      pages,
     });
 
     // kitchen-sink is a Void pages app → manifest.pages is emitted, in scan order.

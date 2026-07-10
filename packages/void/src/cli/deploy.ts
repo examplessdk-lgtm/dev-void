@@ -38,6 +38,7 @@ import { voidWarn } from '../log.ts';
 import { collectMigrations } from '../migrations/collect.ts';
 import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
 import { scanPages } from '../pages/scan.ts';
+import type { PageScanResult } from '../pages/types.ts';
 import {
   inferProjectBindings,
   FRAMEWORK_SCAN_DIRS,
@@ -1034,6 +1035,19 @@ function formatKnownAssetSummary(result: DeployDoneEvent, skipped: number): stri
     : `${result.assets} static asset(s)`;
 }
 
+/**
+ * Assemble the Void deploy manifest, deriving the route-aware ISR `pages` table
+ * from the page scan. This is the single production seam that forwards
+ * `pageScan` → `manifest.pages`; `runFullDeploy` calls it so the wiring is
+ * exercised (and regression-guarded) by a unit test.
+ */
+export function assembleVoidManifest(
+  pageScan: PageScanResult | null,
+  opts: Parameters<typeof buildVoidManifest>[0],
+): DeployManifest {
+  return buildVoidManifest({ ...opts, pages: collectPages(pageScan) });
+}
+
 export async function runStaticDeploy(
   root: string,
   config: ProjectConfig,
@@ -1726,7 +1740,6 @@ async function runFullDeploy(
       : await scanPages(root, { output: deployConfig.output, paths })
     : null;
   const revalidate = collectRevalidate(deployConfig, pageScan);
-  const pages = collectPages(pageScan);
 
   // Fully-static optimization: if output: "static" and all pages are prerendered
   // with no backend features, deploy as a static site (no worker needed)
@@ -1875,14 +1888,13 @@ async function runFullDeploy(
     console.warn(`[void] ${fallbackWarning}`);
   }
 
-  const manifest = buildVoidManifest({
+  const manifest = assembleVoidManifest(pageScan, {
     bindings: liveConfig ? { ...effectiveBindings, needsLive: true } : effectiveBindings,
     migrations: validatedMigrations,
     schedules,
     ssr: isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
     framework: isFrameworkMode ? detected!.name : undefined,
     revalidate,
-    pages,
     vars: envVars,
     queues,
     prerender: uniquePrerenderPaths,
