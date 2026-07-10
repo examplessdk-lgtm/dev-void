@@ -48,7 +48,7 @@ describe('assembleVoidManifest', () => {
       makePage('/blog/:slug', 120), // dynamic segment, ISR
       makePage('/docs/:path{.+}', 3600), // catch-all, ISR, RAW pattern
     ]);
-    const manifest = assembleVoidManifest(pageScan, { bindings: MINIMAL_BINDINGS });
+    const manifest = assembleVoidManifest(pageScan, false, { bindings: MINIMAL_BINDINGS });
     expect(manifest.pages).toEqual([
       { pattern: '/docs/setup/install' },
       { pattern: '/blog/:slug', revalidate: 120 },
@@ -58,8 +58,22 @@ describe('assembleVoidManifest', () => {
 
   it('omits manifest.pages when the scan has no pages', () => {
     expect(
-      assembleVoidManifest(makeScan([]), { bindings: MINIMAL_BINDINGS }).pages,
+      assembleVoidManifest(makeScan([]), false, { bindings: MINIMAL_BINDINGS }).pages,
     ).toBeUndefined();
-    expect(assembleVoidManifest(null, { bindings: MINIMAL_BINDINGS }).pages).toBeUndefined();
+    expect(assembleVoidManifest(null, false, { bindings: MINIMAL_BINDINGS }).pages).toBeUndefined();
+  });
+
+  it('emits manifest.pages for a void app (isFrameworkMode = false)', () => {
+    const scan = makeScan([makePage('/isr', 60)]);
+    expect(assembleVoidManifest(scan, false, { bindings: MINIMAL_BINDINGS }).pages).toEqual([
+      { pattern: '/isr', revalidate: 60 },
+    ]);
+  });
+
+  it('omits manifest.pages in framework mode even with a populated scan (isFrameworkMode = true)', () => {
+    // `pages` is a Void pages-mode concept: a Class-A framework routed through
+    // runFullDeploy must NOT emit it, even when it happens to have a pages/ dir.
+    const scan = makeScan([makePage('/isr', 60)]);
+    expect(assembleVoidManifest(scan, true, { bindings: MINIMAL_BINDINGS }).pages).toBeUndefined();
   });
 });

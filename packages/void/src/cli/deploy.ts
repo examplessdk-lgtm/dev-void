@@ -1040,12 +1040,21 @@ function formatKnownAssetSummary(result: DeployDoneEvent, skipped: number): stri
  * from the page scan. This is the single production seam that forwards
  * `pageScan` → `manifest.pages`; `runFullDeploy` calls it so the wiring is
  * exercised (and regression-guarded) by a unit test.
+ *
+ * `pages` is a Void pages-mode concept. In framework mode (Class-A frameworks
+ * routed through `runFullDeploy`) we must NOT emit it — the framework owns its
+ * own routing/ISR — so `isFrameworkMode` suppresses the table. (plan 0077
+ * Global Constraint: "`pages` is Void-pages-mode only; leave frameworks alone".)
  */
 export function assembleVoidManifest(
   pageScan: PageScanResult | null,
+  isFrameworkMode: boolean,
   opts: Parameters<typeof buildVoidManifest>[0],
 ): DeployManifest {
-  return buildVoidManifest({ ...opts, pages: collectPages(pageScan) });
+  return buildVoidManifest({
+    ...opts,
+    pages: isFrameworkMode ? undefined : collectPages(pageScan),
+  });
 }
 
 export async function runStaticDeploy(
@@ -1888,7 +1897,7 @@ async function runFullDeploy(
     console.warn(`[void] ${fallbackWarning}`);
   }
 
-  const manifest = assembleVoidManifest(pageScan, {
+  const manifest = assembleVoidManifest(pageScan, isFrameworkMode, {
     bindings: liveConfig ? { ...effectiveBindings, needsLive: true } : effectiveBindings,
     migrations: validatedMigrations,
     schedules,

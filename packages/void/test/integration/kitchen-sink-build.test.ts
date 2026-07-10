@@ -137,7 +137,7 @@ describe('playground/kitchen-sink build', () => {
     const deployConfig = readConfig(pg);
     const paths = resolveProjectPaths(pg, deployConfig);
     const pageScan = await scanPages(pg, { output: deployConfig.output, paths });
-    const manifest = assembleVoidManifest(pageScan, {
+    const manifest = assembleVoidManifest(pageScan, false, {
       bindings: {
         needsD1: false,
         needsKV: false,

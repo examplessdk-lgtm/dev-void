@@ -11,6 +11,7 @@ import {
   it,
   vi,
 } from 'vite-plus/test';
+import type { DetectedFramework } from '../../src/plugin-inference.ts';
 
 // @clack/prompts + the output-spinner wrapper are TTY-bound; noop them (same as
 // direct-r2-deploy.test.ts) so runDeploy's interactive UI doesn't render here.
@@ -56,6 +57,22 @@ vi.mock('../../src/prerender.ts', async () => {
     ...actual,
     collectPrerenderPaths: vi.fn(async () => [] as Array<string>),
   };
+});
+
+// detectFramework is mocked so the SAME pre-built fixture can be driven down
+// both deploy routes: the default (undefined → Void pages path, exercised by
+// the first test) and, per-test, a forced Class-A framework (→ runFullDeploy
+// with isFrameworkMode = true, which must suppress manifest.pages). The return
+// value is set in beforeEach (undefined) and overridden inside the framework
+// test — so the Void test always sees the real-world `undefined`.
+const { mockDetectFramework } = vi.hoisted(() => ({
+  mockDetectFramework: vi.fn<(root: string) => DetectedFramework | undefined>(),
+}));
+vi.mock('../../src/plugin-inference.ts', async () => {
+  const actual = await vi.importActual<typeof import('../../src/plugin-inference.ts')>(
+    '../../src/plugin-inference.ts',
+  );
+  return { ...actual, detectFramework: mockDetectFramework };
 });
 
 const { runDeploy } = await import('../../src/cli/deploy.ts');
@@ -180,6 +197,10 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
   });
 
   beforeEach(() => {
+    // Default: no framework detected → the Void pages path. The framework test
+    // overrides this to a Class-A framework before driving runDeploy.
+    mockDetectFramework.mockReturnValue(undefined);
+
     originalFetch = globalThis.fetch;
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
     fetchMock.mockReset();
@@ -229,5 +250,25 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     // The /isr page (pages/isr.server.ts → `export const revalidate = 60`) must
     // survive into the real deploy manifest with its exact TTL.
     expect(pages).toContainEqual({ pattern: '/isr', revalidate: 60 });
+  });
+
+  it('suppresses manifest.pages in framework mode (Class-A framework forced via detectFramework)', async () => {
+    // Force the SAME pre-built fixture down the Class-A framework route. The
+    // vinext-pages preset (workerDir dist/ssr, assetsDir dist/client,
+    // workerMain index.js) matches the Void React build layout exactly, so
+    // runDeployInner routes to runFullDeploy with isFrameworkMode = true.
+    mockDetectFramework.mockReturnValue({ name: 'vinext-pages', class: 'a' });
+    const captured = installPlatformMocks();
+
+    await runDeploy(FIXTURE, { skipBuild: true });
+
+    // The deploy still finalizes (manifest present)...
+    expect(captured.finalizeBody).not.toBeNull();
+    expect(captured.finalizeBody!.manifest).toBeDefined();
+    // ...but `pages` (the Void pages-mode ISR table) is suppressed in framework
+    // mode even though the fixture has a pages/ dir with an ISR page. Removing
+    // the `isFrameworkMode ? undefined :` gate in assembleVoidManifest turns
+    // this RED (pages becomes the populated array instead of undefined).
+    expect(captured.finalizeBody!.manifest?.pages).toBeUndefined();
   });
 });
