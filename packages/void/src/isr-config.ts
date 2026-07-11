@@ -84,100 +84,33 @@ export function collectRevalidate(
   return revalidate;
 }
 
-// Private-use sentinels used while compiling a config pattern to a RegExp.
-// Identical scheme to dispatch's `matchSegmentPattern` (see `matchConfigPattern`).
-const SEGMENT_SENTINEL = String.fromCharCode(0xe000);
-const CATCHALL_SENTINEL = String.fromCharCode(0xe001);
-
-/**
- * Compile a `void.json` `routing.revalidate` CONFIG pattern to a RegExp and
- * test a pathname against it, using the EXACT segment-anchored semantics
- * dispatch applies at runtime (`matchSegmentPattern`,
- * `packages/dispatch/src/pattern.ts`). Parity here is load-bearing: the TTL we
- * bake into a page at build time MUST equal what dispatch's
- * `resolvePathTtl(config, <path the page serves>)` resolves at the edge, or we
- * ship a silently wrong TTL. This is a faithful port of that matcher (minus its
- * LRU cache — a runtime hot-path concern only).
- *
- * We deliberately do NOT reuse the framework's `patternToRegex`
- * (`pages/manifest.ts`): despite looking similar it is the CLIENT route matcher
- * and DIVERGES from dispatch on the two cases ISR configs care about most —
- * (1) it injects `(.+)` for a `:name{.+}` catch-all BEFORE its regex-escape
- * step, so the escape turns it into a literal `\(\.\+\)` that never matches a
- * real path, and (2) its `*` replace lacks the `/g` flag so only the FIRST `*`
- * in a pattern expands. Both would break parity on the exact patterns ISR
- * configs use (`/docs/:path{.+}`, multi-`*`). The parity cross-check test pins
- * this matcher to the parent repo's `matchSegmentPattern`. (Exported for that
- * cross-check test; not part of the package's public exports.)
- */
-export function matchConfigPattern(pattern: string, pathname: string): boolean {
-  let regex: RegExp;
-  try {
-    const escaped = pattern
-      .replace(/(^|\/):[^/{}]+\{\.\+\}(?=\/|$)/g, `$1${CATCHALL_SENTINEL}`) // named catch-all :name{.+}
-      .replace(/(^|\/):[^/]+(?=\/|$)/g, `$1${SEGMENT_SENTINEL}`) // whole-segment :name
-      .replace(/[.+?^${}()|[\]\\]/g, '\\$&') // escape regex specials
-      .replaceAll('*', '.*') // legacy `*` crosses '/'
-      .replaceAll(SEGMENT_SENTINEL, '[^/]+') // one segment
-      .replaceAll(CATCHALL_SENTINEL, '.+'); // >=1 char, crosses '/'
-    regex = new RegExp(`^${escaped}$`);
-  } catch {
-    return false;
-  }
-  return regex.test(pathname);
-}
-
-/**
- * Substitute a page pattern's params to a concrete probe path so it can be
- * tested against config patterns. Each placeholder becomes a value the page's
- * OWN pattern would match:
- *   `:name`     -> one segment            (`_`)
- *   `:name{.+}` -> a value crossing `/`   (`_/_`)  (named catch-all)
- *   `*`         -> a value crossing `/`   (`_/_`)  (anonymous catch-all)
- * Literal segments pass through untouched. The named catch-all is substituted
- * FIRST (same ordering hazard as `matchSegmentPattern`) so `:name{.+}` is
- * consumed as a unit before the plain `:name` rule can grab it and strand the
- * `{.+}` / pick the wrong single-segment value. This is the one slightly-hacky
- * mechanic — kept small: it only builds a representative path, never persisted.
- */
-function pagePatternToProbePath(pattern: string): string {
-  return pattern
-    .replace(/(^|\/):[^/{}]+\{\.\+\}(?=\/|$)/g, '$1_/_') // named catch-all -> crossing value
-    .replace(/(^|\/):[^/]+(?=\/|$)/g, '$1_') // single-segment param -> one segment
-    .replaceAll('*', '_/_'); // anonymous catch-all -> crossing value
-}
-
 /**
  * Resolve a single page's effective ISR TTL at BUILD time so the emitted
  * `pages` table is SELF-SUFFICIENT: dispatch's `resolvePageTtl` first-matches
  * the table and, on a match, uses ONLY that page's baked TTL — it never
  * consults the flat `revalidate` map for a matched page. Before this, a page
  * with no per-page `export const revalidate` baked no TTL, so a Void Pages app
- * that configured ISR through `void.json` `routing.revalidate` silently lost
- * ISR once the `pages` table shipped (worst case: a global-number config turned
- * page ISR OFF for the entire site).
+ * that configured ISR through a global-number `void.json` `routing.revalidate`
+ * silently lost ISR once the `pages` table shipped (page ISR OFF site-wide).
  *
- * Order — SOURCE-SEPARATED, which is what preserves the plan-0077 catch-all
- * shadowing fix (a no-export page must NOT inherit a SIBLING page's per-page
- * TTL):
+ * Two sources, in order — SOURCE-SEPARATED, which is what preserves the
+ * plan-0077 catch-all shadowing fix (a no-export page must NOT inherit a
+ * SIBLING page's per-page TTL):
  *   1. an explicit per-page `export const revalidate` is authoritative — a
  *      positive value turns ISR on; an explicit 0 opts the page OUT and is NOT
  *      overridden by the app-wide config below;
- *   2. else resolve against the app's `void.json` `routing.revalidate` config
- *      ONLY (never the merged `collectRevalidate` map, never another page's
- *      export):
- *        - number -> that global TTL (applies to every page);
- *        - object -> the FIRST config pattern (dispatch first-match order) that
- *          matches the page's representative probe path; else 0;
- *        - absent -> 0.
+ *   2. else a global-NUMBER `void.json` `routing.revalidate` (applies to every
+ *      page); absent -> 0.
  *
- * Accepted residual (do NOT try to fix): a single page pattern that straddles
- * MULTIPLE distinct config patterns (e.g. a root catch-all `/:path{.+}` with
- * config `{ '/blog/*': 3600, '/news/*': 1800 }`) can carry only ONE TTL — the
- * probe is a single representative path, so only the config pattern covering
- * that probe applies. This is a fundamental per-path-vs-per-page expressiveness
- * gap; it can only UNDER-cache (never wrong-serve) and is strictly better than
- * the pre-fix status quo where such a page lost ISR entirely.
+ * An OBJECT (per-path map) `routing.revalidate` is deliberately NOT baked. It is
+ * a per-PATH rule set, and a single page pattern can straddle several of its
+ * entries — INCLUDING an explicit `0` opt-out on one of them (e.g. page
+ * `/blog/:slug` under `{ '/blog/private': 0, '/blog/*': 3600 }`). Collapsing that
+ * to one per-page TTL via a single representative probe path cannot honor the
+ * `0` and would OVER-cache a path the user opted out of — a correctness
+ * violation, not a mere under-cache. So an object-configured pages-mode app does
+ * not drive page ISR through the table (matched pages resolve 0); per-page
+ * `export const revalidate` is the supported per-route mechanism. See plan 0077.
  */
 function resolvePageBuildTtl(
   page: PageDefinition,
@@ -187,18 +120,11 @@ function resolvePageBuildTtl(
   if (page.revalidate != null) {
     return page.revalidate > 0 ? page.revalidate : 0;
   }
-  // 2. App-wide void.json `routing.revalidate` config ONLY.
+  // 2. App-wide void.json `routing.revalidate` — global NUMBER only. An object
+  //    (per-path) config is intentionally not collapsed to a per-page TTL: it
+  //    cannot faithfully honor a per-path `0` opt-out (see the doc comment).
   if (typeof revalidateConfig === 'number') {
     return revalidateConfig > 0 ? revalidateConfig : 0;
-  }
-  if (revalidateConfig != null && typeof revalidateConfig === 'object') {
-    const probe = pagePatternToProbePath(page.pattern);
-    for (const [pattern, ttl] of Object.entries(revalidateConfig)) {
-      // First matching config pattern wins — mirrors dispatch `resolvePathTtl`.
-      if (matchConfigPattern(pattern, probe)) {
-        return ttl > 0 ? ttl : 0;
-      }
-    }
   }
   return 0;
 }
@@ -213,12 +139,13 @@ function resolvePageBuildTtl(
  * flat `revalidate` map — catch-alls are NOT collapsed to `*`.
  *
  * Each page's `revalidate` is resolved at BUILD time (`resolvePageBuildTtl`)
- * from its own `export const revalidate` first, then the app's `void.json`
+ * from its own `export const revalidate` first, then a global-NUMBER `void.json`
  * `routing.revalidate` config (`revalidateConfig`, the RAW config value — NOT
- * the merged `collectRevalidate` map). This makes the table self-sufficient:
- * dispatch's `resolvePageTtl` never has to fall back to the flat map for a
- * matched page (a matched page with no baked TTL resolves to 0), so a Void Pages
- * app that configures ISR only through `routing.revalidate` keeps its ISR.
+ * the merged `collectRevalidate` map; an OBJECT per-path config is not baked,
+ * see `resolvePageBuildTtl`). This makes the table self-sufficient: dispatch's
+ * `resolvePageTtl` never has to fall back to the flat map for a matched page (a
+ * matched page with no baked TTL resolves to 0), so a Void Pages app that
+ * configures ISR through a global-number `routing.revalidate` keeps its ISR.
  *
  * Consumers (dispatch, deploy prewarm) first-match over this list to pick the
  * winning route, then apply that route's `revalidate` (0/absent = not ISR).

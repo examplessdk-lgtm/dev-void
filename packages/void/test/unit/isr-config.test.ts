@@ -1,11 +1,6 @@
 import { describe, expect, it } from 'vite-plus/test';
 import type { VoidConfig } from '../../src/config.ts';
-import {
-  collectPages,
-  collectRevalidate,
-  hasRevalidate,
-  matchConfigPattern,
-} from '../../src/isr-config.ts';
+import { collectPages, collectRevalidate, hasRevalidate } from '../../src/isr-config.ts';
 import type { PageDefinition, PageScanResult } from '../../src/pages/types.ts';
 import { resolvePathTtl } from '../../src/runtime/isr-cache.ts';
 
@@ -203,88 +198,37 @@ describe('collectPages', () => {
     ]);
   });
 
-  // Test 3 — an object config is resolved per-page against the config patterns
-  // ONLY; a page not covered by any config pattern stays 0 (no ISR).
-  it('an object config applies to matching no-export pages only', () => {
+  // Test 3 — an OBJECT (per-path) config is deliberately NOT baked into per-page
+  // TTLs. A page pattern can straddle several config entries (incl. a per-path
+  // `0` opt-out), so collapsing it to one per-page TTL cannot honor the opt-out
+  // and would over-cache. Object-configured pages therefore bake NO TTL (resolve
+  // 0 at the edge); per-page `export const revalidate` is the per-route lever.
+  it('an object config is NOT baked into per-page TTLs (per-path, cannot collapse)', () => {
     const scan = makeScan([makePage('/blog/:slug'), makePage('/about')]);
     expect(collectPages(scan, { '/blog/*': 3600 })).toEqual([
-      { pattern: '/blog/:slug', revalidate: 3600 },
-      { pattern: '/about' }, // not covered by config → no revalidate (0)
+      { pattern: '/blog/:slug' }, // object config not baked → no revalidate (0)
+      { pattern: '/about' },
+    ]);
+  });
+
+  // A per-path `0` opt-out inside an object config is exactly why object configs
+  // are not baked: a naive probe-based collapse would miss the `/blog/private: 0`
+  // rule and over-cache. Nothing is baked, so the opt-out can never be violated.
+  it('does not bake — and so never violates — a per-path 0 opt-out in an object config', () => {
+    const scan = makeScan([makePage('/blog/:slug')]);
+    expect(collectPages(scan, { '/blog/private': 0, '/blog/*': 3600 })).toEqual([
+      { pattern: '/blog/:slug' }, // no TTL baked; /blog/private stays opted out at the edge
     ]);
   });
 
   // Test 4 — SHADOWING PRESERVED (plan 0077): a specific no-export page under a
   // SIBLING catch-all that HAS an export must NOT inherit the sibling's per-page
-  // TTL. With no matching config it stays 0; with a config that covers it, it
-  // legitimately resolves from the config.
-  it('a no-export page does not inherit a sibling catch-all export (config absent)', () => {
+  // TTL. It stays 0 — the table never folds a sibling's per-page export in.
+  it('a no-export page does not inherit a sibling catch-all export', () => {
     const scan = makeScan([makePage('/docs/:path{.+}', 300), makePage('/docs/setup/install')]);
     expect(collectPages(scan)).toEqual([
       { pattern: '/docs/:path{.+}', revalidate: 300 },
       { pattern: '/docs/setup/install' }, // stays 0 — no sibling inheritance
     ]);
-  });
-
-  it('a no-export page DOES resolve from the config when the config covers it', () => {
-    const scan = makeScan([makePage('/docs/:path{.+}', 300), makePage('/docs/setup/install')]);
-    expect(collectPages(scan, { '/docs/*': 300 })).toEqual([
-      { pattern: '/docs/:path{.+}', revalidate: 300 },
-      { pattern: '/docs/setup/install', revalidate: 300 }, // from config, legitimately
-    ]);
-  });
-});
-
-// Test 5 — PARITY: the build-time config-pattern matcher MUST agree with the
-// platform dispatch runtime matcher (`matchSegmentPattern`,
-// `packages/dispatch/src/pattern.ts`) on every pattern an ISR config can use. If
-// they diverge, the TTL baked into the `pages` table won't equal what dispatch
-// resolves at the edge → silent wrong-TTL. The framework repo cannot import the
-// platform matcher in its standalone CI, so this pins `matchConfigPattern` to an
-// EXPLICIT golden truth table of dispatch's segment-anchored semantics:
-// `:name` matches ONE segment, `:name{.+}` and `*` cross `/`, a literal dot is
-// literal, patterns are fully anchored. Keep in sync if those semantics change.
-describe('matchConfigPattern parity with dispatch matchSegmentPattern (golden)', () => {
-  const cases: Array<[string, string, boolean]> = [
-    // single-segment param — must NOT cross '/'
-    ['/blog/:slug', '/blog/hello', true],
-    ['/blog/:slug', '/blog/a/b', false],
-    ['/blog/:slug', '/blog', false],
-    // anonymous catch-all '*' — crosses '/'
-    ['/blog/*', '/blog/hello', true],
-    ['/blog/*', '/blog/a/b', true],
-    ['/blog/*', '/blog', false],
-    // named catch-all ':name{.+}' — crosses '/' (the case client patternToRegex gets wrong)
-    ['/docs/:path{.+}', '/docs/x', true],
-    ['/docs/:path{.+}', '/docs/x/y', true],
-    ['/docs/:path{.+}', '/docs', false],
-    // multiple params / multiple '*' (a non-/g '*' replace would break the second '*')
-    ['/shop/:cat/:id', '/shop/a/1', true],
-    ['/shop/:cat/:id', '/shop/a', false],
-    ['/x/*/y/*', '/x/1/y/2', true],
-    ['/x/*/y/*', '/x/1/2', false],
-    // literal dot is a literal, not "any char"
-    ['/a.b', '/a.b', true],
-    ['/a.b', '/axb', false],
-    // a ':name.ext' param GREEDILY swallows the '.ext' into the single-segment
-    // param (matches dispatch — cf. '/blog/:slug.xml' → '^/blog/[^/]+$'); it is
-    // NOT a literal-suffix match, but it still must not cross '/'.
-    ['/files/:name.json', '/files/a.json', true],
-    ['/files/:name.json', '/files/anything', true],
-    ['/files/:name.json', '/files/a/b', false],
-    // literal
-    ['/about', '/about', true],
-    ['/about', '/about/x', false],
-  ];
-
-  it('matches dispatch segment-anchored semantics across the golden matrix', () => {
-    const wrong: Array<string> = [];
-    for (const [pattern, path, expected] of cases) {
-      if (matchConfigPattern(pattern, path) !== expected) {
-        wrong.push(
-          `pattern=${JSON.stringify(pattern)} path=${JSON.stringify(path)} expected=${expected}`,
-        );
-      }
-    }
-    expect(wrong).toEqual([]);
   });
 });
