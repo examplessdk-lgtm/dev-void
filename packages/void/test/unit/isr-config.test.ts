@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vite-plus/test';
+// Cross-repo import: the platform dispatch worker's runtime matcher. The
+// framework's build-time `matchConfigPattern` MUST resolve config patterns
+// identically, or the baked ISR TTL diverges from what dispatch serves. Kept as
+// a real import (not a copied matrix) so the parity check tracks the source.
+import { matchSegmentPattern } from '../../../../../packages/dispatch/src/pattern.ts';
 import type { VoidConfig } from '../../src/config.ts';
-import { collectPages, collectRevalidate, hasRevalidate } from '../../src/isr-config.ts';
+import {
+  collectPages,
+  collectRevalidate,
+  hasRevalidate,
+  matchConfigPattern,
+} from '../../src/isr-config.ts';
 import type { PageDefinition, PageScanResult } from '../../src/pages/types.ts';
 import { resolvePathTtl } from '../../src/runtime/isr-cache.ts';
 
@@ -170,5 +180,104 @@ describe('collectPages', () => {
       { pattern: '/blog/:slug', revalidate: 120 },
       { pattern: '/docs/:path{.+}', revalidate: 3600 },
     ]);
+  });
+
+  // Test 1 — a per-page `export const revalidate` is authoritative and wins over
+  // ANY void.json routing.revalidate config (number or object).
+  it('per-page export wins over config', () => {
+    const scan = makeScan([makePage('/p', 120)]);
+    expect(collectPages(scan, 3600)).toEqual([{ pattern: '/p', revalidate: 120 }]);
+    expect(collectPages(scan, { '/p': 9999 })).toEqual([{ pattern: '/p', revalidate: 120 }]);
+  });
+
+  // An explicit `export const revalidate = 0` is an opt-OUT and must NOT be
+  // overridden by an app-wide config (preserves pre-#272 opt-out semantics).
+  it('explicit per-page revalidate=0 opts out and is not overridden by config', () => {
+    const scan = makeScan([makePage('/p', 0)]);
+    expect(collectPages(scan, 3600)).toEqual([{ pattern: '/p' }]);
+  });
+
+  // Test 2 — REGRESSION GUARD (the must-fix): a global-number config must turn
+  // ISR ON for EVERY no-export page. Before this fix, such pages baked no TTL and
+  // dispatch's resolvePageTtl returned 0 → page ISR silently OFF for the whole site.
+  it('a global-number config applies to every no-export page', () => {
+    const scan = makeScan([makePage('/blog/:slug'), makePage('/about')]);
+    expect(collectPages(scan, 3600)).toEqual([
+      { pattern: '/blog/:slug', revalidate: 3600 },
+      { pattern: '/about', revalidate: 3600 },
+    ]);
+  });
+
+  // Test 3 — an object config is resolved per-page against the config patterns
+  // ONLY; a page not covered by any config pattern stays 0 (no ISR).
+  it('an object config applies to matching no-export pages only', () => {
+    const scan = makeScan([makePage('/blog/:slug'), makePage('/about')]);
+    expect(collectPages(scan, { '/blog/*': 3600 })).toEqual([
+      { pattern: '/blog/:slug', revalidate: 3600 },
+      { pattern: '/about' }, // not covered by config → no revalidate (0)
+    ]);
+  });
+
+  // Test 4 — SHADOWING PRESERVED (plan 0077): a specific no-export page under a
+  // SIBLING catch-all that HAS an export must NOT inherit the sibling's per-page
+  // TTL. With no matching config it stays 0; with a config that covers it, it
+  // legitimately resolves from the config.
+  it('a no-export page does not inherit a sibling catch-all export (config absent)', () => {
+    const scan = makeScan([makePage('/docs/:path{.+}', 300), makePage('/docs/setup/install')]);
+    expect(collectPages(scan)).toEqual([
+      { pattern: '/docs/:path{.+}', revalidate: 300 },
+      { pattern: '/docs/setup/install' }, // stays 0 — no sibling inheritance
+    ]);
+  });
+
+  it('a no-export page DOES resolve from the config when the config covers it', () => {
+    const scan = makeScan([makePage('/docs/:path{.+}', 300), makePage('/docs/setup/install')]);
+    expect(collectPages(scan, { '/docs/*': 300 })).toEqual([
+      { pattern: '/docs/:path{.+}', revalidate: 300 },
+      { pattern: '/docs/setup/install', revalidate: 300 }, // from config, legitimately
+    ]);
+  });
+});
+
+// Test 5 — PARITY: the build-time config-pattern matcher MUST agree with the
+// platform dispatch runtime matcher (`matchSegmentPattern`) on every pattern an
+// ISR config can use. If they diverge, the TTL baked into the `pages` table
+// won't equal what dispatch resolves at the edge → silent wrong-TTL. This pins
+// the framework matcher to the imported parent source across a matrix that
+// exercises single-segment params, catch-alls, multi-`*`, and literals (dotted).
+describe('matchConfigPattern parity with dispatch matchSegmentPattern', () => {
+  const patterns = [
+    '/blog/:slug',
+    '/blog/*',
+    '/docs/:path{.+}',
+    '/shop/:cat/:id',
+    '/x/*/y/*',
+    '/a.b',
+    '/about',
+  ];
+  const paths = [
+    '/blog/hello',
+    '/blog/a/b',
+    '/docs/x',
+    '/docs/x/y',
+    '/shop/a/1',
+    '/x/1/y/2',
+    '/a.b',
+    '/axb',
+    '/about',
+    '/blog',
+    '/docs',
+  ];
+
+  it('agrees with matchSegmentPattern across the full pattern × path matrix', () => {
+    const divergences: Array<string> = [];
+    for (const pattern of patterns) {
+      for (const path of paths) {
+        if (matchConfigPattern(pattern, path) !== matchSegmentPattern(pattern, path)) {
+          divergences.push(`pattern=${JSON.stringify(pattern)} path=${JSON.stringify(path)}`);
+        }
+      }
+    }
+    expect(divergences).toEqual([]);
   });
 });

@@ -1050,10 +1050,15 @@ export function assembleVoidManifest(
   pageScan: PageScanResult | null,
   isFrameworkMode: boolean,
   opts: Parameters<typeof buildVoidManifest>[0],
+  revalidateConfig?: number | Record<string, number> | undefined,
 ): DeployManifest {
   return buildVoidManifest({
     ...opts,
-    pages: isFrameworkMode ? undefined : collectPages(pageScan),
+    // Bake each page's effective ISR TTL from its own `export const revalidate`
+    // AND the app's `void.json` `routing.revalidate` config (the RAW value, not
+    // the merged `collectRevalidate` map) so the `pages` table is self-sufficient
+    // — dispatch never falls back to the flat map for a matched page.
+    pages: isFrameworkMode ? undefined : collectPages(pageScan, revalidateConfig),
   });
 }
 
@@ -1897,25 +1902,30 @@ async function runFullDeploy(
     console.warn(`[void] ${fallbackWarning}`);
   }
 
-  const manifest = assembleVoidManifest(pageScan, isFrameworkMode, {
-    bindings: liveConfig ? { ...effectiveBindings, needsLive: true } : effectiveBindings,
-    migrations: validatedMigrations,
-    schedules,
-    ssr: isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
-    framework: isFrameworkMode ? detected!.name : undefined,
-    revalidate,
-    vars: envVars,
-    queues,
-    prerender: uniquePrerenderPaths,
-    assetConfig,
-    options: voidPackageOptions,
-    hashedAssetsPrefix: assetsPrefix,
-    headerRules,
-    redirectRules,
-    fallbackRules,
-    dialect,
-    webSockets,
-  });
+  const manifest = assembleVoidManifest(
+    pageScan,
+    isFrameworkMode,
+    {
+      bindings: liveConfig ? { ...effectiveBindings, needsLive: true } : effectiveBindings,
+      migrations: validatedMigrations,
+      schedules,
+      ssr: isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
+      framework: isFrameworkMode ? detected!.name : undefined,
+      revalidate,
+      vars: envVars,
+      queues,
+      prerender: uniquePrerenderPaths,
+      assetConfig,
+      options: voidPackageOptions,
+      hashedAssetsPrefix: assetsPrefix,
+      headerRules,
+      redirectRules,
+      fallbackRules,
+      dialect,
+      webSockets,
+    },
+    deployConfig.routing?.revalidate,
+  );
   const workerDir = join(distDir, workerDirName);
   if (isFrameworkMode) {
     const wrapperFeatures: WrapperFeatures = {
