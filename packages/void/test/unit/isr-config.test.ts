@@ -1,9 +1,4 @@
 import { describe, expect, it } from 'vite-plus/test';
-// Cross-repo import: the platform dispatch worker's runtime matcher. The
-// framework's build-time `matchConfigPattern` MUST resolve config patterns
-// identically, or the baked ISR TTL diverges from what dispatch serves. Kept as
-// a real import (not a copied matrix) so the parity check tracks the source.
-import { matchSegmentPattern } from '../../../../../packages/dispatch/src/pattern.ts';
 import type { VoidConfig } from '../../src/config.ts';
 import {
   collectPages,
@@ -240,44 +235,56 @@ describe('collectPages', () => {
 });
 
 // Test 5 — PARITY: the build-time config-pattern matcher MUST agree with the
-// platform dispatch runtime matcher (`matchSegmentPattern`) on every pattern an
-// ISR config can use. If they diverge, the TTL baked into the `pages` table
-// won't equal what dispatch resolves at the edge → silent wrong-TTL. This pins
-// the framework matcher to the imported parent source across a matrix that
-// exercises single-segment params, catch-alls, multi-`*`, and literals (dotted).
-describe('matchConfigPattern parity with dispatch matchSegmentPattern', () => {
-  const patterns = [
-    '/blog/:slug',
-    '/blog/*',
-    '/docs/:path{.+}',
-    '/shop/:cat/:id',
-    '/x/*/y/*',
-    '/a.b',
-    '/about',
-  ];
-  const paths = [
-    '/blog/hello',
-    '/blog/a/b',
-    '/docs/x',
-    '/docs/x/y',
-    '/shop/a/1',
-    '/x/1/y/2',
-    '/a.b',
-    '/axb',
-    '/about',
-    '/blog',
-    '/docs',
+// platform dispatch runtime matcher (`matchSegmentPattern`,
+// `packages/dispatch/src/pattern.ts`) on every pattern an ISR config can use. If
+// they diverge, the TTL baked into the `pages` table won't equal what dispatch
+// resolves at the edge → silent wrong-TTL. The framework repo cannot import the
+// platform matcher in its standalone CI, so this pins `matchConfigPattern` to an
+// EXPLICIT golden truth table of dispatch's segment-anchored semantics:
+// `:name` matches ONE segment, `:name{.+}` and `*` cross `/`, a literal dot is
+// literal, patterns are fully anchored. Keep in sync if those semantics change.
+describe('matchConfigPattern parity with dispatch matchSegmentPattern (golden)', () => {
+  const cases: Array<[string, string, boolean]> = [
+    // single-segment param — must NOT cross '/'
+    ['/blog/:slug', '/blog/hello', true],
+    ['/blog/:slug', '/blog/a/b', false],
+    ['/blog/:slug', '/blog', false],
+    // anonymous catch-all '*' — crosses '/'
+    ['/blog/*', '/blog/hello', true],
+    ['/blog/*', '/blog/a/b', true],
+    ['/blog/*', '/blog', false],
+    // named catch-all ':name{.+}' — crosses '/' (the case client patternToRegex gets wrong)
+    ['/docs/:path{.+}', '/docs/x', true],
+    ['/docs/:path{.+}', '/docs/x/y', true],
+    ['/docs/:path{.+}', '/docs', false],
+    // multiple params / multiple '*' (a non-/g '*' replace would break the second '*')
+    ['/shop/:cat/:id', '/shop/a/1', true],
+    ['/shop/:cat/:id', '/shop/a', false],
+    ['/x/*/y/*', '/x/1/y/2', true],
+    ['/x/*/y/*', '/x/1/2', false],
+    // literal dot is a literal, not "any char"
+    ['/a.b', '/a.b', true],
+    ['/a.b', '/axb', false],
+    // a ':name.ext' param GREEDILY swallows the '.ext' into the single-segment
+    // param (matches dispatch — cf. '/blog/:slug.xml' → '^/blog/[^/]+$'); it is
+    // NOT a literal-suffix match, but it still must not cross '/'.
+    ['/files/:name.json', '/files/a.json', true],
+    ['/files/:name.json', '/files/anything', true],
+    ['/files/:name.json', '/files/a/b', false],
+    // literal
+    ['/about', '/about', true],
+    ['/about', '/about/x', false],
   ];
 
-  it('agrees with matchSegmentPattern across the full pattern × path matrix', () => {
-    const divergences: Array<string> = [];
-    for (const pattern of patterns) {
-      for (const path of paths) {
-        if (matchConfigPattern(pattern, path) !== matchSegmentPattern(pattern, path)) {
-          divergences.push(`pattern=${JSON.stringify(pattern)} path=${JSON.stringify(path)}`);
-        }
+  it('matches dispatch segment-anchored semantics across the golden matrix', () => {
+    const wrong: Array<string> = [];
+    for (const [pattern, path, expected] of cases) {
+      if (matchConfigPattern(pattern, path) !== expected) {
+        wrong.push(
+          `pattern=${JSON.stringify(pattern)} path=${JSON.stringify(path)} expected=${expected}`,
+        );
       }
     }
-    expect(divergences).toEqual([]);
+    expect(wrong).toEqual([]);
   });
 });
