@@ -150,6 +150,14 @@ function resolvePageBuildTtl(
  * config" (which may cache), so a per-page `export const revalidate = 0` still
  * wins over any `routing.revalidate` rule for the same path.
  */
+// Route-unaware by design: this table is built from `pageScan.pages` only, so a
+// broad catch-all page with a TTL can shadow a non-`/api` `routes/` handler at
+// dispatch and ISR-cache its response (the worker serves the route, but dispatch
+// resolves the page catch-all's TTL). PRE-EXISTING (a global-number
+// `routing.revalidate` already did this), bounded by dispatch `shouldBypassIsr`
+// (no cross-user auth leak) and `isApiPath` (`/api/*` excluded). Documented in
+// plan 0077 as a bounded known limitation; the eventual fix prepends `routes/`
+// patterns here as `revalidate: 0` opt-outs (with method/overlap caveats).
 export function collectPages(
   pageScan: PageScanResult | null,
   revalidateConfig?: number | Record<string, number> | undefined,
