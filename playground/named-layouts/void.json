@@ -2,5 +2,11 @@
   "$schema": "./node_modules/void/schema.json",
   "worker": {
     "compatibility_date": "2026-02-24"
+  },
+  "routing": {
+    "revalidate": {
+      "/docs": 120,
+      "/docs/ref": 0
+    }
   }
 }

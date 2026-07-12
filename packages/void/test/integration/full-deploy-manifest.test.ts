@@ -250,6 +250,26 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     // The /isr page (pages/isr.server.ts → `export const revalidate = 60`) must
     // survive into the real deploy manifest with its exact TTL.
     expect(pages).toContainEqual({ pattern: '/isr', revalidate: 60 });
+
+    // The object `routing.revalidate` in the fixture void.json is NOT baked into
+    // per-page TTLs — a REAL build must emit the 3-state table + the RAW object
+    // config as `manifest.pathRevalidate` (this is the producer half of the
+    // cross-repo contract dispatch consumes; a manually-constructed manifest
+    // would not prove the actual CLI emits it). `/docs` and `/docs/ref` have no
+    // per-page export, so they ship INHERIT-ELIGIBLE (no `revalidate` key) and
+    // dispatch resolves the per-path config against the real request path.
+    const manifest = captured.finalizeBody!.manifest as unknown as {
+      pathRevalidate?: Record<string, number>;
+    };
+    expect(manifest.pathRevalidate).toEqual({ '/docs': 120, '/docs/ref': 0 });
+    expect(pages).toContainEqual({ pattern: '/docs' });
+    expect(pages).toContainEqual({ pattern: '/docs/ref' });
+    // Neither inherit-eligible page carries a baked `revalidate` (that would be
+    // the unsafe build-time collapse of a per-path config — incl. the `0` opt-out).
+    const docsEntry = pages!.find((p) => p.pattern === '/docs');
+    const docsRefEntry = pages!.find((p) => p.pattern === '/docs/ref');
+    expect(docsEntry).not.toHaveProperty('revalidate');
+    expect(docsRefEntry).not.toHaveProperty('revalidate');
   });
 
   it('suppresses manifest.pages in framework mode (Class-A framework forced via detectFramework)', async () => {
