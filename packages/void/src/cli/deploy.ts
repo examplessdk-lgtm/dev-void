@@ -1054,11 +1054,18 @@ export function assembleVoidManifest(
 ): DeployManifest {
   return buildVoidManifest({
     ...opts,
-    // Bake each page's effective ISR TTL from its own `export const revalidate`
-    // AND the app's `void.json` `routing.revalidate` config (the RAW value, not
-    // the merged `collectRevalidate` map) so the `pages` table is self-sufficient
-    // — dispatch never falls back to the flat map for a matched page.
+    // Bake each page's BUILD-time ISR TTL (3-state) from its own `export const
+    // revalidate` first, then a global-NUMBER `routing.revalidate`. A page under
+    // an OBJECT config bakes NO TTL (inherit-eligible) — see `collectPages`.
     pages: isFrameworkMode ? undefined : collectPages(pageScan, revalidateConfig),
+    // Ship the RAW per-path OBJECT config alongside so dispatch can resolve those
+    // inherit-eligible pages against the ACTUAL request path (honoring per-path
+    // `0` opt-outs a dynamic pattern straddles). Object form only: a number
+    // config is already baked into every `pages` entry, so it is never consulted.
+    pathRevalidate:
+      isFrameworkMode || revalidateConfig == null || typeof revalidateConfig !== 'object'
+        ? undefined
+        : revalidateConfig,
   });
 }
 

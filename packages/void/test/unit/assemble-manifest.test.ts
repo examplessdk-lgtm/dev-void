@@ -76,4 +76,48 @@ describe('assembleVoidManifest', () => {
     const scan = makeScan([makePage('/isr', 60)]);
     expect(assembleVoidManifest(scan, true, { bindings: MINIMAL_BINDINGS }).pages).toBeUndefined();
   });
+
+  it('ships the RAW object config as manifest.pathRevalidate; those pages stay inherit-eligible', () => {
+    // Object `routing.revalidate` is not baked — pages stay inherit-eligible
+    // (absent revalidate) and the RAW config ships so dispatch resolves it
+    // per-path against the real request path.
+    const scan = makeScan([makePage('/blog/:slug'), makePage('/about')]);
+    const manifest = assembleVoidManifest(
+      scan,
+      false,
+      { bindings: MINIMAL_BINDINGS },
+      {
+        '/blog/private': 0,
+        '/blog/*': 3600,
+      },
+    );
+    expect(manifest.pages).toEqual([{ pattern: '/blog/:slug' }, { pattern: '/about' }]);
+    expect(manifest.pathRevalidate).toEqual({ '/blog/private': 0, '/blog/*': 3600 });
+  });
+
+  it('omits manifest.pathRevalidate for a global-number config (baked into every page)', () => {
+    // A number config is fully baked into `pages`, so no inherit-eligible page
+    // exists and pathRevalidate would never be consulted — it is not shipped.
+    const scan = makeScan([makePage('/a'), makePage('/b')]);
+    const manifest = assembleVoidManifest(scan, false, { bindings: MINIMAL_BINDINGS }, 3600);
+    expect(manifest.pages).toEqual([
+      { pattern: '/a', revalidate: 3600 },
+      { pattern: '/b', revalidate: 3600 },
+    ]);
+    expect(manifest.pathRevalidate).toBeUndefined();
+  });
+
+  it('omits manifest.pathRevalidate in framework mode even with an object config', () => {
+    const scan = makeScan([makePage('/blog/:slug')]);
+    const manifest = assembleVoidManifest(
+      scan,
+      true,
+      { bindings: MINIMAL_BINDINGS },
+      {
+        '/blog/*': 3600,
+      },
+    );
+    expect(manifest.pages).toBeUndefined();
+    expect(manifest.pathRevalidate).toBeUndefined();
+  });
 });

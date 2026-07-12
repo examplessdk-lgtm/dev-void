@@ -493,6 +493,7 @@ export function buildVoidManifest(opts: {
   framework?: string;
   revalidate?: number | Record<string, number>;
   pages?: Array<{ pattern: string; revalidate?: number }>;
+  pathRevalidate?: Record<string, number>;
   vars?: Record<string, string>;
   queues?: Array<QueueMeta>;
   prerender?: Array<string>;
@@ -513,6 +514,7 @@ export function buildVoidManifest(opts: {
     framework,
     revalidate,
     pages,
+    pathRevalidate,
     vars,
     queues,
     prerender,
@@ -608,6 +610,10 @@ export function buildVoidManifest(opts: {
 
   if (pages && pages.length > 0) {
     manifest.pages = pages;
+  }
+
+  if (pathRevalidate && Object.keys(pathRevalidate).length > 0) {
+    manifest.pathRevalidate = pathRevalidate;
   }
 
   if (prerender && prerender.length > 0) {

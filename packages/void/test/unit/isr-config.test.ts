@@ -180,11 +180,32 @@ describe('collectPages', () => {
     expect(collectPages(scan, { '/p': 9999 })).toEqual([{ pattern: '/p', revalidate: 120 }]);
   });
 
-  // An explicit `export const revalidate = 0` is an opt-OUT and must NOT be
-  // overridden by an app-wide config (preserves pre-#272 opt-out semantics).
-  it('explicit per-page revalidate=0 opts out and is not overridden by config', () => {
+  // An explicit `export const revalidate = 0` is an opt-OUT: it bakes the
+  // DISTINGUISHED marker `revalidate: 0` (NOT absent) so dispatch treats it as a
+  // deliberate opt-out — never overridden by an app-wide config, never a per-path
+  // inherit. The `0`-vs-absent distinction is load-bearing (see the 3-state test).
+  it('explicit per-page revalidate=0 bakes the distinguished opt-out marker (revalidate:0)', () => {
     const scan = makeScan([makePage('/p', 0)]);
-    expect(collectPages(scan, 3600)).toEqual([{ pattern: '/p' }]);
+    expect(collectPages(scan, 3600)).toEqual([{ pattern: '/p', revalidate: 0 }]);
+    // Even with an object rule for the same path, the explicit opt-out marker wins.
+    expect(collectPages(scan, { '/p': 9999 })).toEqual([{ pattern: '/p', revalidate: 0 }]);
+  });
+
+  // The 3-STATE encoding in one table: a baked number `N` (ISR on), an explicit
+  // `0` (opt-out marker), and an ABSENT revalidate (inherit — dispatch resolves
+  // the per-path config against the real request path). Dispatch relies on the
+  // `0`-vs-absent distinction to tell a deliberate opt-out from "ask the config".
+  it('emits all three states: baked N, explicit 0 opt-out, and absent (inherit)', () => {
+    const scan = makeScan([
+      makePage('/on', 120), // per-page export > 0 → baked N
+      makePage('/off', 0), // per-page export 0 → explicit opt-out marker
+      makePage('/inherit'), // no export, object config → inherit (absent)
+    ]);
+    expect(collectPages(scan, { '/inherit': 60 })).toEqual([
+      { pattern: '/on', revalidate: 120 },
+      { pattern: '/off', revalidate: 0 },
+      { pattern: '/inherit' },
+    ]);
   });
 
   // Test 2 — REGRESSION GUARD (the must-fix): a global-number config must turn
@@ -198,26 +219,28 @@ describe('collectPages', () => {
     ]);
   });
 
-  // Test 3 — an OBJECT (per-path) config is deliberately NOT baked into per-page
-  // TTLs. A page pattern can straddle several config entries (incl. a per-path
-  // `0` opt-out), so collapsing it to one per-page TTL cannot honor the opt-out
-  // and would over-cache. Object-configured pages therefore bake NO TTL (resolve
-  // 0 at the edge); per-page `export const revalidate` is the per-route lever.
-  it('an object config is NOT baked into per-page TTLs (per-path, cannot collapse)', () => {
+  // Test 3 — an OBJECT (per-path) config bakes NO per-page TTL: those pages are
+  // INHERIT-eligible (absent revalidate). A page can straddle several object
+  // entries (incl. a per-path `0`), so it can't collapse to one build-time TTL —
+  // the raw config ships as `manifest.pathRevalidate` and dispatch resolves it
+  // against the ACTUAL request path. Absent revalidate = "ask the edge per-path".
+  it('an object config bakes no per-page TTL (pages are inherit-eligible)', () => {
     const scan = makeScan([makePage('/blog/:slug'), makePage('/about')]);
     expect(collectPages(scan, { '/blog/*': 3600 })).toEqual([
-      { pattern: '/blog/:slug' }, // object config not baked → no revalidate (0)
+      { pattern: '/blog/:slug' }, // inherit-eligible → dispatch resolves per-path
       { pattern: '/about' },
     ]);
   });
 
-  // A per-path `0` opt-out inside an object config is exactly why object configs
-  // are not baked: a naive probe-based collapse would miss the `/blog/private: 0`
-  // rule and over-cache. Nothing is baked, so the opt-out can never be violated.
-  it('does not bake — and so never violates — a per-path 0 opt-out in an object config', () => {
+  // A per-path `0` opt-out inside an object config is exactly why baking is unsafe:
+  // a build-time collapse would miss `/blog/private: 0` and over-cache it. Instead
+  // the page bakes no TTL (inherit) and dispatch resolves the per-path config
+  // against the real path, so `/blog/private` correctly resolves 0 at the edge and
+  // `/blog/other` resolves 3600 — a per-path fidelity build-time baking can't give.
+  it('leaves an object-config page inherit-eligible so a per-path 0 opt-out is honored at the edge', () => {
     const scan = makeScan([makePage('/blog/:slug')]);
     expect(collectPages(scan, { '/blog/private': 0, '/blog/*': 3600 })).toEqual([
-      { pattern: '/blog/:slug' }, // no TTL baked; /blog/private stays opted out at the edge
+      { pattern: '/blog/:slug' }, // no baked TTL; edge honors /blog/private:0 per-path
     ]);
   });
 

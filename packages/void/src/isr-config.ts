@@ -85,70 +85,70 @@ export function collectRevalidate(
 }
 
 /**
- * Resolve a single page's effective ISR TTL at BUILD time so the emitted
- * `pages` table is SELF-SUFFICIENT: dispatch's `resolvePageTtl` first-matches
- * the table and, on a match, uses ONLY that page's baked TTL — it never
- * consults the flat `revalidate` map for a matched page. Before this, a page
- * with no per-page `export const revalidate` baked no TTL, so a Void Pages app
- * that configured ISR through a global-number `void.json` `routing.revalidate`
- * silently lost ISR once the `pages` table shipped (page ISR OFF site-wide).
+ * Resolve a single page's BUILD-time ISR TTL for the 3-STATE `pages` table.
+ * Returns:
+ *   - a number `> 0` — ISR ON with that baked TTL;
+ *   - `0` — an EXPLICIT opt-out (a per-page `export const revalidate = 0`, or a
+ *     global-number config of 0). Dispatch honors it verbatim and does NOT fall
+ *     back to the per-path config;
+ *   - `undefined` — INHERIT-eligible: the page bakes no TTL, and dispatch
+ *     resolves the RAW per-path `routing.revalidate` OBJECT config (shipped as
+ *     `manifest.pathRevalidate`) against the ACTUAL request path at the edge.
  *
- * Two sources, in order — SOURCE-SEPARATED, which is what preserves the
- * plan-0077 catch-all shadowing fix (a no-export page must NOT inherit a
- * SIBLING page's per-page TTL):
+ * Sources, in precedence order — SOURCE-SEPARATED, which preserves the plan-0077
+ * catch-all shadowing fix (a no-export page must NOT inherit a SIBLING page's
+ * per-page TTL — sibling exports never reach this function):
  *   1. an explicit per-page `export const revalidate` is authoritative — a
- *      positive value turns ISR on; an explicit 0 opts the page OUT and is NOT
- *      overridden by the app-wide config below;
+ *      positive value turns ISR on; an explicit `0` opts the page OUT and is NOT
+ *      overridden by the app-wide config;
  *   2. else a global-NUMBER `void.json` `routing.revalidate` (applies to every
- *      page); absent -> 0.
+ *      page: `> 0` on, `0` off);
+ *   3. else (an OBJECT config, or none) → `undefined` (inherit-eligible).
  *
- * An OBJECT (per-path map) `routing.revalidate` is deliberately NOT baked. It is
- * a per-PATH rule set, and a single page pattern can straddle several of its
- * entries — INCLUDING an explicit `0` opt-out on one of them (e.g. page
- * `/blog/:slug` under `{ '/blog/private': 0, '/blog/*': 3600 }`). Collapsing that
- * to one per-page TTL via a single representative probe path cannot honor the
- * `0` and would OVER-cache a path the user opted out of — a correctness
- * violation, not a mere under-cache. So an object-configured pages-mode app does
- * not drive page ISR through the table (matched pages resolve 0); per-page
- * `export const revalidate` is the supported per-route mechanism. See plan 0077.
+ * Why an OBJECT config is resolved at the EDGE, not baked here: it is a per-PATH
+ * rule set, and a single dynamic page pattern can straddle several of its entries
+ * — INCLUDING a per-path `0` opt-out (e.g. page `/blog/:slug` under
+ * `{ '/blog/private': 0, '/blog/*': 3600 }`). Collapsing that to one build-time
+ * TTL cannot honor the `0` and would OVER-cache an opted-out path — a wrong-serve.
+ * Dispatch has the concrete request path, so it resolves each rule per-path
+ * correctly. Baking is only safe for the whole-site number config and per-page
+ * exports (each maps to exactly one TTL). See plan 0077.
  */
 function resolvePageBuildTtl(
   page: PageDefinition,
   revalidateConfig: number | Record<string, number> | undefined,
-): number {
-  // 1. Explicit per-page export wins (0 = explicit opt-out, preserved).
+): number | undefined {
+  // 1. Explicit per-page export wins (0 = explicit opt-out, preserved verbatim).
   if (page.revalidate != null) {
     return page.revalidate > 0 ? page.revalidate : 0;
   }
-  // 2. App-wide void.json `routing.revalidate` — global NUMBER only. An object
-  //    (per-path) config is intentionally not collapsed to a per-page TTL: it
-  //    cannot faithfully honor a per-path `0` opt-out (see the doc comment).
+  // 2. App-wide void.json `routing.revalidate` — global NUMBER only.
   if (typeof revalidateConfig === 'number') {
     return revalidateConfig > 0 ? revalidateConfig : 0;
   }
-  return 0;
+  // 3. Object config (or none) → inherit-eligible; dispatch resolves per-path.
+  return undefined;
 }
 
 /**
- * Build the ordered page-route table shipped in the deploy manifest as
- * `pages`. Emits EVERY page route (with or without a TTL) in `pageScan.pages`
- * order — which is already specificity-sorted (static → dynamic → catch-all)
- * and is the exact order the framework's own `matchRoute` (pages/manifest.ts)
- * resolves in. Patterns are emitted RAW (`:slug`, `:path{.+}`, `*`); the edge
- * matcher (`matchSegmentPattern`) handles `:name{.+}` natively, so — unlike the
- * flat `revalidate` map — catch-alls are NOT collapsed to `*`.
+ * Build the ordered page-route table shipped in the deploy manifest as `pages`.
+ * Emits EVERY page route in `pageScan.pages` order — already specificity-sorted
+ * (static → dynamic → catch-all), the exact order the framework's own
+ * `matchRoute` (pages/manifest.ts) resolves in. Patterns are emitted RAW
+ * (`:slug`, `:path{.+}`, `*`); the edge matcher (`matchSegmentPattern`) handles
+ * `:name{.+}` natively, so — unlike the flat `revalidate` map — catch-alls are
+ * NOT collapsed to `*`.
  *
- * Each page's `revalidate` is resolved at BUILD time (`resolvePageBuildTtl`)
- * from its own `export const revalidate` first, then a global-NUMBER `void.json`
- * `routing.revalidate` config (`revalidateConfig`, the RAW config value — NOT
- * the merged `collectRevalidate` map; an OBJECT per-path config is not baked,
- * see `resolvePageBuildTtl`). This makes the table self-sufficient: dispatch's
- * `resolvePageTtl` never has to fall back to the flat map for a matched page (a
- * matched page with no baked TTL resolves to 0), so a Void Pages app that
- * configures ISR through a global-number `routing.revalidate` keeps its ISR.
+ * Each entry carries a 3-STATE `revalidate` (see `resolvePageBuildTtl`):
+ *   - `revalidate: N` (N > 0) — ISR on with baked TTL N;
+ *   - `revalidate: 0` — EXPLICIT opt-out (per-page `= 0`, or global-0 config);
+ *   - `revalidate` ABSENT — inherit-eligible; dispatch resolves the RAW per-path
+ *     OBJECT config (`manifest.pathRevalidate`) against the real request path.
  *
- * Consumers (dispatch, deploy prewarm) first-match over this list to pick the
- * winning route, then apply that route's `revalidate` (0/absent = not ISR).
+ * The explicit-0 vs absent distinction is load-bearing: it lets dispatch tell a
+ * deliberate opt-out (never cache) apart from "no baked TTL, ask the per-path
+ * config" (which may cache), so a per-page `export const revalidate = 0` still
+ * wins over any `routing.revalidate` rule for the same path.
  */
 export function collectPages(
   pageScan: PageScanResult | null,
@@ -159,6 +159,10 @@ export function collectPages(
   }
   return pageScan.pages.map((page) => {
     const ttl = resolvePageBuildTtl(page, revalidateConfig);
-    return ttl > 0 ? { pattern: page.pattern, revalidate: ttl } : { pattern: page.pattern };
+    // `undefined` → inherit-eligible (omit `revalidate`); a number (0 or N) is
+    // baked verbatim so dispatch can distinguish an explicit opt-out from inherit.
+    return ttl === undefined
+      ? { pattern: page.pattern }
+      : { pattern: page.pattern, revalidate: ttl };
   });
 }

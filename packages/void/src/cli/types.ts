@@ -184,6 +184,16 @@ export type DeployManifest = {
   revalidateQueryAllowlist?: Record<string, Array<string>>;
   /** Ordered page-route table for route-aware ISR resolution (pages mode). */
   pages?: Array<{ pattern: string; revalidate?: number }>;
+  /**
+   * RAW per-path `void.json` `routing.revalidate` OBJECT config (pages mode).
+   * Shipped ALONGSIDE the `pages` table so dispatch can resolve a matched
+   * inherit-eligible page (a `pages` entry with NO baked `revalidate`) against
+   * the ACTUAL request path — honoring per-path rules and `0` opt-outs that a
+   * dynamic page pattern straddles, which build-time baking cannot. Distinct
+   * from (and uncontaminated by) the folded `revalidate` map. Object form only:
+   * a global-number config is already baked into every `pages` entry.
+   */
+  pathRevalidate?: Record<string, number>;
   prerender?: Array<string>;
   assetConfig?: AssetConfig;
   vars?: Record<string, string>;
