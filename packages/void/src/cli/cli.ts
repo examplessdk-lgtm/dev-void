@@ -101,6 +101,8 @@ if (helpPath) {
       spa: deployArgs.spa,
       skipBuild: deployArgs.skipBuild,
       debug: deployArgs.debug,
+      backend: deployArgs.backend,
+      provision: deployArgs.provision,
     }).catch((err) => {
       log.error(err.message ?? err);
       process.exit(1);

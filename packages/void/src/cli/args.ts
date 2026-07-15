@@ -6,6 +6,8 @@ export type DeployArgs = {
   spa?: boolean;
   skipBuild?: boolean;
   debug?: boolean;
+  backend?: 'cloudflare';
+  provision?: boolean;
 };
 
 export function parseDeployArgs(args: Array<string>): DeployArgs {
@@ -19,6 +21,8 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
         spa: { type: 'boolean' },
         'skip-build': { type: 'boolean' },
         debug: { type: 'boolean' },
+        backend: { type: 'string' },
+        provision: { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true,
@@ -62,5 +66,17 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
   const skipBuild = parsed.values['skip-build'] === true ? true : undefined;
   const debug = parsed.values.debug === true ? true : undefined;
 
-  return { projectSlug, dir, spa, skipBuild, debug };
+  const backendValue =
+    typeof parsed.values.backend === 'string' ? parsed.values.backend : undefined;
+  if (backendValue !== undefined && backendValue !== 'cloudflare') {
+    throw new Error("deploy: --backend must be 'cloudflare'.");
+  }
+  const backend = backendValue;
+
+  const provision = parsed.values.provision === true ? true : undefined;
+  if (provision && backend !== 'cloudflare') {
+    throw new Error('deploy: --provision requires --backend cloudflare.');
+  }
+
+  return { projectSlug, dir, spa, skipBuild, debug, backend, provision };
 }

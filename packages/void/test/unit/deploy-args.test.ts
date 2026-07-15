@@ -92,4 +92,41 @@ describe('parseDeployArgs', () => {
   it('throws for unexpected positional arguments', () => {
     expect(() => parseDeployArgs(['my-app'])).toThrow("deploy: Unexpected argument 'my-app'.");
   });
+
+  it('parses --backend cloudflare', () => {
+    const result = parseDeployArgs(['--backend', 'cloudflare']);
+    expect(result.backend).toBe('cloudflare');
+    expect(result.provision).toBeUndefined();
+  });
+
+  it('parses --backend cloudflare --provision', () => {
+    const result = parseDeployArgs(['--backend', 'cloudflare', '--provision']);
+    expect(result.backend).toBe('cloudflare');
+    expect(result.provision).toBe(true);
+  });
+
+  it('throws when --provision is used without --backend cloudflare', () => {
+    expect(() => parseDeployArgs(['--provision'])).toThrow(
+      'deploy: --provision requires --backend cloudflare.',
+    );
+  });
+
+  it('throws for an invalid --backend value', () => {
+    expect(() => parseDeployArgs(['--backend', 'node'])).toThrow(
+      "deploy: --backend must be 'cloudflare'.",
+    );
+  });
+
+  it('parses --backend cloudflare together with --project and --skip-build', () => {
+    const result = parseDeployArgs(['--backend', 'cloudflare', '--project', 'foo', '--skip-build']);
+    expect(result.backend).toBe('cloudflare');
+    expect(result.projectSlug).toBe('foo');
+    expect(result.skipBuild).toBe(true);
+  });
+
+  it('leaves backend undefined when no --backend is given (managed path)', () => {
+    const result = parseDeployArgs([]);
+    expect(result.backend).toBeUndefined();
+    expect(result.provision).toBeUndefined();
+  });
 });

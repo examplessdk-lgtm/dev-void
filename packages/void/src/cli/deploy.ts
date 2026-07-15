@@ -136,6 +136,8 @@ export type RunDeployOptions = {
   spa?: boolean;
   skipBuild?: boolean;
   debug?: boolean;
+  backend?: 'cloudflare';
+  provision?: boolean;
 };
 
 type DeployDoneEvent = Extract<DeployEvent, { event: 'done' }>;
@@ -382,11 +384,33 @@ export function buildEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * Deploy to the user's OWN Cloudflare account (no Void platform).
+ *
+ * Stub: the real orchestration (provisioning, config writing, wrangler deploy)
+ * lands in a later task. It intentionally reads its own config later, so it
+ * takes `root`/`options`/`cliLog` rather than any managed-platform state.
+ */
+async function runCloudflareDeploy(
+  _root: string,
+  _options: RunDeployOptions,
+  _cliLog: CliLogger,
+): Promise<void> {
+  throw new Error('void deploy --backend cloudflare is not yet implemented (Task 6)');
+}
+
 async function runDeployInner(
   root: string,
   options: RunDeployOptions | undefined,
   cliLog: CliLogger,
 ): Promise<void> {
+  // Fork to the self-hosted Cloudflare backend BEFORE any managed-platform work
+  // (auth token, PlatformClient, project resolution, config read, branch
+  // selection). Everything below stays byte-for-byte the managed `void` path.
+  if (options?.backend === 'cloudflare') {
+    return runCloudflareDeploy(root, options, cliLog);
+  }
+
   let reauthenticated = false;
   while (true) {
     try {
