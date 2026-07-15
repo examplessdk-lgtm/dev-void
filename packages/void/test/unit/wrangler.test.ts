@@ -861,4 +861,75 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(q.consumers).toHaveLength(2);
     expect(q.consumers.map((c) => c.queue).sort()).toEqual(['emails', 'jobs']);
   });
+
+  it('updating a matching queue entry preserves user fields + inline comments (no whole-object clobber), and is idempotent', () => {
+    // A matching-but-differing entry must be patched property-by-property, NOT
+    // replaced wholesale: replacing the array element with the narrow inferred
+    // patch would drop the user's tuned fields (producer `delivery_delay`;
+    // consumer `dead_letter_queue`, `max_concurrency`) AND their comments,
+    // silently changing production delivery/retry/concurrency/failure-routing.
+    setup(
+      'wrangler.jsonc',
+      `{
+  // Void manages this file — comments below must survive queue upserts.
+  "queues": {
+    "producers": [
+      // job producer — delivery_delay is user-tuned and must NOT be lost
+      { "queue": "jobs", "binding": "QUEUE_JOBS", "delivery_delay": 60 }
+    ],
+    "consumers": [
+      {
+        "queue": "jobs",
+        "max_batch_size": 10,
+        "dead_letter_queue": "jobs-dlq", // route failures here — must survive
+        "max_concurrency": 3
+      }
+    ]
+  }
+}`,
+    );
+
+    const patch = {
+      queues: {
+        // Matches by binding; differs only because the fixture carries an extra
+        // `delivery_delay` the patch omits. This is exactly the clobber case.
+        producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }],
+        // Matches by queue; changes max_batch_size 10 -> 25 and adds max_retries,
+        // while dead_letter_queue + max_concurrency must be preserved.
+        consumers: [{ queue: 'jobs', max_batch_size: 25, max_retries: 5 }],
+      },
+    };
+
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    // All comments — file-level, producer-level, and the inline one — survive.
+    expect(raw).toContain('// Void manages this file');
+    expect(raw).toContain('// job producer — delivery_delay is user-tuned');
+    expect(raw).toContain('// route failures here — must survive');
+
+    const q = parseRaw('wrangler.jsonc').queues as {
+      producers: Array<Record<string, unknown>>;
+      consumers: Array<Record<string, unknown>>;
+    };
+    expect(q.producers).toHaveLength(1);
+    // Producer: user's delivery_delay preserved; queue/binding untouched.
+    expect(q.producers[0]).toEqual({ queue: 'jobs', binding: 'QUEUE_JOBS', delivery_delay: 60 });
+    expect(q.consumers).toHaveLength(1);
+    // Consumer: supplied fields applied; user's DLQ + concurrency preserved.
+    expect(q.consumers[0]).toEqual({
+      queue: 'jobs',
+      max_batch_size: 25,
+      max_retries: 5,
+      dead_letter_queue: 'jobs-dlq',
+      max_concurrency: 3,
+    });
+
+    // Idempotent — a second run writes nothing and is byte-identical.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
 });

@@ -871,10 +871,24 @@ export function writeProvisionedWranglerConfig(
         (existing) => isRecord(existing) && existing[matchKey] === entry[matchKey],
       );
       if (index >= 0) {
-        if (!jsonEqual(currentList[index], entry)) {
-          set(['queues', section, index], entry);
-          currentList[index] = entry;
+        // Update ONLY the properties this patch supplies — never replace the
+        // whole array element. A whole-object `modify()` at the element index
+        // would drop inline comments AND any sibling fields the narrower
+        // inferred patch omits (producer `delivery_delay`; consumer
+        // `dead_letter_queue`, `max_concurrency`, …), silently changing
+        // production delivery/retry/concurrency/failure-routing. Per-property
+        // edits preserve unmentioned fields and comments, and stay idempotent
+        // (a re-run finds each value already equal and writes nothing).
+        const existing = isRecord(currentList[index]) ? currentList[index] : {};
+        for (const [key, value] of Object.entries(entry)) {
+          if (value === undefined) {
+            continue;
+          }
+          if (!jsonEqual(existing[key], value)) {
+            set(['queues', section, index, key], value);
+          }
         }
+        currentList[index] = { ...existing, ...entry };
       } else {
         // `isArrayInsertion` appends at `currentList.length`; it also creates the
         // `queues` object and the section array when they don't exist yet.
