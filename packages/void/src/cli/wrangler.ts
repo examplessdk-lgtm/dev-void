@@ -13,6 +13,8 @@ import {
 } from '../sandbox/config.ts';
 
 const COMPAT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** UTF-8 byte-order mark. Node's utf-8 read preserves a leading one. */
+const UTF8_BOM = '﻿';
 const NODEJS_ALS_FLAG = 'nodejs_als';
 const NODEJS_COMPAT_FLAG = 'nodejs_compat';
 const VOID_CONFIG_FILE = 'void.json';
@@ -681,20 +683,46 @@ export function ensureWranglerNodejsAlsFlag(root: string): boolean {
   return true;
 }
 
+/** A wrangler `queues.producers[]` entry (written verbatim). */
+export type WranglerQueueProducer = {
+  queue: string;
+  binding: string;
+};
+
+/**
+ * A wrangler `queues.consumers[]` entry (written verbatim, snake_case wrangler
+ * keys). Mirrors exactly what Void's queue scanner / `mergeBindings` emit.
+ */
+export type WranglerQueueConsumer = {
+  queue: string;
+  max_batch_size?: number;
+  max_batch_timeout?: number;
+  max_retries?: number;
+  retry_delay?: number;
+};
+
 /**
  * Patch describing the root-config gaps that `wrangler <res> create
  * --update-config` does NOT fill. `writeProvisionedWranglerConfig` applies these
  * to the project's root `wrangler.jsonc`/`wrangler.json`.
  *
- * NOTE — queues are intentionally NOT part of this patch. The build already
- * emits scanner-derived `queues.producers`/`consumers` into
- * `dist/ssr/wrangler.json` unconditionally (`mergeBindings` in `index.ts` sets
- * `result.queues` whenever `queues.length > 0`, with no `resolved.queues`
- * guard), and `@cloudflare/vite-plugin` merges the plugin's config over the root
- * config with `defu`, whose default merger concatenates arrays. So a
- * root-declared queue entry would DUPLICATE the scanner's in the deployed
- * config. Queue provisioning is handled by `wrangler queues create` in the
- * provisioner, never by editing the root config.
+ * Queues — per-app-class behavior (verified against `index.ts`/`deploy.ts`):
+ *
+ *   - NATIVE Void mode (no meta-framework; `detectFramework` → undefined):
+ *     `mergeBindings` (`index.ts`) emits scanner-derived `queues.producers`/
+ *     `consumers` into `dist/ssr/wrangler.json`, and `@cloudflare/vite-plugin`
+ *     `defu`-merges the plugin config over the root config (arrays CONCATENATE).
+ *     So the caller must NOT pass `queues` for a native app — it would DUPLICATE
+ *     the scanner's entries. Leave `queues` undefined; the build binds them.
+ *
+ *   - FRAMEWORK mode (Class A: `index.ts:738` forces `queues = []`; Class B/C:
+ *     the plugin returns before `mergeBindings` runs): the build emits NO queue
+ *     bindings, yet the queue feature IS supported in production — the deploy
+ *     wrapper (`cli/wrapper.ts`) adds a `queue: handleQueue` consumer to the
+ *     framework worker. On self-host there is no Void platform to bind the
+ *     queues, and `wrangler queues create` has no `--update-config`, so the
+ *     orchestrator (Task 6) passes the inferred producers/consumers here to
+ *     bind them in the root config for framework self-host builds only.
  */
 export type ProvisionedWranglerPatch = {
   /** Cloudflare account id → top-level `account_id` (always overwritten). */
@@ -709,6 +737,19 @@ export type ProvisionedWranglerPatch = {
    * only fills its `migrations_dir`.
    */
   d1MigrationsDir?: { binding: string; dir: string };
+  /**
+   * Queue producer/consumer bindings, upserted into `queues.producers[]` /
+   * `queues.consumers[]` idempotently (producers matched by `binding`, consumers
+   * by `queue` — never duplicated on re-run).
+   *
+   * FRAMEWORK self-host ONLY. See the per-app-class note on this type: a native
+   * Void app already emits scanner queues from the build, so passing `queues`
+   * for one would duplicate them via the `defu` array concat.
+   */
+  queues?: {
+    producers?: Array<WranglerQueueProducer>;
+    consumers?: Array<WranglerQueueConsumer>;
+  };
 };
 
 export type WriteProvisionedWranglerResult = {
@@ -752,12 +793,25 @@ export function writeProvisionedWranglerConfig(
   }
   configPath ??= join(root, 'wrangler.jsonc');
 
-  const original = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : '{}';
+  // Node's utf-8 read preserves a leading BOM; wrangler itself strips the BOM
+  // before parsing. Match that: strip it for parsing/editing, then re-add it on
+  // write so the file's bytes round-trip unchanged.
+  const rawContent = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : '{}';
+  const hasBom = rawContent.startsWith(UTF8_BOM);
+  const original = hasBom ? rawContent.slice(UTF8_BOM.length) : rawContent;
+
   let parsed: Record<string, unknown>;
   try {
     parsed = parseJsonc(original);
-  } catch {
-    parsed = {};
+  } catch (error) {
+    // Fail closed. Never treat an unparseable config as `{}`: that would let the
+    // only-if-absent logic clobber an existing `name`/`compatibility_date`, miss
+    // real `d1_databases[]` entries, and rewrite a malformed file. Throw without
+    // writing so the caller surfaces the problem instead of corrupting the file.
+    throw new Error(
+      `deploy: cannot update "${configPath}" — it is not valid JSON/JSONC. ` +
+        `Fix the file and retry. (${(error as Error).message})`,
+    );
   }
 
   const formattingOptions = detectFormattingOptions(original);
@@ -794,9 +848,56 @@ export function writeProvisionedWranglerConfig(
     }
   }
 
-  const modified = text !== original;
+  // queues — idempotent upsert into `queues.producers[]` / `queues.consumers[]`.
+  // Producers key on `binding`, consumers on `queue`. Framework self-host only
+  // (see the note on ProvisionedWranglerPatch); a native app would duplicate the
+  // build's scanner queues.
+  const upsertQueueEntries = (
+    section: 'producers' | 'consumers',
+    matchKey: 'binding' | 'queue',
+    entries: Array<Record<string, unknown>> | undefined,
+  ): void => {
+    if (!entries || entries.length === 0) {
+      return;
+    }
+    // Re-parse `text` (not the initial `parsed`) so earlier edits in this call
+    // are reflected; track appends locally to keep indices valid.
+    const currentQueues = parseJsonc(text).queues as Record<string, unknown> | undefined;
+    const currentList = Array.isArray(currentQueues?.[section])
+      ? [...(currentQueues[section] as Array<Record<string, unknown>>)]
+      : [];
+    for (const entry of entries) {
+      const index = currentList.findIndex(
+        (existing) => isRecord(existing) && existing[matchKey] === entry[matchKey],
+      );
+      if (index >= 0) {
+        if (!jsonEqual(currentList[index], entry)) {
+          set(['queues', section, index], entry);
+          currentList[index] = entry;
+        }
+      } else {
+        // `isArrayInsertion` appends at `currentList.length`; it also creates the
+        // `queues` object and the section array when they don't exist yet.
+        text = applyEdits(
+          text,
+          modify(text, ['queues', section, currentList.length], entry, {
+            formattingOptions,
+            isArrayInsertion: true,
+          }),
+        );
+        currentList.push(entry);
+      }
+    }
+  };
+  if (patch.queues) {
+    upsertQueueEntries('producers', 'binding', patch.queues.producers);
+    upsertQueueEntries('consumers', 'queue', patch.queues.consumers);
+  }
+
+  const finalText = hasBom ? `${UTF8_BOM}${text}` : text;
+  const modified = finalText !== rawContent;
   if (modified) {
-    writeFileSync(configPath, text);
+    writeFileSync(configPath, finalText);
   }
   return { configPath, modified, d1MigrationsDirSkipped };
 }
@@ -824,4 +925,28 @@ function parseJsonc(text: string): Record<string, unknown> {
     throw new SyntaxError('Failed to parse JSONC');
   }
   return result;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Order-insensitive structural equality — avoids rewriting an entry that only
+ * differs in key order (preserves the file's bytes/comments on that entry). */
+function jsonEqual(a: unknown, b: unknown): boolean {
+  return JSON.stringify(canonicalize(a)) === JSON.stringify(canonicalize(b));
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalize);
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalize(value[key])]),
+    );
+  }
+  return value;
 }

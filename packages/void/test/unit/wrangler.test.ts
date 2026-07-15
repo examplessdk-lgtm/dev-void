@@ -729,4 +729,136 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(raw).toContain('\t"account_id": "acc-tab"');
     expect(parseRaw('wrangler.jsonc').account_id).toBe('acc-tab');
   });
+
+  it('handles a leading UTF-8 BOM: parses (never fail-open), respects only-if-absent, matches D1, keeps the BOM + comments', () => {
+    // Node's utf-8 read preserves the BOM; a fail-open-to-`{}` parser would see
+    // name/compatibility_date as absent and clobber them, and miss the D1 entry.
+    const bomFixture =
+      '﻿' +
+      `{
+  // BOM-prefixed config — must NOT be treated as empty.
+  "name": "user-name",
+  "compatibility_date": "2025-06-01",
+  "d1_databases": [
+    { "binding": "DB", "database_name": "app", "database_id": "abc" }
+  ]
+}`;
+    setup('wrangler.jsonc', bomFixture);
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      accountId: 'acc-bom',
+      name: 'should-not-clobber',
+      compatibilityDate: '2026-02-24',
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    });
+
+    expect(result.modified).toBe(true);
+    // D1 matched despite the BOM (fail-open would have skipped it).
+    expect(result.d1MigrationsDirSkipped).toBe(false);
+
+    const raw = readRaw('wrangler.jsonc');
+    // BOM round-trips (wrangler-compatible) and comments survive.
+    expect(raw.charCodeAt(0)).toBe(0xfeff);
+    expect(raw).toContain('// BOM-prefixed config');
+
+    const parsed = parseJsoncRaw(raw.replace(/^﻿/, '')) as Record<string, unknown>;
+    // Only-if-absent respected — the user's values are NOT clobbered.
+    expect(parsed.name).toBe('user-name');
+    expect(parsed.compatibility_date).toBe('2025-06-01');
+    expect(parsed.account_id).toBe('acc-bom');
+    const d1 = parsed.d1_databases as Array<Record<string, unknown>>;
+    expect(d1[0]).toMatchObject({ binding: 'DB', migrations_dir: 'db/migrations' });
+  });
+
+  it('fails closed on a malformed config — throws without writing', () => {
+    const malformed = '{ "name": "x" "d1_databases": [] }'; // missing comma
+    setup('wrangler.jsonc', malformed);
+    expect(() => writeProvisionedWranglerConfig(tmpDir, { accountId: 'acc-x', name: 'y' })).toThrow(
+      /not valid JSON/,
+    );
+    // The file is left byte-for-byte untouched.
+    expect(readRaw('wrangler.jsonc')).toBe(malformed);
+  });
+
+  it('upserts queue producers/consumers into a config with no queues — exactly one each, comments preserved', () => {
+    setup('wrangler.jsonc', commentedFixture);
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: {
+        producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }],
+        consumers: [{ queue: 'jobs', max_batch_size: 10 }],
+      },
+    });
+
+    expect(result.modified).toBe(true);
+    expect(readRaw('wrangler.jsonc')).toContain('// Void manages this file');
+
+    const q = parseRaw('wrangler.jsonc').queues as {
+      producers: Array<Record<string, unknown>>;
+      consumers: Array<Record<string, unknown>>;
+    };
+    expect(q.producers).toHaveLength(1);
+    expect(q.producers[0]).toEqual({ queue: 'jobs', binding: 'QUEUE_JOBS' });
+    expect(q.consumers).toHaveLength(1);
+    expect(q.consumers[0]).toEqual({ queue: 'jobs', max_batch_size: 10 });
+  });
+
+  it('queue upsert is idempotent — re-running yields exactly one producer + one consumer, byte-identical', () => {
+    setup('wrangler.jsonc', commentedFixture);
+    const patch = {
+      queues: {
+        producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }],
+        consumers: [{ queue: 'jobs', max_batch_timeout: 5 }],
+      },
+    };
+
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+    const afterFirst = readRaw('wrangler.jsonc');
+
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+
+    const q = parseRaw('wrangler.jsonc').queues as {
+      producers: Array<unknown>;
+      consumers: Array<unknown>;
+    };
+    expect(q.producers).toHaveLength(1);
+    expect(q.consumers).toHaveLength(1);
+    // No duplicated producer binding in the emitted text.
+    expect((afterFirst.match(/"binding": "QUEUE_JOBS"/g) ?? []).length).toBe(1);
+  });
+
+  it('appends a new queue producer/consumer without duplicating existing ones, leaving them untouched', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  // existing queue
+  "queues": {
+    "producers": [{ "queue": "jobs", "binding": "QUEUE_JOBS" }],
+    "consumers": [{ "queue": "jobs" }]
+  }
+}`,
+    );
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: {
+        producers: [
+          { queue: 'jobs', binding: 'QUEUE_JOBS' }, // already present — must not duplicate
+          { queue: 'emails', binding: 'QUEUE_EMAILS' }, // new — appended
+        ],
+        consumers: [{ queue: 'emails', max_retries: 3 }],
+      },
+    });
+
+    expect(result.modified).toBe(true);
+    expect(readRaw('wrangler.jsonc')).toContain('// existing queue');
+
+    const q = parseRaw('wrangler.jsonc').queues as {
+      producers: Array<Record<string, unknown>>;
+      consumers: Array<Record<string, unknown>>;
+    };
+    expect(q.producers).toHaveLength(2);
+    expect(q.producers.map((p) => p.binding).sort()).toEqual(['QUEUE_EMAILS', 'QUEUE_JOBS']);
+    expect(q.consumers).toHaveLength(2);
+    expect(q.consumers.map((c) => c.queue).sort()).toEqual(['emails', 'jobs']);
+  });
 });
