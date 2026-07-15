@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { parse as parseJsoncRaw } from 'jsonc-parser';
 import { join } from 'pathe';
 import { describe, it, expect, afterEach } from 'vite-plus/test';
 import {
@@ -10,6 +11,7 @@ import {
   readWranglerCompat,
   resolveLiveBindingConfig,
   syncWranglerBindings,
+  writeProvisionedWranglerConfig,
 } from '../../src/cli/wrangler.ts';
 import type { VoidConfig } from '../../src/config.ts';
 import type { InferredBindings } from '../../src/inference/walk.ts';
@@ -561,5 +563,170 @@ describe('syncWranglerBindings', () => {
   it('returns false when no bindings are needed', () => {
     setup('wrangler.jsonc', '{ "name": "test" }');
     expect(syncWranglerBindings(tmpDir, noBindings)).toBe(false);
+  });
+});
+
+describe('writeProvisionedWranglerConfig', () => {
+  const commentedFixture = `{
+  // Void manages this file — comments below must survive provisioning.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "main": "src/index.ts",
+  /* App databases (real ids written by \`wrangler d1 create --update-config\`). */
+  "d1_databases": [
+    { "binding": "DB", "database_name": "app-db", "database_id": "abc-123" },
+    { "binding": "ANALYTICS", "database_name": "an-db", "database_id": "def-456" }
+  ]
+}`;
+
+  function readRaw(filename: string): string {
+    return readFileSync(join(tmpDir, filename), 'utf-8');
+  }
+
+  function parseRaw(filename: string): Record<string, unknown> {
+    return parseJsoncRaw(readRaw(filename)) as Record<string, unknown>;
+  }
+
+  it('preserves comments while filling account_id, name, compatibility_date, and migrations_dir', () => {
+    setup('wrangler.jsonc', commentedFixture);
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      accountId: 'acc-999',
+      name: 'my-app',
+      compatibilityDate: '2026-02-24',
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    });
+
+    expect(result.modified).toBe(true);
+    expect(result.d1MigrationsDirSkipped).toBe(false);
+    expect(result.configPath).toBe(join(tmpDir, 'wrangler.jsonc'));
+
+    const raw = readRaw('wrangler.jsonc');
+    // Crux: comments must survive the write.
+    expect(raw).toContain('// Void manages this file');
+    expect(raw).toContain('/* App databases');
+
+    const parsed = parseRaw('wrangler.jsonc');
+    expect(parsed.account_id).toBe('acc-999');
+    expect(parsed.name).toBe('my-app');
+    expect(parsed.compatibility_date).toBe('2026-02-24');
+    const d1 = parsed.d1_databases as Array<Record<string, unknown>>;
+    expect(d1[0]).toMatchObject({ binding: 'DB', migrations_dir: 'db/migrations' });
+    // The other D1 entry is untouched.
+    expect(d1[1].migrations_dir).toBeUndefined();
+  });
+
+  it('overwrites account_id but only sets name/compatibility_date when absent', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  // user-owned fields
+  "name": "user-chosen-name",
+  "account_id": "stale-account",
+  "compatibility_date": "2025-01-01"
+}`,
+    );
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      accountId: 'fresh-account',
+      name: 'should-not-clobber',
+      compatibilityDate: '2026-02-24',
+    });
+
+    expect(result.modified).toBe(true);
+    const parsed = parseRaw('wrangler.jsonc');
+    // account_id is always corrected on re-resolve.
+    expect(parsed.account_id).toBe('fresh-account');
+    // name / compatibility_date are only-if-absent — user's values win.
+    expect(parsed.name).toBe('user-chosen-name');
+    expect(parsed.compatibility_date).toBe('2025-01-01');
+    expect(readRaw('wrangler.jsonc')).toContain('// user-owned fields');
+  });
+
+  it('adds migrations_dir to the D1 entry matched by binding, leaving others untouched', () => {
+    setup('wrangler.jsonc', commentedFixture);
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      d1MigrationsDir: { binding: 'ANALYTICS', dir: 'db/analytics-migrations' },
+    });
+
+    expect(result.d1MigrationsDirSkipped).toBe(false);
+    const d1 = parseRaw('wrangler.jsonc').d1_databases as Array<Record<string, unknown>>;
+    expect(d1[0].migrations_dir).toBeUndefined();
+    expect(d1[1]).toMatchObject({
+      binding: 'ANALYTICS',
+      migrations_dir: 'db/analytics-migrations',
+    });
+  });
+
+  it('signals when no D1 entry matches the requested binding and leaves the file untouched', () => {
+    setup('wrangler.jsonc', commentedFixture);
+    const before = readRaw('wrangler.jsonc');
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      d1MigrationsDir: { binding: 'MISSING', dir: 'db/migrations' },
+    });
+
+    expect(result.d1MigrationsDirSkipped).toBe(true);
+    expect(result.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('is idempotent — running twice yields byte-identical output with no duplicate keys/entries', () => {
+    setup('wrangler.jsonc', commentedFixture);
+    const patch = {
+      accountId: 'acc-999',
+      name: 'my-app',
+      compatibilityDate: '2026-02-24',
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    };
+
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+    const afterFirst = readRaw('wrangler.jsonc');
+
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+
+    // No duplicated D1 entries or keys.
+    const d1 = parseRaw('wrangler.jsonc').d1_databases as Array<Record<string, unknown>>;
+    expect(d1).toHaveLength(2);
+    expect((afterFirst.match(/"account_id"/g) ?? []).length).toBe(1);
+    expect((afterFirst.match(/"migrations_dir"/g) ?? []).length).toBe(1);
+  });
+
+  it('operates on wrangler.json when wrangler.jsonc is absent', () => {
+    setup('wrangler.json', '{ "name": "json-app" }');
+    const result = writeProvisionedWranglerConfig(tmpDir, { accountId: 'acc-1' });
+    expect(result.configPath).toBe(join(tmpDir, 'wrangler.json'));
+    expect(parseRaw('wrangler.json').account_id).toBe('acc-1');
+  });
+
+  it('prefers wrangler.jsonc over wrangler.json', () => {
+    setup('wrangler.jsonc', '{ "name": "jsonc-app" }');
+    writeFileSync(join(tmpDir, 'wrangler.json'), '{ "name": "json-app" }');
+    const result = writeProvisionedWranglerConfig(tmpDir, { accountId: 'acc-2' });
+    expect(result.configPath).toBe(join(tmpDir, 'wrangler.jsonc'));
+    expect(parseRaw('wrangler.jsonc').account_id).toBe('acc-2');
+    // The wrangler.json is left untouched.
+    expect(parseRaw('wrangler.json').account_id).toBeUndefined();
+  });
+
+  it('creates wrangler.jsonc when no config exists and a patch is provided', () => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    mkdirSync(tmpDir, { recursive: true });
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      accountId: 'acc-new',
+      name: 'brand-new',
+    });
+    expect(result.configPath).toBe(join(tmpDir, 'wrangler.jsonc'));
+    expect(result.modified).toBe(true);
+    const parsed = parseRaw('wrangler.jsonc');
+    expect(parsed.account_id).toBe('acc-new');
+    expect(parsed.name).toBe('brand-new');
+  });
+
+  it('preserves the fixture indentation style (tabs) for inserted content', () => {
+    setup('wrangler.jsonc', '{\n\t"name": "tabbed"\n}');
+    writeProvisionedWranglerConfig(tmpDir, { accountId: 'acc-tab' });
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('\t"account_id": "acc-tab"');
+    expect(parseRaw('wrangler.jsonc').account_id).toBe('acc-tab');
   });
 });

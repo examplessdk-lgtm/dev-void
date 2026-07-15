@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { parse, type ParseError } from 'jsonc-parser';
+import { applyEdits, modify, parse, type FormattingOptions, type ParseError } from 'jsonc-parser';
 import { join } from 'pathe';
 import type { VoidConfig } from '../config.ts';
 import type { InferredBindings } from '../inference/walk.ts';
@@ -679,6 +679,142 @@ export function ensureWranglerNodejsAlsFlag(root: string): boolean {
   parsed.compatibility_flags = [...compatibilityFlags, NODEJS_ALS_FLAG];
   writeFileSync(configPath, JSON.stringify(parsed, null, 2) + '\n');
   return true;
+}
+
+/**
+ * Patch describing the root-config gaps that `wrangler <res> create
+ * --update-config` does NOT fill. `writeProvisionedWranglerConfig` applies these
+ * to the project's root `wrangler.jsonc`/`wrangler.json`.
+ *
+ * NOTE — queues are intentionally NOT part of this patch. The build already
+ * emits scanner-derived `queues.producers`/`consumers` into
+ * `dist/ssr/wrangler.json` unconditionally (`mergeBindings` in `index.ts` sets
+ * `result.queues` whenever `queues.length > 0`, with no `resolved.queues`
+ * guard), and `@cloudflare/vite-plugin` merges the plugin's config over the root
+ * config with `defu`, whose default merger concatenates arrays. So a
+ * root-declared queue entry would DUPLICATE the scanner's in the deployed
+ * config. Queue provisioning is handled by `wrangler queues create` in the
+ * provisioner, never by editing the root config.
+ */
+export type ProvisionedWranglerPatch = {
+  /** Cloudflare account id → top-level `account_id` (always overwritten). */
+  accountId?: string;
+  /** Worker name → top-level `name` (only written when absent). */
+  name?: string;
+  /** Compatibility date → top-level `compatibility_date` (only written when absent). */
+  compatibilityDate?: string;
+  /**
+   * Adds `migrations_dir` to the `d1_databases[]` entry whose `binding` matches.
+   * The D1 entry itself is created by `wrangler d1 create --update-config`; this
+   * only fills its `migrations_dir`.
+   */
+  d1MigrationsDir?: { binding: string; dir: string };
+};
+
+export type WriteProvisionedWranglerResult = {
+  /** Absolute path of the config file that was operated on. */
+  configPath: string;
+  /** True when the file content changed (or a new file was created). */
+  modified: boolean;
+  /**
+   * True when `d1MigrationsDir` was requested but no `d1_databases[]` entry with
+   * the given binding existed. The orchestrator controls ordering — the D1
+   * entry is created by `wrangler d1 create --update-config` first, so a skip
+   * signals the writer ran before provisioning that binding.
+   */
+  d1MigrationsDirSkipped: boolean;
+};
+
+/**
+ * Fill the parts of the root wrangler config that `wrangler <res> create
+ * --update-config` leaves blank: top-level `account_id`, `name`,
+ * `compatibility_date`, and `migrations_dir` on a specific D1 entry.
+ *
+ * Comment-preserving: uses `jsonc-parser` `modify()` + `applyEdits()` so
+ * comments and unrelated content survive (unlike `syncWranglerBindings`, which
+ * round-trips through `JSON.stringify` and strips comments). Every edit is an
+ * idempotent upsert — running twice produces byte-identical output.
+ */
+export function writeProvisionedWranglerConfig(
+  root: string,
+  patch: ProvisionedWranglerPatch,
+): WriteProvisionedWranglerResult {
+  // Resolve the root config file (same discovery idiom as the rest of this
+  // file: prefer wrangler.jsonc, fall back to wrangler.json, else create
+  // wrangler.jsonc).
+  let configPath: string | undefined;
+  for (const name of ['wrangler.jsonc', 'wrangler.json']) {
+    const p = join(root, name);
+    if (existsSync(p)) {
+      configPath = p;
+      break;
+    }
+  }
+  configPath ??= join(root, 'wrangler.jsonc');
+
+  const original = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : '{}';
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parseJsonc(original);
+  } catch {
+    parsed = {};
+  }
+
+  const formattingOptions = detectFormattingOptions(original);
+  let text = original;
+  const set = (path: Array<string | number>, value: unknown): void => {
+    text = applyEdits(text, modify(text, path, value, { formattingOptions }));
+  };
+
+  // account_id — always overwrite so a re-resolve can correct a stale value.
+  if (patch.accountId !== undefined) {
+    set(['account_id'], patch.accountId);
+  }
+
+  // name / compatibility_date — only when absent (never clobber the user's).
+  if (patch.name !== undefined && parsed.name === undefined) {
+    set(['name'], patch.name);
+  }
+  if (patch.compatibilityDate !== undefined && parsed.compatibility_date === undefined) {
+    set(['compatibility_date'], patch.compatibilityDate);
+  }
+
+  // migrations_dir — upsert onto the D1 entry matched by binding. Indices are
+  // stable because we only set a property (never insert/reorder array entries).
+  let d1MigrationsDirSkipped = false;
+  if (patch.d1MigrationsDir) {
+    const d1Entries = Array.isArray(parsed.d1_databases)
+      ? (parsed.d1_databases as Array<{ binding?: unknown }>)
+      : [];
+    const index = d1Entries.findIndex((entry) => entry.binding === patch.d1MigrationsDir!.binding);
+    if (index >= 0) {
+      set(['d1_databases', index, 'migrations_dir'], patch.d1MigrationsDir.dir);
+    } else {
+      d1MigrationsDirSkipped = true;
+    }
+  }
+
+  const modified = text !== original;
+  if (modified) {
+    writeFileSync(configPath, text);
+  }
+  return { configPath, modified, d1MigrationsDirSkipped };
+}
+
+/**
+ * Detect indentation from an existing config so `jsonc-parser` formats inserted
+ * content to match. Falls back to two-space indentation (the repo default).
+ */
+function detectFormattingOptions(text: string): FormattingOptions {
+  const match = text.match(/^([ \t]+)\S/m);
+  if (match) {
+    const indent = match[1];
+    if (indent.startsWith('\t')) {
+      return { tabSize: 1, insertSpaces: false };
+    }
+    return { tabSize: indent.length, insertSpaces: true };
+  }
+  return { tabSize: 2, insertSpaces: true };
 }
 
 function parseJsonc(text: string): Record<string, unknown> {
