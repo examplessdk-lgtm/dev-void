@@ -1,4 +1,5 @@
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+import { chmodSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'pathe';
 import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
 import {
@@ -276,4 +277,73 @@ describe('resolveWranglerCommand', () => {
 
     expect(resolveWranglerCommand(root, 'deploy')).toBe('wrangler deploy');
   });
+});
+
+describe('resolveProjectCommand shell safety (project root with spaces)', () => {
+  // A dedicated root whose path contains a space + a single quote — both are
+  // shell-significant and must be quoted before the string reaches execSync.
+  const SPACED_TMP = join(import.meta.dirname, ".tmp preset o'space");
+
+  beforeEach(() => {
+    rmSync(SPACED_TMP, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    rmSync(SPACED_TMP, { recursive: true, force: true });
+  });
+
+  function setupSpacedProject(binName: string): { root: string; binPath: string } {
+    mkdirSync(join(SPACED_TMP, 'node_modules', '.bin'), { recursive: true });
+    writeFileSync(join(SPACED_TMP, 'package.json'), JSON.stringify({ dependencies: {} }));
+    const binPath = join(SPACED_TMP, 'node_modules', '.bin', binName);
+    // Executable that prints a sentinel + its args so we can confirm the shell
+    // launched THIS binary (not a truncated `/…/.tmp` prefix from word-splitting).
+    writeFileSync(binPath, `#!/bin/sh\necho "VOID_BIN_OK args=$*"\n`);
+    chmodSync(binPath, 0o755);
+    return { root: SPACED_TMP, binPath };
+  }
+
+  it('quotes the resolved executable path so the shell does not word-split it', () => {
+    const { root, binPath } = setupSpacedProject('wrangler');
+    const cmd = resolveWranglerCommand(root, 'deploy');
+
+    // The bin path (which contains a space and a single quote) must be quoted
+    // as a single token, not left as a bare substring the shell would split.
+    expect(cmd).not.toBe(`${binPath} deploy`);
+    expect(cmd.endsWith(' deploy')).toBe(true);
+    if (process.platform === 'win32') {
+      expect(cmd).toBe(`"${binPath}" deploy`);
+    } else {
+      // POSIX single-quote wrap, embedded `'` escaped as '\''.
+      expect(cmd).toBe(`'${binPath.replace(/'/g, "'\\''")}' deploy`);
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'executes the correct binary through a shell for a spaced root',
+    () => {
+      const { root } = setupSpacedProject('wrangler');
+      const cmd = resolveWranglerCommand(root, 'deploy --dry-run');
+      const out = execSync(cmd, { encoding: 'utf-8' });
+      expect(out).toContain('VOID_BIN_OK');
+      expect(out).toContain('args=deploy --dry-run');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'shell-quotes the vite build path for a spaced root',
+    () => {
+      const { binPath } = setupSpacedProject('vp');
+      // vite-plus present → `vite build` resolves to the local `vp` binary.
+      writeFileSync(
+        join(SPACED_TMP, 'package.json'),
+        JSON.stringify({ devDependencies: { 'vite-plus': '^1.0.0' } }),
+      );
+      const cmd = resolveProjectCommand(SPACED_TMP, 'vite build');
+      expect(cmd).toBe(`'${binPath.replace(/'/g, "'\\''")}' build`);
+      const out = execSync(cmd, { encoding: 'utf-8' });
+      expect(out).toContain('VOID_BIN_OK');
+      expect(out).toContain('args=build');
+    },
+  );
 });

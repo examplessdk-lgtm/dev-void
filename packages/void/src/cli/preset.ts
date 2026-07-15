@@ -146,8 +146,34 @@ export type StaticPreset = {
  */
 export function resolveProjectCommand(root: string, command: string): string {
   const [bin, ...args] = command.trim().split(/\s+/);
-  const resolvedBin = localBin(root, resolveCommandBin(root, bin));
+  const resolvedBin = shellQuoteExecutable(localBin(root, resolveCommandBin(root, bin)));
   return args.length > 0 ? `${resolvedBin} ${args.join(' ')}` : resolvedBin;
+}
+
+/**
+ * Shell-quote a resolved executable path so it survives being concatenated into
+ * a command string. The deploy path runs these via `execSync`/`spawnSync`,
+ * which invoke a shell, so a bare absolute path containing a space (e.g. a
+ * project root like `/tmp/my app`) would be word-split by the shell and try to
+ * exec the wrong binary. Paths with no shell-significant characters are returned
+ * unchanged, so ordinary paths stay byte-identical and copy-pasteable; only the
+ * executable segment is quoted (the trailing subcommand args are known-safe
+ * tokens). Platform-aware: cmd.exe (Windows) uses double quotes, POSIX shells
+ * use single quotes.
+ */
+function shellQuoteExecutable(value: string): string {
+  if (process.platform === 'win32') {
+    // cmd.exe: wrap in double quotes when the path contains a space or a shell
+    // metacharacter. Windows filenames cannot contain `"`, so there is no
+    // embedded quote to escape.
+    return /[\s&|<>^()"]/.test(value) ? `"${value}"` : value;
+  }
+  // POSIX sh: characters in the safe set need no quoting; otherwise single-quote
+  // the path and escape any embedded single quote as '\''.
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 /**
