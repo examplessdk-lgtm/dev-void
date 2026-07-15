@@ -1,6 +1,14 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { applyEdits, modify, parse, type FormattingOptions, type ParseError } from 'jsonc-parser';
+import {
+  applyEdits,
+  modify,
+  parse,
+  parseTree,
+  type FormattingOptions,
+  type Node,
+  type ParseError,
+} from 'jsonc-parser';
 import { join } from 'pathe';
 import type { VoidConfig } from '../config.ts';
 import type { InferredBindings } from '../inference/walk.ts';
@@ -814,6 +822,20 @@ export function writeProvisionedWranglerConfig(
     );
   }
 
+  // Fail closed on duplicate member names BEFORE any edit. jsonc-parser's
+  // `parse()` resolves a duplicate key to the LAST member (the value wrangler
+  // itself reads), but `modify()` edits the FIRST. So an upsert would compare
+  // against the effective (last) value, patch the shadowed (first) member, and
+  // leave wrangler reading the stale value — while a re-run finds the effective
+  // value still unchanged, re-patches the already-correct first member, and
+  // returns `modified: false`, looking byte-idempotent even though the requested
+  // production setting was NEVER applied. This is config-wide (a duplicate
+  // `account_id`, `compatibility_date`, a queue consumer's `max_batch_size`,
+  // etc.). Throwing without writing surfaces the problem instead of silently
+  // mis-editing (matches the malformed-config guard above). We do not "target
+  // the last member": that would leave a malformed, still-duplicated file.
+  assertNoDuplicateMembers(original, configPath);
+
   const formattingOptions = detectFormattingOptions(original);
   let text = original;
   const set = (path: Array<string | number>, value: unknown): void => {
@@ -939,6 +961,63 @@ function parseJsonc(text: string): Record<string, unknown> {
     throw new SyntaxError('Failed to parse JSONC');
   }
   return result;
+}
+
+/**
+ * Throw (without writing) if any object in the config declares the same member
+ * name twice. See the call site for why a duplicate makes property-level upserts
+ * silently ineffective. Walks the jsonc AST so nested objects (queue consumers,
+ * D1 entries, …) are covered, not just the top level.
+ */
+function assertNoDuplicateMembers(text: string, configPath: string): void {
+  const root = parseTree(text, undefined, { allowTrailingComma: true });
+  if (!root) {
+    return;
+  }
+  const walk = (node: Node): void => {
+    if (node.type === 'object' && node.children) {
+      const seen = new Set<string>();
+      for (const property of node.children) {
+        const keyNode = property.children?.[0];
+        const key = keyNode?.value;
+        if (typeof key !== 'string') {
+          continue;
+        }
+        if (seen.has(key)) {
+          const { line, column } = offsetToLineColumn(text, keyNode!.offset);
+          throw new Error(
+            `deploy: cannot update "${configPath}" — duplicate key ${JSON.stringify(key)} ` +
+              `at line ${line}, column ${column}. Wrangler reads the last of two duplicate ` +
+              `members, but this writer edits the first, so the update would silently not ` +
+              `apply. Remove the duplicate and retry.`,
+          );
+        }
+        seen.add(key);
+      }
+    }
+    if (node.children) {
+      for (const child of node.children) {
+        walk(child);
+      }
+    }
+  };
+  walk(root);
+}
+
+/** 1-based line/column for a byte offset — used in duplicate-key error messages. */
+function offsetToLineColumn(text: string, offset: number): { line: number; column: number } {
+  let line = 1;
+  let column = 1;
+  const limit = Math.min(offset, text.length);
+  for (let i = 0; i < limit; i++) {
+    if (text[i] === '\n') {
+      line += 1;
+      column = 1;
+    } else {
+      column += 1;
+    }
+  }
+  return { line, column };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

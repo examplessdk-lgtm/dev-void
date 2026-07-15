@@ -779,6 +779,63 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(malformed);
   });
 
+  it('fails closed on a queue consumer with a duplicated property — throws without writing', () => {
+    // jsonc-parser resolves the duplicate `max_batch_size` to the LAST member (20,
+    // what wrangler reads) but modify() edits the FIRST — so patching to 25 would
+    // leave wrangler on the stale 20 while the write looks byte-idempotent. Reject.
+    const dup = `{
+  "queues": {
+    "consumers": [
+      {
+        "queue": "jobs",
+        "max_batch_size": 10,
+        "max_batch_size": 20
+      }
+    ]
+  }
+}`;
+    setup('wrangler.jsonc', dup);
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { consumers: [{ queue: 'jobs', max_batch_size: 25 }] },
+      }),
+    ).toThrow(/duplicate key "max_batch_size"/);
+    // File left byte-for-byte untouched.
+    expect(readRaw('wrangler.jsonc')).toBe(dup);
+  });
+
+  it('fails closed on a top-level duplicated key (account_id twice) — throws without writing', () => {
+    const dup = `{
+  "account_id": "aaa",
+  "account_id": "bbb"
+}`;
+    setup('wrangler.jsonc', dup);
+    expect(() => writeProvisionedWranglerConfig(tmpDir, { accountId: 'ccc' })).toThrow(
+      /duplicate key "account_id"/,
+    );
+    expect(readRaw('wrangler.jsonc')).toBe(dup);
+  });
+
+  it('does not fire the duplicate guard on a valid config — still upserts and stays idempotent', () => {
+    // Sanity: the guard must not break the normal path. A no-duplicate config
+    // upserts a queue consumer and a second run is byte-identical.
+    setup('wrangler.jsonc', commentedFixture);
+    const patch = {
+      accountId: 'acc-ok',
+      queues: { consumers: [{ queue: 'jobs', max_batch_size: 25 }] },
+    };
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+    const afterFirst = readRaw('wrangler.jsonc');
+
+    const q = parseRaw('wrangler.jsonc').queues as { consumers: Array<Record<string, unknown>> };
+    expect(q.consumers).toEqual([{ queue: 'jobs', max_batch_size: 25 }]);
+
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
   it('upserts queue producers/consumers into a config with no queues — exactly one each, comments preserved', () => {
     setup('wrangler.jsonc', commentedFixture);
     const result = writeProvisionedWranglerConfig(tmpDir, {
