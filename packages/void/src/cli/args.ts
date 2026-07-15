@@ -32,6 +32,10 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
     const message = error instanceof Error ? error.message : String(error);
 
     if (message.includes('argument missing') || message.includes('argument is ambiguous')) {
+      const optionMatch = message.match(/Option '(--[a-z-]+)/);
+      if (optionMatch?.[1] === '--backend') {
+        throw new Error("deploy: --backend requires a value ('cloudflare').");
+      }
       throw new Error('deploy: --project requires a slug.');
     }
 
@@ -49,6 +53,13 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
   );
   if (projectTokens.length > 1) {
     throw new Error('deploy: --project can only be specified once.');
+  }
+
+  const backendTokens = tokens.filter(
+    (token) => token.kind === 'option' && token.name === 'backend',
+  );
+  if (backendTokens.length > 1) {
+    throw new Error('deploy: --backend can only be specified once.');
   }
 
   if (parsed.positionals.length > 0) {

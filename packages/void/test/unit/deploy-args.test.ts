@@ -117,6 +117,24 @@ describe('parseDeployArgs', () => {
     );
   });
 
+  it('throws when --backend is repeated even if the final value is cloudflare', () => {
+    expect(() => parseDeployArgs(['--backend', 'node', '--backend', 'cloudflare'])).toThrow(
+      'deploy: --backend can only be specified once.',
+    );
+  });
+
+  it('throws for duplicate --backend cloudflare flags', () => {
+    expect(() => parseDeployArgs(['--backend', 'cloudflare', '--backend', 'cloudflare'])).toThrow(
+      'deploy: --backend can only be specified once.',
+    );
+  });
+
+  it('throws a backend-specific message when --backend has no value', () => {
+    expect(() => parseDeployArgs(['--backend'])).toThrow(
+      "deploy: --backend requires a value ('cloudflare').",
+    );
+  });
+
   it('parses --backend cloudflare together with --project and --skip-build', () => {
     const result = parseDeployArgs(['--backend', 'cloudflare', '--project', 'foo', '--skip-build']);
     expect(result.backend).toBe('cloudflare');
