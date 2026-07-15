@@ -1,7 +1,12 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'pathe';
 import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
-import { detectPreset, formatProjectCommand, resolveProjectCommand } from '../../src/cli/preset.ts';
+import {
+  detectPreset,
+  formatProjectCommand,
+  resolveProjectCommand,
+  resolveWranglerCommand,
+} from '../../src/cli/preset.ts';
 
 const TMP = join(import.meta.dirname, '.tmp-preset');
 
@@ -238,5 +243,37 @@ describe('project Vite commands', () => {
 
     expect(formatProjectCommand(root, 'vite dev')).toBe('vite dev');
     expect(resolveProjectCommand(root, 'vite build')).toBe('vite build');
+  });
+});
+
+describe('resolveWranglerCommand', () => {
+  it('resolves to the local wrangler binary with the subcommand', () => {
+    const root = setupProject({
+      pkg: { dependencies: { wrangler: '^4.0.0' } },
+      files: { 'node_modules/.bin/wrangler': '' },
+    });
+
+    expect(resolveWranglerCommand(root, 'deploy')).toBe(
+      `${join(root, 'node_modules', '.bin', 'wrangler')} deploy`,
+    );
+  });
+
+  it('preserves multi-argument subcommands', () => {
+    const root = setupProject({
+      pkg: { dependencies: { wrangler: '^4.0.0' } },
+      files: { 'node_modules/.bin/wrangler': '' },
+    });
+
+    expect(resolveWranglerCommand(root, 'd1 create foo --binding DB --update-config')).toBe(
+      `${join(root, 'node_modules', '.bin', 'wrangler')} d1 create foo --binding DB --update-config`,
+    );
+  });
+
+  it('falls back to a bare wrangler command when no local binary exists', () => {
+    const root = setupProject({
+      pkg: { dependencies: { wrangler: '^4.0.0' } },
+    });
+
+    expect(resolveWranglerCommand(root, 'deploy')).toBe('wrangler deploy');
   });
 });

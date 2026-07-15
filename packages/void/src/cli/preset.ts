@@ -151,6 +151,19 @@ export function resolveProjectCommand(root: string, command: string): string {
 }
 
 /**
+ * Resolve a command that runs the project's local `wrangler` binary with the
+ * given subcommand, preferring `node_modules/.bin/wrangler` when available.
+ *
+ * Thin wrapper over {@link resolveProjectCommand}: `wrangler` is not a
+ * special-cased bin (unlike `vite` → `vp`), so delegating reuses the exact
+ * local-bin resolution without duplicating it. Returns a shell command string
+ * suitable for `execSync`/`spawnSync` in the deploy path.
+ */
+export function resolveWranglerCommand(root: string, subcommand: string): string {
+  return resolveProjectCommand(root, `wrangler ${subcommand}`);
+}
+
+/**
  * Format a user-facing command string, rewriting `vite` to `vp` when the
  * project depends on Vite+ without expanding to an absolute local bin path.
  */
