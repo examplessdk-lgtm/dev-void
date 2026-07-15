@@ -989,4 +989,72 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(second.modified).toBe(false);
     expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
   });
+
+  it('producer upsert matches by queue name — repoints a user-renamed binding on the same queue without duplicating, preserving delivery_delay + comments, idempotent', () => {
+    // Regression: the producer identity is the queue NAME, not the binding.
+    // A user who renamed the binding to CUSTOM on queue "jobs" must have it
+    // repointed to Void's deterministic QUEUE_JOBS binding IN PLACE — not have a
+    // second producer for "jobs" appended (which would strand their tuned
+    // `delivery_delay` on the now-unused CUSTOM producer, silently bypassed by
+    // the runtime that sends through QUEUE_JOBS).
+    setup(
+      'wrangler.jsonc',
+      `{
+  // Void manages this file — comments must survive queue upserts.
+  "queues": {
+    "producers": [
+      // user renamed the binding but delivery_delay must NOT be lost
+      { "queue": "jobs", "binding": "CUSTOM", "delivery_delay": 60 }
+    ]
+  }
+}`,
+    );
+
+    const patch = {
+      queues: {
+        producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }],
+      },
+    };
+
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('// Void manages this file');
+    expect(raw).toContain('// user renamed the binding but delivery_delay must NOT be lost');
+
+    const q = parseRaw('wrangler.jsonc').queues as { producers: Array<Record<string, unknown>> };
+    // Exactly ONE producer for "jobs": binding repointed, delivery_delay retained.
+    expect(q.producers).toHaveLength(1);
+    expect(q.producers[0]).toEqual({ queue: 'jobs', binding: 'QUEUE_JOBS', delivery_delay: 60 });
+    // No stranded CUSTOM producer left behind.
+    expect(raw).not.toContain('"CUSTOM"');
+
+    // Idempotent — a second run writes nothing and is byte-identical.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('fails closed when the desired producer binding is already bound to a DIFFERENT queue — throws without writing', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": {
+    "producers": [{ "queue": "other", "binding": "QUEUE_JOBS" }]
+  }
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/already bound to queue "other"/);
+
+    // Fail closed — the file is untouched.
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
 });

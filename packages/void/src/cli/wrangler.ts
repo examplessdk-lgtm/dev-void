@@ -747,8 +747,12 @@ export type ProvisionedWranglerPatch = {
   d1MigrationsDir?: { binding: string; dir: string };
   /**
    * Queue producer/consumer bindings, upserted into `queues.producers[]` /
-   * `queues.consumers[]` idempotently (producers matched by `binding`, consumers
-   * by `queue` — never duplicated on re-run).
+   * `queues.consumers[]` idempotently. BOTH sections match by queue NAME — never
+   * duplicated on re-run. Void derives a producer's binding deterministically
+   * from its queue name (`QUEUE_<NAME>`; see `queues/scan.ts` + `runtime/queues.ts`),
+   * so the queue name — not the binding — is the stable identity. Matching a
+   * producer on `binding` would miss a user-renamed binding sitting on the same
+   * queue and silently append a second producer for it.
    *
    * FRAMEWORK self-host ONLY. See the per-app-class note on this type: a native
    * Void app already emits scanner queues from the build, so passing `queues`
@@ -871,12 +875,15 @@ export function writeProvisionedWranglerConfig(
   }
 
   // queues — idempotent upsert into `queues.producers[]` / `queues.consumers[]`.
-  // Producers key on `binding`, consumers on `queue`. Framework self-host only
+  // BOTH sections key on the queue NAME. Void derives a producer's binding
+  // deterministically from its queue name (`QUEUE_<NAME>`; see `queues/scan.ts` +
+  // `runtime/queues.ts`), so the queue name — not the binding — is the stable
+  // identity; matching a producer on `binding` would miss a user-renamed binding
+  // on the same queue and append a duplicate producer. Framework self-host only
   // (see the note on ProvisionedWranglerPatch); a native app would duplicate the
   // build's scanner queues.
   const upsertQueueEntries = (
     section: 'producers' | 'consumers',
-    matchKey: 'binding' | 'queue',
     entries: Array<Record<string, unknown>> | undefined,
   ): void => {
     if (!entries || entries.length === 0) {
@@ -889,8 +896,30 @@ export function writeProvisionedWranglerConfig(
       ? [...(currentQueues[section] as Array<Record<string, unknown>>)]
       : [];
     for (const entry of entries) {
+      // A producer `binding` must map to exactly ONE queue. If the desired
+      // binding already sits on a producer for a DIFFERENT queue, upserting here
+      // would leave two producers sharing one binding — a config wrangler
+      // rejects. Fail closed (before any write) with an actionable message
+      // rather than emitting the broken config.
+      if (section === 'producers' && typeof entry.binding === 'string') {
+        const conflict = currentList.find(
+          (existing) =>
+            isRecord(existing) &&
+            existing.binding === entry.binding &&
+            existing.queue !== entry.queue,
+        );
+        if (isRecord(conflict)) {
+          throw new Error(
+            `deploy: cannot update "${configPath}" — queue producer binding ` +
+              `${JSON.stringify(entry.binding)} is already bound to queue ` +
+              `${JSON.stringify(conflict.queue)}, but queue ${JSON.stringify(entry.queue)} also ` +
+              `requests it. A producer binding must map to exactly one queue. Rename or remove ` +
+              `the conflicting producer and retry.`,
+          );
+        }
+      }
       const index = currentList.findIndex(
-        (existing) => isRecord(existing) && existing[matchKey] === entry[matchKey],
+        (existing) => isRecord(existing) && existing.queue === entry.queue,
       );
       if (index >= 0) {
         // Update ONLY the properties this patch supplies — never replace the
@@ -926,8 +955,8 @@ export function writeProvisionedWranglerConfig(
     }
   };
   if (patch.queues) {
-    upsertQueueEntries('producers', 'binding', patch.queues.producers);
-    upsertQueueEntries('consumers', 'queue', patch.queues.consumers);
+    upsertQueueEntries('producers', patch.queues.producers);
+    upsertQueueEntries('consumers', patch.queues.consumers);
   }
 
   const finalText = hasBom ? `${UTF8_BOM}${text}` : text;
