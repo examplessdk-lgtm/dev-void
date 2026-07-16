@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { parse as parseJsoncRaw } from 'jsonc-parser';
 import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
@@ -2108,7 +2108,9 @@ describe('provisionCloudflareResources — F4 create postcondition (round 4)', (
         { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }] },
         { runWrangler: run, log: silentLog },
       ),
-    ).rejects.toThrow(/reported success but .* holds no real KV namespace id/s);
+    ).rejects.toThrow(
+      /reported success but .* does not hold the expected KV namespace .*need a real id/s,
+    );
     expect(calls.some((c) => isCall(c, 'kv', 'namespace', 'create'))).toBe(true);
     expect(readConfig().kv_namespaces).toBeUndefined();
   });
@@ -2126,7 +2128,9 @@ describe('provisionCloudflareResources — F4 create postcondition (round 4)', (
         { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
         { runWrangler: run, log: silentLog },
       ),
-    ).rejects.toThrow(/reported success but .* holds no real D1 database id/s);
+    ).rejects.toThrow(
+      /reported success but .* does not hold the expected D1 database .*need a real database_id/s,
+    );
     expect(readConfig().d1_databases).toBeUndefined();
   });
 
@@ -2143,7 +2147,9 @@ describe('provisionCloudflareResources — F4 create postcondition (round 4)', (
         { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'myapp-uploads' } },
         { runWrangler: run, log: silentLog },
       ),
-    ).rejects.toThrow(/reported success but .* holds no real R2 bucket id/s);
+    ).rejects.toThrow(
+      /reported success but .* does not hold the expected R2 bucket .*need a real bucket_name/s,
+    );
     expect(readConfig().r2_buckets).toBeUndefined();
   });
 
@@ -2160,7 +2166,9 @@ describe('provisionCloudflareResources — F4 create postcondition (round 4)', (
         },
         { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
       ),
-    ).rejects.toThrow(/reported success but .* holds no real Hyperdrive config id/s);
+    ).rejects.toThrow(
+      /reported success but .* does not hold the expected Hyperdrive config .*need a real id/s,
+    );
     expect(readConfig().hyperdrive).toBeUndefined();
   });
 });
@@ -2470,5 +2478,337 @@ describe('provisionCloudflareResources — F5 one D1 normalizer (round 5)', () =
     expect(result.resources[0]).toMatchObject({ action: 'adopted', id: 'the-id' });
     const d1 = readConfig().d1_databases as Array<Record<string, unknown>>;
     expect(d1[0].database_id).toBe('the-id');
+  });
+});
+
+describe('provisionCloudflareResources — transport account context (round 6 F1)', () => {
+  it('threads the reconciled account into EVERY wrangler call AND the Hyperdrive lister', async () => {
+    // Config pins the account → it is the reconciled effective account (config wins
+    // over the ambient CLOUDFLARE_ACCOUNT_ID). Every seam invocation must receive it.
+    setup(JSON.stringify({ account_id: 'reconciled-acct' }));
+    const seenRunAccounts: Array<string> = [];
+    const seenListAccounts: Array<string> = [];
+    const run: RunWrangler = (args, opts) => {
+      seenRunAccounts.push(opts.accountId);
+      const sub = args.join(' ');
+      if (/^d1 list --json/.test(sub)) {
+        return ok('[]');
+      }
+      if (/^d1 create /.test(sub)) {
+        simulateUpdateConfig('d1_databases', {
+          binding: 'DB',
+          database_name: 'myapp-db',
+          database_id: 'db-id',
+        });
+        return ok();
+      }
+      if (/^kv namespace list/.test(sub)) {
+        return ok('[]');
+      }
+      if (/^kv namespace create /.test(sub)) {
+        simulateUpdateConfig('kv_namespaces', { binding: 'KV', id: 'kv-id' });
+        return ok();
+      }
+      return ok();
+    };
+    await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        d1: { binding: 'DB', name: 'myapp-db' },
+        kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }],
+        // Empty connection string → only the existence check runs (no create), so the
+        // lister IS invoked and records the account it was called with.
+        hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+      },
+      {
+        runWrangler: run,
+        log: silentLog,
+        listHyperdriveConfigs: async ({ accountId }) => {
+          seenListAccounts.push(accountId);
+          return [];
+        },
+      },
+    );
+    expect(seenRunAccounts.length).toBeGreaterThan(0);
+    for (const acct of seenRunAccounts) {
+      expect(acct).toBe('reconciled-acct');
+    }
+    expect(seenListAccounts).toEqual(['reconciled-acct']);
+  });
+});
+
+describe('provisionCloudflareResources — boundary duplicate-member guard (round 6 F2)', () => {
+  it('fails closed at entry on a config with duplicate kv_namespaces members — NO wrangler/REST calls', async () => {
+    // jsonc-parser.parse() (used by readRootConfig) silently resolves a duplicate to
+    // the LAST member, so without the boundary guard a `kv namespace create` could
+    // orphan or a reuse be false. The SAME strict detector the writer uses runs at the
+    // provisioner boundary — before account persistence, discovery, or any remote work.
+    setup(`{
+  "account_id": "acct",
+  "kv_namespaces": [{ "binding": "KV", "id": "aaa" }],
+  "kv_namespaces": [{ "binding": "KV", "id": "bbb" }]
+}`);
+    let restCalled = false;
+    const { run, calls } = makeRunner([{ match: /.*/, reply: () => ok() }]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }] },
+        {
+          runWrangler: run,
+          log: silentLog,
+          listHyperdriveConfigs: async () => {
+            restCalled = true;
+            return [];
+          },
+        },
+      ),
+    ).rejects.toThrow(/duplicate key "kv_namespaces"/);
+    expect(calls).toEqual([]);
+    expect(restCalled).toBe(false);
+  });
+});
+
+describe('provisionCloudflareResources — Hyperdrive list validation at the caller (round 6 F3)', () => {
+  const hdDesired: DesiredResourceSet = {
+    ...emptyDesired,
+    hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+  };
+
+  function provisionWithInjectedList(list: Array<unknown>): Promise<unknown> {
+    setup(JSON.stringify({ account_id: 'acct' }));
+    const { run } = makeRunner([{ match: /.*/, reply: () => ok() }]);
+    return provisionCloudflareResources(tmpDir, wranglerPath, hdDesired, {
+      runWrangler: run,
+      log: silentLog,
+      // The injected lister LIES about its return type — the caller-side validator must
+      // reject the malformed shape at runtime rather than adopt an empty/garbage id.
+      listHyperdriveConfigs: async () => list as never,
+    });
+  }
+
+  it('fails closed on an injected entry with an EMPTY id — never adopts', async () => {
+    await expect(provisionWithInjectedList([{ id: '', name: 'myapp-hd' }])).rejects.toThrow(
+      /malformed config entry/,
+    );
+    expect(readConfig().hyperdrive).toBeUndefined();
+  });
+
+  it('fails closed on a non-object member', async () => {
+    await expect(provisionWithInjectedList([null])).rejects.toThrow(/malformed config entry/);
+    expect(readConfig().hyperdrive).toBeUndefined();
+  });
+
+  it('fails closed on a duplicate id across members', async () => {
+    await expect(
+      provisionWithInjectedList([
+        { id: 'dup', name: 'other' },
+        { id: 'dup', name: 'myapp-hd' },
+      ]),
+    ).rejects.toThrow(/duplicate config id/);
+    expect(readConfig().hyperdrive).toBeUndefined();
+  });
+
+  it('fails closed on 2 configs sharing the requested name (ambiguous)', async () => {
+    await expect(
+      provisionWithInjectedList([
+        { id: 'x', name: 'myapp-hd' },
+        { id: 'y', name: 'myapp-hd' },
+      ]),
+    ).rejects.toThrow(/share that name/);
+    expect(readConfig().hyperdrive).toBeUndefined();
+  });
+});
+
+describe('provisionCloudflareResources — resource-specific create postcondition (round 6 F4)', () => {
+  it('R2: fails closed when create writes a DIFFERENT bucket_name than requested', async () => {
+    setup(JSON.stringify({ account_id: 'acct' }));
+    const { run } = makeRunner([
+      { match: /^r2 bucket info /, reply: () => fail('', 'The specified bucket does not exist') },
+      {
+        match: /^r2 bucket create /,
+        reply: () => {
+          // create "succeeds" but writes a DIFFERENT bucket than requested (a race /
+          // stale --update-config / wrong-account write). bucket_name IS the identity.
+          simulateUpdateConfig('r2_buckets', { binding: 'STORAGE', bucket_name: 'other-bucket' });
+          return ok();
+        },
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'myapp-uploads' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/does not hold the expected R2 bucket .*bucket_name === "myapp-uploads"/s);
+  });
+
+  it('D1: fails closed when create writes a real id but a MISMATCHED database_name', async () => {
+    setup(JSON.stringify({ account_id: 'acct' }));
+    const { run } = makeRunner([
+      { match: /^d1 list --json/, reply: () => ok('[]') },
+      {
+        match: /^d1 create /,
+        reply: () => {
+          simulateUpdateConfig('d1_databases', {
+            binding: 'DB',
+            database_name: 'other-db',
+            database_id: 'real-id',
+          });
+          return ok();
+        },
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/does not hold the expected D1 database .*database_name === "myapp-db"/s);
+  });
+});
+
+describe('provisionCloudflareResources — cross-process Hyperdrive lock (round 6 F6)', () => {
+  const lockPath = `${wranglerPath}.void-provision.lock`;
+  const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('two concurrent Hyperdrive provisions race — exactly ONE create, the other reuses', async () => {
+    setup(
+      JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
+    );
+    let createCalls = 0;
+    const makeProv = (): Promise<{ resources: Array<{ kind: string; action: string }> }> => {
+      const run: RunWrangler = (args) => {
+        if (isCall(args, 'hyperdrive', 'create')) {
+          createCalls++;
+          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: `hd-${createCalls}` });
+          return ok();
+        }
+        return ok();
+      };
+      return provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+        },
+        {
+          runWrangler: run,
+          log: silentLog,
+          // Barrier: the winner holds the lock while LISTING (40ms), so the loser spins
+          // on the lock — proving the LOCK (not accidental sequencing) serializes them.
+          listHyperdriveConfigs: async () => {
+            await delay(40);
+            return [];
+          },
+        },
+      ) as Promise<{ resources: Array<{ kind: string; action: string }> }>;
+    };
+    const [a, b] = await Promise.all([makeProv(), makeProv()]);
+    const actions = [...a.resources, ...b.resources]
+      .filter((r) => r.kind === 'hyperdrive')
+      .map((r) => r.action)
+      .sort();
+    // Exactly one create; the second read-first (inside the lock) reused the first's id.
+    expect(createCalls).toBe(1);
+    expect(actions).toEqual(['created', 'reused']);
+    // Lock always released — no leak.
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('breaks a STALE lock (old timestamp) and proceeds', async () => {
+    setup(
+      JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
+    );
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: process.pid, timestamp: Date.now() - 10 * 60_000 }),
+    );
+    const { run } = makeRunner([
+      {
+        match: /^hyperdrive create /,
+        reply: () => {
+          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: 'hd-real' });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+      },
+      { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
+    );
+    expect(result.resources.find((r) => r.kind === 'hyperdrive')?.action).toBe('created');
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('breaks a STALE lock (dead pid) and proceeds', async () => {
+    setup(
+      JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
+    );
+    // Find a PID that is definitely NOT alive (process.kill throws ESRCH).
+    let deadPid = 999999;
+    for (let pid = 999999; pid > 1; pid--) {
+      try {
+        process.kill(pid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+          deadPid = pid;
+          break;
+        }
+      }
+    }
+    writeFileSync(lockPath, JSON.stringify({ pid: deadPid, timestamp: Date.now() }));
+    const { run } = makeRunner([
+      {
+        match: /^hyperdrive create /,
+        reply: () => {
+          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: 'hd-real' });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+      },
+      { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
+    );
+    expect(result.resources.find((r) => r.kind === 'hyperdrive')?.action).toBe('created');
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('always releases the lock even when the provision THROWS (no leak)', async () => {
+    setup(
+      JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
+    );
+    const { run } = makeRunner([{ match: /^hyperdrive create /, reply: () => fail('', 'boom') }]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+        },
+        { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
+      ),
+    ).rejects.toThrow(/hyperdrive create myapp-hd.*failed/s);
+    expect(existsSync(lockPath)).toBe(false);
   });
 });

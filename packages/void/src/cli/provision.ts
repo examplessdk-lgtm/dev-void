@@ -1,10 +1,14 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { parse, type ParseError } from 'jsonc-parser';
 import { resolve } from 'pathe';
 import { voidLog, voidWarn } from '../log.ts';
 import { resolveWranglerArgv } from './preset.ts';
-import { writeProvisionedWranglerConfig, type WriteProvisionedWranglerResult } from './wrangler.ts';
+import {
+  assertNoDuplicateMembers,
+  writeProvisionedWranglerConfig,
+  type WriteProvisionedWranglerResult,
+} from './wrangler.ts';
 
 /**
  * The set of Cloudflare resources an app needs, computed by the deploy
@@ -61,10 +65,22 @@ export type RunWranglerResult = {
  * array element and is passed literally to the process (no shell), so shell
  * metacharacters (`&`, `$`, `;`, spaces) can never split, inject, or drop args.
  */
-export type RunWrangler = (
-  args: Array<string>,
-  opts?: { cwd?: string; captureJson?: boolean },
-) => RunWranglerResult;
+/**
+ * F1 — the transport context threaded into EVERY wrangler invocation (default AND
+ * injected). Its `accountId` is the ONE reconciled effective account this whole
+ * provision is pinned to: the default runner uses it to pin the spawned wrangler's
+ * env (`CLOUDFLARE_ACCOUNT_ID` + the top-level `--env=` on every argv), and an
+ * injected seam MUST bind its own transport to the SAME account (so it can never
+ * query account B while the config pins A and write a same-name B result into A).
+ */
+export interface WranglerCallContext {
+  /** The reconciled effective Cloudflare account (never empty for a real call). */
+  accountId: string;
+  cwd?: string;
+  captureJson?: boolean;
+}
+
+export type RunWrangler = (args: Array<string>, opts: WranglerCallContext) => RunWranglerResult;
 
 /** A Cloudflare Hyperdrive config as returned by the account-list existence check. */
 export interface HyperdriveConfig {
@@ -79,8 +95,14 @@ export interface HyperdriveConfig {
  * ({@link createDefaultListHyperdriveConfigs}) calls
  * `GET /accounts/{id}/hyperdrive/configs`; unit tests inject a stub so no real
  * network call runs.
+ *
+ * F1 — the lister receives the reconciled `accountId` as an explicit transport
+ * context (never a closure-only binding), so an injected lister can never query a
+ * DIFFERENT account than the one the config is pinned to.
  */
-export type ListHyperdriveConfigs = () => Promise<Array<HyperdriveConfig>>;
+export type ListHyperdriveConfigs = (ctx: {
+  accountId: string;
+}) => Promise<Array<HyperdriveConfig>>;
 
 /** Per-resource outcome, so the orchestrator can log what happened. */
 export interface ProvisionOutcome {
@@ -168,18 +190,18 @@ export function provisionEnv(accountId?: string): NodeJS.ProcessEnv {
  * injection). Captures stdout (for `--json` parsing) and stderr (for
  * error/collision detection). Never called in unit tests — those inject a stub.
  */
-export function createDefaultRunWrangler(
-  root: string,
-  options?: { accountId?: string },
-): RunWrangler {
+export function createDefaultRunWrangler(root: string): RunWrangler {
   const launcher = resolveWranglerArgv(root);
   const [command, ...prefix] = launcher;
   return (args, opts) => {
     const result = spawnSync(command, [...prefix, ...args], {
-      cwd: opts?.cwd ?? root,
+      cwd: opts.cwd ?? root,
       shell: false,
       encoding: 'utf-8',
-      env: provisionEnv(options?.accountId),
+      // F1 — pin the account PER CALL from the transport context, so the spawned
+      // wrangler targets the SAME reconciled account the config + Hyperdrive REST
+      // path use (no split-brain between the config pin and the ambient env).
+      env: provisionEnv(opts.accountId),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -264,15 +286,14 @@ function isCleanFailure(result: RunWranglerResult): boolean {
  * it cannot be built (no account id / no token) — the caller then fails closed
  * before any blind create. Never called in unit tests — those inject a stub.
  */
-function createDefaultListHyperdriveConfigs(
-  accountId?: string,
-  apiToken?: string,
-): ListHyperdriveConfigs | undefined {
+function createDefaultListHyperdriveConfigs(apiToken?: string): ListHyperdriveConfigs | undefined {
   const token = apiToken ?? process.env.CLOUDFLARE_API_TOKEN;
-  if (!accountId || !token) {
+  if (!token) {
     return undefined;
   }
-  return async () => {
+  // F1 — the account comes from the per-call transport context (not a closure), so
+  // this default REST lister always targets the reconciled effective account.
+  return async ({ accountId }) => {
     // Fetch ALL pages (Hyperdrive names are NOT unique — paid accounts allow
     // ~25 configs, paginated) and FAIL CLOSED on any non-2xx, `success !== true`,
     // or a malformed entry. Never coerce a malformed envelope/entry to "absence":
@@ -363,8 +384,188 @@ function createDefaultListHyperdriveConfigs(
         break;
       }
     }
+    // NOTE: the per-entry id/name + duplicate-id checks above are needed for this REST
+    // path's pagination-completeness PROOF (the `byId` map). They are NOT the adoption
+    // gate: `selectHyperdriveMatch` at the CALLER is the single authoritative validator
+    // that covers BOTH this default path AND any injected lister (F3).
     return [...byId.values()];
   };
+}
+
+/**
+ * F3 — the ONE strict Hyperdrive-list validator, applied at the CALLER after EITHER
+ * lister returns (the default fetch OR an injected seam), so validation can never live
+ * only inside the default fetch. Rejects any non-object member, empty/non-string `id`
+ * or `name`, and duplicate `id`; then requires EXACTLY 0 or 1 exact-name match (>1 is
+ * ambiguous — Hyperdrive names are NOT account-unique — and fails closed) BEFORE any
+ * match/write. Returns the single exact-name match, or `undefined` when none matches.
+ * Without this, an injected `[{ id:'', name: requested }]` would be adopted with an
+ * EMPTY id.
+ */
+function selectHyperdriveMatch(
+  configs: Array<unknown>,
+  name: string,
+  configPath: string,
+): HyperdriveConfig | undefined {
+  const seenIds = new Set<string>();
+  const validated: Array<HyperdriveConfig> = [];
+  for (const config of configs) {
+    if (
+      !isRecord(config) ||
+      typeof config.id !== 'string' ||
+      config.id.length === 0 ||
+      typeof config.name !== 'string' ||
+      config.name.length === 0
+    ) {
+      throw new Error(
+        `provision: the Hyperdrive existence check returned a malformed config entry (each must be ` +
+          `an object with a non-empty string id and name). Cannot verify whether ` +
+          `${JSON.stringify(name)} already exists; refusing to create a possible duplicate.`,
+      );
+    }
+    if (seenIds.has(config.id)) {
+      throw new Error(
+        `provision: the Hyperdrive existence check returned a duplicate config id ` +
+          `${JSON.stringify(config.id)}. Cannot verify existing configs; refusing to create a ` +
+          `possible duplicate.`,
+      );
+    }
+    seenIds.add(config.id);
+    validated.push({ id: config.id, name: config.name });
+  }
+  const named = validated.filter((c) => c.name === name);
+  if (named.length > 1) {
+    throw new Error(
+      `provision: cannot adopt Hyperdrive config ${JSON.stringify(name)} — ${named.length} configs ` +
+        `in this account share that name (ids: ${named.map((c) => c.id).join(', ')}). Hyperdrive ` +
+        `names are not account-unique; remove the duplicates or pin the id in "${configPath}", then ` +
+        `retry.`,
+    );
+  }
+  return named[0];
+}
+
+// --- F6: cross-process provision lock ------------------------------------------
+// Hyperdrive is an unguarded list→create and its names are NOT account-unique, so two
+// concurrent provisions could both see "no match" and both create — a permanent
+// orphaned duplicate that read-first then hides forever. Serialize the list→create
+// across processes with a lockfile keyed on the resolved config path (O_EXCL create).
+// A second concurrent run blocks until the first releases, then its read-first (done
+// INSIDE the lock) sees the id the first wrote and SKIPS.
+
+interface ProvisionLock {
+  release: () => void;
+}
+
+/**
+ * A lock older than this — or whose holder PID is dead — is STALE and safe to break, so
+ * a crashed provision cannot wedge every future one. Generous vs. a real provision's
+ * duration.
+ */
+const LOCK_STALE_MS = 120_000;
+/** How long to wait for a held (non-stale) lock before giving up. */
+const LOCK_ACQUIRE_TIMEOUT_MS = 60_000;
+/** Poll interval while waiting for a held lock. */
+const LOCK_POLL_MS = 50;
+
+const lockDelay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * True when a PID is still alive. `process.kill(pid, 0)` sends NO signal but throws
+ * `ESRCH` for a dead process and `EPERM` for a live one we may not signal (still alive).
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Decide whether a currently-held lockfile is STALE (safe to break): a corrupt/malformed
+ * lock, one older than {@link LOCK_STALE_MS}, or one whose holder PID is dead. A lock
+ * that VANISHED (already released between the EEXIST and this read) is NOT stale — the
+ * caller's retry re-acquires it cleanly.
+ */
+function isStaleLock(lockPath: string): boolean {
+  let raw: string;
+  try {
+    raw = readFileSync(lockPath, 'utf-8');
+  } catch {
+    return false;
+  }
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return true;
+  }
+  if (!isRecord(data) || typeof data.pid !== 'number' || typeof data.timestamp !== 'number') {
+    return true;
+  }
+  if (Date.now() - data.timestamp > LOCK_STALE_MS) {
+    return true;
+  }
+  return !isProcessAlive(data.pid);
+}
+
+/**
+ * Acquire the cross-process provision lock via an O_EXCL (`'wx'`) create holding
+ * `{ pid, timestamp }`. Breaks a STALE lock (dead PID / too old), waits out a live one
+ * up to {@link LOCK_ACQUIRE_TIMEOUT_MS}, and returns a handle whose `release()` removes
+ * the lockfile. ALWAYS call `release()` in a `finally` so an interruption never leaks
+ * the lock.
+ */
+async function acquireProvisionLock(configPath: string): Promise<ProvisionLock> {
+  const lockPath = `${configPath}.void-provision.lock`;
+  const deadline = Date.now() + LOCK_ACQUIRE_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, 'wx');
+      try {
+        writeFileSync(fd, JSON.stringify({ pid: process.pid, timestamp: Date.now() }));
+      } finally {
+        closeSync(fd);
+      }
+      let released = false;
+      return {
+        release: () => {
+          if (released) {
+            return;
+          }
+          released = true;
+          try {
+            rmSync(lockPath, { force: true });
+          } catch {
+            // best-effort: a stale-sweep or manual cleanup may have removed it already
+          }
+        },
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw error;
+      }
+      // Held by someone. Break it if stale; otherwise wait and retry until the deadline.
+      if (isStaleLock(lockPath)) {
+        try {
+          rmSync(lockPath, { force: true });
+        } catch {
+          // another racer may have broken it first — just retry the O_EXCL create
+        }
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `provision: timed out after ${LOCK_ACQUIRE_TIMEOUT_MS}ms waiting for the provision lock ` +
+            `at "${lockPath}". Another provision is running for this config; retry once it finishes, ` +
+            `or remove a stale lockfile.`,
+        );
+      }
+      await lockDelay(LOCK_POLL_MS);
+    }
+  }
 }
 
 /**
@@ -702,6 +903,15 @@ interface CreatePostcondition {
   field: string;
   /** The member key that must hold a REAL (non-placeholder) id afterward. */
   idField: string;
+  /**
+   * F4 — when set, the member key that must EXACTLY equal the requested name (the
+   * resource's IDENTITY). R2's `bucket_name` and D1's `database_name` ARE the
+   * identity, so a create that wrote a DIFFERENT resource's name (a race, a stale
+   * `--update-config`, a wrong-account write) must fail closed rather than binding the
+   * app to the wrong resource. KV/Hyperdrive config entries carry no name to
+   * cross-check, so they verify only a real id.
+   */
+  nameField?: string;
   /** Human resource name for the message. */
   resource: string;
   /** Command name for the message. */
@@ -709,16 +919,20 @@ interface CreatePostcondition {
 }
 
 /**
- * F4 backstop — verify a create's POSTCONDITION. wrangler 4.107's `bin.wrangler`
- * is a WRAPPER that spawns `wrangler-dist/cli.js` and maps a signal-killed child
- * (`code === null`) to `process.exit(0)`, so `spawnSync` can see a `create` report
- * "success" though the real CLI was killed and `--update-config` wrote NO id.
- * After every config-writing create (d1/kv/r2/hyperdrive) reports success we
- * RE-READ the resolved config and CONFIRM the target binding now holds a REAL id;
- * otherwise we FAIL CLOSED. This also catches any partial/silent create failure,
- * not only kills. (Queue creates write NO config, so they cannot be verified this
- * way — a killed queue-create self-heals on the next read-first/probe run, which
- * re-detects absence and re-creates.)
+ * F4 backstop — verify a create's POSTCONDITION, RESOURCE-SPECIFICALLY + identity
+ * checked. wrangler 4.107's `bin.wrangler` is a WRAPPER that spawns
+ * `wrangler-dist/cli.js` and maps a signal-killed child (`code === null`) to
+ * `process.exit(0)`, so `spawnSync` can see a `create` report "success" though the
+ * real CLI was killed and `--update-config` wrote NO id. After every config-writing
+ * create (d1/kv/r2/hyperdrive) reports success we RE-READ the resolved config and
+ * CONFIRM the target binding now holds a REAL id AND — where the resource's name is
+ * its identity (R2 `bucket_name`, D1 `database_name`) — that the recorded name EXACTLY
+ * matches the requested one; otherwise we FAIL CLOSED. A bare "some non-placeholder
+ * value" check is NOT enough: for R2, `bucket_name` IS the identity, so
+ * `{ bucket_name: 'other' }` would otherwise pass and bind the WRONG bucket. This also
+ * catches any partial/silent create failure, not only kills. (Queue creates write NO
+ * config, so they cannot be verified this way — a killed queue-create self-heals on
+ * the next read-first/probe run, which re-detects absence and re-creates.)
  */
 function assertCreateWroteRealId(
   configPath: string,
@@ -727,12 +941,16 @@ function assertCreateWroteRealId(
   name: string,
 ): void {
   const entry = findBindingEntry(readRootConfig(configPath)[spec.field], binding);
-  if (!entry || !isRealValue(entry[spec.idField])) {
+  const idOk = !!entry && isRealValue(entry[spec.idField]);
+  const nameOk = spec.nameField === undefined || (!!entry && entry[spec.nameField] === name);
+  if (!idOk || !nameOk) {
     throw new Error(
-      `provision: "${spec.command} ${name}" reported success but "${configPath}" holds no real ` +
-        `${spec.resource} id for binding ${JSON.stringify(binding)} afterward. The create may have ` +
-        `been interrupted — wrangler's launcher can mask a signal-killed child as exit 0. Refusing ` +
-        `to record an unprovisioned resource; inspect the account/config and retry.`,
+      `provision: "${spec.command} ${name}" reported success but "${configPath}" does not hold the ` +
+        `expected ${spec.resource} for binding ${JSON.stringify(binding)} afterward (need a real ` +
+        `${spec.idField}${spec.nameField ? ` and ${spec.nameField} === ${JSON.stringify(name)}` : ''}). ` +
+        `The create may have been interrupted or written a different resource — wrangler's launcher ` +
+        `can mask a signal-killed child as exit 0. Refusing to record a wrong/unprovisioned ` +
+        `resource; inspect the account/config and retry.`,
     );
   }
 }
@@ -812,6 +1030,20 @@ export async function provisionCloudflareResources(
   // relative `rootWranglerPath` would let Node inspect one file while wrangler
   // creates against another (orphan). An already-absolute path is returned as-is.
   const configPath = resolve(root, rootWranglerPath);
+
+  // --- F2: strict duplicate-member guard at the PROVISIONER BOUNDARY --------
+  // `jsonc-parser.parse()` (used by `readRootConfig`) does NOT flag duplicate object
+  // members, and the Task 3 writer's duplicate-member guard only runs when the writer
+  // is invoked — which is SKIPPED when `account_id` is already correct. So without
+  // this, a config with duplicated members (e.g. two `kv_namespaces` arrays) could
+  // reach `kv namespace create` (orphan) or be falsely "reused". Run the SAME strict
+  // detection the writer uses (reused, not re-implemented) at the boundary — before
+  // account persistence, discovery, or ANY remote side effect — and fail closed.
+  if (existsSync(configPath)) {
+    const raw = readFileSync(configPath, 'utf-8');
+    const content = raw.startsWith(UTF8_BOM) ? raw.slice(UTF8_BOM.length) : raw;
+    assertNoDuplicateMembers(content, configPath);
+  }
 
   // --- F2: resource-name validation (BEFORE any argv / remote work) ---------
   // Every name that becomes a wrangler ARGV POSITIONAL is validated up front, so an
@@ -910,13 +1142,26 @@ export async function provisionCloudflareResources(
     accountIdWritten = true;
   }
 
+  // F1 — the reconciled effective account, threaded as the transport context into
+  // EVERY wrangler + Hyperdrive invocation below (default AND injected). The boundary
+  // fence above guarantees a resolved account for ALL remote work, so this non-null
+  // assertion is sound wherever a seam is actually called (an empty `desired` reaches
+  // no seam and never reads it).
+  const transportAccountId = effectiveAccountId!;
+
   // Both seams are pinned to the SAME effective account: the default wrangler runner
   // via its env (`CLOUDFLARE_ACCOUNT_ID` + the top-level `--env=` on every argv), and
-  // the default Hyperdrive lister via `createDefaultListHyperdriveConfigs`
-  // (below). An injected seam owns its own transport but only ever runs past the
-  // fence above, which guarantees a resolved + persisted account.
-  const runWrangler =
-    opts?.runWrangler ?? createDefaultRunWrangler(root, { accountId: effectiveAccountId });
+  // the default Hyperdrive lister via `createDefaultListHyperdriveConfigs` (below).
+  // An injected seam owns its own transport but is ALWAYS invoked WITH the reconciled
+  // account (via the single choke point below / the lister's `{ accountId }` context),
+  // so it can never target a DIFFERENT account than the one the config is pinned to.
+  const selectedRunWrangler = opts?.runWrangler ?? createDefaultRunWrangler(root);
+  // Single choke point: inject the reconciled account into EVERY call so no call site
+  // can forget it (grep-proven — every `runWrangler(...)` below routes through here).
+  const runWrangler = (
+    args: Array<string>,
+    callOpts?: { cwd?: string; captureJson?: boolean },
+  ): RunWranglerResult => selectedRunWrangler(args, { ...callOpts, accountId: transportAccountId });
 
   // --- D1 ------------------------------------------------------------------
   if (desired.d1) {
@@ -1007,6 +1252,7 @@ export async function provisionCloudflareResources(
             {
               field: 'd1_databases',
               idField: 'database_id',
+              nameField: 'database_name',
               resource: 'D1 database',
               command: 'wrangler d1 create',
             },
@@ -1186,6 +1432,7 @@ export async function provisionCloudflareResources(
           {
             field: 'r2_buckets',
             idField: 'bucket_name',
+            nameField: 'bucket_name',
             resource: 'R2 bucket',
             command: 'wrangler r2 bucket create',
           },
@@ -1216,92 +1463,90 @@ export async function provisionCloudflareResources(
   // attempted BEFORE the connection-string gate (it needs no connection string).
   if (desired.hyperdrive) {
     const { binding, name, connectionString } = desired.hyperdrive;
-    const entry = findBindingEntry(readRootConfig(configPath).hyperdrive, binding);
-    if (entry && isRealValue(entry.id)) {
-      resources.push({ kind: 'hyperdrive', binding, name, action: 'reused', id: entry.id });
-    } else {
-      const lister =
-        opts?.listHyperdriveConfigs ??
-        createDefaultListHyperdriveConfigs(effectiveAccountId, opts?.apiToken);
-      let configs: Array<HyperdriveConfig> | undefined;
-      let existenceUnknown = true;
-      if (lister) {
-        try {
-          configs = await lister();
-          existenceUnknown = false;
-        } catch (error) {
-          log.warn(`Hyperdrive existence check for ${name} failed: ${(error as Error).message}`);
-          existenceUnknown = true;
-        }
-      }
-      // Require EXACTLY 0 or 1 exact-name match. Hyperdrive names are NOT unique,
-      // so >1 is ambiguous — adoption cannot pick one, and a blind create would
-      // mint yet another duplicate. Fail closed on ambiguity (regardless of the
-      // connection string).
-      let existing: HyperdriveConfig | undefined;
-      if (configs) {
-        const named = configs.filter((c) => c.name === name);
-        if (named.length > 1) {
-          throw new Error(
-            `provision: cannot adopt Hyperdrive config ${JSON.stringify(name)} — ${named.length} ` +
-              `configs in this account share that name (ids: ${named.map((c) => c.id).join(', ')}). ` +
-              `Hyperdrive names are not account-unique; remove the duplicates or pin the id in ` +
-              `"${configPath}", then retry.`,
-          );
-        }
-        existing = named[0];
-      }
-      if (existing) {
-        log.info(`adopted existing Hyperdrive config ${name} (${existing.id})`);
-        write({ hyperdrive: { binding, id: existing.id } });
-        resources.push({ kind: 'hyperdrive', binding, name, action: 'adopted', id: existing.id });
-      } else if (!connectionString) {
-        // No connection string → we can never CREATE, so there is no duplicate
-        // risk whether or not existence is known: skip (structured, never prompts).
-        const reason = 'no connection string provided';
-        log.warn(`skipping Hyperdrive config ${name}: ${reason}`);
-        resources.push({ kind: 'hyperdrive', binding, name, action: 'skipped', reason });
-      } else if (existenceUnknown) {
-        // A connection string is present (we WOULD create) but existence is
-        // unverifiable → FAIL CLOSED. Blindly creating duplicates a same-named
-        // config.
-        throw new Error(
-          `provision: cannot verify whether Hyperdrive config ${JSON.stringify(name)} already ` +
-            `exists (no existence check available — provide an accountId + API token, or inject a ` +
-            `listHyperdriveConfigs seam). "wrangler hyperdrive create" silently duplicates a ` +
-            `same-named config, so provisioning refuses to create it blindly.`,
-        );
+    // F6 — serialize the unguarded list→create across processes with a cross-process
+    // lock keyed on the resolved config path. The read-first check is done INSIDE the
+    // lock so a second concurrent provision, after acquiring the lock, sees the id the
+    // first wrote and SKIPS (no duplicate). Always released in `finally`, incl. on any
+    // throw below (a leaked lock would wedge the next run until the stale timeout).
+    const lock = await acquireProvisionLock(configPath);
+    try {
+      const entry = findBindingEntry(readRootConfig(configPath).hyperdrive, binding);
+      if (entry && isRealValue(entry.id)) {
+        resources.push({ kind: 'hyperdrive', binding, name, action: 'reused', id: entry.id });
       } else {
-        // Confirmed absent + connection string present → create.
-        const created = runWrangler([
-          'hyperdrive',
-          'create',
-          name,
-          `--connection-string=${connectionString}`,
-          '--binding',
-          binding,
-          '--update-config',
-          ...wranglerConfigArgs(configPath),
-        ]);
-        if (!isCleanSuccess(created)) {
-          throw new Error(
-            `provision: "wrangler hyperdrive create ${name}" failed: ${created.stderr || created.stdout}`,
-          );
+        const lister =
+          opts?.listHyperdriveConfigs ?? createDefaultListHyperdriveConfigs(opts?.apiToken);
+        let configs: Array<HyperdriveConfig> | undefined;
+        let existenceUnknown = true;
+        if (lister) {
+          try {
+            // F1 — always invoke the lister WITH the reconciled account, so an injected
+            // lister can never query a DIFFERENT account than the config is pinned to.
+            configs = await lister({ accountId: transportAccountId });
+            existenceUnknown = false;
+          } catch (error) {
+            log.warn(`Hyperdrive existence check for ${name} failed: ${(error as Error).message}`);
+            existenceUnknown = true;
+          }
         }
-        // F4 postcondition: confirm --update-config wrote a REAL Hyperdrive id.
-        assertCreateWroteRealId(
-          configPath,
-          {
-            field: 'hyperdrive',
-            idField: 'id',
-            resource: 'Hyperdrive config',
-            command: 'wrangler hyperdrive create',
-          },
-          binding,
-          name,
-        );
-        resources.push({ kind: 'hyperdrive', binding, name, action: 'created' });
+        // F3 — apply the ONE strict Hyperdrive-list validator at the CALLER, AFTER the
+        // lister returns (default OR injected). It rejects malformed/empty/duplicate
+        // entries and requires EXACTLY 0 or 1 exact-name match (>1 → fail closed) BEFORE
+        // matching or writing, so no injected list can be adopted with an empty/garbage id.
+        const existing = configs ? selectHyperdriveMatch(configs, name, configPath) : undefined;
+        if (existing) {
+          log.info(`adopted existing Hyperdrive config ${name} (${existing.id})`);
+          write({ hyperdrive: { binding, id: existing.id } });
+          resources.push({ kind: 'hyperdrive', binding, name, action: 'adopted', id: existing.id });
+        } else if (!connectionString) {
+          // No connection string → we can never CREATE, so there is no duplicate
+          // risk whether or not existence is known: skip (structured, never prompts).
+          const reason = 'no connection string provided';
+          log.warn(`skipping Hyperdrive config ${name}: ${reason}`);
+          resources.push({ kind: 'hyperdrive', binding, name, action: 'skipped', reason });
+        } else if (existenceUnknown) {
+          // A connection string is present (we WOULD create) but existence is
+          // unverifiable → FAIL CLOSED. Blindly creating duplicates a same-named config.
+          throw new Error(
+            `provision: cannot verify whether Hyperdrive config ${JSON.stringify(name)} already ` +
+              `exists (no existence check available — provide an accountId + API token, or inject a ` +
+              `listHyperdriveConfigs seam). "wrangler hyperdrive create" silently duplicates a ` +
+              `same-named config, so provisioning refuses to create it blindly.`,
+          );
+        } else {
+          // Confirmed absent + connection string present → create.
+          const created = runWrangler([
+            'hyperdrive',
+            'create',
+            name,
+            `--connection-string=${connectionString}`,
+            '--binding',
+            binding,
+            '--update-config',
+            ...wranglerConfigArgs(configPath),
+          ]);
+          if (!isCleanSuccess(created)) {
+            throw new Error(
+              `provision: "wrangler hyperdrive create ${name}" failed: ${created.stderr || created.stdout}`,
+            );
+          }
+          // F4 postcondition: confirm --update-config wrote a REAL Hyperdrive id.
+          assertCreateWroteRealId(
+            configPath,
+            {
+              field: 'hyperdrive',
+              idField: 'id',
+              resource: 'Hyperdrive config',
+              command: 'wrangler hyperdrive create',
+            },
+            binding,
+            name,
+          );
+          resources.push({ kind: 'hyperdrive', binding, name, action: 'created' });
+        }
       }
+    } finally {
+      lock.release();
     }
   }
 
