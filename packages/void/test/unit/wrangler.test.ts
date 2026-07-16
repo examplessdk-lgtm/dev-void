@@ -2305,6 +2305,59 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
+  it('adopt fails closed when a collected field has a malformed member masking a real binding (round-4 F6) — no write', () => {
+    // kv_namespaces holds a null member AND a valid { binding: 'DB' }. The collector
+    // must NOT silently drop the null and lose the 'DB' binding — adopting a D1 as
+    // 'DB' would then emit an undeployable cross-type duplicate. Reject the whole
+    // config (fail closed) instead of committing the conflicting binding.
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({ kv_namespaces: [null, { binding: 'DB', id: 'kv-id' }] }),
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1: { binding: 'DB', databaseName: 'app', databaseId: 'real-uuid' },
+      }),
+    ).toThrow(/malformed entry at index 0 \(missing a non-empty string "binding"\)/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('producer append fails closed on a mixed-malformed binding field rather than silently dropping (round-4 F6)', () => {
+    // A namespace field with a null member alongside a valid binding must reject the
+    // whole config when the worker-wide uniqueness collector reads it — never a
+    // partial read that could hide a collision.
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({ d1_databases: [null, { binding: 'DB', database_id: 'id' }] }),
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/malformed entry at index 0 \(missing a non-empty string "binding"\)/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('collector fails closed on a malformed binding-list member (round-4 F6) — no write', () => {
+    // The `{ bindings: [...] }` shape (durable_objects/unsafe) is equally strict: a
+    // malformed member throws rather than falling through to a partial read.
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        durable_objects: { bindings: [null, { name: 'DO', class_name: 'C' }] },
+      }),
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/malformed entry at index 0 \(missing a non-empty string "name"\)/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
   it('migrations_dir fails closed when the D1 binding is declared more than once (no findIndex-first)', () => {
     setup(
       'wrangler.jsonc',

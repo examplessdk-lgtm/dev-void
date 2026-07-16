@@ -1698,15 +1698,50 @@ const NAME_KEYED_BINDING_ARRAYS = new Set(['send_email', 'ratelimits']);
  * `getBindingNames` overlooks (see NAME_KEYED_BINDING_ARRAYS).
  */
 function bindingNamesForField(field: string, value: unknown): Array<string> {
-  const generic = genericBindingNames(value);
   if (NAME_KEYED_BINDING_ARRAYS.has(field) && Array.isArray(value)) {
-    const names = value
-      .filter(isRecord)
-      .map((entry) => entry.name)
-      .filter((name): name is string => typeof name === 'string');
-    return [...generic, ...names];
+    // send_email / ratelimits: an array of `{ name }` (some also carry `.binding`).
+    // Collect BOTH — strictly. A malformed member (F6) REJECTS the whole config
+    // (fail closed) rather than being silently dropped, which would let the
+    // uniqueness guard miss a real binding name and commit a conflicting one.
+    const names = strictBindingArray(value, 'name', field);
+    const bindings = value
+      .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+      .map((entry) => entry.binding)
+      .filter((binding): binding is string => typeof binding === 'string' && binding.length > 0);
+    return [...bindings, ...names];
   }
-  return generic;
+  return genericBindingNames(value);
+}
+
+/**
+ * F6 — strictly read `keyField` (a non-empty string) from EVERY member of a
+ * binding-bearing array. THROWS (fail closed) on ANY malformed member — never
+ * silently drops one. Dropping a malformed member could convert a mixed-validity
+ * array (e.g. `[null, { binding: 'DB', id: '…' }]`) into an empty/partial binding
+ * set, so the worker-wide uniqueness guard would MISS the existing `DB` and commit
+ * a conflicting binding — a fail-open in a documented invariant. Mirrors the
+ * writer's existing fail-closed-on-malformed-config philosophy.
+ */
+function strictBindingArray(
+  members: Array<unknown>,
+  keyField: 'binding' | 'name',
+  field: string,
+): Array<string> {
+  return members.map((member, index) => {
+    if (
+      !isRecord(member) ||
+      typeof member[keyField] !== 'string' ||
+      (member[keyField] as string).length === 0
+    ) {
+      throw new Error(
+        `deploy: cannot verify binding-name uniqueness — "${field}" contains a malformed entry at ` +
+          `index ${index} (missing a non-empty string "${keyField}"). Refusing to proceed on a ` +
+          `partially-readable binding set (a dropped entry could hide a real collision). Fix the ` +
+          `wrangler config and retry.`,
+      );
+    }
+    return member[keyField] as string;
+  });
 }
 
 /**
@@ -1721,19 +1756,25 @@ function genericBindingNames(value: unknown): Array<string> {
   if (typeof value !== 'object' || value === null) {
     return [];
   }
-  if (
-    isRecord(value) &&
-    Array.isArray(value.bindings) &&
-    value.bindings.every((binding) => isRecord(binding) && typeof binding.name === 'string')
-  ) {
-    return (value.bindings as Array<{ name: string }>).map((binding) => binding.name);
+  // Shape 1 — binding list `{ bindings: [{ name }] }` (durable_objects, unsafe).
+  // Strict: once this IS a binding list (at least one record member), any malformed
+  // member throws (F6) rather than falling through to a partial/garbage read. The
+  // `some(isRecord)` guard keeps a plain record that merely has a scalar key named
+  // `bindings` (e.g. a `vars` entry) on the shape-4 key path, matching prior
+  // behavior for that pathological case.
+  if (isRecord(value) && Array.isArray(value.bindings) && value.bindings.some(isRecord)) {
+    return strictBindingArray(value.bindings, 'name', 'bindings');
   }
-  if (
-    Array.isArray(value) &&
-    value.every((entry) => isRecord(entry) && typeof entry.binding === 'string')
-  ) {
-    return (value as Array<{ binding: string }>).map((entry) => entry.binding);
+  // Shape 2 — namespace list `[{ binding }]` (kv_namespaces, d1_databases,
+  // r2_buckets, hyperdrive, …). Strict: a mixed-validity array (e.g.
+  // `[null, { binding: 'DB' }]`) throws instead of silently dropping the null and
+  // losing the valid `DB` binding (F6). NAME_KEYED arrays (send_email, ratelimits)
+  // never reach here — `bindingNamesForField` handles them before delegating.
+  if (Array.isArray(value)) {
+    return strictBindingArray(value, 'binding', 'namespace list');
   }
+  // Shape 3 + 4 — a single record with `binding` (ai/browser), or a plain record
+  // whose keys are the names (vars, blob/module maps).
   if (isRecord(value)) {
     if (value.binding !== undefined) {
       return typeof value.binding === 'string' ? [value.binding] : [];
