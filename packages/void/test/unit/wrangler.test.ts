@@ -8,6 +8,7 @@ import {
   ensureWranglerNodejsAlsFlag,
   LATEST_KNOWN_COMPAT_DATE,
   readExistingLiveBindingConfig,
+  readProvisionedBindingEntry,
   readWranglerCompat,
   resolveLiveBindingConfig,
   syncWranglerBindings,
@@ -2851,5 +2852,69 @@ describe('worker-wide binding collector — schema-metadata field shapes (round 
     expect((parseRaw('wrangler.jsonc').queues as Record<string, unknown>).producers).toEqual([
       { queue: 'jobs', binding: 'QUEUE_JOBS' },
     ]);
+  });
+});
+
+describe('readProvisionedBindingEntry (F5 strict canonical binding reader)', () => {
+  const P = '/tmp/wrangler.jsonc';
+
+  it('returns the single matching entry when the binding is unique across the worker', () => {
+    const config = {
+      d1_databases: [
+        { binding: 'DB', database_id: 'id-a', database_name: 'app-db' },
+        { binding: 'OTHER', database_id: 'id-b' },
+      ],
+      kv_namespaces: [{ binding: 'CACHE', id: 'kv-1' }],
+    };
+    expect(readProvisionedBindingEntry(config, 'd1_databases', 'DB', P)).toEqual({
+      binding: 'DB',
+      database_id: 'id-a',
+      database_name: 'app-db',
+    });
+  });
+
+  it('returns undefined when the binding is absent', () => {
+    expect(
+      readProvisionedBindingEntry({ d1_databases: [] }, 'd1_databases', 'DB', P),
+    ).toBeUndefined();
+    expect(readProvisionedBindingEntry({}, 'd1_databases', 'DB', P)).toBeUndefined();
+  });
+
+  it('fails closed on a DUPLICATE binding in the target field', () => {
+    const config = {
+      kv_namespaces: [
+        { binding: 'CACHE', id: 'a' },
+        { binding: 'CACHE', id: 'b' },
+      ],
+    };
+    expect(() => readProvisionedBindingEntry(config, 'kv_namespaces', 'CACHE', P)).toThrow(
+      /binding "CACHE" is declared 2 times in "kv_namespaces"/,
+    );
+  });
+
+  it('fails closed on a CROSS-TYPE collision with another binding field', () => {
+    const config = {
+      d1_databases: [{ binding: 'DB', database_id: 'id-a' }],
+      vars: { DB: 'oops' },
+    };
+    expect(() => readProvisionedBindingEntry(config, 'd1_databases', 'DB', P)).toThrow(
+      /binding "DB" in "d1_databases" is also used by a Environment Variable binding/,
+    );
+  });
+
+  it('fails closed on a CROSS-TYPE collision with a queue producer', () => {
+    const config = {
+      r2_buckets: [{ binding: 'STORAGE', bucket_name: 'b' }],
+      queues: { producers: [{ binding: 'STORAGE', queue: 'jobs' }] },
+    };
+    expect(() => readProvisionedBindingEntry(config, 'r2_buckets', 'STORAGE', P)).toThrow(
+      /binding "STORAGE" in "r2_buckets" is also used by a Queue binding/,
+    );
+  });
+
+  it('fails closed on a malformed target field (wrong outer shape)', () => {
+    expect(() =>
+      readProvisionedBindingEntry({ d1_databases: { binding: 'DB' } }, 'd1_databases', 'DB', P),
+    ).toThrow(/must be an array of binding entries/);
   });
 });

@@ -3052,6 +3052,99 @@ describe('provisionCloudflareResources — F4 whole-list id-format gate (D1 + KV
   });
 });
 
+describe('provisionCloudflareResources — F5 strict duplicate-safe binding reader', () => {
+  it('read-first fails closed on DUPLICATE same-binding entries in the target field (not reused)', async () => {
+    // Two d1_databases entries share binding "DB" — the old first-match `.find()` would
+    // silently pick one and report `reused`. The strict reader fails closed.
+    setup(
+      JSON.stringify({
+        account_id: 'acct',
+        d1_databases: [
+          { binding: 'DB', database_id: uuid('a'), database_name: 'myapp-db' },
+          { binding: 'DB', database_id: uuid('b'), database_name: 'myapp-db' },
+        ],
+      }),
+    );
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/binding "DB" is declared 2 times in "d1_databases"/);
+    // Failed closed before any wrangler call — never reused/created.
+    expect(calls.length).toBe(0);
+  });
+
+  it('read-first fails closed on a CROSS-TYPE collision (binding used by another field) — not reused', async () => {
+    // Binding "DB" is bound to BOTH a d1_databases entry AND a kv_namespaces entry — an
+    // undeployable config wrangler rejects. Reading the D1 entry must fail closed (via the
+    // reused Task-3 collision collector) rather than report `reused` on a broken config.
+    setup(
+      JSON.stringify({
+        account_id: 'acct',
+        d1_databases: [{ binding: 'DB', database_id: uuid('a'), database_name: 'myapp-db' }],
+        kv_namespaces: [{ binding: 'DB', id: hex32('kv') }],
+      }),
+    );
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/binding "DB" in "d1_databases" is also used by a KV Namespace binding/);
+    expect(calls.length).toBe(0);
+  });
+
+  it('read-first fails closed when a QUEUE PRODUCER collides with the binding (cross-type) — not reused', async () => {
+    setup(
+      JSON.stringify({
+        account_id: 'acct',
+        kv_namespaces: [{ binding: 'CACHE', id: hex32('cache') }],
+        queues: { producers: [{ binding: 'CACHE', queue: 'jobs' }] },
+      }),
+    );
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, kvNamespaces: [{ binding: 'CACHE', title: 'cache' }] },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/binding "CACHE" in "kv_namespaces" is also used by a Queue binding/);
+    expect(calls.length).toBe(0);
+  });
+
+  it('reuses cleanly when the binding is unique across the worker (no false collision)', async () => {
+    setup(
+      JSON.stringify({
+        account_id: 'acct',
+        d1_databases: [{ binding: 'DB', database_id: uuid('db'), database_name: 'myapp-db' }],
+        kv_namespaces: [{ binding: 'CACHE', id: hex32('cache') }],
+      }),
+    );
+    const { run, calls } = makeRunner([]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(result.resources).toEqual([
+      { kind: 'd1', binding: 'DB', name: 'myapp-db', action: 'reused', id: uuid('db') },
+    ]);
+    // Reused via read-first — no discovery/create.
+    expect(calls.some((c) => isCall(c, 'd1', 'list'))).toBe(false);
+    expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
+  });
+});
+
 describe('provisionCloudflareResources — resource-specific create postcondition (round 6 F4)', () => {
   it('R2: fails closed when create writes a DIFFERENT bucket_name than requested', async () => {
     setup(JSON.stringify({ account_id: 'acct' }));

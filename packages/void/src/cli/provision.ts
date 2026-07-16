@@ -8,6 +8,7 @@ import { parseDotenvFile } from '../shared/dotenv.ts';
 import { resolveWranglerArgv } from './preset.ts';
 import {
   assertNoDuplicateMembers,
+  readProvisionedBindingEntry,
   writeProvisionedWranglerConfig,
   type WriteProvisionedWranglerResult,
 } from './wrangler.ts';
@@ -926,14 +927,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Read the entry in a `[{ binding }]` array whose `binding` matches. */
-function findBindingEntry(list: unknown, binding: string): Record<string, unknown> | undefined {
-  if (!Array.isArray(list)) {
-    return undefined;
-  }
-  return list.find(
-    (entry): entry is Record<string, unknown> => isRecord(entry) && entry.binding === binding,
-  );
+/**
+ * F5 — read the single provisioned binding entry for `field`/`binding` from the resolved
+ * config, delegating to the STRICT canonical reader in `wrangler.ts`
+ * ({@link readProvisionedBindingEntry}). Unlike the old loose first-match `.find()`, this
+ * validates the target field's outer shape, fails closed on a DUPLICATE binding, and runs
+ * the worker-wide CROSS-TYPE collision check (reusing the Task-3 collector) — so a
+ * duplicate/collision config can never be reported `reused` or pass a create postcondition.
+ */
+function readBindingEntry(
+  configPath: string,
+  field: string,
+  binding: string,
+): Record<string, unknown> | undefined {
+  return readProvisionedBindingEntry(readRootConfig(configPath), field, binding, configPath);
 }
 
 /**
@@ -1289,7 +1296,7 @@ function assertCreateWroteRealId(
   binding: string,
   name: string,
 ): void {
-  const entry = findBindingEntry(readRootConfig(configPath)[spec.field], binding);
+  const entry = readBindingEntry(configPath, spec.field, binding);
   const idOk = !!entry && spec.idValidator(entry[spec.idField]);
   const nameOk = spec.nameField === undefined || (!!entry && entry[spec.nameField] === name);
   if (!idOk || !nameOk) {
@@ -1683,7 +1690,7 @@ async function provisionCloudflareResourcesLocked(
   // --- D1 ------------------------------------------------------------------
   if (desired.d1) {
     const { binding, name } = desired.d1;
-    const entry = findBindingEntry(readRootConfig(configPath).d1_databases, binding);
+    const entry = readBindingEntry(configPath, 'd1_databases', binding);
     if (entry && isRealD1Id(entry.database_id)) {
       // Read-first hit. A prior run may have created the D1 (id written) then
       // crashed BEFORE migrations_dir was set, so ensure + verify it here too —
@@ -1823,7 +1830,7 @@ async function provisionCloudflareResourcesLocked(
 
   // --- KV ------------------------------------------------------------------
   for (const { binding, title } of desired.kvNamespaces) {
-    const entry = findBindingEntry(readRootConfig(configPath).kv_namespaces, binding);
+    const entry = readBindingEntry(configPath, 'kv_namespaces', binding);
     if (entry && isRealKvId(entry.id)) {
       resources.push({ kind: 'kv', binding, name: title, action: 'reused', id: entry.id });
       continue;
@@ -1908,7 +1915,7 @@ async function provisionCloudflareResourcesLocked(
   // --- R2 ------------------------------------------------------------------
   if (desired.r2) {
     const { binding, bucketName } = desired.r2;
-    const entry = findBindingEntry(readRootConfig(configPath).r2_buckets, binding);
+    const entry = readBindingEntry(configPath, 'r2_buckets', binding);
     if (entry && isRealR2BucketName(entry.bucket_name)) {
       resources.push({ kind: 'r2', binding, name: bucketName, action: 'reused' });
     } else {
@@ -1994,7 +2001,7 @@ async function provisionCloudflareResourcesLocked(
     // The whole-provision lock (F1/F2) already serializes this unguarded list→create
     // across processes: the read-first check below runs UNDER that lock, so a second
     // concurrent provision sees the id the first wrote and SKIPS (no duplicate).
-    const entry = findBindingEntry(readRootConfig(configPath).hyperdrive, binding);
+    const entry = readBindingEntry(configPath, 'hyperdrive', binding);
     if (entry && isRealHyperdriveId(entry.id)) {
       resources.push({ kind: 'hyperdrive', binding, name, action: 'reused', id: entry.id });
     } else {

@@ -1771,6 +1771,61 @@ function assertObjectContainer(value: unknown, field: string): Record<string, un
 }
 
 /**
+ * F5 — the STRICT canonical reader for a single provisioned binding entry in a wrangler
+ * config field (`d1_databases` / `kv_namespaces` / `r2_buckets` / `hyperdrive`). Replaces
+ * the provisioner's loose first-match `.find()` — which validated no outer shape,
+ * silently picked among duplicates, and bypassed the worker-wide collision check, so a
+ * duplicate/cross-type-collision config could be reported `reused` or pass a create
+ * postcondition though it is undeployable. Fails closed on:
+ *   1. a malformed TARGET field (reuses {@link bindingNamesForField}: a non-array outer
+ *      shape, or any member without a non-empty string `binding`, throws);
+ *   2. MORE THAN ONE entry in the target field sharing `binding` (ambiguous identity —
+ *      wrangler also rejects duplicate binding names);
+ *   3. a worker-wide CROSS-TYPE collision — `binding` is ALSO owned by any OTHER binding
+ *      type (reuses the {@link collectWorkerBindingNames} Task-3 collector, EXCLUDING the
+ *      target field so the entry never self-collides, and INCLUDING `queues.producers`).
+ * Returns the single matching entry, or `undefined` when the binding is absent.
+ */
+export function readProvisionedBindingEntry(
+  config: Record<string, unknown>,
+  field: string,
+  binding: string,
+  configPath: string,
+): Record<string, unknown> | undefined {
+  // 1. Outer-shape validation of the TARGET field (throws on a non-array / malformed
+  //    member — a member without a valid `binding` could hide a duplicate/collision).
+  bindingNamesForField(field, config[field]);
+  // 2. EXACTLY zero-or-one entry in the target field carries this binding.
+  const rawList = config[field];
+  const list = Array.isArray(rawList) ? rawList : [];
+  const matches = list.filter(
+    (entry): entry is Record<string, unknown> => isRecord(entry) && entry.binding === binding,
+  );
+  if (matches.length > 1) {
+    throw new Error(
+      `provision: cannot read "${configPath}" — binding ${JSON.stringify(binding)} is declared ` +
+        `${matches.length} times in "${field}". Cannot pick one to reuse/verify, and wrangler rejects ` +
+        `duplicate binding names. Remove the duplicate and retry.`,
+    );
+  }
+  // 3. Worker-wide CROSS-TYPE uniqueness — the binding must not be owned by any OTHER
+  //    field. Build the owner map from the config EXCLUDING the target field (so the
+  //    entry does not self-collide) and INCLUDING queues.producers. Reuse the ONE
+  //    collector — never fork it.
+  const owners = collectWorkerBindingNames(configWithoutField(config, field));
+  addQueueProducerOwners(owners, config);
+  const owner = owners.get(binding);
+  if (owner !== undefined) {
+    throw new Error(
+      `provision: cannot read "${configPath}" — binding ${JSON.stringify(binding)} in "${field}" is ` +
+        `also used by a ${owner} binding. Wrangler requires every binding name to be unique across ` +
+        `the whole worker, so this config is undeployable. Rename the conflicting binding and retry.`,
+    );
+  }
+  return matches[0];
+}
+
+/**
  * F5 — the OUTER binding-name SHAPE of a wrangler config field, so the collector reads
  * binding NAMES by KNOWN structure instead of GUESSING from a value's content (which
  * misreads a `vars` value that happens to look like a binding list/object, and lets a
