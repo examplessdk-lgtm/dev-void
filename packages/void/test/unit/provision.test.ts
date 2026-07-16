@@ -3915,6 +3915,131 @@ describe('provisionCloudflareResources — F1 wrangler-exact base resolution ord
   });
 });
 
+describe('provisionCloudflareResources — F4 Hyperdrive password never reaches wrangler diagnostics (round 11)', () => {
+  it('provisionEnv scrubs the session-output sinks and PINS sanitized logging', () => {
+    const saved: Record<string, string | undefined> = {};
+    const set = (k: string, v: string): void => {
+      saved[k] = process.env[k];
+      process.env[k] = v;
+    };
+    set('WRANGLER_OUTPUT_FILE_PATH', '/tmp/wrangler-output.json');
+    set('WRANGLER_OUTPUT_FILE_DIRECTORY', '/tmp/wrangler-output');
+    set('WRANGLER_LOG_SANITIZE', 'false');
+    try {
+      const env = provisionEnv({ accountId: 'acct' });
+      // Output sinks would persist the raw argv (connection string password included).
+      expect(env.WRANGLER_OUTPUT_FILE_PATH).toBeUndefined();
+      expect(env.WRANGLER_OUTPUT_FILE_DIRECTORY).toBeUndefined();
+      // Sanitized logging is PINNED — an ambient `false` is never passed through.
+      expect(env.WRANGLER_LOG_SANITIZE).toBe('true');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) {
+          delete process.env[k];
+        } else {
+          process.env[k] = v;
+        }
+      }
+    }
+  });
+
+  it('FAILS CLOSED when a project dotenv declares WRANGLER_OUTPUT_FILE_DIRECTORY (would resurrect the argv leak)', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    writeFileSync(join(tmpDir, '.env'), 'WRANGLER_OUTPUT_FILE_DIRECTORY=/tmp/wrangler-out\n');
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(
+      /refusing to provision.*\.env.*WRANGLER_OUTPUT_FILE_DIRECTORY.*session diagnostics/s,
+    );
+    expect(calls.length).toBe(0);
+  });
+
+  it('FAILS CLOSED when a project dotenv declares WRANGLER_OUTPUT_FILE_PATH', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    writeFileSync(join(tmpDir, '.env.local'), 'WRANGLER_OUTPUT_FILE_PATH=/tmp/out.json\n');
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/WRANGLER_OUTPUT_FILE_PATH/);
+    expect(calls.length).toBe(0);
+  });
+
+  it('redacts the exact connection string AND URL userinfo passwords from propagated errors', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const conn = 'postgres://dbuser:sup3r-secret@db.example.com:5432/app';
+    const { run } = makeRunner([
+      {
+        // The create fails, ECHOING the connection string (verbatim AND re-rendered).
+        match: /^hyperdrive create /,
+        reply: () =>
+          fail(
+            '',
+            `X [ERROR] could not connect using ${conn} ` +
+              `(also tried mysql://dbuser:sup3r-secret@db.example.com/app)`,
+          ),
+      },
+    ]);
+    let thrown: Error | undefined;
+    try {
+      await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: conn } },
+        { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
+      );
+    } catch (error) {
+      thrown = error as Error;
+    }
+    expect(thrown).toBeDefined();
+    // The password never appears — neither via the verbatim echo nor the re-rendered URL.
+    expect(thrown!.message).not.toContain('sup3r-secret');
+    expect(thrown!.message).not.toContain(conn);
+    expect(thrown!.message).toContain('[REDACTED]');
+  });
+
+  it('redacts a userinfo password from the Hyperdrive lister failure warning', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const warns: Array<string> = [];
+    const { run } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: {
+            binding: 'HYPERDRIVE',
+            name: 'myapp-hd',
+            connectionString: 'postgres://u:leaky-pass@h/db',
+          },
+        },
+        {
+          runWrangler: run,
+          log: { info: () => {}, warn: (msg) => warns.push(msg) },
+          listHyperdriveConfigs: async () => {
+            throw new Error('fetch failed for postgres://u:leaky-pass@h/db');
+          },
+        },
+      ),
+    ).rejects.toThrow(/cannot verify/);
+    const listerWarn = warns.find((w) => w.includes('existence check'));
+    expect(listerWarn).toBeDefined();
+    expect(listerWarn).not.toContain('leaky-pass');
+    expect(listerWarn).toContain('[REDACTED]');
+  });
+});
+
 describe('provisionCloudflareResources — F5 R2 absence needs the STRUCTURED code (round 10)', () => {
   it('a failure whose text merely contains 10006 inside a bucket name is NOT absence (fails closed, no create)', async () => {
     setup(JSON.stringify({ name: 'app', account_id: 'acct' }));

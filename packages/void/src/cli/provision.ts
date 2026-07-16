@@ -246,6 +246,24 @@ const TRANSPORT_REDIRECT_ENV_VARS = [
 ] as const;
 
 /**
+ * F4 — wrangler 4.107's diagnostic-output sinks that would PERSIST the raw provisioning
+ * argv (including a Hyperdrive connection string, password and all) to disk:
+ *   - `WRANGLER_OUTPUT_FILE_PATH` / `WRANGLER_OUTPUT_FILE_DIRECTORY` — when either is set
+ *     (`getOutputFilePathFromEnv`/`getOutputFileDirectoryFromEnv`), wrangler's startup
+ *     middleware appends a `wrangler-session` entry with the VERBATIM
+ *     `command_line_args: argv` to that file (`writeOutput` in wrangler-dist/cli.js) — so
+ *     `hyperdrive create --connection-string=postgres://user:PASSWORD@…` lands on disk.
+ * They are scrubbed from every provisioner child env ({@link provisionEnv}) and fenced in
+ * the project dotenv ({@link assertNoTransportRedirectInProjectDotenv}) — wrangler reloads
+ * dotenv into `process.env` BEFORE writing the session entry, so a dotenv-declared sink
+ * would resurrect the leak. `WRANGLER_LOG_SANITIZE` (`getSanitizeLogs`, default true) is
+ * PINNED to `true` instead: a truthy ambient value survives wrangler's dotenv reload
+ * (dotenv-expand keeps an already-set truthy `process.env` value), so the pin cannot be
+ * overridden into unsanitized logging of the secret-bearing API request.
+ */
+const OUTPUT_FILE_ENV_VARS = ['WRANGLER_OUTPUT_FILE_PATH', 'WRANGLER_OUTPUT_FILE_DIRECTORY'] as const;
+
+/**
  * F1 — resolve the ONE Cloudflare API base URL this provision is pinned to, mirroring
  * wrangler 4.107's `getCloudflareApiBaseUrl` EXACTLY (wrangler-dist/cli.js) so the
  * Hyperdrive REST lister and the spawned wrangler agree on the endpoint:
@@ -449,6 +467,22 @@ function assertNoTransportRedirectInProjectDotenv(root: string): void {
           `the existence check.`,
       );
     }
+    // F4 — wrangler's session-output sinks are fenced too: wrangler reloads this dotenv
+    // into `process.env` BEFORE writing its `wrangler-session` output entry, whose
+    // `command_line_args` is the VERBATIM argv — including a Hyperdrive connection
+    // string's password — so a dotenv-declared sink would resurrect the leak the child-env
+    // scrub (see provisionEnv) just closed.
+    const outputOffenders = OUTPUT_FILE_ENV_VARS.filter((name) => keys.has(name));
+    if (outputOffenders.length > 0) {
+      throw new Error(
+        `provision: refusing to provision — the project file "${file}" sets ` +
+          `${outputOffenders.join(', ')}, which wrangler reloads on every command and which makes ` +
+          `wrangler persist its session diagnostics — including the verbatim command line, where a ` +
+          `Hyperdrive connection string's password would appear — to that output file. Remove ` +
+          `${outputOffenders.join(', ')} from "${file}" (set it in your shell only for ` +
+          `non-provisioning wrangler commands if you need session output).`,
+      );
+    }
   }
 }
 
@@ -478,6 +512,15 @@ export function provisionEnv(ctx?: { accountId?: string; apiBaseUrl?: string }):
   for (const name of TRANSPORT_REDIRECT_ENV_VARS) {
     delete env[name];
   }
+  // F4 — scrub wrangler's session-output sinks (they would persist the raw argv —
+  // a Hyperdrive connection string's password included — to disk) and PIN sanitized
+  // logging: never pass through an ambient `WRANGLER_LOG_SANITIZE=false` for a
+  // secret-bearing invocation. A truthy pinned value also survives wrangler's
+  // per-command dotenv reload (dotenv-expand keeps a set truthy process.env value).
+  for (const name of OUTPUT_FILE_ENV_VARS) {
+    delete env[name];
+  }
+  env.WRANGLER_LOG_SANITIZE = 'true';
   // Pin the ONE resolved API base so wrangler's `getCloudflareApiBaseUrlFromEnv()` returns
   // exactly the endpoint the Hyperdrive REST lister uses (no staging/FedRAMP/arbitrary
   // split-brain). The explicit `--env=` on every argv still forces the top-level config
@@ -1820,6 +1863,29 @@ function wranglerConfigArgs(configPath: string): Array<string> {
 }
 
 /**
+ * F4 — build a redactor that strips connection-string secrets from every string the
+ * provisioner PROPAGATES (buffered wrangler stdout/stderr, error strings, logged
+ * warnings). Two layers:
+ *   1. the EXACT desired connection string (when this provision carries one) is replaced
+ *      whole, so no derived message can echo it verbatim;
+ *   2. any URL userinfo password (`scheme://user:secret@…`) is masked generically, so a
+ *      wrangler error that re-renders a connection string in ANY spelling still never
+ *      leaks the password (the scheme + user survive for diagnostics).
+ * Applied at the single runWrangler choke point (every call site reads pre-redacted
+ * results) and to the Hyperdrive lister's propagated failure message.
+ */
+function createSecretRedactor(connectionString?: string): (text: string) => string {
+  return (text) => {
+    let out = text;
+    if (typeof connectionString === 'string' && connectionString.length > 0) {
+      out = out.split(connectionString).join('[REDACTED]');
+    }
+    out = out.replace(/(\w[\w+.-]*:\/\/[^\s/@:]+:)[^\s@/]+(@)/g, '$1[REDACTED]$2');
+    return out;
+  };
+}
+
+/**
  * Ensure every resource in `desired` exists in the user's own Cloudflare account,
  * creating the missing ones by shelling out to `wrangler` and letting
  * `wrangler <res> create --update-config` write real ids into the root config.
@@ -2088,6 +2154,16 @@ async function provisionCloudflareResourcesLocked(
   // below / the lister's `{ accountId, apiBaseUrl }` context), so it can never target a
   // DIFFERENT account/endpoint than the one the config is pinned to.
   const selectedRunWrangler = opts?.runWrangler ?? createDefaultRunWrangler(root);
+  // F4 — every wrangler result (and any rejection message) is redacted at THIS single
+  // choke point, so no call site can propagate a Hyperdrive connection string (or any URL
+  // userinfo password a wrangler error echoes) into thrown errors / logs / diagnostics.
+  const redactSecrets = createSecretRedactor(desired.hyperdrive?.connectionString);
+  const redactResult = (result: RunWranglerResult): RunWranglerResult => ({
+    ...result,
+    stdout: redactSecrets(result.stdout),
+    stderr: redactSecrets(result.stderr),
+    error: result.error != null ? redactSecrets(result.error) : result.error,
+  });
   // Single choke point: inject the reconciled account + API base into EVERY call so no
   // call site can forget them (grep-proven — every `runWrangler(...)` below routes through
   // here). F1 — async: `Promise.resolve` coerces a sync-stub result OR the default runner's
@@ -2103,7 +2179,13 @@ async function provisionCloudflareResourcesLocked(
         accountId: transportAccountId,
         apiBaseUrl: transportApiBaseUrl,
       }),
-    );
+    ).then(redactResult, (error: unknown) => {
+      // F4 — a REJECTING runner (e.g. an F2 quarantine) must not smuggle the secret either.
+      if (error instanceof Error && typeof error.message === 'string') {
+        error.message = redactSecrets(error.message);
+      }
+      throw error;
+    });
 
   // --- D1 ------------------------------------------------------------------
   if (desired.d1) {
@@ -2459,7 +2541,12 @@ async function provisionCloudflareResourcesLocked(
           validatedConfigs = result;
           existenceUnknown = false;
         } catch (error) {
-          log.warn(`Hyperdrive existence check for ${name} failed: ${(error as Error).message}`);
+          // F4 — redact before propagating (a lister/network error could echo a URL
+          // carrying userinfo credentials).
+          log.warn(
+            `Hyperdrive existence check for ${name} failed: ` +
+              redactSecrets((error as Error).message),
+          );
           existenceUnknown = true;
           validatedConfigs = undefined;
         }
