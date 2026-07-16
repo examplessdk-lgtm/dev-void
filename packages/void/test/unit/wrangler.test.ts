@@ -1408,11 +1408,10 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(d1[0]).toMatchObject({ binding: 'DB', database_id: 'real-id' });
   });
 
-  it('fails closed when overwriting migrations_dir would invalidate a companion migrations_pattern — throws without writing', () => {
-    // A valid drizzle pair (migrations_dir + migrations_pattern) becomes invalid
-    // when the patch changes migrations_dir, because wrangler requires the pattern
-    // to start with `${migrations_dir}/`. Fail closed rather than break `wrangler
-    // d1 migrations`, and never rewrite the user-owned pattern.
+  it('F6: fails closed on an explicit DIFFERENT migrations_dir — names both paths, throws without writing', () => {
+    // User-approved contract (round 11): a reused D1 configured with its own
+    // migrations directory must NEVER be silently rewritten to Void's default —
+    // that would strand the user's migration files. Fail closed, naming both.
     setup(
       'wrangler.jsonc',
       `{
@@ -1433,9 +1432,76 @@ describe('writeProvisionedWranglerConfig', () => {
       writeProvisionedWranglerConfig(tmpDir, {
         d1MigrationsDir: { binding: 'DB', dir: './db/migrations' },
       }),
-    ).toThrow(/"migrations_pattern": "drizzle\/\*\/migration\.sql", which is not under/);
+    ).toThrow(
+      /already sets "migrations_dir": "drizzle".*"\.\/db\/migrations".*Refusing to overwrite an explicit different migrations directory/s,
+    );
 
-    // Fail closed — the file is byte-unchanged (pattern untouched).
+    // Fail closed — the file is byte-unchanged (dir + pattern untouched).
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('F6: an explicit legacy migrations_dir on a reused D1 is never overwritten', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [
+    { "binding": "DB", "database_name": "app", "database_id": "id", "migrations_dir": "./legacy-migrations" }
+  ]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1MigrationsDir: { binding: 'DB', dir: './db/migrations' },
+      }),
+    ).toThrow(/"\.\/legacy-migrations".*"\.\/db\/migrations"/s);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('F6: normalized-EQUIVALENT migrations_dir spellings are kept untouched (byte-identical file)', () => {
+    // `db/migrations` vs `./db/migrations` vs `db/migrations/` all normalize equal
+    // (wrangler's normalizeRelativePath rule) — the user's spelling survives.
+    for (const existing of ['db/migrations', './db/migrations', 'db/migrations/']) {
+      setup(
+        'wrangler.jsonc',
+        `{
+  "d1_databases": [
+    { "binding": "DB", "database_name": "app", "database_id": "id", "migrations_dir": ${JSON.stringify(existing)} }
+  ]
+}`,
+      );
+      const before = readRaw('wrangler.jsonc');
+      const result = writeProvisionedWranglerConfig(tmpDir, {
+        d1MigrationsDir: { binding: 'DB', dir: './db/migrations' },
+      });
+      expect(result.modified).toBe(false);
+      expect(result.d1MigrationsDirSkipped).toBe(false);
+      expect(readRaw('wrangler.jsonc')).toBe(before);
+    }
+  });
+
+  it('F6: fill-if-absent still validates a companion migrations_pattern — throws without writing', () => {
+    // The entry has a pattern but NO migrations_dir; filling Void's default dir would
+    // invalidate the pattern (wrangler requires it to start with `${migrations_dir}/`).
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "app",
+      "database_id": "id",
+      "migrations_pattern": "drizzle/*/migration.sql"
+    }
+  ]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1MigrationsDir: { binding: 'DB', dir: './db/migrations' },
+      }),
+    ).toThrow(/"migrations_pattern": "drizzle\/\*\/migration\.sql", which is not under/);
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
@@ -1953,7 +2019,9 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(fixture);
   });
 
-  it('fails closed when a composite migrations_dir on the matched D1 entry drops an inner comment — throws without writing', () => {
+  it('fails closed on a composite (non-string) migrations_dir on the matched D1 entry — throws without writing', () => {
+    // F6 rejects the malformed value BEFORE any edit (previously the comment-drop
+    // gate caught it after the fact) — the file is never touched either way.
     const fixture = `{
   "d1_databases": [
     {
@@ -1969,7 +2037,7 @@ describe('writeProvisionedWranglerConfig', () => {
       writeProvisionedWranglerConfig(tmpDir, {
         d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
       }),
-    ).toThrow(/"migrations_dir" has an object\/array value; expected a string/);
+    ).toThrow(/non-string "migrations_dir" value; expected a string/);
     expect(readRaw('wrangler.jsonc')).toBe(fixture);
   });
 

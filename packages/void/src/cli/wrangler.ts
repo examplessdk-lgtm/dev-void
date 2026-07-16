@@ -1016,7 +1016,11 @@ export function writeProvisionedWranglerConfig(
   if (patch.d1MigrationsDir) {
     const currentD1 = parseJsonc(text).d1_databases;
     const d1Entries = Array.isArray(currentD1)
-      ? (currentD1 as Array<{ binding?: unknown; migrations_pattern?: unknown }>)
+      ? (currentD1 as Array<{
+          binding?: unknown;
+          migrations_dir?: unknown;
+          migrations_pattern?: unknown;
+        }>)
       : [];
     // Require EXACTLY ONE D1 entry with the binding. `findIndex` (first match)
     // would silently accept DUPLICATE D1 bindings — a config wrangler rejects —
@@ -1038,31 +1042,61 @@ export function writeProvisionedWranglerConfig(
     }
     const index = matchIndices.length === 1 ? matchIndices[0] : -1;
     if (index >= 0) {
-      // A companion `migrations_pattern` (if the user set one) must stay valid
-      // under the NEW `migrations_dir`: wrangler requires the normalized pattern
-      // to start with `${migrations_dir}/` (unless the dir normalizes to ".").
-      // Overwriting `migrations_dir` without checking would invalidate a
-      // currently-valid pair — e.g. drizzle's `migrations_dir:"drizzle"` +
-      // `migrations_pattern:"drizzle/*/migration.sql"` — so `wrangler d1
-      // migrations` create/list/apply then fail. Validate before editing; fail
-      // closed rather than emit a config wrangler rejects, and NEVER rewrite the
-      // user-owned pattern. No pattern (or an already-compatible one) → behave as
-      // before (set / idempotent no-op).
-      const existingPattern = d1Entries[index].migrations_pattern;
-      if (
-        typeof existingPattern === 'string' &&
-        !migrationsPatternMatchesDir(existingPattern, patch.d1MigrationsDir.dir)
-      ) {
+      // F6 (round 11, user-approved contract): fill-if-absent / keep-equivalent /
+      // fail-closed-on-differ. `migrations_dir` is USER-OWNED once set — a reused D1
+      // configured with e.g. `./legacy-migrations` must never be silently rewritten to
+      // Void's default, which would strand the user's migration files.
+      const existingDir = d1Entries[index].migrations_dir;
+      if (existingDir !== undefined && typeof existingDir !== 'string') {
+        // Malformed (object/array/number/…) — wrangler expects a string. Fail closed
+        // without writing (matches the writer's composite-scalar philosophy).
         throw new Error(
           `deploy: cannot update "${configPath}" — the D1 entry for binding ` +
-            `${JSON.stringify(patch.d1MigrationsDir.binding)} has "migrations_pattern": ` +
-            `${JSON.stringify(existingPattern)}, which is not under the requested ` +
-            `"migrations_dir": ${JSON.stringify(patch.d1MigrationsDir.dir)}. Wrangler requires the ` +
-            `pattern to start with the migrations dir, so this change would break ` +
-            `\`wrangler d1 migrations\`. Align "migrations_pattern" with the dir (or remove it) and retry.`,
+            `${JSON.stringify(patch.d1MigrationsDir.binding)} has a non-string ` +
+            `"migrations_dir" value; expected a string. Fix the config and retry.`,
         );
       }
-      set(['d1_databases', index, 'migrations_dir'], patch.d1MigrationsDir.dir);
+      if (typeof existingDir === 'string') {
+        if (
+          normalizeMigrationsPath(existingDir) !==
+          normalizeMigrationsPath(patch.d1MigrationsDir.dir)
+        ) {
+          // An explicit DIFFERENT directory — fail closed with both paths named.
+          throw new Error(
+            `deploy: cannot update "${configPath}" — the D1 entry for binding ` +
+              `${JSON.stringify(patch.d1MigrationsDir.binding)} already sets "migrations_dir": ` +
+              `${JSON.stringify(existingDir)}, but Void keeps this database's migrations in ` +
+              `${JSON.stringify(patch.d1MigrationsDir.dir)}. Refusing to overwrite an explicit ` +
+              `different migrations directory. Either remove "migrations_dir" from the entry (or ` +
+              `set it to ${JSON.stringify(patch.d1MigrationsDir.dir)}) to let Void manage it, or ` +
+              `move the migrations and keep your directory, then retry.`,
+          );
+        }
+        // keep-equivalent: `db/migrations` vs `./db/migrations` vs a trailing slash all
+        // normalize equal (wrangler's own `normalizeRelativePath` rule) — leave the user's
+        // spelling untouched so the file stays byte-identical.
+      } else {
+        // Absent → fill. A companion `migrations_pattern` (if the user set one) must stay
+        // valid under the dir being written: wrangler requires the normalized pattern to
+        // start with `${migrations_dir}/` (unless the dir normalizes to "."), so filling
+        // the dir under an incompatible pattern would break `wrangler d1 migrations`.
+        // Validate before editing; fail closed and NEVER rewrite the user-owned pattern.
+        const existingPattern = d1Entries[index].migrations_pattern;
+        if (
+          typeof existingPattern === 'string' &&
+          !migrationsPatternMatchesDir(existingPattern, patch.d1MigrationsDir.dir)
+        ) {
+          throw new Error(
+            `deploy: cannot update "${configPath}" — the D1 entry for binding ` +
+              `${JSON.stringify(patch.d1MigrationsDir.binding)} has "migrations_pattern": ` +
+              `${JSON.stringify(existingPattern)}, which is not under the requested ` +
+              `"migrations_dir": ${JSON.stringify(patch.d1MigrationsDir.dir)}. Wrangler requires the ` +
+              `pattern to start with the migrations dir, so this change would break ` +
+              `\`wrangler d1 migrations\`. Align "migrations_pattern" with the dir (or remove it) and retry.`,
+          );
+        }
+        set(['d1_databases', index, 'migrations_dir'], patch.d1MigrationsDir.dir);
+      }
     } else {
       d1MigrationsDirSkipped = true;
     }
