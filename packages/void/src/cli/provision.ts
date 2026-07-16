@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { parse, type ParseError } from 'jsonc-parser';
-import { join, resolve } from 'pathe';
+import { basename, dirname, join, resolve } from 'pathe';
 import lockfile from 'proper-lockfile';
 import { voidLog, voidWarn } from '../log.ts';
 import { parseDotenvFile } from '../shared/dotenv.ts';
@@ -751,6 +751,30 @@ interface ProvisionLock {
 }
 
 /**
+ * F3 — canonicalize an already-absolute config path via `realpath` so the lock identity
+ * and every read/write/`-c` key on the REAL file, not a lexical symlink alias. When the
+ * config file EXISTS, its own realpath is returned (a symlink resolves to its target).
+ * When it does NOT yet exist, `realpath` would throw (ENOENT), so we canonicalize the
+ * PARENT directory (which normally exists — the project root) and rejoin the basename, so
+ * two aliases to the same not-yet-created config still resolve to one identity. If neither
+ * the file nor its parent can be canonicalized, the lexical path is returned unchanged (no
+ * worse than before, and the common case — an existing project dir — is always canonical).
+ */
+function canonicalizeConfigPath(absoluteConfigPath: string): string {
+  try {
+    return realpathSync(absoluteConfigPath);
+  } catch {
+    // File missing (or otherwise unresolvable) — canonicalize the parent dir instead.
+  }
+  const dir = dirname(absoluteConfigPath);
+  try {
+    return join(realpathSync(dir), basename(absoluteConfigPath));
+  } catch {
+    return absoluteConfigPath;
+  }
+}
+
+/**
  * Overridable `proper-lockfile` knobs — production uses the module defaults; unit tests
  * pass a SHORT `stale`/`update` (to exercise heartbeat freshness under a slow call) or a
  * failing `fs` (to exercise a leaked-mutex unlock failure). `fs` is `proper-lockfile`'s
@@ -1416,7 +1440,15 @@ export async function provisionCloudflareResources(
   // `cwd: root` and resolves `-c` there — so with `root !== process.cwd()` a bare
   // relative `rootWranglerPath` would let Node inspect one file while wrangler
   // creates against another (orphan). An already-absolute path is returned as-is.
-  const configPath = resolve(root, rootWranglerPath);
+  //
+  // F3 — then CANONICALIZE it with `realpath` so the lock identity (and every read/
+  // write/`-c`) is keyed on the REAL file, not a lexical alias. Without this, a real
+  // config and a symlink alias to it resolve to DIFFERENT lexical paths → DIFFERENT lock
+  // marker dirs (`<path>.void-provision.lock`), so both processes acquire "the" lock at
+  // once and race the same underlying file. Canonicalizing collapses all aliases to one
+  // identity; a missing config canonicalizes its parent dir so the identity is still
+  // alias-stable before the file is created.
+  const configPath = canonicalizeConfigPath(resolve(root, rootWranglerPath));
 
   // F1/F2 — hold ONE cross-process lock for the WHOLE provision: acquire it BEFORE
   // the first config read (so account reconciliation + persistence + all discovery,

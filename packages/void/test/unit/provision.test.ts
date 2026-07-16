@@ -4,10 +4,12 @@ import {
   mkdirSync,
   readFileSync,
   realpath,
+  realpathSync,
   rmdir,
   rmdirSync,
   rmSync,
   stat,
+  symlinkSync,
   utimes,
   utimesSync,
   writeFileSync,
@@ -3290,6 +3292,65 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
     await second.release();
     await second.release();
     expect(existsSync(lockMutex)).toBe(false);
+  });
+
+  it('F3 — concurrent provisions through a SYMLINK ALIAS to the same config serialize (one lock, one create)', async () => {
+    // A real config + a symlink alias to it. Both provisions hit the SAME underlying file
+    // but via DIFFERENT lexical paths. Without realpath canonicalization each derives its
+    // own marker dir (`<lexical>.void-provision.lock`), so both acquire "the" lock at once
+    // and both create a duplicate. With F3 both canonicalize to ONE identity → one lock →
+    // the loser blocks, then read-first (under the lock) reuses the winner's id.
+    setup(
+      JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
+    );
+    const aliasName = 'wrangler.alias.jsonc';
+    symlinkSync(wranglerPath, join(tmpDir, aliasName));
+    // Sanity: the alias and the real config canonicalize to the same real file.
+    expect(realpathSync(join(tmpDir, aliasName))).toBe(realpathSync(wranglerPath));
+    let createCalls = 0;
+    const makeProv = (
+      configArg: string,
+    ): Promise<{ resources: Array<{ kind: string; action: string }> }> => {
+      const run: RunWrangler = (args) => {
+        if (isCall(args, 'hyperdrive', 'create')) {
+          createCalls++;
+          simulateUpdateConfig('hyperdrive', {
+            binding: 'HYPERDRIVE',
+            id: hex32('hd-' + createCalls),
+          });
+          return ok();
+        }
+        return ok();
+      };
+      return provisionCloudflareResources(
+        tmpDir,
+        configArg,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+        },
+        {
+          runWrangler: run,
+          log: silentLog,
+          // Barrier: the winner holds the lock while LISTING (40ms), so the loser blocks
+          // on the shared lock — proving canonicalization (not sequencing) serializes them.
+          listHyperdriveConfigs: async () => {
+            await delay(40);
+            return [];
+          },
+        },
+      ) as Promise<{ resources: Array<{ kind: string; action: string }> }>;
+    };
+    // One via the REAL absolute path, one via the SYMLINK ALIAS (relative).
+    const [a, b] = await Promise.all([makeProv(wranglerPath), makeProv(aliasName)]);
+    const actions = [...a.resources, ...b.resources]
+      .filter((r) => r.kind === 'hyperdrive')
+      .map((r) => r.action)
+      .sort();
+    expect(createCalls).toBe(1);
+    expect(actions).toEqual(['created', 'reused']);
+    // The single canonical mutex was released.
+    expect(existsSync(`${realpathSync(wranglerPath)}.void-provision.lock.lock`)).toBe(false);
   });
 
   it('F1 — two racing FIRST-RUNS (accounts A and B) serialize; the second fails closed on mismatch, no cross-account write', async () => {
