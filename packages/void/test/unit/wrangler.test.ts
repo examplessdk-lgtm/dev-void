@@ -2358,6 +2358,80 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
+  it('binding-list with ALL members malformed ({bindings:[null]}) throws — no plain-map fall-through (round-5 F6)', () => {
+    // The sibling gap round-4 left open: when NO member is a record, the old
+    // `some(isRecord)` guard fell through and read the field as a plain map (a bogus
+    // binding named "bindings"), hiding the malformed binding entirely. Field-aware
+    // strict validation throws even when every member is malformed.
+    setup('wrangler.jsonc', JSON.stringify({ durable_objects: { bindings: [null] } }));
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/malformed entry at index 0 \(missing a non-empty string "name"\)/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('singleton binding with a non-string binding (ai:{binding:123}) throws — not a silent empty set (round-5 F6)', () => {
+    // wrangler's getBindingNames returns `[value.binding]` for a singleton with NO type
+    // check, so a non-string slips in as a bogus name and a malformed one contributes
+    // nothing. Field-aware strict validation rejects the whole config.
+    setup('wrangler.jsonc', JSON.stringify({ ai: { binding: 123 } }));
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"ai" has a malformed "binding"/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('malformed secrets.required member throws — never a silent skip (round-5 F6)', () => {
+    setup('wrangler.jsonc', JSON.stringify({ secrets: { required: ['API_KEY', null] } }));
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"secrets\.required" contains a malformed entry at index 1/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('malformed queues.producers member throws on the adopt path — never a silent skip (round-5 F6)', () => {
+    // The adopt guard layers existing producers into its owner map
+    // (addQueueProducerOwners); a null producer must reject the whole config rather
+    // than be dropped (which could hide a real producer-binding collision).
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({ queues: { producers: [null, { queue: 'q', binding: 'QUEUE_X' }] } }),
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1: { binding: 'DB', databaseName: 'app', databaseId: 'real-uuid' },
+      }),
+    ).toThrow(/"queues\.producers" contains a malformed entry at index 0/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('adopt TARGET array with a mixed valid+malformed member throws — not a silent skip (round-5 F6)', () => {
+    // Adopting into kv_namespaces whose array holds a null beside a valid { binding:'KV' }.
+    // The owner collector EXCLUDES the target field, so the malformed member is caught
+    // only by the strict target-field validation the adopt path now runs before mutating.
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({ kv_namespaces: [null, { binding: 'KV', id: 'kv-id' }] }),
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        kv: { binding: 'KV', id: 'real-id' },
+      }),
+    ).toThrow(/malformed entry at index 0 \(missing a non-empty string "binding"\)/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
   it('migrations_dir fails closed when the D1 binding is declared more than once (no findIndex-first)', () => {
     setup(
       'wrangler.jsonc',

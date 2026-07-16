@@ -931,6 +931,13 @@ export function writeProvisionedWranglerConfig(
     // adopt the same binding into two arrays without noticing the collision.
     const currentConfig = parseJsonc(text);
     const rawList = currentConfig[field];
+    // F6 — strictly validate the TARGET field's own shape too. The owner collector
+    // below EXCLUDES this field (so the matched entry does not self-collide), so
+    // without this a malformed member in the target array (e.g. a `null` beside a
+    // valid `{binding}`) would be silently skipped by the match loop and could hide a
+    // real duplicate binding. Reuse the ONE field-aware validator; it throws on any
+    // malformed member (fail closed) before we mutate the array.
+    bindingNamesForField(field, rawList);
     const currentList = Array.isArray(rawList) ? [...rawList] : [];
     const matches: Array<number> = [];
     for (let i = 0; i < currentList.length; i++) {
@@ -1628,12 +1635,28 @@ function collectWorkerBindingNames(config: Record<string, unknown>): Map<string,
   // ARE worker binding names at deploy, so a queue producer must never silently
   // collide with one.
   const secrets = config.secrets;
-  if (isRecord(secrets) && Array.isArray(secrets.required)) {
-    for (const name of secrets.required) {
-      if (typeof name === 'string') {
-        claim(name, 'Secret');
-      }
+  if (isRecord(secrets) && secrets.required !== undefined) {
+    // F6 — `secrets.required` is a string[] folded into wrangler's uniqueness set
+    // under "Secret". Validate it STRICTLY: a non-array, or any non-empty-string
+    // member, throws (fail closed) rather than being silently skipped, which would
+    // let a queue producer collide with a real secret binding name unnoticed.
+    if (!Array.isArray(secrets.required)) {
+      throw new Error(
+        `deploy: cannot verify binding-name uniqueness — "secrets.required" must be an array of ` +
+          `secret names. Fix the wrangler config and retry.`,
+      );
     }
+    secrets.required.forEach((name, index) => {
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new Error(
+          `deploy: cannot verify binding-name uniqueness — "secrets.required" contains a malformed ` +
+            `entry at index ${index} (expected a non-empty string). Refusing to proceed on a ` +
+            `partially-readable binding set (a dropped entry could hide a real collision). Fix the ` +
+            `wrangler config and retry.`,
+        );
+      }
+      claim(name, 'Secret');
+    });
   }
   return owners;
 }
@@ -1661,18 +1684,35 @@ function addQueueProducerOwners(
   config: Record<string, unknown>,
 ): void {
   const queues = config.queues;
-  if (!isRecord(queues) || !Array.isArray(queues.producers)) {
+  if (!isRecord(queues) || queues.producers === undefined) {
     return;
   }
-  for (const producer of queues.producers) {
+  // F6 — validate `queues.producers` STRICTLY: a non-array, or any member missing a
+  // non-empty string `binding`, throws (fail closed) rather than being silently
+  // skipped, which would let the adopt guard miss a real producer-binding collision.
+  if (!Array.isArray(queues.producers)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "queues.producers" must be an array. Fix ` +
+        `the wrangler config and retry.`,
+    );
+  }
+  queues.producers.forEach((producer, index) => {
     if (
-      isRecord(producer) &&
-      typeof producer.binding === 'string' &&
-      !owners.has(producer.binding)
+      !isRecord(producer) ||
+      typeof producer.binding !== 'string' ||
+      producer.binding.length === 0
     ) {
+      throw new Error(
+        `deploy: cannot verify binding-name uniqueness — "queues.producers" contains a malformed ` +
+          `entry at index ${index} (missing a non-empty string "binding"). Refusing to proceed on a ` +
+          `partially-readable binding set (a dropped producer could hide a real collision). Fix the ` +
+          `wrangler config and retry.`,
+      );
+    }
+    if (!owners.has(producer.binding)) {
       owners.set(producer.binding, 'Queue');
     }
-  }
+  });
 }
 
 /**
@@ -1693,22 +1733,88 @@ function addQueueProducerOwners(
 const NAME_KEYED_BINDING_ARRAYS = new Set(['send_email', 'ratelimits']);
 
 /**
- * Binding names a single config field contributes. Mirrors wrangler's
- * `getBindingNames`, plus the `.name`-keyed arrays wrangler's own
- * `getBindingNames` overlooks (see NAME_KEYED_BINDING_ARRAYS).
+ * F6 — config fields whose value uses the binding-LIST shape `{ bindings: [{ name }] }`
+ * (wrangler parses these via a `.bindings` sub-array, not a top-level array). Known
+ * field-awarely so a `{bindings: […]}` value is validated STRICTLY even when NO member
+ * is a record (`{bindings:[null]}` must throw, not fall through to a plain-map read),
+ * while a KEY-MAP field that merely happens to carry a `bindings` key (e.g. a `vars`
+ * entry named `bindings`) is never misread as a binding list.
+ */
+const BINDING_LIST_FIELDS = new Set(['durable_objects', 'unsafe', 'logfwdr']);
+
+/**
+ * F6 — config fields whose value is a SINGLE binding object `{ binding }` (wrangler
+ * parses these with a single-object validator, e.g. `validateAIBinding`). Known
+ * field-awarely so a PRESENT-but-non-string `binding` THROWS (fail closed) rather than
+ * yielding an empty set, WITHOUT misfiring on a KEY-MAP field (`vars`, blob/module
+ * maps) that could legitimately carry a key named `binding`.
+ */
+const SINGLETON_BINDING_FIELDS = new Set(['ai', 'browser', 'images', 'version_metadata', 'assets']);
+
+/**
+ * F6 — the ONE field-aware strict binding-name reader for a single config field.
+ * Mirrors wrangler's `getBindingNames` but is field-aware and FAILS CLOSED on any
+ * malformed/empty binding identity (wrangler is lenient and would silently drop such
+ * a member, letting the worker-wide uniqueness guard miss a real collision). Routes
+ * each field to its known shape: NAME-keyed arrays, binding LISTS, SINGLETON objects;
+ * everything else (namespace arrays, key-maps) goes through `genericBindingNames`,
+ * which itself fails closed on a malformed namespace-array member.
  */
 function bindingNamesForField(field: string, value: unknown): Array<string> {
   if (NAME_KEYED_BINDING_ARRAYS.has(field) && Array.isArray(value)) {
     // send_email / ratelimits: an array of `{ name }` (some also carry `.binding`).
-    // Collect BOTH — strictly. A malformed member (F6) REJECTS the whole config
-    // (fail closed) rather than being silently dropped, which would let the
-    // uniqueness guard miss a real binding name and commit a conflicting one.
+    // Collect BOTH — strictly. A malformed member REJECTS the whole config (fail
+    // closed) rather than being silently dropped, which would let the uniqueness
+    // guard miss a real binding name and commit a conflicting one.
     const names = strictBindingArray(value, 'name', field);
     const bindings = value
       .filter((entry): entry is Record<string, unknown> => isRecord(entry))
       .map((entry) => entry.binding)
       .filter((binding): binding is string => typeof binding === 'string' && binding.length > 0);
     return [...bindings, ...names];
+  }
+  if (BINDING_LIST_FIELDS.has(field)) {
+    return bindingListNames(field, value);
+  }
+  if (SINGLETON_BINDING_FIELDS.has(field)) {
+    return singletonBindingName(field, value);
+  }
+  return genericBindingNames(value);
+}
+
+/**
+ * F6 — read the binding names from a binding-LIST field (`{ bindings: [{ name }] }`).
+ * When the value carries a `bindings` array, EVERY member is strictly validated for a
+ * non-empty string `name` (a malformed member throws — never a partial/plain-map read
+ * that could hide a real binding). A value that is not the `{bindings: array}` shape
+ * defers to the generic reader (which is itself strict on namespace arrays).
+ */
+function bindingListNames(field: string, value: unknown): Array<string> {
+  if (isRecord(value) && Array.isArray(value.bindings)) {
+    return strictBindingArray(value.bindings, 'name', `${field}.bindings`);
+  }
+  return genericBindingNames(value);
+}
+
+/**
+ * F6 — read the binding name from a SINGLETON field (`{ binding }`). A PRESENT
+ * `binding` that is not a non-empty string is malformed and THROWS (fail closed):
+ * wrangler's `getBindingNames` returns `[value.binding]` here with NO type check, so a
+ * non-string would slip in as a bogus name and a malformed one would silently
+ * contribute nothing. An ABSENT `binding` (e.g. `assets` with only a `directory`)
+ * defers to the generic reader, matching wrangler.
+ */
+function singletonBindingName(field: string, value: unknown): Array<string> {
+  if (
+    isRecord(value) &&
+    value.binding !== undefined &&
+    (typeof value.binding !== 'string' || value.binding.length === 0)
+  ) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" has a malformed "binding" ` +
+        `(expected a non-empty string). Refusing to proceed on a partially-readable binding set (a ` +
+        `dropped binding could hide a real collision). Fix the wrangler config and retry.`,
+    );
   }
   return genericBindingNames(value);
 }
