@@ -3857,6 +3857,64 @@ describe('provisionCloudflareResources — F1 config compliance_region pins the 
   });
 });
 
+describe('provisionCloudflareResources — F1 wrangler-exact base resolution order (round 11)', () => {
+  it('an INVALID WRANGLER_API_ENVIRONMENT fails closed (wrangler assertOneOf) instead of pinning prod', () => {
+    // wrangler's env factory has choices ["production","staging"]; a present out-of-choices
+    // value (typo'd "stagng", or an empty string) throws — never silently public production.
+    expect(() => resolvePinnedApiBaseUrl({ WRANGLER_API_ENVIRONMENT: 'stagng' })).toThrow(
+      /WRANGLER_API_ENVIRONMENT.*"production" or "staging".*"stagng"/s,
+    );
+    expect(() => resolvePinnedApiBaseUrl({ WRANGLER_API_ENVIRONMENT: '' })).toThrow(
+      /WRANGLER_API_ENVIRONMENT/,
+    );
+    // An explicit "production" is a valid choice → the public base.
+    expect(resolvePinnedApiBaseUrl({ WRANGLER_API_ENVIRONMENT: 'production' })).toBe(
+      'https://api.cloudflare.com/client/v4',
+    );
+  });
+
+  it('an empty direct base override is honored AS-IS (presence + nullish semantics, like wrangler)', () => {
+    // wrangler: `getCloudflareApiBaseUrlFromEnv() ?? derived` — a PRESENT empty string is
+    // returned (nullish, not falsy, coalescing) and CLOUDFLARE_* presence beats CF_*.
+    expect(resolvePinnedApiBaseUrl({ CLOUDFLARE_API_BASE_URL: '' })).toBe('');
+    expect(
+      resolvePinnedApiBaseUrl({ CLOUDFLARE_API_BASE_URL: '', CF_API_BASE_URL: 'https://cf.example' }),
+    ).toBe('');
+    expect(resolvePinnedApiBaseUrl({ CF_API_BASE_URL: '' })).toBe('');
+  });
+
+  it('provisionEnv pins a resolved EMPTY base into the child env (presence, not truthiness)', () => {
+    const env = provisionEnv({ accountId: 'acct', apiBaseUrl: '' });
+    // The child wrangler must see the SAME (empty) override the ambient env carried — never
+    // a scrubbed env that would silently re-derive the default endpoint (split-brain).
+    expect(env.CLOUDFLARE_API_BASE_URL).toBe('');
+  });
+
+  it('a direct base + CONFLICTING compliance settings resolves to the direct base (no false reject)', () => {
+    // wrangler's `??` short-circuits past getComplianceRegionSubdomain when a direct base is
+    // present, so the env-vs-config conflict is never evaluated there.
+    expect(
+      resolvePinnedApiBaseUrl(
+        { CLOUDFLARE_API_BASE_URL: 'https://direct.example', CLOUDFLARE_COMPLIANCE_REGION: 'public' },
+        'fedramp_high',
+      ),
+    ).toBe('https://direct.example');
+    // Same for an invalid STAGING selector — unread on the direct branch.
+    expect(
+      resolvePinnedApiBaseUrl({
+        CLOUDFLARE_API_BASE_URL: 'https://direct.example',
+        WRANGLER_API_ENVIRONMENT: 'stagng',
+      }),
+    ).toBe('https://direct.example');
+  });
+
+  it('the config compliance_region VALUE is still validated with a direct base present (wrangler config validation)', () => {
+    expect(() =>
+      resolvePinnedApiBaseUrl({ CLOUDFLARE_API_BASE_URL: 'https://direct.example' }, 'bogus'),
+    ).toThrow(/one of "public" or "fedramp_high"/);
+  });
+});
+
 describe('provisionCloudflareResources — F5 R2 absence needs the STRUCTURED code (round 10)', () => {
   it('a failure whose text merely contains 10006 inside a bucket name is NOT absence (fails closed, no create)', async () => {
     setup(JSON.stringify({ name: 'app', account_id: 'acct' }));

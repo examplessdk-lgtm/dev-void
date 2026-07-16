@@ -247,33 +247,81 @@ const TRANSPORT_REDIRECT_ENV_VARS = [
 
 /**
  * F1 — resolve the ONE Cloudflare API base URL this provision is pinned to, mirroring
- * wrangler 4.107's `getCloudflareApiBaseUrl` EXACTLY so the Hyperdrive REST lister and
- * the spawned wrangler agree on the endpoint:
- *   `CLOUDFLARE_API_BASE_URL` ?? `CF_API_BASE_URL`
- *   ?? `https://api${fed}${staging}.cloudflare.com/client/v4`
- * where `fed = CLOUDFLARE_COMPLIANCE_REGION === 'fedramp_high' ? '.fed' : ''` and
- * `staging = WRANGLER_API_ENVIRONMENT === 'staging' ? '.staging' : ''`. Read ONCE from
- * the REAL ambient `process.env` (which does NOT include the project `.env` — Node never
- * auto-loads it), so an ambient/CI pin is honored while a project dotenv redirect is
- * rejected up front by {@link assertNoTransportRedirectInProjectDotenv}.
+ * wrangler 4.107's `getCloudflareApiBaseUrl` EXACTLY (wrangler-dist/cli.js) so the
+ * Hyperdrive REST lister and the spawned wrangler agree on the endpoint:
+ *
+ *   getCloudflareApiBaseUrl = (complianceConfig) =>
+ *     getCloudflareApiBaseUrlFromEnv() ??
+ *     `https://api${getComplianceRegionSubdomain(complianceConfig)}${getStagingSubdomain()}.cloudflare.com/client/v4`
+ *
+ * Order + semantics mirrored exactly:
+ *   1. The DIRECT base override is evaluated FIRST, by PRESENCE (wrangler's env factory
+ *      checks `variableName in process.env`), with `CLOUDFLARE_API_BASE_URL` taking
+ *      precedence over the deprecated `CF_API_BASE_URL`. A present-but-EMPTY override is
+ *      returned AS-IS: `"" ?? derived` keeps the empty string (NULLISH, not falsy,
+ *      coalescing), so wrangler pins the empty base (its API calls then fail on the
+ *      unparsable URL) — we mirror that instead of silently substituting an endpoint.
+ *   2. Only on the DERIVED branch are the staging/compliance selectors read — wrangler's
+ *      `??` short-circuits past `getComplianceRegionSubdomain`/`getStagingSubdomain` when a
+ *      direct base is present, so a direct base + conflicting compliance settings resolves
+ *      to the direct base in wrangler (NO conflict error) and must not be rejected here.
+ *   3. On the derived branch both env selectors are choice-VALIDATED (wrangler's
+ *      `getProcessEnv` → `assertOneOf` throws on any present value outside the choices,
+ *      e.g. `WRANGLER_API_ENVIRONMENT=stagng` or an empty string), so an invalid selector
+ *      FAILS CLOSED instead of silently pinning public production.
+ *   4. The config's own `compliance_region` VALUE is validated UNCONDITIONALLY — wrangler's
+ *      config validation (`isOneOf("public", "fedramp_high")` on the `compliance_region`
+ *      field) rejects an invalid config value for every command regardless of which branch
+ *      resolves the base.
+ * Read ONCE from the REAL ambient `process.env` (which does NOT include the project `.env`
+ * — Node never auto-loads it), so an ambient/CI pin is honored while a project dotenv
+ * redirect is rejected up front by {@link assertNoTransportRedirectInProjectDotenv}.
  */
 export function resolvePinnedApiBaseUrl(
   env: NodeJS.ProcessEnv = process.env,
   configComplianceRegion?: string,
 ): string {
-  // F1 — reconcile the compliance region FIRST (unconditionally), mirroring wrangler's
-  // `getCloudflareComplianceRegion`: it throws when the env var AND the config both set the
-  // region to DIFFERENT values. We run this even when a direct base override is present so an
-  // irreconcilable config-vs-ambient region fails closed exactly as wrangler would (rather
-  // than silently pinning one endpoint while the config claims another region).
-  const region = resolveComplianceRegion(env, configComplianceRegion);
-  const direct = firstNonEmpty(env.CLOUDFLARE_API_BASE_URL, env.CF_API_BASE_URL);
-  if (direct) {
+  // (4) — validate the config's compliance_region value unconditionally, like wrangler's
+  // config validation (a PRESENT empty string is invalid there too).
+  const configRegion =
+    configComplianceRegion !== undefined
+      ? assertComplianceChoice(configComplianceRegion, 'the wrangler config "compliance_region"')
+      : undefined;
+  // (1) — presence (not truthiness) of the direct override wins, CLOUDFLARE_* first.
+  const direct =
+    env.CLOUDFLARE_API_BASE_URL !== undefined
+      ? env.CLOUDFLARE_API_BASE_URL
+      : env.CF_API_BASE_URL;
+  if (direct !== undefined) {
     return direct;
   }
+  // (2)+(3) — derived branch only: validate the selectors, reconcile the region.
+  const region = resolveComplianceRegion(env, configRegion);
   const fed = region === 'fedramp_high' ? '.fed' : '';
-  const staging = env.WRANGLER_API_ENVIRONMENT === 'staging' ? '.staging' : '';
+  const staging = resolveApiEnvironment(env) === 'staging' ? '.staging' : '';
   return `https://api${fed}${staging}.cloudflare.com/client/v4`;
+}
+
+/**
+ * F1 — mirror wrangler 4.107's `getCloudflareApiEnvironmentFromEnv` (env factory with
+ * `choices: ["production", "staging"]`, default `"production"`): an ABSENT variable
+ * defaults to production; a PRESENT value outside the choices — `"stagng"`, an empty
+ * string — makes wrangler's `assertOneOf` throw, so we fail closed identically instead of
+ * silently pinning public production where wrangler stops.
+ */
+function resolveApiEnvironment(env: NodeJS.ProcessEnv): 'production' | 'staging' {
+  const raw = env.WRANGLER_API_ENVIRONMENT;
+  if (raw === undefined) {
+    return 'production';
+  }
+  if (raw !== 'production' && raw !== 'staging') {
+    throw new Error(
+      `provision: the WRANGLER_API_ENVIRONMENT environment variable must be one of ` +
+        `"production" or "staging", got ${JSON.stringify(raw)}. wrangler rejects this value, so ` +
+        `provisioning refuses to guess an endpoint; fix or unset it and retry.`,
+    );
+  }
+  return raw;
 }
 
 /** F1 — the compliance-region choices wrangler 4.107 accepts (`getCloudflareComplianceRegionFromEnv`). */
@@ -293,28 +341,26 @@ function assertComplianceChoice(value: string, source: string): ComplianceRegion
 
 /**
  * F1 — reconcile the effective Cloudflare compliance region, mirroring wrangler 4.107's
- * `getCloudflareComplianceRegion(complianceConfig)` EXACTLY:
- *   - reads `CLOUDFLARE_COMPLIANCE_REGION` (validated against the `public`/`fedramp_high`
- *     choices, like wrangler's `getProcessEnv` → `assertOneOf`);
- *   - validates the config's top-level `compliance_region` the same way;
- *   - when BOTH are set to DIFFERENT values, THROWS (fail closed) — wrangler raises a
- *     `UserError` for exactly this conflict, so we must not paper over it by pinning one
- *     endpoint while the config declares the other region;
- *   - otherwise returns `env ?? config ?? "public"`.
- * An empty/absent value on either side is treated as "not set".
+ * `getCloudflareComplianceRegion(complianceConfig)` EXACTLY (evaluated only on the
+ * DERIVED-base branch — with a direct base override wrangler never calls it):
+ *   - reads `CLOUDFLARE_COMPLIANCE_REGION` by PRESENCE and validates it against the
+ *     `public`/`fedramp_high` choices (wrangler's `getProcessEnv` → `assertOneOf`, which
+ *     throws on ANY present out-of-choices value — an empty string included);
+ *   - when BOTH the env var AND the (already-validated) config region are set to
+ *     DIFFERENT values, THROWS (fail closed) — wrangler raises a `UserError` for exactly
+ *     this conflict, so we must not paper over it by pinning one endpoint while the config
+ *     declares the other region;
+ *   - otherwise returns `env || config || "public"` (both values are validated choices by
+ *     now, so wrangler's falsy-coalescing is equivalent to nullish here).
  */
 function resolveComplianceRegion(
   env: NodeJS.ProcessEnv,
-  configComplianceRegion: string | undefined,
+  configRegion: ComplianceRegion | undefined,
 ): ComplianceRegion {
   const rawEnv = env.CLOUDFLARE_COMPLIANCE_REGION;
   const envRegion =
-    typeof rawEnv === 'string' && rawEnv.length > 0
+    rawEnv !== undefined
       ? assertComplianceChoice(rawEnv, 'the CLOUDFLARE_COMPLIANCE_REGION environment variable')
-      : undefined;
-  const configRegion =
-    typeof configComplianceRegion === 'string' && configComplianceRegion.length > 0
-      ? assertComplianceChoice(configComplianceRegion, 'the wrangler config "compliance_region"')
       : undefined;
   if (envRegion !== undefined && configRegion !== undefined && envRegion !== configRegion) {
     throw new Error(
@@ -326,15 +372,6 @@ function resolveComplianceRegion(
     );
   }
   return envRegion ?? configRegion ?? 'public';
-}
-
-function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
-  for (const value of values) {
-    if (typeof value === 'string' && value.length > 0) {
-      return value;
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -444,8 +481,12 @@ export function provisionEnv(ctx?: { accountId?: string; apiBaseUrl?: string }):
   // Pin the ONE resolved API base so wrangler's `getCloudflareApiBaseUrlFromEnv()` returns
   // exactly the endpoint the Hyperdrive REST lister uses (no staging/FedRAMP/arbitrary
   // split-brain). The explicit `--env=` on every argv still forces the top-level config
-  // env even if a stray CLOUDFLARE_ENV survived elsewhere.
-  if (ctx?.apiBaseUrl) {
+  // env even if a stray CLOUDFLARE_ENV survived elsewhere. Pinned by PRESENCE (F1): a
+  // resolved EMPTY base (a present-but-empty ambient override, which wrangler honors via
+  // its `in process.env` + nullish coalescing) is pinned as empty too, so the child
+  // wrangler fails on it exactly as the ambient environment would — never silently
+  // re-derived into a different endpoint than the lister uses.
+  if (ctx?.apiBaseUrl !== undefined) {
     env.CLOUDFLARE_API_BASE_URL = ctx.apiBaseUrl;
   }
   // Pin the target account non-interactively (CI-safe) when known, so
@@ -1949,10 +1990,11 @@ async function provisionCloudflareResourcesLocked(
         `"fedramp_high". Fix the config and retry.`,
     );
   }
+  // F1 — a PRESENT string is passed through VERBATIM (an empty string included): wrangler's
+  // config validation (`isOneOf("public", "fedramp_high")`) rejects any present
+  // out-of-choices value, so the resolver must see it to fail closed identically.
   const configComplianceRegion =
-    typeof rawComplianceRegion === 'string' && rawComplianceRegion.length > 0
-      ? rawComplianceRegion
-      : undefined;
+    typeof rawComplianceRegion === 'string' ? rawComplianceRegion : undefined;
   if (configAccountId && opts?.accountId && configAccountId !== opts.accountId) {
     throw new Error(
       `provision: Cloudflare account mismatch — "${configPath}" pins account_id ` +
