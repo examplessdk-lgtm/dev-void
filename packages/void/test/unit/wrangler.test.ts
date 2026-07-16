@@ -2244,4 +2244,83 @@ describe('writeProvisionedWranglerConfig', () => {
     // The .jsonc (which discovery would have preferred) is untouched.
     expect((parseRaw('wrangler.jsonc') as Record<string, unknown>).account_id).toBeUndefined();
   });
+
+  // Adopt collision guards must be built from the CURRENT text, cover MATCHED
+  // (existing-target) entries, include queues.producers, and reject duplicate D1
+  // migration targets (F6) — not just the append/initial-parse cases.
+
+  it('adopt fails closed when the binding collides with an existing queue PRODUCER binding — no write', () => {
+    // An existing queue producer already binds `DB`; adopting a D1 as `DB` would
+    // emit a cross-type duplicate binding name wrangler rejects at deploy. The base
+    // collector omits producers, so the adopt guard must layer them back in.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": { "producers": [{ "queue": "jobs", "binding": "DB" }] }
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1: { binding: 'DB', databaseName: 'app', databaseId: 'real-uuid' },
+      }),
+    ).toThrow(/cannot adopt "DB" into "d1_databases".*already used by a Queue binding/s);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('adopt fails closed when TWO adopts in one patch request the same binding (current-text rebuild, not stale map)', () => {
+    // A single patch adopting the same binding into two arrays would, with a map
+    // built once from the INITIAL parse, append both. The guard rebuilds from the
+    // current text before each adopt, so the second sees the first and fails closed.
+    setup('wrangler.jsonc', '{ "name": "app" }');
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1: { binding: 'DUP', databaseName: 'app', databaseId: 'real-uuid' },
+        kv: { binding: 'DUP', id: 'real-kv-id' },
+      }),
+    ).toThrow(/cannot adopt "DUP" into "kv_namespaces".*already used by a D1 Database binding/s);
+    // Fail closed — nothing written (the d1 append is discarded because the whole
+    // write only commits past the final gate).
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('adopt fails closed on a MATCHED existing-target entry whose binding also collides cross-type — no write', () => {
+    // The target D1 entry already exists (matched, not appended) AND a KV binds the
+    // same name — an undeployable cross-type duplicate. The MATCHED/update path must
+    // fail closed too, not just the append path.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [{ "binding": "DB", "database_name": "app", "database_id": "local" }],
+  "kv_namespaces": [{ "binding": "DB", "id": "abc" }]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1: { binding: 'DB', databaseName: 'app', databaseId: 'real-uuid' },
+      }),
+    ).toThrow(/cannot adopt "DB" into "d1_databases".*already used by a KV Namespace binding/s);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('migrations_dir fails closed when the D1 binding is declared more than once (no findIndex-first)', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [
+    { "binding": "DB", "database_name": "a", "database_id": "id-a" },
+    { "binding": "DB", "database_name": "b", "database_id": "id-b" }
+  ]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1MigrationsDir: { binding: 'DB', dir: './db/migrations' },
+      }),
+    ).toThrow(/binding "DB" is declared 2 times in "d1_databases"/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
 });

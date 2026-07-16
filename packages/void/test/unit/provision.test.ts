@@ -3,6 +3,7 @@ import { parse as parseJsoncRaw } from 'jsonc-parser';
 import { join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import {
+  normalizeRunWranglerResult,
   provisionCloudflareResources,
   type DesiredResourceSet,
   type RunWrangler,
@@ -107,7 +108,7 @@ describe('provisionCloudflareResources — read-first', () => {
       }),
     );
     const { run, calls } = makeRunner([
-      { match: /^d1 list --json$/, reply: () => ok('[]') },
+      { match: /^d1 list --json/, reply: () => ok('[]') },
       {
         match: /^d1 create /,
         reply: () => {
@@ -126,7 +127,7 @@ describe('provisionCloudflareResources — read-first', () => {
       { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
       { runWrangler: run, log: silentLog },
     );
-    expect(calls[0]).toEqual(['d1', 'list', '--json']);
+    expect(calls[0]).toEqual(['d1', 'list', '--json', '-c', wranglerPath]);
     expect(result.resources[0].action).toBe('created');
   });
 });
@@ -179,7 +180,7 @@ describe('provisionCloudflareResources — argv injection safety', () => {
     writeFileSync(spacedPath, JSON.stringify({ name: 'app' }));
     try {
       const { run, calls } = makeRunner([
-        { match: /^d1 list --json$/, reply: () => ok('[]') },
+        { match: /^d1 list --json/, reply: () => ok('[]') },
         {
           match: /^d1 create /,
           reply: () => {
@@ -266,7 +267,7 @@ describe('provisionCloudflareResources — config discovery (fail closed, single
     writeFileSync(jsoncPath, JSON.stringify({ kv_namespaces: [{ binding: 'KV', id: 'local' }] }));
     const { run } = makeRunner([
       {
-        match: /^kv namespace list$/,
+        match: /^kv namespace list/,
         reply: () => ok(JSON.stringify([{ id: 'real-kv-id', title: 'myapp-kv' }])),
       },
     ]);
@@ -290,7 +291,7 @@ describe('provisionCloudflareResources — D1', () => {
   it('creates a missing D1 with --update-config then writes migrations_dir', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
-      { match: /^d1 list --json$/, reply: () => ok('[]') },
+      { match: /^d1 list --json/, reply: () => ok('[]') },
       {
         match: /^d1 create /,
         reply: () => {
@@ -310,7 +311,7 @@ describe('provisionCloudflareResources — D1', () => {
       { runWrangler: run, log: silentLog },
     );
     expect(calls).toEqual([
-      ['d1', 'list', '--json'],
+      ['d1', 'list', '--json', '-c', wranglerPath],
       ['d1', 'create', 'myapp-db', '--binding', 'DB', '--update-config', '-c', wranglerPath],
     ]);
     const d1 = readConfig().d1_databases as Array<Record<string, unknown>>;
@@ -365,7 +366,7 @@ describe('provisionCloudflareResources — D1', () => {
     );
     const { run, calls } = makeRunner([
       {
-        match: /^d1 list --json$/,
+        match: /^d1 list --json/,
         reply: () => ok(JSON.stringify([{ uuid: 'existing-uuid', name: 'myapp-db' }])),
       },
     ]);
@@ -375,7 +376,7 @@ describe('provisionCloudflareResources — D1', () => {
       { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
       { runWrangler: run, log: silentLog },
     );
-    expect(calls).toEqual([['d1', 'list', '--json']]);
+    expect(calls).toEqual([['d1', 'list', '--json', '-c', wranglerPath]]);
     expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
     const d1 = readConfig().d1_databases as Array<Record<string, unknown>>;
     expect(d1).toEqual([
@@ -398,13 +399,13 @@ describe('provisionCloudflareResources — D1', () => {
       }),
     );
     const { run, calls } = makeRunner([
-      { match: /^d1 list --json$/, reply: () => ok('[]') },
+      { match: /^d1 list --json/, reply: () => ok('[]') },
       {
         match: /^d1 create /,
         reply: () => fail('', 'X [ERROR] A database with that name already exists [code: 7502]'),
       },
       {
-        match: /^d1 info myapp-db --json$/,
+        match: /^d1 info myapp-db --json/,
         reply: () => ok(JSON.stringify({ uuid: 'raced-uuid', name: 'myapp-db' })),
       },
     ]);
@@ -415,9 +416,9 @@ describe('provisionCloudflareResources — D1', () => {
       { runWrangler: run, log: silentLog },
     );
     expect(calls).toEqual([
-      ['d1', 'list', '--json'],
+      ['d1', 'list', '--json', '-c', wranglerPath],
       ['d1', 'create', 'myapp-db', '--binding', 'DB', '--update-config', '-c', wranglerPath],
-      ['d1', 'info', 'myapp-db', '--json'],
+      ['d1', 'info', 'myapp-db', '--json', '-c', wranglerPath],
     ]);
     const d1 = readConfig().d1_databases as Array<Record<string, unknown>>;
     expect(d1[0]).toMatchObject({ binding: 'DB', database_id: 'raced-uuid' });
@@ -433,7 +434,7 @@ describe('provisionCloudflareResources — D1', () => {
   it('throws on a non-7502 create failure', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run } = makeRunner([
-      { match: /^d1 list --json$/, reply: () => ok('[]') },
+      { match: /^d1 list --json/, reply: () => ok('[]') },
       {
         match: /^d1 create /,
         reply: () => fail('', 'X [ERROR] Authentication error [code: 10000]'),
@@ -455,7 +456,7 @@ describe('provisionCloudflareResources — KV', () => {
     setup(JSON.stringify({ kv_namespaces: [{ binding: 'KV', id: 'local' }] }));
     const { run, calls } = makeRunner([
       {
-        match: /^kv namespace list$/,
+        match: /^kv namespace list/,
         reply: () => ok(JSON.stringify([{ id: 'real-kv-id', title: 'myapp-kv' }])),
       },
     ]);
@@ -465,7 +466,7 @@ describe('provisionCloudflareResources — KV', () => {
       { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }] },
       { runWrangler: run, log: silentLog },
     );
-    expect(calls).toEqual([['kv', 'namespace', 'list']]);
+    expect(calls).toEqual([['kv', 'namespace', 'list', '-c', wranglerPath]]);
     const kv = readConfig().kv_namespaces as Array<Record<string, unknown>>;
     expect(kv).toEqual([{ binding: 'KV', id: 'real-kv-id' }]);
     expect(result.resources).toEqual([
@@ -476,7 +477,7 @@ describe('provisionCloudflareResources — KV', () => {
   it('creates when the namespace list is empty', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
-      { match: /^kv namespace list$/, reply: () => ok('[]') },
+      { match: /^kv namespace list/, reply: () => ok('[]') },
       {
         match: /^kv namespace create /,
         reply: () => {
@@ -492,7 +493,7 @@ describe('provisionCloudflareResources — KV', () => {
       { runWrangler: run, log: silentLog },
     );
     expect(calls).toEqual([
-      ['kv', 'namespace', 'list'],
+      ['kv', 'namespace', 'list', '-c', wranglerPath],
       [
         'kv',
         'namespace',
@@ -514,7 +515,7 @@ describe('provisionCloudflareResources — KV', () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
       {
-        match: /^kv namespace list$/,
+        match: /^kv namespace list/,
         reply: () => fail('', 'X [ERROR] Authentication error [code: 10000]'),
       },
     ]);
@@ -532,7 +533,7 @@ describe('provisionCloudflareResources — KV', () => {
   it('fails closed (no create) when `kv namespace list` returns non-JSON output', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
-      { match: /^kv namespace list$/, reply: () => ok('not a json list at all') },
+      { match: /^kv namespace list/, reply: () => ok('not a json list at all') },
     ]);
     await expect(
       provisionCloudflareResources(
@@ -548,7 +549,7 @@ describe('provisionCloudflareResources — KV', () => {
   it('fails closed (no create) when `kv namespace list` output is truncated', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
-      { match: /^kv namespace list$/, reply: () => ok('[{ "id": "a", "title": "myapp-kv"') },
+      { match: /^kv namespace list/, reply: () => ok('[{ "id": "a", "title": "myapp-kv"') },
     ]);
     await expect(
       provisionCloudflareResources(
@@ -566,7 +567,7 @@ describe('provisionCloudflareResources — KV', () => {
     const warnings: Array<string> = [];
     const { run } = makeRunner([
       {
-        match: /^kv namespace list$/,
+        match: /^kv namespace list/,
         reply: () =>
           ok(
             JSON.stringify([
@@ -593,7 +594,7 @@ describe('provisionCloudflareResources — KV', () => {
   it('provisions each KV binding independently (ISR_CACHE + app KV)', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
-      { match: /^kv namespace list$/, reply: () => ok('[]') },
+      { match: /^kv namespace list/, reply: () => ok('[]') },
       {
         match: /^kv namespace create /,
         reply: (sub) => {
@@ -652,7 +653,7 @@ describe('provisionCloudflareResources — idempotent re-run', () => {
     setup(JSON.stringify({ kv_namespaces: [{ binding: 'KV', id: 'local' }] }));
     const first = makeRunner([
       {
-        match: /^kv namespace list$/,
+        match: /^kv namespace list/,
         reply: () => ok(JSON.stringify([{ id: 'real-kv-id', title: 'myapp-kv' }])),
       },
     ]);
@@ -699,7 +700,7 @@ describe('provisionCloudflareResources — R2', () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
       {
-        match: /^r2 bucket info myapp-uploads --json$/,
+        match: /^r2 bucket info myapp-uploads --json/,
         reply: () => ok(JSON.stringify({ name: 'myapp-uploads', created: 'x' })),
       },
     ]);
@@ -709,7 +710,9 @@ describe('provisionCloudflareResources — R2', () => {
       { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'myapp-uploads' } },
       { runWrangler: run, log: silentLog },
     );
-    expect(calls).toEqual([['r2', 'bucket', 'info', 'myapp-uploads', '--json']]);
+    expect(calls).toEqual([
+      ['r2', 'bucket', 'info', 'myapp-uploads', '--json', '-c', wranglerPath],
+    ]);
     expect(readConfig().r2_buckets).toEqual([{ binding: 'STORAGE', bucket_name: 'myapp-uploads' }]);
     expect(result.resources).toEqual([
       { kind: 'r2', binding: 'STORAGE', name: 'myapp-uploads', action: 'adopted' },
@@ -741,7 +744,7 @@ describe('provisionCloudflareResources — R2', () => {
       { runWrangler: run, log: silentLog },
     );
     expect(calls).toEqual([
-      ['r2', 'bucket', 'info', 'myapp-uploads', '--json'],
+      ['r2', 'bucket', 'info', 'myapp-uploads', '--json', '-c', wranglerPath],
       [
         'r2',
         'bucket',
@@ -805,7 +808,9 @@ describe('provisionCloudflareResources — R2', () => {
       ),
     ).rejects.toThrow(/r2 bucket info myapp-uploads.*(failed|refusing)/s);
     // No create attempted (the existing bucket must not be duplicated/errored on).
-    expect(calls).toEqual([['r2', 'bucket', 'info', 'myapp-uploads', '--json']]);
+    expect(calls).toEqual([
+      ['r2', 'bucket', 'info', 'myapp-uploads', '--json', '-c', wranglerPath],
+    ]);
   });
 });
 
@@ -968,7 +973,7 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
   it('reuses a queue that `queues info` finds (no create, never writes queue config)', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
-      { match: /^queues info jobs$/, reply: () => ok('Queue Name: jobs') },
+      { match: /^queues info jobs/, reply: () => ok('Queue Name: jobs') },
     ]);
     const result = await provisionCloudflareResources(
       tmpDir,
@@ -976,7 +981,7 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
       { ...emptyDesired, queues: ['jobs'] },
       { runWrangler: run, log: silentLog },
     );
-    expect(calls).toEqual([['queues', 'info', 'jobs']]);
+    expect(calls).toEqual([['queues', 'info', 'jobs', '-c', wranglerPath]]);
     expect(result.resources).toEqual([{ kind: 'queue', name: 'jobs', action: 'reused' }]);
     // Task 4 must NOT write queue producer/consumer entries into the config.
     expect(readConfig().queues).toBeUndefined();
@@ -986,10 +991,10 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
       {
-        match: /^queues info emails$/,
+        match: /^queues info emails/,
         reply: () => fail('', 'X [ERROR] Queue "emails" does not exist.'),
       },
-      { match: /^queues create emails$/, reply: () => ok('Created queue emails') },
+      { match: /^queues create emails/, reply: () => ok('Created queue emails') },
     ]);
     const result = await provisionCloudflareResources(
       tmpDir,
@@ -998,8 +1003,8 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
       { runWrangler: run, log: silentLog },
     );
     expect(calls).toEqual([
-      ['queues', 'info', 'emails'],
-      ['queues', 'create', 'emails'],
+      ['queues', 'info', 'emails', '-c', wranglerPath],
+      ['queues', 'create', 'emails', '-c', wranglerPath],
     ]);
     expect(result.resources).toEqual([{ kind: 'queue', name: 'emails', action: 'created' }]);
     expect(readConfig().queues).toBeUndefined();
@@ -1008,9 +1013,9 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
   it('handles a mix of existing and missing queues', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
-      { match: /^queues info jobs$/, reply: () => ok('Queue Name: jobs') },
-      { match: /^queues info emails$/, reply: () => fail('', 'Queue "emails" does not exist.') },
-      { match: /^queues create emails$/, reply: () => ok() },
+      { match: /^queues info jobs/, reply: () => ok('Queue Name: jobs') },
+      { match: /^queues info emails/, reply: () => fail('', 'Queue "emails" does not exist.') },
+      { match: /^queues create emails/, reply: () => ok() },
     ]);
     const result = await provisionCloudflareResources(
       tmpDir,
@@ -1019,9 +1024,9 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
       { runWrangler: run, log: silentLog },
     );
     expect(calls).toEqual([
-      ['queues', 'info', 'jobs'],
-      ['queues', 'info', 'emails'],
-      ['queues', 'create', 'emails'],
+      ['queues', 'info', 'jobs', '-c', wranglerPath],
+      ['queues', 'info', 'emails', '-c', wranglerPath],
+      ['queues', 'create', 'emails', '-c', wranglerPath],
     ]);
     expect(result.resources).toEqual([
       { kind: 'queue', name: 'jobs', action: 'reused' },
@@ -1033,7 +1038,7 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
       {
-        match: /^queues info jobs$/,
+        match: /^queues info jobs/,
         reply: () => fail('', 'X [ERROR] Authentication error [code: 10000]'),
       },
     ]);
@@ -1046,5 +1051,337 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
       ),
     ).rejects.toThrow(/queues info jobs.*failed/s);
     expect(calls.some((c) => isCall(c, 'queues', 'create'))).toBe(false);
+  });
+});
+
+describe('provisionCloudflareResources — account reconciliation + config pin (F1)', () => {
+  it('fails closed BEFORE any wrangler/REST call when config account_id differs from opts.accountId', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    let restCalled = false;
+    const { run, calls } = makeRunner([{ match: /.*/, reply: () => ok() }]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        {
+          runWrangler: run,
+          accountId: 'requested-acct',
+          log: silentLog,
+          listHyperdriveConfigs: async () => {
+            restCalled = true;
+            return [];
+          },
+        },
+      ),
+    ).rejects.toThrow(/account mismatch.*config-acct.*requested-acct/s);
+    // No wrangler call and no REST call happened before the fail-closed throw.
+    expect(calls).toEqual([]);
+    expect(restCalled).toBe(false);
+  });
+
+  it('passes -c <configPath> to EVERY wrangler invocation (list, info, create)', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([
+      { match: /^d1 list --json/, reply: () => ok('[]') },
+      {
+        match: /^d1 create /,
+        reply: () => {
+          simulateUpdateConfig('d1_databases', {
+            binding: 'DB',
+            database_name: 'myapp-db',
+            database_id: 'created-uuid',
+          });
+          return ok();
+        },
+      },
+      { match: /^kv namespace list/, reply: () => ok('[]') },
+      {
+        match: /^kv namespace create /,
+        reply: () => {
+          simulateUpdateConfig('kv_namespaces', { binding: 'KV', id: 'new-kv-id' });
+          return ok();
+        },
+      },
+      { match: /^r2 bucket info /, reply: () => fail('', 'The specified bucket does not exist') },
+      {
+        match: /^r2 bucket create /,
+        reply: () => {
+          simulateUpdateConfig('r2_buckets', { binding: 'STORAGE', bucket_name: 'b' });
+          return ok();
+        },
+      },
+      { match: /^queues info /, reply: () => fail('', 'Queue "jobs" does not exist.') },
+      { match: /^queues create /, reply: () => ok() },
+    ]);
+    await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        d1: { binding: 'DB', name: 'myapp-db' },
+        kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }],
+        r2: { binding: 'STORAGE', bucketName: 'b' },
+        queues: ['jobs'],
+      },
+      { runWrangler: run, log: silentLog },
+    );
+    // Every wrangler argv threads the ONE resolved config via `-c <configPath>`.
+    expect(calls.length).toBeGreaterThan(0);
+    for (const argv of calls) {
+      const i = argv.indexOf('-c');
+      expect(i).toBeGreaterThanOrEqual(0);
+      expect(argv[i + 1]).toBe(wranglerPath);
+    }
+  });
+
+  it('the default Hyperdrive existence REST call targets the effective (config) account id', async () => {
+    setup(
+      JSON.stringify({
+        account_id: 'config-acct',
+        hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }],
+      }),
+    );
+    const urls: Array<string> = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      urls.push(String(url));
+      return new Response(
+        JSON.stringify({ success: true, result: [], result_info: { total_count: 0 } }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    try {
+      const { run } = makeRunner([]);
+      await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          // Empty connection string → skip AFTER the existence check, so ONLY the
+          // REST call runs (no create).
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+        },
+        { runWrangler: run, apiToken: 'tok', log: silentLog },
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    expect(urls.length).toBeGreaterThan(0);
+    expect(urls[0]).toContain('/accounts/config-acct/hyperdrive/configs');
+  });
+});
+
+describe('provisionCloudflareResources — Hyperdrive discovery (F2 pagination + fail closed)', () => {
+  function stubFetch(pages: Array<{ status?: number; body: unknown }>): {
+    restore: () => void;
+    urls: Array<string>;
+  } {
+    const urls: Array<string> = [];
+    const origFetch = globalThis.fetch;
+    let call = 0;
+    globalThis.fetch = (async (url: string | URL) => {
+      urls.push(String(url));
+      const page = pages[Math.min(call, pages.length - 1)];
+      call++;
+      return new Response(typeof page.body === 'string' ? page.body : JSON.stringify(page.body), {
+        status: page.status ?? 200,
+      });
+    }) as typeof fetch;
+    return {
+      restore: () => {
+        globalThis.fetch = origFetch;
+      },
+      urls,
+    };
+  }
+
+  it('follows result_info pagination and adopts a match found on page 2 (no create)', async () => {
+    setup(
+      JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
+    );
+    const { restore, urls } = stubFetch([
+      {
+        body: {
+          success: true,
+          result: [{ id: 'p1a', name: 'other-1' }],
+          result_info: { total_count: 2 },
+        },
+      },
+      {
+        body: {
+          success: true,
+          result: [{ id: 'p2-hd', name: 'myapp-hd' }],
+          result_info: { total_count: 2 },
+        },
+      },
+    ]);
+    try {
+      const { run, calls } = makeRunner([]);
+      const result = await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+        },
+        { runWrangler: run, apiToken: 'tok', log: silentLog },
+      );
+      expect(urls.length).toBe(2); // both pages fetched
+      expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
+      const hd = readConfig().hyperdrive as Array<Record<string, unknown>>;
+      expect(hd).toEqual([{ binding: 'HYPERDRIVE', id: 'p2-hd' }]);
+      expect(result.resources[0]).toMatchObject({ action: 'adopted', id: 'p2-hd' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('fails closed on a non-2xx envelope (never treats it as absence, no create)', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const { restore } = stubFetch([{ status: 500, body: { success: false } }]);
+    try {
+      const { run, calls } = makeRunner([]);
+      await expect(
+        provisionCloudflareResources(
+          tmpDir,
+          wranglerPath,
+          {
+            ...emptyDesired,
+            hyperdrive: {
+              binding: 'HYPERDRIVE',
+              name: 'myapp-hd',
+              connectionString: 'postgres://x',
+            },
+          },
+          { runWrangler: run, apiToken: 'tok', log: silentLog },
+        ),
+      ).rejects.toThrow(/cannot verify whether Hyperdrive config "myapp-hd"/);
+      expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('fails closed on success:false and on a malformed entry (missing id) — no create', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    // success:false first, then a malformed entry — both must fail closed.
+    for (const body of [
+      { success: false, result: [] },
+      { success: true, result: [{ name: 'myapp-hd' }], result_info: { total_count: 1 } },
+    ]) {
+      const { restore } = stubFetch([{ body }]);
+      try {
+        const { run, calls } = makeRunner([]);
+        await expect(
+          provisionCloudflareResources(
+            tmpDir,
+            wranglerPath,
+            {
+              ...emptyDesired,
+              hyperdrive: {
+                binding: 'HYPERDRIVE',
+                name: 'myapp-hd',
+                connectionString: 'postgres://x',
+              },
+            },
+            { runWrangler: run, apiToken: 'tok', log: silentLog },
+          ),
+        ).rejects.toThrow(/cannot verify whether Hyperdrive config "myapp-hd"/);
+        expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
+      } finally {
+        restore();
+      }
+    }
+  });
+
+  it('fails closed when two configs share the requested name (ambiguous) — no create', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+        },
+        {
+          runWrangler: run,
+          log: silentLog,
+          listHyperdriveConfigs: async () => [
+            { id: 'hd-1', name: 'myapp-hd' },
+            { id: 'hd-2', name: 'myapp-hd' },
+          ],
+        },
+      ),
+    ).rejects.toThrow(/cannot adopt Hyperdrive config "myapp-hd".*share that name/s);
+    expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
+  });
+});
+
+describe('provisionCloudflareResources — KV/R2 fail closed on schema-valid ambiguity (F3)', () => {
+  it('KV: fails closed (no create) when the target title matches but the entry has no id', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([
+      { match: /^kv namespace list/, reply: () => ok(JSON.stringify([{ title: 'myapp-kv' }])) },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }] },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/namespace titled "myapp-kv" with no valid id/);
+    expect(calls.some((c) => isCall(c, 'kv', 'namespace', 'create'))).toBe(false);
+  });
+
+  it('R2: does NOT adopt when `r2 bucket info` exits 0 but the payload names a different bucket', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^r2 bucket info /,
+        reply: () => ok(JSON.stringify({ name: 'a-different-bucket' })),
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'myapp-uploads' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/did not identify the requested bucket/);
+    // Neither adopted nor created — the config is untouched.
+    expect(calls.some((c) => isCall(c, 'r2', 'bucket', 'create'))).toBe(false);
+    expect(readConfig().r2_buckets).toBeUndefined();
+  });
+});
+
+describe('normalizeRunWranglerResult — signal / spawn-error handling (F5)', () => {
+  it('treats a SIGTERM-killed child (status null, signal set) as FAILURE, not success', () => {
+    const r = normalizeRunWranglerResult({
+      stdout: '',
+      stderr: '',
+      status: null,
+      signal: 'SIGTERM',
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('SIGTERM');
+  });
+
+  it('treats a spawn error as FAILURE and surfaces its message', () => {
+    const r = normalizeRunWranglerResult({
+      status: null,
+      error: new Error('spawn wrangler ENOENT'),
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('ENOENT');
+  });
+
+  it('passes a clean exit through unchanged (0 stays success, a real non-zero is preserved)', () => {
+    expect(normalizeRunWranglerResult({ status: 0, stdout: 'ok' }).status).toBe(0);
+    expect(normalizeRunWranglerResult({ status: 2, stderr: 'boom' }).status).toBe(2);
   });
 });

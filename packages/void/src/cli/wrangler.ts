@@ -899,9 +899,11 @@ export function writeProvisionedWranglerConfig(
   }
 
   // Lazily-built map of EVERY binding name already used anywhere in the config
-  // (keyed name → wrangler's friendly owner label). Shared by the adopt-append
-  // guard below and the queue-producer append guard further down; it is keyed on
-  // the initial `parsed` (constant within this call), so memoizing once is safe.
+  // (keyed name → wrangler's friendly owner label). Used by the queue-producer
+  // append guard further down; built from the CURRENT `text` at first use so it
+  // reflects any adopt appended earlier in this call (not the stale initial
+  // `parsed`). The adopt guard below rebuilds its own view per adopt (it must
+  // include queues.producers, which this collector deliberately omits).
   let workerBindingOwners: Map<string, string> | undefined;
 
   // Adopt fields — write the REAL id/name of an already-existing resource into
@@ -915,15 +917,20 @@ export function writeProvisionedWranglerConfig(
   // enforces (see `validateBindingsHaveUniqueNames` mirror below):
   //   - >1 entry in the target array sharing `binding` → fail closed (ambiguous:
   //     adoption cannot pick which to write, and wrangler rejects the duplicate).
-  //   - APPENDING a new entry whose binding is already used by ANOTHER binding
-  //     type (a KV bound `DB`, a var, a secret, …) → fail closed (a cross-type
-  //     duplicate binding name wrangler rejects at deploy).
+  //   - The binding is already used by ANOTHER binding type — a KV bound `DB`, a
+  //     var, a secret, a QUEUE PRODUCER, … — whether we are APPENDING a new entry
+  //     OR UPDATING an existing matched one → fail closed (a cross-type duplicate
+  //     binding name wrangler rejects at deploy).
   const upsertAdoptedBinding = (
     field: string,
     binding: string,
     properties: Record<string, string>,
   ): void => {
-    const rawList = parseJsonc(text)[field];
+    // Re-parse the CURRENT text (not the initial `parsed`) so this sees any adopt
+    // appended earlier in THIS call — a stale map would let a multi-field patch
+    // adopt the same binding into two arrays without noticing the collision.
+    const currentConfig = parseJsonc(text);
+    const rawList = currentConfig[field];
     const currentList = Array.isArray(rawList) ? [...rawList] : [];
     const matches: Array<number> = [];
     for (let i = 0; i < currentList.length; i++) {
@@ -939,6 +946,25 @@ export function writeProvisionedWranglerConfig(
           `real id into, and wrangler rejects duplicate binding names. Remove the duplicate and retry.`,
       );
     }
+    // Worker-wide cross-type uniqueness — checked for BOTH the matched (existing
+    // target) and the append case: a binding shared with any OTHER binding type is
+    // undeployable regardless of whether we create or update this entry. Build the
+    // owner map from the CURRENT config, EXCLUDING the target field (its own
+    // matched entry must not self-collide) and INCLUDING queues.producers (the base
+    // collector omits producers so the producer path does not self-collide, but for
+    // an adopt a producer sharing the binding IS a real cross-type collision).
+    // Reuse the shared collector — do NOT fork it.
+    const owners = collectWorkerBindingNames(configWithoutField(currentConfig, field));
+    addQueueProducerOwners(owners, currentConfig);
+    const owner = owners.get(binding);
+    if (owner !== undefined) {
+      throw new Error(
+        `deploy: cannot update "${configPath}" — cannot adopt ${JSON.stringify(binding)} into ` +
+          `"${field}" because that binding name is already used by a ${owner} binding. Wrangler ` +
+          `requires every binding name to be unique across the whole worker, so this would make ` +
+          `the config undeployable. Rename the conflicting binding and retry.`,
+      );
+    }
     if (matches.length === 1) {
       const index = matches[0];
       const existing = isRecord(currentList[index]) ? currentList[index] : {};
@@ -948,22 +974,6 @@ export function writeProvisionedWranglerConfig(
         }
       }
     } else {
-      // APPEND branch only (no entry in this array owns the binding). wrangler
-      // requires every binding NAME to be unique across the ENTIRE worker, so
-      // before appending, fail closed if the binding is already used by any OTHER
-      // binding type. Reuse the same worker-wide collector the producer guard
-      // uses (do NOT fork it) — a cross-type collision here yields a config
-      // wrangler rejects at deploy.
-      workerBindingOwners ??= collectWorkerBindingNames(parsed);
-      const owner = workerBindingOwners.get(binding);
-      if (owner !== undefined) {
-        throw new Error(
-          `deploy: cannot update "${configPath}" — cannot adopt ${JSON.stringify(binding)} into ` +
-            `"${field}" because that binding name is already used by a ${owner} binding. Wrangler ` +
-            `requires every binding name to be unique across the whole worker, so this would make ` +
-            `the config undeployable. Rename the conflicting binding and retry.`,
-        );
-      }
       text = applyMemberEdit(
         text,
         [field, currentList.length],
@@ -1001,7 +1011,25 @@ export function writeProvisionedWranglerConfig(
     const d1Entries = Array.isArray(currentD1)
       ? (currentD1 as Array<{ binding?: unknown; migrations_pattern?: unknown }>)
       : [];
-    const index = d1Entries.findIndex((entry) => entry.binding === patch.d1MigrationsDir!.binding);
+    // Require EXACTLY ONE D1 entry with the binding. `findIndex` (first match)
+    // would silently accept DUPLICATE D1 bindings — a config wrangler rejects —
+    // and attach migrations_dir to only the first. Fail closed on duplicates.
+    const matchIndices: Array<number> = [];
+    d1Entries.forEach((entry, i) => {
+      if (entry.binding === patch.d1MigrationsDir!.binding) {
+        matchIndices.push(i);
+      }
+    });
+    if (matchIndices.length > 1) {
+      throw new Error(
+        `deploy: cannot update "${configPath}" — binding ` +
+          `${JSON.stringify(patch.d1MigrationsDir.binding)} is declared ${matchIndices.length} times ` +
+          `in "d1_databases". A binding name must be unique across the worker (wrangler rejects the ` +
+          `config otherwise), so migrations_dir cannot be attached unambiguously. Remove the ` +
+          `duplicate D1 entry and retry.`,
+      );
+    }
+    const index = matchIndices.length === 1 ? matchIndices[0] : -1;
     if (index >= 0) {
       // A companion `migrations_pattern` (if the user set one) must stay valid
       // under the NEW `migrations_dir`: wrangler requires the normalized pattern
@@ -1115,8 +1143,9 @@ export function writeProvisionedWranglerConfig(
           // emitting it would produce a config wrangler rejects at deploy
           // (cross-type duplicate binding name). A same-queue producer already
           // owning that binding is a no-op handled above (index >= 0), never a
-          // collision.
-          workerBindingOwners ??= collectWorkerBindingNames(parsed);
+          // collision. Build from the CURRENT text so an adopt appended earlier in
+          // this call is seen too (not the stale initial `parsed`).
+          workerBindingOwners ??= collectWorkerBindingNames(parseJsonc(text));
           const bindingName = String(entry.binding);
           const owner = workerBindingOwners.get(bindingName);
           if (owner !== undefined) {
@@ -1607,6 +1636,43 @@ function collectWorkerBindingNames(config: Record<string, unknown>): Map<string,
     }
   }
   return owners;
+}
+
+/** A shallow copy of `config` with one field omitted (never mutates the input). */
+function configWithoutField(
+  config: Record<string, unknown>,
+  field: string,
+): Record<string, unknown> {
+  const { [field]: _omit, ...rest } = config;
+  return rest;
+}
+
+/**
+ * Add every `queues.producers[].binding` to an existing worker-binding owner map,
+ * under the friendly label "Queue" (first-writer-wins). The base
+ * `collectWorkerBindingNames` deliberately OMITS queues so the producer-append
+ * path does not flag the producer it is adding as a self-collision — but for the
+ * ADOPT path a producer binding sharing the adopted binding IS a real cross-type
+ * collision wrangler rejects at deploy, so the adopt guard layers producers on
+ * top of the reused collector.
+ */
+function addQueueProducerOwners(
+  owners: Map<string, string>,
+  config: Record<string, unknown>,
+): void {
+  const queues = config.queues;
+  if (!isRecord(queues) || !Array.isArray(queues.producers)) {
+    return;
+  }
+  for (const producer of queues.producers) {
+    if (
+      isRecord(producer) &&
+      typeof producer.binding === 'string' &&
+      !owners.has(producer.binding)
+    ) {
+      owners.set(producer.binding, 'Queue');
+    }
+  }
 }
 
 /**

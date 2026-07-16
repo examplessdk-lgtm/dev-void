@@ -6,6 +6,7 @@ import {
   detectPreset,
   formatProjectCommand,
   resolveProjectCommand,
+  resolveWranglerArgv,
   resolveWranglerCommand,
 } from '../../src/cli/preset.ts';
 
@@ -276,6 +277,49 @@ describe('resolveWranglerCommand', () => {
     });
 
     expect(resolveWranglerCommand(root, 'deploy')).toBe('wrangler deploy');
+  });
+});
+
+describe('resolveWranglerArgv (module-resolution launcher)', () => {
+  it('resolves wrangler via module resolution to [execPath, jsBin] even when the app root has no wrangler (strict pnpm)', () => {
+    // wrangler is a dependency of the `void` package, NOT the app root under strict
+    // pnpm. Module resolution (relative to preset.ts) still finds it.
+    const root = setupProject({ pkg: { name: 'app' } });
+    const argv = resolveWranglerArgv(root);
+    expect(argv).toHaveLength(2);
+    expect(argv[0]).toBe(process.execPath);
+    // The resolved entry is wrangler's package-owned JS bin.
+    expect(argv[1].replace(/\\/g, '/')).toMatch(/wrangler\/bin\/wrangler\.js$/);
+  });
+
+  it('prefers the app-root wrangler package.json when present, launched via [execPath, jsBin]', () => {
+    const root = setupProject({
+      pkg: { dependencies: { wrangler: '^4.0.0' } },
+      files: {
+        'node_modules/wrangler/package.json': JSON.stringify({
+          bin: { wrangler: './bin/wrangler.js' },
+        }),
+        'node_modules/wrangler/bin/wrangler.js': '#!/usr/bin/env node\n',
+      },
+    });
+    const argv = resolveWranglerArgv(root);
+    expect(argv).toEqual([
+      process.execPath,
+      join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js'),
+    ]);
+  });
+
+  it('never yields a .bin shim argv and throws clearly when wrangler cannot be resolved', () => {
+    // A shim/`.cmd`-only layout with module resolution failing must THROW — never
+    // degrade to a bare `wrangler` (ENOENT in CI) or a shim Node cannot spawn with
+    // shell:false.
+    const root = setupProject({
+      pkg: { name: 'app' },
+      files: { 'node_modules/.bin/wrangler': '#!/bin/sh\n' },
+    });
+    expect(() => resolveWranglerArgv(root, () => undefined)).toThrow(
+      /could not resolve the "wrangler" package/,
+    );
   });
 });
 

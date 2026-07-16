@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'pathe';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve } from 'pathe';
 import { readProjectPaths } from '../project-paths.ts';
 import {
   getPackageDependencies,
@@ -200,32 +202,82 @@ export function resolveWranglerCommand(root: string, subcommand: string): string
  * a config path containing spaces — can be passed as their own argv elements and
  * are IMMUNE to shell metacharacter injection/splitting.
  *
- * Resolution order:
- *   1. The locally-installed wrangler's JS bin run with the current Node
- *      (`[process.execPath, <node_modules/wrangler/bin/wrangler.js>]`). This is
- *      shell-free AND cross-platform: it sidesteps the Windows `.cmd`/`.ps1`
- *      shim (which Node cannot spawn with `shell: false`) entirely, so there is
- *      never a shim to quote or route through `cmd.exe`.
- *   2. Fallback to the `node_modules/.bin/wrangler` shim when the package layout
- *      is non-standard but the shim exists (directly executable on POSIX).
- *   3. Fallback to the bare `wrangler` name (resolved via PATH by the OS).
+ * Resolution order — ALWAYS launches the resolved JS entry as
+ * `[process.execPath, <wrangler bin.wrangler>]`, which is shell-free AND
+ * cross-platform (it sidesteps the Windows `.cmd`/`.ps1` shim that Node cannot
+ * spawn with `shell: false`):
+ *   1. The app-root `node_modules/wrangler` probe (a consumer may hoist its own
+ *      wrangler at the project root).
+ *   2. MODULE RESOLUTION of `wrangler/package.json`. wrangler is a dependency of
+ *      the `void` PACKAGE, so under strict pnpm (void + consumers use pnpm) it is
+ *      NOT at the app root — it lives under void's own deps. Resolving relative to
+ *      THIS module finds it wherever pnpm placed it.
+ *
+ * If wrangler cannot be resolved by EITHER avenue, throws a clear error — it never
+ * degrades to a bare `wrangler` (ENOENT in clean CI) or a `.cmd` shim.
  */
-export function resolveWranglerArgv(root: string): Array<string> {
-  const jsBin = resolveLocalWranglerJsBin(root);
+export function resolveWranglerArgv(
+  root: string,
+  resolveWranglerPackageJson: () => string | undefined = defaultResolveWranglerPackageJson,
+): Array<string> {
+  const jsBin = resolveLocalWranglerJsBin(root, resolveWranglerPackageJson);
   if (jsBin) {
     return [process.execPath, jsBin];
   }
-  return [localBin(root, 'wrangler')];
+  throw new Error(
+    `provision: could not resolve the "wrangler" package. wrangler ships as a dependency of "void"; ` +
+      `reinstall dependencies (e.g. \`pnpm install\`) so it is present, then retry.`,
+  );
 }
 
 /**
- * Absolute path to the locally-installed wrangler JS entry (from its
- * `package.json` `bin.wrangler`), or `undefined` when wrangler is not installed
- * under `root/node_modules` or its manifest is unreadable.
+ * Resolve `wrangler/package.json` via Node module resolution, relative to THIS
+ * module (the `void` package), so it is found wherever pnpm placed void's own
+ * wrangler dependency. wrangler explicitly exports `./package.json`, so both
+ * `import.meta.resolve` and `createRequire().resolve()` succeed. Returns the
+ * absolute manifest path, or `undefined` when unresolvable.
  */
-function resolveLocalWranglerJsBin(root: string): string | undefined {
-  const pkgPath = join(root, 'node_modules', 'wrangler', 'package.json');
-  if (!existsSync(pkgPath)) {
+function defaultResolveWranglerPackageJson(): string | undefined {
+  if (typeof import.meta.resolve === 'function') {
+    try {
+      return fileURLToPath(import.meta.resolve('wrangler/package.json'));
+    } catch {
+      // fall through to createRequire
+    }
+  }
+  try {
+    return createRequire(import.meta.url).resolve('wrangler/package.json');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Absolute path to the wrangler JS entry (from its `package.json` `bin.wrangler`),
+ * trying the app-root probe first, then the injected module resolver. Returns
+ * `undefined` when wrangler cannot be located or its manifest is unreadable.
+ */
+function resolveLocalWranglerJsBin(
+  root: string,
+  resolveWranglerPackageJson: () => string | undefined,
+): string | undefined {
+  const fromRoot = wranglerJsBinFromPackageJson(
+    join(root, 'node_modules', 'wrangler', 'package.json'),
+  );
+  if (fromRoot) {
+    return fromRoot;
+  }
+  return wranglerJsBinFromPackageJson(resolveWranglerPackageJson());
+}
+
+/**
+ * Read `bin.wrangler` from a wrangler `package.json` at `pkgPath` and resolve it
+ * to an absolute JS entry (relative to the manifest's own directory, so it works
+ * for BOTH the app-root probe and module resolution). Returns `undefined` on any
+ * missing/unreadable/absent-bin case.
+ */
+function wranglerJsBinFromPackageJson(pkgPath: string | undefined): string | undefined {
+  if (!pkgPath || !existsSync(pkgPath)) {
     return undefined;
   }
   try {
@@ -236,7 +288,7 @@ function resolveLocalWranglerJsBin(root: string): string | undefined {
     if (!rel) {
       return undefined;
     }
-    const jsBin = join(root, 'node_modules', 'wrangler', rel);
+    const jsBin = join(dirname(pkgPath), rel);
     return existsSync(jsBin) ? jsBin : undefined;
   } catch {
     return undefined;
