@@ -292,7 +292,34 @@ describe('resolveWranglerArgv (module-resolution launcher)', () => {
     expect(argv[1].replace(/\\/g, '/')).toMatch(/wrangler\/bin\/wrangler\.js$/);
   });
 
-  it('prefers the app-root wrangler package.json when present, launched via [execPath, jsBin]', () => {
+  it("prefers void's own wrangler over an incompatible app-root wrangler (F6)", () => {
+    // The app root pins its OWN (potentially older/incompatible) wrangler, and a
+    // separate "void-nested" wrangler is resolvable via module resolution. The
+    // provisioner targets wrangler 4.107's exact flags/JSON/errors, so void's own
+    // wrangler MUST win — the app-root one must not shadow it.
+    const root = setupProject({
+      pkg: { dependencies: { wrangler: '^3.0.0' } },
+      files: {
+        'node_modules/wrangler/package.json': JSON.stringify({
+          bin: { wrangler: './bin/wrangler.js' },
+        }),
+        'node_modules/wrangler/bin/wrangler.js': '#!/usr/bin/env node\n',
+        'void_modules/wrangler/package.json': JSON.stringify({
+          bin: { wrangler: './bin/wrangler.js' },
+        }),
+        'void_modules/wrangler/bin/wrangler.js': '#!/usr/bin/env node\n',
+      },
+    });
+    const voidWranglerPkg = join(root, 'void_modules', 'wrangler', 'package.json');
+    const argv = resolveWranglerArgv(root, () => voidWranglerPkg);
+    // Resolved to void's nested wrangler, NOT the app-root one.
+    expect(argv).toEqual([
+      process.execPath,
+      join(root, 'void_modules', 'wrangler', 'bin', 'wrangler.js'),
+    ]);
+  });
+
+  it('falls back to the app-root wrangler only when void resolution fails (F6)', () => {
     const root = setupProject({
       pkg: { dependencies: { wrangler: '^4.0.0' } },
       files: {
@@ -302,7 +329,8 @@ describe('resolveWranglerArgv (module-resolution launcher)', () => {
         'node_modules/wrangler/bin/wrangler.js': '#!/usr/bin/env node\n',
       },
     });
-    const argv = resolveWranglerArgv(root);
+    // void's own resolution returns undefined → fall back to the app-root probe.
+    const argv = resolveWranglerArgv(root, () => undefined);
     expect(argv).toEqual([
       process.execPath,
       join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js'),

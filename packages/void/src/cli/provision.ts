@@ -213,8 +213,17 @@ function createDefaultListHyperdriveConfigs(
     // ~25 configs, paginated) and FAIL CLOSED on any non-2xx, `success !== true`,
     // or a malformed entry. Never coerce a malformed envelope/entry to "absence":
     // that would mint a duplicate config on a re-run.
+    //
+    // Completeness is PROVEN, not assumed: we require consistent pagination
+    // metadata (`result_info.total_count`) and keep going until the DISTINCT
+    // config count equals it. Any of — missing metadata, an empty page before all
+    // configs are seen, a repeated/duplicate id, an inconsistent total, or an
+    // overshoot — throws (fail closed) rather than silently declaring the list
+    // complete (which could miss a same-named config on an unread page and mint a
+    // duplicate).
     const perPage = 100;
-    const all: Array<HyperdriveConfig> = [];
+    const byId = new Map<string, HyperdriveConfig>();
+    let expectedTotal: number | undefined;
     for (let page = 1; ; page++) {
       const res = await fetch(
         `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/hyperdrive/configs?page=${page}&per_page=${perPage}`,
@@ -229,6 +238,34 @@ function createDefaultListHyperdriveConfigs(
           'Cloudflare API returned an unsuccessful or malformed Hyperdrive configs payload',
         );
       }
+      // Pagination metadata is REQUIRED to prove completeness. Its absence means
+      // we cannot know whether more pages exist → fail closed.
+      const info = body.result_info;
+      const totalCount =
+        isRecord(info) && typeof info.total_count === 'number' && Number.isInteger(info.total_count)
+          ? info.total_count
+          : undefined;
+      if (totalCount === undefined || totalCount < 0) {
+        throw new Error(
+          'Cloudflare API returned Hyperdrive configs without valid pagination metadata ' +
+            '(result_info.total_count); cannot prove the list is complete',
+        );
+      }
+      if (expectedTotal === undefined) {
+        expectedTotal = totalCount;
+      } else if (totalCount !== expectedTotal) {
+        throw new Error(
+          'Cloudflare API returned inconsistent Hyperdrive pagination totals across pages; ' +
+            'cannot prove the list is complete',
+        );
+      }
+      // An empty page before we have gathered every config is premature truncation.
+      if (body.result.length === 0 && byId.size < expectedTotal) {
+        throw new Error(
+          'Cloudflare API returned an empty Hyperdrive page before all configs were listed; ' +
+            'cannot prove the list is complete',
+        );
+      }
       for (const entry of body.result) {
         if (
           !isRecord(entry) ||
@@ -241,38 +278,43 @@ function createDefaultListHyperdriveConfigs(
             'Cloudflare API returned a malformed Hyperdrive config entry (missing id/name)',
           );
         }
-        all.push({ id: entry.id, name: entry.name });
+        if (byId.has(entry.id)) {
+          throw new Error(
+            'Cloudflare API returned a duplicate Hyperdrive config id across pages; ' +
+              'cannot prove the list is complete',
+          );
+        }
+        byId.set(entry.id, { id: entry.id, name: entry.name });
       }
-      // Follow `result_info` pagination: stop once we have gathered `total_count`
-      // entries (or the page came back empty / without pagination metadata).
-      const info = body.result_info;
-      const totalCount =
-        isRecord(info) && typeof info.total_count === 'number' ? info.total_count : undefined;
-      if (totalCount === undefined || body.result.length === 0 || all.length >= totalCount) {
+      if (byId.size > expectedTotal) {
+        throw new Error(
+          'Cloudflare API returned more Hyperdrive configs than result_info.total_count; ' +
+            'cannot prove the list is complete',
+        );
+      }
+      // Done ONLY when the distinct count matches the proven total. Each remaining
+      // iteration adds ≥1 distinct id (a duplicate or empty page threw above), so
+      // this loop is bounded by `expectedTotal`.
+      if (byId.size === expectedTotal) {
         break;
       }
     }
-    return all;
+    return [...byId.values()];
   };
-}
-
-/** Parse a wrangler `--json` stdout into an array, tolerating noise/failure. */
-function parseJsonArray(stdout: string): Array<Record<string, unknown>> {
-  const value = parseJsonLoose(stdout);
-  return Array.isArray(value) ? (value.filter(isRecord) as Array<Record<string, unknown>>) : [];
 }
 
 /**
  * Parse a wrangler `--json` stdout into an array, distinguishing a VALID JSON
  * array (returns it, possibly empty) from unparseable/non-array output (returns
- * `undefined`). Used where an empty list must mean "authoritatively absent" and
- * garbage must NOT be silently coerced to "absent" (the KV pre-check).
+ * `undefined`). Members are returned UNFILTERED — a malformed member (e.g. a
+ * `null`) is preserved, NOT silently dropped, so {@link validateResourceList}
+ * can fail closed on it (a dropped malformed member could BE the target and look
+ * like "absent", minting a duplicate). Used everywhere an empty list must mean
+ * "authoritatively absent" and garbage must NOT be coerced to "absent".
  */
-function parseJsonArrayStrict(stdout: string): Array<Record<string, unknown>> | undefined {
+function parseJsonArrayStrict(stdout: string): Array<unknown> | undefined {
   const value = parseJsonLoose(stdout);
-  return Array.isArray(value)
-    ? (value.filter(isRecord) as Array<Record<string, unknown>>)
-    : undefined;
+  return Array.isArray(value) ? value : undefined;
 }
 
 /** Parse a wrangler `--json` stdout into an object, tolerating noise/failure. */
@@ -339,7 +381,98 @@ function readRootConfig(configPath: string): Record<string, unknown> {
   return parsed;
 }
 
-// --- wrangler output extractors (one place to align field names with wrangler) ---
+// --- Shared fail-closed discovery gates (one place per class of check) --------
+// The three helpers below are the SINGLE decision points every resource path
+// routes through, so no sibling path can drift into a per-path bug again:
+//   1. assertDiscoverySucceeded — a discovery/list/info result is only trusted
+//      when it exited cleanly (numeric status 0). Called BEFORE any stdout parse.
+//   2. validateResourceList     — a `--json` list is rejected WHOLE if ANY member
+//      is malformed (never silently filtered — a malformed member could BE the
+//      target and look "absent", minting a duplicate).
+//   3. isConfirmedAbsent        — a NON-zero `<res> info`-by-name probe means
+//      "absent" (→ create) ONLY on wrangler's EXACT, name-aware not-found signal;
+//      a signal/spawn failure or any other nonzero is NEVER absence.
+
+/** Escape a string for literal embedding in a `RegExp`. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * FAIL-CLOSED gate over a discovery/list/info result. Throws (no create) unless
+ * the child exited cleanly — a NUMERIC `status === 0`. Because
+ * {@link normalizeRunWranglerResult} already folds a signal-killed child or a
+ * spawn error into a non-zero status, a single numeric check here rejects ALL of
+ * nonzero-exit / SIGTERM / spawn-error / non-numeric status. MUST be called
+ * BEFORE parsing stdout, so a failed result can never be parsed as "absent".
+ */
+function assertDiscoverySucceeded(result: RunWranglerResult, label: string): void {
+  if (typeof result.status !== 'number' || result.status !== 0) {
+    throw new Error(
+      `provision: "${label}" failed (exit ${String(result.status)}): ` +
+        `${result.stderr || result.stdout || 'no output'}. Cannot verify existing resources; ` +
+        `refusing to create a possible duplicate.`,
+    );
+  }
+}
+
+/** Field spec describing a wrangler `--json` list member's required identity. */
+interface ResourceListSpec {
+  /** Human resource name for messages, e.g. `KV namespace` / `D1 database`. */
+  resource: string;
+  /** Command name for messages, e.g. `wrangler kv namespace list`. */
+  command: string;
+  /** Any ONE of these holding a non-empty string satisfies "has an id". */
+  idFields: Array<string>;
+  /** The member field carrying the account-matched name/title. */
+  nameField: string;
+  /** Grammatical label for the name field in messages: `titled` / `named`. */
+  nameLabel: string;
+}
+
+/**
+ * STRICT list validator shared by KV + D1. Rejects the ENTIRE list (throws) if
+ * ANY member is not a well-formed object carrying the required non-empty string
+ * fields — a member is NEVER silently filtered, because a malformed member could
+ * BE the requested target and dropping it would look like "absent" and mint a
+ * duplicate. Returns the validated members (every one guaranteed to have a valid
+ * id + name) on success.
+ */
+function validateResourceList(
+  list: Array<unknown>,
+  spec: ResourceListSpec,
+): Array<Record<string, unknown>> {
+  const validated: Array<Record<string, unknown>> = [];
+  for (const member of list) {
+    if (!isRecord(member)) {
+      throw new Error(
+        `provision: "${spec.command}" returned a malformed ${spec.resource} entry (not an object). ` +
+          `Cannot verify existing resources; refusing to create a possible duplicate.`,
+      );
+    }
+    const rawName = member[spec.nameField];
+    const nameValid = typeof rawName === 'string' && rawName.length > 0;
+    const idValid = spec.idFields.some((f) => {
+      const value = member[f];
+      return typeof value === 'string' && value.length > 0;
+    });
+    if (nameValid && !idValid) {
+      throw new Error(
+        `provision: "${spec.command}" returned a ${spec.resource} ${spec.nameLabel} ` +
+          `${JSON.stringify(rawName)} with no valid id. Cannot verify whether it already exists; ` +
+          `refusing to create a possible duplicate.`,
+      );
+    }
+    if (!nameValid) {
+      throw new Error(
+        `provision: "${spec.command}" returned a malformed ${spec.resource} entry with no valid ` +
+          `${spec.nameField}. Cannot verify existing resources; refusing to create a possible duplicate.`,
+      );
+    }
+    validated.push(member);
+  }
+  return validated;
+}
 
 /** `wrangler d1 list --json` / `d1 info <name> --json` → `{ id, name }`. */
 function extractD1(
@@ -352,16 +485,14 @@ function extractD1(
   if (typeof id !== 'string' || id.length === 0) {
     return undefined;
   }
-  return { id, name: typeof entry.name === 'string' ? entry.name : undefined };
+  const name = entry.name ?? entry.database_name;
+  return { id, name: typeof name === 'string' ? name : undefined };
 }
 
 /**
  * `wrangler kv namespace list` → the `{ id }` of every namespace whose title
- * matches. FAILS CLOSED: a namespace whose title matches the target but carries
- * no non-empty string `id` (a schema-valid-but-idless member like
- * `{ "title": "target" }`) is NOT silently dropped — dropping it would look like
- * "absent" and mint a DUPLICATE namespace (KV titles are not account-unique). It
- * throws so the caller surfaces the ambiguity instead of blindly creating.
+ * matches. The list has ALREADY been through {@link validateResourceList} (every
+ * member has a non-empty string `id` + `title`), so this only filters + collects.
  */
 function extractKvMatches(
   list: Array<Record<string, unknown>>,
@@ -373,14 +504,9 @@ function extractKvMatches(
       continue;
     }
     const id = ns.id;
-    if (typeof id !== 'string' || id.length === 0) {
-      throw new Error(
-        `provision: "wrangler kv namespace list" returned a namespace titled ${JSON.stringify(title)} ` +
-          `with no valid id. Cannot verify whether it already exists; refusing to create a possible ` +
-          `duplicate (KV titles are not account-unique). Inspect the account and retry.`,
-      );
+    if (typeof id === 'string' && id.length > 0) {
+      matches.push({ id });
     }
-    matches.push({ id });
   }
   return matches;
 }
@@ -392,31 +518,30 @@ function isAlreadyExistsError(result: RunWranglerResult): boolean {
 }
 
 /**
- * True when a failing `<res> info/get` means the resource simply does NOT exist
- * (safe to create), vs. a different failure (auth/network) we must surface
- * instead of blindly creating. wrangler's `getQueue` throws `Queue "x" does not
- * exist`; the R2/other get-by-name paths throw comparable not-found errors.
+ * EXACT, name-aware not-found classifier shared by R2 + queues. Given a
+ * already-NON-zero `<res> info`-by-name probe, returns `true` (confirmed absent →
+ * safe to create) ONLY on wrangler's exact, resource-specific not-found signal
+ * for THIS name (regex-escaped). Everything else returns `false` so the caller
+ * fails closed — a signal/spawn failure, an auth/network/metrics error, or a
+ * GENERIC "not found" (e.g. `Account not found`) is NEVER treated as absence,
+ * which would mint a duplicate resource.
  */
-function isMissingResourceError(result: RunWranglerResult): boolean {
+function isConfirmedAbsent(result: RunWranglerResult, kind: 'r2' | 'queue', name: string): boolean {
   const text = `${result.stdout}\n${result.stderr}`;
-  return /does not exist|not found|could not be found|no such/i.test(text);
-}
-
-/**
- * True ONLY when a failing `r2 bucket info` is the confirmed bucket-not-found
- * signal. The DEFINITIVE signal is CF API error code `10006` — the exact code
- * wrangler's own `isConnectedToExistingResource` treats as "bucket absent" — plus
- * wrangler's exact R2 not-found message. In wrangler 4.107 `r2 bucket info` does
- * the bucket lookup AND a separate metrics/GraphQL query, so an EXISTING bucket
- * can exit non-zero on a metrics/auth/network failure. We deliberately do NOT
- * fall back to the broad `isMissingResourceError` regex (`not found`/`no such`/…):
- * an unrelated metrics/GraphQL error whose text loosely contains "not found"
- * would be misread as absence and mint a duplicate. Create ONLY on this confirmed
- * signal; any other non-zero is surfaced.
- */
-function isBucketNotFoundError(result: RunWranglerResult): boolean {
-  const text = `${result.stdout}\n${result.stderr}`;
-  return /\b10006\b/.test(text) || /the specified bucket does not exist/i.test(text);
+  switch (kind) {
+    case 'r2':
+      // CF API error code 10006 (the exact code wrangler's own
+      // `isConnectedToExistingResource` treats as "bucket absent") or wrangler's
+      // exact R2 not-found message. R2's message does not embed the bucket name,
+      // so the code/message IS the exact signal. A metrics/auth/network failure
+      // (whose text may loosely contain "not found") is NOT matched here.
+      return /\b10006\b/.test(text) || /the specified bucket does not exist/i.test(text);
+    case 'queue':
+      // wrangler's `getQueue` throws exactly `Queue "<name>" does not exist`.
+      // Match ONLY that message for THIS queue name — a generic `not found` /
+      // `no such` / `Account not found` must NOT be read as queue absence.
+      return new RegExp(`Queue\\s+"${escapeRegExp(name)}"\\s+does not exist`, 'i').test(text);
+  }
 }
 
 /**
@@ -500,6 +625,22 @@ export async function provisionCloudflareResources(
     patch: Parameters<typeof writeProvisionedWranglerConfig>[1],
   ): WriteProvisionedWranglerResult => writeProvisionedWranglerConfig(root, patch, { configPath });
 
+  // --- account_id (PERSIST FIRST, before any remote side effect) -----------
+  // Pin the effective account_id NOW — before any create writes a real id — so a
+  // partial run can never leave account-A's freshly-minted ids in a config with
+  // NO account pin. Without this, a later retry under account B would see the real
+  // id (read-first hit → skips discovery) and finally stamp `account_id = B`,
+  // binding account-A resources under account B. With the pin written up front, a
+  // different-account retry instead hits the reconciliation above (config account
+  // ≠ requested → fail closed) before touching wrangler/REST. `effectiveAccountId`
+  // equals `opts.accountId` whenever the latter is set (a config/opts mismatch has
+  // already thrown), so this writes exactly the requested account.
+  let accountIdWritten = false;
+  if (opts?.accountId) {
+    write({ accountId: opts.accountId });
+    accountIdWritten = true;
+  }
+
   // --- D1 ------------------------------------------------------------------
   if (desired.d1) {
     const { binding, name } = desired.d1;
@@ -513,11 +654,28 @@ export async function provisionCloudflareResources(
       assertD1MigrationsDirApplied(res, binding, configPath);
       resources.push({ kind: 'd1', binding, name, action: 'reused', id: entry.database_id });
     } else {
-      const existing = extractD1(
-        parseJsonArray(
-          runWrangler(['d1', 'list', '--json', '-c', configPath], { captureJson: true }).stdout,
-        ).find((db) => db.name === name),
-      );
+      // Discovery must SUCCEED (gate) before its stdout is parsed, then the whole
+      // list is strictly validated — a nonzero/SIGTERM/spawn-error or a malformed
+      // member never parses as "absent" and mints a duplicate D1.
+      const listResult = runWrangler(['d1', 'list', '--json', '-c', configPath], {
+        captureJson: true,
+      });
+      assertDiscoverySucceeded(listResult, 'wrangler d1 list');
+      const rawList = parseJsonArrayStrict(listResult.stdout);
+      if (!rawList) {
+        throw new Error(
+          `provision: "wrangler d1 list --json" did not return a JSON array; cannot verify whether ` +
+            `D1 database ${JSON.stringify(name)} exists. Refusing to create a possible duplicate.`,
+        );
+      }
+      const databases = validateResourceList(rawList, {
+        resource: 'D1 database',
+        command: 'wrangler d1 list',
+        idFields: ['uuid', 'database_id'],
+        nameField: 'name',
+        nameLabel: 'named',
+      });
+      const existing = extractD1(databases.find((db) => db.name === name));
       if (existing) {
         log.info(`adopted existing D1 database ${name} (${existing.id})`);
         const res = write({
@@ -540,17 +698,17 @@ export async function provisionCloudflareResources(
         if (created.status !== 0) {
           if (isAlreadyExistsError(created)) {
             // TOCTOU: created between our list and create (code 7502). Capture
-            // the id via `d1 info` and adopt instead of failing.
-            const info = extractD1(
-              parseJsonObject(
-                runWrangler(['d1', 'info', name, '--json', '-c', configPath], { captureJson: true })
-                  .stdout,
-              ),
-            );
-            if (!info) {
+            // the id via `d1 info` — which must SUCCEED (gate) and POSITIVELY
+            // identify THIS database (name match) before we adopt its id.
+            const infoResult = runWrangler(['d1', 'info', name, '--json', '-c', configPath], {
+              captureJson: true,
+            });
+            assertDiscoverySucceeded(infoResult, `wrangler d1 info ${name}`);
+            const info = extractD1(parseJsonObject(infoResult.stdout));
+            if (!info || (info.name !== undefined && info.name !== name)) {
               throw new Error(
                 `provision: "wrangler d1 create ${name}" reported the database already exists, ` +
-                  `but its id could not be resolved via "wrangler d1 info ${name} --json".`,
+                  `but "wrangler d1 info ${name} --json" did not return a matching database id/name.`,
               );
             }
             log.info(`adopted existing D1 database ${name} (${info.id})`);
@@ -584,28 +742,30 @@ export async function provisionCloudflareResources(
       continue;
     }
     // KV titles are NOT account-unique and `kv namespace create` never dedupes,
-    // so this list is the ONLY orphan guard. Require status 0 AND a schema-valid
-    // JSON array before treating an absent title as authoritative — otherwise a
-    // nonzero/auth/network/truncated result would parse as "absent" and mint a
-    // duplicate namespace. Fail closed (throw) instead.
+    // so this list is the ONLY orphan guard. Route it through the SHARED gate +
+    // strict validator: the discovery must exit 0 (nonzero/SIGTERM/spawn-error →
+    // throw), return a real JSON array, and have EVERY member well-formed (a
+    // malformed member — which could BE the target — fails closed rather than being
+    // filtered to a false "absent" that mints a duplicate namespace).
     const listResult = runWrangler(['kv', 'namespace', 'list', '-c', configPath], {
       captureJson: true,
     });
-    if (listResult.status !== 0) {
-      throw new Error(
-        `provision: "wrangler kv namespace list" failed: ${listResult.stderr || listResult.stdout}. ` +
-          `Cannot verify whether KV namespace ${JSON.stringify(title)} exists; refusing to create a ` +
-          `possible duplicate (KV titles are not account-unique).`,
-      );
-    }
-    const parsedList = parseJsonArrayStrict(listResult.stdout);
-    if (!parsedList) {
+    assertDiscoverySucceeded(listResult, 'wrangler kv namespace list');
+    const rawList = parseJsonArrayStrict(listResult.stdout);
+    if (!rawList) {
       throw new Error(
         `provision: "wrangler kv namespace list" did not return a JSON array; cannot verify whether ` +
           `KV namespace ${JSON.stringify(title)} exists. Refusing to create a possible duplicate.`,
       );
     }
-    const matches = extractKvMatches(parsedList, title);
+    const namespaces = validateResourceList(rawList, {
+      resource: 'KV namespace',
+      command: 'wrangler kv namespace list',
+      idFields: ['id'],
+      nameField: 'title',
+      nameLabel: 'titled',
+    });
+    const matches = extractKvMatches(namespaces, title);
     if (matches.length > 0) {
       // KV titles are NOT account-unique. Tie-break deterministically on the
       // lexicographically-smallest id so re-runs adopt the same namespace.
@@ -669,7 +829,7 @@ export async function provisionCloudflareResources(
         log.info(`adopted existing R2 bucket ${bucketName}`);
         write({ r2: { binding, bucketName } });
         resources.push({ kind: 'r2', binding, name: bucketName, action: 'adopted' });
-      } else if (isBucketNotFoundError(info)) {
+      } else if (isConfirmedAbsent(info, 'r2', bucketName)) {
         // CONFIRMED not-found → create. `--update-config` upserts by binding.
         const created = runWrangler([
           'r2',
@@ -801,7 +961,11 @@ export async function provisionCloudflareResources(
       resources.push({ kind: 'queue', name, action: 'reused' });
       continue;
     }
-    if (!isMissingResourceError(info)) {
+    // A non-zero probe is "absent" (→ create) ONLY on the EXACT, name-aware
+    // not-found signal (`Queue "<name>" does not exist`). Any other nonzero — a
+    // signal/spawn failure, an auth error, or a generic `Account not found` — is
+    // NOT absence and fails closed (never a blind create).
+    if (!isConfirmedAbsent(info, 'queue', name)) {
       throw new Error(
         `provision: "wrangler queues info ${name}" failed: ${info.stderr || info.stdout}`,
       );
@@ -815,12 +979,7 @@ export async function provisionCloudflareResources(
     resources.push({ kind: 'queue', name, action: 'created' });
   }
 
-  // --- account_id ----------------------------------------------------------
-  let accountIdWritten = false;
-  if (opts?.accountId) {
-    write({ accountId: opts.accountId });
-    accountIdWritten = true;
-  }
-
+  // account_id was persisted up front (before any remote side effect) — see the
+  // account_id block near the top of this function (F1 fail-closed pin).
   return { resources, configPath, accountIdWritten };
 }

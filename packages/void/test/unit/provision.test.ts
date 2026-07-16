@@ -451,6 +451,115 @@ describe('provisionCloudflareResources — D1', () => {
   });
 });
 
+describe('provisionCloudflareResources — D1 discovery gate + strict validation (F4)', () => {
+  const d1Desired: DesiredResourceSet = {
+    ...emptyDesired,
+    d1: { binding: 'DB', name: 'myapp-db' },
+  };
+
+  it('fails closed (no create) when `d1 list` exits non-zero', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^d1 list --json/,
+        reply: () => fail('', 'X [ERROR] Authentication error [code: 10000]'),
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(tmpDir, wranglerPath, d1Desired, {
+        runWrangler: run,
+        log: silentLog,
+      }),
+    ).rejects.toThrow(/d1 list.*failed/s);
+    expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
+    expect(readConfig().d1_databases).toBeUndefined();
+  });
+
+  it('fails closed (no create) on a SIGTERM-killed `d1 list` (normalized to non-zero)', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const killed = normalizeRunWranglerResult({
+      stdout: '',
+      stderr: '',
+      status: null,
+      signal: 'SIGTERM',
+    });
+    const { run, calls } = makeRunner([{ match: /^d1 list --json/, reply: () => killed }]);
+    await expect(
+      provisionCloudflareResources(tmpDir, wranglerPath, d1Desired, {
+        runWrangler: run,
+        log: silentLog,
+      }),
+    ).rejects.toThrow(/d1 list.*failed/s);
+    expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
+  });
+
+  it('fails closed (no create) on a spawn-error `d1 list` (normalized to non-zero)', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const errored = normalizeRunWranglerResult({
+      status: null,
+      error: new Error('spawn wrangler ENOENT'),
+    });
+    const { run, calls } = makeRunner([{ match: /^d1 list --json/, reply: () => errored }]);
+    await expect(
+      provisionCloudflareResources(tmpDir, wranglerPath, d1Desired, {
+        runWrangler: run,
+        log: silentLog,
+      }),
+    ).rejects.toThrow(/d1 list.*failed/s);
+    expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
+  });
+
+  it('fails closed (no create) when `d1 list` returns truncated JSON (status 0)', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([
+      { match: /^d1 list --json/, reply: () => ok('[{ "uuid": "a", "name": "myapp-db"') },
+    ]);
+    await expect(
+      provisionCloudflareResources(tmpDir, wranglerPath, d1Desired, {
+        runWrangler: run,
+        log: silentLog,
+      }),
+    ).rejects.toThrow(/did not return a JSON array/);
+    expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
+  });
+
+  it('fails closed (no create) when a `d1 list` member is malformed — even when it IS the target name', async () => {
+    // The target-named member carries NO id → it must NOT be filtered to a false
+    // "absent" that mints a duplicate D1.
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([
+      { match: /^d1 list --json/, reply: () => ok(JSON.stringify([{ name: 'myapp-db' }])) },
+    ]);
+    await expect(
+      provisionCloudflareResources(tmpDir, wranglerPath, d1Desired, {
+        runWrangler: run,
+        log: silentLog,
+      }),
+    ).rejects.toThrow(/D1 database named "myapp-db" with no valid id/);
+    expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
+  });
+
+  it('fails closed (no adopt/write) when the collision `d1 info` exits non-zero', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run } = makeRunner([
+      { match: /^d1 list --json/, reply: () => ok('[]') },
+      { match: /^d1 create /, reply: () => fail('', 'X [ERROR] already exists [code: 7502]') },
+      {
+        match: /^d1 info myapp-db --json/,
+        reply: () => fail('', 'X [ERROR] Authentication error [code: 10000]'),
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(tmpDir, wranglerPath, d1Desired, {
+        runWrangler: run,
+        log: silentLog,
+      }),
+    ).rejects.toThrow(/d1 info myapp-db.*failed/s);
+    // The 7502 create wrote nothing, and the failed info produced no adopt/write.
+    expect(readConfig().d1_databases).toBeUndefined();
+  });
+});
+
 describe('provisionCloudflareResources — KV', () => {
   it('adopts when the namespace list shows a title match (writes id, no create)', async () => {
     setup(JSON.stringify({ kv_namespaces: [{ binding: 'KV', id: 'local' }] }));
@@ -1052,6 +1161,68 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
     ).rejects.toThrow(/queues info jobs.*failed/s);
     expect(calls.some((c) => isCall(c, 'queues', 'create'))).toBe(false);
   });
+
+  it('does NOT create on a generic/unrelated "not found" (e.g. Account not found) — fails closed (F5)', async () => {
+    // The OLD broad `/not found|no such/` regex misread "Account not found" as
+    // queue absence and blindly created. It must fail closed instead.
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^queues info jobs/,
+        reply: () => fail('', 'X [ERROR] Account not found [code: 10000]'),
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, queues: ['jobs'] },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/queues info jobs.*failed/s);
+    expect(calls.some((c) => isCall(c, 'queues', 'create'))).toBe(false);
+  });
+
+  it('is name-aware: a "does not exist" for a DIFFERENT queue name is NOT absence for this one (F5)', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^queues info jobs/,
+        reply: () => fail('', 'X [ERROR] Queue "some-other-queue" does not exist.'),
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, queues: ['jobs'] },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/queues info jobs.*failed/s);
+    expect(calls.some((c) => isCall(c, 'queues', 'create'))).toBe(false);
+  });
+
+  it('creates ONLY on the exact `Queue "<name>" does not exist` signal for THAT name (F5)', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^queues info jobs/,
+        reply: () => fail('', 'X [ERROR] Queue "jobs" does not exist.'),
+      },
+      { match: /^queues create jobs/, reply: () => ok('Created queue jobs') },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, queues: ['jobs'] },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(calls).toEqual([
+      ['queues', 'info', 'jobs', '-c', wranglerPath],
+      ['queues', 'create', 'jobs', '-c', wranglerPath],
+    ]);
+    expect(result.resources).toEqual([{ kind: 'queue', name: 'jobs', action: 'created' }]);
+  });
 });
 
 describe('provisionCloudflareResources — account reconciliation + config pin (F1)', () => {
@@ -1077,6 +1248,67 @@ describe('provisionCloudflareResources — account reconciliation + config pin (
     ).rejects.toThrow(/account mismatch.*config-acct.*requested-acct/s);
     // No wrangler call and no REST call happened before the fail-closed throw.
     expect(calls).toEqual([]);
+    expect(restCalled).toBe(false);
+  });
+
+  it('persists account_id BEFORE any remote op so a later different-account retry fails closed (F1)', async () => {
+    // Run 1 under account A: D1 create writes a real id, THEN a later op fails.
+    setup(JSON.stringify({ name: 'app' }));
+    const run1 = makeRunner([
+      { match: /^d1 list --json/, reply: () => ok('[]') },
+      {
+        match: /^d1 create /,
+        reply: () => {
+          simulateUpdateConfig('d1_databases', {
+            binding: 'DB',
+            database_name: 'myapp-db',
+            database_id: 'created-under-A',
+          });
+          return ok();
+        },
+      },
+      // A later op fails → the run throws AFTER the D1 id was already written.
+      {
+        match: /^queues info jobs/,
+        reply: () => fail('', 'X [ERROR] Authentication error [code: 10000]'),
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' }, queues: ['jobs'] },
+        { runWrangler: run1.run, accountId: 'acct-A', log: silentLog },
+      ),
+    ).rejects.toThrow(/queues info jobs.*failed/s);
+    // account_id was pinned to A UP FRONT (before D1), alongside the real D1 id.
+    const after1 = readConfig();
+    expect(after1.account_id).toBe('acct-A');
+    expect((after1.d1_databases as Array<Record<string, unknown>>)[0].database_id).toBe(
+      'created-under-A',
+    );
+
+    // Run 2 retries under account B → must fail closed at reconciliation with NO
+    // wrangler/REST calls (never rebinds account-A's D1 id under account B).
+    let restCalled = false;
+    const run2 = makeRunner([{ match: /.*/, reply: () => ok() }]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' }, queues: ['jobs'] },
+        {
+          runWrangler: run2.run,
+          accountId: 'acct-B',
+          log: silentLog,
+          listHyperdriveConfigs: async () => {
+            restCalled = true;
+            return [];
+          },
+        },
+      ),
+    ).rejects.toThrow(/account mismatch.*acct-A.*acct-B/s);
+    expect(run2.calls).toEqual([]);
     expect(restCalled).toBe(false);
   });
 
@@ -1318,6 +1550,86 @@ describe('provisionCloudflareResources — Hyperdrive discovery (F2 pagination +
     ).rejects.toThrow(/cannot adopt Hyperdrive config "myapp-hd".*share that name/s);
     expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
   });
+
+  it('fails closed on malformed pagination (missing/premature-empty/duplicate/inconsistent) — never declares absence, no create', async () => {
+    // Each case would let the OLD loop stop early and declare "absent" without
+    // proving completeness → a same-named config on an unread page becomes a
+    // duplicate. All must fail closed BEFORE any create.
+    const cases: Array<Array<{ status?: number; body: unknown }>> = [
+      // 1. missing result_info.total_count metadata (cannot prove completeness)
+      [{ body: { success: true, result: [{ id: 'a', name: 'other' }] } }],
+      // 2. premature empty page before all configs are listed
+      [
+        {
+          body: {
+            success: true,
+            result: [{ id: 'a', name: 'other' }],
+            result_info: { total_count: 3 },
+          },
+        },
+        { body: { success: true, result: [], result_info: { total_count: 3 } } },
+      ],
+      // 3. repeated/duplicate id across pages (padding to satisfy a count)
+      [
+        {
+          body: {
+            success: true,
+            result: [{ id: 'a', name: 'x' }],
+            result_info: { total_count: 2 },
+          },
+        },
+        {
+          body: {
+            success: true,
+            result: [{ id: 'a', name: 'x' }],
+            result_info: { total_count: 2 },
+          },
+        },
+      ],
+      // 4. inconsistent total_count between pages
+      [
+        {
+          body: {
+            success: true,
+            result: [{ id: 'a', name: 'x' }],
+            result_info: { total_count: 2 },
+          },
+        },
+        {
+          body: {
+            success: true,
+            result: [{ id: 'b', name: 'y' }],
+            result_info: { total_count: 5 },
+          },
+        },
+      ],
+    ];
+    for (const pages of cases) {
+      setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+      const { restore } = stubFetch(pages);
+      try {
+        const { run, calls } = makeRunner([]);
+        await expect(
+          provisionCloudflareResources(
+            tmpDir,
+            wranglerPath,
+            {
+              ...emptyDesired,
+              hyperdrive: {
+                binding: 'HYPERDRIVE',
+                name: 'myapp-hd',
+                connectionString: 'postgres://x',
+              },
+            },
+            { runWrangler: run, apiToken: 'tok', log: silentLog },
+          ),
+        ).rejects.toThrow(/cannot verify whether Hyperdrive config "myapp-hd"/);
+        expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
+      } finally {
+        restore();
+      }
+    }
+  });
 });
 
 describe('provisionCloudflareResources — KV/R2 fail closed on schema-valid ambiguity (F3)', () => {
@@ -1334,6 +1646,27 @@ describe('provisionCloudflareResources — KV/R2 fail closed on schema-valid amb
         { runWrangler: run, log: silentLog },
       ),
     ).rejects.toThrow(/namespace titled "myapp-kv" with no valid id/);
+    expect(calls.some((c) => isCall(c, 'kv', 'namespace', 'create'))).toBe(false);
+  });
+
+  it('KV: fails closed (no create) when the list has a malformed member (null) — never filtered away', async () => {
+    // The OLD strict parser filtered `null` out, leaving a false "absent" match →
+    // duplicate. The malformed member must reject the WHOLE list instead.
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^kv namespace list/,
+        reply: () => ok(JSON.stringify([null, { id: 'other', title: 'someone-else' }])),
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }] },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/malformed KV namespace entry/);
     expect(calls.some((c) => isCall(c, 'kv', 'namespace', 'create'))).toBe(false);
   });
 

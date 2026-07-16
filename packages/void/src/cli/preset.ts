@@ -206,12 +206,15 @@ export function resolveWranglerCommand(root: string, subcommand: string): string
  * `[process.execPath, <wrangler bin.wrangler>]`, which is shell-free AND
  * cross-platform (it sidesteps the Windows `.cmd`/`.ps1` shim that Node cannot
  * spawn with `shell: false`):
- *   1. The app-root `node_modules/wrangler` probe (a consumer may hoist its own
- *      wrangler at the project root).
- *   2. MODULE RESOLUTION of `wrangler/package.json`. wrangler is a dependency of
- *      the `void` PACKAGE, so under strict pnpm (void + consumers use pnpm) it is
- *      NOT at the app root — it lives under void's own deps. Resolving relative to
- *      THIS module finds it wherever pnpm placed it.
+ *   1. MODULE RESOLUTION of `wrangler/package.json` relative to THIS module (the
+ *      `void` package). The provisioner targets wrangler 4.107's EXACT flags,
+ *      `--json` shapes, and error strings, so void's own pinned wrangler must be
+ *      PREFERRED — an app that hoists an older, incompatible wrangler at its root
+ *      must not shadow it. Under strict pnpm (void + consumers use pnpm) void's
+ *      wrangler is not at the app root anyway; module resolution finds it wherever
+ *      pnpm placed it.
+ *   2. FALLBACK: the app-root `node_modules/wrangler` probe, used only when void's
+ *      own wrangler cannot be resolved (e.g. a bundled/vendored layout).
  *
  * If wrangler cannot be resolved by EITHER avenue, throws a clear error — it never
  * degrades to a bare `wrangler` (ENOENT in clean CI) or a `.cmd` shim.
@@ -254,20 +257,24 @@ function defaultResolveWranglerPackageJson(): string | undefined {
 
 /**
  * Absolute path to the wrangler JS entry (from its `package.json` `bin.wrangler`),
- * trying the app-root probe first, then the injected module resolver. Returns
- * `undefined` when wrangler cannot be located or its manifest is unreadable.
+ * trying the injected module resolver (void's OWN wrangler) FIRST, then falling
+ * back to the app-root probe. Returns `undefined` when wrangler cannot be located
+ * or its manifest is unreadable.
  */
 function resolveLocalWranglerJsBin(
   root: string,
   resolveWranglerPackageJson: () => string | undefined,
 ): string | undefined {
-  const fromRoot = wranglerJsBinFromPackageJson(
-    join(root, 'node_modules', 'wrangler', 'package.json'),
-  );
-  if (fromRoot) {
-    return fromRoot;
+  // Prefer void's own wrangler (module resolution relative to preset.ts): the
+  // provisioner targets its exact 4.107 flags/JSON/errors, so an older app-root
+  // wrangler must not win over it.
+  const fromVoid = wranglerJsBinFromPackageJson(resolveWranglerPackageJson());
+  if (fromVoid) {
+    return fromVoid;
   }
-  return wranglerJsBinFromPackageJson(resolveWranglerPackageJson());
+  // Fallback: a consumer-hoisted wrangler at the project root, only when void's
+  // own resolution failed.
+  return wranglerJsBinFromPackageJson(join(root, 'node_modules', 'wrangler', 'package.json'));
 }
 
 /**
