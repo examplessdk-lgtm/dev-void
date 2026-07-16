@@ -434,27 +434,49 @@ function defaultWranglerEnvFiles(env: string): Array<string> {
 
 /**
  * F1 — FAIL CLOSED when the project's dotenv files declare a transport-redirecting
- * variable. wrangler 4.107 reloads `.env`/`.env.local` (and `.dev.vars`) from the project
- * root into `process.env` on EVERY command with `override: true`, so a repo `.env` setting
- * `CLOUDFLARE_API_BASE_URL` / `WRANGLER_API_ENVIRONMENT` / `CLOUDFLARE_COMPLIANCE_REGION` /
- * `CLOUDFLARE_ENV` would redirect wrangler's authenticated transport (and credentials) to
- * a staging / FedRAMP / arbitrary endpoint AFTER we resolved the pinned base — while the
- * Hyperdrive existence check runs against the pinned base. Single-account/single-endpoint
- * provisioning cannot reason about a transport redirected out from under it, so we refuse.
- * The fix is to export the variable in the shell/CI environment (which we DO honor, pinning
- * both wrangler and the lister to it) instead of the project dotenv.
+ * variable. wrangler 4.107 reloads `.env`/`.env.local` (and the dev-vars files) from the
+ * project root into `process.env` on EVERY command with `override: true`, so a repo `.env`
+ * setting `CLOUDFLARE_API_BASE_URL` / `WRANGLER_API_ENVIRONMENT` /
+ * `CLOUDFLARE_COMPLIANCE_REGION` / `CLOUDFLARE_ENV` would redirect wrangler's authenticated
+ * transport (and credentials) to a staging / FedRAMP / arbitrary endpoint AFTER we resolved
+ * the pinned base — while the Hyperdrive existence check runs against the pinned base.
+ * Single-account/single-endpoint provisioning cannot reason about a transport redirected
+ * out from under it, so we refuse. The fix is to export the variable in the shell/CI
+ * environment (which we DO honor, pinning both wrangler and the lister to it) instead of
+ * the project dotenv.
+ *
+ * Exported for direct unit testing of the file-set and the Windows case rule; production
+ * always calls it with the real `process.platform`.
  */
-function assertNoTransportRedirectInProjectDotenv(root: string): void {
-  // F6 — scan the EXACT dotenv set wrangler 4.107 reloads on every command, using a KEY
-  // scanner that mirrors wrangler's own dotenv parser (accepts the optional `export ` prefix
-  // + quoting). Because the provisioner ALWAYS passes `--env=` (an EMPTY environment string),
-  // wrangler computes `getDefaultEnvFiles("")` = [".env", ".env.local", ".env.", ".env..local"]
-  // — the empty-env filenames `.env.`/`.env..local` are part of the loaded set — plus we also
-  // cover `.dev.vars(.local)`. We do NOT expand — presence of the KEY is the signal.
-  const files = [...defaultWranglerEnvFiles(''), '.dev.vars', '.dev.vars.local'];
+export function assertNoTransportRedirectInProjectDotenv(
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  // F5 (round 11) — scan the EXACT file sets wrangler 4.107 loads for the provisioner's
+  // `--env=` (EMPTY environment string), using a KEY scanner that mirrors wrangler's own
+  // dotenv parser (accepts the optional `export ` prefix + quoting):
+  //   - the per-command `process.env` reload (startup middleware) uses
+  //     `getDefaultEnvFiles("")` = [".env", ".env.local", ".env.", ".env..local"];
+  //   - the dev-vars loader `loadDotDevDotVars(envPath, env)` probes
+  //     `${envPath}.${env}` FIRST when env is defined — `.dev.vars.` for the empty env —
+  //     then falls back to `.dev.vars`. It NEVER loads `.dev.vars.local`, so that file is
+  //     deliberately NOT fenced (blocking it rejected configs wrangler never reads).
+  // We do NOT expand — presence of the KEY is the signal.
+  const files = [...defaultWranglerEnvFiles(''), '.dev.vars.', '.dev.vars'];
+  // F5 — wrangler's dotenv environment is CASE-INSENSITIVE on Windows: `loadDotEnv` loads
+  // into `caseInsensitiveEnv()` when `process.platform === "win32"` — a Proxy that
+  // canonicalizes property names via `toLowerCase` — so a `cloudflare_api_base_url=` line
+  // redirects the transport there. Compare keys case-insensitively on win32, exactly
+  // elsewhere (POSIX env vars are case-sensitive).
+  const caseInsensitive = platform === 'win32';
   for (const file of files) {
     const keys = scanWranglerDotenvKeys(join(root, file));
-    const offenders = TRANSPORT_REDIRECT_ENV_VARS.filter((name) => keys.has(name));
+    const lowerKeys = caseInsensitive
+      ? new Set([...keys].map((key) => key.toLowerCase()))
+      : undefined;
+    const declares = (name: string): boolean =>
+      lowerKeys !== undefined ? lowerKeys.has(name.toLowerCase()) : keys.has(name);
+    const offenders = TRANSPORT_REDIRECT_ENV_VARS.filter(declares);
     if (offenders.length > 0) {
       throw new Error(
         `provision: refusing to provision — the project file "${file}" sets ` +
@@ -472,7 +494,7 @@ function assertNoTransportRedirectInProjectDotenv(root: string): void {
     // `command_line_args` is the VERBATIM argv — including a Hyperdrive connection
     // string's password — so a dotenv-declared sink would resurrect the leak the child-env
     // scrub (see provisionEnv) just closed.
-    const outputOffenders = OUTPUT_FILE_ENV_VARS.filter((name) => keys.has(name));
+    const outputOffenders = OUTPUT_FILE_ENV_VARS.filter(declares);
     if (outputOffenders.length > 0) {
       throw new Error(
         `provision: refusing to provision — the project file "${file}" sets ` +

@@ -19,6 +19,7 @@ import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
   acquireProvisionLock,
+  assertNoTransportRedirectInProjectDotenv,
   createDefaultRunWrangler,
   isAlreadyGoneKillError,
   normalizeRunWranglerResult,
@@ -4037,6 +4038,72 @@ describe('provisionCloudflareResources — F4 Hyperdrive password never reaches 
     expect(listerWarn).toBeDefined();
     expect(listerWarn).not.toContain('leaky-pass');
     expect(listerWarn).toContain('[REDACTED]');
+  });
+});
+
+describe('provisionCloudflareResources — F5 dotenv fence file set + case rule are wrangler-exact (round 11)', () => {
+  const redirect = 'CLOUDFLARE_API_BASE_URL=https://api.staging.cloudflare.com/client/v4\n';
+
+  it('`.dev.vars.local` no longer blocks — wrangler never loads that file', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    writeFileSync(join(tmpDir, '.dev.vars.local'), redirect);
+    const { run } = makeRunner([
+      { match: /^d1 list/, reply: () => ok('[]') },
+      {
+        match: /^d1 create/,
+        reply: () => {
+          simulateUpdateConfig('d1_databases', {
+            binding: 'DB',
+            database_name: 'myapp-db',
+            database_id: uuid('db'),
+          });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(result.resources[0].action).toBe('created');
+  });
+
+  it('detects a redirect var in `.dev.vars.` (the empty-env dev-vars file wrangler probes FIRST)', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    writeFileSync(join(tmpDir, '.dev.vars.'), redirect);
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/refusing to provision.*"\.dev\.vars\.".*CLOUDFLARE_API_BASE_URL/s);
+    expect(calls.length).toBe(0);
+  });
+
+  it('compares variable names case-insensitively on win32 (wrangler loads dotenv into a caseInsensitiveEnv there)', () => {
+    setup(JSON.stringify({ name: 'app' }));
+    writeFileSync(join(tmpDir, '.env'), 'cloudflare_api_base_url=https://evil.example\n');
+    // Simulated win32: the mixed-case key IS the transport var (case-insensitive env).
+    expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'win32')).toThrow(
+      /refusing to provision.*\.env/s,
+    );
+    // POSIX: env vars are case-sensitive — the lowercase key is a different variable.
+    expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'darwin')).not.toThrow();
+    expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'linux')).not.toThrow();
+  });
+
+  it('the win32 case rule also covers the output-file sinks', () => {
+    setup(JSON.stringify({ name: 'app' }));
+    writeFileSync(join(tmpDir, '.env'), 'Wrangler_Output_File_Path=/tmp/out.json\n');
+    expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'win32')).toThrow(
+      /session diagnostics/,
+    );
+    expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'darwin')).not.toThrow();
   });
 });
 
