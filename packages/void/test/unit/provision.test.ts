@@ -26,6 +26,7 @@ import {
   provisionCloudflareResources,
   provisionEnv,
   resolvePinnedApiBaseUrl,
+  WranglerQuarantineError,
   type DesiredResourceSet,
   type RunWrangler,
   type RunWranglerResult,
@@ -4224,6 +4225,147 @@ describe('provisionCloudflareResources — F7 read-first stored-name identity (r
   });
 });
 
+describe('provisionCloudflareResources — F2 quarantine retains the whole-provision lock (round 11)', () => {
+  const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
+
+  it('a quarantine rejection RETAINS the mutex (not released) and surfaces the quarantine error', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    // A runner whose child could not be confirmed dead — the default runner rejects
+    // with a quarantine error in that state; injecting the same rejection exercises the
+    // provision-level contract: NO release, mutex retained, error surfaced verbatim.
+    const quarantineError = new WranglerQuarantineError(43210, 'test: child unconfirmed');
+    const run: RunWrangler = () => Promise.reject(quarantineError);
+    let thrown: unknown;
+    try {
+      await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBe(quarantineError);
+    expect((thrown as Error).message).toMatch(/pid 43210/);
+    expect((thrown as Error).message).toMatch(/intentionally RETAINED/);
+    // THE crux: the mutex directory still exists — the lock was NOT released with a
+    // possibly-live wrangler child. (A non-quarantine failure releases it — see the
+    // whole-provision lock suite.)
+    expect(existsSync(lockMutex)).toBe(true);
+    // Cleanup: remove the retained mutex so later tests can lock again. quarantine()
+    // detached the lock from proper-lockfile's tracking, so no heartbeat/compromise
+    // callback fires after this removal.
+    rmSync(lockMutex, { recursive: true, force: true });
+  });
+
+  it('a NON-quarantine failure still releases the mutex (baseline)', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const { run } = makeRunner([{ match: /^d1 list/, reply: () => fail('', 'boom') }]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/d1 list.*failed/s);
+    expect(existsSync(lockMutex)).toBe(false);
+  });
+});
+
+describe('createDefaultRunWrangler — F2 parent-signal forwarding awaits confirmed teardown (round 11)', () => {
+  const SIG_TMP = join(import.meta.dirname, '.tmp-f2-signal-round11');
+  beforeEach(() => {
+    rmSync(SIG_TMP, { recursive: true, force: true });
+    mkdirSync(SIG_TMP, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(SIG_TMP, { recursive: true, force: true });
+  });
+
+  it('SIGTERM to the parent: the child group is confirmed dead BEFORE the parent re-raises and exits', async () => {
+    // A REAL parent process (so the re-raise/exit is observable) runs the runner around a
+    // child that exits 250ms AFTER receiving the forwarded SIGTERM. Pre-fix the parent
+    // re-raised immediately — it was dead while the child lived on (proper-lockfile's exit
+    // hook would strip the mutex under a live child). Post-fix the parent awaits the
+    // confirmed teardown, so AT parent exit the child is deterministically gone.
+    const pidFile = join(SIG_TMP, 'child.pid');
+    const childScript = join(SIG_TMP, 'slow-exit-child.cjs');
+    writeFileSync(
+      childScript,
+      `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
+        `process.on('SIGTERM', () => setTimeout(() => process.exit(0), 250));\n` +
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const parentScript = join(SIG_TMP, 'parent.mjs');
+    const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
+    writeFileSync(
+      parentScript,
+      `import { createDefaultRunWrangler } from ${JSON.stringify(provisionUrl)};\n` +
+        `const run = createDefaultRunWrangler(process.cwd(), {\n` +
+        `  launcher: [process.execPath, ${JSON.stringify(childScript)}, ${JSON.stringify(pidFile)}],\n` +
+        `});\n` +
+        `run(['noop'], { accountId: 'acct' }).then(\n` +
+        `  (r) => console.log('runner-settled', r.status, r.signal),\n` +
+        `  (e) => console.log('runner-rejected', e.message),\n` +
+        `);\n`,
+    );
+    const { spawn } = await import('node:child_process');
+    const parent = spawn(process.execPath, [parentScript], {
+      cwd: SIG_TMP,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let childPid: number | undefined;
+    try {
+      // Wait until the grandchild wrote its pid (it is alive and hanging).
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        if (existsSync(pidFile)) {
+          const raw = readFileSync(pidFile, 'utf-8');
+          if (raw.length > 0) {
+            childPid = Number(raw);
+            break;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(childPid).toBeDefined();
+      // Terminate the PARENT. It must forward to the child's group, await the CONFIRMED
+      // teardown (the child takes ~250ms to exit), and only then re-raise + die.
+      parent.kill('SIGTERM');
+      const [, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((res) => {
+        parent.on('exit', (code, sig) => res([code, sig]));
+      });
+      // The parent died of the re-raised SIGTERM (default action) — not exit 0.
+      expect(signal).toBe('SIGTERM');
+      // THE crux: at the moment the parent exited, the child was ALREADY dead. Pre-fix
+      // (immediate re-raise) the child would still be alive here for another ~250ms.
+      let childAlive = true;
+      try {
+        process.kill(childPid!, 0);
+      } catch {
+        childAlive = false;
+      }
+      expect(childAlive).toBe(false);
+    } finally {
+      // Belt + braces: never leak processes even on assertion failure.
+      try {
+        parent.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+      if (childPid !== undefined) {
+        try {
+          process.kill(childPid, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    }
+  }, 20_000);
+});
+
 describe('provisionCloudflareResources — F5 R2 absence needs the STRUCTURED code (round 10)', () => {
   it('a failure whose text merely contains 10006 inside a bucket name is NOT absence (fails closed, no create)', async () => {
     setup(JSON.stringify({ name: 'app', account_id: 'acct' }));
@@ -4365,7 +4507,7 @@ describe('createDefaultRunWrangler — F3 confirmed child termination + kill cla
     expect(isAlreadyGoneKillError(null)).toBe(false);
   });
 
-  it('a REAL kill failure (EPERM) on timeout SURFACES as a hard failure (not masked as a clean kill)', async () => {
+  it('a REAL kill failure (EPERM) on timeout QUARANTINES: the runner REJECTS, never settle-and-release (round 11)', async () => {
     const pidFile = join(F3_TMP, 'cli.pid');
     const hungCli = join(F3_TMP, 'hung.cjs');
     writeFileSync(
@@ -4381,12 +4523,57 @@ describe('createDefaultRunWrangler — F3 confirmed child termination + kill cla
         throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
       },
     });
-    const result = await run(['d1', 'list', '--json'], { accountId: 'acct' });
-    // HARD failure that SURFACES the kill error (never a clean/absent exit).
-    expect(result.signal).toBe('SIGKILL');
-    expect(result.status).not.toBe(0);
-    expect(result.error).toMatch(/EPERM/);
-    expect(result.stderr).toMatch(/could not be killed: EPERM/);
+    // The child may still be running, so the runner must NOT resolve (a resolution would
+    // let the provision error path release the whole-provision lock under a live child).
+    // It REJECTS with a quarantine error naming the pid + manual-recovery guidance.
+    let rejected: unknown;
+    try {
+      await run(['d1', 'list', '--json'], { accountId: 'acct' });
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBeInstanceOf(WranglerQuarantineError);
+    const err = rejected as WranglerQuarantineError;
+    expect(err.quarantine).toBe(true);
+    expect(err.message).toMatch(/could not be killed: EPERM/);
+    expect(err.message).toMatch(/intentionally RETAINED/);
+    expect(err.message).toMatch(/pid \d+/);
+    // The child is genuinely STILL ALIVE (the bug scenario) — prove it, then clean up.
+    const pid = Number(readFileSync(pidFile, 'utf-8'));
+    expect(() => process.kill(pid, 0)).not.toThrow();
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // already gone
+    }
+    expect(await waitForDead(pid, 5_000)).toBe(true);
+  });
+
+  it('an unconfirmable termination (grace expiry, child still alive) QUARANTINES too (round 11)', async () => {
+    const pidFile = join(F3_TMP, 'cli3.pid');
+    const hungCli = join(F3_TMP, 'hung3.cjs');
+    writeFileSync(
+      hungCli,
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const run = createDefaultRunWrangler(F3_TMP, {
+      launcher: [process.execPath, hungCli],
+      timeoutMs: 250,
+      confirmKillGraceMs: 500,
+      // A killer that CLAIMS success but kills nothing: the group stays alive, so
+      // close/group-gone can never both be confirmed → quarantine at the grace expiry.
+      killProcessGroup: () => {},
+    });
+    let rejected: unknown;
+    try {
+      await run(['d1', 'list', '--json'], { accountId: 'acct' });
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBeInstanceOf(WranglerQuarantineError);
+    expect((rejected as Error).message).toMatch(/could not be confirmed terminated within 500ms/);
+    expect((rejected as Error).message).toMatch(/intentionally RETAINED/);
     // Clean up the real child the fake killer left alive.
     const pid = Number(readFileSync(pidFile, 'utf-8'));
     try {

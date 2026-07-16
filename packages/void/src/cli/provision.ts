@@ -7,6 +7,7 @@ import {
   realpathSync,
   writeFileSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { parse, type ParseError } from 'jsonc-parser';
 import { basename, dirname, join, resolve } from 'pathe';
 import lockfile from 'proper-lockfile';
@@ -575,13 +576,14 @@ export function provisionEnv(ctx?: { accountId?: string; apiBaseUrl?: string }):
 const COMMAND_TIMEOUT_MS = 120_000;
 
 /**
- * F3 — after a timeout SIGKILL, how long to keep confirming the child's whole process group
- * is ACTUALLY gone (poll `kill(pid, 0)` → ESRCH) before giving up and surfacing an
- * unconfirmed-termination HARD failure. SIGKILL is uncatchable, so a healthy kernel reaps the
- * group within milliseconds; this generous bound only guards a pathological
- * uninterruptible-sleep child, and the runner never settles a timeout as "done" until the
- * group is confirmed gone (so the whole-provision lock — released only after this promise
- * settles — can never be released while the real wrangler CLI is still creating resources).
+ * F3/F2 — after a timeout SIGKILL, how long to keep confirming the child is ACTUALLY gone —
+ * BOTH its `close` event AND whole-group disappearance (`kill(-pid, 0)` → ESRCH) — before
+ * giving up. SIGKILL is uncatchable, so a healthy kernel reaps the group within
+ * milliseconds; this generous bound only guards a pathological uninterruptible-sleep child.
+ * The runner NEVER settles a timeout as "done" until both facts are confirmed; an expiry
+ * (or a failed kill) REJECTS with a {@link WranglerQuarantineError} instead, so the
+ * whole-provision lock — released only after a CONFIRMED settle — is intentionally
+ * retained while the real wrangler CLI may still be creating resources.
  */
 const CONFIRM_KILL_GRACE_MS = 5_000;
 /** F3 — the pid-poll interval while confirming post-SIGKILL termination. */
@@ -595,6 +597,42 @@ const CONFIRM_KILL_POLL_MS = 20;
  */
 export function isAlreadyGoneKillError(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | null)?.code === 'ESRCH';
+}
+
+/**
+ * F2 (round 11) — a QUARANTINE failure: the runner could NOT confirm that a spawned
+ * wrangler child (and its whole process group) is dead — the group kill failed for a
+ * non-ESRCH reason (EPERM, …), or the post-SIGKILL confirmation window expired with the
+ * group still (possibly) alive. The child may STILL be creating resources / writing
+ * config, so the whole-provision mutex must be INTENTIONALLY RETAINED — never released —
+ * and this error surfaces with manual-recovery guidance naming the surviving pid.
+ * {@link provisionCloudflareResources} detects it via {@link isQuarantineError} and calls
+ * `lock.quarantine()` instead of `lock.release()`.
+ */
+export class WranglerQuarantineError extends Error {
+  readonly quarantine = true as const;
+  readonly pid: number | undefined;
+  constructor(pid: number | undefined, detail: string) {
+    const pidLabel = pid !== undefined ? ` (pid ${pid})` : '';
+    super(
+      `provision: the spawned wrangler could not be confirmed terminated${pidLabel} — ${detail}. ` +
+        `It may still be running and creating resources, so the cross-process provision lock is ` +
+        `intentionally RETAINED (not released) to block concurrent provisions. Manual recovery: ` +
+        `verify the process${pidLabel} is dead (e.g. \`kill -0 <pid>\`; terminate it if not), then ` +
+        `remove the stale "<wrangler config>.void-provision.lock.lock" directory — or wait for it ` +
+        `to go stale (~${Math.round(LOCK_STALE_MS / 1000)}s with no live owner) — and re-run.`,
+    );
+    this.name = 'WranglerQuarantineError';
+    this.pid = pid;
+  }
+}
+
+/** F2 — true when `error` is a quarantine failure whose provision lock must stay retained. */
+export function isQuarantineError(error: unknown): error is WranglerQuarantineError {
+  return (
+    error instanceof WranglerQuarantineError ||
+    (error as { quarantine?: boolean } | null)?.quarantine === true
+  );
 }
 
 /**
@@ -624,6 +662,11 @@ export function createDefaultRunWrangler(
      * it to exercise the ESRCH-already-gone and real-kill-failure branches.
      */
     killProcessGroup?: (target: number, signal: NodeJS.Signals) => void;
+    /**
+     * F2 test seam — the post-kill termination-confirmation window. Defaults to
+     * {@link CONFIRM_KILL_GRACE_MS}. Tests shrink it to exercise the quarantine expiry.
+     */
+    confirmKillGraceMs?: number;
   },
 ): RunWrangler {
   // F2 — `resolveWranglerArgv` now yields wrangler's REAL CLI entry
@@ -632,6 +675,7 @@ export function createDefaultRunWrangler(
   // be trusted to report the exit code — see `resolveWranglerArgv`).
   const launcher = options?.launcher ?? resolveWranglerArgv(root);
   const timeoutMs = options?.timeoutMs ?? COMMAND_TIMEOUT_MS;
+  const confirmGraceMs = options?.confirmKillGraceMs ?? CONFIRM_KILL_GRACE_MS;
   const killProcessGroup =
     options?.killProcessGroup ??
     ((target: number, signal: NodeJS.Signals) => process.kill(target, signal));
@@ -643,7 +687,7 @@ export function createDefaultRunWrangler(
   // to strand, so a plain `child.kill` suffices.
   const isWindows = process.platform === 'win32';
   return (args, opts) =>
-    new Promise<RunWranglerResult>((resolvePromise) => {
+    new Promise<RunWranglerResult>((resolvePromise, rejectPromise) => {
       const child = spawn(command, [...prefix, ...args], {
         cwd: opts.cwd ?? root,
         shell: false,
@@ -660,6 +704,14 @@ export function createDefaultRunWrangler(
       let stderr = '';
       let timedOut = false;
       let settled = false;
+      // F2 — the TWO independent facts a timed-out run must confirm before it may settle:
+      //   `closed`    — the child's `close` event fired (process exited + stdio drained);
+      //   `groupGone` — the whole process GROUP is confirmed gone (`kill(-pid, 0)` → ESRCH;
+      //                 trivially true where no group exists: Windows, or no pid).
+      // NO timeout path settles-and-releases without BOTH; an unconfirmable child instead
+      // REJECTS with a {@link WranglerQuarantineError} (lock intentionally retained).
+      let closed = false;
+      let groupGone = false;
       // `confirmTimer` is REASSIGNED across poll iterations; `timer` is assigned once (below).
       let confirmTimer: ReturnType<typeof setTimeout> | undefined;
       child.stdout?.setEncoding('utf-8');
@@ -687,25 +739,92 @@ export function createDefaultRunWrangler(
         }
       };
 
+      /** True when the whole process group no longer exists (`kill(-pid, 0)` → ESRCH). */
+      const probeGroupGone = (): boolean => {
+        if (groupGone) {
+          return true;
+        }
+        if (isWindows || typeof child.pid !== 'number') {
+          // No process-group concept — `close` is the only (and sufficient) confirmation.
+          groupGone = true;
+          return true;
+        }
+        try {
+          process.kill(-child.pid, 0);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+            groupGone = true;
+          }
+          // EPERM → some group member exists but we cannot signal it — treat as ALIVE
+          // (fail safe: never confirm on a probe we could not perform).
+        }
+        return groupGone;
+      };
+
       const timeoutStderr = (extra?: string): string =>
         [stderr, `provision: wrangler exceeded the ${timeoutMs}ms command timeout`, extra]
           .filter(Boolean)
           .join('\n');
 
-      // F3 — forward a parent SIGINT/SIGTERM to the child's process GROUP so a Ctrl-C /
-      // termination tears the DETACHED child (+ grandchildren) down instead of orphaning it to
-      // keep creating resources / writing config after the whole-provision lock is (eventually)
-      // released on process exit. After forwarding we remove our own listeners and RE-RAISE the
-      // same signal, so the parent's normal termination still proceeds (installing a listener
-      // otherwise suppresses Node's default exit-on-signal).
+      // F3/F2 — forward a parent SIGINT/SIGTERM to the child's process GROUP so a Ctrl-C /
+      // termination tears the DETACHED child (+ grandchildren) down instead of orphaning it.
+      // F2 (round 11): after forwarding, AWAIT confirmed (bounded) teardown — child `close`
+      // AND group disappearance — BEFORE re-raising the signal on the parent. Re-raising
+      // immediately would kill the parent, whose proper-lockfile exit hook removes the
+      // whole-provision mutex while the child may STILL be creating resources. On an
+      // unconfirmed teardown, print a warning naming the surviving pid, THEN re-raise.
       const detachSignals = (): void => {
         process.removeListener('SIGINT', onSigint);
         process.removeListener('SIGTERM', onSigterm);
       };
       const forwardSignal = (signal: NodeJS.Signals) => (): void => {
-        signalGroup(signal);
+        // Detach first so the re-raise takes Node's default exit-on-signal action.
         detachSignals();
-        process.kill(process.pid, signal);
+        const reRaise = (): void => {
+          process.kill(process.pid, signal);
+          // Signals are delivered asynchronously: if the event loop has drained by now,
+          // the process would exit NORMALLY (status 0) before the pending signal lands.
+          // A short REFERENCED no-op keeps the loop alive so the re-raised signal's
+          // default action terminates the process (it fires within milliseconds; the
+          // timer is only a bounded fallback if something else swallowed the signal).
+          setTimeout(() => {}, 2_000);
+        };
+        const outcome = signalGroup(signal);
+        if (typeof outcome === 'object') {
+          process.stderr.write(
+            `provision: warning — could not forward ${signal} to the wrangler child process ` +
+              `group${typeof child.pid === 'number' ? ` (pid ${child.pid})` : ''}: ` +
+              `${outcome.error.message}. It may still be running; verify it is dead before ` +
+              `re-running provision.\n`,
+          );
+          reRaise();
+          return;
+        }
+        if (outcome === 'gone') {
+          reRaise();
+          return;
+        }
+        // 'signaled' — await bounded teardown confirmation, then re-raise. The poll timer is
+        // REFERENCED so the parent cannot exit (status 0, exit hooks run) before the re-raise.
+        const deadline = Date.now() + confirmGraceMs;
+        const awaitTeardown = (): void => {
+          if (closed && probeGroupGone()) {
+            reRaise();
+            return;
+          }
+          if (Date.now() >= deadline) {
+            process.stderr.write(
+              `provision: warning — the wrangler child process group` +
+                `${typeof child.pid === 'number' ? ` (pid ${child.pid})` : ''} did not terminate ` +
+                `within ${confirmGraceMs}ms of ${signal}; it may still be running. Verify it is ` +
+                `dead before re-running provision.\n`,
+            );
+            reRaise();
+            return;
+          }
+          setTimeout(awaitTeardown, CONFIRM_KILL_POLL_MS);
+        };
+        awaitTeardown();
       };
       const onSigint = forwardSignal('SIGINT');
       const onSigterm = forwardSignal('SIGTERM');
@@ -723,44 +842,33 @@ export function createDefaultRunWrangler(
         resolvePromise(result);
       };
 
-      // F3 — after SIGKILLing the group on timeout, CONFIRM the child is actually gone (poll
-      // `kill(pid, 0)` → ESRCH) BEFORE settling, so we never report a synthetic SIGKILL while
-      // the real CLI may still be running. `close` (below) also settles once the group is
-      // reaped (killing the whole group closes the inherited pipes); this pid-poll is the
-      // bound so a delayed `close` cannot hold the promise — and thus the lock — forever.
-      const confirmDeadThenSettle = (): void => {
-        const pid = child.pid;
-        if (isWindows || typeof pid !== 'number') {
-          confirmTimer = setTimeout(
-            () =>
-              finish(
-                normalizeRunWranglerResult({
-                  stdout,
-                  stderr: timeoutStderr(),
-                  status: null,
-                  signal: 'SIGKILL',
-                }),
-              ),
-            CONFIRM_KILL_GRACE_MS,
-          );
-          confirmTimer.unref?.();
+      // F2 — settle by REJECTING with a quarantine error: the child could not be confirmed
+      // dead, so the caller must retain the whole-provision lock (never release it under a
+      // possibly-live child) and surface manual-recovery guidance.
+      const quarantine = (detail: string): void => {
+        if (settled) {
           return;
         }
-        const deadline = Date.now() + CONFIRM_KILL_GRACE_MS;
+        settled = true;
+        clearTimeout(timer);
+        clearTimeout(confirmTimer);
+        detachSignals();
+        rejectPromise(new WranglerQuarantineError(child.pid, detail));
+      };
+
+      // F3/F2 — after SIGKILLing the group on timeout, CONFIRM termination BEFORE settling:
+      // BOTH the child's `close` (exit + pipes drained) AND group disappearance
+      // (`kill(-pid, 0)` → ESRCH) are required, so a synthetic SIGKILL result is never
+      // reported — and the lock never released — while the real CLI (or a grandchild in its
+      // group) may still be running. If the grace window expires unconfirmed, QUARANTINE:
+      // reject without releasing (never a silent settle-and-release).
+      const confirmDeadThenSettle = (): void => {
+        const deadline = Date.now() + confirmGraceMs;
         const poll = (): void => {
           if (settled) {
             return;
           }
-          let alive = true;
-          try {
-            process.kill(pid, 0);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
-              alive = false;
-            }
-            // EPERM → the pid exists but we cannot signal it — treat as alive (fail safe).
-          }
-          if (!alive) {
+          if (closed && probeGroupGone()) {
             finish(
               normalizeRunWranglerResult({
                 stdout,
@@ -772,67 +880,66 @@ export function createDefaultRunWrangler(
             return;
           }
           if (Date.now() >= deadline) {
-            // Could NOT confirm termination within the grace window — surface a HARD failure
-            // naming the risk (never a clean/absent exit, never a silent success).
-            finish(
-              normalizeRunWranglerResult({
-                stdout,
-                stderr: timeoutStderr(
-                  `the process group could not be confirmed terminated within ${CONFIRM_KILL_GRACE_MS}ms`,
-                ),
-                status: null,
-                signal: 'SIGKILL',
-              }),
+            quarantine(
+              `the process group could not be confirmed terminated within ${confirmGraceMs}ms ` +
+                `of the timeout SIGKILL (${timeoutStderr()})`,
             );
             return;
           }
+          // REFERENCED (no unref): this poll must keep the event loop alive until the
+          // outcome is confirmed — an unref'd timer would let the process exit mid-confirm.
           confirmTimer = setTimeout(poll, CONFIRM_KILL_POLL_MS);
-          confirmTimer.unref?.();
         };
         poll();
       };
 
-      // Hard timeout: SIGKILL the whole group, then AWAIT CONFIRMED termination before settling
-      // — so the whole-provision lock (released only after this promise settles) can NEVER be
-      // released while the real wrangler CLI is still alive.
+      // Hard timeout: SIGKILL the whole group, then AWAIT CONFIRMED termination before
+      // settling — so the whole-provision lock (released only after this promise settles)
+      // can NEVER be released while the real wrangler CLI is still alive. A kill FAILURE is
+      // a QUARANTINE (rejects; lock retained), never a settle-and-release.
       const timer = setTimeout(() => {
         timedOut = true;
         const outcome = signalGroup('SIGKILL');
         if (typeof outcome === 'object') {
-          // A REAL kill failure (not ESRCH). The child MAY still be running, so surface the
-          // failure as a HARD error instead of pretending the kill succeeded.
-          finish(
-            normalizeRunWranglerResult({
-              stdout,
-              stderr: timeoutStderr(
-                `the process group could not be killed: ${outcome.error.message}`,
-              ),
-              status: null,
-              signal: 'SIGKILL',
-              error: outcome.error,
-            }),
-          );
+          // A REAL kill failure (not ESRCH). The child MAY still be running — QUARANTINE.
+          quarantine(`the process group could not be killed: ${outcome.error.message}`);
           return;
         }
-        // 'signaled' or 'gone' (ESRCH ⇒ already dead ⇒ nothing to kill): confirm termination,
-        // then settle. Never settle the timeout as "done" before the group is confirmed gone.
+        if (outcome === 'gone') {
+          // ESRCH ⇒ the whole group already exited — only `close` remains to be seen.
+          groupGone = true;
+        }
         confirmDeadThenSettle();
       }, timeoutMs);
-      timer.unref?.();
+      // REFERENCED (no unref): if every other handle unrefs (pipes closed by a child that
+      // never exits), an unref'd deadline would let the event loop drain and the process
+      // exit 0 mid-command. It is cleared in finish/quarantine, so a completed call never
+      // holds the loop open.
+
       // A spawn error (ENOENT, EACCES) may fire `error` WITHOUT a later `close`, so
-      // settle here too — a HARD failure (never mistaken for a clean/absent exit).
+      // settle here too — a HARD failure (never mistaken for a clean/absent exit). The
+      // child never ran, so there is nothing to confirm dead.
       child.on('error', (error: Error) => {
         finish(normalizeRunWranglerResult({ stdout, stderr, status: null, signal: null, error }));
       });
       child.on('close', (code, signal) => {
-        finish(
-          normalizeRunWranglerResult({
-            stdout,
-            stderr: timedOut ? timeoutStderr() : stderr,
-            status: code,
-            signal,
-          }),
-        );
+        closed = true;
+        if (!timedOut) {
+          finish(normalizeRunWranglerResult({ stdout, stderr, status: code, signal }));
+          return;
+        }
+        // Timed out: `close` alone is not enough — the confirm poll settles once the
+        // group is ALSO confirmed gone (both facts). Nudge it now for promptness.
+        if (probeGroupGone()) {
+          finish(
+            normalizeRunWranglerResult({
+              stdout,
+              stderr: timeoutStderr(),
+              status: null,
+              signal: 'SIGKILL',
+            }),
+          );
+        }
       });
     });
 }
@@ -1156,6 +1263,42 @@ interface ProvisionLock {
    * repeated calls return the SAME settled promise.
    */
   release: () => Promise<void>;
+  /**
+   * F2 (round 11) — RETAIN the mutex intentionally (quarantine): a spawned wrangler child
+   * could not be confirmed dead, so the on-disk mutex directory must OUTLIVE this process
+   * to keep blocking concurrent provisions. `proper-lockfile` registers a signal-exit
+   * sweep that `rmdirSync`s every still-TRACKED lock on process exit, so simply "not
+   * releasing" is not enough — this detaches the lock from the library's internal
+   * tracking (stopping the mtime heartbeat too), leaving the mutex directory on disk. It
+   * then self-heals for future runs via the normal stale window (~{@link LOCK_STALE_MS})
+   * once no live owner refreshes it. Idempotent; a later `release()` becomes a no-op
+   * (`ERELEASED` → success) and never removes the retained directory.
+   */
+  quarantine: () => void;
+}
+
+/**
+ * F2 — `proper-lockfile`'s INTERNAL lock registry, used ONLY by {@link ProvisionLock.quarantine}
+ * to detach a retained lock from the library's exit sweep (`onExit` → `rmdirSync` of every
+ * tracked mutex) and stop its mtime-refresh heartbeat. `getLocks` is exported by
+ * `proper-lockfile/lib/lockfile.js` (not re-exported from the package root). Loaded lazily
+ * and defensively: if a future proper-lockfile reshapes its internals, quarantine degrades
+ * to "retained until process exit" instead of crashing.
+ */
+type ProperLockfileInternals = {
+  getLocks?: () => Record<
+    string,
+    { updateTimeout?: ReturnType<typeof setTimeout>; released?: boolean }
+  >;
+};
+
+function loadProperLockfileInternals(): ProperLockfileInternals | undefined {
+  try {
+    return createRequire(import.meta.url)('proper-lockfile/lib/lockfile.js') as
+      ProperLockfileInternals;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -1323,6 +1466,43 @@ export async function acquireProvisionLock(
   };
   return {
     release: () => (releasePromise ??= doRelease()),
+    // F2 (round 11) — quarantine: detach this lock from proper-lockfile's internal
+    // tracking WITHOUT removing the on-disk mutex directory, so:
+    //   1. the library's signal-exit sweep (which rmdirSync's every tracked lock on
+    //      process exit) no longer removes it — the retained mutex OUTLIVES this process
+    //      and keeps blocking concurrent provisions while the unconfirmed child may live;
+    //   2. the mtime heartbeat stops, so the retained mutex goes stale (~LOCK_STALE_MS)
+    //      once truly abandoned — a permanent wedge is impossible;
+    //   3. any late release() gets ERELEASED (untracked) → treated as success, never an
+    //      rmdir of the retained directory.
+    // Prevent a compromise-callback race too: mark it released before detaching.
+    quarantine: () => {
+      // A no-op after a successful release (nothing to retain).
+      if (releasePromise !== undefined) {
+        return;
+      }
+      releasePromise = Promise.resolve(); // any later release() is a settled no-op
+      const internals = loadProperLockfileInternals();
+      const locks = internals?.getLocks?.();
+      if (!locks) {
+        return; // degraded: retained only until process exit (internals unavailable)
+      }
+      // proper-lockfile keys its registry on the REALPATH of the locked marker file.
+      let key: string;
+      try {
+        key = realpathSync(lockTarget);
+      } catch {
+        key = resolve(lockTarget);
+      }
+      const tracked = locks[key];
+      if (tracked) {
+        tracked.released = true;
+        if (tracked.updateTimeout !== undefined) {
+          clearTimeout(tracked.updateTimeout);
+        }
+        delete locks[key];
+      }
+    },
   };
 }
 
@@ -1949,6 +2129,12 @@ export async function provisionCloudflareResources(
   // The reconciliation + duplicate-member guard + resource work all run UNDER the lock in
   // `provisionCloudflareResourcesLocked`, so a racing first-run serializes: the second
   // process re-reads the persisted account/ids and fails closed (or reuses).
+  //
+  // C5 (accepted residual) — this mutex is keyed on the local CONFIG PATH, so it only
+  // serializes provisions of the same config on ONE machine; two different HOSTS
+  // provisioning the same project can still race and create duplicates. Accepted by
+  // design: provision is a single-operator dev-machine action, so no remote coordination
+  // is built. (Documented in the Task 7 docs.)
   const lock = await acquireProvisionLock(configPath, opts?.lockOptions);
   // F2 — ALWAYS release, but do NOT swallow a release failure. On body SUCCESS a failed
   // unlock means the mutex leaked, so the provision must FAIL (surfaced, not hidden). On
@@ -1966,6 +2152,15 @@ export async function provisionCloudflareResources(
     bodyError = error;
   }
   if (threw) {
+    // F2 (round 11) — QUARANTINE: the failure means a spawned wrangler child could not be
+    // confirmed dead — it may STILL be creating resources — so the mutex is INTENTIONALLY
+    // RETAINED (never released here; `quarantine()` also detaches it from proper-lockfile's
+    // exit sweep so the on-disk directory outlives this process). Releasing it would let a
+    // concurrent provision race the surviving child on the same config/account.
+    if (isQuarantineError(bodyError)) {
+      lock.quarantine();
+      throw bodyError;
+    }
     // F7 — attempt release; if IT also fails, surface BOTH (the body error is primary but
     // the leaked-mutex error must never be swallowed). An AggregateError carries both in
     // `.errors`, with `.cause` set to the primary body error so a `cause`-walking logger
