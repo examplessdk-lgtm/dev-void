@@ -1036,7 +1036,12 @@ function withListerDeadline<T>(start: (signal: AbortSignal) => Promise<T>, ms: n
       controller.abort();
       reject(new Error(`the existence check exceeded the ${ms}ms deadline`));
     }, ms);
-    timer.unref?.();
+    // F3 (round 11) — the deadline timer stays REFERENCED until the lister settles (both
+    // settle arms below clear it). An unref'd timer let a real CLI process EXIT 0 before
+    // the deadline fired: with a never-settling lister nothing else holds the loop —
+    // proper-lockfile's heartbeat is unref'd too — so the loop drained and the process
+    // exited mid-provision reporting success. Vitest's own handles masked this in-worker;
+    // the child-process regression test spawns a real node process to prove it.
     // Defer `start` into the promise chain so a synchronous throw is captured as a rejection.
     Promise.resolve()
       .then(() => start(controller.signal))

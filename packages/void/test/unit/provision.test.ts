@@ -4366,6 +4366,85 @@ describe('createDefaultRunWrangler — F2 parent-signal forwarding awaits confir
   }, 20_000);
 });
 
+describe('withListerDeadline — F3 the deadline holds in a REAL process (round 11, child-process regression)', () => {
+  const F3R11_TMP = join(import.meta.dirname, '.tmp-f3-round11');
+  beforeEach(() => {
+    rmSync(F3R11_TMP, { recursive: true, force: true });
+    mkdirSync(F3R11_TMP, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(F3R11_TMP, { recursive: true, force: true });
+  });
+
+  it('a never-settling lister REJECTS after the deadline — the process does NOT exit 0 early, lock released', async () => {
+    // Pre-fix, the deadline timer was unref'd: with a never-settling lister nothing else
+    // referenced the loop (proper-lockfile's heartbeat is unref'd too), so a REAL node
+    // process drained its loop and exited STATUS 0 before the deadline fired — silently
+    // "succeeding" mid-provision. Vitest's own handles mask this in-worker, so the
+    // regression must run in a spawned child process.
+    const appRoot = join(F3R11_TMP, 'app');
+    const probe = join(F3R11_TMP, 'probe.mjs');
+    const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
+    writeFileSync(
+      probe,
+      `import { mkdirSync, writeFileSync } from 'node:fs';\n` +
+        `import { join } from 'node:path';\n` +
+        `import { provisionCloudflareResources } from ${JSON.stringify(provisionUrl)};\n` +
+        `const root = ${JSON.stringify(appRoot)};\n` +
+        `mkdirSync(root, { recursive: true });\n` +
+        `const cfg = join(root, 'wrangler.jsonc');\n` +
+        `writeFileSync(cfg, JSON.stringify({ name: 'app', account_id: 'acct' }));\n` +
+        `provisionCloudflareResources(root, cfg, {\n` +
+        `  kvNamespaces: [],\n` +
+        `  queues: [],\n` +
+        `  hyperdrive: { binding: 'HYPERDRIVE', name: 'probe-hd', connectionString: 'postgres://u:pw@h/db' },\n` +
+        `}, {\n` +
+        `  runWrangler: () => ({ stdout: '', stderr: '', status: 0 }),\n` +
+        `  listHyperdriveConfigs: () => new Promise(() => {}),\n` +
+        `  listTimeoutMs: 500,\n` +
+        `  log: { info: () => {}, warn: (m) => console.log('WARN:' + m) },\n` +
+        `}).then(\n` +
+        `  () => console.log('RESOLVED'),\n` +
+        `  (err) => { console.log('REJECTED:' + err.message); process.exitCode = 7; },\n` +
+        `);\n`,
+    );
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, [probe], {
+      cwd: F3R11_TMP,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    child.stdout.setEncoding('utf-8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    const killTimer = setTimeout(() => child.kill('SIGKILL'), 15_000);
+    try {
+      const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((res) => {
+        child.on('close', (c, s) => res([c, s]));
+      });
+      expect(signal).toBeNull();
+      // THE crux: pre-fix the loop drained and the process exited 0 with NO output.
+      expect(code).not.toBe(0);
+      expect(code).toBe(7);
+      expect(stdout).toContain('exceeded the 500ms deadline');
+      expect(stdout).toContain('REJECTED:');
+      expect(stdout).not.toContain('RESOLVED');
+      // The whole-provision lock was RELEASED on the normal fail-closed path.
+      expect(
+        existsSync(join(appRoot, 'wrangler.jsonc.void-provision.lock.lock')),
+      ).toBe(false);
+    } finally {
+      clearTimeout(killTimer);
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+  }, 20_000);
+});
+
 describe('provisionCloudflareResources — F5 R2 absence needs the STRUCTURED code (round 10)', () => {
   it('a failure whose text merely contains 10006 inside a bucket name is NOT absence (fails closed, no create)', async () => {
     setup(JSON.stringify({ name: 'app', account_id: 'acct' }));
