@@ -1148,29 +1148,31 @@ export function writeProvisionedWranglerConfig(
           }
         }
         index = matches.length === 1 ? matches[0] : -1;
-        if (index === -1) {
-          // APPEND branch only (no producer already owns this binding). wrangler
-          // requires every binding NAME to be unique across the ENTIRE worker —
-          // not just within `queues.producers`. So before appending a producer
-          // whose binding (`QUEUE_<NAME>`) is ALREADY used by any OTHER binding
-          // (D1/KV/R2/DO/service/var/AI/hyperdrive/vectorize/…), fail closed:
-          // emitting it would produce a config wrangler rejects at deploy
-          // (cross-type duplicate binding name). A same-queue producer already
-          // owning that binding is a no-op handled above (index >= 0), never a
-          // collision. Build from the CURRENT text so an adopt appended earlier in
-          // this call is seen too (not the stale initial `parsed`).
-          workerBindingOwners ??= collectWorkerBindingNames(parseJsonc(text));
-          const bindingName = String(entry.binding);
-          const owner = workerBindingOwners.get(bindingName);
-          if (owner !== undefined) {
-            throw new Error(
-              `deploy: cannot update "${configPath}" — queue producer binding ` +
-                `${JSON.stringify(bindingName)} is already used by a ${owner} binding. Wrangler ` +
-                `requires every binding name to be unique across the whole worker, so appending ` +
-                `this producer would make the config undeployable. Rename the conflicting binding ` +
-                `(or the queue) and retry.`,
-            );
-          }
+        // F4 — run the canonical worker-wide binding-name collision check for EVERY
+        // producer upsert (matched/idempotent AND append), not only the `index === -1`
+        // append path. wrangler requires every binding NAME to be unique across the
+        // ENTIRE worker — not just within `queues.producers` — so a producer binding
+        // (`QUEUE_<NAME>`) that ALSO names any OTHER binding (D1/KV/R2/DO/service/var/
+        // secret/AI/hyperdrive/vectorize/…) is a cross-type collision wrangler rejects
+        // at deploy. That config is undeployable whether we APPEND the producer or leave
+        // a same-queue one already in place, so BOTH must fail closed: skipping the
+        // check on the idempotent path would silently accept an already-broken config
+        // with `modified:false`, and would also miss a malformed OTHER binding field the
+        // collector fails closed on. The collector deliberately OMITS `queues` (see
+        // FRIENDLY_BINDING_NAMES), so a producer never self-collides. Build from the
+        // CURRENT text so an adopt appended earlier in this call is seen too (not the
+        // stale initial `parsed`).
+        workerBindingOwners ??= collectWorkerBindingNames(parseJsonc(text));
+        const bindingName = String(entry.binding);
+        const owner = workerBindingOwners.get(bindingName);
+        if (owner !== undefined) {
+          throw new Error(
+            `deploy: cannot update "${configPath}" — queue producer binding ` +
+              `${JSON.stringify(bindingName)} is already used by a ${owner} binding. Wrangler ` +
+              `requires every binding name to be unique across the whole worker, so this producer ` +
+              `would make the config undeployable. Rename the conflicting binding (or the queue) ` +
+              `and retry.`,
+          );
         }
       } else {
         index = currentList.findIndex(
@@ -1743,80 +1745,131 @@ function assertValidQueueProducers(producers: unknown): Array<Record<string, unk
 }
 
 /**
- * Binding-name arrays whose entries key the binding name on `.name`, NOT
- * `.binding`. wrangler's `getBindingNames` only reads `.binding` from array
- * entries (its `isNamespaceList` branch), so it OVERLOOKS these — yet
- * `validateSendEmailBinding` and `validateRateLimitBinding` both
- * `isRequiredProperty(value, "name")`, so `.name` is the binding name wrangler
- * enforces uniqueness on at deploy. We collect them as a safe superset so a queue
- * producer can never silently collide with a send_email or ratelimit binding.
+ * F5 — the OUTER binding-name SHAPE of a wrangler config field, so the collector reads
+ * binding NAMES by KNOWN structure instead of GUESSING from a value's content (which
+ * misreads a `vars` value that happens to look like a binding list/object, and lets a
+ * required-but-missing binding pass). Each variant + its required-ness is derived
+ * DIRECTLY from wrangler 4.107's config-schema.json (`RawConfig.properties`):
  *
- * NOTE: `workflows` entries also carry a `.name`, but that is the workflow
- * RESOURCE name — the binding name is `.binding` — so `workflows` stays OUT of
- * this set (its `.binding` is picked up by the generic path). `durable_objects`
- * uses the `{ bindings: [{ name }] }` shape, handled by `genericBindingNames`'
- * binding-list branch.
- */
-const NAME_KEYED_BINDING_ARRAYS = new Set(['send_email', 'ratelimits']);
-
-/**
- * F6 — config fields whose value uses the binding-LIST shape `{ bindings: [{ name }] }`
- * (wrangler parses these via a `.bindings` sub-array, not a top-level array). Known
- * field-awarely so a `{bindings: […]}` value is validated STRICTLY even when NO member
- * is a record (`{bindings:[null]}` must throw, not fall through to a plain-map read),
- * while a KEY-MAP field that merely happens to carry a `bindings` key (e.g. a `vars`
- * entry named `bindings`) is never misread as a binding list.
- */
-const BINDING_LIST_FIELDS = new Set(['durable_objects', 'unsafe', 'logfwdr']);
-
-/**
- * F6 — config fields whose value is a SINGLE binding object `{ binding }` (wrangler
- * parses these with a single-object validator, e.g. `validateAIBinding` /
- * `validateNamedSimpleBinding` / `validateVersionMetadataBinding` /
- * `validateAssetsConfig`). Known field-awarely so a PRESENT-but-non-string `binding`
- * THROWS (fail closed) rather than yielding an empty set, WITHOUT misfiring on a
- * KEY-MAP field (`vars`, blob/module maps) that could legitimately carry a key named
- * `binding`.
+ *   | shape            | schema example                         | binding name is | required        |
+ *   | ---------------- | -------------------------------------- | --------------- | --------------- |
+ *   | key-map          | vars/wasm_modules/text_blobs/data_blobs| the KEYS        | —               |
+ *   | name-keyed-array | send_email/ratelimits `[{ name }]`     | member `.name`  | `.name` req     |
+ *   | namespace-array  | kv_namespaces/d1_databases/… `[{ binding }]` | member `.binding` | `.binding` req |
+ *   | singleton        | ai/browser/…/version_metadata `{ binding }`  | `.binding`   | req (assets: optional) |
+ *   | binding-list     | durable_objects/logfwdr/unsafe `{ bindings: [{ name }] }` | member `.name` | `bindings` req (unsafe: optional) |
  *
- * This is the COMPLETE singleton set per wrangler 4.107's config validator: `ai`,
- * `browser`, `images`, `stream`, `media`, `websearch` (all `validateNamedSimpleBinding`),
- * `version_metadata` (`validateVersionMetadataBinding`), and `assets`
- * (`validateAssetsConfig`, whose `binding` is optional). Every OTHER
- * `friendlyBindingNames` field is either an array (`validateBindingArray` — namespace
- * list, covered by the generic strict path) or a binding LIST (`{ bindings }` — see
- * BINDING_LIST_FIELDS), so none is missing here.
+ * `namespace-array` is the DEFAULT for every `FRIENDLY_BINDING_NAMES` field not listed
+ * in {@link BINDING_FIELD_SHAPES}. `secrets.required` (a `string[]`) is folded in
+ * separately by {@link collectWorkerBindingNames}, and `queues.producers` by
+ * {@link addQueueProducerOwners} / the producer-upsert path — neither uses this table.
  */
-const SINGLETON_BINDING_FIELDS = new Set([
-  'ai',
-  'browser',
-  'images',
-  'stream',
-  'media',
-  'websearch',
-  'version_metadata',
-  'assets',
-]);
+type BindingFieldShape =
+  | { kind: 'key-map' }
+  | { kind: 'name-keyed-array' }
+  | { kind: 'namespace-array' }
+  | { kind: 'singleton'; bindingRequired: boolean }
+  | { kind: 'binding-list'; bindingsRequired: boolean };
 
 /**
- * F6 — the ONE field-aware strict binding-name reader for a single config field.
- * Mirrors wrangler's `getBindingNames` but is field-aware and FAILS CLOSED on any
- * malformed/empty binding identity (wrangler is lenient and would silently drop such
- * a member, letting the worker-wide uniqueness guard miss a real collision). Routes
- * each field to its known shape: NAME-keyed arrays, binding LISTS, SINGLETON objects;
- * everything else (namespace arrays, key-maps) goes through `genericBindingNames`,
- * which itself fails closed on a malformed namespace-array member.
+ * F5 — explicit per-field shape metadata (see {@link BindingFieldShape}), transcribed
+ * from wrangler 4.107's config schema. Any `FRIENDLY_BINDING_NAMES` field absent here is
+ * a `namespace-array` (`[{ binding }]`) — the shape wrangler's `getBindingNames` reads
+ * via its `isNamespaceList` branch.
+ */
+const BINDING_FIELD_SHAPES: Record<string, BindingFieldShape> = {
+  // Key-maps — the KEYS are the binding names (env var / module / blob names). Never
+  // read the VALUES, so a value that looks like a binding list/object is not misread.
+  vars: { kind: 'key-map' },
+  wasm_modules: { kind: 'key-map' },
+  text_blobs: { kind: 'key-map' },
+  data_blobs: { kind: 'key-map' },
+  // Name-keyed arrays — identity on `.name` (wrangler's `getBindingNames` overlooks
+  // these; `validateSendEmailBinding`/`validateRateLimitBinding` require `.name`).
+  send_email: { kind: 'name-keyed-array' },
+  ratelimits: { kind: 'name-keyed-array' },
+  // Singletons `{ binding }` — `binding` REQUIRED per schema for all except `assets`
+  // (`validateAssetsConfig`, where a binding-less assets-only-directory is legal).
+  ai: { kind: 'singleton', bindingRequired: true },
+  browser: { kind: 'singleton', bindingRequired: true },
+  images: { kind: 'singleton', bindingRequired: true },
+  stream: { kind: 'singleton', bindingRequired: true },
+  media: { kind: 'singleton', bindingRequired: true },
+  websearch: { kind: 'singleton', bindingRequired: true },
+  version_metadata: { kind: 'singleton', bindingRequired: true },
+  assets: { kind: 'singleton', bindingRequired: false },
+  // Binding lists `{ bindings: [{ name }] }` — `bindings` REQUIRED for durable_objects
+  // and logfwdr; OPTIONAL for `unsafe` (which may carry only `metadata`).
+  durable_objects: { kind: 'binding-list', bindingsRequired: true },
+  logfwdr: { kind: 'binding-list', bindingsRequired: true },
+  unsafe: { kind: 'binding-list', bindingsRequired: false },
+};
+
+/**
+ * F5 — the ONE field-aware strict binding-name reader for a single config field. Routes
+ * each field to its KNOWN shape (see {@link BINDING_FIELD_SHAPES}) and FAILS CLOSED on
+ * any malformed/missing REQUIRED identity or wrong outer shape — never content-guessing.
+ * wrangler is lenient and would silently drop such a member, letting the worker-wide
+ * uniqueness guard miss (or invent) a collision.
  */
 function bindingNamesForField(field: string, value: unknown): Array<string> {
-  if (NAME_KEYED_BINDING_ARRAYS.has(field)) {
-    return nameKeyedBindingNames(field, value);
+  const shape: BindingFieldShape = BINDING_FIELD_SHAPES[field] ?? { kind: 'namespace-array' };
+  switch (shape.kind) {
+    case 'key-map':
+      return keyMapBindingNames(field, value);
+    case 'name-keyed-array':
+      return nameKeyedBindingNames(field, value);
+    case 'namespace-array':
+      return namespaceArrayBindingNames(field, value);
+    case 'singleton':
+      return singletonBindingName(field, value, shape.bindingRequired);
+    case 'binding-list':
+      return bindingListNames(field, value, shape.bindingsRequired);
   }
-  if (BINDING_LIST_FIELDS.has(field)) {
-    return bindingListNames(field, value);
+}
+
+/**
+ * F5 — read binding names from a KEY-MAP field (`vars`/`wasm_modules`/`text_blobs`/
+ * `data_blobs`): the object's KEYS are the binding names. Reads ONLY the keys — never
+ * the values — so a value that happens to look like a binding list (`{bindings:[…]}`)
+ * or a singleton (`{binding:'x'}`) is NOT misread (the old generic path returned the
+ * VALUE, or a nested `name`, instead of the real KEY). A PRESENT value that is not a
+ * plain object is the wrong outer shape and THROWS (fail closed). An explicitly
+ * `undefined`-valued key is not a real binding and is skipped.
+ */
+function keyMapBindingNames(field: string, value: unknown): Array<string> {
+  if (value === undefined) {
+    return [];
   }
-  if (SINGLETON_BINDING_FIELDS.has(field)) {
-    return singletonBindingName(field, value);
+  if (!isRecord(value)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" must be an object mapping names ` +
+        `to values. Refusing to proceed on a partially-readable binding set (a wrong-shaped field ` +
+        `could hide a real collision). Fix the wrangler config and retry.`,
+    );
   }
-  return genericBindingNames(value);
+  return Object.keys(value).filter((key) => value[key] !== undefined);
+}
+
+/**
+ * F5 — read binding names from a NAMESPACE-array field (`[{ binding }]`: kv_namespaces,
+ * d1_databases, r2_buckets, hyperdrive, services, vectorize, …). A PRESENT value that
+ * is not an array is the wrong outer shape and THROWS rather than being re-read as a
+ * key-map (which could under-collect and hide a real collision); every member is
+ * strictly validated for a non-empty string `.binding`.
+ */
+function namespaceArrayBindingNames(field: string, value: unknown): Array<string> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" must be an array of binding ` +
+        `entries. Refusing to proceed on a partially-readable binding set (a wrong-shaped field ` +
+        `could hide a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  return strictBindingArray(value, 'binding', field);
 }
 
 /**
@@ -1848,19 +1901,20 @@ function nameKeyedBindingNames(field: string, value: unknown): Array<string> {
 }
 
 /**
- * F6 — read the binding names from a binding-LIST field (`{ bindings: [{ name }] }`).
- * When the value carries a `bindings` array, EVERY member is strictly validated for a
- * non-empty string `name` (a malformed member throws — never a partial/plain-map read
- * that could hide a real binding). A value that is not the `{bindings: array}` shape
- * defers to the generic reader (which is itself strict on namespace arrays).
+ * F5 — read the binding names from a binding-LIST field (`{ bindings: [{ name }] }`:
+ * durable_objects / logfwdr / unsafe). A PRESENT value that is not an object is the
+ * wrong outer shape and THROWS. When `bindingsRequired` (durable_objects / logfwdr per
+ * schema), a MISSING `bindings` array THROWS (never a silent empty read); `unsafe` is
+ * optional, so a `bindings`-less `{ metadata }` contributes nothing. A PRESENT
+ * `bindings` array has EVERY member strictly validated for a non-empty string `name`.
  */
-function bindingListNames(field: string, value: unknown): Array<string> {
+function bindingListNames(field: string, value: unknown, bindingsRequired: boolean): Array<string> {
   if (value === undefined) {
     return [];
   }
   // Encode the REQUIRED outer shape: a binding-list field must be an object; a
-  // wrong-shaped value (array, string, …) THROWS rather than falling back to generic
-  // key collection (which could under-collect and hide a real binding collision).
+  // wrong-shaped value (array, string, …) THROWS rather than under-collecting (which
+  // could hide a real binding collision).
   if (!isRecord(value)) {
     throw new Error(
       `deploy: cannot verify binding-name uniqueness — "${field}" must be an object with a ` +
@@ -1868,10 +1922,14 @@ function bindingListNames(field: string, value: unknown): Array<string> {
         `field could hide a real collision). Fix the wrangler config and retry.`,
     );
   }
-  // An object with NO `bindings` key contributes no binding names (e.g. `unsafe`
-  // carrying only `metadata`), matching wrangler — but a PRESENT `bindings` that is
-  // not an array is malformed and fails closed.
   if (value.bindings === undefined) {
+    if (bindingsRequired) {
+      throw new Error(
+        `deploy: cannot verify binding-name uniqueness — "${field}" requires a "bindings" array. ` +
+          `Refusing to proceed on a partially-readable binding set (a wrong-shaped field could hide ` +
+          `a real collision). Fix the wrangler config and retry.`,
+      );
+    }
     return [];
   }
   if (!Array.isArray(value.bindings)) {
@@ -1885,26 +1943,48 @@ function bindingListNames(field: string, value: unknown): Array<string> {
 }
 
 /**
- * F6 — read the binding name from a SINGLETON field (`{ binding }`). A PRESENT
- * `binding` that is not a non-empty string is malformed and THROWS (fail closed):
- * wrangler's `getBindingNames` returns `[value.binding]` here with NO type check, so a
- * non-string would slip in as a bogus name and a malformed one would silently
- * contribute nothing. An ABSENT `binding` (e.g. `assets` with only a `directory`)
- * defers to the generic reader, matching wrangler.
+ * F5 — read the binding name from a SINGLETON field (`{ binding }`: ai / browser /
+ * images / stream / media / websearch / version_metadata / assets). A PRESENT value
+ * that is not an object is the wrong outer shape and THROWS. A PRESENT-but-malformed
+ * `binding` (non-string / empty) THROWS. When `bindingRequired` (every singleton except
+ * `assets`, per schema), an ABSENT `binding` also THROWS — never a silent empty read,
+ * and never a fall-through that would mis-collect the object's OTHER keys (e.g.
+ * `{ staging: true }`) as bogus binding names. `assets` is binding-optional, so an
+ * absent binding (e.g. `{ directory }`) contributes nothing.
  */
-function singletonBindingName(field: string, value: unknown): Array<string> {
-  if (
-    isRecord(value) &&
-    value.binding !== undefined &&
-    (typeof value.binding !== 'string' || value.binding.length === 0)
-  ) {
+function singletonBindingName(
+  field: string,
+  value: unknown,
+  bindingRequired: boolean,
+): Array<string> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!isRecord(value)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" must be an object with a ` +
+        `"binding". Refusing to proceed on a partially-readable binding set (a wrong-shaped field ` +
+        `could hide a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  if (typeof value.binding === 'string' && value.binding.length > 0) {
+    return [value.binding];
+  }
+  if (value.binding !== undefined) {
     throw new Error(
       `deploy: cannot verify binding-name uniqueness — "${field}" has a malformed "binding" ` +
         `(expected a non-empty string). Refusing to proceed on a partially-readable binding set (a ` +
         `dropped binding could hide a real collision). Fix the wrangler config and retry.`,
     );
   }
-  return genericBindingNames(value);
+  if (bindingRequired) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" requires a "binding" (a ` +
+        `non-empty string). Refusing to proceed on a partially-readable binding set (a dropped ` +
+        `binding could hide a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  return [];
 }
 
 /**
@@ -1936,46 +2016,6 @@ function strictBindingArray(
     }
     return member[keyField] as string;
   });
-}
-
-/**
- * Mirror wrangler's `getBindingNames`: extract the binding NAMES a config value
- * contributes across the four shapes wrangler recognizes — a binding list
- * (`{ bindings: [{ name }] }`, e.g. `durable_objects`/`unsafe`), a namespace list
- * (`[{ binding }]`, e.g. `kv_namespaces`/`d1_databases`), a single record with a
- * `binding` (e.g. `ai`/`browser`/`version_metadata`), and a plain record whose
- * keys are the names (`vars`, blob/module maps).
- */
-function genericBindingNames(value: unknown): Array<string> {
-  if (typeof value !== 'object' || value === null) {
-    return [];
-  }
-  // Shape 1 — binding list `{ bindings: [{ name }] }` (durable_objects, unsafe).
-  // Strict: once this IS a binding list (at least one record member), any malformed
-  // member throws (F6) rather than falling through to a partial/garbage read. The
-  // `some(isRecord)` guard keeps a plain record that merely has a scalar key named
-  // `bindings` (e.g. a `vars` entry) on the shape-4 key path, matching prior
-  // behavior for that pathological case.
-  if (isRecord(value) && Array.isArray(value.bindings) && value.bindings.some(isRecord)) {
-    return strictBindingArray(value.bindings, 'name', 'bindings');
-  }
-  // Shape 2 — namespace list `[{ binding }]` (kv_namespaces, d1_databases,
-  // r2_buckets, hyperdrive, …). Strict: a mixed-validity array (e.g.
-  // `[null, { binding: 'DB' }]`) throws instead of silently dropping the null and
-  // losing the valid `DB` binding (F6). NAME_KEYED arrays (send_email, ratelimits)
-  // never reach here — `bindingNamesForField` handles them before delegating.
-  if (Array.isArray(value)) {
-    return strictBindingArray(value, 'binding', 'namespace list');
-  }
-  // Shape 3 + 4 — a single record with `binding` (ai/browser), or a plain record
-  // whose keys are the names (vars, blob/module maps).
-  if (isRecord(value)) {
-    if (value.binding !== undefined) {
-      return typeof value.binding === 'string' ? [value.binding] : [];
-    }
-    return Object.keys(value).filter((key) => value[key] !== undefined);
-  }
-  return [];
 }
 
 /**

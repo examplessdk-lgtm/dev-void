@@ -1295,10 +1295,10 @@ describe('writeProvisionedWranglerConfig', () => {
   });
 
   it('worker-wide guard does not fire on the idempotent same-queue producer path (no false collision)', () => {
-    // QUEUE_JOBS already exists as a producer for the SAME queue. That is a no-op
-    // upsert (index >= 0), so the append-only worker-wide collision guard never
-    // runs — a producer already owning its binding for its own queue is not a
-    // collision.
+    // QUEUE_JOBS already exists as a producer for the SAME queue. The worker-wide
+    // collision guard now runs for EVERY producer upsert (F4), but the collector
+    // deliberately OMITS `queues`, so a producer never self-collides — with no OTHER
+    // binding owning QUEUE_JOBS the upsert stays an idempotent no-op.
     setup(
       'wrangler.jsonc',
       `{
@@ -2528,5 +2528,237 @@ describe('writeProvisionedWranglerConfig', () => {
       Record<string, unknown>
     >;
     expect(producers).toEqual([{ queue: 'jobs', binding: 'QUEUE_JOBS' }]);
+  });
+});
+
+describe('writeProvisionedWranglerConfig — producer collision on EVERY upsert (round 7 F4)', () => {
+  const readRaw = (f: string): string => readFileSync(join(tmpDir, f), 'utf-8');
+  const parseRaw = (f: string): Record<string, unknown> =>
+    parseJsoncRaw(readRaw(f)) as Record<string, unknown>;
+
+  it('fails closed on the IDEMPOTENT same-queue producer path when the binding cross-type collides — throws (not a silent modified:false)', () => {
+    // A D1 named QUEUE_JOBS PLUS an existing producer QUEUE_JOBS for the SAME queue: the
+    // config is already undeployable (cross-type binding-name collision wrangler
+    // rejects). The old code took the `index >= 0` path and returned `modified:false`,
+    // silently accepting it. The worker-wide collision check now runs for EVERY producer
+    // upsert (matched/idempotent AND append), so the idempotent path fails closed too.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [{ "binding": "QUEUE_JOBS", "database_name": "app", "database_id": "id" }],
+  "queues": {
+    "producers": [{ "queue": "jobs", "binding": "QUEUE_JOBS" }]
+  }
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"QUEUE_JOBS" is already used by a D1 Database binding/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('fails closed on the idempotent path when a matched producer binding collides with a var name', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "vars": { "QUEUE_JOBS": "some-value" },
+  "queues": {
+    "producers": [{ "queue": "jobs", "binding": "QUEUE_JOBS" }]
+  }
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"QUEUE_JOBS" is already used by an? Environment Variable binding/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('fails closed on the idempotent path when a MALFORMED other binding field would mask a collision', () => {
+    // A null kv_namespaces member alongside the idempotent producer: the collector now
+    // runs on the idempotent path too, so a partially-readable binding set fails closed
+    // rather than silently accepting the config with modified:false.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "kv_namespaces": [null, { "binding": "KV", "id": "abc" }],
+  "queues": {
+    "producers": [{ "queue": "jobs", "binding": "QUEUE_JOBS" }]
+  }
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/malformed entry at index 0 \(missing a non-empty string "binding"\)/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('negative control: idempotent same-queue producer with NO cross-type collision stays a no-op (modified:false)', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": {
+    "producers": [{ "queue": "jobs", "binding": "QUEUE_JOBS" }]
+  }
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+    });
+    expect(result.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+    // The producer is untouched.
+    expect((parseRaw('wrangler.jsonc').queues as Record<string, unknown>).producers).toEqual([
+      { queue: 'jobs', binding: 'QUEUE_JOBS' },
+    ]);
+  });
+});
+
+describe('worker-wide binding collector — schema-metadata field shapes (round 7 F5)', () => {
+  const readRaw = (f: string): string => readFileSync(join(tmpDir, f), 'utf-8');
+  const parseRaw = (f: string): Record<string, unknown> =>
+    parseJsoncRaw(readRaw(f)) as Record<string, unknown>;
+
+  // Every case drives the collector through a queue-producer append of QUEUE_JOBS.
+  const appendProducer = () =>
+    writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+    });
+
+  it('key-map: a `vars` value that LOOKS like a binding list is collected as KEYS (not misread) — no false collision', () => {
+    // A var literally named "bindings" holding an array-of-records VALUE. The old
+    // content-guessing read the nested `.name` ("QUEUE_JOBS") and falsely flagged a
+    // collision. Key-map handling collects the KEY ("bindings"), so the append proceeds.
+    setup('wrangler.jsonc', JSON.stringify({ vars: { bindings: [{ name: 'QUEUE_JOBS' }] } }));
+    const result = appendProducer();
+    expect(result.modified).toBe(true);
+    expect((parseRaw('wrangler.jsonc').queues as Record<string, unknown>).producers).toEqual([
+      { queue: 'jobs', binding: 'QUEUE_JOBS' },
+    ]);
+  });
+
+  it('key-map: a `vars` key named "binding" reports the KEY, not its VALUE — no false collision', () => {
+    // A var named "binding" whose VALUE is "QUEUE_JOBS". The old singleton misread
+    // returned the VALUE ("QUEUE_JOBS") → false collision. Key-map collects the KEY
+    // ("binding"), so the QUEUE_JOBS producer appends cleanly.
+    setup('wrangler.jsonc', JSON.stringify({ vars: { binding: 'QUEUE_JOBS' } }));
+    const result = appendProducer();
+    expect(result.modified).toBe(true);
+  });
+
+  it('key-map: a real KEY collision (a var named QUEUE_JOBS) still fails closed', () => {
+    setup('wrangler.jsonc', JSON.stringify({ vars: { QUEUE_JOBS: { bindings: [] } } }));
+    const before = readRaw('wrangler.jsonc');
+    expect(appendProducer).toThrow(
+      /"QUEUE_JOBS" is already used by an? Environment Variable binding/,
+    );
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('key-map: a wrong-shaped `vars` (array, not object) fails closed', () => {
+    setup('wrangler.jsonc', JSON.stringify({ vars: [{ QUEUE_JOBS: 'x' }] }));
+    const before = readRaw('wrangler.jsonc');
+    expect(appendProducer).toThrow(/"vars" must be an object mapping names to values/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('singleton: a required singleton (ai) with NO binding fails closed', () => {
+    setup('wrangler.jsonc', JSON.stringify({ ai: {} }));
+    const before = readRaw('wrangler.jsonc');
+    expect(appendProducer).toThrow(/"ai" requires a "binding"/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('singleton: a required singleton (browser) present with only OTHER keys fails closed (not mis-collected)', () => {
+    // The old fall-through read `{ remote: true }` via generic key collection, inventing
+    // a bogus "remote" binding name. The required-binding rule fails closed instead.
+    setup('wrangler.jsonc', JSON.stringify({ browser: { remote: true } }));
+    const before = readRaw('wrangler.jsonc');
+    expect(appendProducer).toThrow(/"browser" requires a "binding"/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('singleton: a wrong-shaped required singleton (ai as array) fails closed', () => {
+    setup('wrangler.jsonc', JSON.stringify({ ai: [{ binding: 'AI' }] }));
+    const before = readRaw('wrangler.jsonc');
+    expect(appendProducer).toThrow(/"ai" must be an object with a "binding"/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('singleton: the OPTIONAL `assets` binding with only a directory contributes nothing (no throw, no bogus name)', () => {
+    // The old fall-through mis-collected "directory" as a binding name. assets is
+    // binding-optional, so it now contributes nothing and the producer appends.
+    setup('wrangler.jsonc', JSON.stringify({ assets: { directory: './public' } }));
+    const result = appendProducer();
+    expect(result.modified).toBe(true);
+  });
+
+  it('binding-list: durable_objects missing the REQUIRED `bindings` array fails closed', () => {
+    setup('wrangler.jsonc', JSON.stringify({ durable_objects: {} }));
+    const before = readRaw('wrangler.jsonc');
+    expect(appendProducer).toThrow(/"durable_objects" requires a "bindings" array/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('binding-list: logfwdr missing the REQUIRED `bindings` array fails closed', () => {
+    setup('wrangler.jsonc', JSON.stringify({ logfwdr: { schema: 'x' } }));
+    const before = readRaw('wrangler.jsonc');
+    expect(appendProducer).toThrow(/"logfwdr" requires a "bindings" array/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('binding-list: a durable_objects member missing its `name` identity fails closed', () => {
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({ durable_objects: { bindings: [{ class_name: 'C' }] } }),
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(appendProducer).toThrow(
+      /malformed entry at index 0 \(missing a non-empty string "name"\)/,
+    );
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('binding-list: `unsafe.bindings` is OPTIONAL — metadata-only unsafe contributes nothing (no throw)', () => {
+    setup('wrangler.jsonc', JSON.stringify({ unsafe: { metadata: { foo: 'bar' } } }));
+    const result = appendProducer();
+    expect(result.modified).toBe(true);
+  });
+
+  it('no false rejection: a VALID full config across every shape is collected correctly and the producer appends', () => {
+    // A rich, well-formed config exercising key-map / singleton / binding-list /
+    // namespace-array / name-keyed shapes — none of which names QUEUE_JOBS — must NOT
+    // be rejected. (A real cross-type collision would still fail closed; see above.)
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        vars: { API_URL: 'https://x', bindings: [{ name: 'DECOY' }] },
+        wasm_modules: { WASM_MOD: './m.wasm' },
+        d1_databases: [{ binding: 'DB', database_name: 'app', database_id: 'id' }],
+        kv_namespaces: [{ binding: 'KV', id: 'abc' }],
+        ai: { binding: 'AI' },
+        version_metadata: { binding: 'VERSION' },
+        assets: { directory: './public' },
+        durable_objects: { bindings: [{ name: 'DO', class_name: 'C' }] },
+        unsafe: { metadata: { note: 'x' } },
+        send_email: [{ name: 'EMAIL' }],
+        ratelimits: [{ name: 'LIMIT', namespace_id: '1001', simple: { limit: 100, period: 60 } }],
+        secrets: { required: ['SECRET_KEY'] },
+      }),
+    );
+    const result = appendProducer();
+    expect(result.modified).toBe(true);
+    expect((parseRaw('wrangler.jsonc').queues as Record<string, unknown>).producers).toEqual([
+      { queue: 'jobs', binding: 'QUEUE_JOBS' },
+    ]);
   });
 });
