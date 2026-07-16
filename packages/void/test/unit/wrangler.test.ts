@@ -2855,6 +2855,76 @@ describe('worker-wide binding collector — schema-metadata field shapes (round 
   });
 });
 
+describe('name-keyed collector — send_email/ratelimits identity is `.name` only (round 10 F7)', () => {
+  const readRaw = (f: string): string => readFileSync(join(tmpDir, f), 'utf-8');
+  const parseRaw = (f: string): Record<string, unknown> =>
+    parseJsoncRaw(readRaw(f)) as Record<string, unknown>;
+  const appendProducer = () =>
+    writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+    });
+
+  it('a send_email entry carrying an optional `.binding` does NOT collide with a DIFFERENT resource using that string', () => {
+    // wrangler 4.107 keys send_email on `.name` ONLY (config-schema.json has no `.binding`
+    // property; upload keys by `output[name]`). A mixed array `[{name,binding},{name}]` must
+    // therefore leave the `.binding` string ("QUEUE_JOBS") FREE for a queue producer — the old
+    // union of `.binding` invented a false "Send Email" collision and blocked the append.
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        send_email: [
+          { name: 'EMAIL_A', binding: 'QUEUE_JOBS', destination_address: 'ops@example.com' },
+          { name: 'EMAIL_B' },
+        ],
+      }),
+    );
+    const result = appendProducer();
+    expect(result.modified).toBe(true);
+    expect((parseRaw('wrangler.jsonc').queues as Record<string, unknown>).producers).toEqual([
+      { queue: 'jobs', binding: 'QUEUE_JOBS' },
+    ]);
+  });
+
+  it('a ratelimits entry carrying an optional `.binding` does NOT collide with a producer using that string', () => {
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        ratelimits: [
+          {
+            name: 'LIMIT_A',
+            binding: 'QUEUE_JOBS',
+            namespace_id: '1',
+            simple: { limit: 100, period: 60 },
+          },
+        ],
+      }),
+    );
+    const result = appendProducer();
+    expect(result.modified).toBe(true);
+  });
+
+  it('a REAL same-`name` send_email collision is STILL caught (producer binding equals a send_email name)', () => {
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        send_email: [{ name: 'QUEUE_JOBS', destination_address: 'ops@example.com' }],
+      }),
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(appendProducer).toThrow(/"QUEUE_JOBS" is already used by a Send Email binding/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('a name-keyed member missing its `.name` identity STILL fails closed (fail-closed preserved)', () => {
+    setup('wrangler.jsonc', JSON.stringify({ send_email: [{ binding: 'ONLY_BINDING' }] }));
+    const before = readRaw('wrangler.jsonc');
+    expect(appendProducer).toThrow(
+      /malformed entry at index 0 \(missing a non-empty string "name"\)/,
+    );
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+});
+
 describe('readProvisionedBindingEntry (F5 strict canonical binding reader)', () => {
   const P = '/tmp/wrangler.jsonc';
 

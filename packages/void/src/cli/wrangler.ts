@@ -1954,13 +1954,23 @@ function namespaceArrayBindingNames(field: string, value: unknown): Array<string
 }
 
 /**
- * F5 — read binding names from a NAME-keyed array field (`send_email` / `ratelimits`:
- * an array of `{ name }`, some also carrying `.binding`). Encodes the field's REQUIRED
- * outer shape: a PRESENT value that is not an array THROWS (fail closed) rather than
- * falling back to generic key collection — wrangler validates these via
- * `validateBindingArray`, so a non-array is malformed and could hide a real collision
- * if silently re-read as a key-map. An ABSENT value contributes nothing. Every array
- * member is strictly validated (a malformed one rejects the whole config).
+ * F5/F7 — read binding names from a NAME-keyed array field (`send_email` / `ratelimits`:
+ * an array of `{ name }`). Encodes the field's REQUIRED outer shape: a PRESENT value that
+ * is not an array THROWS (fail closed) rather than falling back to generic key collection —
+ * wrangler validates these via `validateBindingArray`, so a non-array is malformed and
+ * could hide a real collision if silently re-read as a key-map. An ABSENT value contributes
+ * nothing. Every array member is strictly validated (a malformed one rejects the whole
+ * config).
+ *
+ * F7 — identity is the `.name` ONLY. Verified against wrangler 4.107's bundle +
+ * `config-schema.json`: NEITHER `send_email` NOR `ratelimits` has a `.binding` property in
+ * the schema, and on UPLOAD wrangler keys them by `.name` (send_email:
+ * `output[name] = { type: "send_email", ...}`; ratelimits push `{ name: binding.name, … }`).
+ * An optional `.binding` that happens to sit on such an entry is NOT a binding identity
+ * wrangler recognizes, so unioning it invents a PHANTOM collision — e.g. a
+ * `send_email:[{name:"EMAIL_A",binding:"QUEUE_JOBS"}]` would falsely block a legitimate
+ * `QUEUE_JOBS` queue producer / adopt / read-first. We therefore collect ONLY the `.name`
+ * of every member (a genuine same-`name` collision is still caught).
  */
 function nameKeyedBindingNames(field: string, value: unknown): Array<string> {
   if (value === undefined) {
@@ -1973,12 +1983,7 @@ function nameKeyedBindingNames(field: string, value: unknown): Array<string> {
         `could hide a real collision). Fix the wrangler config and retry.`,
     );
   }
-  const names = strictBindingArray(value, 'name', field);
-  const bindings = value
-    .filter((entry): entry is Record<string, unknown> => isRecord(entry))
-    .map((entry) => entry.binding)
-    .filter((binding): binding is string => typeof binding === 'string' && binding.length > 0);
-  return [...bindings, ...names];
+  return strictBindingArray(value, 'name', field);
 }
 
 /**
