@@ -749,6 +749,22 @@ export type ProvisionedWranglerPatch = {
    */
   d1MigrationsDir?: { binding: string; dir: string };
   /**
+   * ADOPT an already-existing resource: write its REAL id/name into the config
+   * entry matched by `binding`, creating the entry (and its array) if absent.
+   *
+   * These exist because `wrangler <res> create --update-config` — which is what
+   * writes the id on the CREATE path — cannot run when the resource already
+   * exists in the account (create errors on a name collision). So on the adopt
+   * path the provisioner captures the id via `wrangler <res> list/info --json`
+   * and routes it through here, keeping every comment-preserving jsonc write in
+   * this one writer. Each is an idempotent, comment-preserving property upsert
+   * (byte-identical on re-run) that never touches sibling fields.
+   */
+  d1?: { binding: string; databaseName: string; databaseId: string };
+  kv?: { binding: string; id: string };
+  r2?: { binding: string; bucketName: string };
+  hyperdrive?: { binding: string; id: string };
+  /**
    * Queue producer/consumer bindings, upserted into `queues.producers[]` /
    * `queues.consumers[]` idempotently, keyed by each section's wrangler identity
    * so re-runs never duplicate:
@@ -877,12 +893,64 @@ export function writeProvisionedWranglerConfig(
     set(['compatibility_date'], patch.compatibilityDate);
   }
 
+  // Adopt fields — write the REAL id/name of an already-existing resource into
+  // the binding's config entry (create the array + entry if absent), keyed by
+  // `binding`. Runs BEFORE `migrations_dir` so an adopt that CREATES a D1 entry
+  // is visible to the `migrations_dir` upsert below (which re-parses `text`).
+  // Each is an idempotent property upsert: a matched entry has only the supplied
+  // props set (siblings + comments preserved), a missing one is appended.
+  const upsertAdoptedBinding = (
+    field: string,
+    binding: string,
+    properties: Record<string, string>,
+  ): void => {
+    const rawList = parseJsonc(text)[field];
+    const currentList = Array.isArray(rawList) ? [...rawList] : [];
+    const index = currentList.findIndex((entry) => isRecord(entry) && entry.binding === binding);
+    if (index >= 0) {
+      const existing = isRecord(currentList[index]) ? currentList[index] : {};
+      for (const [key, value] of Object.entries(properties)) {
+        if (!jsonEqual(existing[key], value)) {
+          set([field, index, key], value);
+        }
+      }
+    } else {
+      text = applyMemberEdit(
+        text,
+        [field, currentList.length],
+        { binding, ...properties },
+        {
+          formattingOptions,
+          isArrayInsertion: true,
+        },
+      );
+    }
+  };
+  if (patch.d1) {
+    upsertAdoptedBinding('d1_databases', patch.d1.binding, {
+      database_name: patch.d1.databaseName,
+      database_id: patch.d1.databaseId,
+    });
+  }
+  if (patch.kv) {
+    upsertAdoptedBinding('kv_namespaces', patch.kv.binding, { id: patch.kv.id });
+  }
+  if (patch.r2) {
+    upsertAdoptedBinding('r2_buckets', patch.r2.binding, { bucket_name: patch.r2.bucketName });
+  }
+  if (patch.hyperdrive) {
+    upsertAdoptedBinding('hyperdrive', patch.hyperdrive.binding, { id: patch.hyperdrive.id });
+  }
+
   // migrations_dir — upsert onto the D1 entry matched by binding. Indices are
   // stable because we only set a property (never insert/reorder array entries).
+  // Re-parse `text` (not the initial `parsed`) so a D1 entry an adopt just
+  // created above is matched here too.
   let d1MigrationsDirSkipped = false;
   if (patch.d1MigrationsDir) {
-    const d1Entries = Array.isArray(parsed.d1_databases)
-      ? (parsed.d1_databases as Array<{ binding?: unknown; migrations_pattern?: unknown }>)
+    const currentD1 = parseJsonc(text).d1_databases;
+    const d1Entries = Array.isArray(currentD1)
+      ? (currentD1 as Array<{ binding?: unknown; migrations_pattern?: unknown }>)
       : [];
     const index = d1Entries.findIndex((entry) => entry.binding === patch.d1MigrationsDir!.binding);
     if (index >= 0) {

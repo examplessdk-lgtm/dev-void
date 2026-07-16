@@ -1967,4 +1967,191 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(second.modified).toBe(false);
     expect(readRaw('wrangler.jsonc')).toBe(raw);
   });
+
+  // Adopt fields — write the REAL id/name of an already-existing resource into
+  // the binding's entry (the CREATE path can't, since `wrangler <res> create
+  // --update-config` errors on a name collision). Upsert-existing + upsert-new +
+  // idempotent-rerun + comment-preserved, for each of d1/kv/r2/hyperdrive.
+
+  it('d1 adopt: overwrites a placeholder database_id/database_name in place, keeps comments, idempotent', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  // Void manages this file — comments must survive adoption.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "default", "database_id": "local" }
+  ]
+}`,
+    );
+
+    const patch = {
+      d1: { binding: 'DB', databaseName: 'myapp-db', databaseId: 'real-uuid-123' },
+    };
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('// Void manages this file');
+
+    const d1 = parseRaw('wrangler.jsonc').d1_databases as Array<Record<string, unknown>>;
+    // No duplicate entry — the placeholder was updated in place.
+    expect(d1).toHaveLength(1);
+    expect(d1[0]).toEqual({
+      binding: 'DB',
+      database_name: 'myapp-db',
+      database_id: 'real-uuid-123',
+    });
+
+    // Idempotent — a second run is byte-identical.
+    const afterFirst = raw;
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('d1 adopt: creates the d1_databases entry when the binding is absent', () => {
+    setup('wrangler.jsonc', '{ "name": "app" }');
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      d1: { binding: 'DB', databaseName: 'myapp-db', databaseId: 'real-uuid-123' },
+    });
+    expect(result.modified).toBe(true);
+    const d1 = parseRaw('wrangler.jsonc').d1_databases as Array<Record<string, unknown>>;
+    expect(d1).toHaveLength(1);
+    expect(d1[0]).toEqual({
+      binding: 'DB',
+      database_name: 'myapp-db',
+      database_id: 'real-uuid-123',
+    });
+  });
+
+  it('d1 adopt composes with d1MigrationsDir on the same binding (the real adopt path)', () => {
+    // The adopt path passes both: capture the real id AND set migrations_dir. Even
+    // when the D1 entry is absent, adopt creates it and migrations_dir lands on it.
+    setup('wrangler.jsonc', '{ "name": "app" }');
+    const patch = {
+      d1: { binding: 'DB', databaseName: 'myapp-db', databaseId: 'real-uuid-123' },
+      d1MigrationsDir: { binding: 'DB', dir: './db/migrations' },
+    };
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+    expect(first.d1MigrationsDirSkipped).toBe(false);
+
+    const d1 = parseRaw('wrangler.jsonc').d1_databases as Array<Record<string, unknown>>;
+    expect(d1).toHaveLength(1);
+    expect(d1[0]).toMatchObject({
+      binding: 'DB',
+      database_name: 'myapp-db',
+      database_id: 'real-uuid-123',
+      migrations_dir: './db/migrations',
+    });
+
+    // Idempotent.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('kv adopt: overwrites a placeholder id in place, keeps comments, idempotent', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  // comment must survive
+  "kv_namespaces": [
+    { "binding": "ISR_CACHE", "id": "local" }
+  ]
+}`,
+    );
+    const patch = { kv: { binding: 'ISR_CACHE', id: 'realkvid456' } };
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+    expect(readRaw('wrangler.jsonc')).toContain('// comment must survive');
+
+    const kv = parseRaw('wrangler.jsonc').kv_namespaces as Array<Record<string, unknown>>;
+    expect(kv).toHaveLength(1);
+    expect(kv[0]).toEqual({ binding: 'ISR_CACHE', id: 'realkvid456' });
+
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('kv adopt: creates the kv_namespaces entry when the binding is absent', () => {
+    setup('wrangler.jsonc', '{ "name": "app" }');
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      kv: { binding: 'KV', id: 'realkvid456' },
+    });
+    expect(result.modified).toBe(true);
+    const kv = parseRaw('wrangler.jsonc').kv_namespaces as Array<Record<string, unknown>>;
+    expect(kv).toEqual([{ binding: 'KV', id: 'realkvid456' }]);
+  });
+
+  it('r2 adopt: overwrites a placeholder bucket_name in place, keeps comments, idempotent', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  // comment must survive
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "default" }
+  ]
+}`,
+    );
+    const patch = { r2: { binding: 'STORAGE', bucketName: 'myapp-uploads' } };
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+    expect(readRaw('wrangler.jsonc')).toContain('// comment must survive');
+
+    const r2 = parseRaw('wrangler.jsonc').r2_buckets as Array<Record<string, unknown>>;
+    expect(r2).toEqual([{ binding: 'STORAGE', bucket_name: 'myapp-uploads' }]);
+
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('r2 adopt: creates the r2_buckets entry when the binding is absent', () => {
+    setup('wrangler.jsonc', '{ "name": "app" }');
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      r2: { binding: 'STORAGE', bucketName: 'myapp-uploads' },
+    });
+    expect(result.modified).toBe(true);
+    const r2 = parseRaw('wrangler.jsonc').r2_buckets as Array<Record<string, unknown>>;
+    expect(r2).toEqual([{ binding: 'STORAGE', bucket_name: 'myapp-uploads' }]);
+  });
+
+  it('hyperdrive adopt: overwrites the id in place, keeps comments, idempotent', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  // comment must survive
+  "hyperdrive": [
+    { "binding": "HYPERDRIVE", "id": "local" }
+  ]
+}`,
+    );
+    const patch = { hyperdrive: { binding: 'HYPERDRIVE', id: 'realhyperid789' } };
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+    expect(readRaw('wrangler.jsonc')).toContain('// comment must survive');
+
+    const hd = parseRaw('wrangler.jsonc').hyperdrive as Array<Record<string, unknown>>;
+    expect(hd).toEqual([{ binding: 'HYPERDRIVE', id: 'realhyperid789' }]);
+
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('hyperdrive adopt: creates the hyperdrive entry when the binding is absent', () => {
+    setup('wrangler.jsonc', '{ "name": "app" }');
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      hyperdrive: { binding: 'HYPERDRIVE', id: 'realhyperid789' },
+    });
+    expect(result.modified).toBe(true);
+    const hd = parseRaw('wrangler.jsonc').hyperdrive as Array<Record<string, unknown>>;
+    expect(hd).toEqual([{ binding: 'HYPERDRIVE', id: 'realhyperid789' }]);
+  });
 });
