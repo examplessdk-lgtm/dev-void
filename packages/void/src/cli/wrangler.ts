@@ -1090,7 +1090,7 @@ export function writeProvisionedWranglerConfig(
     }
     // Re-parse `text` (not the initial `parsed`) so earlier edits in this call
     // are reflected; track appends locally to keep indices valid.
-    const currentQueues = parseJsonc(text).queues as Record<string, unknown> | undefined;
+    const currentQueues = assertObjectContainer(parseJsonc(text).queues, 'queues');
     // F5 — before mutating producers, route the EXISTING `queues.producers` list
     // through the SAME strict validator the adopt guard uses. Without this, a corrupt
     // list (e.g. `[null]`) would be cloned, its non-record members silently skipped by
@@ -1643,8 +1643,8 @@ function collectWorkerBindingNames(config: Record<string, unknown>): Map<string,
   // `bindingsGroupedByType["Secret"] = config2.secrets?.required ?? []`). These
   // ARE worker binding names at deploy, so a queue producer must never silently
   // collide with one.
-  const secrets = config.secrets;
-  if (isRecord(secrets) && secrets.required !== undefined) {
+  const secrets = assertObjectContainer(config.secrets, 'secrets');
+  if (secrets && secrets.required !== undefined) {
     // F6 — `secrets.required` is a string[] folded into wrangler's uniqueness set
     // under "Secret". Validate it STRICTLY: a non-array, or any non-empty-string
     // member, throws (fail closed) rather than being silently skipped, which would
@@ -1692,8 +1692,8 @@ function addQueueProducerOwners(
   owners: Map<string, string>,
   config: Record<string, unknown>,
 ): void {
-  const queues = config.queues;
-  if (!isRecord(queues) || queues.producers === undefined) {
+  const queues = assertObjectContainer(config.queues, 'queues');
+  if (!queues || queues.producers === undefined) {
     return;
   }
   // F5/F6 — validate `queues.producers` STRICTLY (the ONE shared validator, also used
@@ -1742,6 +1742,32 @@ function assertValidQueueProducers(producers: unknown): Array<Record<string, unk
     }
     return producer;
   });
+}
+
+/**
+ * F3 — validate the OUTER shape of a wrangler container field that wrangler 4.107
+ * requires to be an OBJECT (`queues`, `secrets`). A PRESENT-but-non-object container
+ * (array/string/number/null) is malformed for wrangler AND would bypass the binding
+ * collectors, HIDING a real cross-type binding collision — so it THROWS (fail closed).
+ * An ABSENT container (undefined) returns undefined (a no-op, NOT an error).
+ * Returns the container as a record when present-and-object.
+ *
+ * NOTE: `null` is `typeof 'object'` but `isRecord(null)` is false, so `secrets: null` /
+ * `queues: null` (present but null) THROWS — correct (wrangler requires an object).
+ * Absent (`undefined`) is the only no-op.
+ */
+function assertObjectContainer(value: unknown, field: string): Record<string, unknown> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" must be an object. Refusing to ` +
+        `proceed on a partially-readable binding set (a wrong-shaped container could hide a real ` +
+        `collision). Fix the wrangler config and retry.`,
+    );
+  }
+  return value;
 }
 
 /**

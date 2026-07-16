@@ -1316,6 +1316,97 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
+  it('F3: fails closed when an ARRAY-shaped `queues` (present) would hide a producer/D1 binding collision on adopt — throws without writing', () => {
+    // wrangler 4.107 REQUIRES `queues` to be an OBJECT `{ producers, consumers }`.
+    // A PRESENT array-shaped `queues` makes the old `isRecord(queues)` guard in
+    // `addQueueProducerOwners` return early, so a producer-like `{ binding: "DB" }`
+    // is NOT collected — and a D1 adopt of binding `DB` would then slip through the
+    // cross-type uniqueness check. The shared `assertObjectContainer` validator now
+    // fails closed on the malformed outer shape instead of hiding the collision.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": [{ "binding": "DB", "queue": "jobs" }],
+  "d1_databases": []
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1: { binding: 'DB', databaseName: 'app', databaseId: 'db-id' },
+      }),
+    ).toThrow(/"queues" must be an object/);
+
+    // Fail closed — the file is byte-unchanged (collision NOT hidden).
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('F3: fails closed when a WRONG-SHAPE `secrets` (present, non-object) would hide a secret binding collision on producer upsert — throws without writing', () => {
+    // wrangler requires `secrets` to be an OBJECT `{ required: string[] }`. A
+    // present-but-array `secrets` was silently skipped by the old `isRecord(secrets)`
+    // guard in `collectWorkerBindingNames`, so a producer could collide with a real
+    // secret binding name unnoticed. `assertObjectContainer` now fails closed.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "secrets": ["QUEUE_JOBS"]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"secrets" must be an object/);
+
+    // Fail closed — the file is byte-unchanged.
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('F3: fails closed when an ARRAY-shaped `queues` (present) is seen on the producer UPSERT path — throws without writing (no bypass)', () => {
+    // The producer-upsert path (`upsertQueueEntries`) is ALSO routed through
+    // `assertObjectContainer`, so an array-shaped `queues` throws there too — proving
+    // no path can bypass the outer-shape validator.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": [{ "binding": "DB", "queue": "jobs" }]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"queues" must be an object/);
+
+    // Fail closed — the file is byte-unchanged.
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('F3: ABSENT `queues` and `secrets` containers are a NO-OP — a D1 adopt with neither present succeeds normally', () => {
+    // Regression guard: `assertObjectContainer(undefined, …)` returns undefined (a
+    // no-op, NOT an error). A config with NO `queues` and NO `secrets` adopts a D1
+    // binding normally.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [{ "binding": "DB", "database_name": "app", "database_id": "" }]
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      d1: { binding: 'DB', databaseName: 'app', databaseId: 'real-id' },
+    });
+    expect(result.modified).toBe(true);
+
+    const d1 = parseRaw('wrangler.jsonc').d1_databases as Array<Record<string, unknown>>;
+    expect(d1[0]).toMatchObject({ binding: 'DB', database_id: 'real-id' });
+  });
+
   it('fails closed when overwriting migrations_dir would invalidate a companion migrations_pattern — throws without writing', () => {
     // A valid drizzle pair (migrations_dir + migrations_pattern) becomes invalid
     // when the patch changes migrations_dir, because wrangler requires the pattern
