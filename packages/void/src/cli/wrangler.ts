@@ -1406,15 +1406,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * wrangler's friendly label for each binding namespace (mirrors
- * `friendlyBindingNames` in `wrangler-dist/cli.js`, used by
- * `validateBindingsHaveUniqueNames`). Drives the owner name in the worker-wide
- * producer-collision error.
+ * wrangler's friendly label for each binding namespace. Mirrors
+ * `friendlyBindingNames` in `wrangler-dist/cli.js` — the map
+ * `validateBindingsHaveUniqueNames` iterates to gather every worker-wide binding
+ * name. Drives the owner name in the worker-wide producer-collision error.
  *
- * `queues` is intentionally ABSENT: producer identity is handled by the upsert's
- * binding-match logic and consumers carry no binding, so including it here would
- * be redundant. `secrets.required` (which wrangler folds in as "Secret") is also
- * excluded — it is not a binding declared in `wrangler.jsonc`.
+ * This is a 1:1 copy of wrangler's `friendlyBindingNames` EXCEPT `queues`, which
+ * is intentionally ABSENT: wrangler folds in `queues.producers`, but here producer
+ * identity is handled by the upsert's own binding-match logic (and consumers carry
+ * no binding), so including it would flag the very producer we are about to append
+ * as a self-collision. Every OTHER field wrangler enumerates is present (including
+ * `unsafe_hello_world`). `secrets.required` — which wrangler folds in separately
+ * under the label "Secret", not via this map — is handled in
+ * `collectWorkerBindingNames`.
  */
 const FRIENDLY_BINDING_NAMES: Record<string, string> = {
   data_blobs: 'Data Blob',
@@ -1450,6 +1454,7 @@ const FRIENDLY_BINDING_NAMES: Record<string, string> = {
   artifacts: 'Artifacts',
   ratelimits: 'Rate Limit',
   assets: 'Assets',
+  unsafe_hello_world: 'Hello World',
   flagship: 'Flagship',
   worker_loaders: 'Worker Loader',
   vpc_services: 'VPC Service',
@@ -1458,17 +1463,36 @@ const FRIENDLY_BINDING_NAMES: Record<string, string> = {
 
 /**
  * Collect every binding NAME already used across the worker config, mapped to
- * wrangler's friendly owner label (first writer wins on ties). Mirrors wrangler's
- * `validateBindingsHaveUniqueNames` field set (minus `queues`, handled by the
- * producer upsert's own identity logic). Used to fail closed before appending a
- * queue producer whose binding collides with any other binding.
+ * wrangler's friendly owner label (first writer wins on ties). Mirrors the exact
+ * name set `validateBindingsHaveUniqueNames` builds in `wrangler-dist/cli.js`:
+ * `getBindingNames(config[field])` for every `friendlyBindingNames` field, PLUS
+ * `config.secrets.required` under the label "Secret" — minus `queues` (see
+ * FRIENDLY_BINDING_NAMES for why). Used to fail closed before appending a queue
+ * producer whose binding collides with any other worker-wide binding.
  */
 function collectWorkerBindingNames(config: Record<string, unknown>): Map<string, string> {
   const owners = new Map<string, string>();
+  const claim = (name: string, friendly: string): void => {
+    if (!owners.has(name)) {
+      owners.set(name, friendly);
+    }
+  };
   for (const [field, friendly] of Object.entries(FRIENDLY_BINDING_NAMES)) {
     for (const name of bindingNamesForField(field, config[field])) {
-      if (!owners.has(name)) {
-        owners.set(name, friendly);
+      claim(name, friendly);
+    }
+  }
+  // wrangler folds `secrets.required` into the uniqueness set OUTSIDE the
+  // `friendlyBindingNames` loop, under the friendly label "Secret" (see
+  // `validateBindingsHaveUniqueNames`:
+  // `bindingsGroupedByType["Secret"] = config2.secrets?.required ?? []`). These
+  // ARE worker binding names at deploy, so a queue producer must never silently
+  // collide with one.
+  const secrets = config.secrets;
+  if (isRecord(secrets) && Array.isArray(secrets.required)) {
+    for (const name of secrets.required) {
+      if (typeof name === 'string') {
+        claim(name, 'Secret');
       }
     }
   }
@@ -1476,15 +1500,30 @@ function collectWorkerBindingNames(config: Record<string, unknown>): Map<string,
 }
 
 /**
+ * Binding-name arrays whose entries key the binding name on `.name`, NOT
+ * `.binding`. wrangler's `getBindingNames` only reads `.binding` from array
+ * entries (its `isNamespaceList` branch), so it OVERLOOKS these — yet
+ * `validateSendEmailBinding` and `validateRateLimitBinding` both
+ * `isRequiredProperty(value, "name")`, so `.name` is the binding name wrangler
+ * enforces uniqueness on at deploy. We collect them as a safe superset so a queue
+ * producer can never silently collide with a send_email or ratelimit binding.
+ *
+ * NOTE: `workflows` entries also carry a `.name`, but that is the workflow
+ * RESOURCE name — the binding name is `.binding` — so `workflows` stays OUT of
+ * this set (its `.binding` is picked up by the generic path). `durable_objects`
+ * uses the `{ bindings: [{ name }] }` shape, handled by `genericBindingNames`'
+ * binding-list branch.
+ */
+const NAME_KEYED_BINDING_ARRAYS = new Set(['send_email', 'ratelimits']);
+
+/**
  * Binding names a single config field contributes. Mirrors wrangler's
- * `getBindingNames`, with one addition: `send_email` entries key on `.name`
- * (wrangler's namespace-list detection keys on `.binding`), so collect those too
- * as a safe superset — a producer binding must never silently collide with a
- * send_email binding.
+ * `getBindingNames`, plus the `.name`-keyed arrays wrangler's own
+ * `getBindingNames` overlooks (see NAME_KEYED_BINDING_ARRAYS).
  */
 function bindingNamesForField(field: string, value: unknown): Array<string> {
   const generic = genericBindingNames(value);
-  if (field === 'send_email' && Array.isArray(value)) {
+  if (NAME_KEYED_BINDING_ARRAYS.has(field) && Array.isArray(value)) {
     const names = value
       .filter(isRecord)
       .map((entry) => entry.name)

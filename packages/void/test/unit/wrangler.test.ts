@@ -1156,6 +1156,124 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
+  it('fails closed when the desired producer binding collides with a secrets.required name — throws without writing', () => {
+    // wrangler folds `secrets.required` into its worker-wide uniqueness set under
+    // the label "Secret" (validateBindingsHaveUniqueNames). QUEUE_JOBS is declared
+    // there, so appending a producer with that binding would emit a cross-type
+    // duplicate wrangler rejects at deploy. Fail closed instead.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "secrets": { "required": ["QUEUE_JOBS"] }
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"QUEUE_JOBS" is already used by a Secret binding/);
+
+    // Fail closed — the file is byte-unchanged.
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('fails closed when the desired producer binding collides with an unsafe_hello_world binding — throws without writing', () => {
+    // `unsafe_hello_world` is a `[{ binding }]` array in wrangler's
+    // friendlyBindingNames set. QUEUE_JOBS is already such a binding, so the
+    // append would make the config undeployable — fail closed.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "unsafe_hello_world": [{ "binding": "QUEUE_JOBS", "enable_timer": false }]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"QUEUE_JOBS" is already used by a Hello World binding/);
+
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('fails closed when the desired producer binding collides with a ratelimits[].name — throws without writing', () => {
+    // ratelimit bindings key their NAME on `.name`, not `.binding`, so wrangler's
+    // own getBindingNames overlooks them — but validateRateLimitBinding requires
+    // `.name`, making it the binding name enforced at deploy. Collect it as a safe
+    // superset and fail closed on the collision.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "ratelimits": [{ "name": "QUEUE_JOBS", "namespace_id": "1", "simple": { "limit": 100, "period": 60 } }]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"QUEUE_JOBS" is already used by a Rate Limit binding/);
+
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('fails closed when the desired producer binding collides with a send_email[].name — throws without writing', () => {
+    // send_email is the other `.name`-keyed binding array (like ratelimits). A
+    // producer binding must never silently collide with a send_email binding.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "send_email": [{ "name": "QUEUE_JOBS", "destination_address": "ops@example.com" }]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"QUEUE_JOBS" is already used by a Send Email binding/);
+
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('negative control: top-level name, d1 database_name, and consumer queue equal to the producer binding are NOT binding names — append succeeds', () => {
+    // None of these fields is a binding NAME: the worker `name`, a D1
+    // `database_name`, and a queues.consumers[].queue can all legally equal
+    // QUEUE_JOBS without colliding with the QUEUE_JOBS producer binding. The guard
+    // must only inspect the binding-bearing fields wrangler enumerates, so this
+    // append proceeds.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "name": "QUEUE_JOBS",
+  "d1_databases": [{ "binding": "DB", "database_name": "QUEUE_JOBS", "database_id": "id" }],
+  "queues": {
+    "consumers": [{ "queue": "QUEUE_JOBS", "max_batch_size": 10 }]
+  }
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+    });
+    expect(result.modified).toBe(true);
+
+    const q = parseRaw('wrangler.jsonc').queues as {
+      producers: Array<Record<string, unknown>>;
+      consumers: Array<Record<string, unknown>>;
+    };
+    // The producer was appended; the consumer keyed on the same queue string is
+    // untouched (not a binding-name collision).
+    expect(q.producers).toEqual([{ queue: 'jobs', binding: 'QUEUE_JOBS' }]);
+    expect(q.consumers).toEqual([{ queue: 'QUEUE_JOBS', max_batch_size: 10 }]);
+  });
+
   it('negative control: a producer binding that collides with nothing appends normally', () => {
     // A DB binding named DB does NOT collide with the QUEUE_JOBS producer binding,
     // so the append proceeds — the worker-wide guard is precise, not paranoid.
