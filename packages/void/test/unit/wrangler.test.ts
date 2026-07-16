@@ -990,20 +990,55 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
   });
 
-  it('producer upsert matches by queue name — repoints a user-renamed binding on the same queue without duplicating, preserving delivery_delay + comments, idempotent', () => {
-    // Regression: the producer identity is the queue NAME, not the binding.
-    // A user who renamed the binding to CUSTOM on queue "jobs" must have it
-    // repointed to Void's deterministic QUEUE_JOBS binding IN PLACE — not have a
-    // second producer for "jobs" appended (which would strand their tuned
-    // `delivery_delay` on the now-unused CUSTOM producer, silently bypassed by
-    // the runtime that sends through QUEUE_JOBS).
+  it('producer upsert keys on binding — a matching QUEUE_JOBS beside a user CUSTOM producer on the same queue is a no-op (no duplicate binding)', () => {
+    // Producers are keyed by their UNIQUE `binding`, not the queue: wrangler
+    // allows multiple producers per queue but rejects duplicate binding names.
+    // Given a legal `{jobs,CUSTOM}` + `{jobs,QUEUE_JOBS}` pair, desiring
+    // `{jobs,QUEUE_JOBS}` must leave both untouched. A by-queue upsert would
+    // rewrite the FIRST match (CUSTOM → QUEUE_JOBS), minting two identical
+    // QUEUE_JOBS bindings that wrangler rejects.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": {
+    "producers": [
+      { "queue": "jobs", "binding": "CUSTOM" },
+      { "queue": "jobs", "binding": "QUEUE_JOBS" }
+    ]
+  }
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+    });
+
+    // Already present under its binding — nothing to do, byte-identical.
+    expect(result.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+
+    const q = parseRaw('wrangler.jsonc').queues as { producers: Array<Record<string, unknown>> };
+    expect(q.producers).toEqual([
+      { queue: 'jobs', binding: 'CUSTOM' },
+      { queue: 'jobs', binding: 'QUEUE_JOBS' },
+    ]);
+    // Exactly one QUEUE_JOBS binding — no duplicate minted.
+    expect((before.match(/"QUEUE_JOBS"/g) ?? []).length).toBe(1);
+  });
+
+  it('producer upsert appends QUEUE_JOBS beside a user CUSTOM producer on the same queue — never hijacks the user producer', () => {
+    // A user renamed their producer binding to CUSTOM on queue "jobs". Void's
+    // deterministic QUEUE_JOBS binding is absent, so it is APPENDED as its own
+    // producer; the user's CUSTOM producer (and its tuned delivery_delay) is left
+    // exactly as-is. Void must not rewrite a binding it does not own.
     setup(
       'wrangler.jsonc',
       `{
   // Void manages this file — comments must survive queue upserts.
   "queues": {
     "producers": [
-      // user renamed the binding but delivery_delay must NOT be lost
+      // user's own producer — must be left untouched
       { "queue": "jobs", "binding": "CUSTOM", "delivery_delay": 60 }
     ]
   }
@@ -1011,9 +1046,7 @@ describe('writeProvisionedWranglerConfig', () => {
     );
 
     const patch = {
-      queues: {
-        producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }],
-      },
+      queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
     };
 
     const first = writeProvisionedWranglerConfig(tmpDir, patch);
@@ -1021,14 +1054,13 @@ describe('writeProvisionedWranglerConfig', () => {
 
     const raw = readRaw('wrangler.jsonc');
     expect(raw).toContain('// Void manages this file');
-    expect(raw).toContain('// user renamed the binding but delivery_delay must NOT be lost');
+    expect(raw).toContain("// user's own producer — must be left untouched");
 
     const q = parseRaw('wrangler.jsonc').queues as { producers: Array<Record<string, unknown>> };
-    // Exactly ONE producer for "jobs": binding repointed, delivery_delay retained.
-    expect(q.producers).toHaveLength(1);
-    expect(q.producers[0]).toEqual({ queue: 'jobs', binding: 'QUEUE_JOBS', delivery_delay: 60 });
-    // No stranded CUSTOM producer left behind.
-    expect(raw).not.toContain('"CUSTOM"');
+    // Two producers now: the user's CUSTOM (untouched) + Void's appended QUEUE_JOBS.
+    expect(q.producers).toHaveLength(2);
+    expect(q.producers[0]).toEqual({ queue: 'jobs', binding: 'CUSTOM', delivery_delay: 60 });
+    expect(q.producers[1]).toEqual({ queue: 'jobs', binding: 'QUEUE_JOBS' });
 
     // Idempotent — a second run writes nothing and is byte-identical.
     const afterFirst = readRaw('wrangler.jsonc');
@@ -1056,5 +1088,89 @@ describe('writeProvisionedWranglerConfig', () => {
 
     // Fail closed — the file is untouched.
     expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('inserting migrations_dir keeps a trailing inline comment on the property it documented (no reassociation)', () => {
+    // The D1 entry's LAST property carries a trailing inline comment. Naively
+    // inserting migrations_dir via a formatting modify() reflows the region and
+    // re-emits the comment at the end — silently moving `// production database`
+    // onto migrations_dir. The comment must stay with database_id.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "app",
+      "database_id": "prod-id" // production database
+    }
+  ]
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    });
+    expect(result.modified).toBe(true);
+    expect(result.d1MigrationsDirSkipped).toBe(false);
+
+    const raw = readRaw('wrangler.jsonc');
+    // Comment stays attached to database_id (comma before it), NOT migrations_dir.
+    expect(raw).toContain('"database_id": "prod-id", // production database');
+    expect(raw).not.toMatch(/migrations_dir[^\n]*production database/);
+
+    const d1 = parseRaw('wrangler.jsonc').d1_databases as Array<Record<string, unknown>>;
+    expect(d1[0]).toMatchObject({ binding: 'DB', migrations_dir: 'db/migrations' });
+
+    // Idempotent — a second run writes nothing and is byte-identical.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    });
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('appending a queue entry keeps a trailing inline comment on the entry it documented (no reassociation)', () => {
+    // The producers array's LAST entry carries a trailing inline comment.
+    // Appending a new entry must not reflow `// jobs producer` onto the appended
+    // emails entry — it must stay with the jobs entry.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": {
+    "producers": [
+      { "queue": "jobs", "binding": "QUEUE_JOBS" } // jobs producer
+    ]
+  }
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(result.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    // The comment stays with the jobs entry (before the appended emails entry),
+    // never reassociated onto QUEUE_EMAILS.
+    expect(raw).toContain('}, // jobs producer');
+    expect(raw.indexOf('// jobs producer')).toBeGreaterThan(raw.indexOf('QUEUE_JOBS'));
+    expect(raw.indexOf('// jobs producer')).toBeLessThan(raw.indexOf('QUEUE_EMAILS'));
+    expect(raw).not.toMatch(/QUEUE_EMAILS[\s\S]*jobs producer/);
+
+    const q = parseRaw('wrangler.jsonc').queues as { producers: Array<Record<string, unknown>> };
+    expect(q.producers).toEqual([
+      { queue: 'jobs', binding: 'QUEUE_JOBS' },
+      { queue: 'emails', binding: 'QUEUE_EMAILS' },
+    ]);
+
+    // Idempotent — a second run writes nothing and is byte-identical.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
   });
 });

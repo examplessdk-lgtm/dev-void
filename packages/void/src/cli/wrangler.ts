@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import {
   applyEdits,
+  findNodeAtLocation,
   modify,
   parse,
   parseTree,
@@ -747,12 +748,19 @@ export type ProvisionedWranglerPatch = {
   d1MigrationsDir?: { binding: string; dir: string };
   /**
    * Queue producer/consumer bindings, upserted into `queues.producers[]` /
-   * `queues.consumers[]` idempotently. BOTH sections match by queue NAME — never
-   * duplicated on re-run. Void derives a producer's binding deterministically
-   * from its queue name (`QUEUE_<NAME>`; see `queues/scan.ts` + `runtime/queues.ts`),
-   * so the queue name — not the binding — is the stable identity. Matching a
-   * producer on `binding` would miss a user-renamed binding sitting on the same
-   * queue and silently append a second producer for it.
+   * `queues.consumers[]` idempotently, keyed by each section's wrangler identity
+   * so re-runs never duplicate:
+   *
+   *   - Producers are matched by `binding`. wrangler requires producer binding
+   *     names to be UNIQUE across the worker (multiple producers may legally
+   *     target one queue), so the binding — not the queue — is the identity.
+   *     Void's binding is the deterministic `QUEUE_<NAME>`. A missing binding is
+   *     APPENDED (never rewriting a user's own same-queue producer); a binding
+   *     already bound to a DIFFERENT queue fails closed (a binding must map to
+   *     exactly one queue, else wrangler rejects the deploy).
+   *   - Consumers are matched by `queue`. wrangler allows exactly one consumer
+   *     per queue, so the queue name is the identity; matched entries are
+   *     property-upserted (user-tuned fields preserved).
    *
    * FRAMEWORK self-host ONLY. See the per-app-class note on this type: a native
    * Void app already emits scanner queues from the build, so passing `queues`
@@ -843,7 +851,7 @@ export function writeProvisionedWranglerConfig(
   const formattingOptions = detectFormattingOptions(original);
   let text = original;
   const set = (path: Array<string | number>, value: unknown): void => {
-    text = applyEdits(text, modify(text, path, value, { formattingOptions }));
+    text = applyMemberEdit(text, path, value, { formattingOptions });
   };
 
   // account_id — always overwrite so a re-resolve can correct a stale value.
@@ -875,13 +883,18 @@ export function writeProvisionedWranglerConfig(
   }
 
   // queues — idempotent upsert into `queues.producers[]` / `queues.consumers[]`.
-  // BOTH sections key on the queue NAME. Void derives a producer's binding
-  // deterministically from its queue name (`QUEUE_<NAME>`; see `queues/scan.ts` +
-  // `runtime/queues.ts`), so the queue name — not the binding — is the stable
-  // identity; matching a producer on `binding` would miss a user-renamed binding
-  // on the same queue and append a duplicate producer. Framework self-host only
-  // (see the note on ProvisionedWranglerPatch); a native app would duplicate the
-  // build's scanner queues.
+  // Each section keys on its wrangler identity:
+  //   - PRODUCERS key on `binding`. wrangler requires producer binding names to
+  //     be unique across the worker (multiple producers may target one queue),
+  //     so the binding — not the queue — is the identity. Void's binding is the
+  //     deterministic `QUEUE_<NAME>` (see `queues/scan.ts` + `runtime/queues.ts`).
+  //     A missing binding is appended (a user's own same-queue producer with a
+  //     different binding is left alone — Void must not hijack it); a binding
+  //     already bound to a DIFFERENT queue fails closed.
+  //   - CONSUMERS key on `queue`. wrangler allows exactly one consumer per queue,
+  //     so the queue name is the identity.
+  // Framework self-host only (see the note on ProvisionedWranglerPatch); a native
+  // app would duplicate the build's scanner queues.
   const upsertQueueEntries = (
     section: 'producers' | 'consumers',
     entries: Array<Record<string, unknown>> | undefined,
@@ -896,31 +909,37 @@ export function writeProvisionedWranglerConfig(
       ? [...(currentQueues[section] as Array<Record<string, unknown>>)]
       : [];
     for (const entry of entries) {
-      // A producer `binding` must map to exactly ONE queue. If the desired
-      // binding already sits on a producer for a DIFFERENT queue, upserting here
-      // would leave two producers sharing one binding — a config wrangler
-      // rejects. Fail closed (before any write) with an actionable message
-      // rather than emitting the broken config.
-      if (section === 'producers' && typeof entry.binding === 'string') {
-        const conflict = currentList.find(
-          (existing) =>
-            isRecord(existing) &&
-            existing.binding === entry.binding &&
-            existing.queue !== entry.queue,
-        );
-        if (isRecord(conflict)) {
+      // Match on the section's identity: producers by `binding`, consumers by
+      // `queue`. Keying producers on the queue would rewrite the FIRST of several
+      // legal same-queue producers, so a `{queue,CUSTOM}` + `{queue,QUEUE_JOBS}`
+      // pair collapses into two identical `QUEUE_JOBS` bindings — a config
+      // wrangler rejects.
+      const index =
+        section === 'producers'
+          ? currentList.findIndex(
+              (existing) => isRecord(existing) && existing.binding === entry.binding,
+            )
+          : currentList.findIndex(
+              (existing) => isRecord(existing) && existing.queue === entry.queue,
+            );
+
+      // A producer `binding` must map to exactly ONE queue. If this binding is
+      // already bound to a DIFFERENT queue, upserting would leave two producers
+      // sharing one binding — a config wrangler rejects. Fail closed (before any
+      // write) with an actionable message rather than emitting the broken config.
+      if (section === 'producers' && index >= 0) {
+        const existing = currentList[index];
+        if (isRecord(existing) && existing.queue !== entry.queue) {
           throw new Error(
             `deploy: cannot update "${configPath}" — queue producer binding ` +
               `${JSON.stringify(entry.binding)} is already bound to queue ` +
-              `${JSON.stringify(conflict.queue)}, but queue ${JSON.stringify(entry.queue)} also ` +
+              `${JSON.stringify(existing.queue)}, but queue ${JSON.stringify(entry.queue)} also ` +
               `requests it. A producer binding must map to exactly one queue. Rename or remove ` +
               `the conflicting producer and retry.`,
           );
         }
       }
-      const index = currentList.findIndex(
-        (existing) => isRecord(existing) && existing.queue === entry.queue,
-      );
+
       if (index >= 0) {
         // Update ONLY the properties this patch supplies — never replace the
         // whole array element. A whole-object `modify()` at the element index
@@ -929,7 +948,9 @@ export function writeProvisionedWranglerConfig(
         // `dead_letter_queue`, `max_concurrency`, …), silently changing
         // production delivery/retry/concurrency/failure-routing. Per-property
         // edits preserve unmentioned fields and comments, and stay idempotent
-        // (a re-run finds each value already equal and writes nothing).
+        // (a re-run finds each value already equal and writes nothing). For a
+        // producer matched by binding the queue already equals (a mismatch threw
+        // above), so this loop is a no-op that preserves the user's entry.
         const existing = isRecord(currentList[index]) ? currentList[index] : {};
         for (const [key, value] of Object.entries(entry)) {
           if (value === undefined) {
@@ -941,15 +962,14 @@ export function writeProvisionedWranglerConfig(
         }
         currentList[index] = { ...existing, ...entry };
       } else {
-        // `isArrayInsertion` appends at `currentList.length`; it also creates the
-        // `queues` object and the section array when they don't exist yet.
-        text = applyEdits(
-          text,
-          modify(text, ['queues', section, currentList.length], entry, {
-            formattingOptions,
-            isArrayInsertion: true,
-          }),
-        );
+        // Append at `currentList.length`; `applyMemberEdit` also creates the
+        // `queues` object and the section array when they don't exist yet, and
+        // keeps a trailing inline comment attached to the preceding entry it
+        // documented (see the comment-relocation logic there).
+        text = applyMemberEdit(text, ['queues', section, currentList.length], entry, {
+          formattingOptions,
+          isArrayInsertion: true,
+        });
         currentList.push(entry);
       }
     }
@@ -990,6 +1010,118 @@ function parseJsonc(text: string): Record<string, unknown> {
     throw new SyntaxError('Failed to parse JSONC');
   }
   return result;
+}
+
+/**
+ * `modify()` + `applyEdits()`, but when the edit APPENDS a new member after a
+ * sibling that carries a trailing inline comment, keep that comment attached to
+ * the sibling it documented.
+ *
+ * jsonc-parser's formatting `modify()` reflows the whole enclosing member/entry
+ * region and re-emits a trailing inline comment at the END of that region — so
+ * inserting `migrations_dir` after `"database_id": "id" // production db` (or
+ * appending a queue entry after `{ … } // jobs producer`) silently reassociates
+ * the comment onto the NEWLY inserted member. That violates the writer's
+ * comment-preservation contract. Here we detect that exact case, run the
+ * (comment-free) formatting edit on a stripped copy, then splice the comment
+ * back right after the sibling's separating comma so it stays put.
+ *
+ * Every other edit (value replacement, append after a comment-free sibling,
+ * first insertion into a missing container) falls through to the plain path, so
+ * behavior is byte-identical to before outside the trailing-comment case.
+ */
+function applyMemberEdit(
+  text: string,
+  path: Array<string | number>,
+  value: unknown,
+  options: { formattingOptions: FormattingOptions; isArrayInsertion?: boolean },
+): string {
+  const plain = (): string => applyEdits(text, modify(text, path, value, options));
+
+  const root = parseTree(text, undefined, { allowTrailingComma: true });
+  if (!root) {
+    return plain();
+  }
+
+  // Only an APPEND can split a sibling from its trailing comment. A value
+  // replacement (existing object key, not an array insertion) reformats just
+  // that member and keeps its own comment — nothing to relocate.
+  if (!options.isArrayInsertion && findNodeAtLocation(root, path) !== undefined) {
+    return plain();
+  }
+
+  const container = findNodeAtLocation(root, path.slice(0, -1));
+  const members = container?.children;
+  if (!container || !members || members.length === 0) {
+    return plain();
+  }
+
+  // jsonc-parser appends both new object properties and new array elements after
+  // the container's current last member, so that member is the preceding sibling.
+  const last = members[members.length - 1];
+  const trailing = readTrailingComment(text, last.offset + last.length);
+  if (!trailing) {
+    return plain();
+  }
+
+  // Strip the comment, run the now-comment-free formatting edit, then re-attach
+  // the comment after the sibling's separating comma in the rewritten text.
+  const stripped = text.slice(0, last.offset + last.length) + text.slice(trailing.end);
+  const rewritten = applyEdits(stripped, modify(stripped, path, value, options));
+
+  const newRoot = parseTree(rewritten, undefined, { allowTrailingComma: true });
+  const newContainer = newRoot ? findNodeAtLocation(newRoot, path.slice(0, -1)) : undefined;
+  const newMembers = newContainer?.children;
+  if (!newRoot || !newContainer || !newMembers || newMembers.length < 2) {
+    // We just appended, so this should not happen; fall back rather than corrupt.
+    return plain();
+  }
+  // The appended member is last; its predecessor is the sibling we relocate onto.
+  const sibling = newMembers[newMembers.length - 2];
+  const commaPos = rewritten.indexOf(',', sibling.offset + sibling.length);
+  if (commaPos === -1) {
+    return plain();
+  }
+  return `${rewritten.slice(0, commaPos + 1)} ${trailing.text}${rewritten.slice(commaPos + 1)}`;
+}
+
+/**
+ * If a trailing inline comment sits on the same line right after `offset` (only
+ * whitespace between), return its text and end offset. A `//` line comment or a
+ * single-line `/* *\/` block comment counts; a newline, comma, or closing
+ * bracket first means there is no trailing comment (returns undefined).
+ */
+function readTrailingComment(
+  text: string,
+  offset: number,
+): { text: string; end: number } | undefined {
+  let i = offset;
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) {
+    i++;
+  }
+  if (text[i] === '/' && text[i + 1] === '/') {
+    let end = i;
+    while (end < text.length && text[end] !== '\n') {
+      end++;
+    }
+    if (end > i && text[end - 1] === '\r') {
+      end--;
+    }
+    return { text: text.slice(i, end), end };
+  }
+  if (text[i] === '/' && text[i + 1] === '*') {
+    const close = text.indexOf('*/', i + 2);
+    if (close === -1) {
+      return undefined;
+    }
+    const end = close + 2;
+    // Only a single-line block comment is safe to relocate onto one line.
+    if (text.slice(i, end).includes('\n')) {
+      return undefined;
+    }
+    return { text: text.slice(i, end), end };
+  }
+  return undefined;
 }
 
 /**
