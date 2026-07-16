@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { parse, type ParseError } from 'jsonc-parser';
-import { resolve } from 'pathe';
+import { join, resolve } from 'pathe';
 import lockfile from 'proper-lockfile';
 import { voidLog, voidWarn } from '../log.ts';
+import { parseDotenvFile } from '../shared/dotenv.ts';
 import { resolveWranglerArgv } from './preset.ts';
 import {
   assertNoDuplicateMembers,
@@ -77,6 +78,13 @@ export type RunWranglerResult = {
 export interface WranglerCallContext {
   /** The reconciled effective Cloudflare account (never empty for a real call). */
   accountId: string;
+  /**
+   * F1 — the ONE pinned Cloudflare API base URL this provision resolved (mirroring
+   * wrangler's own `getCloudflareApiBaseUrl`), threaded so the default runner can pin the
+   * spawned wrangler's `CLOUDFLARE_API_BASE_URL` to the SAME endpoint the Hyperdrive REST
+   * lister uses. An injected seam may ignore it (it owns its own transport).
+   */
+  apiBaseUrl?: string;
   cwd?: string;
   captureJson?: boolean;
 }
@@ -109,12 +117,14 @@ export interface HyperdriveConfig {
  * `GET /accounts/{id}/hyperdrive/configs`; unit tests inject a stub so no real
  * network call runs.
  *
- * F1 — the lister receives the reconciled `accountId` as an explicit transport
- * context (never a closure-only binding), so an injected lister can never query a
- * DIFFERENT account than the one the config is pinned to.
+ * F1 — the lister receives the reconciled `accountId` AND the pinned `apiBaseUrl` as an
+ * explicit transport context (never a closure-only binding), so an injected lister can
+ * never query a DIFFERENT account/endpoint than the one wrangler + the config are pinned
+ * to. The default lister builds its REST URL from `apiBaseUrl` instead of hardcoding prod.
  */
 export type ListHyperdriveConfigs = (ctx: {
   accountId: string;
+  apiBaseUrl: string;
 }) => Promise<Array<HyperdriveConfig>>;
 
 /** Per-resource outcome, so the orchestrator can log what happened. */
@@ -202,32 +212,128 @@ const defaultLogger: ProvisionLogger = {
 };
 
 /**
+ * F1 — the transport-redirecting env vars wrangler 4.107 honors. Each can point
+ * wrangler's authenticated API transport at a DIFFERENT endpoint (or select a
+ * different env-block/account) than the ONE this provision pinned:
+ *   - `CLOUDFLARE_API_BASE_URL` / `CF_API_BASE_URL` — override the API base URL directly
+ *     (`getCloudflareApiBaseUrlFromEnv`).
+ *   - `WRANGLER_API_ENVIRONMENT=staging` — routes to `api.staging.cloudflare.com`.
+ *   - `CLOUDFLARE_COMPLIANCE_REGION=fedramp_high` — routes to `api.fed.cloudflare.com`.
+ *   - `CLOUDFLARE_ENV` — selects a named `env.*` config block (different account/bindings).
+ * We pin ONE resolved base explicitly (see {@link provisionEnv}) and fail closed when a
+ * project dotenv would reselect one (see {@link assertNoTransportRedirectInProjectDotenv}).
+ */
+const TRANSPORT_REDIRECT_ENV_VARS = [
+  'CLOUDFLARE_API_BASE_URL',
+  'CF_API_BASE_URL',
+  'WRANGLER_API_ENVIRONMENT',
+  'CLOUDFLARE_COMPLIANCE_REGION',
+  'CLOUDFLARE_ENV',
+] as const;
+
+/**
+ * F1 — resolve the ONE Cloudflare API base URL this provision is pinned to, mirroring
+ * wrangler 4.107's `getCloudflareApiBaseUrl` EXACTLY so the Hyperdrive REST lister and
+ * the spawned wrangler agree on the endpoint:
+ *   `CLOUDFLARE_API_BASE_URL` ?? `CF_API_BASE_URL`
+ *   ?? `https://api${fed}${staging}.cloudflare.com/client/v4`
+ * where `fed = CLOUDFLARE_COMPLIANCE_REGION === 'fedramp_high' ? '.fed' : ''` and
+ * `staging = WRANGLER_API_ENVIRONMENT === 'staging' ? '.staging' : ''`. Read ONCE from
+ * the REAL ambient `process.env` (which does NOT include the project `.env` — Node never
+ * auto-loads it), so an ambient/CI pin is honored while a project dotenv redirect is
+ * rejected up front by {@link assertNoTransportRedirectInProjectDotenv}.
+ */
+export function resolvePinnedApiBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const direct = firstNonEmpty(env.CLOUDFLARE_API_BASE_URL, env.CF_API_BASE_URL);
+  if (direct) {
+    return direct;
+  }
+  const fed = env.CLOUDFLARE_COMPLIANCE_REGION === 'fedramp_high' ? '.fed' : '';
+  const staging = env.WRANGLER_API_ENVIRONMENT === 'staging' ? '.staging' : '';
+  return `https://api${fed}${staging}.cloudflare.com/client/v4`;
+}
+
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.length > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * F1 — FAIL CLOSED when the project's dotenv files declare a transport-redirecting
+ * variable. wrangler 4.107 reloads `.env`/`.env.local` (and `.dev.vars`) from the project
+ * root into `process.env` on EVERY command with `override: true`, so a repo `.env` setting
+ * `CLOUDFLARE_API_BASE_URL` / `WRANGLER_API_ENVIRONMENT` / `CLOUDFLARE_COMPLIANCE_REGION` /
+ * `CLOUDFLARE_ENV` would redirect wrangler's authenticated transport (and credentials) to
+ * a staging / FedRAMP / arbitrary endpoint AFTER we resolved the pinned base — while the
+ * Hyperdrive existence check runs against the pinned base. Single-account/single-endpoint
+ * provisioning cannot reason about a transport redirected out from under it, so we refuse.
+ * The fix is to export the variable in the shell/CI environment (which we DO honor, pinning
+ * both wrangler and the lister to it) instead of the project dotenv.
+ */
+function assertNoTransportRedirectInProjectDotenv(root: string): void {
+  // The always-loaded wrangler dotenv set (`getDefaultEnvFiles`) plus `.dev.vars`. We do
+  // NOT expand — presence of the KEY is the signal, whatever its value.
+  const files = ['.env', '.env.local', '.dev.vars', '.dev.vars.local'];
+  for (const file of files) {
+    const parsed = parseDotenvFile(join(root, file), { expand: false });
+    const offenders = TRANSPORT_REDIRECT_ENV_VARS.filter((name) => name in parsed);
+    if (offenders.length > 0) {
+      throw new Error(
+        `provision: refusing to provision — the project file "${file}" sets ` +
+          `${offenders.join(', ')}, which wrangler reloads on every command and would redirect its ` +
+          `authenticated Cloudflare API transport (and credentials) to a different endpoint/account ` +
+          `than this provision is pinned to (the Hyperdrive existence check would then run against a ` +
+          `DIFFERENT endpoint, risking cross-environment writes or duplicate resources). Remove ` +
+          `${offenders.join(', ')} from "${file}" and, if you truly need a non-default endpoint, ` +
+          `export it in your shell/CI environment instead — that pin IS honored for both wrangler and ` +
+          `the existence check.`,
+      );
+    }
+  }
+}
+
+/**
  * Child-process env with the CF Access service-token PAIR scrubbed. Mirrors
  * `buildEnv` in `deploy.ts`: a shared, long-lived Access token is needed only by
  * this CLI's own API client and must never leak into the spawned wrangler
  * process (which may in turn run user hooks). The cloudflared `CF_ACCESS_TOKEN`
  * JWT (dev path) is left untouched.
+ *
+ * F1 — pins ONE transport context: scrubs every {@link TRANSPORT_REDIRECT_ENV_VARS}
+ * from the child env, then re-sets `CLOUDFLARE_API_BASE_URL` to the SINGLE resolved
+ * `apiBaseUrl` so the spawned wrangler and the Hyperdrive REST lister hit the exact same
+ * endpoint. Scrubbing the compliance/staging/env selectors makes the explicit base
+ * authoritative (they can no longer re-derive a different base). Combined with
+ * {@link assertNoTransportRedirectInProjectDotenv} (which blocks a project dotenv from
+ * repopulating any of them via wrangler's per-command reload), the pin cannot be moved.
  */
-export function provisionEnv(accountId?: string): NodeJS.ProcessEnv {
+export function provisionEnv(ctx?: { accountId?: string; apiBaseUrl?: string }): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env.CF_ACCESS_CLIENT_ID;
   delete env.CF_ACCESS_CLIENT_SECRET;
-  // Best-effort scrub of CLOUDFLARE_ENV (it selects an ENVIRONMENT-specific config
-  // block whose `account_id`/bindings could differ from the account this provision
-  // pinned). This ALONE is NOT sufficient: wrangler 4.107 reloads `.env`/`.env.local`
-  // from the project root into `process.env` on every command, so a project `.env`
-  // with `CLOUDFLARE_ENV=staging` would repopulate it after this delete. The RELIABLE
-  // top-level pin is the explicit empty `--env=` flag added to EVERY wrangler argv
-  // (see `wranglerConfigArgs`); wrangler resolves the env as `args.env ?? CLOUDFLARE_ENV`,
-  // and an explicit empty `args.env` short-circuits the `??` so the reloaded
-  // CLOUDFLARE_ENV can never reselect a named env-block/account. The delete stays as
-  // defense in depth for any other consumer of this env.
-  delete env.CLOUDFLARE_ENV;
+  // Scrub EVERY transport-redirecting selector (CLOUDFLARE_ENV, the API-base overrides,
+  // WRANGLER_API_ENVIRONMENT, CLOUDFLARE_COMPLIANCE_REGION). CLOUDFLARE_ENV would select a
+  // named env-block whose account_id/bindings differ; the others would re-derive a
+  // different API base. We fold their effect into the ONE explicit base below.
+  for (const name of TRANSPORT_REDIRECT_ENV_VARS) {
+    delete env[name];
+  }
+  // Pin the ONE resolved API base so wrangler's `getCloudflareApiBaseUrlFromEnv()` returns
+  // exactly the endpoint the Hyperdrive REST lister uses (no staging/FedRAMP/arbitrary
+  // split-brain). The explicit `--env=` on every argv still forces the top-level config
+  // env even if a stray CLOUDFLARE_ENV survived elsewhere.
+  if (ctx?.apiBaseUrl) {
+    env.CLOUDFLARE_API_BASE_URL = ctx.apiBaseUrl;
+  }
   // Pin the target account non-interactively (CI-safe) when known, so
   // `wrangler <res> list/create` never prompts for disambiguation AND never falls
   // back to a DIFFERENT ambient account than the one we resolved + persisted.
-  if (accountId) {
-    env.CLOUDFLARE_ACCOUNT_ID = accountId;
+  if (ctx?.accountId) {
+    env.CLOUDFLARE_ACCOUNT_ID = ctx.accountId;
   }
   return env;
 }
@@ -257,20 +363,41 @@ const COMMAND_TIMEOUT_MS = 120_000;
  * another process to see the lock stale and steal it while we still hold it. A
  * {@link COMMAND_TIMEOUT_MS} SIGKILL guards against a hung child.
  */
-export function createDefaultRunWrangler(root: string): RunWrangler {
-  const launcher = resolveWranglerArgv(root);
+export function createDefaultRunWrangler(
+  root: string,
+  options?: {
+    /** F2 test seam — the argv launcher. Defaults to the real wrangler CLI entry. */
+    launcher?: Array<string>;
+    /** F2 test seam — the per-command timeout. Defaults to {@link COMMAND_TIMEOUT_MS}. */
+    timeoutMs?: number;
+  },
+): RunWrangler {
+  // F2 — `resolveWranglerArgv` now yields wrangler's REAL CLI entry
+  // (`wrangler-dist/cli.js`), NOT the `bin.wrangler` wrapper, so a SIGKILL from the
+  // timeout below hits the real process (the wrapper could neither relay the kill nor
+  // be trusted to report the exit code — see `resolveWranglerArgv`).
+  const launcher = options?.launcher ?? resolveWranglerArgv(root);
+  const timeoutMs = options?.timeoutMs ?? COMMAND_TIMEOUT_MS;
   const [command, ...prefix] = launcher;
+  // POSIX: spawn the child as its OWN process-group leader (`detached`) so the timeout
+  // can SIGKILL the WHOLE group (`process.kill(-pid, …)`) — reaping any grandchildren
+  // (e.g. an esbuild service) that would otherwise linger holding the inherited pipes.
+  // Windows has no process groups here; the direct (wrapper-free) CLI has no grandchild
+  // to strand, so a plain `child.kill` suffices.
+  const isWindows = process.platform === 'win32';
   return (args, opts) =>
     new Promise<RunWranglerResult>((resolvePromise) => {
       const child = spawn(command, [...prefix, ...args], {
         cwd: opts.cwd ?? root,
         shell: false,
-        // F1 — pin the account PER CALL from the transport context, so the spawned
-        // wrangler targets the SAME reconciled account the config + Hyperdrive REST
-        // path use (no split-brain between the config pin and the ambient env).
-        env: provisionEnv(opts.accountId),
+        // F1 — pin the account + API base PER CALL from the transport context, so the
+        // spawned wrangler targets the SAME reconciled account + endpoint the config +
+        // Hyperdrive REST path use (no split-brain between the config pin and the
+        // ambient/dotenv env).
+        env: provisionEnv({ accountId: opts.accountId, apiBaseUrl: opts.apiBaseUrl }),
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
+        detached: !isWindows,
       });
       let stdout = '';
       let stderr = '';
@@ -284,13 +411,18 @@ export function createDefaultRunWrangler(root: string): RunWrangler {
       child.stderr?.on('data', (chunk: string) => {
         stderr += chunk;
       });
-      // Hard timeout: SIGKILL the hung child. `close` then fires with a non-null
-      // signal, which `normalizeRunWranglerResult` classifies as a HARD failure.
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill('SIGKILL');
-      }, COMMAND_TIMEOUT_MS);
-      timer.unref?.();
+      const killHard = (): void => {
+        try {
+          if (!isWindows && typeof child.pid === 'number') {
+            // Negative pid → the whole process group (child + any grandchildren).
+            process.kill(-child.pid, 'SIGKILL');
+          } else {
+            child.kill('SIGKILL');
+          }
+        } catch {
+          // Already exited (ESRCH) — nothing to kill.
+        }
+      };
       const finish = (result: RunWranglerResult): void => {
         if (settled) {
           return;
@@ -299,6 +431,26 @@ export function createDefaultRunWrangler(root: string): RunWrangler {
         clearTimeout(timer);
         resolvePromise(result);
       };
+      // Hard timeout: SIGKILL the whole group AND settle the promise NOW — never wait for
+      // `close`. Even after bypassing the signal-swallowing wrapper, a grandchild that
+      // inherited the stdio pipes could keep them open so `close` never fires; settling
+      // on the timer itself guarantees the runner ALWAYS rejects within `timeoutMs`
+      // (`signal: 'SIGKILL'` → a HARD failure, never mistaken for a clean/absent exit).
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killHard();
+        finish(
+          normalizeRunWranglerResult({
+            stdout,
+            stderr: [stderr, `provision: wrangler exceeded the ${timeoutMs}ms command timeout`]
+              .filter(Boolean)
+              .join('\n'),
+            status: null,
+            signal: 'SIGKILL',
+          }),
+        );
+      }, timeoutMs);
+      timer.unref?.();
       // A spawn error (ENOENT, EACCES) may fire `error` WITHOUT a later `close`, so
       // settle here too — a HARD failure (never mistaken for a clean/absent exit).
       child.on('error', (error: Error) => {
@@ -309,7 +461,7 @@ export function createDefaultRunWrangler(root: string): RunWrangler {
           normalizeRunWranglerResult({
             stdout,
             stderr: timedOut
-              ? [stderr, `provision: wrangler exceeded the ${COMMAND_TIMEOUT_MS}ms command timeout`]
+              ? [stderr, `provision: wrangler exceeded the ${timeoutMs}ms command timeout`]
                   .filter(Boolean)
                   .join('\n')
               : stderr,
@@ -403,9 +555,12 @@ function createDefaultListHyperdriveConfigs(apiToken?: string): ListHyperdriveCo
   if (!token) {
     return undefined;
   }
-  // F1 — the account comes from the per-call transport context (not a closure), so
-  // this default REST lister always targets the reconciled effective account.
-  return async ({ accountId }) => {
+  // F1 — the account AND the pinned API base come from the per-call transport context
+  // (not a closure), so this default REST lister always targets the reconciled effective
+  // account at the SAME endpoint the spawned wrangler uses (never a hardcoded prod base
+  // while wrangler was redirected to staging/FedRAMP/an arbitrary endpoint).
+  return async ({ accountId, apiBaseUrl }) => {
+    const base = apiBaseUrl.replace(/\/+$/, '');
     // Fetch ALL pages (Hyperdrive names are NOT unique — paid accounts allow
     // ~25 configs, paginated) and FAIL CLOSED on any non-2xx, `success !== true`,
     // or a malformed entry. Never coerce a malformed envelope/entry to "absence":
@@ -423,7 +578,7 @@ function createDefaultListHyperdriveConfigs(apiToken?: string): ListHyperdriveCo
     let expectedTotal: number | undefined;
     for (let page = 1; ; page++) {
       const res = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/hyperdrive/configs?page=${page}&per_page=${perPage}`,
+        `${base}/accounts/${encodeURIComponent(accountId)}/hyperdrive/configs?page=${page}&per_page=${perPage}`,
         { headers: { Authorization: `Bearer ${token}` } },
       );
       if (!res.ok) {
@@ -1417,6 +1572,14 @@ async function provisionCloudflareResourcesLocked(
     );
   }
 
+  // F1 — before ANY remote work, fail closed if the project dotenv would redirect
+  // wrangler's authenticated transport out from under the pinned base (wrangler reloads
+  // `.env`/`.env.local`/`.dev.vars` on every command). A single-endpoint provisioner
+  // cannot reason about a redirected transport vs. the pinned Hyperdrive REST base.
+  if (hasRemoteWork) {
+    assertNoTransportRedirectInProjectDotenv(root);
+  }
+
   // --- account_id (PERSIST FIRST, before selecting/calling any seam) --------
   // Pin the effective account_id NOW — before the runWrangler/lister seams are even
   // selected, and before any create writes a real id — so a partial run can never
@@ -1439,24 +1602,36 @@ async function provisionCloudflareResourcesLocked(
   // assertion is sound wherever a seam is actually called (an empty `desired` reaches
   // no seam and never reads it).
   const transportAccountId = effectiveAccountId!;
+  // F1 — the ONE pinned Cloudflare API base URL (mirroring wrangler's own derivation),
+  // resolved from the REAL ambient env. Threaded into BOTH the wrangler runner (via the
+  // spawned env's `CLOUDFLARE_API_BASE_URL`) and the Hyperdrive REST lister, so both hit
+  // the same endpoint. The dotenv fence above guarantees no project `.env` can move it.
+  const transportApiBaseUrl = resolvePinnedApiBaseUrl();
 
-  // Both seams are pinned to the SAME effective account: the default wrangler runner
-  // via its env (`CLOUDFLARE_ACCOUNT_ID` + the top-level `--env=` on every argv), and
-  // the default Hyperdrive lister via `createDefaultListHyperdriveConfigs` (below).
-  // An injected seam owns its own transport but is ALWAYS invoked WITH the reconciled
-  // account (via the single choke point below / the lister's `{ accountId }` context),
-  // so it can never target a DIFFERENT account than the one the config is pinned to.
+  // Both seams are pinned to the SAME effective account + API base: the default wrangler
+  // runner via its env (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_BASE_URL` + the top-level
+  // `--env=` on every argv), and the default Hyperdrive lister via
+  // `createDefaultListHyperdriveConfigs` (below). An injected seam owns its own transport
+  // but is ALWAYS invoked WITH the reconciled account + base (via the single choke point
+  // below / the lister's `{ accountId, apiBaseUrl }` context), so it can never target a
+  // DIFFERENT account/endpoint than the one the config is pinned to.
   const selectedRunWrangler = opts?.runWrangler ?? createDefaultRunWrangler(root);
-  // Single choke point: inject the reconciled account into EVERY call so no call site
-  // can forget it (grep-proven — every `runWrangler(...)` below routes through here).
-  // F1 — async: `Promise.resolve` coerces a sync-stub result OR the default runner's
+  // Single choke point: inject the reconciled account + API base into EVERY call so no
+  // call site can forget them (grep-proven — every `runWrangler(...)` below routes through
+  // here). F1 — async: `Promise.resolve` coerces a sync-stub result OR the default runner's
   // Promise, and every call site `await`s it. Awaiting yields to the event loop, so a
   // real (slow) wrangler call never blocks the lock heartbeat.
   const runWrangler = (
     args: Array<string>,
     callOpts?: { cwd?: string; captureJson?: boolean },
   ): Promise<RunWranglerResult> =>
-    Promise.resolve(selectedRunWrangler(args, { ...callOpts, accountId: transportAccountId }));
+    Promise.resolve(
+      selectedRunWrangler(args, {
+        ...callOpts,
+        accountId: transportAccountId,
+        apiBaseUrl: transportApiBaseUrl,
+      }),
+    );
 
   // --- D1 ------------------------------------------------------------------
   if (desired.d1) {
@@ -1787,7 +1962,10 @@ async function provisionCloudflareResourcesLocked(
         try {
           // F1 — always invoke the lister WITH the reconciled account, so an injected
           // lister can never query a DIFFERENT account than the config is pinned to.
-          const result = await lister({ accountId: transportAccountId });
+          const result = await lister({
+            accountId: transportAccountId,
+            apiBaseUrl: transportApiBaseUrl,
+          });
           if (!Array.isArray(result)) {
             throw new Error(
               `the existence check returned a ${result === null ? 'null' : typeof result} result ` +

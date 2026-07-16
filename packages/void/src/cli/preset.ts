@@ -203,7 +203,7 @@ export function resolveWranglerCommand(root: string, subcommand: string): string
  * are IMMUNE to shell metacharacter injection/splitting.
  *
  * Resolution order — ALWAYS launches the resolved JS entry as
- * `[process.execPath, <wrangler bin.wrangler>]`, which is shell-free AND
+ * `[process.execPath, <wrangler-dist/cli.js>]`, which is shell-free AND
  * cross-platform (it sidesteps the Windows `.cmd`/`.ps1` shim that Node cannot
  * spawn with `shell: false`):
  *   1. MODULE RESOLUTION of `wrangler/package.json` relative to THIS module (the
@@ -215,6 +215,22 @@ export function resolveWranglerCommand(root: string, subcommand: string): string
  *      pnpm placed it.
  *   2. FALLBACK: the app-root `node_modules/wrangler` probe, used only when void's
  *      own wrangler cannot be resolved (e.g. a bundled/vendored layout).
+ *
+ * F2 — the resolved entry is wrangler's REAL CLI (`wrangler-dist/cli.js`, its
+ * package `main`/`exports["."]`), NOT the `bin.wrangler` WRAPPER. The wrapper
+ * (`bin/wrangler.js`) merely does a Node-version guard and then RE-SPAWNS
+ * `wrangler-dist/cli.js`, forwarding only SIGINT/SIGTERM to the grandchild (via a
+ * default `.kill()` = SIGTERM) and mapping a signal-killed grandchild (`code === null`)
+ * to `process.exit(0)`. Launching through it defeats the provisioner's hard command
+ * timeout: a `SIGKILL` sent to the wrapper cannot be relayed to the inner CLI, which
+ * survives holding the inherited stdio pipes so the parent's `close` never fires; and a
+ * killed inner CLI is masked as a clean exit 0. Launching `wrangler-dist/cli.js`
+ * DIRECTLY removes that layer entirely — the SIGKILL now hits the real process, and no
+ * wrapper can swallow the signal or rewrite the exit code. Bypassing the wrapper is
+ * safe: its only behaviors are the version guard (we spawn with the SAME `process.execPath`
+ * that already passed it) and an IPC-forwarding channel that is inert here (the runner
+ * spawns with `stdio: ['ignore','pipe','pipe']`, so the wrapper's `process.send` would be
+ * undefined and forward nothing).
  *
  * If wrangler cannot be resolved by EITHER avenue, throws a clear error — it never
  * degrades to a bare `wrangler` (ENOENT in clean CI) or a `.cmd` shim.
@@ -256,10 +272,12 @@ function defaultResolveWranglerPackageJson(): string | undefined {
 }
 
 /**
- * Absolute path to the wrangler JS entry (from its `package.json` `bin.wrangler`),
- * trying the injected module resolver (void's OWN wrangler) FIRST, then falling
- * back to the app-root probe. Returns `undefined` when wrangler cannot be located
- * or its manifest is unreadable.
+ * Absolute path to wrangler's REAL CLI JS entry (its `package.json` `main` /
+ * `exports["."]` → `wrangler-dist/cli.js`, NOT the `bin.wrangler` wrapper — see
+ * {@link resolveWranglerArgv} for why we bypass the wrapper), trying the injected
+ * module resolver (void's OWN wrangler) FIRST, then falling back to the app-root
+ * probe. Returns `undefined` when wrangler cannot be located or its manifest is
+ * unreadable.
  */
 function resolveLocalWranglerJsBin(
   root: string,
@@ -268,38 +286,67 @@ function resolveLocalWranglerJsBin(
   // Prefer void's own wrangler (module resolution relative to preset.ts): the
   // provisioner targets its exact 4.107 flags/JSON/errors, so an older app-root
   // wrangler must not win over it.
-  const fromVoid = wranglerJsBinFromPackageJson(resolveWranglerPackageJson());
+  const fromVoid = wranglerCliEntryFromPackageJson(resolveWranglerPackageJson());
   if (fromVoid) {
     return fromVoid;
   }
   // Fallback: a consumer-hoisted wrangler at the project root, only when void's
   // own resolution failed.
-  return wranglerJsBinFromPackageJson(join(root, 'node_modules', 'wrangler', 'package.json'));
+  return wranglerCliEntryFromPackageJson(join(root, 'node_modules', 'wrangler', 'package.json'));
 }
 
 /**
- * Read `bin.wrangler` from a wrangler `package.json` at `pkgPath` and resolve it
- * to an absolute JS entry (relative to the manifest's own directory, so it works
- * for BOTH the app-root probe and module resolution). Returns `undefined` on any
- * missing/unreadable/absent-bin case.
+ * F2 — resolve wrangler's REAL CLI entry from its `package.json` at `pkgPath`. Reads the
+ * `main` field (`wrangler-dist/cli.js`), falling back to `exports["."]` (its `default`
+ * condition, or a bare string), and resolves it to an absolute JS entry relative to the
+ * manifest's own directory (so it works for BOTH the app-root probe and module
+ * resolution). Deliberately does NOT read `bin.wrangler`: that is the signal-swallowing
+ * wrapper the provisioner must bypass. Returns `undefined` on any missing/unreadable/
+ * absent-entry case.
  */
-function wranglerJsBinFromPackageJson(pkgPath: string | undefined): string | undefined {
+function wranglerCliEntryFromPackageJson(pkgPath: string | undefined): string | undefined {
   if (!pkgPath || !existsSync(pkgPath)) {
     return undefined;
   }
   try {
     const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
-      bin?: string | Record<string, string>;
+      main?: string;
+      exports?: unknown;
     };
-    const rel = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.wrangler;
+    const rel = wranglerCliRelativeEntry(pkg);
     if (!rel) {
       return undefined;
     }
-    const jsBin = join(dirname(pkgPath), rel);
-    return existsSync(jsBin) ? jsBin : undefined;
+    const jsEntry = join(dirname(pkgPath), rel);
+    return existsSync(jsEntry) ? jsEntry : undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The relative CLI entry from a wrangler manifest: `main` first (wrangler 4.107 sets it
+ * to `wrangler-dist/cli.js`, which equals `exports["."].default`), then the `.` export
+ * (`{ default: string }` or a bare string). Returns `undefined` when neither is a string.
+ */
+function wranglerCliRelativeEntry(pkg: { main?: string; exports?: unknown }): string | undefined {
+  if (typeof pkg.main === 'string' && pkg.main.length > 0) {
+    return pkg.main;
+  }
+  const exports = pkg.exports;
+  if (exports && typeof exports === 'object' && !Array.isArray(exports)) {
+    const dot = (exports as Record<string, unknown>)['.'];
+    if (typeof dot === 'string' && dot.length > 0) {
+      return dot;
+    }
+    if (dot && typeof dot === 'object' && !Array.isArray(dot)) {
+      const dflt = (dot as Record<string, unknown>).default;
+      if (typeof dflt === 'string' && dflt.length > 0) {
+        return dflt;
+      }
+    }
+  }
+  return undefined;
 }
 
 /**

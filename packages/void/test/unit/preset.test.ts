@@ -281,51 +281,82 @@ describe('resolveWranglerCommand', () => {
 });
 
 describe('resolveWranglerArgv (module-resolution launcher)', () => {
-  it('resolves wrangler via module resolution to [execPath, jsBin] even when the app root has no wrangler (strict pnpm)', () => {
+  it('resolves wrangler via module resolution to [execPath, cli.js] even when the app root has no wrangler (strict pnpm)', () => {
     // wrangler is a dependency of the `void` package, NOT the app root under strict
     // pnpm. Module resolution (relative to preset.ts) still finds it.
     const root = setupProject({ pkg: { name: 'app' } });
     const argv = resolveWranglerArgv(root);
     expect(argv).toHaveLength(2);
     expect(argv[0]).toBe(process.execPath);
-    // The resolved entry is wrangler's package-owned JS bin.
-    expect(argv[1].replace(/\\/g, '/')).toMatch(/wrangler\/bin\/wrangler\.js$/);
+    // F2 — the resolved entry is wrangler's REAL CLI (`wrangler-dist/cli.js`, its
+    // package `main`), NOT the signal-swallowing `bin/wrangler.js` wrapper.
+    expect(argv[1].replace(/\\/g, '/')).toMatch(/wrangler\/wrangler-dist\/cli\.js$/);
+    expect(argv[1].replace(/\\/g, '/')).not.toMatch(/bin\/wrangler\.js$/);
   });
 
-  it("prefers void's own wrangler over an incompatible app-root wrangler (F6)", () => {
+  it("prefers void's own wrangler over an incompatible app-root wrangler (F6), resolving its REAL cli.js (F2)", () => {
     // The app root pins its OWN (potentially older/incompatible) wrangler, and a
     // separate "void-nested" wrangler is resolvable via module resolution. The
     // provisioner targets wrangler 4.107's exact flags/JSON/errors, so void's own
-    // wrangler MUST win — the app-root one must not shadow it.
+    // wrangler MUST win — the app-root one must not shadow it. F2 — the resolved entry
+    // is the `main` CLI (`wrangler-dist/cli.js`), NOT the `bin.wrangler` wrapper.
     const root = setupProject({
       pkg: { dependencies: { wrangler: '^3.0.0' } },
       files: {
         'node_modules/wrangler/package.json': JSON.stringify({
+          main: './wrangler-dist/cli.js',
           bin: { wrangler: './bin/wrangler.js' },
         }),
+        'node_modules/wrangler/wrangler-dist/cli.js': "'use strict';\n",
         'node_modules/wrangler/bin/wrangler.js': '#!/usr/bin/env node\n',
         'void_modules/wrangler/package.json': JSON.stringify({
+          main: './wrangler-dist/cli.js',
           bin: { wrangler: './bin/wrangler.js' },
         }),
+        'void_modules/wrangler/wrangler-dist/cli.js': "'use strict';\n",
         'void_modules/wrangler/bin/wrangler.js': '#!/usr/bin/env node\n',
       },
     });
     const voidWranglerPkg = join(root, 'void_modules', 'wrangler', 'package.json');
     const argv = resolveWranglerArgv(root, () => voidWranglerPkg);
-    // Resolved to void's nested wrangler, NOT the app-root one.
+    // Resolved to void's nested wrangler's REAL CLI, NOT the app-root one, NOT the wrapper.
     expect(argv).toEqual([
       process.execPath,
-      join(root, 'void_modules', 'wrangler', 'bin', 'wrangler.js'),
+      join(root, 'void_modules', 'wrangler', 'wrangler-dist', 'cli.js'),
     ]);
   });
 
-  it('falls back to the app-root wrangler only when void resolution fails (F6)', () => {
+  it('resolves the CLI via `exports["."].default` when `main` is absent (F2)', () => {
+    // A manifest that exposes its CLI only through the `.` export condition still
+    // resolves to the real cli.js (never the wrapper).
+    const root = setupProject({
+      pkg: { name: 'app' },
+      files: {
+        'void_modules/wrangler/package.json': JSON.stringify({
+          exports: { '.': { types: './cli.d.ts', default: './wrangler-dist/cli.js' } },
+          bin: { wrangler: './bin/wrangler.js' },
+        }),
+        'void_modules/wrangler/wrangler-dist/cli.js': "'use strict';\n",
+        'void_modules/wrangler/bin/wrangler.js': '#!/usr/bin/env node\n',
+      },
+    });
+    const voidWranglerPkg = join(root, 'void_modules', 'wrangler', 'package.json');
+    const argv = resolveWranglerArgv(root, () => voidWranglerPkg);
+    expect(argv).toEqual([
+      process.execPath,
+      join(root, 'void_modules', 'wrangler', 'wrangler-dist', 'cli.js'),
+    ]);
+  });
+
+  it('falls back to the app-root wrangler only when void resolution fails (F6), resolving its real cli.js (F2)', () => {
     const root = setupProject({
       pkg: { dependencies: { wrangler: '^4.0.0' } },
       files: {
         'node_modules/wrangler/package.json': JSON.stringify({
+          main: './wrangler-dist/cli.js',
           bin: { wrangler: './bin/wrangler.js' },
         }),
+        'node_modules/wrangler/wrangler-dist/cli.js': "'use strict';\n",
         'node_modules/wrangler/bin/wrangler.js': '#!/usr/bin/env node\n',
       },
     });
@@ -333,7 +364,7 @@ describe('resolveWranglerArgv (module-resolution launcher)', () => {
     const argv = resolveWranglerArgv(root, () => undefined);
     expect(argv).toEqual([
       process.execPath,
-      join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js'),
+      join(root, 'node_modules', 'wrangler', 'wrangler-dist', 'cli.js'),
     ]);
   });
 

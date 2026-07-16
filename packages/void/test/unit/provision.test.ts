@@ -17,9 +17,11 @@ import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
   acquireProvisionLock,
+  createDefaultRunWrangler,
   normalizeRunWranglerResult,
   provisionCloudflareResources,
   provisionEnv,
+  resolvePinnedApiBaseUrl,
   type DesiredResourceSet,
   type RunWrangler,
   type RunWranglerResult,
@@ -1573,6 +1575,157 @@ describe('provisionCloudflareResources — account reconciliation + config pin (
     }
     expect(urls.length).toBeGreaterThan(0);
     expect(urls[0]).toContain('/accounts/config-acct/hyperdrive/configs');
+    // Default (no ambient redirect) → public prod base.
+    expect(urls[0]).toMatch(/^https:\/\/api\.cloudflare\.com\/client\/v4\//);
+  });
+});
+
+describe('provisionCloudflareResources — F1 pinned transport (one base for wrangler + REST)', () => {
+  it('resolvePinnedApiBaseUrl mirrors wrangler: default prod, direct override, staging, fedramp', () => {
+    expect(resolvePinnedApiBaseUrl({})).toBe('https://api.cloudflare.com/client/v4');
+    expect(resolvePinnedApiBaseUrl({ CLOUDFLARE_API_BASE_URL: 'https://api.example/v9' })).toBe(
+      'https://api.example/v9',
+    );
+    // Deprecated alias honored when the primary is absent.
+    expect(resolvePinnedApiBaseUrl({ CF_API_BASE_URL: 'https://cf.example/v4' })).toBe(
+      'https://cf.example/v4',
+    );
+    expect(resolvePinnedApiBaseUrl({ WRANGLER_API_ENVIRONMENT: 'staging' })).toBe(
+      'https://api.staging.cloudflare.com/client/v4',
+    );
+    expect(resolvePinnedApiBaseUrl({ CLOUDFLARE_COMPLIANCE_REGION: 'fedramp_high' })).toBe(
+      'https://api.fed.cloudflare.com/client/v4',
+    );
+  });
+
+  it('the default Hyperdrive REST lister honors a pinned CLOUDFLARE_API_BASE_URL (not hardcoded prod)', async () => {
+    const prev = process.env.CLOUDFLARE_API_BASE_URL;
+    process.env.CLOUDFLARE_API_BASE_URL = 'https://api.staging.cloudflare.com/client/v4';
+    setup(
+      JSON.stringify({
+        account_id: 'config-acct',
+        hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }],
+      }),
+    );
+    const urls: Array<string> = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      urls.push(String(url));
+      return new Response(
+        JSON.stringify({ success: true, result: [], result_info: { total_count: 0 } }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    try {
+      const { run } = makeRunner([]);
+      await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+        },
+        { runWrangler: run, apiToken: 'tok', log: silentLog },
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prev === undefined) {
+        delete process.env.CLOUDFLARE_API_BASE_URL;
+      } else {
+        process.env.CLOUDFLARE_API_BASE_URL = prev;
+      }
+    }
+    // The REST existence check hit the SAME pinned endpoint wrangler would (staging),
+    // not the hardcoded public-prod base.
+    expect(urls[0]).toMatch(/^https:\/\/api\.staging\.cloudflare\.com\/client\/v4\//);
+    expect(urls[0]).toContain('/accounts/config-acct/hyperdrive/configs');
+  });
+
+  it('the injected lister receives the pinned apiBaseUrl in its transport context', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    let seen: { accountId: string; apiBaseUrl: string } | undefined;
+    const { run } = makeRunner([]);
+    await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+      },
+      {
+        runWrangler: run,
+        log: silentLog,
+        listHyperdriveConfigs: async (ctx) => {
+          seen = ctx;
+          return [];
+        },
+      },
+    );
+    expect(seen).toEqual({
+      accountId: 'config-acct',
+      apiBaseUrl: 'https://api.cloudflare.com/client/v4',
+    });
+  });
+
+  it('FAILS CLOSED when a project .env sets a transport-redirect var (no wrangler/REST)', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    // A repo .env that would redirect wrangler's transport on every command.
+    writeFileSync(
+      join(tmpDir, '.env'),
+      'CLOUDFLARE_API_BASE_URL=https://api.staging.cloudflare.com/client/v4\n',
+    );
+    let listerCalled = false;
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          d1: { binding: 'DB', name: 'myapp-db' },
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+        },
+        {
+          runWrangler: run,
+          log: silentLog,
+          listHyperdriveConfigs: async () => {
+            listerCalled = true;
+            return [];
+          },
+        },
+      ),
+    ).rejects.toThrow(/refusing to provision.*\.env.*CLOUDFLARE_API_BASE_URL.*redirect/s);
+    // Failed closed BEFORE any remote work.
+    expect(calls.length).toBe(0);
+    expect(listerCalled).toBe(false);
+  });
+
+  it('does NOT fail on a benign project .env without transport-redirect vars', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    writeFileSync(join(tmpDir, '.env'), 'DATABASE_URL=postgres://localhost/app\nFOO=bar\n');
+    const { run } = makeRunner([
+      { match: /^d1 list/, reply: () => ok('[]') },
+      {
+        match: /^d1 create/,
+        reply: () => {
+          simulateUpdateConfig('d1_databases', {
+            binding: 'DB',
+            database_name: 'myapp-db',
+            database_id: uuid('db'),
+          });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(result.resources).toEqual([
+      { kind: 'd1', binding: 'DB', name: 'myapp-db', action: 'created' },
+    ]);
   });
 });
 
@@ -1902,32 +2055,159 @@ describe('normalizeRunWranglerResult — signal / spawn-error handling (F5)', ()
   });
 });
 
+describe('createDefaultRunWrangler — hard timeout kills the REAL process (F2)', () => {
+  const F2_TMP = join(import.meta.dirname, '.tmp-f2-timeout');
+  beforeEach(() => {
+    rmSync(F2_TMP, { recursive: true, force: true });
+    mkdirSync(F2_TMP, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(F2_TMP, { recursive: true, force: true });
+  });
+
+  /** Poll `process.kill(pid, 0)` until the pid is dead (ESRCH) or the deadline passes. */
+  async function waitForDead(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0); // still alive
+      } catch {
+        return true; // ESRCH → dead
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return false;
+  }
+
+  it('a DIRECT hung CLI is SIGKILLed and the runner REJECTS-as-hard-failure within the timeout', async () => {
+    // Simulate the post-fix launcher: a direct CLI entry (no wrapper) that ignores SIGTERM
+    // and hangs forever, writing its pid so the test can confirm it was actually killed.
+    const pidFile = join(F2_TMP, 'cli.pid');
+    const hungCli = join(F2_TMP, 'hung-cli.cjs');
+    writeFileSync(
+      hungCli,
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
+        `process.on('SIGTERM', () => {});\n` + // survives a plain SIGTERM (like the wrapper sends)
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const run = createDefaultRunWrangler(F2_TMP, {
+      launcher: [process.execPath, hungCli],
+      timeoutMs: 400,
+    });
+    const start = Date.now();
+    const result = await run(['d1', 'list', '--json'], { accountId: 'acct' });
+    const elapsed = Date.now() - start;
+    // Settled within the timeout window (generous ceiling to avoid CI flake).
+    expect(elapsed).toBeLessThan(5_000);
+    // HARD failure: a non-null signal, folded to a non-zero status.
+    expect(result.signal).toBe('SIGKILL');
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/exceeded the 400ms command timeout/);
+    // No lingering process — the SIGKILL reached the real CLI.
+    const pid = Number(readFileSync(pidFile, 'utf-8'));
+    expect(await waitForDead(pid, 5_000)).toBe(true);
+  });
+
+  it('a WRAPPER that re-spawns a hung grandchild: runner still settles in time AND the grandchild is reaped (F2)', async () => {
+    // The exact scenario the finding describes: a `bin/wrangler.js`-style wrapper that
+    // spawns an inner CLI with inherited stdio and forwards only SIGTERM (never SIGKILL),
+    // mapping a signal-killed child to exit 0. Pre-fix this defeated the timeout (the
+    // grandchild survived holding the pipes so `close` never fired). The runner now spawns
+    // the launcher in its OWN process group and SIGKILLs the WHOLE group on timeout, then
+    // settles immediately — so even a wrapper-plus-hung-grandchild rejects within the
+    // timeout with NO lingering process.
+    const gcPidFile = join(F2_TMP, 'grandchild.pid');
+    const grandchild = join(F2_TMP, 'grandchild.cjs');
+    writeFileSync(
+      grandchild,
+      `require('fs').writeFileSync(${JSON.stringify(gcPidFile)}, String(process.pid));\n` +
+        `process.on('SIGTERM', () => {});\n` + // ignore the wrapper's forwarded SIGTERM
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const wrapper = join(F2_TMP, 'wrapper.cjs');
+    writeFileSync(
+      wrapper,
+      `const { spawn } = require('child_process');\n` +
+        `const child = spawn(process.execPath, [${JSON.stringify(grandchild)}], { stdio: ['inherit','inherit','inherit'] });\n` +
+        `child.on('exit', (code) => process.exit(code === null ? 0 : code));\n` + // mask signal death as exit 0
+        `process.on('SIGTERM', () => child.kill());\n` + // forward only SIGTERM (default)
+        `process.on('SIGINT', () => child.kill());\n`,
+    );
+    const run = createDefaultRunWrangler(F2_TMP, {
+      launcher: [process.execPath, wrapper],
+      timeoutMs: 500,
+    });
+    const start = Date.now();
+    const result = await run(['d1', 'list', '--json'], { accountId: 'acct' });
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(5_000);
+    expect(result.signal).toBe('SIGKILL');
+    expect(result.status).not.toBe(0);
+    // The grandchild wrote its pid, then must have been reaped by the process-group kill.
+    const gcPid = Number(readFileSync(gcPidFile, 'utf-8'));
+    expect(Number.isInteger(gcPid)).toBe(true);
+    expect(await waitForDead(gcPid, 5_000)).toBe(true);
+  });
+});
+
 describe('provisionCloudflareResources — F1 account gate + env scrub (round 4)', () => {
-  it('provisionEnv scrubs CLOUDFLARE_ENV + the CF Access token pair and pins the account', () => {
-    const prevEnv = process.env.CLOUDFLARE_ENV;
-    const prevId = process.env.CF_ACCESS_CLIENT_ID;
-    const prevSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-    process.env.CLOUDFLARE_ENV = 'staging';
-    process.env.CF_ACCESS_CLIENT_ID = 'id';
-    process.env.CF_ACCESS_CLIENT_SECRET = 'secret';
+  it('provisionEnv scrubs CLOUDFLARE_ENV + the CF Access token pair and pins the account (F1)', () => {
+    const saved: Record<string, string | undefined> = {};
+    const set = (k: string, v: string): void => {
+      saved[k] = process.env[k];
+      process.env[k] = v;
+    };
+    set('CLOUDFLARE_ENV', 'staging');
+    set('CF_ACCESS_CLIENT_ID', 'id');
+    set('CF_ACCESS_CLIENT_SECRET', 'secret');
     try {
-      const env = provisionEnv('acct-X');
+      const env = provisionEnv({ accountId: 'acct-X' });
       // CLOUDFLARE_ENV would let wrangler select an env-specific account block.
       expect(env.CLOUDFLARE_ENV).toBeUndefined();
       expect(env.CF_ACCESS_CLIENT_ID).toBeUndefined();
       expect(env.CF_ACCESS_CLIENT_SECRET).toBeUndefined();
       expect(env.CLOUDFLARE_ACCOUNT_ID).toBe('acct-X');
     } finally {
-      const restore = (k: string, v: string | undefined): void => {
+      for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) {
           delete process.env[k];
         } else {
           process.env[k] = v;
         }
-      };
-      restore('CLOUDFLARE_ENV', prevEnv);
-      restore('CF_ACCESS_CLIENT_ID', prevId);
-      restore('CF_ACCESS_CLIENT_SECRET', prevSecret);
+      }
+    }
+  });
+
+  it('provisionEnv scrubs EVERY transport-redirect var and pins the ONE resolved API base (F1)', () => {
+    const saved: Record<string, string | undefined> = {};
+    const set = (k: string, v: string): void => {
+      saved[k] = process.env[k];
+      process.env[k] = v;
+    };
+    // Ambient redirect vars that (via wrangler's per-command dotenv reload) could point the
+    // transport elsewhere — all must be scrubbed from the child env.
+    set('CLOUDFLARE_API_BASE_URL', 'https://evil.example');
+    set('CF_API_BASE_URL', 'https://evil2.example');
+    set('WRANGLER_API_ENVIRONMENT', 'staging');
+    set('CLOUDFLARE_COMPLIANCE_REGION', 'fedramp_high');
+    try {
+      const env = provisionEnv({
+        accountId: 'acct-X',
+        apiBaseUrl: 'https://api.cloudflare.com/client/v4',
+      });
+      expect(env.CF_API_BASE_URL).toBeUndefined();
+      expect(env.WRANGLER_API_ENVIRONMENT).toBeUndefined();
+      expect(env.CLOUDFLARE_COMPLIANCE_REGION).toBeUndefined();
+      // The ONE pinned base overrides any ambient/derived value.
+      expect(env.CLOUDFLARE_API_BASE_URL).toBe('https://api.cloudflare.com/client/v4');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) {
+          delete process.env[k];
+        } else {
+          process.env[k] = v;
+        }
+      }
     }
   });
 
