@@ -2,10 +2,12 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import {
   applyEdits,
+  createScanner,
   findNodeAtLocation,
   modify,
   parse,
   parseTree,
+  SyntaxKind,
   type FormattingOptions,
   type Node,
   type ParseError,
@@ -850,7 +852,15 @@ export function writeProvisionedWranglerConfig(
 
   const formattingOptions = detectFormattingOptions(original);
   let text = original;
+  // Paths this call overwrites with a scalar. When a scalar-expected field
+  // (account_id, migrations_dir, a queue option) already holds a COMPOSITE
+  // object/array value, `jsonc-parser.modify()` replaces the whole node —
+  // deleting any comment nested inside it while still reporting the edit as
+  // applied. The final comment-preservation gate below uses these paths to name
+  // the offending field when it detects such a drop.
+  const scalarSetPaths: Array<Array<string | number>> = [];
   const set = (path: Array<string | number>, value: unknown): void => {
+    scalarSetPaths.push(path);
     text = applyMemberEdit(text, path, value, { formattingOptions });
   };
 
@@ -1000,12 +1010,91 @@ export function writeProvisionedWranglerConfig(
     upsertQueueEntries('consumers', patch.queues.consumers);
   }
 
+  // FINAL GATE — global comment-text-preservation invariant. The writer's
+  // contract is that every comment's TEXT survives a write. Relocation only
+  // MOVES a comment (identical text, new position), so the multiset of comment
+  // TOKENS is preserved and this gate passes. A DROPPED comment — the
+  // composite-overwrite case above, or any other pathological path — makes the
+  // output multiset miss a token. Assert the final output is a SUPERSET of the
+  // original's comment tokens BEFORE writing; on any drop, throw WITHOUT writing
+  // so the file is never corrupted (the BOM re-add + write happen only past this
+  // gate). O(n): one scanner pass over each string.
+  const droppedComment = findDroppedComment(
+    extractCommentTokens(original),
+    extractCommentTokens(text),
+  );
+  if (droppedComment !== undefined) {
+    // Prefer a specific diagnosis when the cause is a scalar-expected field that
+    // held a composite (object/array) value in the ORIGINAL — `modify()` would
+    // have replaced the whole node, dropping the nested comment.
+    const originalRoot = parseTree(original, undefined, { allowTrailingComma: true });
+    const compositeField = originalRoot
+      ? scalarSetPaths.find((path) => {
+          const node = findNodeAtLocation(originalRoot, path);
+          return node?.type === 'object' || node?.type === 'array';
+        })
+      : undefined;
+    if (compositeField) {
+      const field = String(compositeField[compositeField.length - 1]);
+      throw new Error(
+        `deploy: cannot update "${configPath}" — "${field}" has an object/array value; ` +
+          `expected a string. Fix the config and retry.`,
+      );
+    }
+    throw new Error(
+      `deploy: cannot update "${configPath}" — this edit would drop a comment ` +
+        `(${droppedComment}); the writer refuses to corrupt the file — simplify the ` +
+        `surrounding structure and retry.`,
+    );
+  }
+
   const finalText = hasBom ? `${UTF8_BOM}${text}` : text;
   const modified = finalText !== rawContent;
   if (modified) {
     writeFileSync(configPath, finalText);
   }
   return { configPath, modified, d1MigrationsDirSkipped };
+}
+
+/**
+ * Extract the multiset of comment TOKENS (line + block) from JSONC source using
+ * jsonc-parser's scanner — exact by construction, no regex. Each token is its
+ * verbatim source slice, so a relocated comment keeps identical text (its
+ * multiset entry is unchanged) while a dropped comment removes one.
+ */
+function extractCommentTokens(text: string): Array<string> {
+  const scanner = createScanner(text, false);
+  const tokens: Array<string> = [];
+  let kind = scanner.scan();
+  while (kind !== SyntaxKind.EOF) {
+    if (kind === SyntaxKind.LineCommentTrivia || kind === SyntaxKind.BlockCommentTrivia) {
+      const offset = scanner.getTokenOffset();
+      tokens.push(text.slice(offset, offset + scanner.getTokenLength()));
+    }
+    kind = scanner.scan();
+  }
+  return tokens;
+}
+
+/**
+ * Multiset-subset check: return the first comment token present in `before` but
+ * missing (accounting for repeats) from `after`, or `undefined` when `after` is
+ * a superset of `before`. The final gate uses this to prove no comment TEXT was
+ * dropped by the edits.
+ */
+function findDroppedComment(before: Array<string>, after: Array<string>): string | undefined {
+  const counts = new Map<string, number>();
+  for (const token of after) {
+    counts.set(token, (counts.get(token) ?? 0) + 1);
+  }
+  for (const token of before) {
+    const remaining = counts.get(token) ?? 0;
+    if (remaining <= 0) {
+      return token;
+    }
+    counts.set(token, remaining - 1);
+  }
+  return undefined;
 }
 
 /**

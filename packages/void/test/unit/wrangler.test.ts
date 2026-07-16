@@ -1536,4 +1536,135 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(result.modified).toBe(false);
     expect(readRaw('wrangler.jsonc')).toBe(fixture);
   });
+
+  // Global comment-text-preservation invariant (final gate before write). The
+  // writer's contract is that every comment's TEXT survives a write. A
+  // scalar-expected field holding a composite object/array value with a comment
+  // inside is a case jsonc-parser's modify() silently drops (it replaces the
+  // whole node yet reports modified:true). The final gate compares the comment
+  // token multiset of the original vs the final output and throws WITHOUT
+  // writing on any drop, rather than chasing each pathological path.
+
+  it('fails closed when a composite account_id value drops an inner comment — throws without writing', () => {
+    // `account_id` is scalar-expected but holds an object with a comment inside.
+    // modify() replaces the whole node (deleting the comment) and reports
+    // success; the final gate must catch the dropped comment and refuse to write.
+    const fixture = `{
+  "account_id": { "x": 1 /* keep this note */ },
+  "name": "app"
+}`;
+    setup('wrangler.jsonc', fixture);
+    expect(() => writeProvisionedWranglerConfig(tmpDir, { accountId: 'acc-999' })).toThrow(
+      /"account_id" has an object\/array value; expected a string/,
+    );
+    // Fail closed — the file is byte-for-byte untouched.
+    expect(readRaw('wrangler.jsonc')).toBe(fixture);
+  });
+
+  it('fails closed when a composite migrations_dir on the matched D1 entry drops an inner comment — throws without writing', () => {
+    const fixture = `{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "app",
+      "database_id": "id",
+      "migrations_dir": { "dir": "old" /* keep this note */ }
+    }
+  ]
+}`;
+    setup('wrangler.jsonc', fixture);
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+      }),
+    ).toThrow(/"migrations_dir" has an object\/array value; expected a string/);
+    expect(readRaw('wrangler.jsonc')).toBe(fixture);
+  });
+
+  it('fails closed when a composite consumer option (max_batch_size) drops an inner comment — throws without writing', () => {
+    const fixture = `{
+  "queues": {
+    "consumers": [
+      { "queue": "jobs", "max_batch_size": { "n": 1 /* keep this note */ } }
+    ]
+  }
+}`;
+    setup('wrangler.jsonc', fixture);
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { consumers: [{ queue: 'jobs', max_batch_size: 25 }] },
+      }),
+    ).toThrow(/"max_batch_size" has an object\/array value; expected a string/);
+    expect(readRaw('wrangler.jsonc')).toBe(fixture);
+  });
+
+  it('does NOT fire on a normal comment-rich config — upsert succeeds, every comment survives, idempotent', () => {
+    // Negative control: the invariant must never fire for a valid edit. A config
+    // with several comments upserts cleanly, keeps ALL comments, and a second run
+    // is byte-identical (the gate does not perturb idempotence).
+    setup('wrangler.jsonc', commentedFixture);
+    const patch = {
+      accountId: 'acc-ok',
+      name: 'my-app',
+      compatibilityDate: '2026-02-24',
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+      queues: {
+        producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }],
+        consumers: [{ queue: 'jobs', max_batch_size: 10 }],
+      },
+    };
+
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    // Every original comment token is still present.
+    expect(raw).toContain('// Void manages this file');
+    expect(raw).toContain('/* App databases');
+
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(raw);
+  });
+
+  it('does NOT fire on a relocation — appending after a trailing-commented sibling keeps every comment', () => {
+    // Relocation MOVES a comment (same text, new position), so the comment-token
+    // multiset is unchanged and the invariant passes. Appending a queue producer
+    // after a sibling that carries a trailing inline comment must succeed.
+    setup(
+      'wrangler.jsonc',
+      `{
+  // file-level note
+  "queues": {
+    "producers": [
+      { "queue": "jobs", "binding": "QUEUE_JOBS" } // jobs producer
+    ]
+  }
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(result.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    // Both comments survive; the trailing one stays on the jobs entry.
+    expect(raw).toContain('// file-level note');
+    expect(raw).toContain('// jobs producer');
+    expect(raw).toContain('}, // jobs producer');
+
+    const q = parseRaw('wrangler.jsonc').queues as { producers: Array<Record<string, unknown>> };
+    expect(q.producers).toEqual([
+      { queue: 'jobs', binding: 'QUEUE_JOBS' },
+      { queue: 'emails', binding: 'QUEUE_EMAILS' },
+    ]);
+
+    // Idempotent.
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(raw);
+  });
 });
