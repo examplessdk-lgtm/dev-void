@@ -12,7 +12,7 @@ import {
   type Node,
   type ParseError,
 } from 'jsonc-parser';
-import { join } from 'pathe';
+import { join, normalize } from 'pathe';
 import type { VoidConfig } from '../config.ts';
 import type { InferredBindings } from '../inference/walk.ts';
 import type { WebSocketRouteDefinition } from '../router/websocket.ts';
@@ -882,15 +882,46 @@ export function writeProvisionedWranglerConfig(
   let d1MigrationsDirSkipped = false;
   if (patch.d1MigrationsDir) {
     const d1Entries = Array.isArray(parsed.d1_databases)
-      ? (parsed.d1_databases as Array<{ binding?: unknown }>)
+      ? (parsed.d1_databases as Array<{ binding?: unknown; migrations_pattern?: unknown }>)
       : [];
     const index = d1Entries.findIndex((entry) => entry.binding === patch.d1MigrationsDir!.binding);
     if (index >= 0) {
+      // A companion `migrations_pattern` (if the user set one) must stay valid
+      // under the NEW `migrations_dir`: wrangler requires the normalized pattern
+      // to start with `${migrations_dir}/` (unless the dir normalizes to ".").
+      // Overwriting `migrations_dir` without checking would invalidate a
+      // currently-valid pair — e.g. drizzle's `migrations_dir:"drizzle"` +
+      // `migrations_pattern:"drizzle/*/migration.sql"` — so `wrangler d1
+      // migrations` create/list/apply then fail. Validate before editing; fail
+      // closed rather than emit a config wrangler rejects, and NEVER rewrite the
+      // user-owned pattern. No pattern (or an already-compatible one) → behave as
+      // before (set / idempotent no-op).
+      const existingPattern = d1Entries[index].migrations_pattern;
+      if (
+        typeof existingPattern === 'string' &&
+        !migrationsPatternMatchesDir(existingPattern, patch.d1MigrationsDir.dir)
+      ) {
+        throw new Error(
+          `deploy: cannot update "${configPath}" — the D1 entry for binding ` +
+            `${JSON.stringify(patch.d1MigrationsDir.binding)} has "migrations_pattern": ` +
+            `${JSON.stringify(existingPattern)}, which is not under the requested ` +
+            `"migrations_dir": ${JSON.stringify(patch.d1MigrationsDir.dir)}. Wrangler requires the ` +
+            `pattern to start with the migrations dir, so this change would break ` +
+            `\`wrangler d1 migrations\`. Align "migrations_pattern" with the dir (or remove it) and retry.`,
+        );
+      }
       set(['d1_databases', index, 'migrations_dir'], patch.d1MigrationsDir.dir);
     } else {
       d1MigrationsDirSkipped = true;
     }
   }
+
+  // Lazily-built map of EVERY binding name already used anywhere in the config
+  // (keyed name → wrangler's friendly owner label), EXCLUDING `queues` (producer
+  // identity is handled by the binding-match logic below; consumers carry no
+  // binding). Used to fail closed before APPENDING a new producer whose binding
+  // collides with a worker-wide binding name (see the producers branch).
+  let workerBindingOwners: Map<string, string> | undefined;
 
   // queues — idempotent upsert into `queues.producers[]` / `queues.consumers[]`.
   // Each section keys on its wrangler identity:
@@ -965,6 +996,29 @@ export function writeProvisionedWranglerConfig(
           }
         }
         index = matches.length === 1 ? matches[0] : -1;
+        if (index === -1) {
+          // APPEND branch only (no producer already owns this binding). wrangler
+          // requires every binding NAME to be unique across the ENTIRE worker —
+          // not just within `queues.producers`. So before appending a producer
+          // whose binding (`QUEUE_<NAME>`) is ALREADY used by any OTHER binding
+          // (D1/KV/R2/DO/service/var/AI/hyperdrive/vectorize/…), fail closed:
+          // emitting it would produce a config wrangler rejects at deploy
+          // (cross-type duplicate binding name). A same-queue producer already
+          // owning that binding is a no-op handled above (index >= 0), never a
+          // collision.
+          workerBindingOwners ??= collectWorkerBindingNames(parsed);
+          const bindingName = String(entry.binding);
+          const owner = workerBindingOwners.get(bindingName);
+          if (owner !== undefined) {
+            throw new Error(
+              `deploy: cannot update "${configPath}" — queue producer binding ` +
+                `${JSON.stringify(bindingName)} is already used by a ${owner} binding. Wrangler ` +
+                `requires every binding name to be unique across the whole worker, so appending ` +
+                `this producer would make the config undeployable. Rename the conflicting binding ` +
+                `(or the queue) and retry.`,
+            );
+          }
+        }
       } else {
         index = currentList.findIndex(
           (existing) => isRecord(existing) && existing.queue === entry.queue,
@@ -1349,6 +1403,153 @@ function offsetToLineColumn(text: string, offset: number): { line: number; colum
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * wrangler's friendly label for each binding namespace (mirrors
+ * `friendlyBindingNames` in `wrangler-dist/cli.js`, used by
+ * `validateBindingsHaveUniqueNames`). Drives the owner name in the worker-wide
+ * producer-collision error.
+ *
+ * `queues` is intentionally ABSENT: producer identity is handled by the upsert's
+ * binding-match logic and consumers carry no binding, so including it here would
+ * be redundant. `secrets.required` (which wrangler folds in as "Secret") is also
+ * excluded — it is not a binding declared in `wrangler.jsonc`.
+ */
+const FRIENDLY_BINDING_NAMES: Record<string, string> = {
+  data_blobs: 'Data Blob',
+  durable_objects: 'Durable Object',
+  kv_namespaces: 'KV Namespace',
+  send_email: 'Send Email',
+  d1_databases: 'D1 Database',
+  vectorize: 'Vectorize Index',
+  ai_search_namespaces: 'AI Search Namespace',
+  ai_search: 'AI Search Instance',
+  websearch: 'Web Search',
+  agent_memory: 'Agent Memory',
+  hyperdrive: 'Hyperdrive Config',
+  r2_buckets: 'R2 Bucket',
+  logfwdr: 'logfwdr',
+  services: 'Worker',
+  analytics_engine_datasets: 'Analytics Engine Dataset',
+  text_blobs: 'Text Blob',
+  browser: 'Browser Run',
+  ai: 'AI',
+  images: 'Images',
+  stream: 'Stream',
+  media: 'Media',
+  version_metadata: 'Worker Version Metadata',
+  unsafe: 'Unsafe Metadata',
+  vars: 'Environment Variable',
+  wasm_modules: 'Wasm Module',
+  dispatch_namespaces: 'Dispatch Namespace',
+  mtls_certificates: 'mTLS Certificate',
+  workflows: 'Workflow',
+  pipelines: 'Pipeline',
+  secrets_store_secrets: 'Secrets Store Secret',
+  artifacts: 'Artifacts',
+  ratelimits: 'Rate Limit',
+  assets: 'Assets',
+  flagship: 'Flagship',
+  worker_loaders: 'Worker Loader',
+  vpc_services: 'VPC Service',
+  vpc_networks: 'VPC Network',
+};
+
+/**
+ * Collect every binding NAME already used across the worker config, mapped to
+ * wrangler's friendly owner label (first writer wins on ties). Mirrors wrangler's
+ * `validateBindingsHaveUniqueNames` field set (minus `queues`, handled by the
+ * producer upsert's own identity logic). Used to fail closed before appending a
+ * queue producer whose binding collides with any other binding.
+ */
+function collectWorkerBindingNames(config: Record<string, unknown>): Map<string, string> {
+  const owners = new Map<string, string>();
+  for (const [field, friendly] of Object.entries(FRIENDLY_BINDING_NAMES)) {
+    for (const name of bindingNamesForField(field, config[field])) {
+      if (!owners.has(name)) {
+        owners.set(name, friendly);
+      }
+    }
+  }
+  return owners;
+}
+
+/**
+ * Binding names a single config field contributes. Mirrors wrangler's
+ * `getBindingNames`, with one addition: `send_email` entries key on `.name`
+ * (wrangler's namespace-list detection keys on `.binding`), so collect those too
+ * as a safe superset — a producer binding must never silently collide with a
+ * send_email binding.
+ */
+function bindingNamesForField(field: string, value: unknown): Array<string> {
+  const generic = genericBindingNames(value);
+  if (field === 'send_email' && Array.isArray(value)) {
+    const names = value
+      .filter(isRecord)
+      .map((entry) => entry.name)
+      .filter((name): name is string => typeof name === 'string');
+    return [...generic, ...names];
+  }
+  return generic;
+}
+
+/**
+ * Mirror wrangler's `getBindingNames`: extract the binding NAMES a config value
+ * contributes across the four shapes wrangler recognizes — a binding list
+ * (`{ bindings: [{ name }] }`, e.g. `durable_objects`/`unsafe`), a namespace list
+ * (`[{ binding }]`, e.g. `kv_namespaces`/`d1_databases`), a single record with a
+ * `binding` (e.g. `ai`/`browser`/`version_metadata`), and a plain record whose
+ * keys are the names (`vars`, blob/module maps).
+ */
+function genericBindingNames(value: unknown): Array<string> {
+  if (typeof value !== 'object' || value === null) {
+    return [];
+  }
+  if (
+    isRecord(value) &&
+    Array.isArray(value.bindings) &&
+    value.bindings.every((binding) => isRecord(binding) && typeof binding.name === 'string')
+  ) {
+    return (value.bindings as Array<{ name: string }>).map((binding) => binding.name);
+  }
+  if (
+    Array.isArray(value) &&
+    value.every((entry) => isRecord(entry) && typeof entry.binding === 'string')
+  ) {
+    return (value as Array<{ binding: string }>).map((entry) => entry.binding);
+  }
+  if (isRecord(value)) {
+    if (value.binding !== undefined) {
+      return typeof value.binding === 'string' ? [value.binding] : [];
+    }
+    return Object.keys(value).filter((key) => value[key] !== undefined);
+  }
+  return [];
+}
+
+/**
+ * True when a D1 `migrations_pattern` is valid under `dir` per wrangler's rule:
+ * the normalized pattern must start with `${normalized dir}/` (or the dir
+ * normalizes to "."). Mirrors wrangler's `resolveMigrationsConfig` /
+ * `stripDirPrefix`.
+ */
+function migrationsPatternMatchesDir(pattern: string, dir: string): boolean {
+  const normalizedDir = normalizeMigrationsPath(dir);
+  if (normalizedDir === '.') {
+    return true;
+  }
+  return normalizeMigrationsPath(pattern).startsWith(`${normalizedDir}/`);
+}
+
+/**
+ * Mirror wrangler's `normalizeRelativePath`: forward-slash, posix-normalize, then
+ * drop a trailing slash. Keeps the migrations validity check byte-identical with
+ * wrangler's own.
+ */
+function normalizeMigrationsPath(p: string): string {
+  const normalized = normalize(p.replace(/\\/g, '/'));
+  return normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
 }
 
 /** Order-insensitive structural equality — avoids rewriting an entry that only

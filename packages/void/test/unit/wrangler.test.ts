@@ -1097,6 +1097,188 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
+  it('fails closed when the desired producer binding collides with a D1 binding name (worker-wide uniqueness) — throws without writing', () => {
+    // wrangler requires every binding NAME to be unique across the ENTIRE worker,
+    // not just within queues.producers. QUEUE_JOBS is already a D1 binding, so
+    // appending a producer with that binding would emit a cross-type duplicate
+    // wrangler 4.x rejects at deploy. Fail closed instead.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [{ "binding": "QUEUE_JOBS", "database_name": "app", "database_id": "id" }]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"QUEUE_JOBS" is already used by a D1 Database binding/);
+
+    // Fail closed — the file is byte-unchanged.
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('fails closed when the desired producer binding collides with a KV binding name — throws without writing', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "kv_namespaces": [{ "binding": "QUEUE_JOBS", "id": "abc" }]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"QUEUE_JOBS" is already used by a KV Namespace binding/);
+
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('fails closed when the desired producer binding collides with a var name — throws without writing', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "vars": { "QUEUE_JOBS": "some-value" }
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"QUEUE_JOBS" is already used by an? Environment Variable binding/);
+
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('negative control: a producer binding that collides with nothing appends normally', () => {
+    // A DB binding named DB does NOT collide with the QUEUE_JOBS producer binding,
+    // so the append proceeds — the worker-wide guard is precise, not paranoid.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [{ "binding": "DB", "database_name": "app", "database_id": "id" }],
+  "kv_namespaces": [{ "binding": "KV", "id": "abc" }]
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+    });
+    expect(result.modified).toBe(true);
+
+    const q = parseRaw('wrangler.jsonc').queues as { producers: Array<Record<string, unknown>> };
+    expect(q.producers).toEqual([{ queue: 'jobs', binding: 'QUEUE_JOBS' }]);
+  });
+
+  it('worker-wide guard does not fire on the idempotent same-queue producer path (no false collision)', () => {
+    // QUEUE_JOBS already exists as a producer for the SAME queue. That is a no-op
+    // upsert (index >= 0), so the append-only worker-wide collision guard never
+    // runs — a producer already owning its binding for its own queue is not a
+    // collision.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": {
+    "producers": [{ "queue": "jobs", "binding": "QUEUE_JOBS" }]
+  }
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+    });
+    expect(result.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('fails closed when overwriting migrations_dir would invalidate a companion migrations_pattern — throws without writing', () => {
+    // A valid drizzle pair (migrations_dir + migrations_pattern) becomes invalid
+    // when the patch changes migrations_dir, because wrangler requires the pattern
+    // to start with `${migrations_dir}/`. Fail closed rather than break `wrangler
+    // d1 migrations`, and never rewrite the user-owned pattern.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "app",
+      "database_id": "id",
+      "migrations_dir": "drizzle",
+      "migrations_pattern": "drizzle/*/migration.sql"
+    }
+  ]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1MigrationsDir: { binding: 'DB', dir: './db/migrations' },
+      }),
+    ).toThrow(/"migrations_pattern": "drizzle\/\*\/migration\.sql", which is not under/);
+
+    // Fail closed — the file is byte-unchanged (pattern untouched).
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('migrations_dir upsert proceeds when there is no migrations_pattern (unchanged behavior, idempotent)', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [
+    { "binding": "DB", "database_name": "app", "database_id": "id" }
+  ]
+}`,
+    );
+
+    const patch = { d1MigrationsDir: { binding: 'DB', dir: 'drizzle' } };
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+    const d1 = parseRaw('wrangler.jsonc').d1_databases as Array<Record<string, unknown>>;
+    expect(d1[0]).toMatchObject({ binding: 'DB', migrations_dir: 'drizzle' });
+
+    // Idempotent — a second run writes nothing and is byte-identical.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('migrations_dir upsert is a no-op when a compatible migrations_pattern already matches the requested dir', () => {
+    // The existing pattern is under the requested dir, so setting the (already
+    // equal) migrations_dir is a byte-idempotent no-op that leaves the pattern
+    // untouched.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "app",
+      "database_id": "id",
+      "migrations_dir": "db/migrations",
+      "migrations_pattern": "db/migrations/0001_init.sql"
+    }
+  ]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    });
+    expect(result.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
   it('inserting migrations_dir keeps a trailing inline comment on the property it documented (no reassociation)', () => {
     // The D1 entry's LAST property carries a trailing inline comment. Naively
     // inserting migrations_dir via a formatting modify() reflows the region and
