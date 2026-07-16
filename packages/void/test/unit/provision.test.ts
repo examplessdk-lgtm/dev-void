@@ -1,4 +1,17 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdir,
+  mkdirSync,
+  readFileSync,
+  realpath,
+  rmdir,
+  rmdirSync,
+  rmSync,
+  stat,
+  utimes,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { parse as parseJsoncRaw } from 'jsonc-parser';
 import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
@@ -11,6 +24,12 @@ import {
   type RunWrangler,
   type RunWranglerResult,
 } from '../../src/cli/provision.ts';
+
+/**
+ * A passthrough of proper-lockfile's callback-style fs seam (mkdir/stat/utimes/rmdir/
+ * realpath + a sync rmdir). The F2 unlock-failure test overrides `rmdir` on top of this.
+ */
+const passthruFs = { mkdir, stat, utimes, rmdir, realpath, rmdirSync };
 
 const tmpDir = join(import.meta.dirname, '.tmp-provision-test');
 const wranglerPath = join(tmpDir, 'wrangler.jsonc');
@@ -84,6 +103,19 @@ function isCall(argv: Array<string>, ...prefix: Array<string>): boolean {
 const ok = (stdout = ''): RunWranglerResult => ({ stdout, stderr: '', status: 0 });
 const fail = (stdout: string, stderr = ''): RunWranglerResult => ({ stdout, stderr, status: 1 });
 
+// Valid-FORMAT synthetic ids for fixtures. F4's validators require REAL shapes:
+// D1 database_id is a hyphenated UUID; KV + Hyperdrive ids are 32-char lowercase hex.
+// ASCII-hex of the seed, zero-padded to 32 — deterministic, distinct, and ORDER-PRESERVING
+// on equal-length seeds (so lexicographic tie-break assertions stay valid).
+function hex32(seed: string): string {
+  const raw = Buffer.from(seed, 'utf8').toString('hex').slice(0, 32);
+  return (raw + '0'.repeat(32)).slice(0, 32);
+}
+function uuid(seed: string): string {
+  const h = hex32(seed);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
 /** Mimic `wrangler <res> create --update-config`: upsert a binding entry by binding. */
 function simulateUpdateConfig(
   field: string,
@@ -108,7 +140,7 @@ describe('provisionCloudflareResources — read-first', () => {
   it('skips D1 create when the binding already has a real database_id (records reused, no wrangler call)', async () => {
     setup(
       JSON.stringify({
-        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: 'real-uuid-1' }],
+        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: uuid('db1') }],
       }),
     );
     const { run, calls } = makeRunner([]);
@@ -121,7 +153,7 @@ describe('provisionCloudflareResources — read-first', () => {
     // Read-first: no wrangler invocation at all (migrations_dir is filled via the writer).
     expect(calls).toEqual([]);
     expect(result.resources).toEqual([
-      { kind: 'd1', binding: 'DB', name: 'myapp-db', action: 'reused', id: 'real-uuid-1' },
+      { kind: 'd1', binding: 'DB', name: 'myapp-db', action: 'reused', id: uuid('db1') },
     ]);
   });
 
@@ -139,7 +171,7 @@ describe('provisionCloudflareResources — read-first', () => {
           simulateUpdateConfig('d1_databases', {
             binding: 'DB',
             database_name: 'myapp-db',
-            database_id: 'created-uuid',
+            database_id: uuid('created'),
           });
           return ok();
         },
@@ -165,7 +197,7 @@ describe('provisionCloudflareResources — argv injection safety', () => {
       {
         match: /^hyperdrive create /,
         reply: () => {
-          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: 'new-hd-id' });
+          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: hex32('newhd') });
           return ok();
         },
       },
@@ -211,7 +243,7 @@ describe('provisionCloudflareResources — argv injection safety', () => {
           reply: () => {
             simulateUpdateConfig(
               'd1_databases',
-              { binding: 'DB', database_name: 'myapp-db', database_id: 'created-uuid' },
+              { binding: 'DB', database_name: 'myapp-db', database_id: uuid('created') },
               spacedPath,
             );
             return ok();
@@ -250,7 +282,7 @@ describe('provisionCloudflareResources — config discovery (fail closed, single
     setup(
       '﻿' +
         JSON.stringify({
-          d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: 'real-uuid-1' }],
+          d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: uuid('db1') }],
         }),
     );
     const { run, calls } = makeRunner([]);
@@ -262,7 +294,7 @@ describe('provisionCloudflareResources — config discovery (fail closed, single
     );
     // A BOM must NOT defeat read-first (a fail-open-to-{} parse would re-provision).
     expect(calls.some((c) => c[0] === 'd1')).toBe(false);
-    expect(result.resources[0]).toMatchObject({ kind: 'd1', action: 'reused', id: 'real-uuid-1' });
+    expect(result.resources[0]).toMatchObject({ kind: 'd1', action: 'reused', id: uuid('db1') });
     // BOM survives the writer's migrations_dir fill.
     expect(readFileSync(wranglerPath, 'utf-8').charCodeAt(0)).toBe(0xfeff);
   });
@@ -294,7 +326,7 @@ describe('provisionCloudflareResources — config discovery (fail closed, single
     const { run } = makeRunner([
       {
         match: /^kv namespace list/,
-        reply: () => ok(JSON.stringify([{ id: 'real-kv-id', title: 'myapp-kv' }])),
+        reply: () => ok(JSON.stringify([{ id: hex32('kv'), title: 'myapp-kv' }])),
       },
     ]);
     const result = await provisionCloudflareResources(
@@ -306,7 +338,7 @@ describe('provisionCloudflareResources — config discovery (fail closed, single
     expect(result.configPath).toBe(jsonPath);
     // The adopted id landed in the passed file (wrangler.json) — NOT split into .jsonc.
     const jsonAfter = parseJsoncRaw(readFileSync(jsonPath, 'utf-8')) as Record<string, unknown>;
-    expect((jsonAfter.kv_namespaces as Array<Record<string, unknown>>)[0].id).toBe('real-kv-id');
+    expect((jsonAfter.kv_namespaces as Array<Record<string, unknown>>)[0].id).toBe(hex32('kv'));
     // wrangler.jsonc is untouched (still the placeholder).
     const jsoncAfter = parseJsoncRaw(readFileSync(jsoncPath, 'utf-8')) as Record<string, unknown>;
     expect((jsoncAfter.kv_namespaces as Array<Record<string, unknown>>)[0].id).toBe('local');
@@ -324,7 +356,7 @@ describe('provisionCloudflareResources — D1', () => {
           simulateUpdateConfig('d1_databases', {
             binding: 'DB',
             database_name: 'myapp-db',
-            database_id: 'created-uuid',
+            database_id: uuid('created'),
           });
           return ok();
         },
@@ -355,7 +387,7 @@ describe('provisionCloudflareResources — D1', () => {
       {
         binding: 'DB',
         database_name: 'myapp-db',
-        database_id: 'created-uuid',
+        database_id: uuid('created'),
         migrations_dir: './db/migrations',
       },
     ]);
@@ -370,7 +402,7 @@ describe('provisionCloudflareResources — D1', () => {
     // fill migrations_dir — without re-creating (no duplicate D1).
     setup(
       JSON.stringify({
-        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: 'real-uuid-1' }],
+        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: uuid('db1') }],
       }),
     );
     const { run, calls } = makeRunner([]);
@@ -386,11 +418,11 @@ describe('provisionCloudflareResources — D1', () => {
     expect(d1[0]).toEqual({
       binding: 'DB',
       database_name: 'myapp-db',
-      database_id: 'real-uuid-1',
+      database_id: uuid('db1'),
       migrations_dir: './db/migrations',
     });
     expect(result.resources).toEqual([
-      { kind: 'd1', binding: 'DB', name: 'myapp-db', action: 'reused', id: 'real-uuid-1' },
+      { kind: 'd1', binding: 'DB', name: 'myapp-db', action: 'reused', id: uuid('db1') },
     ]);
   });
 
@@ -403,7 +435,7 @@ describe('provisionCloudflareResources — D1', () => {
     const { run, calls } = makeRunner([
       {
         match: /^d1 list --json/,
-        reply: () => ok(JSON.stringify([{ uuid: 'existing-uuid', name: 'myapp-db' }])),
+        reply: () => ok(JSON.stringify([{ uuid: uuid('existing'), name: 'myapp-db' }])),
       },
     ]);
     const result = await provisionCloudflareResources(
@@ -419,12 +451,12 @@ describe('provisionCloudflareResources — D1', () => {
       {
         binding: 'DB',
         database_name: 'myapp-db',
-        database_id: 'existing-uuid',
+        database_id: uuid('existing'),
         migrations_dir: './db/migrations',
       },
     ]);
     expect(result.resources).toEqual([
-      { kind: 'd1', binding: 'DB', name: 'myapp-db', action: 'adopted', id: 'existing-uuid' },
+      { kind: 'd1', binding: 'DB', name: 'myapp-db', action: 'adopted', id: uuid('existing') },
     ]);
   });
 
@@ -442,7 +474,7 @@ describe('provisionCloudflareResources — D1', () => {
       },
       {
         match: /^d1 info myapp-db --json/,
-        reply: () => ok(JSON.stringify({ uuid: 'raced-uuid', name: 'myapp-db' })),
+        reply: () => ok(JSON.stringify({ uuid: uuid('raced'), name: 'myapp-db' })),
       },
     ]);
     const result = await provisionCloudflareResources(
@@ -467,13 +499,13 @@ describe('provisionCloudflareResources — D1', () => {
       ['d1', 'info', 'myapp-db', '--json', '-c', wranglerPath, '--env='],
     ]);
     const d1 = readConfig().d1_databases as Array<Record<string, unknown>>;
-    expect(d1[0]).toMatchObject({ binding: 'DB', database_id: 'raced-uuid' });
+    expect(d1[0]).toMatchObject({ binding: 'DB', database_id: uuid('raced') });
     expect(result.resources[0]).toEqual({
       kind: 'd1',
       binding: 'DB',
       name: 'myapp-db',
       action: 'adopted',
-      id: 'raced-uuid',
+      id: uuid('raced'),
     });
   });
 
@@ -612,7 +644,7 @@ describe('provisionCloudflareResources — KV', () => {
     const { run, calls } = makeRunner([
       {
         match: /^kv namespace list/,
-        reply: () => ok(JSON.stringify([{ id: 'real-kv-id', title: 'myapp-kv' }])),
+        reply: () => ok(JSON.stringify([{ id: hex32('kv'), title: 'myapp-kv' }])),
       },
     ]);
     const result = await provisionCloudflareResources(
@@ -623,9 +655,9 @@ describe('provisionCloudflareResources — KV', () => {
     );
     expect(calls).toEqual([['kv', 'namespace', 'list', '-c', wranglerPath, '--env=']]);
     const kv = readConfig().kv_namespaces as Array<Record<string, unknown>>;
-    expect(kv).toEqual([{ binding: 'KV', id: 'real-kv-id' }]);
+    expect(kv).toEqual([{ binding: 'KV', id: hex32('kv') }]);
     expect(result.resources).toEqual([
-      { kind: 'kv', binding: 'KV', name: 'myapp-kv', action: 'adopted', id: 'real-kv-id' },
+      { kind: 'kv', binding: 'KV', name: 'myapp-kv', action: 'adopted', id: hex32('kv') },
     ]);
   });
 
@@ -636,7 +668,7 @@ describe('provisionCloudflareResources — KV', () => {
       {
         match: /^kv namespace create /,
         reply: () => {
-          simulateUpdateConfig('kv_namespaces', { binding: 'ISR_CACHE', id: 'new-kv-id' });
+          simulateUpdateConfig('kv_namespaces', { binding: 'ISR_CACHE', id: hex32('newkv') });
           return ok();
         },
       },
@@ -727,9 +759,9 @@ describe('provisionCloudflareResources — KV', () => {
         reply: () =>
           ok(
             JSON.stringify([
-              { id: 'zzz', title: 'myapp-kv' },
-              { id: 'aaa', title: 'myapp-kv' },
-              { id: 'mmm', title: 'other' },
+              { id: hex32('zzz'), title: 'myapp-kv' },
+              { id: hex32('aaa'), title: 'myapp-kv' },
+              { id: hex32('mmm'), title: 'other' },
             ]),
           ),
       },
@@ -740,11 +772,12 @@ describe('provisionCloudflareResources — KV', () => {
       { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }] },
       { runWrangler: run, log: { info: () => {}, warn: (m) => warnings.push(m) } },
     );
-    expect(result.resources[0]).toMatchObject({ action: 'adopted', id: 'aaa' });
-    expect((readConfig().kv_namespaces as Array<Record<string, unknown>>)[0].id).toBe('aaa');
-    expect(warnings.some((w) => w.includes('multiple KV namespaces') && w.includes('aaa'))).toBe(
-      true,
-    );
+    // hex32 is order-preserving on equal-length seeds, so hex32('aaa') < hex32('zzz').
+    expect(result.resources[0]).toMatchObject({ action: 'adopted', id: hex32('aaa') });
+    expect((readConfig().kv_namespaces as Array<Record<string, unknown>>)[0].id).toBe(hex32('aaa'));
+    expect(
+      warnings.some((w) => w.includes('multiple KV namespaces') && w.includes(hex32('aaa'))),
+    ).toBe(true);
   });
 
   it('provisions each KV binding independently (ISR_CACHE + app KV)', async () => {
@@ -755,7 +788,7 @@ describe('provisionCloudflareResources — KV', () => {
         match: /^kv namespace create /,
         reply: (sub) => {
           const binding = sub.includes('ISR_CACHE') ? 'ISR_CACHE' : 'KV';
-          simulateUpdateConfig('kv_namespaces', { binding, id: `${binding}-id` });
+          simulateUpdateConfig('kv_namespaces', { binding, id: hex32(binding) });
           return ok();
         },
       },
@@ -822,7 +855,7 @@ describe('provisionCloudflareResources — idempotent re-run', () => {
     const first = makeRunner([
       {
         match: /^kv namespace list/,
-        reply: () => ok(JSON.stringify([{ id: 'real-kv-id', title: 'myapp-kv' }])),
+        reply: () => ok(JSON.stringify([{ id: hex32('kv'), title: 'myapp-kv' }])),
       },
     ]);
     const desired: DesiredResourceSet = {
@@ -842,7 +875,7 @@ describe('provisionCloudflareResources — idempotent re-run', () => {
     });
     expect(second.calls).toEqual([]);
     expect(result.resources).toEqual([
-      { kind: 'kv', binding: 'KV', name: 'myapp-kv', action: 'reused', id: 'real-kv-id' },
+      { kind: 'kv', binding: 'KV', name: 'myapp-kv', action: 'reused', id: hex32('kv') },
     ]);
     expect(readFileSync(wranglerPath, 'utf-8')).toBe(afterFirst);
   });
@@ -985,7 +1018,7 @@ describe('provisionCloudflareResources — R2', () => {
 
 describe('provisionCloudflareResources — Hyperdrive', () => {
   it('reuses when the hyperdrive binding already has a real id (no wrangler call)', async () => {
-    setup(JSON.stringify({ hyperdrive: [{ binding: 'HYPERDRIVE', id: 'real-hd-id' }] }));
+    setup(JSON.stringify({ hyperdrive: [{ binding: 'HYPERDRIVE', id: hex32('hd') }] }));
     const { run, calls } = makeRunner([]);
     const result = await provisionCloudflareResources(
       tmpDir,
@@ -1003,7 +1036,7 @@ describe('provisionCloudflareResources — Hyperdrive', () => {
         binding: 'HYPERDRIVE',
         name: 'myapp-hd',
         action: 'reused',
-        id: 'real-hd-id',
+        id: hex32('hd'),
       },
     ]);
   });
@@ -1023,21 +1056,21 @@ describe('provisionCloudflareResources — Hyperdrive', () => {
         log: silentLog,
         listHyperdriveConfigs: async () => [
           { id: 'other-hd', name: 'someone-else' },
-          { id: 'existing-hd-id', name: 'myapp-hd' },
+          { id: hex32('existing'), name: 'myapp-hd' },
         ],
       },
     );
     // No wrangler create — existence via the injected REST seam, id via the writer.
     expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
     const hd = readConfig().hyperdrive as Array<Record<string, unknown>>;
-    expect(hd).toEqual([{ binding: 'HYPERDRIVE', id: 'existing-hd-id' }]);
+    expect(hd).toEqual([{ binding: 'HYPERDRIVE', id: hex32('existing') }]);
     expect(result.resources).toEqual([
       {
         kind: 'hyperdrive',
         binding: 'HYPERDRIVE',
         name: 'myapp-hd',
         action: 'adopted',
-        id: 'existing-hd-id',
+        id: hex32('existing'),
       },
     ]);
   });
@@ -1048,7 +1081,7 @@ describe('provisionCloudflareResources — Hyperdrive', () => {
       {
         match: /^hyperdrive create /,
         reply: () => {
-          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: 'new-hd-id' });
+          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: hex32('newhd') });
           return ok();
         },
       },
@@ -1388,7 +1421,7 @@ describe('provisionCloudflareResources — account reconciliation + config pin (
           simulateUpdateConfig('d1_databases', {
             binding: 'DB',
             database_name: 'myapp-db',
-            database_id: 'created-under-A',
+            database_id: uuid('createdA'),
           });
           return ok();
         },
@@ -1411,7 +1444,7 @@ describe('provisionCloudflareResources — account reconciliation + config pin (
     const after1 = readConfig();
     expect(after1.account_id).toBe('acct-A');
     expect((after1.d1_databases as Array<Record<string, unknown>>)[0].database_id).toBe(
-      'created-under-A',
+      uuid('createdA'),
     );
 
     // Run 2 retries under account B → must fail closed at reconciliation with NO
@@ -1449,7 +1482,7 @@ describe('provisionCloudflareResources — account reconciliation + config pin (
           simulateUpdateConfig('d1_databases', {
             binding: 'DB',
             database_name: 'myapp-db',
-            database_id: 'created-uuid',
+            database_id: uuid('created'),
           });
           return ok();
         },
@@ -1458,7 +1491,7 @@ describe('provisionCloudflareResources — account reconciliation + config pin (
       {
         match: /^kv namespace create /,
         reply: () => {
-          simulateUpdateConfig('kv_namespaces', { binding: 'KV', id: 'new-kv-id' });
+          simulateUpdateConfig('kv_namespaces', { binding: 'KV', id: hex32('newkv') });
           return ok();
         },
       },
@@ -1466,7 +1499,7 @@ describe('provisionCloudflareResources — account reconciliation + config pin (
       {
         match: /^r2 bucket create /,
         reply: () => {
-          simulateUpdateConfig('r2_buckets', { binding: 'STORAGE', bucket_name: 'b' });
+          simulateUpdateConfig('r2_buckets', { binding: 'STORAGE', bucket_name: 'bucket-b' });
           return ok();
         },
       },
@@ -1490,7 +1523,7 @@ describe('provisionCloudflareResources — account reconciliation + config pin (
         ...emptyDesired,
         d1: { binding: 'DB', name: 'myapp-db' },
         kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }],
-        r2: { binding: 'STORAGE', bucketName: 'b' },
+        r2: { binding: 'STORAGE', bucketName: 'bucket-b' },
         queues: ['jobs'],
       },
       { runWrangler: run, log: silentLog },
@@ -1582,7 +1615,7 @@ describe('provisionCloudflareResources — Hyperdrive discovery (F2 pagination +
       {
         body: {
           success: true,
-          result: [{ id: 'p2-hd', name: 'myapp-hd' }],
+          result: [{ id: hex32('p2hd'), name: 'myapp-hd' }],
           result_info: { total_count: 2 },
         },
       },
@@ -1601,8 +1634,8 @@ describe('provisionCloudflareResources — Hyperdrive discovery (F2 pagination +
       expect(urls.length).toBe(2); // both pages fetched
       expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
       const hd = readConfig().hyperdrive as Array<Record<string, unknown>>;
-      expect(hd).toEqual([{ binding: 'HYPERDRIVE', id: 'p2-hd' }]);
-      expect(result.resources[0]).toMatchObject({ action: 'adopted', id: 'p2-hd' });
+      expect(hd).toEqual([{ binding: 'HYPERDRIVE', id: hex32('p2hd') }]);
+      expect(result.resources[0]).toMatchObject({ action: 'adopted', id: hex32('p2hd') });
     } finally {
       restore();
     }
@@ -1939,7 +1972,7 @@ describe('provisionCloudflareResources — F1 account gate + env scrub (round 4)
             simulateUpdateConfig('d1_databases', {
               binding: 'DB',
               database_name: 'myapp-db',
-              database_id: 'created-under-A',
+              database_id: uuid('createdA'),
             });
             return ok();
           },
@@ -1960,7 +1993,7 @@ describe('provisionCloudflareResources — F1 account gate + env scrub (round 4)
       const after1 = readConfig();
       expect(after1.account_id).toBe('ambient-A');
       expect((after1.d1_databases as Array<Record<string, unknown>>)[0].database_id).toBe(
-        'created-under-A',
+        uuid('createdA'),
       );
 
       // Run 2 retries under account B → reconciliation A≠B fails closed, NO
@@ -2003,22 +2036,24 @@ describe('provisionCloudflareResources — F2 resource-name validation (round 4)
     createPrefix: Array<string>;
   }> = [
     {
-      label: /invalid D1 database name/,
+      // badNames all start with "-", so the universal option-injection guard fires FIRST
+      // (F5 split) with "refusing to pass an unsafe <label> name", before the grammar check.
+      label: /unsafe D1 database name/,
       desired: (name) => ({ ...emptyDesired, d1: { binding: 'DB', name } }),
       createPrefix: ['d1', 'create'],
     },
     {
-      label: /invalid KV namespace name/,
+      label: /unsafe KV namespace name/,
       desired: (name) => ({ ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: name }] }),
       createPrefix: ['kv', 'namespace', 'create'],
     },
     {
-      label: /invalid R2 bucket name/,
+      label: /unsafe R2 bucket name/,
       desired: (name) => ({ ...emptyDesired, r2: { binding: 'STORAGE', bucketName: name } }),
       createPrefix: ['r2', 'bucket', 'create'],
     },
     {
-      label: /invalid Hyperdrive config name/,
+      label: /unsafe Hyperdrive config name/,
       desired: (name) => ({
         ...emptyDesired,
         hyperdrive: { binding: 'HYPERDRIVE', name, connectionString: 'postgres://x' },
@@ -2026,7 +2061,7 @@ describe('provisionCloudflareResources — F2 resource-name validation (round 4)
       createPrefix: ['hyperdrive', 'create'],
     },
     {
-      label: /invalid queue name/,
+      label: /unsafe queue name/,
       desired: (name) => ({ ...emptyDesired, queues: [name] }),
       createPrefix: ['queues', 'create'],
     },
@@ -2182,7 +2217,7 @@ describe('provisionCloudflareResources — F5 strict D1 identity (round 4)', () 
         match: /^d1 list --json/,
         // Empty-string uuid must NOT shadow the valid database_id.
         reply: () =>
-          ok(JSON.stringify([{ uuid: '', database_id: 'real-db-id', name: 'myapp-db' }])),
+          ok(JSON.stringify([{ uuid: '', database_id: uuid('realdb'), name: 'myapp-db' }])),
       },
     ]);
     const result = await provisionCloudflareResources(
@@ -2193,8 +2228,8 @@ describe('provisionCloudflareResources — F5 strict D1 identity (round 4)', () 
     );
     expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
     const d1 = readConfig().d1_databases as Array<Record<string, unknown>>;
-    expect(d1[0].database_id).toBe('real-db-id');
-    expect(result.resources[0]).toMatchObject({ action: 'adopted', id: 'real-db-id' });
+    expect(d1[0].database_id).toBe(uuid('realdb'));
+    expect(result.resources[0]).toMatchObject({ action: 'adopted', id: uuid('realdb') });
   });
 
   it('fails closed when the target-named list member has conflicting non-empty ids (ambiguous)', async () => {
@@ -2280,7 +2315,7 @@ describe('provisionCloudflareResources — F1 top-level env pin via --env= (roun
             simulateUpdateConfig('d1_databases', {
               binding: 'DB',
               database_name: 'myapp-db',
-              database_id: 'created-uuid',
+              database_id: uuid('created'),
             });
             return ok();
           },
@@ -2382,7 +2417,7 @@ describe('provisionCloudflareResources — F3 absolute config path (round 5)', (
     const { run, calls } = makeRunner([
       {
         match: /^kv namespace list/,
-        reply: () => ok(JSON.stringify([{ id: 'real-kv-id', title: 'myapp-kv' }])),
+        reply: () => ok(JSON.stringify([{ id: hex32('kv'), title: 'myapp-kv' }])),
       },
     ]);
     const result = await provisionCloudflareResources(
@@ -2401,7 +2436,7 @@ describe('provisionCloudflareResources — F3 absolute config path (round 5)', (
     }
     // The adopted id landed in root/wrangler.jsonc — the file Node read from too.
     const after = parseJsoncRaw(readFileSync(abs, 'utf-8')) as Record<string, unknown>;
-    expect((after.kv_namespaces as Array<Record<string, unknown>>)[0].id).toBe('real-kv-id');
+    expect((after.kv_namespaces as Array<Record<string, unknown>>)[0].id).toBe(hex32('kv'));
   });
 });
 
@@ -2466,7 +2501,9 @@ describe('provisionCloudflareResources — F5 one D1 normalizer (round 5)', () =
       {
         match: /^d1 list --json/,
         reply: () =>
-          ok(JSON.stringify([{ name: 'myapp-db', database_name: 'myapp-db', uuid: 'the-id' }])),
+          ok(
+            JSON.stringify([{ name: 'myapp-db', database_name: 'myapp-db', uuid: uuid('theid') }]),
+          ),
       },
     ]);
     const result = await provisionCloudflareResources(
@@ -2476,9 +2513,9 @@ describe('provisionCloudflareResources — F5 one D1 normalizer (round 5)', () =
       { runWrangler: run, log: silentLog },
     );
     expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
-    expect(result.resources[0]).toMatchObject({ action: 'adopted', id: 'the-id' });
+    expect(result.resources[0]).toMatchObject({ action: 'adopted', id: uuid('theid') });
     const d1 = readConfig().d1_databases as Array<Record<string, unknown>>;
-    expect(d1[0].database_id).toBe('the-id');
+    expect(d1[0].database_id).toBe(uuid('theid'));
   });
 });
 
@@ -2499,7 +2536,7 @@ describe('provisionCloudflareResources — transport account context (round 6 F1
         simulateUpdateConfig('d1_databases', {
           binding: 'DB',
           database_name: 'myapp-db',
-          database_id: 'db-id',
+          database_id: uuid('dbid'),
         });
         return ok();
       }
@@ -2507,7 +2544,7 @@ describe('provisionCloudflareResources — transport account context (round 6 F1
         return ok('[]');
       }
       if (/^kv namespace create /.test(sub)) {
-        simulateUpdateConfig('kv_namespaces', { binding: 'KV', id: 'kv-id' });
+        simulateUpdateConfig('kv_namespaces', { binding: 'KV', id: hex32('kvid') });
         return ok();
       }
       return ok();
@@ -2701,6 +2738,152 @@ describe('provisionCloudflareResources — resource-specific create postconditio
   });
 });
 
+describe('provisionCloudflareResources — F4 resource-specific real-id validators', () => {
+  it('KV: an id of " " is NOT real — runs discovery instead of read-first reuse', async () => {
+    setup(JSON.stringify({ account_id: 'acct', kv_namespaces: [{ binding: 'KV', id: ' ' }] }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^kv namespace list/,
+        reply: () => ok(JSON.stringify([{ id: hex32('kv'), title: 'myapp-kv' }])),
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }] },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(calls.some((c) => isCall(c, 'kv', 'namespace', 'list'))).toBe(true);
+    expect(result.resources[0]).toMatchObject({ action: 'adopted', id: hex32('kv') });
+  });
+
+  it('D1: an id of "xyz" is NOT real — runs discovery instead of read-first reuse', async () => {
+    setup(
+      JSON.stringify({
+        account_id: 'acct',
+        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: 'xyz' }],
+      }),
+    );
+    const { run, calls } = makeRunner([
+      {
+        match: /^d1 list --json/,
+        reply: () => ok(JSON.stringify([{ name: 'myapp-db', database_id: uuid('db') }])),
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(calls.some((c) => isCall(c, 'd1', 'list'))).toBe(true);
+    expect(result.resources[0]).toMatchObject({ action: 'adopted', id: uuid('db') });
+  });
+
+  it('KV: create postcondition FAILS when --update-config wrote a non-hex id', async () => {
+    setup(JSON.stringify({ account_id: 'acct' }));
+    const { run } = makeRunner([
+      { match: /^kv namespace list/, reply: () => ok('[]') },
+      {
+        match: /^kv namespace create/,
+        reply: () => {
+          simulateUpdateConfig('kv_namespaces', { binding: 'KV', id: 'not-a-real-id' });
+          return ok();
+        },
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }] },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/does not hold the expected KV namespace/);
+  });
+
+  it('D1: a correctly-formatted UUID is accepted as read-first reuse (no wrangler call)', async () => {
+    setup(
+      JSON.stringify({
+        account_id: 'acct',
+        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: uuid('db') }],
+      }),
+    );
+    const { run, calls } = makeRunner([]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(result.resources[0]).toMatchObject({ action: 'reused', id: uuid('db') });
+    expect(calls.some((c) => isCall(c, 'd1', 'list'))).toBe(false);
+  });
+});
+
+describe('provisionCloudflareResources — F5 KV title grammar vs option-injection guard', () => {
+  it('accepts a KV title with spaces ("My Own Namespace") and passes it as ONE literal argv element', async () => {
+    setup(JSON.stringify({ account_id: 'acct' }));
+    const { run, calls } = makeRunner([
+      { match: /^kv namespace list/, reply: () => ok('[]') },
+      {
+        match: /^kv namespace create/,
+        reply: () => {
+          simulateUpdateConfig('kv_namespaces', { binding: 'KV', id: hex32('kv') });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'My Own Namespace' }] },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(result.resources[0]).toMatchObject({ kind: 'kv', action: 'created' });
+    const createCall = calls.find((c) => isCall(c, 'kv', 'namespace', 'create'));
+    expect(createCall).toContain('My Own Namespace'); // single token, not split on spaces
+  });
+
+  it('rejects a leading-"-" name for every resource kind before any wrangler call', async () => {
+    const desireds = [
+      { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: '--help' }] },
+      { ...emptyDesired, d1: { binding: 'DB', name: '-x' } },
+      { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: '-b' } },
+      {
+        ...emptyDesired,
+        hyperdrive: { binding: 'HD', name: '--config', connectionString: 'postgres://x' },
+      },
+      { ...emptyDesired, queues: ['-q'] },
+    ];
+    for (const desired of desireds) {
+      setup(JSON.stringify({ account_id: 'acct' }));
+      const { run, calls } = makeRunner([]);
+      await expect(
+        provisionCloudflareResources(tmpDir, wranglerPath, desired, {
+          runWrangler: run,
+          log: silentLog,
+        }),
+      ).rejects.toThrow(/unsafe|refusing to pass/);
+      expect(calls.length).toBe(0);
+    }
+  });
+
+  it('rejects an R2 bucket name with invalid characters (uppercase/underscore)', async () => {
+    setup(JSON.stringify({ account_id: 'acct' }));
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'My_Bucket' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/invalid R2 bucket name/);
+    expect(calls.length).toBe(0);
+  });
+});
+
 describe('provisionCloudflareResources — whole-provision cross-process lock (F1/F2, proper-lockfile)', () => {
   // proper-lockfile locks a dedicated adjacent MARKER file (persists between runs) and
   // implements the mutex as `${marker}.lock` DIRECTORY (removed on release). "No leak"
@@ -2718,7 +2901,10 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
       const run: RunWrangler = (args) => {
         if (isCall(args, 'hyperdrive', 'create')) {
           createCalls++;
-          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: `hd-${createCalls}` });
+          simulateUpdateConfig('hyperdrive', {
+            binding: 'HYPERDRIVE',
+            id: hex32('hd-' + createCalls),
+          });
           return ok();
         }
         return ok();
@@ -2768,7 +2954,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
       {
         match: /^hyperdrive create /,
         reply: () => {
-          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: 'hd-real' });
+          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: hex32('hd-real') });
           return ok();
         },
       },
@@ -2844,7 +3030,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
             simulateUpdateConfig('d1_databases', {
               binding: 'DB',
               database_name: 'myapp-db',
-              database_id: `db-${account}`,
+              database_id: uuid('db-' + account),
             });
             return ok();
           }
@@ -2880,7 +3066,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
       const winner = cfg.account_id as string;
       expect(['acct-A', 'acct-B']).toContain(winner);
       const d1 = (cfg.d1_databases as Array<Record<string, unknown>>)[0];
-      expect(d1.database_id).toBe(`db-${winner}`);
+      expect(d1.database_id).toBe(uuid('db-' + winner));
       // Mutex released — no leak.
       expect(existsSync(lockMutex)).toBe(false);
     } finally {
@@ -2890,5 +3076,44 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
         process.env.CLOUDFLARE_ACCOUNT_ID = savedAmbient;
       }
     }
+  });
+
+  it('F1 — a wrangler call blocking past a SHORT stale window does NOT let a second process steal the mutex (async heartbeat keeps it fresh)', async () => {
+    setup(JSON.stringify({ account_id: 'acct', kv_namespaces: [{ binding: 'KV', id: 'local' }] }));
+    const run: RunWrangler = async (args) => {
+      if (isCall(args, 'kv', 'namespace', 'list')) {
+        await delay(3000); // blocks (async) for 3s > the 2s stale window
+        return ok(JSON.stringify([{ id: hex32('kv'), title: 'myapp-kv' }]));
+      }
+      return ok();
+    };
+    const prov = provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }] },
+      { runWrangler: run, log: silentLog, lockOptions: { stale: 2000, update: 1000, retries: 0 } },
+    );
+    // 2.5s into the block — PAST the 2s stale window. If the async heartbeat did not keep the
+    // mutex fresh, a retries:0 acquire would STEAL it; it must be REFUSED instead.
+    await delay(2500);
+    await expect(acquireProvisionLock(wranglerPath, { stale: 2000, retries: 0 })).rejects.toThrow();
+    const result = await prov;
+    expect(result.resources[0]).toMatchObject({ kind: 'kv', action: 'adopted', id: hex32('kv') });
+    expect(existsSync(lockMutex)).toBe(false);
+  }, 15000);
+
+  it('F2 — a genuine unlock failure REJECTS the provision (leaked mutex surfaced, not swallowed)', async () => {
+    setup(JSON.stringify({ account_id: 'acct' }));
+    const failingFs = {
+      ...passthruFs,
+      rmdir: (_p: string, cb: (e: Error | null) => void) =>
+        cb(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })),
+    };
+    await expect(
+      provisionCloudflareResources(tmpDir, wranglerPath, emptyDesired, {
+        log: silentLog,
+        lockOptions: { fs: failingFs },
+      }),
+    ).rejects.toThrow(/failed to release the cross-process provision lock/);
   });
 });

@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { parse, type ParseError } from 'jsonc-parser';
 import { resolve } from 'pathe';
@@ -81,7 +81,19 @@ export interface WranglerCallContext {
   captureJson?: boolean;
 }
 
-export type RunWrangler = (args: Array<string>, opts: WranglerCallContext) => RunWranglerResult;
+/**
+ * F1 — the seam returns a Promise (or a plain value, which the choke point coerces
+ * with `Promise.resolve`). The default runner is ASYNC (`spawn`, awaited) so a slow
+ * wrangler call NEVER blocks the event loop, which keeps `proper-lockfile`'s heartbeat
+ * timer firing (a synchronous `spawnSync` would freeze the loop, so the heartbeat could
+ * not refresh the mutex mtime and another process could steal a lock we still hold).
+ * Injected unit-test stubs may stay synchronous (returning a plain `RunWranglerResult`)
+ * — `Promise.resolve` at the choke point wraps them transparently.
+ */
+export type RunWrangler = (
+  args: Array<string>,
+  opts: WranglerCallContext,
+) => RunWranglerResult | Promise<RunWranglerResult>;
 
 /** A Cloudflare Hyperdrive config as returned by the account-list existence check. */
 export interface HyperdriveConfig {
@@ -148,6 +160,42 @@ function isRealValue(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value !== 'local' && value !== 'default';
 }
 
+// --- F4: resource-SPECIFIC real-id format validators --------------------------
+// `isRealValue` alone (non-empty + not the `local`/`default` placeholders) let ANY
+// nonempty string — `" "`, `"xyz"` — satisfy read-first reuse AND the create
+// postcondition, so a resource could be reported provisioned with no valid identifier
+// and NO discovery. Each id class has a FIXED Cloudflare format (verified 2026-07
+// against wrangler 4.107 + live account resources):
+//   - D1 `database_id`:  a hyphenated UUID (e.g. `52b3bbc7-c473-4b26-9486-1345f5de61c4`).
+//   - KV namespace `id`: 32 lowercase-hex chars, no hyphens (e.g. `7c07b54c…153aa11a`).
+//   - Hyperdrive `id`:   32 lowercase-hex chars, no hyphens (e.g. `a8097c6a…34ad195c`) —
+//                        NOT a hyphenated UUID (confirmed from a live config).
+//   - R2 identity IS the `bucket_name` (see {@link R2_BUCKET_NAME_RE}).
+// These gate read-first reuse, discovery/adoption results, adoption writes, AND create
+// postconditions — so a placeholder OR a malformed id fails closed (→ discovery, or a
+// hard error) instead of being recorded as a real resource.
+const D1_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const HEX32_ID_RE = /^[0-9a-f]{32}$/i;
+/** R2 bucket names ARE the identity: wrangler 4.107's `isValidR2BucketName`. */
+const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
+
+/** A D1 `database_id` that is a real (non-placeholder) hyphenated UUID. */
+function isRealD1Id(value: unknown): value is string {
+  return isRealValue(value) && D1_ID_RE.test(value);
+}
+/** A KV namespace `id` that is a real (non-placeholder) 32-hex string. */
+function isRealKvId(value: unknown): value is string {
+  return isRealValue(value) && HEX32_ID_RE.test(value);
+}
+/** A Hyperdrive config `id` that is a real (non-placeholder) 32-hex string. */
+function isRealHyperdriveId(value: unknown): value is string {
+  return isRealValue(value) && HEX32_ID_RE.test(value);
+}
+/** An R2 `bucket_name` that is a real (non-placeholder) valid bucket name. */
+function isRealR2BucketName(value: unknown): value is string {
+  return isRealValue(value) && R2_BUCKET_NAME_RE.test(value);
+}
+
 const defaultLogger: ProvisionLogger = {
   info: (msg) => voidLog(msg),
   warn: (msg) => voidWarn(msg),
@@ -185,29 +233,92 @@ export function provisionEnv(accountId?: string): NodeJS.ProcessEnv {
 }
 
 /**
+ * Hard per-command timeout for a single wrangler invocation. A hung wrangler must
+ * NEVER hang the whole provision, so the default runner SIGKILLs a child that runs
+ * past this and reports a HARD failure (a non-null signal — see
+ * {@link normalizeRunWranglerResult}). With the ASYNC runner this bound is
+ * INDEPENDENT of {@link LOCK_STALE_MS}: awaiting the child keeps the event loop free,
+ * so `proper-lockfile`'s heartbeat refreshes the mutex throughout — the timeout only
+ * bounds a hang, it is not load-bearing for lock safety.
+ */
+const COMMAND_TIMEOUT_MS = 120_000;
+
+/**
  * Default `runWrangler`: resolves the project-local wrangler as an ARGV launcher
- * via Task 2's {@link resolveWranglerArgv} and runs it with `spawnSync` and
+ * via Task 2's {@link resolveWranglerArgv} and runs it with `spawn` and
  * `shell: false`, so every argument is passed literally (no shell parsing → no
  * injection). Captures stdout (for `--json` parsing) and stderr (for
  * error/collision detection). Never called in unit tests — those inject a stub.
+ *
+ * F1 — ASYNC (returns a Promise). `spawn` + `await` (vs. the old blocking
+ * `spawnSync`) keeps the Node event loop free while wrangler runs, so
+ * `proper-lockfile`'s update timer keeps refreshing the mutex mtime for the WHOLE
+ * provision — no wrangler call, however slow, can freeze the loop long enough for
+ * another process to see the lock stale and steal it while we still hold it. A
+ * {@link COMMAND_TIMEOUT_MS} SIGKILL guards against a hung child.
  */
 export function createDefaultRunWrangler(root: string): RunWrangler {
   const launcher = resolveWranglerArgv(root);
   const [command, ...prefix] = launcher;
-  return (args, opts) => {
-    const result = spawnSync(command, [...prefix, ...args], {
-      cwd: opts.cwd ?? root,
-      shell: false,
-      encoding: 'utf-8',
-      // F1 — pin the account PER CALL from the transport context, so the spawned
-      // wrangler targets the SAME reconciled account the config + Hyperdrive REST
-      // path use (no split-brain between the config pin and the ambient env).
-      env: provisionEnv(opts.accountId),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
+  return (args, opts) =>
+    new Promise<RunWranglerResult>((resolvePromise) => {
+      const child = spawn(command, [...prefix, ...args], {
+        cwd: opts.cwd ?? root,
+        shell: false,
+        // F1 — pin the account PER CALL from the transport context, so the spawned
+        // wrangler targets the SAME reconciled account the config + Hyperdrive REST
+        // path use (no split-brain between the config pin and the ambient env).
+        env: provisionEnv(opts.accountId),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      let stdout = '';
+      let stderr = '';
+      let timedOut = false;
+      let settled = false;
+      child.stdout?.setEncoding('utf-8');
+      child.stderr?.setEncoding('utf-8');
+      child.stdout?.on('data', (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr?.on('data', (chunk: string) => {
+        stderr += chunk;
+      });
+      // Hard timeout: SIGKILL the hung child. `close` then fires with a non-null
+      // signal, which `normalizeRunWranglerResult` classifies as a HARD failure.
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGKILL');
+      }, COMMAND_TIMEOUT_MS);
+      timer.unref?.();
+      const finish = (result: RunWranglerResult): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolvePromise(result);
+      };
+      // A spawn error (ENOENT, EACCES) may fire `error` WITHOUT a later `close`, so
+      // settle here too — a HARD failure (never mistaken for a clean/absent exit).
+      child.on('error', (error: Error) => {
+        finish(normalizeRunWranglerResult({ stdout, stderr, status: null, signal: null, error }));
+      });
+      child.on('close', (code, signal) => {
+        finish(
+          normalizeRunWranglerResult({
+            stdout,
+            stderr: timedOut
+              ? [stderr, `provision: wrangler exceeded the ${COMMAND_TIMEOUT_MS}ms command timeout`]
+                  .filter(Boolean)
+                  .join('\n')
+              : stderr,
+            status: code,
+            signal,
+          }),
+        );
+      });
     });
-    return normalizeRunWranglerResult(result);
-  };
 }
 
 /**
@@ -443,6 +554,16 @@ function selectHyperdriveMatch(
         `retry.`,
     );
   }
+  // F4 — the sole exact-name match must carry a real 32-hex Hyperdrive id before we adopt
+  // it. A non-empty-but-malformed id (`" "`, `"xyz"`) fails closed rather than binding the
+  // app to a bogus id.
+  if (named[0] && !isRealHyperdriveId(named[0].id)) {
+    throw new Error(
+      `provision: cannot adopt Hyperdrive config ${JSON.stringify(name)} — its id ` +
+        `${JSON.stringify(named[0].id)} is not a valid 32-character hex Hyperdrive id. Refusing to ` +
+        `bind the app to an unverified config; inspect the account and retry.`,
+    );
+  }
   return named[0];
 }
 
@@ -466,7 +587,25 @@ function selectHyperdriveMatch(
 // ownership-scoped release.
 
 interface ProvisionLock {
+  /**
+   * Drop the mutex. F2 — REJECTS on a genuine (non-`onCompromised`) unlock failure so a
+   * LEAKED lock is surfaced, never hidden behind a "successful" provision. Idempotent:
+   * repeated calls return the SAME settled promise.
+   */
   release: () => Promise<void>;
+}
+
+/**
+ * Overridable `proper-lockfile` knobs — production uses the module defaults; unit tests
+ * pass a SHORT `stale`/`update` (to exercise heartbeat freshness under a slow call) or a
+ * failing `fs` (to exercise a leaked-mutex unlock failure). `fs` is `proper-lockfile`'s
+ * callback-style filesystem seam (mkdir/stat/utimes/rmdir/realpath).
+ */
+export interface ProvisionLockOptions {
+  stale?: number;
+  update?: number;
+  retries?: number | { retries: number; factor?: number; minTimeout?: number; maxTimeout?: number };
+  fs?: unknown;
 }
 
 /**
@@ -475,6 +614,15 @@ interface ProvisionLock {
  * future one. A LIVE owner refreshes the mutex mtime every {@link LOCK_UPDATE_MS}
  * (strictly less than this), so it never expires by age. Generous vs. a real
  * provision's duration.
+ *
+ * F1 CORRECTNESS — this heartbeat is a `setTimeout` on the Node event loop, so it only
+ * fires while the loop is FREE. The default runner is ASYNC (`spawn`, awaited), so no
+ * wrangler call blocks the loop; between/`during` every `await` the pending update timer
+ * runs and refreshes the mtime. Fast synchronous bookkeeping (JSON parse, small config
+ * reads) is « `LOCK_UPDATE_MS`, so the mtime is continuously refreshed and NO other
+ * process ever sees this lock stale → it can never be stolen while we hold it. (The old
+ * blocking `spawnSync` could freeze the loop past `LOCK_STALE_MS`, starving the
+ * heartbeat AND `onCompromised`, which is exactly the race F1 closes.)
  */
 const LOCK_STALE_MS = 120_000;
 /** Refresh interval keeping a live owner's lock fresh (must be < {@link LOCK_STALE_MS}). */
@@ -499,32 +647,58 @@ const LOCK_RETRIES = { retries: 100, factor: 1.5, minTimeout: 200, maxTimeout: 2
  * mtime changed, or the mutex vanished under a live owner), provisioning must NEVER
  * continue — a compromised lock means another process may be racing the same config.
  */
-export async function acquireProvisionLock(configPath: string): Promise<ProvisionLock> {
+export async function acquireProvisionLock(
+  configPath: string,
+  lockOptions?: ProvisionLockOptions,
+): Promise<ProvisionLock> {
   const lockTarget = `${configPath}.void-provision.lock`;
   if (!existsSync(lockTarget)) {
     writeFileSync(lockTarget, '');
   }
+  const staleMs = lockOptions?.stale ?? LOCK_STALE_MS;
   const release = await lockfile.lock(lockTarget, {
-    stale: LOCK_STALE_MS,
-    update: LOCK_UPDATE_MS,
-    retries: LOCK_RETRIES,
+    stale: staleMs,
+    update: lockOptions?.update ?? LOCK_UPDATE_MS,
+    retries: lockOptions?.retries ?? LOCK_RETRIES,
+    // `proper-lockfile`'s callback-style fs seam — overridable so a test can force an
+    // unlock failure. Production uses the library default (graceful-fs).
+    ...(lockOptions?.fs !== undefined ? { fs: lockOptions.fs as never } : {}),
     onCompromised: (error) => {
       throw error;
     },
   });
-  let released = false;
-  return {
-    release: async () => {
-      if (released) {
+  // F2 — cache ONE shared release promise so a double-release is idempotent (the SAME
+  // settled promise is returned, never a second `proper-lockfile` unlock), and PROPAGATE
+  // a genuine unlock failure instead of swallowing it. `proper-lockfile` drops its own
+  // ownership state (`released = true`, `delete locks[file]`) BEFORE it rmdir's the mutex
+  // dir, so an EACCES/EBUSY/I/O rmdir failure leaves the `.lock` directory on disk — a
+  // LEAKED cross-process mutex that blocks future provisions until it goes stale — while
+  // the old code resolved "released" and reported the provision a success. We now surface
+  // it: the caller fails the provision. (Because that same drop-before-rmdir ordering
+  // makes `proper-lockfile`'s own release non-retryable — a second call returns
+  // `ERELEASED` without re-attempting the rmdir — we do NOT retry via a manual dir sweep,
+  // which could race a successor; the leaked mutex self-heals for future runs after the
+  // stale window.) An `ERELEASED` error means the lock was ALREADY dropped (e.g. by an
+  // `onCompromised` sweep, whose re-throw is the authority) — not a leak we caused — so
+  // it is treated as success.
+  let releasePromise: Promise<void> | undefined;
+  const doRelease = async (): Promise<void> => {
+    try {
+      await release();
+    } catch (error) {
+      if ((error as { code?: string } | null)?.code === 'ERELEASED') {
         return;
       }
-      released = true;
-      try {
-        await release();
-      } catch {
-        // best-effort: a stale-compromise sweep may have already dropped the mutex
-      }
-    },
+      throw new Error(
+        `provision: failed to release the cross-process provision lock "${lockTarget}.lock" ` +
+          `(${(error as Error).message}). The mutex directory may still exist and will block ` +
+          `future provisions until it goes stale (~${Math.round(staleMs / 1000)}s). Remove it ` +
+          `manually if it persists, then retry.`,
+      );
+    }
+  };
+  return {
+    release: () => (releasePromise ??= doRelease()),
   };
 }
 
@@ -750,6 +924,12 @@ function normalizeD1(entry: Record<string, unknown> | undefined, requestedName: 
   if (new Set(ids).size !== 1) {
     return { kind: 'claimed-but-invalid' };
   }
+  // F4 — the lone id must be a real D1 UUID. A claimant that names the requested DB but
+  // carries a malformed/placeholder id (`" "`, `"xyz"`) is ambiguous, never adoptable —
+  // fail closed rather than adopt or (worse) mistake it for absent and mint a duplicate.
+  if (!isRealD1Id(ids[0])) {
+    return { kind: 'claimed-but-invalid' };
+  }
   return { kind: 'match', id: ids[0] };
 }
 
@@ -757,6 +937,10 @@ function normalizeD1(entry: Record<string, unknown> | undefined, requestedName: 
  * `wrangler kv namespace list` → the `{ id }` of every namespace whose title
  * matches. The list has ALREADY been through {@link validateResourceList} (every
  * member has a non-empty string `id` + `title`), so this only filters + collects.
+ *
+ * F4 — a title-matching namespace whose `id` is NOT a real KV id (32-hex) is ambiguous:
+ * we can neither adopt it nor treat it as absent (which would mint a duplicate title), so
+ * we FAIL CLOSED. Real wrangler always returns 32-hex ids; this guards a malformed seam.
  */
 function extractKvMatches(
   list: Array<Record<string, unknown>>,
@@ -767,10 +951,14 @@ function extractKvMatches(
     if (ns.title !== title) {
       continue;
     }
-    const id = ns.id;
-    if (typeof id === 'string' && id.length > 0) {
-      matches.push({ id });
+    if (!isRealKvId(ns.id)) {
+      throw new Error(
+        `provision: "wrangler kv namespace list" returned a namespace titled ${JSON.stringify(title)} ` +
+          `with a malformed id ${JSON.stringify(ns.id)} (expected a 32-character hex namespace id). ` +
+          `Cannot verify whether it already exists; refusing to create a possible duplicate.`,
+      );
     }
+    matches.push({ id: ns.id });
   }
   return matches;
 }
@@ -864,6 +1052,13 @@ interface CreatePostcondition {
   /** The member key that must hold a REAL (non-placeholder) id afterward. */
   idField: string;
   /**
+   * F4 — resource-SPECIFIC id-format validator (D1 UUID / KV 32-hex / R2 bucket-name /
+   * Hyperdrive 32-hex). Replaces the loose `isRealValue`, so a create that reported
+   * success but wrote a placeholder/garbage id (e.g. a signal-killed child masked as
+   * exit 0) fails closed instead of being recorded as provisioned.
+   */
+  idValidator: (value: unknown) => value is string;
+  /**
    * F4 — when set, the member key that must EXACTLY equal the requested name (the
    * resource's IDENTITY). R2's `bucket_name` and D1's `database_name` ARE the
    * identity, so a create that wrote a DIFFERENT resource's name (a race, a stale
@@ -901,7 +1096,7 @@ function assertCreateWroteRealId(
   name: string,
 ): void {
   const entry = findBindingEntry(readRootConfig(configPath)[spec.field], binding);
-  const idOk = !!entry && isRealValue(entry[spec.idField]);
+  const idOk = !!entry && spec.idValidator(entry[spec.idField]);
   const nameOk = spec.nameField === undefined || (!!entry && entry[spec.nameField] === name);
   if (!idOk || !nameOk) {
     throw new Error(
@@ -915,26 +1110,109 @@ function assertCreateWroteRealId(
   }
 }
 
-/**
- * F2 — Cloudflare resource-name grammar enforced on EVERY name placed as a
- * wrangler ARGV POSITIONAL (D1 db name, KV title, R2 bucket, Hyperdrive name,
- * queue name) BEFORE it reaches argv. Shell-free spawning stops shell injection
- * but NOT CLI OPTION injection: a name like `--help`, `--config`, or `-h` would be
- * parsed by wrangler as a FLAG (and a queue name is derived from a filename → it
- * is attacker-influenced). We require the name to START with an ASCII letter or
- * digit and contain only ASCII letters, digits, `-` and `_`, 1–63 chars. That
- * rejects any leading `-` (the flag vector) plus whitespace/metacharacters, and is
- * a safe superset of Cloudflare's per-resource naming rules. Fail closed on any
- * violation — an option-like name never reaches wrangler.
- */
-const RESOURCE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
-function assertValidResourceName(kind: string, name: string): void {
-  if (typeof name !== 'string' || !RESOURCE_NAME_RE.test(name)) {
+// --- F5: option-injection guard SEPARATE from per-resource service grammar -----
+// The old single regex `^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$` was applied to EVERY
+// resource, but wrangler 4.107 forwards the KV namespace positional VERBATIM as the KV
+// TITLE, and Cloudflare permits titles like "My Own Namespace" (spaces) — so valid KV
+// namespaces were REJECTED before discovery. It was also wrong for R2 (whose real
+// grammar is lowercase DNS-like). We therefore split the two concerns:
+//   1. OPTION-INJECTION guard  — a SECURITY invariant applied to EVERY positional,
+//      identical across resources: shell-free spawning stops shell injection but NOT CLI
+//      OPTION injection, so a positional starting with `-` (`--help`, `-c`, `--config`)
+//      would be parsed by wrangler as a FLAG (a queue name is derived from a filename →
+//      attacker-influenced). We reject empty, a leading `-`, and any control char /
+//      newline (which could smuggle a token or corrupt argv).
+//   2. SERVICE grammar         — each resource's ACTUAL Cloudflare grammar (verified
+//      2026-07 against wrangler 4.107 + live resources), so a valid name is never
+//      rejected AND obvious garbage still fails before a remote call.
+
+/** True when `value` contains an ASCII control character (0x00–0x1F or 0x7F). */
+function hasControlChar(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** F5.1 — the universal option-injection guard for ANY wrangler ARGV positional. */
+function assertNoOptionInjection(kind: string, name: string): void {
+  if (
+    typeof name !== 'string' ||
+    name.length === 0 ||
+    name.startsWith('-') ||
+    hasControlChar(name)
+  ) {
     throw new Error(
-      `provision: refusing to pass an invalid ${kind} name ${JSON.stringify(name)} to wrangler. ` +
-        `Resource names must be 1–63 characters, start with a letter or digit, and contain only ` +
-        `letters, digits, "-" or "_" (a name beginning with "-" would be parsed as a CLI flag). ` +
-        `Rename the resource and retry.`,
+      `provision: refusing to pass an unsafe ${kind} name ${JSON.stringify(name)} to wrangler. A ` +
+        `name may not be empty, begin with "-" (it would be parsed as a CLI flag), or contain ` +
+        `control characters. Rename the resource and retry.`,
+    );
+  }
+}
+
+type ResourceNameKind = 'd1' | 'kvTitle' | 'r2' | 'hyperdrive' | 'queue';
+
+/**
+ * F5.2 — per-resource Cloudflare naming GRAMMAR, verified 2026-07 against wrangler 4.107
+ * and live account resources:
+ *   - `r2`      — wrangler's own `isValidR2BucketName`: 3–63 chars, lowercase letters /
+ *                 digits / `-`, begin+end alphanumeric (DNS-like). This IS the identity.
+ *   - `kvTitle` — the KV namespace positional is forwarded verbatim as the account TITLE;
+ *                 Cloudflare allows a broad charset INCLUDING SPACES (≤512 chars). We only
+ *                 forbid control chars (already covered by the injection guard) — spaces
+ *                 and mixed case are legal, so "My Own Namespace" is accepted.
+ *   - `d1` / `hyperdrive` / `queue` — 1–63 chars, begin with a letter/digit, then
+ *                 letters / digits / `-` / `_` (matches every live D1 `name`, Hyperdrive
+ *                 config `name`, and Void's `QUEUE_<NAME>`-derived queue names).
+ */
+const RESOURCE_NAME_GRAMMARS: Record<
+  ResourceNameKind,
+  { re: RegExp; label: string; rule: string }
+> = {
+  r2: {
+    re: R2_BUCKET_NAME_RE,
+    label: 'R2 bucket',
+    rule: 'be 3–63 characters, contain only lowercase letters, digits and "-", and begin and end with a letter or digit',
+  },
+  kvTitle: {
+    // 1–512 chars, any non-control character (spaces allowed). The leading-"-" / control
+    // guard is enforced separately by assertNoOptionInjection.
+    re: /^[\s\S]{1,512}$/,
+    label: 'KV namespace',
+    rule: 'be 1–512 characters and contain no control characters (spaces are allowed)',
+  },
+  d1: {
+    re: /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/,
+    label: 'D1 database',
+    rule: 'be 1–63 characters, start with a letter or digit, and contain only letters, digits, "-" or "_"',
+  },
+  hyperdrive: {
+    re: /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/,
+    label: 'Hyperdrive config',
+    rule: 'be 1–63 characters, start with a letter or digit, and contain only letters, digits, "-" or "_"',
+  },
+  queue: {
+    re: /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/,
+    label: 'queue',
+    rule: 'be 1–63 characters, start with a letter or digit, and contain only letters, digits, "-" or "_"',
+  },
+};
+
+/**
+ * F5 — validate a name destined for a wrangler ARGV positional: FIRST the universal
+ * option-injection guard, THEN the resource's own Cloudflare grammar. Fail closed on any
+ * violation, before the account gate or any wrangler/REST call.
+ */
+function assertValidResourceName(kind: ResourceNameKind, name: string): void {
+  assertNoOptionInjection(RESOURCE_NAME_GRAMMARS[kind].label, name);
+  const grammar = RESOURCE_NAME_GRAMMARS[kind];
+  if (!grammar.re.test(name)) {
+    throw new Error(
+      `provision: refusing to pass an invalid ${grammar.label} name ${JSON.stringify(name)} to ` +
+        `wrangler. A ${grammar.label} name must ${grammar.rule}. Rename the resource and retry.`,
     );
   }
 }
@@ -988,16 +1266,36 @@ export async function provisionCloudflareResources(
   // F1/F2 — hold ONE cross-process lock for the WHOLE provision: acquire it BEFORE
   // the first config read (so account reconciliation + persistence + all discovery,
   // remote work, and config writes happen against the state the lock protects), and
-  // ALWAYS release it in `finally` (an interruption must never leak the lock). The
-  // reconciliation + duplicate-member guard + resource work all run UNDER the lock in
+  // ALWAYS release it (both the success and error paths below call `lock.release()`, so
+  // an interruption never leaks the lock; a genuine unlock failure fails the provision).
+  // The reconciliation + duplicate-member guard + resource work all run UNDER the lock in
   // `provisionCloudflareResourcesLocked`, so a racing first-run serializes: the second
   // process re-reads the persisted account/ids and fails closed (or reuses).
-  const lock = await acquireProvisionLock(configPath);
+  const lock = await acquireProvisionLock(configPath, opts?.lockOptions);
+  // F2 — ALWAYS release, but do NOT swallow a release failure. On body SUCCESS a failed
+  // unlock means the mutex leaked, so the provision must FAIL (surfaced, not hidden). On
+  // body FAILURE the body error is primary, so still attempt release but never let a
+  // release failure mask the original error. (`release()` is idempotent — one shared
+  // promise — so these paths never double-unlock.)
+  let result: ProvisionResult | undefined;
+  let threw = false;
+  let bodyError: unknown;
   try {
-    return await provisionCloudflareResourcesLocked(root, configPath, desired, opts);
-  } finally {
-    await lock.release();
+    result = await provisionCloudflareResourcesLocked(root, configPath, desired, opts);
+  } catch (error) {
+    threw = true;
+    bodyError = error;
   }
+  if (threw) {
+    await lock.release().catch(() => {
+      // The body already failed — the body error is the primary failure to surface; a
+      // secondary release failure here must not replace it.
+    });
+    throw bodyError;
+  }
+  // Body succeeded: a genuine unlock failure (leaked mutex) rejects the provision.
+  await lock.release();
+  return result as ProvisionResult;
 }
 
 /** Injectable seams + settings for {@link provisionCloudflareResources}. */
@@ -1007,6 +1305,8 @@ export interface ProvisionOptions {
   apiToken?: string;
   listHyperdriveConfigs?: ListHyperdriveConfigs;
   log?: ProvisionLogger;
+  /** Test-only override of the `proper-lockfile` stale/update/retries/fs knobs (F1/F2). */
+  lockOptions?: ProvisionLockOptions;
 }
 
 /**
@@ -1035,22 +1335,23 @@ async function provisionCloudflareResourcesLocked(
     assertNoDuplicateMembers(content, configPath);
   }
 
-  // --- F2: resource-name validation (BEFORE any argv / remote work) ---------
-  // Every name that becomes a wrangler ARGV POSITIONAL is validated up front, so an
-  // option-like name (`--help`, `-h`, `--config`) can never reach wrangler and be
-  // parsed as a flag. Fail closed here, before the account gate or any wrangler/REST
-  // call.
+  // --- F5: resource-name validation (BEFORE any argv / remote work) ---------
+  // Every name that becomes a wrangler ARGV POSITIONAL runs through the universal
+  // option-injection guard (so an option-like name `--help`/`-h`/`--config` can never
+  // reach wrangler as a flag) AND its own per-resource Cloudflare grammar (so a valid KV
+  // title with spaces is accepted, while an invalid R2 bucket name is rejected). Fail
+  // closed here, before the account gate or any wrangler/REST call.
   if (desired.d1) {
-    assertValidResourceName('D1 database', desired.d1.name);
+    assertValidResourceName('d1', desired.d1.name);
   }
   for (const { title } of desired.kvNamespaces) {
-    assertValidResourceName('KV namespace', title);
+    assertValidResourceName('kvTitle', title);
   }
   if (desired.r2) {
-    assertValidResourceName('R2 bucket', desired.r2.bucketName);
+    assertValidResourceName('r2', desired.r2.bucketName);
   }
   if (desired.hyperdrive) {
-    assertValidResourceName('Hyperdrive config', desired.hyperdrive.name);
+    assertValidResourceName('hyperdrive', desired.hyperdrive.name);
   }
   for (const queueName of desired.queues) {
     assertValidResourceName('queue', queueName);
@@ -1148,16 +1449,20 @@ async function provisionCloudflareResourcesLocked(
   const selectedRunWrangler = opts?.runWrangler ?? createDefaultRunWrangler(root);
   // Single choke point: inject the reconciled account into EVERY call so no call site
   // can forget it (grep-proven — every `runWrangler(...)` below routes through here).
+  // F1 — async: `Promise.resolve` coerces a sync-stub result OR the default runner's
+  // Promise, and every call site `await`s it. Awaiting yields to the event loop, so a
+  // real (slow) wrangler call never blocks the lock heartbeat.
   const runWrangler = (
     args: Array<string>,
     callOpts?: { cwd?: string; captureJson?: boolean },
-  ): RunWranglerResult => selectedRunWrangler(args, { ...callOpts, accountId: transportAccountId });
+  ): Promise<RunWranglerResult> =>
+    Promise.resolve(selectedRunWrangler(args, { ...callOpts, accountId: transportAccountId }));
 
   // --- D1 ------------------------------------------------------------------
   if (desired.d1) {
     const { binding, name } = desired.d1;
     const entry = findBindingEntry(readRootConfig(configPath).d1_databases, binding);
-    if (entry && isRealValue(entry.database_id)) {
+    if (entry && isRealD1Id(entry.database_id)) {
       // Read-first hit. A prior run may have created the D1 (id written) then
       // crashed BEFORE migrations_dir was set, so ensure + verify it here too —
       // idempotent when already present — so the retry converges rather than
@@ -1169,9 +1474,12 @@ async function provisionCloudflareResourcesLocked(
       // Discovery must SUCCEED (gate) before its stdout is parsed, then the whole
       // list is strictly validated — a nonzero/SIGTERM/spawn-error or a malformed
       // member never parses as "absent" and mints a duplicate D1.
-      const listResult = runWrangler(['d1', 'list', '--json', ...wranglerConfigArgs(configPath)], {
-        captureJson: true,
-      });
+      const listResult = await runWrangler(
+        ['d1', 'list', '--json', ...wranglerConfigArgs(configPath)],
+        {
+          captureJson: true,
+        },
+      );
       assertDiscoverySucceeded(listResult, 'wrangler d1 list');
       const rawList = parseJsonArrayStrict(listResult.stdout);
       if (!rawList) {
@@ -1224,7 +1532,7 @@ async function provisionCloudflareResourcesLocked(
         assertD1MigrationsDirApplied(res, binding, configPath);
         resources.push({ kind: 'd1', binding, name, action: 'adopted', id: existing.id });
       } else {
-        const created = runWrangler([
+        const created = await runWrangler([
           'd1',
           'create',
           name,
@@ -1242,6 +1550,7 @@ async function provisionCloudflareResourcesLocked(
             {
               field: 'd1_databases',
               idField: 'database_id',
+              idValidator: isRealD1Id,
               nameField: 'database_name',
               resource: 'D1 database',
               command: 'wrangler d1 create',
@@ -1256,7 +1565,7 @@ async function provisionCloudflareResourcesLocked(
           // TOCTOU: created between our list and create (clean non-zero, code 7502).
           // Capture the id via `d1 info` — which must SUCCEED (gate) and POSITIVELY
           // identify THIS database (EXACT name match) before we adopt its id.
-          const infoResult = runWrangler(
+          const infoResult = await runWrangler(
             ['d1', 'info', name, '--json', ...wranglerConfigArgs(configPath)],
             { captureJson: true },
           );
@@ -1292,7 +1601,7 @@ async function provisionCloudflareResourcesLocked(
   // --- KV ------------------------------------------------------------------
   for (const { binding, title } of desired.kvNamespaces) {
     const entry = findBindingEntry(readRootConfig(configPath).kv_namespaces, binding);
-    if (entry && isRealValue(entry.id)) {
+    if (entry && isRealKvId(entry.id)) {
       resources.push({ kind: 'kv', binding, name: title, action: 'reused', id: entry.id });
       continue;
     }
@@ -1302,9 +1611,12 @@ async function provisionCloudflareResourcesLocked(
     // throw), return a real JSON array, and have EVERY member well-formed (a
     // malformed member — which could BE the target — fails closed rather than being
     // filtered to a false "absent" that mints a duplicate namespace).
-    const listResult = runWrangler(['kv', 'namespace', 'list', ...wranglerConfigArgs(configPath)], {
-      captureJson: true,
-    });
+    const listResult = await runWrangler(
+      ['kv', 'namespace', 'list', ...wranglerConfigArgs(configPath)],
+      {
+        captureJson: true,
+      },
+    );
     assertDiscoverySucceeded(listResult, 'wrangler kv namespace list');
     const rawList = parseJsonArrayStrict(listResult.stdout);
     if (!rawList) {
@@ -1336,7 +1648,7 @@ async function provisionCloudflareResourcesLocked(
       write({ kv: { binding, id: chosen.id } });
       resources.push({ kind: 'kv', binding, name: title, action: 'adopted', id: chosen.id });
     } else {
-      const created = runWrangler([
+      const created = await runWrangler([
         'kv',
         'namespace',
         'create',
@@ -1358,6 +1670,7 @@ async function provisionCloudflareResourcesLocked(
         {
           field: 'kv_namespaces',
           idField: 'id',
+          idValidator: isRealKvId,
           resource: 'KV namespace',
           command: 'wrangler kv namespace create',
         },
@@ -1372,12 +1685,12 @@ async function provisionCloudflareResourcesLocked(
   if (desired.r2) {
     const { binding, bucketName } = desired.r2;
     const entry = findBindingEntry(readRootConfig(configPath).r2_buckets, binding);
-    if (entry && isRealValue(entry.bucket_name)) {
+    if (entry && isRealR2BucketName(entry.bucket_name)) {
       resources.push({ kind: 'r2', binding, name: bucketName, action: 'reused' });
     } else {
       // `wrangler r2 bucket list` is a human table, not JSON. Bucket names ARE
       // account-unique, so probe the single bucket by name.
-      const info = runWrangler(
+      const info = await runWrangler(
         ['r2', 'bucket', 'info', bucketName, '--json', ...wranglerConfigArgs(configPath)],
         { captureJson: true },
       );
@@ -1401,7 +1714,7 @@ async function provisionCloudflareResourcesLocked(
       } else if (isConfirmedAbsent(info, 'r2', bucketName)) {
         // CONFIRMED not-found (clean non-zero + exact signal) → create.
         // `--update-config` upserts by binding.
-        const created = runWrangler([
+        const created = await runWrangler([
           'r2',
           'bucket',
           'create',
@@ -1422,6 +1735,7 @@ async function provisionCloudflareResourcesLocked(
           {
             field: 'r2_buckets',
             idField: 'bucket_name',
+            idValidator: isRealR2BucketName,
             nameField: 'bucket_name',
             resource: 'R2 bucket',
             command: 'wrangler r2 bucket create',
@@ -1457,7 +1771,7 @@ async function provisionCloudflareResourcesLocked(
     // across processes: the read-first check below runs UNDER that lock, so a second
     // concurrent provision sees the id the first wrote and SKIPS (no duplicate).
     const entry = findBindingEntry(readRootConfig(configPath).hyperdrive, binding);
-    if (entry && isRealValue(entry.id)) {
+    if (entry && isRealHyperdriveId(entry.id)) {
       resources.push({ kind: 'hyperdrive', binding, name, action: 'reused', id: entry.id });
     } else {
       const lister =
@@ -1518,7 +1832,7 @@ async function provisionCloudflareResourcesLocked(
         );
       } else {
         // Confirmed absent + connection string present → create.
-        const created = runWrangler([
+        const created = await runWrangler([
           'hyperdrive',
           'create',
           name,
@@ -1539,6 +1853,7 @@ async function provisionCloudflareResourcesLocked(
           {
             field: 'hyperdrive',
             idField: 'id',
+            idValidator: isRealHyperdriveId,
             resource: 'Hyperdrive config',
             command: 'wrangler hyperdrive create',
           },
@@ -1557,7 +1872,7 @@ async function provisionCloudflareResourcesLocked(
   // queue RESOURCE exists — binding the producers/consumers into the config is
   // app-class-aware and belongs to Task 6.
   for (const name of desired.queues) {
-    const info = runWrangler(['queues', 'info', name, ...wranglerConfigArgs(configPath)]);
+    const info = await runWrangler(['queues', 'info', name, ...wranglerConfigArgs(configPath)]);
     // "Exists → reuse" ONLY when the probe POSITIVELY names THIS queue (F4). A bare
     // clean 0 is NOT trusted: the bin wrapper can mask a signal-killed inner CLI as
     // exit 0 with empty output, which a plain `isCleanSuccess` would misread as
@@ -1577,7 +1892,12 @@ async function provisionCloudflareResourcesLocked(
           `${info.stderr || info.stdout || 'no output'}`,
       );
     }
-    const created = runWrangler(['queues', 'create', name, ...wranglerConfigArgs(configPath)]);
+    const created = await runWrangler([
+      'queues',
+      'create',
+      name,
+      ...wranglerConfigArgs(configPath),
+    ]);
     if (!isCleanSuccess(created)) {
       throw new Error(
         `provision: "wrangler queues create ${name}" failed: ${created.stderr || created.stdout}`,
@@ -1588,7 +1908,7 @@ async function provisionCloudflareResourcesLocked(
     // signal-killed inner CLI as exit 0, creating nothing). RE-RUN the SAME positive
     // `queues info` probe and only record `created` if it now confirms THIS queue;
     // otherwise fail closed (a killed create self-heals on the next run's probe).
-    const verify = runWrangler(['queues', 'info', name, ...wranglerConfigArgs(configPath)]);
+    const verify = await runWrangler(['queues', 'info', name, ...wranglerConfigArgs(configPath)]);
     if (!queueInfoConfirmsExists(verify, name)) {
       throw new Error(
         `provision: "wrangler queues create ${name}" reported success but "wrangler queues info ` +
