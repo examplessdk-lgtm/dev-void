@@ -1173,4 +1173,195 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(second.modified).toBe(false);
     expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
   });
+
+  it('inserting migrations_dir keeps a trailing comment that sits AFTER a separator comma on its property', () => {
+    // The last property carries a JSONC trailing comma BEFORE its inline comment
+    // (`"database_id": "prod-id", // …`). A naive scan sees the comma first and
+    // gives up, letting the plain formatting edit reassociate the comment onto
+    // the inserted migrations_dir. The comment must stay with database_id.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "app",
+      "database_id": "prod-id", // production database
+    }
+  ]
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    });
+    expect(result.modified).toBe(true);
+    expect(result.d1MigrationsDirSkipped).toBe(false);
+
+    const raw = readRaw('wrangler.jsonc');
+    // Comment stays attached to database_id, NOT migrations_dir.
+    expect(raw).toContain('"database_id": "prod-id", // production database');
+    expect(raw).not.toMatch(/migrations_dir[^\n]*production database/);
+
+    const d1 = parseRaw('wrangler.jsonc').d1_databases as Array<Record<string, unknown>>;
+    expect(d1[0]).toMatchObject({ binding: 'DB', migrations_dir: 'db/migrations' });
+
+    // Idempotent — a second run writes nothing and is byte-identical.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    });
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('inserting migrations_dir keeps a single-line block comment that sits after a separator comma', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "app",
+      "database_id": "prod-id", /* production database */
+    }
+  ]
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    });
+    expect(result.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('"database_id": "prod-id", /* production database */');
+    expect(raw).not.toMatch(/migrations_dir[^\n]*production database/);
+
+    // Idempotent.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    });
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('creating a missing queues.producers section keeps the trailing comment on the existing consumers entry', () => {
+    // Only `consumers` exists (with a trailing inline comment). Adding the
+    // `producers` section makes modify() append `producers` as a NEW member of
+    // the `queues` object, right after `consumers`. The `// jobs consumer`
+    // comment must stay on the consumers entry, not move onto producers.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": {
+    "consumers": [
+      { "queue": "jobs", "max_batch_size": 10 }
+    ] // jobs consumer
+  }
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(result.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    // Comment stays with consumers (its comma comes before it), never on producers.
+    expect(raw).toContain('], // jobs consumer');
+    expect(raw.indexOf('// jobs consumer')).toBeGreaterThan(raw.indexOf('"consumers"'));
+    expect(raw.indexOf('// jobs consumer')).toBeLessThan(raw.indexOf('"producers"'));
+    expect(raw).not.toMatch(/"producers"[\s\S]*jobs consumer/);
+
+    const q = parseRaw('wrangler.jsonc').queues as {
+      producers: Array<Record<string, unknown>>;
+      consumers: Array<Record<string, unknown>>;
+    };
+    expect(q.consumers).toEqual([{ queue: 'jobs', max_batch_size: 10 }]);
+    expect(q.producers).toEqual([{ queue: 'emails', binding: 'QUEUE_EMAILS' }]);
+
+    // Idempotent — a second run writes nothing and is byte-identical.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('creating a missing queues.producers section keeps a single-line block comment on the consumers entry', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": {
+    "consumers": [
+      { "queue": "jobs", "max_batch_size": 10 }
+    ] /* jobs consumer */
+  }
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(result.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('], /* jobs consumer */');
+    expect(raw.indexOf('/* jobs consumer */')).toBeLessThan(raw.indexOf('"producers"'));
+    expect(raw).not.toMatch(/"producers"[\s\S]*jobs consumer/);
+
+    // Idempotent.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('KNOWN LIMITATION: jsonc-parser modify() reassociates a MULTI-LINE block comment used as a trailing comment; comment text is preserved, association is best-effort', () => {
+    // A block comment that spans multiple lines cannot be safely relocated onto
+    // a single line, so readTrailingComment declines it and the plain formatting
+    // edit runs. jsonc-parser then re-emits the comment at the end of the
+    // reflowed region — moving it onto the appended entry. We PIN this: the hard
+    // guarantee is that the comment TEXT survives; exact association is
+    // best-effort for this exotic placement and is not chased further.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": {
+    "producers": [
+      { "queue": "jobs", "binding": "QUEUE_JOBS" } /* jobs
+         producer spanning lines */
+    ]
+  }
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(result.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    // Hard guarantee: the comment text is never dropped.
+    expect(raw).toContain('producer spanning lines');
+    // Both producers are present and parse cleanly.
+    const q = parseRaw('wrangler.jsonc').queues as { producers: Array<Record<string, unknown>> };
+    expect(q.producers).toEqual([
+      { queue: 'jobs', binding: 'QUEUE_JOBS' },
+      { queue: 'emails', binding: 'QUEUE_EMAILS' },
+    ]);
+
+    // Still idempotent despite the best-effort association.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
 });

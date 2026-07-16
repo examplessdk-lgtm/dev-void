@@ -1050,7 +1050,21 @@ function applyMemberEdit(
     return plain();
   }
 
-  const container = findNodeAtLocation(root, path.slice(0, -1));
+  // Find the container `modify()` will append the new member to. Usually the
+  // leaf container (`path` minus its final key/index). But when that container
+  // does not exist yet, `modify()` creates the first missing segment as a NEW
+  // member of the deepest ANCESTOR that DOES exist — so that ancestor is the
+  // receiver, and its current last member is the preceding sibling whose
+  // trailing comment must stay put (e.g. adding `queues.producers` next to a
+  // `queues.consumers` that carries a `// …` trailing comment). Anchoring the
+  // relocation on the real receiving container keeps the comment on the sibling
+  // in both cases.
+  let receivingPath = path.slice(0, -1);
+  let container = findNodeAtLocation(root, receivingPath);
+  while (!container && receivingPath.length > 0) {
+    receivingPath = receivingPath.slice(0, -1);
+    container = findNodeAtLocation(root, receivingPath);
+  }
   const members = container?.children;
   if (!container || !members || members.length === 0) {
     return plain();
@@ -1064,13 +1078,15 @@ function applyMemberEdit(
     return plain();
   }
 
-  // Strip the comment, run the now-comment-free formatting edit, then re-attach
-  // the comment after the sibling's separating comma in the rewritten text.
+  // Strip the comment (and the optional separator comma `readTrailingComment`
+  // skipped to reach it), run the now-comment-free formatting edit, then
+  // re-attach the comment after the sibling's separating comma in the rewritten
+  // text.
   const stripped = text.slice(0, last.offset + last.length) + text.slice(trailing.end);
   const rewritten = applyEdits(stripped, modify(stripped, path, value, options));
 
   const newRoot = parseTree(rewritten, undefined, { allowTrailingComma: true });
-  const newContainer = newRoot ? findNodeAtLocation(newRoot, path.slice(0, -1)) : undefined;
+  const newContainer = newRoot ? findNodeAtLocation(newRoot, receivingPath) : undefined;
   const newMembers = newContainer?.children;
   if (!newRoot || !newContainer || !newMembers || newMembers.length < 2) {
     // We just appended, so this should not happen; fall back rather than corrupt.
@@ -1086,10 +1102,16 @@ function applyMemberEdit(
 }
 
 /**
- * If a trailing inline comment sits on the same line right after `offset` (only
- * whitespace between), return its text and end offset. A `//` line comment or a
- * single-line `/* *\/` block comment counts; a newline, comma, or closing
- * bracket first means there is no trailing comment (returns undefined).
+ * If a trailing inline comment sits on the same line right after `offset`,
+ * return its text and end offset. Only whitespace and an OPTIONAL single
+ * separator comma may sit between the sibling's value and the comment — so both
+ * `"id": "x" // c` and `"id": "x", // c` (a JSONC trailing comma, or the
+ * separator once a sibling follows) are recognized. A `//` line comment or a
+ * single-line `/* *\/` block comment counts; a newline or closing bracket first
+ * means there is no trailing comment (returns undefined). `offset` points just
+ * past the sibling's value, and the sibling is always its container's LAST
+ * member, so any comma here is a trailing/separator comma — never a boundary to
+ * an existing following member.
  */
 function readTrailingComment(
   text: string,
@@ -1098,6 +1120,16 @@ function readTrailingComment(
   let i = offset;
   while (i < text.length && (text[i] === ' ' || text[i] === '\t')) {
     i++;
+  }
+  // Tolerate one optional separator/trailing comma between the value and its
+  // inline comment. `stripped` (at the call site) removes everything from
+  // `offset` through the comment's end, so the skipped comma is discarded and
+  // the re-attach step re-inserts the comment after the sibling's fresh comma.
+  if (text[i] === ',') {
+    i++;
+    while (i < text.length && (text[i] === ' ' || text[i] === '\t')) {
+      i++;
+    }
   }
   if (text[i] === '/' && text[i + 1] === '/') {
     let end = i;
