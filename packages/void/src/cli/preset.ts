@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'pathe';
 import { readProjectPaths } from '../project-paths.ts';
 import {
@@ -187,6 +187,60 @@ function shellQuoteExecutable(value: string): string {
  */
 export function resolveWranglerCommand(root: string, subcommand: string): string {
   return resolveProjectCommand(root, `wrangler ${subcommand}`);
+}
+
+/**
+ * Resolve the project-local `wrangler` as an ARGV LAUNCHER — an array of tokens
+ * `[executable, ...prefixArgs]` meant to be spawned with `shell: false` and the
+ * real wrangler subcommand appended as further DISCRETE argv elements.
+ *
+ * Unlike {@link resolveWranglerCommand} (which returns a shell-quoted STRING for
+ * `shell: true` callers), this never builds a shell command line, so untrusted
+ * values — resource names, a Postgres connection string riddled with `&`/`$`/`;`,
+ * a config path containing spaces — can be passed as their own argv elements and
+ * are IMMUNE to shell metacharacter injection/splitting.
+ *
+ * Resolution order:
+ *   1. The locally-installed wrangler's JS bin run with the current Node
+ *      (`[process.execPath, <node_modules/wrangler/bin/wrangler.js>]`). This is
+ *      shell-free AND cross-platform: it sidesteps the Windows `.cmd`/`.ps1`
+ *      shim (which Node cannot spawn with `shell: false`) entirely, so there is
+ *      never a shim to quote or route through `cmd.exe`.
+ *   2. Fallback to the `node_modules/.bin/wrangler` shim when the package layout
+ *      is non-standard but the shim exists (directly executable on POSIX).
+ *   3. Fallback to the bare `wrangler` name (resolved via PATH by the OS).
+ */
+export function resolveWranglerArgv(root: string): Array<string> {
+  const jsBin = resolveLocalWranglerJsBin(root);
+  if (jsBin) {
+    return [process.execPath, jsBin];
+  }
+  return [localBin(root, 'wrangler')];
+}
+
+/**
+ * Absolute path to the locally-installed wrangler JS entry (from its
+ * `package.json` `bin.wrangler`), or `undefined` when wrangler is not installed
+ * under `root/node_modules` or its manifest is unreadable.
+ */
+function resolveLocalWranglerJsBin(root: string): string | undefined {
+  const pkgPath = join(root, 'node_modules', 'wrangler', 'package.json');
+  if (!existsSync(pkgPath)) {
+    return undefined;
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
+      bin?: string | Record<string, string>;
+    };
+    const rel = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.wrangler;
+    if (!rel) {
+      return undefined;
+    }
+    const jsBin = join(root, 'node_modules', 'wrangler', rel);
+    return existsSync(jsBin) ? jsBin : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

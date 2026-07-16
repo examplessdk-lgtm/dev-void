@@ -817,19 +817,24 @@ export type WriteProvisionedWranglerResult = {
 export function writeProvisionedWranglerConfig(
   root: string,
   patch: ProvisionedWranglerPatch,
+  options?: { configPath?: string },
 ): WriteProvisionedWranglerResult {
-  // Resolve the root config file (same discovery idiom as the rest of this
-  // file: prefer wrangler.jsonc, fall back to wrangler.json, else create
-  // wrangler.jsonc).
-  let configPath: string | undefined;
-  for (const name of ['wrangler.jsonc', 'wrangler.json']) {
-    const p = join(root, name);
-    if (existsSync(p)) {
-      configPath = p;
-      break;
+  // Resolve the root config file. When the caller pins an EXACT `configPath`
+  // (the provisioner does, so its read-first parse, wrangler `-c`, and this
+  // write all operate on the SAME file — no split-brain), honor it verbatim.
+  // Otherwise fall back to the same discovery idiom as the rest of this file:
+  // prefer wrangler.jsonc, fall back to wrangler.json, else create wrangler.jsonc.
+  let configPath = options?.configPath;
+  if (configPath === undefined) {
+    for (const name of ['wrangler.jsonc', 'wrangler.json']) {
+      const p = join(root, name);
+      if (existsSync(p)) {
+        configPath = p;
+        break;
+      }
     }
+    configPath ??= join(root, 'wrangler.jsonc');
   }
-  configPath ??= join(root, 'wrangler.jsonc');
 
   // Node's utf-8 read preserves a leading BOM; wrangler itself strips the BOM
   // before parsing. Match that: strip it for parsing/editing, then re-add it on
@@ -893,12 +898,26 @@ export function writeProvisionedWranglerConfig(
     set(['compatibility_date'], patch.compatibilityDate);
   }
 
+  // Lazily-built map of EVERY binding name already used anywhere in the config
+  // (keyed name → wrangler's friendly owner label). Shared by the adopt-append
+  // guard below and the queue-producer append guard further down; it is keyed on
+  // the initial `parsed` (constant within this call), so memoizing once is safe.
+  let workerBindingOwners: Map<string, string> | undefined;
+
   // Adopt fields — write the REAL id/name of an already-existing resource into
   // the binding's config entry (create the array + entry if absent), keyed by
   // `binding`. Runs BEFORE `migrations_dir` so an adopt that CREATES a D1 entry
   // is visible to the `migrations_dir` upsert below (which re-parses `text`).
   // Each is an idempotent property upsert: a matched entry has only the supplied
   // props set (siblings + comments preserved), a missing one is appended.
+  //
+  // The upsert upholds the SAME worker-wide binding invariants the producer path
+  // enforces (see `validateBindingsHaveUniqueNames` mirror below):
+  //   - >1 entry in the target array sharing `binding` → fail closed (ambiguous:
+  //     adoption cannot pick which to write, and wrangler rejects the duplicate).
+  //   - APPENDING a new entry whose binding is already used by ANOTHER binding
+  //     type (a KV bound `DB`, a var, a secret, …) → fail closed (a cross-type
+  //     duplicate binding name wrangler rejects at deploy).
   const upsertAdoptedBinding = (
     field: string,
     binding: string,
@@ -906,8 +925,22 @@ export function writeProvisionedWranglerConfig(
   ): void => {
     const rawList = parseJsonc(text)[field];
     const currentList = Array.isArray(rawList) ? [...rawList] : [];
-    const index = currentList.findIndex((entry) => isRecord(entry) && entry.binding === binding);
-    if (index >= 0) {
+    const matches: Array<number> = [];
+    for (let i = 0; i < currentList.length; i++) {
+      const entry = currentList[i];
+      if (isRecord(entry) && entry.binding === binding) {
+        matches.push(i);
+      }
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `deploy: cannot update "${configPath}" — binding ${JSON.stringify(binding)} is declared ` +
+          `${matches.length} times in "${field}". Adoption cannot choose which entry to write the ` +
+          `real id into, and wrangler rejects duplicate binding names. Remove the duplicate and retry.`,
+      );
+    }
+    if (matches.length === 1) {
+      const index = matches[0];
       const existing = isRecord(currentList[index]) ? currentList[index] : {};
       for (const [key, value] of Object.entries(properties)) {
         if (!jsonEqual(existing[key], value)) {
@@ -915,6 +948,22 @@ export function writeProvisionedWranglerConfig(
         }
       }
     } else {
+      // APPEND branch only (no entry in this array owns the binding). wrangler
+      // requires every binding NAME to be unique across the ENTIRE worker, so
+      // before appending, fail closed if the binding is already used by any OTHER
+      // binding type. Reuse the same worker-wide collector the producer guard
+      // uses (do NOT fork it) — a cross-type collision here yields a config
+      // wrangler rejects at deploy.
+      workerBindingOwners ??= collectWorkerBindingNames(parsed);
+      const owner = workerBindingOwners.get(binding);
+      if (owner !== undefined) {
+        throw new Error(
+          `deploy: cannot update "${configPath}" — cannot adopt ${JSON.stringify(binding)} into ` +
+            `"${field}" because that binding name is already used by a ${owner} binding. Wrangler ` +
+            `requires every binding name to be unique across the whole worker, so this would make ` +
+            `the config undeployable. Rename the conflicting binding and retry.`,
+        );
+      }
       text = applyMemberEdit(
         text,
         [field, currentList.length],
@@ -983,13 +1032,6 @@ export function writeProvisionedWranglerConfig(
       d1MigrationsDirSkipped = true;
     }
   }
-
-  // Lazily-built map of EVERY binding name already used anywhere in the config
-  // (keyed name → wrangler's friendly owner label), EXCLUDING `queues` (producer
-  // identity is handled by the binding-match logic below; consumers carry no
-  // binding). Used to fail closed before APPENDING a new producer whose binding
-  // collides with a worker-wide binding name (see the producers branch).
-  let workerBindingOwners: Map<string, string> | undefined;
 
   // queues — idempotent upsert into `queues.producers[]` / `queues.consumers[]`.
   // Each section keys on its wrangler identity:

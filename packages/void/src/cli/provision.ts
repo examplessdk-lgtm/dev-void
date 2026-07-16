@@ -2,8 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { parse, type ParseError } from 'jsonc-parser';
 import { voidLog, voidWarn } from '../log.ts';
-import { resolveWranglerCommand } from './preset.ts';
-import { writeProvisionedWranglerConfig } from './wrangler.ts';
+import { resolveWranglerArgv } from './preset.ts';
+import { writeProvisionedWranglerConfig, type WriteProvisionedWranglerResult } from './wrangler.ts';
 
 /**
  * The set of Cloudflare resources an app needs, computed by the deploy
@@ -31,15 +31,37 @@ export interface DesiredResourceSet {
 export type RunWranglerResult = { stdout: string; stderr: string; status: number };
 
 /**
- * Seam over shelling out to the project's `wrangler`. The default
- * implementation ({@link createDefaultRunWrangler}) wraps `spawnSync`; unit
- * tests inject a stub so no real wrangler runs. `subcommand` is the part AFTER
- * `wrangler ` (e.g. `d1 list --json`).
+ * Seam over shelling out to the project's `wrangler`. The default implementation
+ * ({@link createDefaultRunWrangler}) wraps `spawnSync` with `shell: false`; unit
+ * tests inject a stub so no real wrangler runs.
+ *
+ * `args` is the wrangler ARGV after the launcher — one array element per token,
+ * e.g. `['d1', 'list', '--json']` or
+ * `['hyperdrive', 'create', name, '--connection-string=' + conn, ...]`. Every
+ * untrusted value (resource name, connection string, config path) is its OWN
+ * array element and is passed literally to the process (no shell), so shell
+ * metacharacters (`&`, `$`, `;`, spaces) can never split, inject, or drop args.
  */
 export type RunWrangler = (
-  subcommand: string,
+  args: Array<string>,
   opts?: { cwd?: string; captureJson?: boolean },
 ) => RunWranglerResult;
+
+/** A Cloudflare Hyperdrive config as returned by the account-list existence check. */
+export interface HyperdriveConfig {
+  id: string;
+  name: string;
+}
+
+/**
+ * Seam over listing the account's Hyperdrive configs (wrangler 4.107 has NO
+ * machine-readable `hyperdrive list` and no get-by-name, so existence is checked
+ * via the Cloudflare REST API). The default implementation
+ * ({@link createDefaultListHyperdriveConfigs}) calls
+ * `GET /accounts/{id}/hyperdrive/configs`; unit tests inject a stub so no real
+ * network call runs.
+ */
+export type ListHyperdriveConfigs = () => Promise<Array<HyperdriveConfig>>;
 
 /** Per-resource outcome, so the orchestrator can log what happened. */
 export interface ProvisionOutcome {
@@ -70,6 +92,9 @@ export interface ProvisionLogger {
 
 /** Where Void keeps D1 migrations — written as `migrations_dir` on the D1 entry. */
 const D1_MIGRATIONS_DIR = './db/migrations';
+
+/** UTF-8 byte-order mark. Node's utf-8 read preserves a leading one. */
+const UTF8_BOM = '﻿';
 
 /**
  * Values wrangler/Void write as placeholders during local dev
@@ -106,23 +131,26 @@ function provisionEnv(accountId?: string): NodeJS.ProcessEnv {
 }
 
 /**
- * Default `runWrangler`: resolves the project-local wrangler via Task 2's
- * {@link resolveWranglerCommand} and runs it with `spawnSync`, capturing stdout
- * (for `--json` parsing) and stderr (for error/collision detection). Never
- * called in unit tests — those inject a stub.
+ * Default `runWrangler`: resolves the project-local wrangler as an ARGV launcher
+ * via Task 2's {@link resolveWranglerArgv} and runs it with `spawnSync` and
+ * `shell: false`, so every argument is passed literally (no shell parsing → no
+ * injection). Captures stdout (for `--json` parsing) and stderr (for
+ * error/collision detection). Never called in unit tests — those inject a stub.
  */
 export function createDefaultRunWrangler(
   root: string,
   options?: { accountId?: string },
 ): RunWrangler {
-  return (subcommand, opts) => {
-    const command = resolveWranglerCommand(root, subcommand);
-    const result = spawnSync(command, {
+  const launcher = resolveWranglerArgv(root);
+  const [command, ...prefix] = launcher;
+  return (args, opts) => {
+    const result = spawnSync(command, [...prefix, ...args], {
       cwd: opts?.cwd ?? root,
-      shell: true,
+      shell: false,
       encoding: 'utf-8',
       env: provisionEnv(options?.accountId),
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     });
     return {
       stdout: result.stdout ?? '',
@@ -132,10 +160,58 @@ export function createDefaultRunWrangler(
   };
 }
 
+/**
+ * Default Hyperdrive existence check: `GET /accounts/{id}/hyperdrive/configs`
+ * with the CF API token, matched by name in the caller. Returns `undefined` when
+ * it cannot be built (no account id / no token) — the caller then fails closed
+ * before any blind create. Never called in unit tests — those inject a stub.
+ */
+function createDefaultListHyperdriveConfigs(
+  accountId?: string,
+  apiToken?: string,
+): ListHyperdriveConfigs | undefined {
+  const token = apiToken ?? process.env.CLOUDFLARE_API_TOKEN;
+  if (!accountId || !token) {
+    return undefined;
+  }
+  return async () => {
+    const res = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/hyperdrive/configs`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!res.ok) {
+      throw new Error(`Cloudflare API returned HTTP ${res.status} listing Hyperdrive configs`);
+    }
+    const body = (await res.json()) as { result?: unknown };
+    if (!isRecord(body) || !Array.isArray(body.result)) {
+      throw new Error('Cloudflare API returned an unexpected Hyperdrive configs payload');
+    }
+    return body.result
+      .filter(
+        (c): c is { id: string; name: string } =>
+          isRecord(c) && typeof c.id === 'string' && typeof c.name === 'string',
+      )
+      .map((c) => ({ id: c.id, name: c.name }));
+  };
+}
+
 /** Parse a wrangler `--json` stdout into an array, tolerating noise/failure. */
 function parseJsonArray(stdout: string): Array<Record<string, unknown>> {
   const value = parseJsonLoose(stdout);
   return Array.isArray(value) ? (value.filter(isRecord) as Array<Record<string, unknown>>) : [];
+}
+
+/**
+ * Parse a wrangler `--json` stdout into an array, distinguishing a VALID JSON
+ * array (returns it, possibly empty) from unparseable/non-array output (returns
+ * `undefined`). Used where an empty list must mean "authoritatively absent" and
+ * garbage must NOT be silently coerced to "absent" (the KV pre-check).
+ */
+function parseJsonArrayStrict(stdout: string): Array<Record<string, unknown>> | undefined {
+  const value = parseJsonLoose(stdout);
+  return Array.isArray(value)
+    ? (value.filter(isRecord) as Array<Record<string, unknown>>)
+    : undefined;
 }
 
 /** Parse a wrangler `--json` stdout into an object, tolerating noise/failure. */
@@ -175,16 +251,31 @@ function findBindingEntry(list: unknown, binding: string): Record<string, unknow
   );
 }
 
-/** Read + parse the root wrangler config (fresh each call — wrangler mutates it). */
-function readRootConfig(rootWranglerPath: string): Record<string, unknown> {
-  if (!existsSync(rootWranglerPath)) {
+/**
+ * Read + parse the root wrangler config (fresh each call — wrangler mutates it).
+ * BOM-aware (wrangler + the Task 3 writer strip a leading BOM before parsing, so
+ * we must too, else a BOM-prefixed config would look unparseable). FAILS CLOSED
+ * on a genuine parse error or a non-object root: never silently treat a real
+ * config as `{}`, which would miss existing ids (re-provision/orphan) and mask a
+ * corrupt file. A missing file is fine (nothing to read-first → `{}`).
+ */
+function readRootConfig(configPath: string): Record<string, unknown> {
+  if (!existsSync(configPath)) {
     return {};
   }
+  const raw = readFileSync(configPath, 'utf-8');
+  const content = raw.startsWith(UTF8_BOM) ? raw.slice(UTF8_BOM.length) : raw;
   const errors: Array<ParseError> = [];
-  const parsed = parse(readFileSync(rootWranglerPath, 'utf-8'), errors, {
-    allowTrailingComma: true,
-  });
-  return errors.length === 0 && isRecord(parsed) ? parsed : {};
+  const parsed = parse(content, errors, { allowTrailingComma: true });
+  if (errors.length > 0) {
+    throw new Error(
+      `provision: cannot read "${configPath}" — it is not valid JSON/JSONC. Fix the file and retry.`,
+    );
+  }
+  if (!isRecord(parsed)) {
+    throw new Error(`provision: "${configPath}" must be a JSON object.`);
+  }
+  return parsed;
 }
 
 // --- wrangler output extractors (one place to align field names with wrangler) ---
@@ -203,9 +294,12 @@ function extractD1(
   return { id, name: typeof entry.name === 'string' ? entry.name : undefined };
 }
 
-/** `wrangler kv namespace list` → `[{ id, title }]`. */
-function extractKvMatches(stdout: string, title: string): Array<{ id: string; title: string }> {
-  return parseJsonArray(stdout)
+/** `wrangler kv namespace list` → `[{ id, title }]` (already parsed + validated). */
+function extractKvMatches(
+  list: Array<Record<string, unknown>>,
+  title: string,
+): Array<{ id: string; title: string }> {
+  return list
     .filter((ns) => ns.title === title)
     .map((ns) => ({ id: String(ns.id ?? ''), title }))
     .filter((ns) => ns.id.length > 0);
@@ -229,14 +323,48 @@ function isMissingResourceError(result: RunWranglerResult): boolean {
 }
 
 /**
+ * True ONLY when a failing `r2 bucket info` is the confirmed bucket-not-found
+ * signal (CF API code `10006` / a not-found message). In wrangler 4.107 `r2
+ * bucket info` does the bucket lookup AND a separate metrics/GraphQL query, so an
+ * EXISTING bucket can exit non-zero on a metrics/auth/network failure. Creating
+ * on any non-zero would then error on the existing name (spurious failure) or, in
+ * the worst case, risk a duplicate — so we create ONLY on this confirmed signal.
+ */
+function isBucketNotFoundError(result: RunWranglerResult): boolean {
+  const text = `${result.stdout}\n${result.stderr}`;
+  return text.includes('10006') || isMissingResourceError(result);
+}
+
+/**
+ * Throw when the writer could not attach `migrations_dir` because no matching
+ * `d1_databases[]` entry exists. The provisioner only writes `migrations_dir`
+ * AFTER establishing the D1 entry (create/adopt/reuse), so a skip here means the
+ * D1 resource is unexpectedly absent from the config — never silently succeed
+ * with the gap unfilled.
+ */
+function assertD1MigrationsDirApplied(
+  result: WriteProvisionedWranglerResult,
+  binding: string,
+  configPath: string,
+): void {
+  if (result.d1MigrationsDirSkipped) {
+    throw new Error(
+      `provision: could not set migrations_dir for D1 binding ${JSON.stringify(binding)} — no ` +
+        `matching d1_databases entry exists in "${configPath}" after provisioning it. The D1 ` +
+        `resource was not written to the config as expected; inspect the file and retry.`,
+    );
+  }
+}
+
+/**
  * Ensure every resource in `desired` exists in the user's own Cloudflare account,
  * creating the missing ones by shelling out to `wrangler` and letting
  * `wrangler <res> create --update-config` write real ids into the root config.
  * For resources that already exist (adopt path) — where `create` cannot run —
- * the real id is captured from `wrangler <res> list/info` and written through the
- * Task 3 writer's adopt fields. Pure provisioning: NO build, deploy, or
- * drift-check. Idempotent + read-first: a binding already pointing at a real id
- * is left untouched.
+ * the real id is captured from `wrangler <res> list/info` (or, for Hyperdrive,
+ * the account-list existence seam) and written through the Task 3 writer's adopt
+ * fields. Pure provisioning: NO build, deploy, or drift-check. Idempotent +
+ * read-first: a binding already pointing at a real id is left untouched.
  */
 export async function provisionCloudflareResources(
   root: string,
@@ -245,48 +373,68 @@ export async function provisionCloudflareResources(
   opts?: {
     runWrangler?: RunWrangler;
     accountId?: string;
+    apiToken?: string;
+    listHyperdriveConfigs?: ListHyperdriveConfigs;
     log?: ProvisionLogger;
   },
 ): Promise<ProvisionResult> {
   await Promise.resolve();
+  // ONE exact config path threaded through read-first, wrangler `-c`, AND the
+  // writer, so reads and writes can never hit different files (no split-brain).
+  const configPath = rootWranglerPath;
   const runWrangler =
     opts?.runWrangler ?? createDefaultRunWrangler(root, { accountId: opts?.accountId });
   const log = opts?.log ?? defaultLogger;
   const resources: Array<ProvisionOutcome> = [];
-  let configPath = rootWranglerPath;
-  const write = (patch: Parameters<typeof writeProvisionedWranglerConfig>[1]): void => {
-    configPath = writeProvisionedWranglerConfig(root, patch).configPath;
-  };
+  const write = (
+    patch: Parameters<typeof writeProvisionedWranglerConfig>[1],
+  ): WriteProvisionedWranglerResult => writeProvisionedWranglerConfig(root, patch, { configPath });
 
   // --- D1 ------------------------------------------------------------------
   if (desired.d1) {
     const { binding, name } = desired.d1;
-    const entry = findBindingEntry(readRootConfig(rootWranglerPath).d1_databases, binding);
+    const entry = findBindingEntry(readRootConfig(configPath).d1_databases, binding);
     if (entry && isRealValue(entry.database_id)) {
+      // Read-first hit. A prior run may have created the D1 (id written) then
+      // crashed BEFORE migrations_dir was set, so ensure + verify it here too —
+      // idempotent when already present — so the retry converges rather than
+      // leaving the gap unfilled forever.
+      const res = write({ d1MigrationsDir: { binding, dir: D1_MIGRATIONS_DIR } });
+      assertD1MigrationsDirApplied(res, binding, configPath);
       resources.push({ kind: 'd1', binding, name, action: 'reused', id: entry.database_id });
     } else {
       const existing = extractD1(
-        parseJsonArray(runWrangler('d1 list --json', { captureJson: true }).stdout).find(
+        parseJsonArray(runWrangler(['d1', 'list', '--json'], { captureJson: true }).stdout).find(
           (db) => db.name === name,
         ),
       );
       if (existing) {
         log.info(`adopted existing D1 database ${name} (${existing.id})`);
-        write({
+        const res = write({
           d1: { binding, databaseName: name, databaseId: existing.id },
           d1MigrationsDir: { binding, dir: D1_MIGRATIONS_DIR },
         });
+        assertD1MigrationsDirApplied(res, binding, configPath);
         resources.push({ kind: 'd1', binding, name, action: 'adopted', id: existing.id });
       } else {
-        const created = runWrangler(
-          `d1 create ${name} --binding ${binding} --update-config -c ${rootWranglerPath}`,
-        );
+        const created = runWrangler([
+          'd1',
+          'create',
+          name,
+          '--binding',
+          binding,
+          '--update-config',
+          '-c',
+          configPath,
+        ]);
         if (created.status !== 0) {
           if (isAlreadyExistsError(created)) {
             // TOCTOU: created between our list and create (code 7502). Capture
             // the id via `d1 info` and adopt instead of failing.
             const info = extractD1(
-              parseJsonObject(runWrangler(`d1 info ${name} --json`, { captureJson: true }).stdout),
+              parseJsonObject(
+                runWrangler(['d1', 'info', name, '--json'], { captureJson: true }).stdout,
+              ),
             );
             if (!info) {
               throw new Error(
@@ -295,10 +443,11 @@ export async function provisionCloudflareResources(
               );
             }
             log.info(`adopted existing D1 database ${name} (${info.id})`);
-            write({
+            const res = write({
               d1: { binding, databaseName: name, databaseId: info.id },
               d1MigrationsDir: { binding, dir: D1_MIGRATIONS_DIR },
             });
+            assertD1MigrationsDirApplied(res, binding, configPath);
             resources.push({ kind: 'd1', binding, name, action: 'adopted', id: info.id });
           } else {
             throw new Error(
@@ -308,7 +457,8 @@ export async function provisionCloudflareResources(
         } else {
           // wrangler wrote database_id/database_name via --update-config; fill
           // the migrations_dir it does not.
-          write({ d1MigrationsDir: { binding, dir: D1_MIGRATIONS_DIR } });
+          const res = write({ d1MigrationsDir: { binding, dir: D1_MIGRATIONS_DIR } });
+          assertD1MigrationsDirApplied(res, binding, configPath);
           resources.push({ kind: 'd1', binding, name, action: 'created' });
         }
       }
@@ -317,15 +467,32 @@ export async function provisionCloudflareResources(
 
   // --- KV ------------------------------------------------------------------
   for (const { binding, title } of desired.kvNamespaces) {
-    const entry = findBindingEntry(readRootConfig(rootWranglerPath).kv_namespaces, binding);
+    const entry = findBindingEntry(readRootConfig(configPath).kv_namespaces, binding);
     if (entry && isRealValue(entry.id)) {
       resources.push({ kind: 'kv', binding, name: title, action: 'reused', id: entry.id });
       continue;
     }
-    const matches = extractKvMatches(
-      runWrangler('kv namespace list', { captureJson: true }).stdout,
-      title,
-    );
+    // KV titles are NOT account-unique and `kv namespace create` never dedupes,
+    // so this list is the ONLY orphan guard. Require status 0 AND a schema-valid
+    // JSON array before treating an absent title as authoritative — otherwise a
+    // nonzero/auth/network/truncated result would parse as "absent" and mint a
+    // duplicate namespace. Fail closed (throw) instead.
+    const listResult = runWrangler(['kv', 'namespace', 'list'], { captureJson: true });
+    if (listResult.status !== 0) {
+      throw new Error(
+        `provision: "wrangler kv namespace list" failed: ${listResult.stderr || listResult.stdout}. ` +
+          `Cannot verify whether KV namespace ${JSON.stringify(title)} exists; refusing to create a ` +
+          `possible duplicate (KV titles are not account-unique).`,
+      );
+    }
+    const parsedList = parseJsonArrayStrict(listResult.stdout);
+    if (!parsedList) {
+      throw new Error(
+        `provision: "wrangler kv namespace list" did not return a JSON array; cannot verify whether ` +
+          `KV namespace ${JSON.stringify(title)} exists. Refusing to create a possible duplicate.`,
+      );
+    }
+    const matches = extractKvMatches(parsedList, title);
     if (matches.length > 0) {
       // KV titles are NOT account-unique. Tie-break deterministically on the
       // lexicographically-smallest id so re-runs adopt the same namespace.
@@ -341,9 +508,17 @@ export async function provisionCloudflareResources(
       write({ kv: { binding, id: chosen.id } });
       resources.push({ kind: 'kv', binding, name: title, action: 'adopted', id: chosen.id });
     } else {
-      const created = runWrangler(
-        `kv namespace create ${title} --binding ${binding} --update-config -c ${rootWranglerPath}`,
-      );
+      const created = runWrangler([
+        'kv',
+        'namespace',
+        'create',
+        title,
+        '--binding',
+        binding,
+        '--update-config',
+        '-c',
+        configPath,
+      ]);
       if (created.status !== 0) {
         throw new Error(
           `provision: "wrangler kv namespace create ${title}" failed: ${created.stderr || created.stdout}`,
@@ -356,65 +531,121 @@ export async function provisionCloudflareResources(
   // --- R2 ------------------------------------------------------------------
   if (desired.r2) {
     const { binding, bucketName } = desired.r2;
-    const entry = findBindingEntry(readRootConfig(rootWranglerPath).r2_buckets, binding);
+    const entry = findBindingEntry(readRootConfig(configPath).r2_buckets, binding);
     if (entry && isRealValue(entry.bucket_name)) {
       resources.push({ kind: 'r2', binding, name: bucketName, action: 'reused' });
-    } else if (
-      runWrangler(`r2 bucket info ${bucketName} --json`, { captureJson: true }).status === 0
-    ) {
-      // `wrangler r2 bucket list` is a human table, not JSON. Bucket names ARE
-      // account-unique, so probe the single bucket by name: `r2 bucket info`
-      // exits 0 only when the bucket exists (it throws a CF API error otherwise).
-      // Adopt it — write the `{binding,bucket_name}` entry via the writer.
-      log.info(`adopted existing R2 bucket ${bucketName}`);
-      write({ r2: { binding, bucketName } });
-      resources.push({ kind: 'r2', binding, name: bucketName, action: 'adopted' });
     } else {
-      // Non-zero info → the bucket does not exist (or is unreachable); create it.
-      // `r2 bucket create` on an already-existing name errors instead of silently
-      // duplicating, so a transient info failure can never mint a second bucket —
-      // the create surfaces the real problem. `--update-config` upserts by binding.
-      const created = runWrangler(
-        `r2 bucket create ${bucketName} --binding ${binding} --update-config -c ${rootWranglerPath}`,
-      );
-      if (created.status !== 0) {
+      // `wrangler r2 bucket list` is a human table, not JSON. Bucket names ARE
+      // account-unique, so probe the single bucket by name.
+      const info = runWrangler(['r2', 'bucket', 'info', bucketName, '--json'], {
+        captureJson: true,
+      });
+      if (info.status === 0) {
+        // Adopt it — write the `{binding,bucket_name}` entry via the writer.
+        log.info(`adopted existing R2 bucket ${bucketName}`);
+        write({ r2: { binding, bucketName } });
+        resources.push({ kind: 'r2', binding, name: bucketName, action: 'adopted' });
+      } else if (isBucketNotFoundError(info)) {
+        // CONFIRMED not-found → create. `--update-config` upserts by binding.
+        const created = runWrangler([
+          'r2',
+          'bucket',
+          'create',
+          bucketName,
+          '--binding',
+          binding,
+          '--update-config',
+          '-c',
+          configPath,
+        ]);
+        if (created.status !== 0) {
+          throw new Error(
+            `provision: "wrangler r2 bucket create ${bucketName}" failed: ${created.stderr || created.stdout}`,
+          );
+        }
+        resources.push({ kind: 'r2', binding, name: bucketName, action: 'created' });
+      } else {
+        // A non-zero that is NOT the confirmed not-found signal (auth/metrics/
+        // network) — the bucket may well EXIST. Surface the real error instead of
+        // attempting a create that would spuriously fail or risk a duplicate.
         throw new Error(
-          `provision: "wrangler r2 bucket create ${bucketName}" failed: ${created.stderr || created.stdout}`,
+          `provision: "wrangler r2 bucket info ${bucketName}" failed: ${info.stderr || info.stdout}. ` +
+            `Cannot determine whether the bucket exists; refusing to create a possible duplicate.`,
         );
       }
-      resources.push({ kind: 'r2', binding, name: bucketName, action: 'created' });
     }
   }
 
   // --- Hyperdrive ----------------------------------------------------------
   // wrangler 4.107 has NO machine-readable Hyperdrive list (`hyperdrive list`
-  // prints a cli-table3 box table; there is no `--json` and no get-by-NAME —
-  // `hyperdrive get` takes an id). So account-list adoption is not reliably
-  // possible; idempotency comes from read-first on the config (where the id
-  // `wrangler hyperdrive create --update-config` wrote already lives) plus
-  // create otherwise. The writer's `hyperdrive` adopt field stays available for
-  // Task 6, which can supply a known id from its own preflight.
+  // prints a cli-table3 box table; there is no `--json`, and `hyperdrive get`
+  // takes an id, not a name). `hyperdrive create` on a NON-UNIQUE name silently
+  // mints a DUPLICATE config (new UUID), so a re-run without the id in config
+  // would keep minting duplicates. Existence is therefore checked via an
+  // INJECTABLE Cloudflare REST seam (GET …/hyperdrive/configs, matched by name):
+  // reliable + fully testable (unit tests stub it, no real network). Adoption is
+  // attempted BEFORE the connection-string gate (it needs no connection string).
   if (desired.hyperdrive) {
     const { binding, name, connectionString } = desired.hyperdrive;
-    const entry = findBindingEntry(readRootConfig(rootWranglerPath).hyperdrive, binding);
+    const entry = findBindingEntry(readRootConfig(configPath).hyperdrive, binding);
     if (entry && isRealValue(entry.id)) {
       resources.push({ kind: 'hyperdrive', binding, name, action: 'reused', id: entry.id });
-    } else if (!connectionString) {
-      // CI-safe: never prompt. Task 6/preflight is responsible for obtaining a
-      // connection string; without one we cannot create the config.
-      const reason = 'no connection string provided';
-      log.warn(`skipping Hyperdrive config ${name}: ${reason}`);
-      resources.push({ kind: 'hyperdrive', binding, name, action: 'skipped', reason });
     } else {
-      const created = runWrangler(
-        `hyperdrive create ${name} --connection-string=${connectionString} --binding ${binding} --update-config -c ${rootWranglerPath}`,
-      );
-      if (created.status !== 0) {
-        throw new Error(
-          `provision: "wrangler hyperdrive create ${name}" failed: ${created.stderr || created.stdout}`,
-        );
+      const lister =
+        opts?.listHyperdriveConfigs ??
+        createDefaultListHyperdriveConfigs(opts?.accountId, opts?.apiToken);
+      let existing: HyperdriveConfig | undefined;
+      let existenceUnknown = true;
+      if (lister) {
+        try {
+          const configs = await lister();
+          existing = configs.find((c) => c.name === name);
+          existenceUnknown = false;
+        } catch (error) {
+          log.warn(`Hyperdrive existence check for ${name} failed: ${(error as Error).message}`);
+          existenceUnknown = true;
+        }
       }
-      resources.push({ kind: 'hyperdrive', binding, name, action: 'created' });
+      if (existing) {
+        log.info(`adopted existing Hyperdrive config ${name} (${existing.id})`);
+        write({ hyperdrive: { binding, id: existing.id } });
+        resources.push({ kind: 'hyperdrive', binding, name, action: 'adopted', id: existing.id });
+      } else if (!connectionString) {
+        // No connection string → we can never CREATE, so there is no duplicate
+        // risk whether or not existence is known: skip (structured, never prompts).
+        const reason = 'no connection string provided';
+        log.warn(`skipping Hyperdrive config ${name}: ${reason}`);
+        resources.push({ kind: 'hyperdrive', binding, name, action: 'skipped', reason });
+      } else if (existenceUnknown) {
+        // A connection string is present (we WOULD create) but existence is
+        // unverifiable → FAIL CLOSED. Blindly creating duplicates a same-named
+        // config.
+        throw new Error(
+          `provision: cannot verify whether Hyperdrive config ${JSON.stringify(name)} already ` +
+            `exists (no existence check available — provide an accountId + API token, or inject a ` +
+            `listHyperdriveConfigs seam). "wrangler hyperdrive create" silently duplicates a ` +
+            `same-named config, so provisioning refuses to create it blindly.`,
+        );
+      } else {
+        // Confirmed absent + connection string present → create.
+        const created = runWrangler([
+          'hyperdrive',
+          'create',
+          name,
+          `--connection-string=${connectionString}`,
+          '--binding',
+          binding,
+          '--update-config',
+          '-c',
+          configPath,
+        ]);
+        if (created.status !== 0) {
+          throw new Error(
+            `provision: "wrangler hyperdrive create ${name}" failed: ${created.stderr || created.stdout}`,
+          );
+        }
+        resources.push({ kind: 'hyperdrive', binding, name, action: 'created' });
+      }
     }
   }
 
@@ -425,7 +656,7 @@ export async function provisionCloudflareResources(
   // queue RESOURCE exists — binding the producers/consumers into the config is
   // app-class-aware and belongs to Task 6.
   for (const name of desired.queues) {
-    const info = runWrangler(`queues info ${name}`);
+    const info = runWrangler(['queues', 'info', name]);
     if (info.status === 0) {
       resources.push({ kind: 'queue', name, action: 'reused' });
       continue;
@@ -435,7 +666,7 @@ export async function provisionCloudflareResources(
         `provision: "wrangler queues info ${name}" failed: ${info.stderr || info.stdout}`,
       );
     }
-    const created = runWrangler(`queues create ${name}`);
+    const created = runWrangler(['queues', 'create', name]);
     if (created.status !== 0) {
       throw new Error(
         `provision: "wrangler queues create ${name}" failed: ${created.stderr || created.stdout}`,

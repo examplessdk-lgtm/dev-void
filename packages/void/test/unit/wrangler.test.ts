@@ -2154,4 +2154,94 @@ describe('writeProvisionedWranglerConfig', () => {
     const hd = parseRaw('wrangler.jsonc').hyperdrive as Array<Record<string, unknown>>;
     expect(hd).toEqual([{ binding: 'HYPERDRIVE', id: 'realhyperid789' }]);
   });
+
+  // Adopt-field invariants — the append path must uphold the SAME worker-wide
+  // binding-uniqueness rules the queue-producer guard enforces, and the update
+  // path must fail closed on an ambiguous duplicate binding in the target array.
+
+  it('adopt fails closed when the binding is already used by a DIFFERENT resource type (worker-wide collision) — no write', () => {
+    // A KV is already bound `DB`; adopting a D1 as `DB` would emit a cross-type
+    // duplicate binding name wrangler rejects at deploy. Fail closed.
+    setup('wrangler.jsonc', '{ "kv_namespaces": [{ "binding": "DB", "id": "abc" }] }');
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1: { binding: 'DB', databaseName: 'app', databaseId: 'real-uuid' },
+      }),
+    ).toThrow(/cannot adopt "DB" into "d1_databases".*already used by a KV Namespace binding/s);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('adopt fails closed when the binding collides with a var name — no write', () => {
+    setup('wrangler.jsonc', '{ "vars": { "STORAGE": "x" } }');
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        r2: { binding: 'STORAGE', bucketName: 'uploads' },
+      }),
+    ).toThrow(
+      /cannot adopt "STORAGE" into "r2_buckets".*already used by an? Environment Variable/s,
+    );
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('adopt fails closed when the target array already declares the binding twice (ambiguous) — no write', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [
+    { "binding": "DB", "database_name": "a", "database_id": "id-a" },
+    { "binding": "DB", "database_name": "b", "database_id": "id-b" }
+  ]
+}`,
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        d1: { binding: 'DB', databaseName: 'app', databaseId: 'real-uuid' },
+      }),
+    ).toThrow(/binding "DB" is declared 2 times in "d1_databases"/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('negative control: adopt appends normally when the binding collides with nothing, and is idempotent', () => {
+    // A D1 binding `DB` and a KV binding `KV` do NOT collide with adopting an R2
+    // as `STORAGE` — the worker-wide guard is precise, not paranoid.
+    setup(
+      'wrangler.jsonc',
+      `{
+  "d1_databases": [{ "binding": "DB", "database_name": "app", "database_id": "id" }],
+  "kv_namespaces": [{ "binding": "KV", "id": "abc" }]
+}`,
+    );
+    const patch = { r2: { binding: 'STORAGE', bucketName: 'uploads' } };
+    const first = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(first.modified).toBe(true);
+    const r2 = parseRaw('wrangler.jsonc').r2_buckets as Array<Record<string, unknown>>;
+    expect(r2).toEqual([{ binding: 'STORAGE', bucket_name: 'uploads' }]);
+
+    // Idempotent — a second run writes nothing and is byte-identical.
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, patch);
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('honors an explicit configPath option (writes the pinned file, not discovery)', () => {
+    // The provisioner pins the exact file so read-first + wrangler -c + this write
+    // never diverge. With both files present, discovery would prefer .jsonc; the
+    // explicit option must win and write .json.
+    setup('wrangler.jsonc', '{ "name": "jsonc" }');
+    writeFileSync(join(tmpDir, 'wrangler.json'), '{ "name": "json" }');
+    const jsonPath = join(tmpDir, 'wrangler.json');
+    const result = writeProvisionedWranglerConfig(
+      tmpDir,
+      { accountId: 'acc-pinned' },
+      { configPath: jsonPath },
+    );
+    expect(result.configPath).toBe(jsonPath);
+    expect((parseRaw('wrangler.json') as Record<string, unknown>).account_id).toBe('acc-pinned');
+    // The .jsonc (which discovery would have preferred) is untouched.
+    expect((parseRaw('wrangler.jsonc') as Record<string, unknown>).account_id).toBeUndefined();
+  });
 });
