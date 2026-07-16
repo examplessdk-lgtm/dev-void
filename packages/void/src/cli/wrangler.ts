@@ -914,30 +914,51 @@ export function writeProvisionedWranglerConfig(
       // legal same-queue producers, so a `{queue,CUSTOM}` + `{queue,QUEUE_JOBS}`
       // pair collapses into two identical `QUEUE_JOBS` bindings — a config
       // wrangler rejects.
-      const index =
-        section === 'producers'
-          ? currentList.findIndex(
-              (existing) => isRecord(existing) && existing.binding === entry.binding,
-            )
-          : currentList.findIndex(
-              (existing) => isRecord(existing) && existing.queue === entry.queue,
-            );
-
-      // A producer `binding` must map to exactly ONE queue. If this binding is
-      // already bound to a DIFFERENT queue, upserting would leave two producers
-      // sharing one binding — a config wrangler rejects. Fail closed (before any
-      // write) with an actionable message rather than emitting the broken config.
-      if (section === 'producers' && index >= 0) {
-        const existing = currentList[index];
-        if (isRecord(existing) && existing.queue !== entry.queue) {
+      //
+      // A producer `binding` must map to exactly ONE queue, so the fail-closed
+      // guard must inspect EVERY producer sharing the desired binding — not just
+      // the first `findIndex` hit — to stay deterministic regardless of array
+      // order:
+      //   - 0 matches                → append the new producer (`index = -1`).
+      //   - 1 match, same queue      → no-op upsert (idempotent).
+      //   - 1 match, different queue → fail closed (binding bound elsewhere).
+      //   - >1 match (duplicate binding across entries) → fail closed; the
+      //     registry is already undeployable, so never silently "converge" on it
+      //     (an order-dependent first-match check would falsely report success).
+      let index: number;
+      if (section === 'producers') {
+        const matches: Array<number> = [];
+        for (let i = 0; i < currentList.length; i++) {
+          const existing = currentList[i];
+          if (isRecord(existing) && existing.binding === entry.binding) {
+            matches.push(i);
+          }
+        }
+        if (matches.length > 1) {
           throw new Error(
             `deploy: cannot update "${configPath}" — queue producer binding ` +
-              `${JSON.stringify(entry.binding)} is already bound to queue ` +
-              `${JSON.stringify(existing.queue)}, but queue ${JSON.stringify(entry.queue)} also ` +
-              `requests it. A producer binding must map to exactly one queue. Rename or remove ` +
-              `the conflicting producer and retry.`,
+              `${JSON.stringify(entry.binding)} is declared ${matches.length} times across ` +
+              `producers. A producer binding must map to exactly one queue, so wrangler rejects ` +
+              `this config. Remove the duplicate producers and retry.`,
           );
         }
+        if (matches.length === 1) {
+          const existing = currentList[matches[0]];
+          if (isRecord(existing) && existing.queue !== entry.queue) {
+            throw new Error(
+              `deploy: cannot update "${configPath}" — queue producer binding ` +
+                `${JSON.stringify(entry.binding)} is already bound to queue ` +
+                `${JSON.stringify(existing.queue)}, but queue ${JSON.stringify(entry.queue)} also ` +
+                `requests it. A producer binding must map to exactly one queue. Rename or remove ` +
+                `the conflicting producer and retry.`,
+            );
+          }
+        }
+        index = matches.length === 1 ? matches[0] : -1;
+      } else {
+        index = currentList.findIndex(
+          (existing) => isRecord(existing) && existing.queue === entry.queue,
+        );
       }
 
       if (index >= 0) {
@@ -1098,7 +1119,26 @@ function applyMemberEdit(
   if (commaPos === -1) {
     return plain();
   }
-  return `${rewritten.slice(0, commaPos + 1)} ${trailing.text}${rewritten.slice(commaPos + 1)}`;
+  const relocated = `${rewritten.slice(0, commaPos + 1)} ${trailing.text}${rewritten.slice(commaPos + 1)}`;
+
+  // Validate-before-write backstop. Comment relocation must ONLY ever change
+  // comment placement — never JSONC validity or data. Re-parse the relocated
+  // string; if it does not parse, or its data is not deeply equal to the plain
+  // formatting edit's data, discard it and return the plain (always-valid)
+  // result. This makes relocation safe by construction: the worst case is a
+  // comment reassociated by jsonc-parser onto the wrong sibling, but the file is
+  // always valid JSONC and always carries the correct data — never corruption.
+  const plainResult = plain();
+  let relocatedParsed: Record<string, unknown>;
+  try {
+    relocatedParsed = parseJsonc(relocated);
+  } catch {
+    return plainResult;
+  }
+  if (!jsonEqual(relocatedParsed, parseJsonc(plainResult))) {
+    return plainResult;
+  }
+  return relocated;
 }
 
 /**
@@ -1132,12 +1172,15 @@ function readTrailingComment(
     }
   }
   if (text[i] === '/' && text[i + 1] === '/') {
+    // A line comment ends at the first line terminator — CR or LF. Stopping at
+    // BOTH means a classic-Mac CR-only file terminates the comment here instead
+    // of swallowing the rest of the line (including the closing brace, which
+    // would relocate the new member outside the root object and corrupt the
+    // file); and a CRLF file's trailing `\r` is left out of the comment text and
+    // preserved on write.
     let end = i;
-    while (end < text.length && text[end] !== '\n') {
+    while (end < text.length && text[end] !== '\n' && text[end] !== '\r') {
       end++;
-    }
-    if (end > i && text[end - 1] === '\r') {
-      end--;
     }
     return { text: text.slice(i, end), end };
   }
@@ -1147,11 +1190,13 @@ function readTrailingComment(
       return undefined;
     }
     const end = close + 2;
-    // Only a single-line block comment is safe to relocate onto one line.
-    if (text.slice(i, end).includes('\n')) {
+    // Only a single-line block comment is safe to relocate onto one line. A CR
+    // or LF inside makes it multi-line → decline (accepted best-effort path).
+    const slice = text.slice(i, end);
+    if (slice.includes('\n') || slice.includes('\r')) {
       return undefined;
     }
-    return { text: text.slice(i, end), end };
+    return { text: slice, end };
   }
   return undefined;
 }

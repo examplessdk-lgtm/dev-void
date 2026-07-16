@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { parse as parseJsoncRaw } from 'jsonc-parser';
+import { parse as parseJsoncRaw, type ParseError } from 'jsonc-parser';
 import { join } from 'pathe';
 import { describe, it, expect, afterEach } from 'vite-plus/test';
 import {
@@ -27,6 +27,13 @@ function setup(filename: string, content: string) {
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
+
+/** Count jsonc-parser parse errors — used to assert CR-only edits stay valid. */
+function parseErrors(text: string): number {
+  const errs: Array<ParseError> = [];
+  parseJsoncRaw(text, errs, { allowTrailingComma: true });
+  return errs.length;
+}
 
 describe('readWranglerCompat', () => {
   it('resolves the latest known-good compatibility date without writing void.json', () => {
@@ -1363,5 +1370,170 @@ describe('writeProvisionedWranglerConfig', () => {
     });
     expect(second.modified).toBe(false);
     expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  const CR = '\r';
+
+  it('CR-only line endings: inserting migrations_dir stays valid, keeps the trailing comment, byte-identical on re-run', () => {
+    // Classic-Mac CR-only file. A `\n`-only comment scanner would swallow the CR
+    // + the closing brace, writing migrations_dir OUTSIDE the object (parse error)
+    // and making a second run throw. Stopping the scan at CR keeps it valid.
+    const fixture =
+      `{${CR}` +
+      `  "d1_databases": [${CR}` +
+      `    {${CR}` +
+      `      "binding": "DB",${CR}` +
+      `      "database_id": "prod-id" // entrypoint${CR}` +
+      `    }${CR}` +
+      `  ]${CR}` +
+      `}`;
+    setup('wrangler.jsonc', fixture);
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    });
+    expect(result.modified).toBe(true);
+    expect(result.d1MigrationsDirSkipped).toBe(false);
+
+    const raw = readRaw('wrangler.jsonc');
+    // Zero parse errors — the closing brace was NOT consumed by the comment scan.
+    expect(parseErrors(raw)).toBe(0);
+    // Comment text preserved and still on database_id (not moved onto migrations_dir).
+    expect(raw).toContain('// entrypoint');
+    expect(raw).not.toMatch(/migrations_dir[^\r\n]*entrypoint/);
+    const d1 = parseRaw('wrangler.jsonc').d1_databases as Array<Record<string, unknown>>;
+    expect(d1[0]).toMatchObject({ binding: 'DB', migrations_dir: 'db/migrations' });
+
+    // Byte-identical second run — previously the corrupted file made this THROW.
+    const afterFirst = raw;
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      d1MigrationsDir: { binding: 'DB', dir: 'db/migrations' },
+    });
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('CR-only line endings: appending a queue producer stays valid, keeps the trailing comment, byte-identical on re-run', () => {
+    const fixture =
+      `{${CR}` +
+      `  "queues": {${CR}` +
+      `    "producers": [${CR}` +
+      `      { "queue": "jobs", "binding": "QUEUE_JOBS" } // jobs producer${CR}` +
+      `    ]${CR}` +
+      `  }${CR}` +
+      `}`;
+    setup('wrangler.jsonc', fixture);
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(result.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    expect(parseErrors(raw)).toBe(0);
+    expect(raw).toContain('// jobs producer');
+    // Comment stays with the jobs entry, never reassociated onto the appended one.
+    expect(raw).not.toMatch(/QUEUE_EMAILS[\s\S]*jobs producer/);
+    const q = parseRaw('wrangler.jsonc').queues as { producers: Array<Record<string, unknown>> };
+    expect(q.producers).toEqual([
+      { queue: 'jobs', binding: 'QUEUE_JOBS' },
+      { queue: 'emails', binding: 'QUEUE_EMAILS' },
+    ]);
+
+    const afterFirst = raw;
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('CR-only line endings: creating a missing queues.producers section stays valid, keeps the consumers trailing comment', () => {
+    const fixture =
+      `{${CR}` +
+      `  "queues": {${CR}` +
+      `    "consumers": [${CR}` +
+      `      { "queue": "jobs", "max_batch_size": 10 }${CR}` +
+      `    ] // jobs consumer${CR}` +
+      `  }${CR}` +
+      `}`;
+    setup('wrangler.jsonc', fixture);
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(result.modified).toBe(true);
+
+    const raw = readRaw('wrangler.jsonc');
+    expect(parseErrors(raw)).toBe(0);
+    expect(raw).toContain('// jobs consumer');
+    expect(raw).not.toMatch(/"producers"[\s\S]*jobs consumer/);
+    const q = parseRaw('wrangler.jsonc').queues as {
+      producers: Array<Record<string, unknown>>;
+      consumers: Array<Record<string, unknown>>;
+    };
+    expect(q.consumers).toEqual([{ queue: 'jobs', max_batch_size: 10 }]);
+    expect(q.producers).toEqual([{ queue: 'emails', binding: 'QUEUE_EMAILS' }]);
+
+    const afterFirst = raw;
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'emails', binding: 'QUEUE_EMAILS' }] },
+    });
+    expect(second.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+  });
+
+  it('producer conflict is order-independent: a duplicate binding across producers fails closed in EITHER array order', () => {
+    // Both entries share binding QUEUE_JOBS (already undeployable). The desired
+    // {jobs,QUEUE_JOBS} must fail closed regardless of order — a first-match check
+    // would falsely report convergence when {jobs,...} happens to come first.
+    const forward =
+      `{\n` +
+      `  "queues": {\n` +
+      `    "producers": [\n` +
+      `      { "queue": "jobs", "binding": "QUEUE_JOBS" },\n` +
+      `      { "queue": "other", "binding": "QUEUE_JOBS" }\n` +
+      `    ]\n` +
+      `  }\n` +
+      `}`;
+    setup('wrangler.jsonc', forward);
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/declared 2 times/);
+    expect(readRaw('wrangler.jsonc')).toBe(forward);
+
+    const reversed =
+      `{\n` +
+      `  "queues": {\n` +
+      `    "producers": [\n` +
+      `      { "queue": "other", "binding": "QUEUE_JOBS" },\n` +
+      `      { "queue": "jobs", "binding": "QUEUE_JOBS" }\n` +
+      `    ]\n` +
+      `  }\n` +
+      `}`;
+    setup('wrangler.jsonc', reversed);
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/declared 2 times/);
+    expect(readRaw('wrangler.jsonc')).toBe(reversed);
+  });
+
+  it('producer upsert is a no-op when the sole matching binding already maps to the same queue', () => {
+    const fixture =
+      `{\n` +
+      `  "queues": {\n` +
+      `    "producers": [{ "queue": "jobs", "binding": "QUEUE_JOBS" }]\n` +
+      `  }\n` +
+      `}`;
+    setup('wrangler.jsonc', fixture);
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+    });
+    expect(result.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(fixture);
   });
 });
