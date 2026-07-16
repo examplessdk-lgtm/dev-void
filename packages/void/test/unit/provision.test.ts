@@ -4107,6 +4107,123 @@ describe('provisionCloudflareResources — F5 dotenv fence file set + case rule 
   });
 });
 
+describe('provisionCloudflareResources — F7 read-first stored-name identity (round 11)', () => {
+  it('D1: a stored database_name EQUAL to the desired name is reused (as before)', async () => {
+    setup(
+      JSON.stringify({
+        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: uuid('db1') }],
+      }),
+    );
+    const { run, calls } = makeRunner([]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(calls).toEqual([]);
+    expect(result.resources[0]).toEqual({
+      kind: 'd1',
+      binding: 'DB',
+      name: 'myapp-db',
+      action: 'reused',
+      id: uuid('db1'),
+    });
+  });
+
+  it('D1: a stored database_name DIFFERENT from the desired name fails closed (no wrangler call, no reuse)', async () => {
+    setup(
+      JSON.stringify({
+        d1_databases: [{ binding: 'DB', database_name: 'other-db', database_id: uuid('other') }],
+      }),
+    );
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(
+      /D1 binding "DB".*stores database_name "other-db".*wants database "myapp-db".*contradicts the desired name/s,
+    );
+    // Fail closed — no discovery/create, config untouched.
+    expect(calls).toEqual([]);
+    expect((readConfig().d1_databases as Array<Record<string, unknown>>)[0].database_id).toBe(
+      uuid('other'),
+    );
+  });
+
+  it('D1: an entry with a real id but NO database_name keeps ID-only reuse', async () => {
+    setup(JSON.stringify({ d1_databases: [{ binding: 'DB', database_id: uuid('db1') }] }));
+    const { run, calls } = makeRunner([]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(calls).toEqual([]);
+    expect(result.resources[0].action).toBe('reused');
+    expect(result.resources[0].id).toBe(uuid('db1'));
+  });
+
+  it('R2: a stored bucket_name EQUAL to the desired name is reused (as before)', async () => {
+    setup(JSON.stringify({ r2_buckets: [{ binding: 'STORAGE', bucket_name: 'myapp-uploads' }] }));
+    const { run, calls } = makeRunner([]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'myapp-uploads' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(calls).toEqual([]);
+    expect(result.resources[0].action).toBe('reused');
+  });
+
+  it('R2: a stored bucket_name DIFFERENT from the desired name fails closed (contradiction, never silent reuse)', async () => {
+    setup(JSON.stringify({ r2_buckets: [{ binding: 'STORAGE', bucket_name: 'someone-elses-bucket' }] }));
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'myapp-uploads' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(
+      /R2 binding "STORAGE".*stores bucket_name "someone-elses-bucket".*wants bucket "myapp-uploads".*contradicts the desired bucket/s,
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it('R2: the `default` placeholder bucket_name still takes the discovery path (not a contradiction)', async () => {
+    setup(JSON.stringify({ r2_buckets: [{ binding: 'STORAGE', bucket_name: 'default' }] }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^r2 bucket info /,
+        reply: () => fail('', 'X [ERROR] The specified bucket does not exist [code: 10006]'),
+      },
+      {
+        match: /^r2 bucket create /,
+        reply: () => {
+          simulateUpdateConfig('r2_buckets', { binding: 'STORAGE', bucket_name: 'myapp-uploads' });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'myapp-uploads' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(calls.some((c) => isCall(c, 'r2', 'bucket', 'create'))).toBe(true);
+    expect(result.resources[0].action).toBe('created');
+  });
+});
+
 describe('provisionCloudflareResources — F5 R2 absence needs the STRUCTURED code (round 10)', () => {
   it('a failure whose text merely contains 10006 inside a bucket name is NOT absence (fails closed, no create)', async () => {
     setup(JSON.stringify({ name: 'app', account_id: 'acct' }));

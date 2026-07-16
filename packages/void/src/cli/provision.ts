@@ -2214,6 +2214,23 @@ async function provisionCloudflareResourcesLocked(
     const { binding, name } = desired.d1;
     const entry = readBindingEntry(configPath, 'd1_databases', binding);
     if (entry && isRealD1Id(entry.database_id)) {
+      // F7 (round 11, user-approved contract) — stored-name identity: when the entry
+      // STORES a `database_name`, it must EQUAL the desired name before the id is
+      // reused. A real id under a CONTRADICTING stored name means the binding points at
+      // a DIFFERENT database than this deploy wants — reusing it would silently run the
+      // app (and its migrations) against the wrong database. An entry storing NO name
+      // keeps ID-only reuse (the id alone is the identity then).
+      const storedName = entry.database_name;
+      if (storedName !== undefined && storedName !== name) {
+        throw new Error(
+          `provision: D1 binding ${JSON.stringify(binding)} in "${configPath}" stores ` +
+            `database_name ${JSON.stringify(storedName)} (with a real database_id), but this ` +
+            `deploy wants database ${JSON.stringify(name)}. Refusing to reuse a database that ` +
+            `contradicts the desired name. Fix "${configPath}" — correct the entry's ` +
+            `database_name/database_id (or remove the entry to re-provision) — or rename the ` +
+            `desired database, then retry.`,
+        );
+      }
       // Read-first hit. A prior run may have created the D1 (id written) then
       // crashed BEFORE migrations_dir was set, so ensure + verify it here too —
       // idempotent when already present — so the retry converges rather than
@@ -2438,7 +2455,24 @@ async function provisionCloudflareResourcesLocked(
   if (desired.r2) {
     const { binding, bucketName } = desired.r2;
     const entry = readBindingEntry(configPath, 'r2_buckets', binding);
-    if (entry && isRealR2BucketName(entry.bucket_name)) {
+    // F7 (round 11, user-approved contract) — `bucket_name` IS the R2 identity: a stored
+    // REAL (non-placeholder) bucket_name that differs from the desired name is a
+    // CONTRADICTION — reusing it would keep the app bound to a different bucket while
+    // reporting the desired one provisioned. Equal → reuse as before (the desired name
+    // already passed the R2 grammar gate, so an equal stored name is format-valid too).
+    // A placeholder (`default`) or absent name keeps the discovery path.
+    const storedBucketName = entry?.bucket_name;
+    if (entry && isRealValue(storedBucketName)) {
+      if (storedBucketName !== bucketName) {
+        throw new Error(
+          `provision: R2 binding ${JSON.stringify(binding)} in "${configPath}" stores ` +
+            `bucket_name ${JSON.stringify(storedBucketName)}, but this deploy wants bucket ` +
+            `${JSON.stringify(bucketName)}. bucket_name IS the R2 identity, so this entry ` +
+            `contradicts the desired bucket. Fix "${configPath}" — correct the entry's ` +
+            `bucket_name (or remove the entry to re-provision) — or rename the desired bucket, ` +
+            `then retry.`,
+        );
+      }
       resources.push({ kind: 'r2', binding, name: bucketName, action: 'reused' });
     } else {
       // `wrangler r2 bucket list` is a human table, not JSON. Bucket names ARE
