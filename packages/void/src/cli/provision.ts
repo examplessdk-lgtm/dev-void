@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { parse, type ParseError } from 'jsonc-parser';
+import { resolve } from 'pathe';
 import { voidLog, voidWarn } from '../log.ts';
 import { resolveWranglerArgv } from './preset.ts';
 import { writeProvisionedWranglerConfig, type WriteProvisionedWranglerResult } from './wrangler.ts';
@@ -140,11 +141,16 @@ export function provisionEnv(accountId?: string): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env.CF_ACCESS_CLIENT_ID;
   delete env.CF_ACCESS_CLIENT_SECRET;
-  // Scrub CLOUDFLARE_ENV: it selects an ENVIRONMENT-specific config block, whose
-  // own `account_id` (and bindings) could differ from the single account this
-  // provision pinned — a footgun. Removing it forces wrangler onto the top-level
-  // (pinned) config/account so `wrangler <res> list/create` cannot silently drift
-  // to an env-specific account we never resolved or persisted.
+  // Best-effort scrub of CLOUDFLARE_ENV (it selects an ENVIRONMENT-specific config
+  // block whose `account_id`/bindings could differ from the account this provision
+  // pinned). This ALONE is NOT sufficient: wrangler 4.107 reloads `.env`/`.env.local`
+  // from the project root into `process.env` on every command, so a project `.env`
+  // with `CLOUDFLARE_ENV=staging` would repopulate it after this delete. The RELIABLE
+  // top-level pin is the explicit empty `--env=` flag added to EVERY wrangler argv
+  // (see `wranglerConfigArgs`); wrangler resolves the env as `args.env ?? CLOUDFLARE_ENV`,
+  // and an explicit empty `args.env` short-circuits the `??` so the reloaded
+  // CLOUDFLARE_ENV can never reselect a named env-block/account. The delete stays as
+  // defense in depth for any other consumer of this env.
   delete env.CLOUDFLARE_ENV;
   // Pin the target account non-interactively (CI-safe) when known, so
   // `wrangler <res> list/create` never prompts for disambiguation AND never falls
@@ -533,43 +539,57 @@ function validateResourceList(
 }
 
 /**
- * ONE strict D1 identity normalizer, shared by `d1 list --json` and
- * `d1 info <name> --json`. Requires EXACTLY ONE unambiguous NON-EMPTY id:
- *   - reads BOTH aliases (`database_id`, `uuid`), treating an EMPTY STRING as
- *     ABSENT for each — so an empty-string `uuid` can no longer shadow a valid
- *     `database_id` (`'' ?? x === ''` in the old `??` chain made a validated DB
- *     look absent → duplicate create);
- *   - prefers `database_id` when both are present and equal;
- *   - REJECTS conflicting non-empty aliases (two distinct ids → returns
- *     `undefined`, so the caller does not adopt an ambiguous identity).
- * The `name` (from `database_name`/`name`, empty treated as absent) is returned so
- * callers can require an EXACT requested-name match before adopting.
+ * The one D1 identity outcome, so a caller can distinguish "not the requested
+ * database" (skip → maybe create) from "IS the requested database but ambiguous"
+ * (fail closed → never adopt, never mistake for absent).
  */
-function normalizeD1Identity(
-  entry: Record<string, unknown> | undefined,
-): { id: string; name?: string } | undefined {
-  if (!entry) {
-    return undefined;
+type D1Match = { kind: 'match'; id: string } | { kind: 'claimed-but-invalid' } | { kind: 'other' };
+
+/**
+ * THE single strict D1 identity normalizer (F5), shared by `d1 list --json` and
+ * `d1 info <name> --json`. It reconciles the TWO name aliases (`name`,
+ * `database_name`) and TWO id aliases (`database_id`, `uuid`) — an EMPTY STRING is
+ * treated as ABSENT for each — and returns a usable id ONLY when the entry
+ * unambiguously IS the requested database:
+ *   - `{ kind: 'other' }` — no non-empty name alias equals `requestedName`, so this
+ *     entry is a different database (the caller skips it, never mistakes it for the
+ *     target, and never adopts it under a normalization of a DIFFERENT name);
+ *   - `{ kind: 'claimed-but-invalid' }` — a name alias DOES equal `requestedName`
+ *     but the entry is ambiguous: CONFLICTING non-empty name aliases (e.g.
+ *     `name:"wanted"` + `database_name:"other"`), OR not EXACTLY ONE distinct
+ *     non-empty id (0 → no id; >1 → conflicting/blank uuid vs database_id). The
+ *     caller fails closed (never adopt, never create a duplicate);
+ *   - `{ kind: 'match', id }` — exactly one requested-name alias and exactly one
+ *     unambiguous non-empty id.
+ * The old two-helper split (`normalizeD1Identity` preferring `database_name`,
+ * `d1EntryName` preferring `name`) let a `{name,database_name}` mismatch be
+ * SELECTED under one alias yet KEYED under the other. This collapses both into one
+ * exact-match rule so no sibling gap remains.
+ */
+function normalizeD1(entry: Record<string, unknown> | undefined, requestedName: string): D1Match {
+  if (!isRecord(entry)) {
+    return { kind: 'other' };
+  }
+  const names = [entry.name, entry.database_name].filter(
+    (value): value is string => typeof value === 'string' && value.length > 0,
+  );
+  // Not the requested database unless SOME non-empty alias equals it exactly.
+  if (!names.includes(requestedName)) {
+    return { kind: 'other' };
+  }
+  // It claims the requested name — now it must be UNAMBIGUOUS to adopt.
+  // Conflicting non-empty name aliases → ambiguous identity.
+  if (new Set(names).size > 1) {
+    return { kind: 'claimed-but-invalid' };
   }
   const ids = [entry.database_id, entry.uuid].filter(
     (value): value is string => typeof value === 'string' && value.length > 0,
   );
-  // 0 distinct → no id; >1 distinct → conflicting/ambiguous. Either way, not a
-  // usable identity: the caller must fail closed rather than adopt/duplicate.
+  // 0 distinct → no id; >1 distinct → conflicting/blank aliases. Fail closed.
   if (new Set(ids).size !== 1) {
-    return undefined;
+    return { kind: 'claimed-but-invalid' };
   }
-  const name = [entry.database_name, entry.name].find(
-    (value): value is string => typeof value === 'string' && value.length > 0,
-  );
-  return { id: ids[0], name };
-}
-
-/** The requested-name value carried by a `d1 list` member (either alias). */
-function d1EntryName(entry: Record<string, unknown>): string | undefined {
-  return [entry.name, entry.database_name].find(
-    (value): value is string => typeof value === 'string' && value.length > 0,
-  );
+  return { kind: 'match', id: ids[0] };
 }
 
 /**
@@ -632,6 +652,27 @@ function isConfirmedAbsent(result: RunWranglerResult, kind: 'r2' | 'queue', name
       // `no such` / `Account not found` must NOT be read as queue absence.
       return new RegExp(`Queue\\s+"${escapeRegExp(name)}"\\s+does not exist`, 'i').test(text);
   }
+}
+
+/**
+ * F4 — a `wrangler queues info <name>` result POSITIVELY confirms THIS queue
+ * exists. Queues write NO config, so a create cannot be verified by re-reading the
+ * config (the D1/KV/R2/Hyperdrive backstop). And wrangler's `bin.wrangler` wrapper
+ * maps a signal-killed inner CLI to `process.exit(0)` (`bin/wrangler.js`:
+ * `code === null → exit(0)`), so a KILLED probe/create can surface a clean exit 0
+ * with empty/partial output. A bare clean 0 is therefore NOT proof the queue exists.
+ * We require BOTH a clean success (numeric exit 0, no signal/spawn error — the
+ * provenance rule) AND the output to name THIS exact queue: wrangler 4.107's
+ * `queues info` prints `Queue Name: <queue_name>` for the queue it fetched by name
+ * (account-unique), so an exact `Queue Name: <name>` line is the positive signal.
+ * Used for BOTH the reuse probe and the post-create verify probe.
+ */
+function queueInfoConfirmsExists(result: RunWranglerResult, name: string): boolean {
+  if (!isCleanSuccess(result)) {
+    return false;
+  }
+  const text = `${result.stdout}\n${result.stderr}`;
+  return new RegExp(`^Queue Name:\\s+${escapeRegExp(name)}\\s*$`, 'm').test(text);
 }
 
 /**
@@ -721,6 +762,26 @@ function assertValidResourceName(kind: string, name: string): void {
 }
 
 /**
+ * F1 — the trailing flags EVERY provisioner wrangler invocation MUST carry, built
+ * ONCE so no call site can forget them:
+ *   - `-c <configPath>` pins the ONE resolved config (no split-brain reads/writes);
+ *   - `--env=` (an explicit EMPTY environment) FORCES wrangler onto the top-level
+ *     config environment. wrangler 4.107 selects its config env as
+ *     `args.env ?? getCloudflareEnv()`; passing an explicit empty `args.env`
+ *     short-circuits the `??` so a project `.env`/`.env.local` that sets
+ *     `CLOUDFLARE_ENV` (reloaded into `process.env` on every wrangler command)
+ *     can NEVER reselect a named `env.*` block — whose `account_id`/bindings could
+ *     differ from the single account this provision resolved, patched, and pinned.
+ *     `--env=` is wrangler's own documented sentinel for "use the top-level
+ *     environment" (it prints exactly this guidance when multiple env blocks exist).
+ * Discovery/create AND `--update-config` therefore all operate on the SAME
+ * top-level config/account.
+ */
+function wranglerConfigArgs(configPath: string): Array<string> {
+  return ['-c', configPath, '--env='];
+}
+
+/**
  * Ensure every resource in `desired` exists in the user's own Cloudflare account,
  * creating the missing ones by shelling out to `wrangler` and letting
  * `wrangler <res> create --update-config` write real ids into the root config.
@@ -743,9 +804,14 @@ export async function provisionCloudflareResources(
   },
 ): Promise<ProvisionResult> {
   await Promise.resolve();
-  // ONE exact config path threaded through read-first, wrangler `-c`, AND the
+  // ONE ABSOLUTE config path threaded through read-first, wrangler `-c`, AND the
   // writer, so reads and writes can never hit different files (no split-brain).
-  const configPath = rootWranglerPath;
+  // Resolve it against `root` ONCE, up front: Node reads/writes here resolve a
+  // RELATIVE path against `process.cwd()`, but the default wrangler runs with
+  // `cwd: root` and resolves `-c` there — so with `root !== process.cwd()` a bare
+  // relative `rootWranglerPath` would let Node inspect one file while wrangler
+  // creates against another (orphan). An already-absolute path is returned as-is.
+  const configPath = resolve(root, rootWranglerPath);
 
   // --- F2: resource-name validation (BEFORE any argv / remote work) ---------
   // Every name that becomes a wrangler ARGV POSITIONAL is validated up front, so an
@@ -810,14 +876,16 @@ export async function provisionCloudflareResources(
     !!desired.hyperdrive ||
     desired.queues.length > 0;
 
-  // F1 fail-closed gate: the DEFAULT runWrangler passes the ambient
-  // CLOUDFLARE_ACCOUNT_ID to the REAL wrangler, so without a resolved account
-  // wrangler could create resources under an environment/ambient account we never
-  // persisted (a later retry under a different account would then rebind them).
-  // Require a known account before spawning it. The gate is scoped to the default
-  // path — the ONLY consumer of the ambient env; when a caller injects runWrangler
-  // (unit tests / a future orchestrator seam) it owns the account context.
-  if (!opts?.runWrangler && hasRemoteWork && !effectiveAccountId) {
+  // F2 — the MANDATORY account fence, at the PROVISIONER BOUNDARY (not inside the
+  // default runWrangler). Whenever `desired` implies remote work, an effective
+  // account MUST be resolvable — UNCONDITIONALLY, whether the wrangler runner and
+  // Hyperdrive lister are the default seams or injected. Otherwise a seam could do
+  // remote work (list/info/create/REST) under an ambient/interactive account we
+  // never persisted, so a partial run under account A followed by a retry under B
+  // would rebind A's resources with no reconciliation (the F1 pin needs a
+  // persisted `account_id` to fail closed on the retry). Fail closed BEFORE
+  // selecting or calling ANY seam.
+  if (hasRemoteWork && !effectiveAccountId) {
     throw new Error(
       `provision: no Cloudflare account is resolvable — set "account_id" in your root wrangler ` +
         `config or export CLOUDFLARE_ACCOUNT_ID before deploying. Refusing to provision resources ` +
@@ -825,24 +893,30 @@ export async function provisionCloudflareResources(
         `account that is never persisted, so a later retry could rebind them elsewhere).`,
     );
   }
-  const runWrangler =
-    opts?.runWrangler ?? createDefaultRunWrangler(root, { accountId: effectiveAccountId });
 
-  // --- account_id (PERSIST FIRST, before any remote side effect) -----------
-  // Pin the effective account_id NOW — before any create writes a real id — so a
-  // partial run can never leave freshly-minted ids in a config with NO account pin.
-  // Without this, a later retry under a DIFFERENT account would see the real id
-  // (read-first hit → skips discovery) and finally stamp its own `account_id`,
-  // binding the first account's resources under the second. With the pin written up
-  // front, a different-account retry instead hits the reconciliation above (config
-  // account ≠ requested → fail closed) before touching wrangler/REST. Skip the write
-  // when the config ALREADY pins that exact account (keeps byte-identical configs
-  // untouched).
+  // --- account_id (PERSIST FIRST, before selecting/calling any seam) --------
+  // Pin the effective account_id NOW — before the runWrangler/lister seams are even
+  // selected, and before any create writes a real id — so a partial run can never
+  // leave freshly-minted ids in a config with NO account pin. Without this, a later
+  // retry under a DIFFERENT account would see the real id (read-first hit → skips
+  // discovery) and finally stamp its own `account_id`, binding the first account's
+  // resources under the second. With the pin written up front, a different-account
+  // retry instead hits the reconciliation above (config account ≠ requested → fail
+  // closed) before touching wrangler/REST. Skip the write when the config ALREADY
+  // pins that exact account (keeps byte-identical configs untouched).
   let accountIdWritten = false;
   if (effectiveAccountId && configAccountId !== effectiveAccountId) {
     write({ accountId: effectiveAccountId });
     accountIdWritten = true;
   }
+
+  // Both seams are pinned to the SAME effective account: the default wrangler runner
+  // via its env (`CLOUDFLARE_ACCOUNT_ID` + the top-level `--env=` on every argv), and
+  // the default Hyperdrive lister via `createDefaultListHyperdriveConfigs`
+  // (below). An injected seam owns its own transport but only ever runs past the
+  // fence above, which guarantees a resolved + persisted account.
+  const runWrangler =
+    opts?.runWrangler ?? createDefaultRunWrangler(root, { accountId: effectiveAccountId });
 
   // --- D1 ------------------------------------------------------------------
   if (desired.d1) {
@@ -860,7 +934,7 @@ export async function provisionCloudflareResources(
       // Discovery must SUCCEED (gate) before its stdout is parsed, then the whole
       // list is strictly validated — a nonzero/SIGTERM/spawn-error or a malformed
       // member never parses as "absent" and mints a duplicate D1.
-      const listResult = runWrangler(['d1', 'list', '--json', '-c', configPath], {
+      const listResult = runWrangler(['d1', 'list', '--json', ...wranglerConfigArgs(configPath)], {
         captureJson: true,
       });
       assertDiscoverySucceeded(listResult, 'wrangler d1 list');
@@ -878,20 +952,34 @@ export async function provisionCloudflareResources(
         nameField: 'name',
         nameLabel: 'named',
       });
-      // F5: find the member whose name matches the request, then normalize its
-      // identity strictly. If the target-named member exists but its id is
-      // ambiguous/empty (e.g. an empty-string `uuid` that used to shadow a valid
-      // `database_id`, or conflicting aliases), FAIL CLOSED — never fall through to
-      // create (a duplicate) and never adopt an ambiguous id.
-      const namedMatch = databases.find((db) => d1EntryName(db) === name);
-      const existing = normalizeD1Identity(namedMatch);
-      if (namedMatch && !existing) {
+      // F5: run the ONE strict normalizer over EVERY member against the requested
+      // name. Collect the members that CLAIM the requested name (match or ambiguous).
+      // - >1 claimant → ambiguous which to adopt → fail closed;
+      // - 1 ambiguous claimant → fail closed (never adopt an ambiguous id, never
+      //   mistake it for absent and mint a duplicate);
+      // - 1 valid claimant → adopt; 0 → create.
+      const claimants = databases
+        .map((db) => normalizeD1(db, name))
+        .filter((m): m is Exclude<D1Match, { kind: 'other' }> => m.kind !== 'other');
+      if (claimants.length > 1) {
         throw new Error(
-          `provision: "wrangler d1 list" returned a D1 database named ${JSON.stringify(name)} with ` +
-            `an ambiguous or empty id (conflicting/blank uuid/database_id). Cannot adopt it, and ` +
-            `refusing to create a possible duplicate; inspect the account and retry.`,
+          `provision: "wrangler d1 list" returned ${claimants.length} D1 databases named ` +
+            `${JSON.stringify(name)}. D1 database names are account-unique, so this is ambiguous; ` +
+            `cannot pick one to adopt and refusing to create a possible duplicate. Inspect the ` +
+            `account and retry.`,
         );
       }
+      if (claimants.length === 1 && claimants[0].kind === 'claimed-but-invalid') {
+        throw new Error(
+          `provision: "wrangler d1 list" returned a D1 database named ${JSON.stringify(name)} with ` +
+            `an ambiguous or empty id (conflicting/blank uuid/database_id, or conflicting name ` +
+            `aliases). Cannot adopt it, and refusing to create a possible duplicate; inspect the ` +
+            `account and retry.`,
+        );
+      }
+      // After the guards above, a lone claimant is necessarily a valid `match`.
+      const existing =
+        claimants.length === 1 && claimants[0].kind === 'match' ? claimants[0] : undefined;
       if (existing) {
         log.info(`adopted existing D1 database ${name} (${existing.id})`);
         const res = write({
@@ -908,8 +996,7 @@ export async function provisionCloudflareResources(
           '--binding',
           binding,
           '--update-config',
-          '-c',
-          configPath,
+          ...wranglerConfigArgs(configPath),
         ]);
         if (isCleanSuccess(created)) {
           // wrangler wrote database_id/database_name via --update-config; VERIFY the
@@ -933,12 +1020,15 @@ export async function provisionCloudflareResources(
           // TOCTOU: created between our list and create (clean non-zero, code 7502).
           // Capture the id via `d1 info` — which must SUCCEED (gate) and POSITIVELY
           // identify THIS database (EXACT name match) before we adopt its id.
-          const infoResult = runWrangler(['d1', 'info', name, '--json', '-c', configPath], {
-            captureJson: true,
-          });
+          const infoResult = runWrangler(
+            ['d1', 'info', name, '--json', ...wranglerConfigArgs(configPath)],
+            { captureJson: true },
+          );
           assertDiscoverySucceeded(infoResult, `wrangler d1 info ${name}`);
-          const info = normalizeD1Identity(parseJsonObject(infoResult.stdout));
-          if (!info || info.name !== name) {
+          // SAME strict normalizer as the list path — must POSITIVELY identify THIS
+          // database by an exact name match with an unambiguous id.
+          const info = normalizeD1(parseJsonObject(infoResult.stdout), name);
+          if (info.kind !== 'match') {
             throw new Error(
               `provision: "wrangler d1 create ${name}" reported the database already exists, ` +
                 `but "wrangler d1 info ${name} --json" did not return a database with a matching ` +
@@ -976,7 +1066,7 @@ export async function provisionCloudflareResources(
     // throw), return a real JSON array, and have EVERY member well-formed (a
     // malformed member — which could BE the target — fails closed rather than being
     // filtered to a false "absent" that mints a duplicate namespace).
-    const listResult = runWrangler(['kv', 'namespace', 'list', '-c', configPath], {
+    const listResult = runWrangler(['kv', 'namespace', 'list', ...wranglerConfigArgs(configPath)], {
       captureJson: true,
     });
     assertDiscoverySucceeded(listResult, 'wrangler kv namespace list');
@@ -1018,8 +1108,7 @@ export async function provisionCloudflareResources(
         '--binding',
         binding,
         '--update-config',
-        '-c',
-        configPath,
+        ...wranglerConfigArgs(configPath),
       ]);
       if (!isCleanSuccess(created)) {
         throw new Error(
@@ -1052,9 +1141,10 @@ export async function provisionCloudflareResources(
     } else {
       // `wrangler r2 bucket list` is a human table, not JSON. Bucket names ARE
       // account-unique, so probe the single bucket by name.
-      const info = runWrangler(['r2', 'bucket', 'info', bucketName, '--json', '-c', configPath], {
-        captureJson: true,
-      });
+      const info = runWrangler(
+        ['r2', 'bucket', 'info', bucketName, '--json', ...wranglerConfigArgs(configPath)],
+        { captureJson: true },
+      );
       if (isCleanSuccess(info)) {
         // A clean exit 0 is not enough to adopt — the success payload must
         // POSITIVELY identify the requested bucket (its `name`) before we write the
@@ -1083,8 +1173,7 @@ export async function provisionCloudflareResources(
           '--binding',
           binding,
           '--update-config',
-          '-c',
-          configPath,
+          ...wranglerConfigArgs(configPath),
         ]);
         if (!isCleanSuccess(created)) {
           throw new Error(
@@ -1192,8 +1281,7 @@ export async function provisionCloudflareResources(
           '--binding',
           binding,
           '--update-config',
-          '-c',
-          configPath,
+          ...wranglerConfigArgs(configPath),
         ]);
         if (!isCleanSuccess(created)) {
           throw new Error(
@@ -1224,27 +1312,44 @@ export async function provisionCloudflareResources(
   // queue RESOURCE exists — binding the producers/consumers into the config is
   // app-class-aware and belongs to Task 6.
   for (const name of desired.queues) {
-    const info = runWrangler(['queues', 'info', name, '-c', configPath]);
-    if (isCleanSuccess(info)) {
+    const info = runWrangler(['queues', 'info', name, ...wranglerConfigArgs(configPath)]);
+    // "Exists → reuse" ONLY when the probe POSITIVELY names THIS queue (F4). A bare
+    // clean 0 is NOT trusted: the bin wrapper can mask a signal-killed inner CLI as
+    // exit 0 with empty output, which a plain `isCleanSuccess` would misread as
+    // reused though nothing was verified.
+    if (queueInfoConfirmsExists(info, name)) {
       resources.push({ kind: 'queue', name, action: 'reused' });
       continue;
     }
-    // A probe is "absent" (→ create) ONLY on a CLEAN non-zero exit carrying the
-    // EXACT, name-aware not-found signal (`Queue "<name>" does not exist`). Any
-    // signal/spawn failure (HARD failure), an auth error, or a generic `Account not
-    // found` is NOT absence and fails closed (never a blind create).
+    // Not confirmed-present. It is "absent" (→ create) ONLY on a CLEAN non-zero exit
+    // carrying the EXACT, name-aware not-found signal (`Queue "<name>" does not
+    // exist`). Everything else — a signal/spawn failure, an auth error, a generic
+    // `Account not found`, OR a masked-kill clean-0 that did NOT positively identify
+    // the queue — fails closed (never a blind create, never a false reuse).
     if (!isConfirmedAbsent(info, 'queue', name)) {
       throw new Error(
-        `provision: "wrangler queues info ${name}" failed: ${info.stderr || info.stdout}`,
+        `provision: "wrangler queues info ${name}" failed or did not confirm the queue exists: ` +
+          `${info.stderr || info.stdout || 'no output'}`,
       );
     }
-    const created = runWrangler(['queues', 'create', name, '-c', configPath]);
-    // Queue creates write NO config, so they cannot be postcondition-verified; a
-    // killed queue-create self-heals on the next run (its `queues info` probe
-    // re-detects absence and re-creates). We still fail closed on a non-clean exit.
+    const created = runWrangler(['queues', 'create', name, ...wranglerConfigArgs(configPath)]);
     if (!isCleanSuccess(created)) {
       throw new Error(
         `provision: "wrangler queues create ${name}" failed: ${created.stderr || created.stdout}`,
+      );
+    }
+    // F4 verify probe — queues write NO config, so `assertCreateWroteRealId` cannot
+    // cover them. A create reporting clean 0 is NOT enough (the bin wrapper masks a
+    // signal-killed inner CLI as exit 0, creating nothing). RE-RUN the SAME positive
+    // `queues info` probe and only record `created` if it now confirms THIS queue;
+    // otherwise fail closed (a killed create self-heals on the next run's probe).
+    const verify = runWrangler(['queues', 'info', name, ...wranglerConfigArgs(configPath)]);
+    if (!queueInfoConfirmsExists(verify, name)) {
+      throw new Error(
+        `provision: "wrangler queues create ${name}" reported success but "wrangler queues info ` +
+          `${name}" did not confirm the queue exists afterward. The create may have been ` +
+          `interrupted — wrangler's launcher can mask a signal-killed child as exit 0. Refusing to ` +
+          `record an unprovisioned queue; inspect the account and retry.`,
       );
     }
     resources.push({ kind: 'queue', name, action: 'created' });
