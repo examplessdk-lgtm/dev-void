@@ -1396,9 +1396,12 @@ const RESOURCE_NAME_GRAMMARS: Record<
     rule: 'be 1–63 characters, start with a letter or digit, and contain only letters, digits, "-" or "_"',
   },
   queue: {
-    re: /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/,
+    // F6 — Cloudflare Queues: 1–63 chars, letters/digits/dashes only (NO underscores),
+    // and the FIRST and LAST char must be alphanumeric (no leading/trailing dash). The
+    // leading-`-` case is also covered by the option-injection guard, kept as belt+braces.
+    re: /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/,
     label: 'queue',
-    rule: 'be 1–63 characters, start with a letter or digit, and contain only letters, digits, "-" or "_"',
+    rule: 'be 1–63 characters, contain only letters, digits and "-", and begin and end with a letter or digit',
   },
 };
 

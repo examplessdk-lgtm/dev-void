@@ -3343,6 +3343,54 @@ describe('provisionCloudflareResources — F5 KV title grammar vs option-injecti
   });
 });
 
+describe('provisionCloudflareResources — F6 queue name grammar (Cloudflare Queues)', () => {
+  const provisionQueue = (name: string): Promise<unknown> => {
+    setup(JSON.stringify({ account_id: 'acct' }));
+    const { run, calls } = makeRunner([
+      { match: /^queues info /, reply: () => ok(`Queue Name: ${name}`) },
+    ]);
+    return provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, queues: [name] },
+      { runWrangler: run, log: silentLog },
+    ).then((r) => {
+      // Return the calls so accepted-name tests can assert wrangler was reached.
+      (r as { _calls?: unknown })._calls = calls;
+      return r;
+    });
+  };
+
+  // Underscores are NOT allowed; a trailing separator is NOT allowed; > 63 chars rejected.
+  for (const bad of ['jobs_v2', 'jobs_', 'jobs-', '_jobs', '-jobs', 'a'.repeat(64)]) {
+    it(`rejects the invalid queue name ${JSON.stringify(bad)} before any wrangler call`, async () => {
+      setup(JSON.stringify({ account_id: 'acct' }));
+      const { run, calls } = makeRunner([]);
+      await expect(
+        provisionCloudflareResources(
+          tmpDir,
+          wranglerPath,
+          { ...emptyDesired, queues: [bad] },
+          { runWrangler: run, log: silentLog },
+        ),
+      ).rejects.toThrow(/unsafe queue name|invalid queue name/);
+      expect(calls.length).toBe(0);
+    });
+  }
+
+  // Valid: single alphanumeric, 63 chars, and internal dashes.
+  for (const good of ['a', 'Q9', 'a'.repeat(63), 'jobs-v2', 'my-queue-1']) {
+    it(`accepts the valid queue name ${JSON.stringify(good)} (reaches wrangler)`, async () => {
+      const result = (await provisionQueue(good)) as {
+        resources: Array<{ kind: string; action: string }>;
+        _calls: Array<Array<string>>;
+      };
+      expect(result.resources).toEqual([{ kind: 'queue', name: good, action: 'reused' }]);
+      expect(result._calls.some((c) => isCall(c, 'queues', 'info'))).toBe(true);
+    });
+  }
+});
+
 describe('provisionCloudflareResources — whole-provision cross-process lock (F1/F2, proper-lockfile)', () => {
   // proper-lockfile locks a dedicated adjacent MARKER file (persists between runs) and
   // implements the mutex as `${marker}.lock` DIRECTORY (removed on release). "No leak"
