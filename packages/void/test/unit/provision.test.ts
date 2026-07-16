@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { parse as parseJsoncRaw } from 'jsonc-parser';
 import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
+  acquireProvisionLock,
   normalizeRunWranglerResult,
   provisionCloudflareResources,
   provisionEnv,
@@ -2621,6 +2622,31 @@ describe('provisionCloudflareResources — Hyperdrive list validation at the cal
     ).rejects.toThrow(/share that name/);
     expect(readConfig().hyperdrive).toBeUndefined();
   });
+
+  // F3 — a runtime null/undefined/non-array OUTER result must be treated as UNKNOWN
+  // (never coerced to "empty" = confirmed absence), so it fails closed BEFORE any
+  // create instead of authorizing a blind `hyperdrive create` on a same-named config.
+  for (const [label, bad] of [
+    ['null', null],
+    ['undefined', undefined],
+    ['a non-array object', { configs: [] }],
+    ['a string', 'nope'],
+  ] as const) {
+    it(`fails closed (no create) when the lister returns ${label}`, async () => {
+      setup(JSON.stringify({ account_id: 'acct' }));
+      const { run, calls } = makeRunner([{ match: /.*/, reply: () => ok() }]);
+      await expect(
+        provisionCloudflareResources(tmpDir, wranglerPath, hdDesired, {
+          runWrangler: run,
+          log: silentLog,
+          listHyperdriveConfigs: async () => bad as never,
+        }),
+      ).rejects.toThrow(/cannot verify whether Hyperdrive config "myapp-hd"/);
+      // No blind create, and nothing written to the config.
+      expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
+      expect(readConfig().hyperdrive).toBeUndefined();
+    });
+  }
 });
 
 describe('provisionCloudflareResources — resource-specific create postcondition (round 6 F4)', () => {
@@ -2675,11 +2701,15 @@ describe('provisionCloudflareResources — resource-specific create postconditio
   });
 });
 
-describe('provisionCloudflareResources — cross-process Hyperdrive lock (round 6 F6)', () => {
-  const lockPath = `${wranglerPath}.void-provision.lock`;
+describe('provisionCloudflareResources — whole-provision cross-process lock (F1/F2, proper-lockfile)', () => {
+  // proper-lockfile locks a dedicated adjacent MARKER file (persists between runs) and
+  // implements the mutex as `${marker}.lock` DIRECTORY (removed on release). "No leak"
+  // therefore means the MUTEX dir is gone (not the marker file).
+  const lockMarker = `${wranglerPath}.void-provision.lock`;
+  const lockMutex = `${lockMarker}.lock`;
   const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-  it('two concurrent Hyperdrive provisions race — exactly ONE create, the other reuses', async () => {
+  it('two concurrent Hyperdrive provisions race — exactly ONE create, the other reuses, mutex released', async () => {
     setup(
       JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
     );
@@ -2703,7 +2733,7 @@ describe('provisionCloudflareResources — cross-process Hyperdrive lock (round 
         {
           runWrangler: run,
           log: silentLog,
-          // Barrier: the winner holds the lock while LISTING (40ms), so the loser spins
+          // Barrier: the winner holds the lock while LISTING (40ms), so the loser blocks
           // on the lock — proving the LOCK (not accidental sequencing) serializes them.
           listHyperdriveConfigs: async () => {
             await delay(40);
@@ -2720,18 +2750,20 @@ describe('provisionCloudflareResources — cross-process Hyperdrive lock (round 
     // Exactly one create; the second read-first (inside the lock) reused the first's id.
     expect(createCalls).toBe(1);
     expect(actions).toEqual(['created', 'reused']);
-    // Lock always released — no leak.
-    expect(existsSync(lockPath)).toBe(false);
+    // Mutex always released — no leak.
+    expect(existsSync(lockMutex)).toBe(false);
   });
 
-  it('breaks a STALE lock (old timestamp) and proceeds', async () => {
+  it('recovers a STALE/abandoned lock (old mtime, crashed owner) and proceeds', async () => {
     setup(
       JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
     );
-    writeFileSync(
-      lockPath,
-      JSON.stringify({ pid: process.pid, timestamp: Date.now() - 10 * 60_000 }),
-    );
+    // Simulate a crashed owner's abandoned mutex: the marker + a mutex dir whose mtime
+    // is well past the 120s stale window, so proper-lockfile compromises + steals it.
+    writeFileSync(lockMarker, '');
+    mkdirSync(lockMutex);
+    const old = new Date(Date.now() - 300_000);
+    utimesSync(lockMutex, old, old);
     const { run } = makeRunner([
       {
         match: /^hyperdrive create /,
@@ -2751,46 +2783,7 @@ describe('provisionCloudflareResources — cross-process Hyperdrive lock (round 
       { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
     );
     expect(result.resources.find((r) => r.kind === 'hyperdrive')?.action).toBe('created');
-    expect(existsSync(lockPath)).toBe(false);
-  });
-
-  it('breaks a STALE lock (dead pid) and proceeds', async () => {
-    setup(
-      JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
-    );
-    // Find a PID that is definitely NOT alive (process.kill throws ESRCH).
-    let deadPid = 999999;
-    for (let pid = 999999; pid > 1; pid--) {
-      try {
-        process.kill(pid, 0);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
-          deadPid = pid;
-          break;
-        }
-      }
-    }
-    writeFileSync(lockPath, JSON.stringify({ pid: deadPid, timestamp: Date.now() }));
-    const { run } = makeRunner([
-      {
-        match: /^hyperdrive create /,
-        reply: () => {
-          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: 'hd-real' });
-          return ok();
-        },
-      },
-    ]);
-    const result = await provisionCloudflareResources(
-      tmpDir,
-      wranglerPath,
-      {
-        ...emptyDesired,
-        hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
-      },
-      { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
-    );
-    expect(result.resources.find((r) => r.kind === 'hyperdrive')?.action).toBe('created');
-    expect(existsSync(lockPath)).toBe(false);
+    expect(existsSync(lockMutex)).toBe(false);
   });
 
   it('always releases the lock even when the provision THROWS (no leak)', async () => {
@@ -2809,6 +2802,93 @@ describe('provisionCloudflareResources — cross-process Hyperdrive lock (round 
         { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
       ),
     ).rejects.toThrow(/hyperdrive create myapp-hd.*failed/s);
-    expect(existsSync(lockPath)).toBe(false);
+    expect(existsSync(lockMutex)).toBe(false);
+  });
+
+  it('acquireProvisionLock serializes — a second acquire waits until the first releases, then proceeds; release always frees it', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const first = await acquireProvisionLock(wranglerPath);
+    expect(existsSync(lockMutex)).toBe(true);
+    let secondAcquired = false;
+    const secondPromise = acquireProvisionLock(wranglerPath).then((lock) => {
+      secondAcquired = true;
+      return lock;
+    });
+    // While the first holds the lock the second cannot acquire (it retries/blocks).
+    await delay(60);
+    expect(secondAcquired).toBe(false);
+    await first.release();
+    const second = await secondPromise;
+    expect(secondAcquired).toBe(true);
+    // Release is idempotent and always frees the mutex.
+    await second.release();
+    await second.release();
+    expect(existsSync(lockMutex)).toBe(false);
+  });
+
+  it('F1 — two racing FIRST-RUNS (accounts A and B) serialize; the second fails closed on mismatch, no cross-account write', async () => {
+    // Neither run has a config account_id at start. The whole-provision lock forces them
+    // to serialize: the winner reads no account, persists its own, and provisions; the
+    // loser — under the lock — re-reads the persisted account and fails closed on the
+    // A≠B mismatch BEFORE any create, so it never rebinds the winner's resources.
+    setup(JSON.stringify({ name: 'app' }));
+    const savedAmbient = process.env.CLOUDFLARE_ACCOUNT_ID;
+    delete process.env.CLOUDFLARE_ACCOUNT_ID; // force reconciliation via opts.accountId only
+    try {
+      const makeProv = (account: string): Promise<unknown> => {
+        const run: RunWrangler = (args) => {
+          if (isCall(args, 'd1', 'list')) {
+            return ok('[]');
+          }
+          if (isCall(args, 'd1', 'create')) {
+            simulateUpdateConfig('d1_databases', {
+              binding: 'DB',
+              database_name: 'myapp-db',
+              database_id: `db-${account}`,
+            });
+            return ok();
+          }
+          return ok();
+        };
+        return provisionCloudflareResources(
+          tmpDir,
+          wranglerPath,
+          {
+            ...emptyDesired,
+            // A slow lister keeps the winner holding the lock long enough that the loser
+            // is forced to wait on it (serialization, not accidental sequencing).
+            d1: { binding: 'DB', name: 'myapp-db' },
+          },
+          {
+            runWrangler: run,
+            accountId: account,
+            log: silentLog,
+            listHyperdriveConfigs: async () => [],
+          },
+        );
+      };
+      const results = await Promise.allSettled([makeProv('acct-A'), makeProv('acct-B')]);
+      const fulfilled = results.filter((r) => r.status === 'fulfilled');
+      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+      // Exactly one wins; the other fails closed on the account mismatch.
+      expect(fulfilled.length).toBe(1);
+      expect(rejected.length).toBe(1);
+      expect(String(rejected[0].reason)).toMatch(/account mismatch/);
+      // The config is pinned to the WINNER, with the winner's D1 id — no cross-account
+      // overwrite (both never wrote; the loser never ran a wrangler create).
+      const cfg = readConfig();
+      const winner = cfg.account_id as string;
+      expect(['acct-A', 'acct-B']).toContain(winner);
+      const d1 = (cfg.d1_databases as Array<Record<string, unknown>>)[0];
+      expect(d1.database_id).toBe(`db-${winner}`);
+      // Mutex released — no leak.
+      expect(existsSync(lockMutex)).toBe(false);
+    } finally {
+      if (savedAmbient === undefined) {
+        delete process.env.CLOUDFLARE_ACCOUNT_ID;
+      } else {
+        process.env.CLOUDFLARE_ACCOUNT_ID = savedAmbient;
+      }
+    }
   });
 });

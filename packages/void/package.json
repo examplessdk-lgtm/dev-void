@@ -332,6 +332,7 @@
     "ignore": "^7.0.5",
     "jsonc-parser": "3.3.1",
     "pg": "8.22.0",
+    "proper-lockfile": "^4.1.2",
     "wrangler": "catalog:"
   },
   "devDependencies": {
@@ -340,6 +341,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "catalog:",
     "@types/pg": "^8.20.0",
+    "@types/proper-lockfile": "^4.1.4",
     "@typescript/native-preview": "catalog:",
     "arktype": "^2.2.2",
     "estree-walker": "^3.0.3",

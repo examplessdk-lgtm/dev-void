@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { parse, type ParseError } from 'jsonc-parser';
 import { resolve } from 'pathe';
+import lockfile from 'proper-lockfile';
 import { voidLog, voidWarn } from '../log.ts';
 import { resolveWranglerArgv } from './preset.ts';
 import {
@@ -445,127 +446,86 @@ function selectHyperdriveMatch(
   return named[0];
 }
 
-// --- F6: cross-process provision lock ------------------------------------------
-// Hyperdrive is an unguarded list→create and its names are NOT account-unique, so two
-// concurrent provisions could both see "no match" and both create — a permanent
-// orphaned duplicate that read-first then hides forever. Serialize the list→create
-// across processes with a lockfile keyed on the resolved config path (O_EXCL create).
-// A second concurrent run blocks until the first releases, then its read-first (done
-// INSIDE the lock) sees the id the first wrote and SKIPS.
+// --- F1/F2: whole-provision cross-process lock (proper-lockfile) ----------------
+// TWO independent races must be serialized across processes, so ONE lock is held for
+// the WHOLE provision (acquired before the first config read, released in `finally`):
+//   1. Account reconciliation (F1). A first-run provision READS → RECONCILES → PERSISTS
+//      one effective `account_id`. Two first-run processes for accounts A and B could
+//      otherwise both see no `account_id`, overwrite each other, and then write an
+//      A-side result into a now-B-pinned config. Under the lock the second process
+//      re-reads the persisted account and FAILS CLOSED on mismatch (or reuses).
+//   2. Hyperdrive list→create (round 6). Hyperdrive is unguarded and its names are NOT
+//      account-unique, so two concurrent provisions could both see "no match" and both
+//      create a permanent orphaned duplicate. Under the lock the second run's
+//      read-first sees the id the first wrote and SKIPS.
+// The hand-rolled O_EXCL lock this replaces had classic protocol bugs (a freshly
+// created file is visible before its metadata is written; age-only expiry ignoring a
+// live owner; a check-then-unlink stale-takeover race; an ownerless release that could
+// remove a successor's lock). `proper-lockfile` does atomic `mkdir`-based acquisition,
+// mtime-refresh so a live owner never expires by age, stale-compromise detection, and
+// ownership-scoped release.
 
 interface ProvisionLock {
-  release: () => void;
+  release: () => Promise<void>;
 }
 
 /**
- * A lock older than this — or whose holder PID is dead — is STALE and safe to break, so
- * a crashed provision cannot wedge every future one. Generous vs. a real provision's
- * duration.
+ * A lock whose owner has not refreshed it within this window is treated as abandoned
+ * (crashed) and may be compromised/stolen, so a crashed provision cannot wedge every
+ * future one. A LIVE owner refreshes the mutex mtime every {@link LOCK_UPDATE_MS}
+ * (strictly less than this), so it never expires by age. Generous vs. a real
+ * provision's duration.
  */
 const LOCK_STALE_MS = 120_000;
-/** How long to wait for a held (non-stale) lock before giving up. */
-const LOCK_ACQUIRE_TIMEOUT_MS = 60_000;
-/** Poll interval while waiting for a held lock. */
-const LOCK_POLL_MS = 50;
-
-const lockDelay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+/** Refresh interval keeping a live owner's lock fresh (must be < {@link LOCK_STALE_MS}). */
+const LOCK_UPDATE_MS = 20_000;
+/**
+ * Backoff budget while waiting for a held (non-stale) lock. Polls with jittered backoff
+ * for roughly a minute before giving up, so a concurrent provision blocks (not spins)
+ * until the holder releases, then proceeds.
+ */
+const LOCK_RETRIES = { retries: 100, factor: 1.5, minTimeout: 200, maxTimeout: 2_000 } as const;
 
 /**
- * True when a PID is still alive. `process.kill(pid, 0)` sends NO signal but throws
- * `ESRCH` for a dead process and `EPERM` for a live one we may not signal (still alive).
+ * Acquire the cross-process provision lock over the resolved config path via
+ * `proper-lockfile` (an atomic `mkdir`-based mutex at `<configPath>.void-provision.lock.lock`).
+ * `proper-lockfile` requires the locked pathname to EXIST, so we lock a DEDICATED
+ * adjacent marker file (`<configPath>.void-provision.lock`), creating it if absent —
+ * never the real config, so the writer's missing-vs-empty config semantics stay
+ * untouched. Returns a handle whose `release()` drops the mutex; ALWAYS call it in a
+ * `finally` so an interruption never leaks the lock.
+ *
+ * `onCompromised` FAILS CLOSED (re-throws): if the lock is ever detected stolen (its
+ * mtime changed, or the mutex vanished under a live owner), provisioning must NEVER
+ * continue — a compromised lock means another process may be racing the same config.
  */
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
+export async function acquireProvisionLock(configPath: string): Promise<ProvisionLock> {
+  const lockTarget = `${configPath}.void-provision.lock`;
+  if (!existsSync(lockTarget)) {
+    writeFileSync(lockTarget, '');
   }
-}
-
-/**
- * Decide whether a currently-held lockfile is STALE (safe to break): a corrupt/malformed
- * lock, one older than {@link LOCK_STALE_MS}, or one whose holder PID is dead. A lock
- * that VANISHED (already released between the EEXIST and this read) is NOT stale — the
- * caller's retry re-acquires it cleanly.
- */
-function isStaleLock(lockPath: string): boolean {
-  let raw: string;
-  try {
-    raw = readFileSync(lockPath, 'utf-8');
-  } catch {
-    return false;
-  }
-  let data: unknown;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    return true;
-  }
-  if (!isRecord(data) || typeof data.pid !== 'number' || typeof data.timestamp !== 'number') {
-    return true;
-  }
-  if (Date.now() - data.timestamp > LOCK_STALE_MS) {
-    return true;
-  }
-  return !isProcessAlive(data.pid);
-}
-
-/**
- * Acquire the cross-process provision lock via an O_EXCL (`'wx'`) create holding
- * `{ pid, timestamp }`. Breaks a STALE lock (dead PID / too old), waits out a live one
- * up to {@link LOCK_ACQUIRE_TIMEOUT_MS}, and returns a handle whose `release()` removes
- * the lockfile. ALWAYS call `release()` in a `finally` so an interruption never leaks
- * the lock.
- */
-async function acquireProvisionLock(configPath: string): Promise<ProvisionLock> {
-  const lockPath = `${configPath}.void-provision.lock`;
-  const deadline = Date.now() + LOCK_ACQUIRE_TIMEOUT_MS;
-  for (;;) {
-    try {
-      const fd = openSync(lockPath, 'wx');
+  const release = await lockfile.lock(lockTarget, {
+    stale: LOCK_STALE_MS,
+    update: LOCK_UPDATE_MS,
+    retries: LOCK_RETRIES,
+    onCompromised: (error) => {
+      throw error;
+    },
+  });
+  let released = false;
+  return {
+    release: async () => {
+      if (released) {
+        return;
+      }
+      released = true;
       try {
-        writeFileSync(fd, JSON.stringify({ pid: process.pid, timestamp: Date.now() }));
-      } finally {
-        closeSync(fd);
+        await release();
+      } catch {
+        // best-effort: a stale-compromise sweep may have already dropped the mutex
       }
-      let released = false;
-      return {
-        release: () => {
-          if (released) {
-            return;
-          }
-          released = true;
-          try {
-            rmSync(lockPath, { force: true });
-          } catch {
-            // best-effort: a stale-sweep or manual cleanup may have removed it already
-          }
-        },
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw error;
-      }
-      // Held by someone. Break it if stale; otherwise wait and retry until the deadline.
-      if (isStaleLock(lockPath)) {
-        try {
-          rmSync(lockPath, { force: true });
-        } catch {
-          // another racer may have broken it first — just retry the O_EXCL create
-        }
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `provision: timed out after ${LOCK_ACQUIRE_TIMEOUT_MS}ms waiting for the provision lock ` +
-            `at "${lockPath}". Another provision is running for this config; retry once it finishes, ` +
-            `or remove a stale lockfile.`,
-        );
-      }
-      await lockDelay(LOCK_POLL_MS);
-    }
-  }
+    },
+  };
 }
 
 /**
@@ -1013,13 +973,7 @@ export async function provisionCloudflareResources(
   root: string,
   rootWranglerPath: string,
   desired: DesiredResourceSet,
-  opts?: {
-    runWrangler?: RunWrangler;
-    accountId?: string;
-    apiToken?: string;
-    listHyperdriveConfigs?: ListHyperdriveConfigs;
-    log?: ProvisionLogger;
-  },
+  opts?: ProvisionOptions,
 ): Promise<ProvisionResult> {
   await Promise.resolve();
   // ONE ABSOLUTE config path threaded through read-first, wrangler `-c`, AND the
@@ -1031,6 +985,42 @@ export async function provisionCloudflareResources(
   // creates against another (orphan). An already-absolute path is returned as-is.
   const configPath = resolve(root, rootWranglerPath);
 
+  // F1/F2 — hold ONE cross-process lock for the WHOLE provision: acquire it BEFORE
+  // the first config read (so account reconciliation + persistence + all discovery,
+  // remote work, and config writes happen against the state the lock protects), and
+  // ALWAYS release it in `finally` (an interruption must never leak the lock). The
+  // reconciliation + duplicate-member guard + resource work all run UNDER the lock in
+  // `provisionCloudflareResourcesLocked`, so a racing first-run serializes: the second
+  // process re-reads the persisted account/ids and fails closed (or reuses).
+  const lock = await acquireProvisionLock(configPath);
+  try {
+    return await provisionCloudflareResourcesLocked(root, configPath, desired, opts);
+  } finally {
+    await lock.release();
+  }
+}
+
+/** Injectable seams + settings for {@link provisionCloudflareResources}. */
+export interface ProvisionOptions {
+  runWrangler?: RunWrangler;
+  accountId?: string;
+  apiToken?: string;
+  listHyperdriveConfigs?: ListHyperdriveConfigs;
+  log?: ProvisionLogger;
+}
+
+/**
+ * The provision body, run entirely UNDER the whole-provision lock (see
+ * {@link provisionCloudflareResources}). `configPath` is the ONE resolved absolute
+ * config path the lock is keyed on — threaded through read-first, wrangler `-c`, and
+ * the writer so reads/writes can never hit different files.
+ */
+async function provisionCloudflareResourcesLocked(
+  root: string,
+  configPath: string,
+  desired: DesiredResourceSet,
+  opts?: ProvisionOptions,
+): Promise<ProvisionResult> {
   // --- F2: strict duplicate-member guard at the PROVISIONER BOUNDARY --------
   // `jsonc-parser.parse()` (used by `readRootConfig`) does NOT flag duplicate object
   // members, and the Task 3 writer's duplicate-member guard only runs when the writer
@@ -1463,90 +1453,100 @@ export async function provisionCloudflareResources(
   // attempted BEFORE the connection-string gate (it needs no connection string).
   if (desired.hyperdrive) {
     const { binding, name, connectionString } = desired.hyperdrive;
-    // F6 — serialize the unguarded list→create across processes with a cross-process
-    // lock keyed on the resolved config path. The read-first check is done INSIDE the
-    // lock so a second concurrent provision, after acquiring the lock, sees the id the
-    // first wrote and SKIPS (no duplicate). Always released in `finally`, incl. on any
-    // throw below (a leaked lock would wedge the next run until the stale timeout).
-    const lock = await acquireProvisionLock(configPath);
-    try {
-      const entry = findBindingEntry(readRootConfig(configPath).hyperdrive, binding);
-      if (entry && isRealValue(entry.id)) {
-        resources.push({ kind: 'hyperdrive', binding, name, action: 'reused', id: entry.id });
-      } else {
-        const lister =
-          opts?.listHyperdriveConfigs ?? createDefaultListHyperdriveConfigs(opts?.apiToken);
-        let configs: Array<HyperdriveConfig> | undefined;
-        let existenceUnknown = true;
-        if (lister) {
-          try {
-            // F1 — always invoke the lister WITH the reconciled account, so an injected
-            // lister can never query a DIFFERENT account than the config is pinned to.
-            configs = await lister({ accountId: transportAccountId });
-            existenceUnknown = false;
-          } catch (error) {
-            log.warn(`Hyperdrive existence check for ${name} failed: ${(error as Error).message}`);
-            existenceUnknown = true;
-          }
-        }
-        // F3 — apply the ONE strict Hyperdrive-list validator at the CALLER, AFTER the
-        // lister returns (default OR injected). It rejects malformed/empty/duplicate
-        // entries and requires EXACTLY 0 or 1 exact-name match (>1 → fail closed) BEFORE
-        // matching or writing, so no injected list can be adopted with an empty/garbage id.
-        const existing = configs ? selectHyperdriveMatch(configs, name, configPath) : undefined;
-        if (existing) {
-          log.info(`adopted existing Hyperdrive config ${name} (${existing.id})`);
-          write({ hyperdrive: { binding, id: existing.id } });
-          resources.push({ kind: 'hyperdrive', binding, name, action: 'adopted', id: existing.id });
-        } else if (!connectionString) {
-          // No connection string → we can never CREATE, so there is no duplicate
-          // risk whether or not existence is known: skip (structured, never prompts).
-          const reason = 'no connection string provided';
-          log.warn(`skipping Hyperdrive config ${name}: ${reason}`);
-          resources.push({ kind: 'hyperdrive', binding, name, action: 'skipped', reason });
-        } else if (existenceUnknown) {
-          // A connection string is present (we WOULD create) but existence is
-          // unverifiable → FAIL CLOSED. Blindly creating duplicates a same-named config.
-          throw new Error(
-            `provision: cannot verify whether Hyperdrive config ${JSON.stringify(name)} already ` +
-              `exists (no existence check available — provide an accountId + API token, or inject a ` +
-              `listHyperdriveConfigs seam). "wrangler hyperdrive create" silently duplicates a ` +
-              `same-named config, so provisioning refuses to create it blindly.`,
-          );
-        } else {
-          // Confirmed absent + connection string present → create.
-          const created = runWrangler([
-            'hyperdrive',
-            'create',
-            name,
-            `--connection-string=${connectionString}`,
-            '--binding',
-            binding,
-            '--update-config',
-            ...wranglerConfigArgs(configPath),
-          ]);
-          if (!isCleanSuccess(created)) {
+    // The whole-provision lock (F1/F2) already serializes this unguarded list→create
+    // across processes: the read-first check below runs UNDER that lock, so a second
+    // concurrent provision sees the id the first wrote and SKIPS (no duplicate).
+    const entry = findBindingEntry(readRootConfig(configPath).hyperdrive, binding);
+    if (entry && isRealValue(entry.id)) {
+      resources.push({ kind: 'hyperdrive', binding, name, action: 'reused', id: entry.id });
+    } else {
+      const lister =
+        opts?.listHyperdriveConfigs ?? createDefaultListHyperdriveConfigs(opts?.apiToken);
+      // F3 — treat the seam result as UNKNOWN until PROVEN a real array. The OUTER
+      // result is validated (`Array.isArray`) BEFORE existence is marked known, so a
+      // runtime `null`/`undefined`/non-array is NEVER coerced to "empty" (confirmed
+      // absence) — which would authorize a blind create. A malformed outer result and a
+      // failed async lister BOTH leave existence UNKNOWN → fail closed if we WOULD create.
+      let validatedConfigs: Array<unknown> | undefined;
+      let existenceUnknown = true;
+      if (lister) {
+        try {
+          // F1 — always invoke the lister WITH the reconciled account, so an injected
+          // lister can never query a DIFFERENT account than the config is pinned to.
+          const result = await lister({ accountId: transportAccountId });
+          if (!Array.isArray(result)) {
             throw new Error(
-              `provision: "wrangler hyperdrive create ${name}" failed: ${created.stderr || created.stdout}`,
+              `the existence check returned a ${result === null ? 'null' : typeof result} result ` +
+                `instead of an array`,
             );
           }
-          // F4 postcondition: confirm --update-config wrote a REAL Hyperdrive id.
-          assertCreateWroteRealId(
-            configPath,
-            {
-              field: 'hyperdrive',
-              idField: 'id',
-              resource: 'Hyperdrive config',
-              command: 'wrangler hyperdrive create',
-            },
-            binding,
-            name,
-          );
-          resources.push({ kind: 'hyperdrive', binding, name, action: 'created' });
+          validatedConfigs = result;
+          existenceUnknown = false;
+        } catch (error) {
+          log.warn(`Hyperdrive existence check for ${name} failed: ${(error as Error).message}`);
+          existenceUnknown = true;
+          validatedConfigs = undefined;
         }
       }
-    } finally {
-      lock.release();
+      // F3 — the ONE strict per-entry validator runs OUTSIDE the try, on a PROVEN array
+      // only, so its malformed-member / duplicate-id / ambiguous-name throws stay HARD
+      // failures (never swallowed into "unknown"). It requires EXACTLY 0 or 1 exact-name
+      // match (>1 → fail closed) BEFORE matching or writing, so no injected list can be
+      // adopted with an empty/garbage id.
+      const existing =
+        validatedConfigs !== undefined
+          ? selectHyperdriveMatch(validatedConfigs, name, configPath)
+          : undefined;
+      if (existing) {
+        log.info(`adopted existing Hyperdrive config ${name} (${existing.id})`);
+        write({ hyperdrive: { binding, id: existing.id } });
+        resources.push({ kind: 'hyperdrive', binding, name, action: 'adopted', id: existing.id });
+      } else if (!connectionString) {
+        // No connection string → we can never CREATE, so there is no duplicate
+        // risk whether or not existence is known: skip (structured, never prompts).
+        const reason = 'no connection string provided';
+        log.warn(`skipping Hyperdrive config ${name}: ${reason}`);
+        resources.push({ kind: 'hyperdrive', binding, name, action: 'skipped', reason });
+      } else if (existenceUnknown) {
+        // A connection string is present (we WOULD create) but existence is
+        // unverifiable → FAIL CLOSED. Blindly creating duplicates a same-named config.
+        throw new Error(
+          `provision: cannot verify whether Hyperdrive config ${JSON.stringify(name)} already ` +
+            `exists (no existence check available — provide an accountId + API token, or inject a ` +
+            `listHyperdriveConfigs seam). "wrangler hyperdrive create" silently duplicates a ` +
+            `same-named config, so provisioning refuses to create it blindly.`,
+        );
+      } else {
+        // Confirmed absent + connection string present → create.
+        const created = runWrangler([
+          'hyperdrive',
+          'create',
+          name,
+          `--connection-string=${connectionString}`,
+          '--binding',
+          binding,
+          '--update-config',
+          ...wranglerConfigArgs(configPath),
+        ]);
+        if (!isCleanSuccess(created)) {
+          throw new Error(
+            `provision: "wrangler hyperdrive create ${name}" failed: ${created.stderr || created.stdout}`,
+          );
+        }
+        // F4 postcondition: confirm --update-config wrote a REAL Hyperdrive id.
+        assertCreateWroteRealId(
+          configPath,
+          {
+            field: 'hyperdrive',
+            idField: 'id',
+            resource: 'Hyperdrive config',
+            command: 'wrangler hyperdrive create',
+          },
+          binding,
+          name,
+        );
+        resources.push({ kind: 'hyperdrive', binding, name, action: 'created' });
+      }
     }
   }
 
