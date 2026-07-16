@@ -1,10 +1,16 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { parse, type ParseError } from 'jsonc-parser';
 import { basename, dirname, join, resolve } from 'pathe';
 import lockfile from 'proper-lockfile';
 import { voidLog, voidWarn } from '../log.ts';
-import { parseDotenvFile } from '../shared/dotenv.ts';
 import { resolveWranglerArgv } from './preset.ts';
 import {
   assertNoDuplicateMembers,
@@ -126,6 +132,13 @@ export interface HyperdriveConfig {
 export type ListHyperdriveConfigs = (ctx: {
   accountId: string;
   apiBaseUrl: string;
+  /**
+   * F4 — the abort signal enforcing the caller's OVERALL lister deadline. The default lister
+   * threads it into EVERY paginated `fetch`; an injected seam SHOULD honor it too. The caller
+   * ALSO races the whole call against the same deadline, so even a seam that ignores the signal
+   * cannot hold the whole-provision lock past the deadline.
+   */
+  signal: AbortSignal;
 }) => Promise<Array<HyperdriveConfig>>;
 
 /** Per-resource outcome, so the orchestrator can log what happened. */
@@ -244,14 +257,75 @@ const TRANSPORT_REDIRECT_ENV_VARS = [
  * auto-loads it), so an ambient/CI pin is honored while a project dotenv redirect is
  * rejected up front by {@link assertNoTransportRedirectInProjectDotenv}.
  */
-export function resolvePinnedApiBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+export function resolvePinnedApiBaseUrl(
+  env: NodeJS.ProcessEnv = process.env,
+  configComplianceRegion?: string,
+): string {
+  // F1 — reconcile the compliance region FIRST (unconditionally), mirroring wrangler's
+  // `getCloudflareComplianceRegion`: it throws when the env var AND the config both set the
+  // region to DIFFERENT values. We run this even when a direct base override is present so an
+  // irreconcilable config-vs-ambient region fails closed exactly as wrangler would (rather
+  // than silently pinning one endpoint while the config claims another region).
+  const region = resolveComplianceRegion(env, configComplianceRegion);
   const direct = firstNonEmpty(env.CLOUDFLARE_API_BASE_URL, env.CF_API_BASE_URL);
   if (direct) {
     return direct;
   }
-  const fed = env.CLOUDFLARE_COMPLIANCE_REGION === 'fedramp_high' ? '.fed' : '';
+  const fed = region === 'fedramp_high' ? '.fed' : '';
   const staging = env.WRANGLER_API_ENVIRONMENT === 'staging' ? '.staging' : '';
   return `https://api${fed}${staging}.cloudflare.com/client/v4`;
+}
+
+/** F1 — the compliance-region choices wrangler 4.107 accepts (`getCloudflareComplianceRegionFromEnv`). */
+const COMPLIANCE_REGIONS = ['public', 'fedramp_high'] as const;
+type ComplianceRegion = (typeof COMPLIANCE_REGIONS)[number];
+
+function assertComplianceChoice(value: string, source: string): ComplianceRegion {
+  if (value !== 'public' && value !== 'fedramp_high') {
+    throw new Error(
+      `provision: ${source} must be one of ${COMPLIANCE_REGIONS.map((c) => JSON.stringify(c)).join(
+        ' or ',
+      )}, got ${JSON.stringify(value)}.`,
+    );
+  }
+  return value;
+}
+
+/**
+ * F1 — reconcile the effective Cloudflare compliance region, mirroring wrangler 4.107's
+ * `getCloudflareComplianceRegion(complianceConfig)` EXACTLY:
+ *   - reads `CLOUDFLARE_COMPLIANCE_REGION` (validated against the `public`/`fedramp_high`
+ *     choices, like wrangler's `getProcessEnv` → `assertOneOf`);
+ *   - validates the config's top-level `compliance_region` the same way;
+ *   - when BOTH are set to DIFFERENT values, THROWS (fail closed) — wrangler raises a
+ *     `UserError` for exactly this conflict, so we must not paper over it by pinning one
+ *     endpoint while the config declares the other region;
+ *   - otherwise returns `env ?? config ?? "public"`.
+ * An empty/absent value on either side is treated as "not set".
+ */
+function resolveComplianceRegion(
+  env: NodeJS.ProcessEnv,
+  configComplianceRegion: string | undefined,
+): ComplianceRegion {
+  const rawEnv = env.CLOUDFLARE_COMPLIANCE_REGION;
+  const envRegion =
+    typeof rawEnv === 'string' && rawEnv.length > 0
+      ? assertComplianceChoice(rawEnv, 'the CLOUDFLARE_COMPLIANCE_REGION environment variable')
+      : undefined;
+  const configRegion =
+    typeof configComplianceRegion === 'string' && configComplianceRegion.length > 0
+      ? assertComplianceChoice(configComplianceRegion, 'the wrangler config "compliance_region"')
+      : undefined;
+  if (envRegion !== undefined && configRegion !== undefined && envRegion !== configRegion) {
+    throw new Error(
+      `provision: the Cloudflare compliance region is set to conflicting values — the ` +
+        `CLOUDFLARE_COMPLIANCE_REGION environment variable is ${JSON.stringify(envRegion)} but the ` +
+        `wrangler config "compliance_region" is ${JSON.stringify(configRegion)}. wrangler refuses to ` +
+        `run with a mismatched compliance region; reconcile them (remove one, or set them equal) and ` +
+        `retry.`,
+    );
+  }
+  return envRegion ?? configRegion ?? 'public';
 }
 
 function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
@@ -261,6 +335,46 @@ function firstNonEmpty(...values: Array<string | undefined>): string | undefined
     }
   }
   return undefined;
+}
+
+/**
+ * F6 — wrangler 4.107's bundled `dotenv` LINE regex (verbatim), used ONLY to detect the
+ * declared KEYS wrangler would load — including the OPTIONAL `export ` prefix, the `KEY: val`
+ * form, and single/double/backtick quoting — so our transport-redirect fence sees exactly
+ * what wrangler's per-command dotenv reload would. We read keys, never values.
+ */
+const WRANGLER_DOTENV_LINE =
+  /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
+
+/** F6 — the set of declared dotenv KEYS in `filePath`, parsed the way wrangler does. */
+function scanWranglerDotenvKeys(filePath: string): Set<string> {
+  const keys = new Set<string>();
+  if (!existsSync(filePath)) {
+    return keys;
+  }
+  const content = readFileSync(filePath, 'utf-8');
+  WRANGLER_DOTENV_LINE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = WRANGLER_DOTENV_LINE.exec(content)) !== null) {
+    if (match[1]) {
+      keys.add(match[1]);
+    }
+    // Guard against a zero-width match wedging the loop.
+    if (match.index === WRANGLER_DOTENV_LINE.lastIndex) {
+      WRANGLER_DOTENV_LINE.lastIndex++;
+    }
+  }
+  return keys;
+}
+
+/**
+ * F6 — mirror wrangler 4.107's `getDefaultEnvFiles(env)`: base `.env`/`.env.local`, then —
+ * when the environment argument is DEFINED (we always pass `--env=`, so wrangler sees
+ * `args.env === ""`, which is `!== undefined`) — the per-env pair `.env.${env}`/`.env.${env}.local`.
+ * With the empty environment those are the empty-env filenames `.env.` and `.env..local`.
+ */
+function defaultWranglerEnvFiles(env: string): Array<string> {
+  return ['.env', '.env.local', `.env.${env}`, `.env.${env}.local`];
 }
 
 /**
@@ -276,12 +390,16 @@ function firstNonEmpty(...values: Array<string | undefined>): string | undefined
  * both wrangler and the lister to it) instead of the project dotenv.
  */
 function assertNoTransportRedirectInProjectDotenv(root: string): void {
-  // The always-loaded wrangler dotenv set (`getDefaultEnvFiles`) plus `.dev.vars`. We do
-  // NOT expand — presence of the KEY is the signal, whatever its value.
-  const files = ['.env', '.env.local', '.dev.vars', '.dev.vars.local'];
+  // F6 — scan the EXACT dotenv set wrangler 4.107 reloads on every command, using a KEY
+  // scanner that mirrors wrangler's own dotenv parser (accepts the optional `export ` prefix
+  // + quoting). Because the provisioner ALWAYS passes `--env=` (an EMPTY environment string),
+  // wrangler computes `getDefaultEnvFiles("")` = [".env", ".env.local", ".env.", ".env..local"]
+  // — the empty-env filenames `.env.`/`.env..local` are part of the loaded set — plus we also
+  // cover `.dev.vars(.local)`. We do NOT expand — presence of the KEY is the signal.
+  const files = [...defaultWranglerEnvFiles(''), '.dev.vars', '.dev.vars.local'];
   for (const file of files) {
-    const parsed = parseDotenvFile(join(root, file), { expand: false });
-    const offenders = TRANSPORT_REDIRECT_ENV_VARS.filter((name) => name in parsed);
+    const keys = scanWranglerDotenvKeys(join(root, file));
+    const offenders = TRANSPORT_REDIRECT_ENV_VARS.filter((name) => keys.has(name));
     if (offenders.length > 0) {
       throw new Error(
         `provision: refusing to provision — the project file "${file}" sets ` +
@@ -351,6 +469,29 @@ export function provisionEnv(ctx?: { accountId?: string; apiBaseUrl?: string }):
 const COMMAND_TIMEOUT_MS = 120_000;
 
 /**
+ * F3 — after a timeout SIGKILL, how long to keep confirming the child's whole process group
+ * is ACTUALLY gone (poll `kill(pid, 0)` → ESRCH) before giving up and surfacing an
+ * unconfirmed-termination HARD failure. SIGKILL is uncatchable, so a healthy kernel reaps the
+ * group within milliseconds; this generous bound only guards a pathological
+ * uninterruptible-sleep child, and the runner never settles a timeout as "done" until the
+ * group is confirmed gone (so the whole-provision lock — released only after this promise
+ * settles — can never be released while the real wrangler CLI is still creating resources).
+ */
+const CONFIRM_KILL_GRACE_MS = 5_000;
+/** F3 — the pid-poll interval while confirming post-SIGKILL termination. */
+const CONFIRM_KILL_POLL_MS = 20;
+
+/**
+ * F3 — classify a process-group kill error. `ESRCH` means the group ALREADY exited (there was
+ * nothing left to kill) → success. ANY other code (`EPERM`, …) is a REAL kill failure: the
+ * child may still be running, so it must be surfaced, never swallowed. Exported for direct
+ * unit testing of the classification the timeout/cancel paths rely on.
+ */
+export function isAlreadyGoneKillError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'ESRCH';
+}
+
+/**
  * Default `runWrangler`: resolves the project-local wrangler as an ARGV launcher
  * via Task 2's {@link resolveWranglerArgv} and runs it with `spawn` and
  * `shell: false`, so every argument is passed literally (no shell parsing → no
@@ -371,6 +512,12 @@ export function createDefaultRunWrangler(
     launcher?: Array<string>;
     /** F2 test seam — the per-command timeout. Defaults to {@link COMMAND_TIMEOUT_MS}. */
     timeoutMs?: number;
+    /**
+     * F3 test seam — the process-GROUP signaller (`target` is the value passed to
+     * `process.kill`: a NEGATIVE pid for the group). Defaults to `process.kill`. Tests inject
+     * it to exercise the ESRCH-already-gone and real-kill-failure branches.
+     */
+    killProcessGroup?: (target: number, signal: NodeJS.Signals) => void;
   },
 ): RunWrangler {
   // F2 — `resolveWranglerArgv` now yields wrangler's REAL CLI entry
@@ -379,6 +526,9 @@ export function createDefaultRunWrangler(
   // be trusted to report the exit code — see `resolveWranglerArgv`).
   const launcher = options?.launcher ?? resolveWranglerArgv(root);
   const timeoutMs = options?.timeoutMs ?? COMMAND_TIMEOUT_MS;
+  const killProcessGroup =
+    options?.killProcessGroup ??
+    ((target: number, signal: NodeJS.Signals) => process.kill(target, signal));
   const [command, ...prefix] = launcher;
   // POSIX: spawn the child as its OWN process-group leader (`detached`) so the timeout
   // can SIGKILL the WHOLE group (`process.kill(-pid, …)`) — reaping any grandchildren
@@ -404,6 +554,8 @@ export function createDefaultRunWrangler(
       let stderr = '';
       let timedOut = false;
       let settled = false;
+      // `confirmTimer` is REASSIGNED across poll iterations; `timer` is assigned once (below).
+      let confirmTimer: ReturnType<typeof setTimeout> | undefined;
       child.stdout?.setEncoding('utf-8');
       child.stderr?.setEncoding('utf-8');
       child.stdout?.on('data', (chunk: string) => {
@@ -412,44 +564,153 @@ export function createDefaultRunWrangler(
       child.stderr?.on('data', (chunk: string) => {
         stderr += chunk;
       });
-      const killHard = (): void => {
+
+      // F3 — signal the child's WHOLE process group (it is `detached`, so its own group leader).
+      // Returns a STRUCTURED outcome so the caller distinguishes ESRCH ("already gone" →
+      // success) from a REAL kill failure (EPERM/… → the child may still be running → surface).
+      const signalGroup = (signal: NodeJS.Signals): 'signaled' | 'gone' | { error: Error } => {
         try {
           if (!isWindows && typeof child.pid === 'number') {
-            // Negative pid → the whole process group (child + any grandchildren).
-            process.kill(-child.pid, 'SIGKILL');
+            killProcessGroup(-child.pid, signal); // negative pid → the whole group
           } else {
-            child.kill('SIGKILL');
+            child.kill(signal);
           }
-        } catch {
-          // Already exited (ESRCH) — nothing to kill.
+          return 'signaled';
+        } catch (error) {
+          return isAlreadyGoneKillError(error) ? 'gone' : { error: error as Error };
         }
       };
+
+      const timeoutStderr = (extra?: string): string =>
+        [stderr, `provision: wrangler exceeded the ${timeoutMs}ms command timeout`, extra]
+          .filter(Boolean)
+          .join('\n');
+
+      // F3 — forward a parent SIGINT/SIGTERM to the child's process GROUP so a Ctrl-C /
+      // termination tears the DETACHED child (+ grandchildren) down instead of orphaning it to
+      // keep creating resources / writing config after the whole-provision lock is (eventually)
+      // released on process exit. After forwarding we remove our own listeners and RE-RAISE the
+      // same signal, so the parent's normal termination still proceeds (installing a listener
+      // otherwise suppresses Node's default exit-on-signal).
+      const detachSignals = (): void => {
+        process.removeListener('SIGINT', onSigint);
+        process.removeListener('SIGTERM', onSigterm);
+      };
+      const forwardSignal = (signal: NodeJS.Signals) => (): void => {
+        signalGroup(signal);
+        detachSignals();
+        process.kill(process.pid, signal);
+      };
+      const onSigint = forwardSignal('SIGINT');
+      const onSigterm = forwardSignal('SIGTERM');
+      process.on('SIGINT', onSigint);
+      process.on('SIGTERM', onSigterm);
+
       const finish = (result: RunWranglerResult): void => {
         if (settled) {
           return;
         }
         settled = true;
         clearTimeout(timer);
+        clearTimeout(confirmTimer);
+        detachSignals();
         resolvePromise(result);
       };
-      // Hard timeout: SIGKILL the whole group AND settle the promise NOW — never wait for
-      // `close`. Even after bypassing the signal-swallowing wrapper, a grandchild that
-      // inherited the stdio pipes could keep them open so `close` never fires; settling
-      // on the timer itself guarantees the runner ALWAYS rejects within `timeoutMs`
-      // (`signal: 'SIGKILL'` → a HARD failure, never mistaken for a clean/absent exit).
+
+      // F3 — after SIGKILLing the group on timeout, CONFIRM the child is actually gone (poll
+      // `kill(pid, 0)` → ESRCH) BEFORE settling, so we never report a synthetic SIGKILL while
+      // the real CLI may still be running. `close` (below) also settles once the group is
+      // reaped (killing the whole group closes the inherited pipes); this pid-poll is the
+      // bound so a delayed `close` cannot hold the promise — and thus the lock — forever.
+      const confirmDeadThenSettle = (): void => {
+        const pid = child.pid;
+        if (isWindows || typeof pid !== 'number') {
+          confirmTimer = setTimeout(
+            () =>
+              finish(
+                normalizeRunWranglerResult({
+                  stdout,
+                  stderr: timeoutStderr(),
+                  status: null,
+                  signal: 'SIGKILL',
+                }),
+              ),
+            CONFIRM_KILL_GRACE_MS,
+          );
+          confirmTimer.unref?.();
+          return;
+        }
+        const deadline = Date.now() + CONFIRM_KILL_GRACE_MS;
+        const poll = (): void => {
+          if (settled) {
+            return;
+          }
+          let alive = true;
+          try {
+            process.kill(pid, 0);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+              alive = false;
+            }
+            // EPERM → the pid exists but we cannot signal it — treat as alive (fail safe).
+          }
+          if (!alive) {
+            finish(
+              normalizeRunWranglerResult({
+                stdout,
+                stderr: timeoutStderr(),
+                status: null,
+                signal: 'SIGKILL',
+              }),
+            );
+            return;
+          }
+          if (Date.now() >= deadline) {
+            // Could NOT confirm termination within the grace window — surface a HARD failure
+            // naming the risk (never a clean/absent exit, never a silent success).
+            finish(
+              normalizeRunWranglerResult({
+                stdout,
+                stderr: timeoutStderr(
+                  `the process group could not be confirmed terminated within ${CONFIRM_KILL_GRACE_MS}ms`,
+                ),
+                status: null,
+                signal: 'SIGKILL',
+              }),
+            );
+            return;
+          }
+          confirmTimer = setTimeout(poll, CONFIRM_KILL_POLL_MS);
+          confirmTimer.unref?.();
+        };
+        poll();
+      };
+
+      // Hard timeout: SIGKILL the whole group, then AWAIT CONFIRMED termination before settling
+      // — so the whole-provision lock (released only after this promise settles) can NEVER be
+      // released while the real wrangler CLI is still alive.
       const timer = setTimeout(() => {
         timedOut = true;
-        killHard();
-        finish(
-          normalizeRunWranglerResult({
-            stdout,
-            stderr: [stderr, `provision: wrangler exceeded the ${timeoutMs}ms command timeout`]
-              .filter(Boolean)
-              .join('\n'),
-            status: null,
-            signal: 'SIGKILL',
-          }),
-        );
+        const outcome = signalGroup('SIGKILL');
+        if (typeof outcome === 'object') {
+          // A REAL kill failure (not ESRCH). The child MAY still be running, so surface the
+          // failure as a HARD error instead of pretending the kill succeeded.
+          finish(
+            normalizeRunWranglerResult({
+              stdout,
+              stderr: timeoutStderr(
+                `the process group could not be killed: ${outcome.error.message}`,
+              ),
+              status: null,
+              signal: 'SIGKILL',
+              error: outcome.error,
+            }),
+          );
+          return;
+        }
+        // 'signaled' or 'gone' (ESRCH ⇒ already dead ⇒ nothing to kill): confirm termination,
+        // then settle. Never settle the timeout as "done" before the group is confirmed gone.
+        confirmDeadThenSettle();
       }, timeoutMs);
       timer.unref?.();
       // A spawn error (ENOENT, EACCES) may fire `error` WITHOUT a later `close`, so
@@ -461,11 +722,7 @@ export function createDefaultRunWrangler(
         finish(
           normalizeRunWranglerResult({
             stdout,
-            stderr: timedOut
-              ? [stderr, `provision: wrangler exceeded the ${timeoutMs}ms command timeout`]
-                  .filter(Boolean)
-                  .join('\n')
-              : stderr,
+            stderr: timedOut ? timeoutStderr() : stderr,
             status: code,
             signal,
           }),
@@ -546,6 +803,44 @@ function isCleanFailure(result: RunWranglerResult): boolean {
 }
 
 /**
+ * F4 — the OVERALL deadline for the Hyperdrive existence lister (across ALL its paginated
+ * requests). A stalled body or a never-settling injected seam must never hold the
+ * whole-provision lock (whose heartbeat keeps refreshing while the loop is free) forever, so
+ * the caller fails closed at this bound.
+ */
+const HYPERDRIVE_LIST_TIMEOUT_MS = 60_000;
+
+/**
+ * F4 — run a lister call under an OVERALL deadline. Builds one `AbortController`, hands its
+ * signal to `start` (threaded into every paginated `fetch`), and races the returned promise
+ * against a timer that ABORTS the signal AND rejects — so even a seam that ignores the signal
+ * (never settling) can NOT hold the caller (and thus the provision lock) past `ms`.
+ */
+function withListerDeadline<T>(start: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`the existence check exceeded the ${ms}ms deadline`));
+    }, ms);
+    timer.unref?.();
+    // Defer `start` into the promise chain so a synchronous throw is captured as a rejection.
+    Promise.resolve()
+      .then(() => start(controller.signal))
+      .then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+  });
+}
+
+/**
  * Default Hyperdrive existence check: `GET /accounts/{id}/hyperdrive/configs`
  * with the CF API token, matched by name in the caller. Returns `undefined` when
  * it cannot be built (no account id / no token) — the caller then fails closed
@@ -560,7 +855,7 @@ function createDefaultListHyperdriveConfigs(apiToken?: string): ListHyperdriveCo
   // (not a closure), so this default REST lister always targets the reconciled effective
   // account at the SAME endpoint the spawned wrangler uses (never a hardcoded prod base
   // while wrangler was redirected to staging/FedRAMP/an arbitrary endpoint).
-  return async ({ accountId, apiBaseUrl }) => {
+  return async ({ accountId, apiBaseUrl, signal }) => {
     const base = apiBaseUrl.replace(/\/+$/, '');
     // Fetch ALL pages (Hyperdrive names are NOT unique — paid accounts allow
     // ~25 configs, paginated) and FAIL CLOSED on any non-2xx, `success !== true`,
@@ -580,7 +875,9 @@ function createDefaultListHyperdriveConfigs(apiToken?: string): ListHyperdriveCo
     for (let page = 1; ; page++) {
       const res = await fetch(
         `${base}/accounts/${encodeURIComponent(accountId)}/hyperdrive/configs?page=${page}&per_page=${perPage}`,
-        { headers: { Authorization: `Bearer ${token}` } },
+        // F4 — apply the caller's deadline signal to EVERY paginated request, so a stalled
+        // body / never-settling page is aborted rather than holding the provision lock forever.
+        { headers: { Authorization: `Bearer ${token}` }, signal },
       );
       if (!res.ok) {
         throw new Error(`Cloudflare API returned HTTP ${res.status} listing Hyperdrive configs`);
@@ -765,16 +1062,53 @@ interface ProvisionLock {
  * the file nor its parent can be canonicalized, the lexical path is returned unchanged (no
  * worse than before, and the common case — an existing project dir — is always canonical).
  */
-function canonicalizeConfigPath(absoluteConfigPath: string): string {
+function canonicalizeConfigPath(absoluteConfigPath: string, depth = 0): string {
   try {
     return realpathSync(absoluteConfigPath);
-  } catch {
-    // File missing (or otherwise unresolvable) — canonicalize the parent dir instead.
+  } catch (error) {
+    // ONLY ENOENT (a path component does not exist yet) is the benign "not created yet" case
+    // we handle below. Any OTHER realpath error (EACCES, ELOOP for a real symlink cycle,
+    // ENOTDIR) means the path is genuinely unresolvable — RETHROW so it is never swallowed
+    // into a bogus lexical fallback that both aliases and the target could disagree on.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
   }
+  // ENOENT: the FINAL path component may itself be a DANGLING SYMLINK — it exists as a link,
+  // but its target does not exist YET (a not-yet-created config). If so, resolve the link to
+  // its intended target and canonicalize THAT, so an alias and its target share ONE lock
+  // identity (both writes hit the same real file). `lstatSync` does NOT follow the link, so it
+  // reports the link itself.
+  let linkStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    linkStat = lstatSync(absoluteConfigPath);
+  } catch {
+    // The final component is genuinely absent (not even a link) — fall through to the
+    // parent-dir fallback below.
+    linkStat = undefined;
+  }
+  if (linkStat?.isSymbolicLink()) {
+    // Bound the walk so a pathological chain of dangling links (that `realpathSync` did not
+    // already reject as ELOOP) cannot recurse forever — surface it as an ELOOP instead.
+    if (depth >= 40) {
+      throw Object.assign(
+        new Error(`ELOOP: too many symbolic links while resolving "${absoluteConfigPath}"`),
+        { code: 'ELOOP' },
+      );
+    }
+    const target = readlinkSync(absoluteConfigPath);
+    return canonicalizeConfigPath(resolve(dirname(absoluteConfigPath), target), depth + 1);
+  }
+  // Genuinely absent, NON-symlink file — canonicalize the PARENT dir (normally the project
+  // root, which exists) + rejoin the real basename, so two lexical aliases to the same
+  // not-yet-created config still resolve to one identity.
   const dir = dirname(absoluteConfigPath);
   try {
     return join(realpathSync(dir), basename(absoluteConfigPath));
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
     return absoluteConfigPath;
   }
 }
@@ -1190,12 +1524,15 @@ function isConfirmedAbsent(result: RunWranglerResult, kind: 'r2' | 'queue', name
   const text = `${result.stdout}\n${result.stderr}`;
   switch (kind) {
     case 'r2':
-      // CF API error code 10006 (the exact code wrangler's own
-      // `isConnectedToExistingResource` treats as "bucket absent") or wrangler's
-      // exact R2 not-found message. R2's message does not embed the bucket name,
-      // so the code/message IS the exact signal. A metrics/auth/network failure
-      // (whose text may loosely contain "not found") is NOT matched here.
-      return /\b10006\b/.test(text) || /the specified bucket does not exist/i.test(text);
+      // F5 — CF API error code 10006 is the exact code wrangler treats as "bucket absent"
+      // (its `getR2Bucket`/`isConnectedToExistingResource` branch on `err.code === 10006`).
+      // wrangler renders an `APIError` as `${message} [code: ${err.code}]` (its `renderError`
+      // in wrangler 4.107), so a genuine 10006 ALWAYS surfaces as the STRUCTURED token
+      // `[code: 10006]` in the error output. We require that bracketed token — NOT a bare
+      // `10006` anywhere in output: a bucket NAME that merely contains those digits (e.g.
+      // `archive-10006-prod`) inside an unrelated auth/service/network failure would falsely
+      // read as absence and authorize a duplicating create. Only the structured code counts.
+      return /\[code:\s*10006\]/.test(text);
     case 'queue':
       // wrangler's `getQueue` throws exactly `Queue "<name>" does not exist`.
       // Match ONLY that message for THIS queue name — a generic `not found` /
@@ -1536,6 +1873,8 @@ export interface ProvisionOptions {
   log?: ProvisionLogger;
   /** Test-only override of the `proper-lockfile` stale/update/retries/fs knobs (F1/F2). */
   lockOptions?: ProvisionLockOptions;
+  /** F4 — override the OVERALL Hyperdrive-lister deadline (ms). Defaults to {@link HYPERDRIVE_LIST_TIMEOUT_MS}. */
+  listTimeoutMs?: number;
 }
 
 /**
@@ -1594,10 +1933,25 @@ async function provisionCloudflareResourcesLocked(
   // targets Y — a cross-account create/orphan. Fail closed on a real mismatch;
   // otherwise pin ONE value EVERYWHERE (the wrangler env, which scrubs CLOUDFLARE_ENV
   // and overrides any different ambient account, AND the Hyperdrive REST call).
-  const rawConfigAccountId = readRootConfig(configPath).account_id;
+  const rootConfig = readRootConfig(configPath);
+  const rawConfigAccountId = rootConfig.account_id;
   const configAccountId =
     typeof rawConfigAccountId === 'string' && rawConfigAccountId.length > 0
       ? rawConfigAccountId
+      : undefined;
+  // F1 — the config's top-level `compliance_region` co-determines the ONE pinned API base
+  // (FedRAMP vs public). Read + type-check it here so it can be reconciled with the ambient
+  // `CLOUDFLARE_COMPLIANCE_REGION` (fail closed on conflict) when the base is resolved below.
+  const rawComplianceRegion = rootConfig.compliance_region;
+  if (rawComplianceRegion !== undefined && typeof rawComplianceRegion !== 'string') {
+    throw new Error(
+      `provision: "${configPath}" has a non-string "compliance_region"; it must be "public" or ` +
+        `"fedramp_high". Fix the config and retry.`,
+    );
+  }
+  const configComplianceRegion =
+    typeof rawComplianceRegion === 'string' && rawComplianceRegion.length > 0
+      ? rawComplianceRegion
       : undefined;
   if (configAccountId && opts?.accountId && configAccountId !== opts.accountId) {
     throw new Error(
@@ -1677,10 +2031,12 @@ async function provisionCloudflareResourcesLocked(
   // no seam and never reads it).
   const transportAccountId = effectiveAccountId!;
   // F1 — the ONE pinned Cloudflare API base URL (mirroring wrangler's own derivation),
-  // resolved from the REAL ambient env. Threaded into BOTH the wrangler runner (via the
-  // spawned env's `CLOUDFLARE_API_BASE_URL`) and the Hyperdrive REST lister, so both hit
+  // resolved from the REAL ambient env AND the config's `compliance_region` (so a FedRAMP
+  // config pins the `.fed` endpoint even with no ambient override, and a config-vs-ambient
+  // region conflict fails closed like wrangler). Threaded into BOTH the wrangler runner (via
+  // the spawned env's `CLOUDFLARE_API_BASE_URL`) and the Hyperdrive REST lister, so both hit
   // the same endpoint. The dotenv fence above guarantees no project `.env` can move it.
-  const transportApiBaseUrl = resolvePinnedApiBaseUrl();
+  const transportApiBaseUrl = resolvePinnedApiBaseUrl(process.env, configComplianceRegion);
 
   // Both seams are pinned to the SAME effective account + API base: the default wrangler
   // runner via its env (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_BASE_URL` + the top-level
@@ -2038,10 +2394,20 @@ async function provisionCloudflareResourcesLocked(
         try {
           // F1 — always invoke the lister WITH the reconciled account, so an injected
           // lister can never query a DIFFERENT account than the config is pinned to.
-          const result = await lister({
-            accountId: transportAccountId,
-            apiBaseUrl: transportApiBaseUrl,
-          });
+          // F4 — bound the WHOLE call by an overall deadline threaded as an `AbortSignal`.
+          // `withListerDeadline` aborts the signal AND rejects at the deadline, so even a
+          // seam that ignores the signal (a stalled body / never-settling promise) can NEVER
+          // keep the heartbeat refreshing the whole-provision lock forever — it fails closed
+          // (→ existence unknown → a create attempt throws below → the lock is released).
+          const result = await withListerDeadline(
+            (signal) =>
+              lister({
+                accountId: transportAccountId,
+                apiBaseUrl: transportApiBaseUrl,
+                signal,
+              }),
+            opts?.listTimeoutMs ?? HYPERDRIVE_LIST_TIMEOUT_MS,
+          );
           if (!Array.isArray(result)) {
             throw new Error(
               `the existence check returned a ${result === null ? 'null' : typeof result} result ` +

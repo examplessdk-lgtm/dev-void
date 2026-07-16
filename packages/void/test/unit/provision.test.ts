@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
   acquireProvisionLock,
   createDefaultRunWrangler,
+  isAlreadyGoneKillError,
   normalizeRunWranglerResult,
   provisionCloudflareResources,
   provisionEnv,
@@ -929,7 +930,7 @@ describe('provisionCloudflareResources — R2', () => {
     const { run, calls } = makeRunner([
       {
         match: /^r2 bucket info /,
-        reply: () => fail('', 'X [ERROR] The specified bucket does not exist'),
+        reply: () => fail('', 'X [ERROR] The specified bucket does not exist [code: 10006]'),
       },
       {
         match: /^r2 bucket create /,
@@ -1499,7 +1500,10 @@ describe('provisionCloudflareResources — account reconciliation + config pin (
           return ok();
         },
       },
-      { match: /^r2 bucket info /, reply: () => fail('', 'The specified bucket does not exist') },
+      {
+        match: /^r2 bucket info /,
+        reply: () => fail('', 'The specified bucket does not exist. [code: 10006]'),
+      },
       {
         match: /^r2 bucket create /,
         reply: () => {
@@ -1643,9 +1647,9 @@ describe('provisionCloudflareResources — F1 pinned transport (one base for wra
     expect(urls[0]).toContain('/accounts/config-acct/hyperdrive/configs');
   });
 
-  it('the injected lister receives the pinned apiBaseUrl in its transport context', async () => {
+  it('the injected lister receives the pinned apiBaseUrl + a deadline AbortSignal in its transport context', async () => {
     setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
-    let seen: { accountId: string; apiBaseUrl: string } | undefined;
+    let seen: { accountId: string; apiBaseUrl: string; signal: AbortSignal } | undefined;
     const { run } = makeRunner([]);
     await provisionCloudflareResources(
       tmpDir,
@@ -1663,10 +1667,10 @@ describe('provisionCloudflareResources — F1 pinned transport (one base for wra
         },
       },
     );
-    expect(seen).toEqual({
-      accountId: 'config-acct',
-      apiBaseUrl: 'https://api.cloudflare.com/client/v4',
-    });
+    expect(seen?.accountId).toBe('config-acct');
+    expect(seen?.apiBaseUrl).toBe('https://api.cloudflare.com/client/v4');
+    // F4 — the lister is handed the overall-deadline signal to thread into every fetch.
+    expect(seen?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it('FAILS CLOSED when a project .env sets a transport-redirect var (no wrangler/REST)', async () => {
@@ -2455,7 +2459,10 @@ describe('provisionCloudflareResources — F4 create postcondition (round 4)', (
   it('R2: a create that reports success but writes NO bucket fails closed', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run } = makeRunner([
-      { match: /^r2 bucket info /, reply: () => fail('', 'The specified bucket does not exist') },
+      {
+        match: /^r2 bucket info /,
+        reply: () => fail('', 'The specified bucket does not exist. [code: 10006]'),
+      },
       { match: /^r2 bucket create /, reply: () => ok() },
     ]);
     await expect(
@@ -3149,7 +3156,10 @@ describe('provisionCloudflareResources — resource-specific create postconditio
   it('R2: fails closed when create writes a DIFFERENT bucket_name than requested', async () => {
     setup(JSON.stringify({ account_id: 'acct' }));
     const { run } = makeRunner([
-      { match: /^r2 bucket info /, reply: () => fail('', 'The specified bucket does not exist') },
+      {
+        match: /^r2 bucket info /,
+        reply: () => fail('', 'The specified bucket does not exist. [code: 10006]'),
+      },
       {
         match: /^r2 bucket create /,
         reply: () => {
@@ -3725,5 +3735,535 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
     expect(messages).toMatch(/failed to release the cross-process provision lock/);
     // The primary body error is also preserved as `cause` for cause-walking loggers.
     expect((agg.cause as Error).message).toMatch(/hyperdrive create/);
+  });
+});
+
+describe('provisionCloudflareResources — F1 config compliance_region pins the transport (round 10)', () => {
+  it('resolvePinnedApiBaseUrl honors the config compliance_region (fedramp) with no ambient override', () => {
+    // Config says fedramp_high, no CLOUDFLARE_COMPLIANCE_REGION ambient → the FedRAMP base.
+    expect(resolvePinnedApiBaseUrl({}, 'fedramp_high')).toBe(
+      'https://api.fed.cloudflare.com/client/v4',
+    );
+    // Config "public" → public base; absent config → public base.
+    expect(resolvePinnedApiBaseUrl({}, 'public')).toBe('https://api.cloudflare.com/client/v4');
+    expect(resolvePinnedApiBaseUrl({}, undefined)).toBe('https://api.cloudflare.com/client/v4');
+  });
+
+  it('resolvePinnedApiBaseUrl fails closed on a config-vs-ambient compliance_region conflict', () => {
+    expect(() =>
+      resolvePinnedApiBaseUrl({ CLOUDFLARE_COMPLIANCE_REGION: 'public' }, 'fedramp_high'),
+    ).toThrow(/conflicting values/);
+    // Equal on both sides is fine (no conflict).
+    expect(
+      resolvePinnedApiBaseUrl({ CLOUDFLARE_COMPLIANCE_REGION: 'fedramp_high' }, 'fedramp_high'),
+    ).toBe('https://api.fed.cloudflare.com/client/v4');
+  });
+
+  it('rejects an invalid config compliance_region value', () => {
+    expect(() => resolvePinnedApiBaseUrl({}, 'somewhere')).toThrow(
+      /one of "public" or "fedramp_high"/,
+    );
+  });
+
+  it('a fedramp config pins BOTH the wrangler child env AND the Hyperdrive REST lister to the .fed base', async () => {
+    const prev = process.env.CLOUDFLARE_COMPLIANCE_REGION;
+    delete process.env.CLOUDFLARE_COMPLIANCE_REGION; // no ambient override — config is authoritative
+    setup(
+      JSON.stringify({
+        account_id: 'config-acct',
+        compliance_region: 'fedramp_high',
+        hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }],
+      }),
+    );
+    let seen: { apiBaseUrl: string } | undefined;
+    const calls: Array<Array<string>> = [];
+    const run: RunWrangler = (args, opts) => {
+      calls.push(args);
+      // The wrangler child is pinned to the SAME base via its env transport context.
+      expect(opts.apiBaseUrl).toBe('https://api.fed.cloudflare.com/client/v4');
+      return { stdout: '', stderr: '', status: 0 };
+    };
+    try {
+      await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+        },
+        {
+          runWrangler: run,
+          log: silentLog,
+          listHyperdriveConfigs: async (ctx) => {
+            seen = ctx;
+            return [];
+          },
+        },
+      );
+    } finally {
+      if (prev === undefined) {
+        delete process.env.CLOUDFLARE_COMPLIANCE_REGION;
+      } else {
+        process.env.CLOUDFLARE_COMPLIANCE_REGION = prev;
+      }
+    }
+    expect(seen?.apiBaseUrl).toBe('https://api.fed.cloudflare.com/client/v4');
+  });
+
+  it('fails closed when the config compliance_region conflicts with an ambient CLOUDFLARE_COMPLIANCE_REGION', async () => {
+    const prev = process.env.CLOUDFLARE_COMPLIANCE_REGION;
+    process.env.CLOUDFLARE_COMPLIANCE_REGION = 'public';
+    setup(
+      JSON.stringify({
+        account_id: 'config-acct',
+        compliance_region: 'fedramp_high',
+        hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }],
+      }),
+    );
+    let listerCalled = false;
+    const { run } = makeRunner([]);
+    try {
+      await expect(
+        provisionCloudflareResources(
+          tmpDir,
+          wranglerPath,
+          {
+            ...emptyDesired,
+            hyperdrive: {
+              binding: 'HYPERDRIVE',
+              name: 'myapp-hd',
+              connectionString: 'postgres://x',
+            },
+          },
+          {
+            runWrangler: run,
+            log: silentLog,
+            listHyperdriveConfigs: async () => {
+              listerCalled = true;
+              return [];
+            },
+          },
+        ),
+      ).rejects.toThrow(/conflicting values/);
+    } finally {
+      if (prev === undefined) {
+        delete process.env.CLOUDFLARE_COMPLIANCE_REGION;
+      } else {
+        process.env.CLOUDFLARE_COMPLIANCE_REGION = prev;
+      }
+    }
+    // Failed closed before any remote work.
+    expect(listerCalled).toBe(false);
+  });
+});
+
+describe('provisionCloudflareResources — F5 R2 absence needs the STRUCTURED code (round 10)', () => {
+  it('a failure whose text merely contains 10006 inside a bucket name is NOT absence (fails closed, no create)', async () => {
+    setup(JSON.stringify({ name: 'app', account_id: 'acct' }));
+    const { run, calls } = makeRunner([
+      {
+        // An AUTH failure (code 10000) whose text contains the digits 10006 inside a bucket name.
+        match: /^r2 bucket info /,
+        reply: () =>
+          fail('', 'X [ERROR] Authentication error for bucket archive-10006-prod [code: 10000]'),
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'archive-10006-prod' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/r2 bucket info archive-10006-prod.*(failed|refusing)/s);
+    // No blind create on a non-structured-10006 failure.
+    expect(calls.some((c) => isCall(c, 'r2', 'bucket', 'create'))).toBe(false);
+  });
+
+  it('the GENUINE structured [code: 10006] IS absence → create', async () => {
+    setup(JSON.stringify({ name: 'app', account_id: 'acct' }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^r2 bucket info /,
+        reply: () => fail('', 'X [ERROR] The specified bucket does not exist. [code: 10006]'),
+      },
+      {
+        match: /^r2 bucket create /,
+        reply: () => {
+          simulateUpdateConfig('r2_buckets', {
+            binding: 'STORAGE',
+            bucket_name: 'archive-10006-prod',
+          });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'archive-10006-prod' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(calls.some((c) => isCall(c, 'r2', 'bucket', 'create'))).toBe(true);
+    expect(result.resources[0].action).toBe('created');
+  });
+});
+
+describe('provisionCloudflareResources — F4 Hyperdrive lister deadline (round 10)', () => {
+  const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
+
+  it('a never-settling lister makes the boundary REJECT within the deadline (no infinite hold, lock released)', async () => {
+    setup(
+      JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
+    );
+    const { run } = makeRunner([]);
+    const start = Date.now();
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+        },
+        {
+          runWrangler: run,
+          log: silentLog,
+          // Ignores the signal and NEVER settles — pre-fix this held the lock forever.
+          listHyperdriveConfigs: () => new Promise<never>(() => {}),
+          listTimeoutMs: 200,
+        },
+      ),
+    ).rejects.toThrow(/cannot verify whether Hyperdrive config .* already/s);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(5_000);
+    // The lock was released (no infinite hold).
+    expect(existsSync(lockMutex)).toBe(false);
+  }, 10_000);
+
+  it('the deadline signal is aborted when the deadline fires (so a real fetch would cancel)', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    let capturedSignal: AbortSignal | undefined;
+    const { run } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+        },
+        {
+          runWrangler: run,
+          log: silentLog,
+          listHyperdriveConfigs: (ctx) => {
+            capturedSignal = ctx.signal;
+            return new Promise<never>(() => {});
+          },
+          listTimeoutMs: 150,
+        },
+      ),
+    ).rejects.toThrow(/cannot verify/);
+    expect(capturedSignal?.aborted).toBe(true);
+  }, 10_000);
+});
+
+describe('createDefaultRunWrangler — F3 confirmed child termination + kill classification (round 10)', () => {
+  const F3_TMP = join(import.meta.dirname, '.tmp-f3-round10');
+  beforeEach(() => {
+    rmSync(F3_TMP, { recursive: true, force: true });
+    mkdirSync(F3_TMP, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(F3_TMP, { recursive: true, force: true });
+  });
+
+  async function waitForDead(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
+  }
+
+  it('isAlreadyGoneKillError: ESRCH → true (already gone), any other code → false (real failure)', () => {
+    expect(isAlreadyGoneKillError(Object.assign(new Error('x'), { code: 'ESRCH' }))).toBe(true);
+    expect(isAlreadyGoneKillError(Object.assign(new Error('x'), { code: 'EPERM' }))).toBe(false);
+    expect(isAlreadyGoneKillError(new Error('x'))).toBe(false);
+    expect(isAlreadyGoneKillError(null)).toBe(false);
+  });
+
+  it('a REAL kill failure (EPERM) on timeout SURFACES as a hard failure (not masked as a clean kill)', async () => {
+    const pidFile = join(F3_TMP, 'cli.pid');
+    const hungCli = join(F3_TMP, 'hung.cjs');
+    writeFileSync(
+      hungCli,
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const run = createDefaultRunWrangler(F3_TMP, {
+      launcher: [process.execPath, hungCli],
+      timeoutMs: 300,
+      // Simulate a kill that FAILS for a non-ESRCH reason (the child is still alive).
+      killProcessGroup: () => {
+        throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+      },
+    });
+    const result = await run(['d1', 'list', '--json'], { accountId: 'acct' });
+    // HARD failure that SURFACES the kill error (never a clean/absent exit).
+    expect(result.signal).toBe('SIGKILL');
+    expect(result.status).not.toBe(0);
+    expect(result.error).toMatch(/EPERM/);
+    expect(result.stderr).toMatch(/could not be killed: EPERM/);
+    // Clean up the real child the fake killer left alive.
+    const pid = Number(readFileSync(pidFile, 'utf-8'));
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // already gone
+    }
+    expect(await waitForDead(pid, 5_000)).toBe(true);
+  });
+
+  it('an ESRCH kill (already gone) is treated as SUCCESS — settles as the timeout hard-failure, no kill-error text', async () => {
+    const pidFile = join(F3_TMP, 'cli2.pid');
+    const hungCli = join(F3_TMP, 'hung2.cjs');
+    writeFileSync(
+      hungCli,
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const run = createDefaultRunWrangler(F3_TMP, {
+      launcher: [process.execPath, hungCli],
+      timeoutMs: 300,
+      // Kill FOR REAL, then report ESRCH (the child exited in the race window) → treated as gone.
+      killProcessGroup: (target, signal) => {
+        process.kill(target, signal);
+        throw Object.assign(new Error('ESRCH: no such process'), { code: 'ESRCH' });
+      },
+    });
+    const result = await run(['d1', 'list', '--json'], { accountId: 'acct' });
+    expect(result.signal).toBe('SIGKILL');
+    expect(result.status).not.toBe(0);
+    // ESRCH is NOT a kill failure — no "could not be killed" surfaced.
+    expect(result.stderr).not.toMatch(/could not be killed/);
+    expect(result.error).toBeNull();
+    const pid = Number(readFileSync(pidFile, 'utf-8'));
+    expect(await waitForDead(pid, 5_000)).toBe(true);
+  });
+
+  it('lock is released only AFTER confirmed child termination: a hung wrangler → provision rejects, child dead, mutex gone', async () => {
+    // Drive a FULL provision whose wrangler runner is the REAL default runner spawning a hung
+    // CLI. The `d1 list` times out → confirmed-termination hard failure → provision rejects →
+    // the whole-provision lock is released. The child must be dead and the mutex gone.
+    const cfgDir = join(F3_TMP, 'app');
+    mkdirSync(cfgDir, { recursive: true });
+    const cfgPath = join(cfgDir, 'wrangler.jsonc');
+    writeFileSync(cfgPath, JSON.stringify({ name: 'app', account_id: 'acct' }));
+    const pidFile = join(F3_TMP, 'prov-cli.pid');
+    const hungCli = join(F3_TMP, 'prov-hung.cjs');
+    writeFileSync(
+      hungCli,
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
+        `process.on('SIGTERM', () => {});\n` +
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const runner = createDefaultRunWrangler(cfgDir, {
+      launcher: [process.execPath, hungCli],
+      timeoutMs: 400,
+    });
+    const lockMutex = `${realpathSync(cfgPath)}.void-provision.lock.lock`;
+    await expect(
+      provisionCloudflareResources(
+        cfgDir,
+        cfgPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: runner, log: silentLog },
+      ),
+    ).rejects.toThrow(/d1 list.*(failed|timeout)/s);
+    const pid = Number(readFileSync(pidFile, 'utf-8'));
+    // The child (and its group) was confirmed terminated...
+    expect(await waitForDead(pid, 5_000)).toBe(true);
+    // ...and the lock was released (never leaked past the child).
+    expect(existsSync(lockMutex)).toBe(false);
+  }, 15_000);
+});
+
+describe('provisionCloudflareResources — F2 dangling-symlink lock identity (round 10)', () => {
+  it('two concurrent provisions via a dangling-symlink alias to the SAME not-yet-created target serialize (one lock, one create)', async () => {
+    // A `shared/` dir exists but `shared/wrangler.jsonc` does NOT yet. Two aliases both point
+    // (as DANGLING symlinks) at that same not-yet-created target. Without resolving the dangling
+    // final link each alias would canonicalize to ITS OWN lexical path → two marker locks → both
+    // create a duplicate. With F2 both resolve to the ONE real target → one lock → the loser
+    // blocks, then read-first (under the lock) reuses the winner's id.
+    const sharedDir = join(tmpDir, 'shared');
+    mkdirSync(sharedDir, { recursive: true });
+    const target = join(sharedDir, 'wrangler.jsonc'); // NOT created yet — dangling
+    const aliasA = join(tmpDir, 'aliasA.jsonc');
+    const aliasB = join(tmpDir, 'aliasB.jsonc');
+    symlinkSync(target, aliasA);
+    symlinkSync(target, aliasB);
+    expect(existsSync(target)).toBe(false); // both aliases are dangling at start
+
+    const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+    let createCalls = 0;
+    const makeProv = (
+      aliasPath: string,
+    ): Promise<{ resources: Array<{ kind: string; action: string }> }> => {
+      const run: RunWrangler = (args) => {
+        if (isCall(args, 'hyperdrive', 'create')) {
+          createCalls++;
+          // --update-config writes to the CANONICAL target (both aliases resolve to it).
+          simulateUpdateConfig(
+            'hyperdrive',
+            { binding: 'HYPERDRIVE', id: hex32('hd-' + createCalls) },
+            target,
+          );
+          return ok();
+        }
+        return ok();
+      };
+      return provisionCloudflareResources(
+        tmpDir,
+        aliasPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+        },
+        {
+          runWrangler: run,
+          log: silentLog,
+          // Barrier: the winner holds the lock while LISTING (40ms) so the loser must wait on
+          // the SHARED lock — proving the dangling-link canonicalization (not sequencing) serializes.
+          listHyperdriveConfigs: async () => {
+            await delay(40);
+            return [];
+          },
+        },
+      ) as Promise<{ resources: Array<{ kind: string; action: string }> }>;
+    };
+    const [a, b] = await Promise.all([makeProv(aliasA), makeProv(aliasB)]);
+    const actions = [...a.resources, ...b.resources]
+      .filter((r) => r.kind === 'hyperdrive')
+      .map((r) => r.action)
+      .sort();
+    expect(createCalls).toBe(1);
+    expect(actions).toEqual(['created', 'reused']);
+    // The ONE canonical mutex (keyed on the real target) is released.
+    expect(existsSync(`${realpathSync(target)}.void-provision.lock.lock`)).toBe(false);
+  }, 15_000);
+
+  it('a non-ENOENT realpath error (a self-referential symlink cycle → ELOOP) SURFACES, not swallowed', async () => {
+    // `loop.jsonc` → `loop.jsonc` is a symlink cycle: realpath throws ELOOP (NOT ENOENT). The
+    // old broad catch swallowed it and fell back to a bogus lexical path; F2 rethrows it.
+    mkdirSync(tmpDir, { recursive: true });
+    const loop = join(tmpDir, 'loop.jsonc');
+    symlinkSync(loop, loop);
+    const { run } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        loop,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/ELOOP/);
+  });
+});
+
+describe('provisionCloudflareResources — F6 dotenv fence: export prefix + empty-env files (round 10)', () => {
+  const redirect = 'CLOUDFLARE_API_BASE_URL=https://api.staging.cloudflare.com/client/v4\n';
+  const runFail = () => {
+    const { run, calls } = makeRunner([]);
+    return { run, calls };
+  };
+
+  it('detects an `export `-prefixed transport-redirect var in `.env` and fails closed (no remote work)', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    writeFileSync(join(tmpDir, '.env'), `export ${redirect}`);
+    const { run, calls } = runFail();
+    let listerCalled = false;
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          d1: { binding: 'DB', name: 'myapp-db' },
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+        },
+        {
+          runWrangler: run,
+          log: silentLog,
+          listHyperdriveConfigs: async () => {
+            listerCalled = true;
+            return [];
+          },
+        },
+      ),
+    ).rejects.toThrow(/refusing to provision.*\.env.*CLOUDFLARE_API_BASE_URL.*redirect/s);
+    expect(calls.length).toBe(0);
+    expect(listerCalled).toBe(false);
+  });
+
+  it('detects a transport-redirect var in the empty-env file `.env.` (loaded because every command passes --env=)', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    writeFileSync(join(tmpDir, '.env.'), redirect);
+    const { run, calls } = runFail();
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/refusing to provision.*"\.env\.".*CLOUDFLARE_API_BASE_URL.*redirect/s);
+    expect(calls.length).toBe(0);
+  });
+
+  it('detects a transport-redirect var in the empty-env file `.env..local`', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    writeFileSync(join(tmpDir, '.env..local'), redirect);
+    const { run, calls } = runFail();
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/refusing to provision.*"\.env\.\.local".*redirect/s);
+    expect(calls.length).toBe(0);
+  });
+
+  it('does NOT false-trigger on a benign `.env` with an unrelated `export` var', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    writeFileSync(join(tmpDir, '.env'), 'export DATABASE_URL=postgres://localhost/app\nFOO=bar\n');
+    const { run } = makeRunner([
+      { match: /^d1 list/, reply: () => ok('[]') },
+      {
+        match: /^d1 create/,
+        reply: () => {
+          simulateUpdateConfig('d1_databases', {
+            binding: 'DB',
+            database_name: 'myapp-db',
+            database_id: uuid('db'),
+          });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(result.resources.find((r) => r.kind === 'd1')?.action).toBe('created');
   });
 });
