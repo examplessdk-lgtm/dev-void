@@ -1091,6 +1091,13 @@ export function writeProvisionedWranglerConfig(
     // Re-parse `text` (not the initial `parsed`) so earlier edits in this call
     // are reflected; track appends locally to keep indices valid.
     const currentQueues = parseJsonc(text).queues as Record<string, unknown> | undefined;
+    // F5 — before mutating producers, route the EXISTING `queues.producers` list
+    // through the SAME strict validator the adopt guard uses. Without this, a corrupt
+    // list (e.g. `[null]`) would be cloned, its non-record members silently skipped by
+    // the match loop below, and a new producer committed beside the corruption.
+    if (section === 'producers') {
+      assertValidQueueProducers(currentQueues?.producers);
+    }
     const currentList = Array.isArray(currentQueues?.[section])
       ? [...(currentQueues[section] as Array<Record<string, unknown>>)]
       : [];
@@ -1496,7 +1503,7 @@ function readTrailingComment(
  * silently ineffective. Walks the jsonc AST so nested objects (queue consumers,
  * D1 entries, …) are covered, not just the top level.
  */
-function assertNoDuplicateMembers(text: string, configPath: string): void {
+export function assertNoDuplicateMembers(text: string, configPath: string): void {
   const root = parseTree(text, undefined, { allowTrailingComma: true });
   if (!root) {
     return;
@@ -1687,16 +1694,38 @@ function addQueueProducerOwners(
   if (!isRecord(queues) || queues.producers === undefined) {
     return;
   }
-  // F6 — validate `queues.producers` STRICTLY: a non-array, or any member missing a
-  // non-empty string `binding`, throws (fail closed) rather than being silently
-  // skipped, which would let the adopt guard miss a real producer-binding collision.
-  if (!Array.isArray(queues.producers)) {
+  // F5/F6 — validate `queues.producers` STRICTLY (the ONE shared validator, also used
+  // by the producer-upsert path) so a non-array or a malformed member fails closed
+  // rather than being silently skipped, which would let the adopt guard miss a real
+  // producer-binding collision.
+  for (const producer of assertValidQueueProducers(queues.producers)) {
+    const binding = producer.binding as string;
+    if (!owners.has(binding)) {
+      owners.set(binding, 'Queue');
+    }
+  }
+}
+
+/**
+ * F5 — the ONE strict `queues.producers` validator, shared by BOTH the adopt-guard's
+ * owner collection ({@link addQueueProducerOwners}) and the producer-upsert path (which
+ * otherwise clones the list and silently skips non-record members, committing a new
+ * producer beside a corrupt list). A non-array, or any member that is not a record with
+ * a non-empty string `binding`, THROWS (fail closed) rather than being dropped — a
+ * dropped/hidden producer could mask a real binding collision. Returns the validated
+ * producer records (each guaranteed to carry a non-empty string `binding`).
+ */
+function assertValidQueueProducers(producers: unknown): Array<Record<string, unknown>> {
+  if (producers === undefined) {
+    return [];
+  }
+  if (!Array.isArray(producers)) {
     throw new Error(
       `deploy: cannot verify binding-name uniqueness — "queues.producers" must be an array. Fix ` +
         `the wrangler config and retry.`,
     );
   }
-  queues.producers.forEach((producer, index) => {
+  return producers.map((producer, index) => {
     if (
       !isRecord(producer) ||
       typeof producer.binding !== 'string' ||
@@ -1709,9 +1738,7 @@ function addQueueProducerOwners(
           `wrangler config and retry.`,
       );
     }
-    if (!owners.has(producer.binding)) {
-      owners.set(producer.binding, 'Queue');
-    }
+    return producer;
   });
 }
 
@@ -1744,12 +1771,31 @@ const BINDING_LIST_FIELDS = new Set(['durable_objects', 'unsafe', 'logfwdr']);
 
 /**
  * F6 — config fields whose value is a SINGLE binding object `{ binding }` (wrangler
- * parses these with a single-object validator, e.g. `validateAIBinding`). Known
- * field-awarely so a PRESENT-but-non-string `binding` THROWS (fail closed) rather than
- * yielding an empty set, WITHOUT misfiring on a KEY-MAP field (`vars`, blob/module
- * maps) that could legitimately carry a key named `binding`.
+ * parses these with a single-object validator, e.g. `validateAIBinding` /
+ * `validateNamedSimpleBinding` / `validateVersionMetadataBinding` /
+ * `validateAssetsConfig`). Known field-awarely so a PRESENT-but-non-string `binding`
+ * THROWS (fail closed) rather than yielding an empty set, WITHOUT misfiring on a
+ * KEY-MAP field (`vars`, blob/module maps) that could legitimately carry a key named
+ * `binding`.
+ *
+ * This is the COMPLETE singleton set per wrangler 4.107's config validator: `ai`,
+ * `browser`, `images`, `stream`, `media`, `websearch` (all `validateNamedSimpleBinding`),
+ * `version_metadata` (`validateVersionMetadataBinding`), and `assets`
+ * (`validateAssetsConfig`, whose `binding` is optional). Every OTHER
+ * `friendlyBindingNames` field is either an array (`validateBindingArray` — namespace
+ * list, covered by the generic strict path) or a binding LIST (`{ bindings }` — see
+ * BINDING_LIST_FIELDS), so none is missing here.
  */
-const SINGLETON_BINDING_FIELDS = new Set(['ai', 'browser', 'images', 'version_metadata', 'assets']);
+const SINGLETON_BINDING_FIELDS = new Set([
+  'ai',
+  'browser',
+  'images',
+  'stream',
+  'media',
+  'websearch',
+  'version_metadata',
+  'assets',
+]);
 
 /**
  * F6 — the ONE field-aware strict binding-name reader for a single config field.
@@ -1761,17 +1807,8 @@ const SINGLETON_BINDING_FIELDS = new Set(['ai', 'browser', 'images', 'version_me
  * which itself fails closed on a malformed namespace-array member.
  */
 function bindingNamesForField(field: string, value: unknown): Array<string> {
-  if (NAME_KEYED_BINDING_ARRAYS.has(field) && Array.isArray(value)) {
-    // send_email / ratelimits: an array of `{ name }` (some also carry `.binding`).
-    // Collect BOTH — strictly. A malformed member REJECTS the whole config (fail
-    // closed) rather than being silently dropped, which would let the uniqueness
-    // guard miss a real binding name and commit a conflicting one.
-    const names = strictBindingArray(value, 'name', field);
-    const bindings = value
-      .filter((entry): entry is Record<string, unknown> => isRecord(entry))
-      .map((entry) => entry.binding)
-      .filter((binding): binding is string => typeof binding === 'string' && binding.length > 0);
-    return [...bindings, ...names];
+  if (NAME_KEYED_BINDING_ARRAYS.has(field)) {
+    return nameKeyedBindingNames(field, value);
   }
   if (BINDING_LIST_FIELDS.has(field)) {
     return bindingListNames(field, value);
@@ -1783,6 +1820,34 @@ function bindingNamesForField(field: string, value: unknown): Array<string> {
 }
 
 /**
+ * F5 — read binding names from a NAME-keyed array field (`send_email` / `ratelimits`:
+ * an array of `{ name }`, some also carrying `.binding`). Encodes the field's REQUIRED
+ * outer shape: a PRESENT value that is not an array THROWS (fail closed) rather than
+ * falling back to generic key collection — wrangler validates these via
+ * `validateBindingArray`, so a non-array is malformed and could hide a real collision
+ * if silently re-read as a key-map. An ABSENT value contributes nothing. Every array
+ * member is strictly validated (a malformed one rejects the whole config).
+ */
+function nameKeyedBindingNames(field: string, value: unknown): Array<string> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" must be an array of binding ` +
+        `entries. Refusing to proceed on a partially-readable binding set (a wrong-shaped field ` +
+        `could hide a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  const names = strictBindingArray(value, 'name', field);
+  const bindings = value
+    .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+    .map((entry) => entry.binding)
+    .filter((binding): binding is string => typeof binding === 'string' && binding.length > 0);
+  return [...bindings, ...names];
+}
+
+/**
  * F6 — read the binding names from a binding-LIST field (`{ bindings: [{ name }] }`).
  * When the value carries a `bindings` array, EVERY member is strictly validated for a
  * non-empty string `name` (a malformed member throws — never a partial/plain-map read
@@ -1790,10 +1855,33 @@ function bindingNamesForField(field: string, value: unknown): Array<string> {
  * defers to the generic reader (which is itself strict on namespace arrays).
  */
 function bindingListNames(field: string, value: unknown): Array<string> {
-  if (isRecord(value) && Array.isArray(value.bindings)) {
-    return strictBindingArray(value.bindings, 'name', `${field}.bindings`);
+  if (value === undefined) {
+    return [];
   }
-  return genericBindingNames(value);
+  // Encode the REQUIRED outer shape: a binding-list field must be an object; a
+  // wrong-shaped value (array, string, …) THROWS rather than falling back to generic
+  // key collection (which could under-collect and hide a real binding collision).
+  if (!isRecord(value)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" must be an object with a ` +
+        `"bindings" array. Refusing to proceed on a partially-readable binding set (a wrong-shaped ` +
+        `field could hide a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  // An object with NO `bindings` key contributes no binding names (e.g. `unsafe`
+  // carrying only `metadata`), matching wrangler — but a PRESENT `bindings` that is
+  // not an array is malformed and fails closed.
+  if (value.bindings === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value.bindings)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}.bindings" must be an array. ` +
+        `Refusing to proceed on a partially-readable binding set (a wrong-shaped field could hide ` +
+        `a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  return strictBindingArray(value.bindings, 'name', `${field}.bindings`);
 }
 
 /**

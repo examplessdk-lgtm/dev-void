@@ -2450,4 +2450,83 @@ describe('writeProvisionedWranglerConfig', () => {
     ).toThrow(/binding "DB" is declared 2 times in "d1_databases"/);
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
+
+  it('producer upsert fails closed when the EXISTING queues.producers list has a null member (round-6 F5)', () => {
+    // The producer-upsert path previously cloned queues.producers and silently skipped
+    // non-record members, committing a new producer beside a corrupt list. It now routes
+    // the existing list through the SAME strict validator the adopt guard uses.
+    setup('wrangler.jsonc', JSON.stringify({ queues: { producers: [null] } }));
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"queues\.producers" contains a malformed entry at index 0/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('collector fails closed on a malformed stream/media/websearch singleton binding (round-6 F5)', () => {
+    // These singleton `{ binding }` fields were OMITTED from the strict set, so a
+    // present-but-non-string binding silently contributed nothing (wrangler quirk).
+    for (const field of ['stream', 'media', 'websearch']) {
+      setup('wrangler.jsonc', JSON.stringify({ [field]: { binding: 123 } }));
+      const before = readRaw('wrangler.jsonc');
+      expect(() =>
+        writeProvisionedWranglerConfig(tmpDir, {
+          queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+        }),
+      ).toThrow(new RegExp(`"${field}" has a malformed "binding"`));
+      expect(readRaw('wrangler.jsonc')).toBe(before);
+    }
+  });
+
+  it('collector fails closed on a wrong-shaped binding-list field (durable_objects as array) (round-6 F5)', () => {
+    // durable_objects must be `{ bindings: [...] }`; an array is the wrong outer shape
+    // and must throw rather than fall back to generic key collection (under-collection
+    // could hide a real binding collision).
+    setup('wrangler.jsonc', JSON.stringify({ durable_objects: [{ name: 'DO', class_name: 'C' }] }));
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"durable_objects" must be an object with a "bindings" array/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('collector fails closed on a wrong-shaped name-keyed field (send_email as object) (round-6 F5)', () => {
+    // send_email must be an array of `{ name }`; a non-array is the wrong outer shape and
+    // must throw rather than be re-read as a key-map.
+    setup('wrangler.jsonc', JSON.stringify({ send_email: { EMAIL: {} } }));
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, {
+        queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+      }),
+    ).toThrow(/"send_email" must be an array of binding entries/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('negative control: valid stream/media/websearch singletons + unsafe-with-only-metadata do NOT throw (round-6 F5)', () => {
+    // A well-formed singleton contributes its binding name; `unsafe` with only metadata
+    // (no bindings) contributes nothing — neither should trip the strict collector.
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        stream: { binding: 'STREAM' },
+        media: { binding: 'MEDIA' },
+        websearch: { binding: 'SEARCH' },
+        unsafe: { metadata: { foo: 'bar' } },
+      }),
+    );
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [{ queue: 'jobs', binding: 'QUEUE_JOBS' }] },
+    });
+    expect(result.modified).toBe(true);
+    const parsed = parseRaw('wrangler.jsonc');
+    const producers = (parsed.queues as Record<string, unknown>).producers as Array<
+      Record<string, unknown>
+    >;
+    expect(producers).toEqual([{ queue: 'jobs', binding: 'QUEUE_JOBS' }]);
+  });
 });
