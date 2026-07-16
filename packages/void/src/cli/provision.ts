@@ -1486,9 +1486,10 @@ export async function provisionCloudflareResources(
   const lock = await acquireProvisionLock(configPath, opts?.lockOptions);
   // F2 — ALWAYS release, but do NOT swallow a release failure. On body SUCCESS a failed
   // unlock means the mutex leaked, so the provision must FAIL (surfaced, not hidden). On
-  // body FAILURE the body error is primary, so still attempt release but never let a
-  // release failure mask the original error. (`release()` is idempotent — one shared
-  // promise — so these paths never double-unlock.)
+  // body FAILURE the body error is primary, but a release failure means the mutex LEAKED,
+  // so it must NOT be silently discarded (a leaked mutex blocks future retries). We
+  // preserve BOTH via an AggregateError. (`release()` is idempotent — one shared promise —
+  // so these paths never double-unlock.)
   let result: ProvisionResult | undefined;
   let threw = false;
   let bodyError: unknown;
@@ -1499,10 +1500,26 @@ export async function provisionCloudflareResources(
     bodyError = error;
   }
   if (threw) {
-    await lock.release().catch(() => {
-      // The body already failed — the body error is the primary failure to surface; a
-      // secondary release failure here must not replace it.
-    });
+    // F7 — attempt release; if IT also fails, surface BOTH (the body error is primary but
+    // the leaked-mutex error must never be swallowed). An AggregateError carries both in
+    // `.errors`, with `.cause` set to the primary body error so a `cause`-walking logger
+    // still sees it.
+    let releaseError: unknown;
+    try {
+      await lock.release();
+    } catch (error) {
+      releaseError = error;
+    }
+    if (releaseError !== undefined) {
+      throw new AggregateError(
+        [bodyError, releaseError],
+        `provision failed AND the cross-process provision lock could not be released afterward — a ` +
+          `leaked mutex may block future provisions. Primary error: ` +
+          `${bodyError instanceof Error ? bodyError.message : String(bodyError)}; release error: ` +
+          `${releaseError instanceof Error ? releaseError.message : String(releaseError)}.`,
+        { cause: bodyError },
+      );
+    }
     throw bodyError;
   }
   // Body succeeded: a genuine unlock failure (leaked mutex) rejects the provision.

@@ -3682,4 +3682,48 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
       }),
     ).rejects.toThrow(/failed to release the cross-process provision lock/);
   });
+
+  it('F7 — a body failure COMBINED with an unlock failure surfaces BOTH (AggregateError)', async () => {
+    setup(
+      JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
+    );
+    // rmdir fails → the mutex leaks on release; the body also fails (hyperdrive create).
+    const failingFs = {
+      ...passthruFs,
+      rmdir: (_p: string, cb: (e: Error | null) => void) =>
+        cb(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })),
+    };
+    const { run } = makeRunner([
+      { match: /^hyperdrive create /, reply: () => fail('', 'boom-body') },
+    ]);
+    let caught: unknown;
+    try {
+      await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+        },
+        {
+          runWrangler: run,
+          log: silentLog,
+          listHyperdriveConfigs: async () => [],
+          lockOptions: { fs: failingFs },
+        },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(AggregateError);
+    const agg = caught as AggregateError;
+    const messages = agg.errors
+      .map((e) => (e instanceof Error ? e.message : String(e)))
+      .join(' || ');
+    // BOTH the body (hyperdrive create) error AND the leaked-mutex release error surface.
+    expect(messages).toMatch(/hyperdrive create myapp-hd.*failed.*boom-body/s);
+    expect(messages).toMatch(/failed to release the cross-process provision lock/);
+    // The primary body error is also preserved as `cause` for cause-walking loggers.
+    expect((agg.cause as Error).message).toMatch(/hyperdrive create/);
+  });
 });
