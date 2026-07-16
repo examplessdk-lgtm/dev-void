@@ -1059,7 +1059,7 @@ describe('provisionCloudflareResources — Hyperdrive', () => {
         runWrangler: run,
         log: silentLog,
         listHyperdriveConfigs: async () => [
-          { id: 'other-hd', name: 'someone-else' },
+          { id: hex32('other-hd'), name: 'someone-else' },
           { id: hex32('existing'), name: 'myapp-hd' },
         ],
       },
@@ -1763,7 +1763,7 @@ describe('provisionCloudflareResources — Hyperdrive discovery (F2 pagination +
       {
         body: {
           success: true,
-          result: [{ id: 'p1a', name: 'other-1' }],
+          result: [{ id: hex32('p1a'), name: 'other-1' }],
           result_info: { total_count: 2 },
         },
       },
@@ -1869,8 +1869,8 @@ describe('provisionCloudflareResources — Hyperdrive discovery (F2 pagination +
           runWrangler: run,
           log: silentLog,
           listHyperdriveConfigs: async () => [
-            { id: 'hd-1', name: 'myapp-hd' },
-            { id: 'hd-2', name: 'myapp-hd' },
+            { id: hex32('hd-1'), name: 'myapp-hd' },
+            { id: hex32('hd-2'), name: 'myapp-hd' },
           ],
         },
       ),
@@ -2519,7 +2519,8 @@ describe('provisionCloudflareResources — F5 strict D1 identity (round 4)', () 
     const { run, calls } = makeRunner([
       {
         match: /^d1 list --json/,
-        reply: () => ok(JSON.stringify([{ uuid: 'id-a', database_id: 'id-b', name: 'myapp-db' }])),
+        reply: () =>
+          ok(JSON.stringify([{ uuid: uuid('id-a'), database_id: uuid('id-b'), name: 'myapp-db' }])),
       },
     ]);
     await expect(
@@ -2735,7 +2736,7 @@ describe('provisionCloudflareResources — F5 one D1 normalizer (round 5)', () =
         reply: () =>
           ok(
             JSON.stringify([
-              { name: 'myapp-db', database_name: 'other-db', database_id: 'the-id' },
+              { name: 'myapp-db', database_name: 'other-db', database_id: uuid('the-id') },
             ]),
           ),
       },
@@ -2760,8 +2761,8 @@ describe('provisionCloudflareResources — F5 one D1 normalizer (round 5)', () =
         reply: () =>
           ok(
             JSON.stringify([
-              { name: 'myapp-db', database_id: 'id-1' },
-              { name: 'myapp-db', database_id: 'id-2' },
+              { name: 'myapp-db', database_id: uuid('id-1') },
+              { name: 'myapp-db', database_id: uuid('id-2') },
             ]),
           ),
       },
@@ -2925,8 +2926,8 @@ describe('provisionCloudflareResources — Hyperdrive list validation at the cal
   it('fails closed on a duplicate id across members', async () => {
     await expect(
       provisionWithInjectedList([
-        { id: 'dup', name: 'other' },
-        { id: 'dup', name: 'myapp-hd' },
+        { id: hex32('dup'), name: 'other' },
+        { id: hex32('dup'), name: 'myapp-hd' },
       ]),
     ).rejects.toThrow(/duplicate config id/);
     expect(readConfig().hyperdrive).toBeUndefined();
@@ -2935,10 +2936,21 @@ describe('provisionCloudflareResources — Hyperdrive list validation at the cal
   it('fails closed on 2 configs sharing the requested name (ambiguous)', async () => {
     await expect(
       provisionWithInjectedList([
-        { id: 'x', name: 'myapp-hd' },
-        { id: 'y', name: 'myapp-hd' },
+        { id: hex32('x'), name: 'myapp-hd' },
+        { id: hex32('y'), name: 'myapp-hd' },
       ]),
     ).rejects.toThrow(/share that name/);
+    expect(readConfig().hyperdrive).toBeUndefined();
+  });
+
+  it('F4 — fails closed on a NON-matching member with a malformed id (no create)', async () => {
+    // A member for a DIFFERENT config carries a bogus (non-hex) id. Before F4 this passed
+    // the whole-list gate (only the name-matched member was format-checked), so an ABSENT
+    // target authorized a blind create against a possibly-untrustworthy list. Now every
+    // member's id is format-validated up front → fail closed, NO create.
+    await expect(
+      provisionWithInjectedList([{ id: 'bogus', name: 'someone-else' }]),
+    ).rejects.toThrow(/malformed id "bogus".*32-character hex Hyperdrive id/s);
     expect(readConfig().hyperdrive).toBeUndefined();
   });
 
@@ -2966,6 +2978,78 @@ describe('provisionCloudflareResources — Hyperdrive list validation at the cal
       expect(readConfig().hyperdrive).toBeUndefined();
     });
   }
+});
+
+describe('provisionCloudflareResources — F4 whole-list id-format gate (D1 + KV, before name filtering)', () => {
+  it('D1: a NON-matching list member with a malformed id fails the whole list closed (no create)', async () => {
+    setup(JSON.stringify({ account_id: 'acct' }));
+    const { run, calls } = makeRunner([
+      // A different database with a bogus (non-UUID) id. Target "myapp-db" is absent, but
+      // the untrustworthy member must reject the list rather than authorize a create.
+      {
+        match: /^d1 list --json/,
+        reply: () => ok(JSON.stringify([{ name: 'other', database_id: 'bogus' }])),
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/no valid id/);
+    expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
+  });
+
+  it('KV: a NON-matching list member with a malformed id fails the whole list closed (no create)', async () => {
+    setup(JSON.stringify({ account_id: 'acct' }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^kv namespace list/,
+        reply: () => ok(JSON.stringify([{ title: 'other', id: 'bogus' }])),
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }] },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/no valid id/);
+    expect(calls.some((c) => isCall(c, 'kv', 'namespace', 'create'))).toBe(false);
+  });
+
+  it('D1: a well-formed non-matching member still allows the target to be created (absence is authoritative)', async () => {
+    setup(JSON.stringify({ account_id: 'acct' }));
+    const { run } = makeRunner([
+      {
+        match: /^d1 list --json/,
+        reply: () => ok(JSON.stringify([{ name: 'other', database_id: uuid('other') }])),
+      },
+      {
+        match: /^d1 create /,
+        reply: () => {
+          simulateUpdateConfig('d1_databases', {
+            binding: 'DB',
+            database_name: 'myapp-db',
+            database_id: uuid('mine'),
+          });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(result.resources).toEqual([
+      { kind: 'd1', binding: 'DB', name: 'myapp-db', action: 'created' },
+    ]);
+  });
 });
 
 describe('provisionCloudflareResources — resource-specific create postcondition (round 6 F4)', () => {

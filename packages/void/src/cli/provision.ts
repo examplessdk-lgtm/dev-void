@@ -660,14 +660,16 @@ function createDefaultListHyperdriveConfigs(apiToken?: string): ListHyperdriveCo
 }
 
 /**
- * F3 — the ONE strict Hyperdrive-list validator, applied at the CALLER after EITHER
+ * F3/F4 — the ONE strict Hyperdrive-list validator, applied at the CALLER after EITHER
  * lister returns (the default fetch OR an injected seam), so validation can never live
- * only inside the default fetch. Rejects any non-object member, empty/non-string `id`
- * or `name`, and duplicate `id`; then requires EXACTLY 0 or 1 exact-name match (>1 is
- * ambiguous — Hyperdrive names are NOT account-unique — and fails closed) BEFORE any
- * match/write. Returns the single exact-name match, or `undefined` when none matches.
- * Without this, an injected `[{ id:'', name: requested }]` would be adopted with an
- * EMPTY id.
+ * only inside the default fetch. Validates EVERY member up front — BEFORE any name
+ * filtering: rejects any non-object member, empty/non-string `name`, and duplicate `id`,
+ * AND (F4) requires every member's `id` to be a REAL 32-hex Hyperdrive id (not merely
+ * non-empty). A malformed id on ANY member means the list is untrustworthy, so we fail
+ * closed rather than skip that member and mistake the target for absent. Then requires
+ * EXACTLY 0 or 1 exact-name match (>1 is ambiguous — Hyperdrive names are NOT
+ * account-unique — and fails closed) BEFORE any match/write. Returns the single
+ * exact-name match, or `undefined` when none matches.
  */
 function selectHyperdriveMatch(
   configs: Array<unknown>,
@@ -690,6 +692,18 @@ function selectHyperdriveMatch(
           `${JSON.stringify(name)} already exists; refusing to create a possible duplicate.`,
       );
     }
+    // F4 — EVERY member's id must be a real 32-hex Hyperdrive id, checked BEFORE name
+    // filtering. A non-empty-but-malformed id (`" "`, `"xyz"`) on any member means the
+    // list is untrustworthy → fail closed (never skip it and mistake the target for
+    // absent, which would mint a duplicate config).
+    if (!isRealHyperdriveId(config.id)) {
+      throw new Error(
+        `provision: the Hyperdrive existence check returned a config ` +
+          `${JSON.stringify(config.name)} with a malformed id ${JSON.stringify(config.id)} ` +
+          `(expected a 32-character hex Hyperdrive id). Cannot verify whether ` +
+          `${JSON.stringify(name)} already exists; refusing to create a possible duplicate.`,
+      );
+    }
     if (seenIds.has(config.id)) {
       throw new Error(
         `provision: the Hyperdrive existence check returned a duplicate config id ` +
@@ -707,16 +721,6 @@ function selectHyperdriveMatch(
         `in this account share that name (ids: ${named.map((c) => c.id).join(', ')}). Hyperdrive ` +
         `names are not account-unique; remove the duplicates or pin the id in "${configPath}", then ` +
         `retry.`,
-    );
-  }
-  // F4 — the sole exact-name match must carry a real 32-hex Hyperdrive id before we adopt
-  // it. A non-empty-but-malformed id (`" "`, `"xyz"`) fails closed rather than binding the
-  // app to a bogus id.
-  if (named[0] && !isRealHyperdriveId(named[0].id)) {
-    throw new Error(
-      `provision: cannot adopt Hyperdrive config ${JSON.stringify(name)} — its id ` +
-        `${JSON.stringify(named[0].id)} is not a valid 32-character hex Hyperdrive id. Refusing to ` +
-        `bind the app to an unverified config; inspect the account and retry.`,
     );
   }
   return named[0];
@@ -1000,8 +1004,17 @@ interface ResourceListSpec {
   resource: string;
   /** Command name for messages, e.g. `wrangler kv namespace list`. */
   command: string;
-  /** Any ONE of these holding a non-empty string satisfies "has an id". */
+  /** Any ONE of these holding a REAL (format-valid) id satisfies "has an id". */
   idFields: Array<string>;
+  /**
+   * F4 — the resource-SPECIFIC real-id FORMAT validator (D1 UUID / KV 32-hex), run
+   * over EVERY member's id fields inside the whole-list gate BEFORE any name filtering.
+   * A member whose id is merely non-empty but MALFORMED (`" "`, `"bogus"`, a `local`
+   * placeholder) no longer passes: the list is untrustworthy, so we reject it WHOLE and
+   * fail closed rather than skip that member and mistake the target for absent (which
+   * would mint a duplicate).
+   */
+  idValidator: (value: unknown) => value is string;
   /** The member field carrying the account-matched name/title. */
   nameField: string;
   /** Grammatical label for the name field in messages: `titled` / `named`. */
@@ -1009,12 +1022,15 @@ interface ResourceListSpec {
 }
 
 /**
- * STRICT list validator shared by KV + D1. Rejects the ENTIRE list (throws) if
- * ANY member is not a well-formed object carrying the required non-empty string
- * fields — a member is NEVER silently filtered, because a malformed member could
- * BE the requested target and dropping it would look like "absent" and mint a
- * duplicate. Returns the validated members (every one guaranteed to have a valid
- * id + name) on success.
+ * STRICT list validator shared by KV + D1. Rejects the ENTIRE list (throws) if ANY
+ * member is not a well-formed object carrying a non-empty name AND — F4 — a
+ * FORMAT-VALID id (per {@link ResourceListSpec.idValidator}). A member is NEVER
+ * silently filtered, and a member with a malformed id is NEVER accepted, because
+ * either could BE the requested target (or signal a corrupt list) and treating it as
+ * "absent" would mint a duplicate. Validates EVERY member up front — BEFORE any
+ * name-filtering by the caller — so a nonmatching member with a bogus id can no longer
+ * pass the gate as authoritative absence. Returns the validated members (every one
+ * guaranteed to have a real id + name) on success.
  */
 function validateResourceList(
   list: Array<unknown>,
@@ -1030,15 +1046,14 @@ function validateResourceList(
     }
     const rawName = member[spec.nameField];
     const nameValid = typeof rawName === 'string' && rawName.length > 0;
-    const idValid = spec.idFields.some((f) => {
-      const value = member[f];
-      return typeof value === 'string' && value.length > 0;
-    });
+    // F4 — a REAL (format-valid) id, not merely a non-empty string.
+    const idValid = spec.idFields.some((f) => spec.idValidator(member[f]));
     if (nameValid && !idValid) {
       throw new Error(
         `provision: "${spec.command}" returned a ${spec.resource} ${spec.nameLabel} ` +
-          `${JSON.stringify(rawName)} with no valid id. Cannot verify whether it already exists; ` +
-          `refusing to create a possible duplicate.`,
+          `${JSON.stringify(rawName)} with no valid id (its ` +
+          `${spec.idFields.join('/')} is missing or not a well-formed id). Cannot verify existing ` +
+          `resources; refusing to create a possible duplicate.`,
       );
     }
     if (!nameValid) {
@@ -1699,6 +1714,7 @@ async function provisionCloudflareResourcesLocked(
         resource: 'D1 database',
         command: 'wrangler d1 list',
         idFields: ['uuid', 'database_id'],
+        idValidator: isRealD1Id,
         nameField: 'name',
         nameLabel: 'named',
       });
@@ -1836,6 +1852,7 @@ async function provisionCloudflareResourcesLocked(
       resource: 'KV namespace',
       command: 'wrangler kv namespace list',
       idFields: ['id'],
+      idValidator: isRealKvId,
       nameField: 'title',
       nameLabel: 'titled',
     });
