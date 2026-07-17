@@ -2587,7 +2587,9 @@ describe('provisionCloudflareResources — F5 strict D1 identity (round 4)', () 
         { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
         { runWrangler: run, log: silentLog },
       ),
-    ).rejects.toThrow(/ambiguous or empty id/);
+      // F7 (round 12): the WHOLE-LIST alias reconciler now rejects the conflicting
+      // aliases before the claimant-level check even runs — same fail-closed outcome.
+    ).rejects.toThrow(/no valid id.*agreeing on one id/s);
     expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
   });
 
@@ -4456,6 +4458,278 @@ describe('provisionCloudflareResources — F7 read-first stored-name identity (r
     );
     expect(calls.some((c) => isCall(c, 'r2', 'bucket', 'create'))).toBe(true);
     expect(result.resources[0].action).toBe('created');
+  });
+});
+
+describe('provisionCloudflareResources — F6 per-resource placeholder rules (round 12)', () => {
+  it('R2: a stored bucket_name of "local" is a REAL name — a different desired bucket fails closed (no silent rewrite)', async () => {
+    // "local" is grammar-valid and is NOT R2's placeholder (only "default" is); the old
+    // shared check treated it as a placeholder, skipped the stored-name contradiction
+    // gate, and silently REWROTE the entry to the desired bucket.
+    setup(
+      JSON.stringify({
+        account_id: 'acct',
+        r2_buckets: [{ binding: 'STORAGE', bucket_name: 'local' }],
+      }),
+    );
+    const { run, calls } = makeRunner([
+      { match: /^r2 bucket info /, reply: () => ok(JSON.stringify({ name: 'myapp-storage' })) },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'myapp-storage' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(
+      /R2 binding "STORAGE".*stores.*bucket_name "local".*wants bucket "myapp-storage".*contradicts/s,
+    );
+    // Fail closed: no discovery/create, stored entry untouched.
+    expect(calls).toEqual([]);
+    expect((readConfig().r2_buckets as Array<Record<string, unknown>>)[0].bucket_name).toBe(
+      'local',
+    );
+  });
+
+  it('R2: a stored bucket_name of "local" EQUAL to the desired bucket is reused (real name, no wrangler call)', async () => {
+    setup(
+      JSON.stringify({
+        account_id: 'acct',
+        r2_buckets: [{ binding: 'STORAGE', bucket_name: 'local' }],
+      }),
+    );
+    const { run, calls } = makeRunner([]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'local' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(calls).toEqual([]);
+    expect(result.resources[0]).toEqual({
+      kind: 'r2',
+      binding: 'STORAGE',
+      name: 'local',
+      action: 'reused',
+    });
+  });
+
+  it('R2: a bucket genuinely named "default" is created + verified via the remote probe (no false postcondition failure)', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    let created = false;
+    const { run, calls } = makeRunner([
+      {
+        match: /^r2 bucket info /,
+        reply: () =>
+          created
+            ? ok(JSON.stringify({ name: 'default' }))
+            : fail('', 'X [ERROR] The specified bucket does not exist. [code: 10006]'),
+      },
+      {
+        match: /^r2 bucket create /,
+        reply: () => {
+          created = true;
+          simulateUpdateConfig('r2_buckets', { binding: 'STORAGE', bucket_name: 'default' });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'default' } },
+      { runWrangler: run, log: silentLog },
+    );
+    // Pre-fix the create postcondition rejected `default` as a placeholder and failed a
+    // successful create. Post-fix it verifies via the EXACT remote probe instead.
+    expect(result.resources[0]).toEqual({
+      kind: 'r2',
+      binding: 'STORAGE',
+      name: 'default',
+      action: 'created',
+    });
+    const infoCalls = calls.filter((c) => isCall(c, 'r2', 'bucket', 'info'));
+    expect(infoCalls.length).toBe(2); // the absence probe + the post-create verify probe
+  });
+
+  it('R2: a masked-killed create of a bucket named "default" fails closed when the verify probe cannot confirm it', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const { run } = makeRunner([
+      {
+        // Absence first, and STILL absent on the verify probe (the create was masked).
+        match: /^r2 bucket info /,
+        reply: () => fail('', 'X [ERROR] The specified bucket does not exist. [code: 10006]'),
+      },
+      {
+        // The create "succeeds" (exit 0) and even writes the entry — but for the name
+        // `default` that entry is indistinguishable from the local-dev placeholder.
+        match: /^r2 bucket create /,
+        reply: () => {
+          simulateUpdateConfig('r2_buckets', { binding: 'STORAGE', bucket_name: 'default' });
+          return ok();
+        },
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, r2: { binding: 'STORAGE', bucketName: 'default' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/did not confirm the bucket exists/);
+  });
+
+  it('D1/KV: the "local" placeholders still take the discovery path (unchanged)', async () => {
+    setup(
+      JSON.stringify({
+        account_id: 'acct',
+        d1_databases: [{ binding: 'DB', database_name: 'default', database_id: 'local' }],
+        kv_namespaces: [{ binding: 'KV', id: 'local' }],
+      }),
+    );
+    const { run, calls } = makeRunner([
+      { match: /^d1 list --json/, reply: () => ok('[]') },
+      {
+        match: /^d1 create /,
+        reply: () => {
+          simulateUpdateConfig('d1_databases', {
+            binding: 'DB',
+            database_name: 'myapp-db',
+            database_id: uuid('db'),
+          });
+          return ok();
+        },
+      },
+      { match: /^kv namespace list/, reply: () => ok('[]') },
+      {
+        match: /^kv namespace create /,
+        reply: () => {
+          simulateUpdateConfig('kv_namespaces', { binding: 'KV', id: hex32('kv') });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        d1: { binding: 'DB', name: 'myapp-db' },
+        kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }],
+      },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(true);
+    expect(calls.some((c) => isCall(c, 'kv', 'namespace', 'create'))).toBe(true);
+    expect(result.resources.map((r) => r.action)).toEqual(['created', 'created']);
+  });
+});
+
+describe('provisionCloudflareResources — F7 D1 whole-list alias reconciliation (round 12)', () => {
+  it('a NON-target member with a valid uuid but a CONFLICTING/malformed database_id rejects the WHOLE list (no create)', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const { run, calls } = makeRunner([
+      {
+        // The exact repro: `uuid` alone validated under the old any-one-alias gate, and
+        // normalizeD1 returned `other` before reconciling — so this corrupt member
+        // authorized authoritative absence and a create.
+        match: /^d1 list --json/,
+        reply: () =>
+          ok(
+            JSON.stringify([{ name: 'other-db', uuid: uuid('other'), database_id: 'bogus' }]),
+          ),
+      },
+      { match: /^d1 create /, reply: () => ok() },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/no valid id.*agreeing on one id/s);
+    expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
+  });
+
+  it('a NON-target member with TWO valid but DISAGREEING alias UUIDs rejects the whole list (no create)', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^d1 list --json/,
+        reply: () =>
+          ok(
+            JSON.stringify([
+              { name: 'other-db', uuid: uuid('alias-a'), database_id: uuid('alias-b') },
+            ]),
+          ),
+      },
+      { match: /^d1 create /, reply: () => ok() },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/no valid id/);
+    expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
+  });
+
+  it('a member with AGREEING aliases (uuid === database_id) passes the gate; absence stays authoritative', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const { run } = makeRunner([
+      {
+        match: /^d1 list --json/,
+        reply: () =>
+          ok(
+            JSON.stringify([
+              { name: 'other-db', uuid: uuid('same'), database_id: uuid('same') },
+            ]),
+          ),
+      },
+      {
+        match: /^d1 create /,
+        reply: () => {
+          simulateUpdateConfig('d1_databases', {
+            binding: 'DB',
+            database_name: 'myapp-db',
+            database_id: uuid('mine'),
+          });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(result.resources[0].action).toBe('created');
+  });
+
+  it('the TARGET member with a non-string secondary alias (uuid: 123) fails closed as ambiguous — never adopted', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^d1 list --json/,
+        reply: () =>
+          ok(JSON.stringify([{ name: 'myapp-db', database_id: uuid('db'), uuid: 123 }])),
+      },
+    ]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/no valid id/);
+    expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
   });
 });
 

@@ -177,22 +177,26 @@ const D1_MIGRATIONS_DIR = './db/migrations';
 /** UTF-8 byte-order mark. Node's utf-8 read preserves a leading one. */
 const UTF8_BOM = '﻿';
 
-/**
- * Values wrangler/Void write as placeholders during local dev
- * (`syncWranglerBindings`): a D1 `database_id: 'local'`, a KV `id: 'local'`, an
- * R2 `bucket_name: 'default'`. A binding holding one of these is NOT yet backed
- * by a real account resource, so provisioning must not treat it as done.
- */
-function isRealValue(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value !== 'local' && value !== 'default';
-}
+// --- F6 (round 12): per-resource local-dev PLACEHOLDER metadata -----------------
+// Exactly what `syncWranglerBindings` (wrangler.ts) writes for a not-yet-provisioned
+// binding — a D1 entry gets `database_id: 'local'`, a KV entry `id: 'local'`, an R2
+// entry `bucket_name: 'default'`. Each placeholder belongs to ITS OWN field only: the
+// shared "reject both `local` and `default` everywhere" check this replaces falsely
+// treated a stored R2 bucket_name of `local` — a grammar-valid, legitimately usable
+// bucket name that is NOT Void's R2 placeholder — as unprovisioned, bypassing the
+// stored-name contradiction gate (silent rewrite) and failing the create postcondition
+// for a bucket genuinely named `default`. Placeholder rules are judged ONLY where
+// read-first identity is resolved (and the R2 create postcondition's probe fallback);
+// Hyperdrive has no placeholder (its 32-hex format alone excludes these words).
+const D1_ID_PLACEHOLDER = 'local';
+const KV_ID_PLACEHOLDER = 'local';
+const R2_BUCKET_NAME_PLACEHOLDER = 'default';
 
 // --- F4: resource-SPECIFIC real-id format validators --------------------------
-// `isRealValue` alone (non-empty + not the `local`/`default` placeholders) let ANY
-// nonempty string — `" "`, `"xyz"` — satisfy read-first reuse AND the create
-// postcondition, so a resource could be reported provisioned with no valid identifier
-// and NO discovery. Each id class has a FIXED Cloudflare format (verified 2026-07
-// against wrangler 4.107 + live account resources):
+// A merely non-empty string — `" "`, `"xyz"` — must never satisfy read-first reuse or
+// the create postcondition, else a resource could be reported provisioned with no valid
+// identifier and NO discovery. Each id class has a FIXED Cloudflare format (verified
+// 2026-07 against wrangler 4.107 + live account resources):
 //   - D1 `database_id`:  a hyphenated UUID (e.g. `52b3bbc7-c473-4b26-9486-1345f5de61c4`).
 //   - KV namespace `id`: 32 lowercase-hex chars, no hyphens (e.g. `7c07b54c…153aa11a`).
 //   - Hyperdrive `id`:   32 lowercase-hex chars, no hyphens (e.g. `a8097c6a…34ad195c`) —
@@ -208,19 +212,28 @@ const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
 
 /** A D1 `database_id` that is a real (non-placeholder) hyphenated UUID. */
 function isRealD1Id(value: unknown): value is string {
-  return isRealValue(value) && D1_ID_RE.test(value);
+  return typeof value === 'string' && value !== D1_ID_PLACEHOLDER && D1_ID_RE.test(value);
 }
 /** A KV namespace `id` that is a real (non-placeholder) 32-hex string. */
 function isRealKvId(value: unknown): value is string {
-  return isRealValue(value) && HEX32_ID_RE.test(value);
+  return typeof value === 'string' && value !== KV_ID_PLACEHOLDER && HEX32_ID_RE.test(value);
 }
-/** A Hyperdrive config `id` that is a real (non-placeholder) 32-hex string. */
+/** A Hyperdrive config `id` that is a real 32-hex string (no placeholder exists). */
 function isRealHyperdriveId(value: unknown): value is string {
-  return isRealValue(value) && HEX32_ID_RE.test(value);
+  return typeof value === 'string' && HEX32_ID_RE.test(value);
 }
-/** An R2 `bucket_name` that is a real (non-placeholder) valid bucket name. */
-function isRealR2BucketName(value: unknown): value is string {
-  return isRealValue(value) && R2_BUCKET_NAME_RE.test(value);
+/** An R2 `bucket_name` satisfying wrangler's bucket-name GRAMMAR (format only). */
+function isValidR2BucketNameFormat(value: unknown): value is string {
+  return typeof value === 'string' && R2_BUCKET_NAME_RE.test(value);
+}
+/**
+ * F6 — a STORED R2 `bucket_name` that names a REAL bucket, i.e. any non-empty string
+ * that is not R2's own placeholder (`default`). `local` IS a real name here. Grammar is
+ * deliberately not required: a grammar-invalid stored name that contradicts the desired
+ * bucket must still fail closed as a contradiction, never be silently rewritten.
+ */
+function isRealStoredR2BucketName(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value !== R2_BUCKET_NAME_PLACEHOLDER;
 }
 
 const defaultLogger: ProvisionLogger = {
@@ -1919,17 +1932,19 @@ interface ResourceListSpec {
   resource: string;
   /** Command name for messages, e.g. `wrangler kv namespace list`. */
   command: string;
-  /** Any ONE of these holding a REAL (format-valid) id satisfies "has an id". */
-  idFields: Array<string>;
   /**
-   * F4 — the resource-SPECIFIC real-id FORMAT validator (D1 UUID / KV 32-hex), run
-   * over EVERY member's id fields inside the whole-list gate BEFORE any name filtering.
-   * A member whose id is merely non-empty but MALFORMED (`" "`, `"bogus"`, a `local`
-   * placeholder) no longer passes: the list is untrustworthy, so we reject it WHOLE and
-   * fail closed rather than skip that member and mistake the target for absent (which
-   * would mint a duplicate).
+   * F4/F7 — the resource-SPECIFIC member-identity validator, run over EVERY member
+   * inside the whole-list gate BEFORE any name filtering: KV requires a real 32-hex
+   * `id`; D1 requires its TWO id aliases to RECONCILE ({@link reconcileD1IdAliases} —
+   * every present alias a well-formed UUID, all agreeing on one id). A member whose
+   * identity is merely non-empty but MALFORMED (`" "`, `"bogus"`, a `local`
+   * placeholder) — or whose secondary alias conflicts — no longer passes: the list is
+   * untrustworthy, so we reject it WHOLE and fail closed rather than skip that member
+   * and mistake the target for absent (which would mint a duplicate).
    */
-  idValidator: (value: unknown) => value is string;
+  hasValidId: (member: Record<string, unknown>) => boolean;
+  /** Human description of the id requirement for the whole-list rejection message. */
+  idRule: string;
   /** The member field carrying the account-matched name/title. */
   nameField: string;
   /** Grammatical label for the name field in messages: `titled` / `named`. */
@@ -1961,13 +1976,12 @@ function validateResourceList(
     }
     const rawName = member[spec.nameField];
     const nameValid = typeof rawName === 'string' && rawName.length > 0;
-    // F4 — a REAL (format-valid) id, not merely a non-empty string.
-    const idValid = spec.idFields.some((f) => spec.idValidator(member[f]));
+    // F4/F7 — a REAL, RECONCILED identity — not merely one non-empty alias.
+    const idValid = spec.hasValidId(member);
     if (nameValid && !idValid) {
       throw new Error(
         `provision: "${spec.command}" returned a ${spec.resource} ${spec.nameLabel} ` +
-          `${JSON.stringify(rawName)} with no valid id (its ` +
-          `${spec.idFields.join('/')} is missing or not a well-formed id). Cannot verify existing ` +
+          `${JSON.stringify(rawName)} with no valid id (${spec.idRule}). Cannot verify existing ` +
           `resources; refusing to create a possible duplicate.`,
       );
     }
@@ -1988,6 +2002,41 @@ function validateResourceList(
  * (fail closed → never adopt, never mistake for absent).
  */
 type D1Match = { kind: 'match'; id: string } | { kind: 'claimed-but-invalid' } | { kind: 'other' };
+
+/**
+ * F7 (round 12) — THE one D1 id-alias reconciler, shared by the WHOLE-LIST gate (every
+ * `d1 list` member, BEFORE any name filtering) and {@link normalizeD1} (the requested
+ * database's identity). D1 carries TWO id aliases (`database_id`, `uuid`); `undefined`
+ * or an EMPTY STRING means "not provided" (wrangler omits/blanks the secondary alias).
+ * The reconciled id exists ONLY when at least one alias is present, EVERY present alias
+ * is a well-formed real D1 UUID, and ALL present aliases agree on one id. Anything
+ * else — a non-string alias, a malformed value (`"bogus"`), or two disagreeing UUIDs —
+ * is `invalid`: the entry's identity cannot be trusted. The old gate accepted a member
+ * when ANY ONE alias validated, so `{ name: "other-db", uuid: <valid>,
+ * database_id: "bogus" }` passed the whole-list gate and authorized authoritative
+ * absence for the target — a corrupt list minting a duplicate.
+ */
+type D1ReconciledId = { kind: 'id'; id: string } | { kind: 'absent' } | { kind: 'invalid' };
+
+function reconcileD1IdAliases(entry: Record<string, unknown>): D1ReconciledId {
+  const present = [entry.database_id, entry.uuid].filter(
+    (value) => value !== undefined && value !== '',
+  );
+  if (present.length === 0) {
+    return { kind: 'absent' };
+  }
+  const ids = new Set<string>();
+  for (const value of present) {
+    if (!isRealD1Id(value)) {
+      return { kind: 'invalid' };
+    }
+    ids.add(value);
+  }
+  if (ids.size !== 1) {
+    return { kind: 'invalid' };
+  }
+  return { kind: 'id', id: [...ids][0] };
+}
 
 /**
  * THE single strict D1 identity normalizer (F5), shared by `d1 list --json` and
@@ -2026,20 +2075,14 @@ function normalizeD1(entry: Record<string, unknown> | undefined, requestedName: 
   if (new Set(names).size > 1) {
     return { kind: 'claimed-but-invalid' };
   }
-  const ids = [entry.database_id, entry.uuid].filter(
-    (value): value is string => typeof value === 'string' && value.length > 0,
-  );
-  // 0 distinct → no id; >1 distinct → conflicting/blank aliases. Fail closed.
-  if (new Set(ids).size !== 1) {
+  // F7 — the ONE alias reconciler: no id, ANY malformed/non-string present alias, or
+  // disagreeing aliases → ambiguous, never adoptable — fail closed rather than adopt
+  // or (worse) mistake it for absent and mint a duplicate.
+  const reconciled = reconcileD1IdAliases(entry);
+  if (reconciled.kind !== 'id') {
     return { kind: 'claimed-but-invalid' };
   }
-  // F4 — the lone id must be a real D1 UUID. A claimant that names the requested DB but
-  // carries a malformed/placeholder id (`" "`, `"xyz"`) is ambiguous, never adoptable —
-  // fail closed rather than adopt or (worse) mistake it for absent and mint a duplicate.
-  if (!isRealD1Id(ids[0])) {
-    return { kind: 'claimed-but-invalid' };
-  }
-  return { kind: 'match', id: ids[0] };
+  return { kind: 'match', id: reconciled.id };
 }
 
 /**
@@ -2812,8 +2855,11 @@ async function provisionCloudflareResourcesLocked(
       const databases = validateResourceList(rawList, {
         resource: 'D1 database',
         command: 'wrangler d1 list',
-        idFields: ['uuid', 'database_id'],
-        idValidator: isRealD1Id,
+        // F7 — the ONE alias reconciler gates EVERY member (never "any one alias
+        // valid"): a conflicting or malformed secondary alias rejects the whole list.
+        hasValidId: (member) => reconcileD1IdAliases(member).kind === 'id',
+        idRule:
+          'its uuid/database_id aliases must be present, well-formed D1 UUIDs agreeing on one id',
         nameField: 'name',
         nameLabel: 'named',
       });
@@ -2950,8 +2996,8 @@ async function provisionCloudflareResourcesLocked(
     const namespaces = validateResourceList(rawList, {
       resource: 'KV namespace',
       command: 'wrangler kv namespace list',
-      idFields: ['id'],
-      idValidator: isRealKvId,
+      hasValidId: (member) => isRealKvId(member.id),
+      idRule: 'its id is missing or not a well-formed 32-hex namespace id',
       nameField: 'title',
       nameLabel: 'titled',
     });
@@ -3013,9 +3059,12 @@ async function provisionCloudflareResourcesLocked(
     // CONTRADICTION — reusing it would keep the app bound to a different bucket while
     // reporting the desired one provisioned. Equal → reuse as before (the desired name
     // already passed the R2 grammar gate, so an equal stored name is format-valid too).
-    // A placeholder (`default`) or absent name keeps the discovery path.
+    // F6 (round 12) — ONLY R2's own placeholder (`default`) or an absent/non-string name
+    // keeps the discovery path: a stored `local` is a grammar-valid REAL bucket name
+    // (the shared check that also rejected `local` let it bypass this contradiction
+    // gate and be silently rewritten).
     const storedBucketName = entry?.bucket_name;
-    if (entry && isRealValue(storedBucketName)) {
+    if (entry && isRealStoredR2BucketName(storedBucketName)) {
       if (storedBucketName !== bucketName) {
         throw new Error(
           `provision: R2 binding ${JSON.stringify(binding)} in "${configPath}" stores ` +
@@ -3069,13 +3118,16 @@ async function provisionCloudflareResourcesLocked(
             `provision: "wrangler r2 bucket create ${bucketName}" failed: ${created.stderr || created.stdout}`,
           );
         }
-        // F4 postcondition: confirm --update-config wrote a REAL bucket_name.
+        // F4 postcondition: confirm --update-config wrote the requested bucket_name
+        // (grammar-valid + EXACT name equality — the name IS the R2 identity).
+        // F6 (round 12): no placeholder heuristic here — a desired bucket genuinely
+        // named `default` must not fail a create that succeeded.
         assertCreateWroteRealId(
           configPath,
           {
             field: 'r2_buckets',
             idField: 'bucket_name',
-            idValidator: isRealR2BucketName,
+            idValidator: isValidR2BucketNameFormat,
             nameField: 'bucket_name',
             resource: 'R2 bucket',
             command: 'wrangler r2 bucket create',
@@ -3083,6 +3135,28 @@ async function provisionCloudflareResourcesLocked(
           binding,
           bucketName,
         );
+        // F6 (round 12) — when the DESIRED name IS R2's placeholder string, the config
+        // postcondition is vacuous: a pre-existing placeholder entry is byte-identical
+        // to a real create result, so a masked signal-killed create (wrangler's
+        // launcher can report exit 0) would pass it. Verify via the EXACT remote probe
+        // instead — the same positive identification the adopt path uses.
+        if (bucketName === R2_BUCKET_NAME_PLACEHOLDER) {
+          const verify = await runWrangler(
+            ['r2', 'bucket', 'info', bucketName, '--json', ...wranglerConfigArgs(configPath)],
+            { captureJson: true },
+          );
+          const payload = isCleanSuccess(verify) ? parseJsonObject(verify.stdout) : undefined;
+          if (!payload || payload.name !== bucketName) {
+            throw new Error(
+              `provision: "wrangler r2 bucket create ${bucketName}" reported success but a ` +
+                `follow-up "wrangler r2 bucket info ${bucketName}" did not confirm the bucket ` +
+                `exists. The create may have been interrupted — wrangler's launcher can mask a ` +
+                `signal-killed child as exit 0, and the config entry is indistinguishable from ` +
+                `the local-dev placeholder for this name. Refusing to record an unprovisioned ` +
+                `bucket; inspect the account and retry.`,
+            );
+          }
+        }
         resources.push({ kind: 'r2', binding, name: bucketName, action: 'created' });
       } else {
         // A non-zero that is NOT the confirmed not-found signal (auth/metrics/
