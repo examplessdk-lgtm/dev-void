@@ -1,13 +1,17 @@
 import { spawn } from 'node:child_process';
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
   lstatSync,
+  openSync,
   readFileSync,
   readlinkSync,
   realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { parse, type ParseError } from 'jsonc-parser';
@@ -717,17 +721,22 @@ export interface QuarantineInfo {
  */
 const quarantineBeforeDeathHooks = new Set<(info: QuarantineInfo) => void>();
 
-function runQuarantineBeforeDeathHooks(info: QuarantineInfo): void {
+function runQuarantineBeforeDeathHooks(info: QuarantineInfo): Array<Error> {
   // Hooks never mutate the registry while running (quarantine() only touches its own
   // lock state), so direct Set iteration is safe.
+  const failures: Array<Error> = [];
   for (const hook of quarantineBeforeDeathHooks) {
     try {
       hook(info);
-    } catch {
-      // Never let a failing hook block the re-raise; retention is best-effort here and
-      // the async quarantine rejection still surfaces the failure where possible.
+    } catch (error) {
+      // F3 (round 13) — a hook failure means a provision lock could NOT be quarantined
+      // durably (its sidecar did not persist), so it stays TRACKED instead. Collected
+      // so the signal path can refuse to re-raise: a dying process's exit sweep would
+      // release every still-tracked mutex under the possibly-live child.
+      failures.push(error as Error);
     }
   }
+  return failures;
 }
 
 /** F2 — true when `error` is a quarantine failure whose provision lock must stay retained. */
@@ -981,7 +990,7 @@ export function createDefaultRunWrangler(
           setTimeout(() => {}, 2_000);
         };
         const quarantineThenReRaise = (detail: string): void => {
-          runQuarantineBeforeDeathHooks({
+          const hookFailures = runQuarantineBeforeDeathHooks({
             pid: child.pid,
             reason:
               `the spawned wrangler could not be confirmed terminated after a forwarded ` +
@@ -995,6 +1004,22 @@ export function createDefaultRunWrangler(
               `re-running provision.\n`,
           );
           quarantine(detail);
+          if (hookFailures.length > 0) {
+            // F3 (round 13) — at least one provision lock could NOT be quarantined
+            // durably; it remains TRACKED (heartbeat running). Re-raising would kill
+            // this process, whose exit sweep releases every tracked mutex under the
+            // possibly-live child — so do NOT re-raise. The quarantine rejection above
+            // fails the provision, whose caller keeps holding the tracked lock.
+            for (const failure of hookFailures) {
+              process.stderr.write(`provision: ${failure.message}\n`);
+            }
+            process.stderr.write(
+              `provision: NOT re-raising ${signal} — a provision lock's quarantine metadata ` +
+                `could not be persisted, so the lock is intentionally still held by this ` +
+                `process to keep it from being stolen.\n`,
+            );
+            return;
+          }
           reRaise();
         };
         const outcome = signalGroup(signal);
@@ -1458,6 +1483,15 @@ interface ProvisionLock {
    * dead (ESRCH), clearing the sidecar + stale mutex itself; while the group may live
    * (or the probe fails) it FAILS CLOSED. Idempotent; a later `release()` becomes a
    * no-op (`ERELEASED` → success) and never removes the retained directory.
+   *
+   * F3 (round 13) — DURABLE sidecar persistence is a PRECONDITION for the detach: the
+   * detached mutex's heartbeat stops, so without a durable sidecar there is nothing for
+   * the acquisition gate to gate on and the mutex would go mtime-stale and be STOLEN
+   * while the child may live (the round-12 code warned and detached anyway — fail open).
+   * If the sidecar cannot be written+verified this THROWS instead, leaving the lock
+   * fully TRACKED (heartbeat running, `release()` still functional, NOT stealable): the
+   * error states the lock is intentionally still held and how to recover manually. A
+   * later `quarantine()` call retries the persistence.
    */
   quarantine: (info: QuarantineInfo) => void;
 }
@@ -1473,6 +1507,13 @@ function quarantineSidecarPath(lockTarget: string): string {
  * partial JSON. On POSIX the spawned wrangler child is `detached` (its own process-group
  * leader), so the recorded `pgid` IS its pid; Windows has no process groups (the gate
  * probes the pid directly there).
+ *
+ * F3 (round 13) — DURABLE: the temp file is fsync'd before the rename, the directory is
+ * fsync'd after it (best-effort where directories cannot be opened), and the final
+ * sidecar is READ BACK and verified. Any failure THROWS — callers treat persistence as a
+ * PRECONDITION for detaching the lock from proper-lockfile's tracking (see
+ * {@link ProvisionLock.quarantine}); a sidecar that merely "probably" landed is not a
+ * durable marker the acquisition gate can rely on.
  */
 function writeQuarantineSidecar(sidecarPath: string, info: QuarantineInfo): void {
   const payload = JSON.stringify(
@@ -1487,8 +1528,43 @@ function writeQuarantineSidecar(sidecarPath: string, info: QuarantineInfo): void
     2,
   );
   const tmpPath = `${sidecarPath}.tmp-${process.pid}`;
-  writeFileSync(tmpPath, payload);
-  renameSync(tmpPath, sidecarPath);
+  try {
+    const fd = openSync(tmpPath, 'w');
+    try {
+      writeSync(fd, payload);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmpPath, sidecarPath);
+  } catch (error) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // Best-effort temp cleanup — the write failure below is the real signal.
+    }
+    throw error;
+  }
+  try {
+    const dirFd = openSync(dirname(sidecarPath), 'r');
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    // Some platforms (Windows) cannot open/fsync a directory — the read-back below is
+    // still required to pass.
+  }
+  // VERIFY: the durable marker must be present and carry the recorded owner.
+  const readBack: unknown = JSON.parse(readFileSync(sidecarPath, 'utf-8'));
+  if (
+    !isRecord(readBack) ||
+    readBack.pid !== (info.pid ?? null) ||
+    readBack.reason !== info.reason
+  ) {
+    throw new Error(`the quarantine sidecar "${sidecarPath}" did not verify after writing`);
+  }
 }
 
 function readPositiveInt(value: unknown): number | undefined {
@@ -1701,6 +1777,29 @@ const LOCK_UPDATE_MS = 20_000;
 const LOCK_RETRIES = { retries: 100, factor: 1.5, minTimeout: 200, maxTimeout: 2_000 } as const;
 
 /**
+ * F1 (round 13) — normalize the `retries` knob into the ONE backoff schedule OUR
+ * acquisition loop runs (proper-lockfile's internal retrying is disabled with
+ * `retries: 0` so the quarantine gate runs on EVERY attempt — see
+ * {@link acquireProvisionLock}). A bare number keeps {@link LOCK_RETRIES}' backoff shape.
+ */
+function normalizeLockRetries(retries: ProvisionLockOptions['retries']): {
+  retries: number;
+  factor: number;
+  minTimeout: number;
+  maxTimeout: number;
+} {
+  if (typeof retries === 'number') {
+    return { ...LOCK_RETRIES, retries };
+  }
+  return {
+    retries: retries?.retries ?? LOCK_RETRIES.retries,
+    factor: retries?.factor ?? LOCK_RETRIES.factor,
+    minTimeout: retries?.minTimeout ?? LOCK_RETRIES.minTimeout,
+    maxTimeout: retries?.maxTimeout ?? LOCK_RETRIES.maxTimeout,
+  };
+}
+
+/**
  * Acquire the cross-process provision lock over the resolved config path via
  * `proper-lockfile` (an atomic `mkdir`-based mutex at `<configPath>.void-provision.lock.lock`).
  * `proper-lockfile` requires the locked pathname to EXIST, so we lock a DEDICATED
@@ -1712,32 +1811,97 @@ const LOCK_RETRIES = { retries: 100, factor: 1.5, minTimeout: 200, maxTimeout: 2
  * `onCompromised` FAILS CLOSED (re-throws): if the lock is ever detected stolen (its
  * mtime changed, or the mutex vanished under a live owner), provisioning must NEVER
  * continue — a compromised lock means another process may be racing the same config.
+ *
+ * F1 (round 13) — acquisition is ONE atomic recovery protocol, applied on EVERY
+ * attempt: quarantine GATE → single non-retrying proper-lockfile acquisition →
+ * REVALIDATE the gate under ownership → clear-or-abort. Retrying is owned by THIS
+ * function (proper-lockfile runs with `retries: 0`), so a waiter that entered while the
+ * holder was healthy re-runs the gate on every backoff attempt and can never stale-take
+ * a mutex whose holder QUARANTINED mid-wait; the post-acquire revalidation catches a
+ * sidecar that appeared between the last gate and the acquisition itself (the fresh
+ * lock is released and the acquisition fails closed).
  */
 export async function acquireProvisionLock(
   configPath: string,
   lockOptions?: ProvisionLockOptions,
 ): Promise<ProvisionLock> {
   const lockTarget = `${configPath}.void-provision.lock`;
-  // F2 (round 12) — the quarantine gate runs FIRST, before proper-lockfile is even
-  // consulted. This function is the single acquisition choke point for every provision,
-  // so a quarantined mutex can never be reached via the mtime-stale path while the
-  // recorded wrangler process group may still be alive.
-  assertQuarantineClearedOrClear(lockTarget);
   if (!existsSync(lockTarget)) {
     writeFileSync(lockTarget, '');
   }
   const staleMs = lockOptions?.stale ?? LOCK_STALE_MS;
-  const release = await lockfile.lock(lockTarget, {
-    stale: staleMs,
-    update: lockOptions?.update ?? LOCK_UPDATE_MS,
-    retries: lockOptions?.retries ?? LOCK_RETRIES,
-    // `proper-lockfile`'s callback-style fs seam — overridable so a test can force an
-    // unlock failure. Production uses the library default (graceful-fs).
-    ...(lockOptions?.fs !== undefined ? { fs: lockOptions.fs as never } : {}),
-    onCompromised: (error) => {
+  const retryCfg = normalizeLockRetries(lockOptions?.retries);
+  // One NON-retrying proper-lockfile acquisition (it still performs the library's own
+  // internal stale-reclaim of an abandoned mutex within the single attempt).
+  const acquireOnce = (): ReturnType<typeof lockfile.lock> =>
+    lockfile.lock(lockTarget, {
+      stale: staleMs,
+      update: lockOptions?.update ?? LOCK_UPDATE_MS,
+      retries: 0,
+      // `proper-lockfile`'s callback-style fs seam — overridable so a test can force an
+      // unlock failure. Production uses the library default (graceful-fs).
+      ...(lockOptions?.fs !== undefined ? { fs: lockOptions.fs as never } : {}),
+      onCompromised: (error) => {
+        throw error;
+      },
+    });
+  // F1 (round 13) — ONE atomic recovery protocol: gate → acquire → revalidate →
+  // clear-or-abort, on EVERY attempt. This function is the single acquisition choke
+  // point for every provision (grep-proven: no other code calls `lockfile.lock`), and
+  // proper-lockfile's INTERNAL retrying is disabled (`retries: 0` above) in favor of
+  // OUR loop, because the round-12 code gated on the quarantine sidecar ONCE before the
+  // library's retry loop: a contender could pass that gate while the holder was still
+  // healthy, keep retrying while the holder QUARANTINED (sidecar written, heartbeat
+  // detached), then stale-take the retained mutex without ever seeing the sidecar —
+  // acquiring the lock while the recorded wrangler group was alive.
+  let release: Awaited<ReturnType<typeof lockfile.lock>> | undefined;
+  for (let attempt = 0; ; attempt++) {
+    // (1) the GATE, before every attempt: fail closed while a recorded group may live;
+    // clear the sidecar once the group is confirmed dead.
+    assertQuarantineClearedOrClear(lockTarget);
+    // (2) one acquisition attempt; a held (non-stale) mutex backs off and loops.
+    try {
+      release = await acquireOnce();
+    } catch (error) {
+      if ((error as { code?: string } | null)?.code === 'ELOCKED' && attempt < retryCfg.retries) {
+        const delay = Math.min(
+          retryCfg.minTimeout * retryCfg.factor ** attempt,
+          retryCfg.maxTimeout,
+        );
+        await new Promise((resolveSleep) => setTimeout(resolveSleep, delay));
+        continue;
+      }
       throw error;
-    },
-  });
+    }
+    // (3) REVALIDATE under ownership, before the provision body may run: a holder can
+    // have quarantined between this attempt's gate and the acquisition (its retained
+    // mutex going mtime-stale and being reclaimed by the very `acquireOnce` above). A
+    // recorded group that is alive/unprobeable → release the fresh mutex + fail closed;
+    // a dead group → the gate cleared the sidecar → ownership is valid.
+    try {
+      assertQuarantineClearedOrClear(lockTarget);
+      break;
+    } catch (gateError) {
+      let revalidateReleaseError: unknown;
+      try {
+        await release();
+      } catch (error) {
+        revalidateReleaseError = error;
+      }
+      release = undefined;
+      if (revalidateReleaseError !== undefined) {
+        throw new AggregateError(
+          [gateError, revalidateReleaseError],
+          `provision: a quarantine was found right after acquiring the provision lock AND the ` +
+            `fresh lock could not be released afterward. Quarantine: ` +
+            `${(gateError as Error).message}; release error: ` +
+            `${(revalidateReleaseError as Error).message}`,
+          { cause: gateError },
+        );
+      }
+      throw gateError;
+    }
+  }
   // F2 — cache ONE shared release promise so a double-release is idempotent (the SAME
   // settled promise is returned, never a second `proper-lockfile` unlock), and PROPAGATE
   // a genuine unlock failure instead of swallowing it. `proper-lockfile` drops its own
@@ -1752,10 +1916,12 @@ export async function acquireProvisionLock(
   // stale window.) An `ERELEASED` error means the lock was ALREADY dropped (e.g. by an
   // `onCompromised` sweep, whose re-throw is the authority) — not a leak we caused — so
   // it is treated as success.
+  // The loop above only breaks after a successful acquisition + revalidation.
+  const acquiredRelease = release!;
   let releasePromise: Promise<void> | undefined;
   const doRelease = async (): Promise<void> => {
     try {
-      await release();
+      await acquiredRelease();
     } catch (error) {
       if ((error as { code?: string } | null)?.code === 'ERELEASED') {
         return;
@@ -1787,20 +1953,30 @@ export async function acquireProvisionLock(
       if (releasePromise !== undefined) {
         return;
       }
-      releasePromise = Promise.resolve(); // any later release() is a settled no-op
-      // F2 (round 12) — persist the quarantine owner metadata (atomic write) BEFORE
-      // detaching, so the acquisition gate can probe the recorded group. Best-effort:
-      // if the sidecar cannot be written, retention still happens via the detach below
-      // (the stale window then applies) — surface the degradation without failing.
+      // F3 (round 13) — DURABLE sidecar persistence is a PRECONDITION for everything
+      // below: the detach stops the mtime heartbeat, so a mutex retained WITHOUT a
+      // durable sidecar has nothing for the acquisition gate to gate on — it goes
+      // mtime-stale and is stolen while the unconfirmed child may live (the round-12
+      // code warned and detached anyway — fail open). On persistence failure the lock
+      // stays fully TRACKED (heartbeat running, release() functional, NOT stealable)
+      // and this throws the hard error below; a later quarantine() call retries.
       try {
         writeQuarantineSidecar(quarantineSidecarPath(lockTarget), info);
       } catch (error) {
-        process.stderr.write(
-          `provision: warning — could not persist quarantine metadata to ` +
-            `"${quarantineSidecarPath(lockTarget)}" (${(error as Error).message}); the retained ` +
-            `lock is then only protected by its stale window.\n`,
+        throw new Error(
+          `provision: could not persist quarantine metadata to ` +
+            `"${quarantineSidecarPath(lockTarget)}" (${(error as Error).message}). The ` +
+            `cross-process provision lock "${lockTarget}.lock" is intentionally STILL HELD by ` +
+            `this process (tracked, heartbeat running) so it cannot go stale and be stolen ` +
+            `while the unconfirmed wrangler child` +
+            `${info.pid !== undefined ? ` (pid ${info.pid})` : ''} may still be running. ` +
+            `Manual recovery: verify the process is dead` +
+            `${info.pid !== undefined ? ` (e.g. \`kill -0 ${info.pid}\`)` : ''} and terminate ` +
+            `it if not; the lock is freed when this process exits — remove the ` +
+            `"${lockTarget}.lock" directory if it persists, then re-run.`,
         );
       }
+      releasePromise = Promise.resolve(); // any later release() is a settled no-op
       const internals = loadProperLockfileInternals();
       const locks = internals?.getLocks?.();
       if (!locks) {
@@ -2847,12 +3023,30 @@ export async function provisionCloudflareResources(
     // exit sweep so the on-disk directory outlives this process). Releasing it would let a
     // concurrent provision race the surviving child on the same config/account.
     if (isQuarantineError(bodyError)) {
-      lock.quarantine({
-        // Defensive reads: `isQuarantineError` also accepts a structural match (a
-        // `{ quarantine: true }` carrier that is not the class instance).
-        pid: typeof bodyError.pid === 'number' ? bodyError.pid : undefined,
-        reason: typeof bodyError.message === 'string' ? bodyError.message : String(bodyError),
-      });
+      try {
+        lock.quarantine({
+          // Defensive reads: `isQuarantineError` also accepts a structural match (a
+          // `{ quarantine: true }` carrier that is not the class instance).
+          pid: typeof bodyError.pid === 'number' ? bodyError.pid : undefined,
+          reason: typeof bodyError.message === 'string' ? bodyError.message : String(bodyError),
+        });
+      } catch (quarantineError) {
+        // F3 (round 13) — the quarantine sidecar could not be persisted, so the lock is
+        // intentionally STILL HELD (tracked, heartbeat running — see
+        // {@link ProvisionLock.quarantine}). NEVER release it here: the unconfirmed
+        // wrangler child may still be creating resources. Surface BOTH errors.
+        throw new AggregateError(
+          [bodyError, quarantineError],
+          `provision failed with an unconfirmed wrangler child AND its quarantine metadata ` +
+            `could not be persisted — the cross-process provision lock is intentionally still ` +
+            `held by this process (not released, not stealable) while the child may live. ` +
+            `Primary error: ` +
+            `${bodyError instanceof Error ? bodyError.message : String(bodyError)}; quarantine ` +
+            `error: ` +
+            `${quarantineError instanceof Error ? quarantineError.message : String(quarantineError)}.`,
+          { cause: bodyError },
+        );
+      }
       throw bodyError;
     }
     // F7 — attempt release; if IT also fails, surface BOTH (the body error is primary but

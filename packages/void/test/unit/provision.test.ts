@@ -5227,6 +5227,203 @@ describe('acquireProvisionLock — F2 quarantine sidecar gate (round 12)', () =>
   });
 });
 
+describe('acquireProvisionLock — F1 the gate runs on EVERY attempt + post-acquire revalidation (round 13)', () => {
+  const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
+  const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
+
+  async function waitForDead(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
+  }
+
+  async function spawnHang(): Promise<import('node:child_process').ChildProcess> {
+    const { spawn } = await import('node:child_process');
+    return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+  }
+
+  function reap(child: import('node:child_process').ChildProcess): void {
+    try {
+      process.kill(-child.pid!, 'SIGKILL');
+    } catch {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+  }
+
+  it('a waiter that started while the holder was HEALTHY fails closed when the holder quarantines mid-wait', async () => {
+    // The round-12 code gated ONCE before proper-lockfile's internal retry loop: this
+    // waiter passed that gate (holder healthy, no sidecar), kept retrying while the
+    // holder QUARANTINED (heartbeat detached), then stale-took the retained mutex
+    // without ever seeing the sidecar — acquiring while the recorded group was ALIVE.
+    setup(JSON.stringify({ name: 'app' }));
+    const holder = await acquireProvisionLock(wranglerPath, { stale: 2_000 });
+    const child = await spawnHang();
+    try {
+      const waiter = acquireProvisionLock(wranglerPath, {
+        stale: 2_000,
+        retries: { retries: 60, factor: 1, minTimeout: 150, maxTimeout: 150 },
+      });
+      // Let the waiter run a few healthy attempts first, THEN quarantine the holder.
+      await new Promise((r) => setTimeout(r, 400));
+      holder.quarantine({ pid: child.pid, reason: 'round-13: waiter crosses quarantine' });
+      // Post-fix the waiter's NEXT attempt re-runs the gate: sidecar + live group →
+      // fail closed (never a stale-take of the detached mutex).
+      await expect(waiter).rejects.toThrow(/QUARANTINED.*waiter crosses quarantine/s);
+      expect(existsSync(sidecar)).toBe(true);
+      expect(existsSync(lockMutex)).toBe(true);
+    } finally {
+      reap(child);
+    }
+    expect(await waitForDead(child.pid!, 5_000)).toBe(true);
+    rmSync(lockMutex, { recursive: true, force: true });
+    rmSync(sidecar, { force: true });
+  }, 15_000);
+
+  it('the same waiter PROCEEDS (sidecar cleared) once the recorded group is dead', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const holder = await acquireProvisionLock(wranglerPath, { stale: 2_000 });
+    const child = await spawnHang();
+    const waiter = acquireProvisionLock(wranglerPath, {
+      stale: 2_000,
+      retries: { retries: 80, factor: 1, minTimeout: 150, maxTimeout: 150 },
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    // Kill the recorded group FIRST, then quarantine: the sidecar records an
+    // already-dead group, so the waiter's next gate deterministically probes it dead
+    // (quarantining a live child here would race the waiter's fail-closed gate).
+    reap(child);
+    expect(await waitForDead(child.pid!, 5_000)).toBe(true);
+    holder.quarantine({ pid: child.pid, reason: 'round-13: waiter proceeds once dead' });
+    // The waiter's next gate probes the recorded group DEAD → clears the sidecar →
+    // proper-lockfile's stale lifecycle then reclaims the heartbeat-less mutex.
+    const lock = await waiter;
+    expect(existsSync(sidecar)).toBe(false);
+    await lock.release();
+    expect(existsSync(lockMutex)).toBe(false);
+  }, 15_000);
+
+  it('post-acquire REVALIDATION: a sidecar appearing DURING acquisition releases the fresh lock and fails closed', async () => {
+    // Simulates a holder quarantining between this attempt's gate and the mkdir that
+    // acquires the mutex: the fs seam's mkdir drops a sidecar recording a LIVE group
+    // just before creating the lock directory.
+    setup(JSON.stringify({ name: 'app' }));
+    const child = await spawnHang();
+    try {
+      const seamFs = {
+        ...passthruFs,
+        mkdir: (...args: Array<unknown>) => {
+          writeFileSync(
+            sidecar,
+            JSON.stringify({
+              pid: child.pid,
+              pgid: child.pid,
+              reason: 'round-13: appeared mid-acquisition',
+            }),
+          );
+          (passthruFs.mkdir as (...a: Array<unknown>) => void)(...args);
+        },
+      };
+      await expect(
+        acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 0, fs: seamFs }),
+      ).rejects.toThrow(/QUARANTINED.*appeared mid-acquisition/s);
+      // The freshly-acquired mutex was RELEASED on the failed revalidation (fail
+      // closed, no leak, no half-owned lock)…
+      expect(existsSync(lockMutex)).toBe(false);
+      // …and the sidecar remains for the next acquisition to gate on.
+      expect(existsSync(sidecar)).toBe(true);
+    } finally {
+      reap(child);
+    }
+    expect(await waitForDead(child.pid!, 5_000)).toBe(true);
+    rmSync(sidecar, { force: true });
+  });
+});
+
+describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quarantine (round 13)', () => {
+  const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
+  const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
+  // Blocking the sidecar's TEMP path (a directory where the temp file goes) makes the
+  // durable write fail while leaving the sidecar path itself absent — exactly the
+  // fail-open shape of the finding (no durable marker lands anywhere).
+  const tmpBlocker = `${sidecar}.tmp-${process.pid}`;
+
+  it('a sidecar-write failure keeps the lock TRACKED (heartbeat running, NOT stealable) and throws a hard error', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const lock = await acquireProvisionLock(wranglerPath, { stale: 2_000 });
+    try {
+      mkdirSync(tmpBlocker);
+      expect(() => lock.quarantine({ pid: 99_999, reason: 'round-13: sidecar blocked' })).toThrow(
+        /intentionally STILL HELD/,
+      );
+      // No partial/durable marker landed…
+      expect(existsSync(sidecar)).toBe(false);
+      // …and the lock did NOT detach: wait past the stale window — the still-running
+      // heartbeat keeps the mtime fresh, so a contender sees a HELD lock. (Pre-fix the
+      // detached, heartbeat-less mutex aged stale here and was stolen while the
+      // recorded child lived.)
+      await new Promise((r) => setTimeout(r, 2_600));
+      await expect(
+        acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 0 }),
+      ).rejects.toThrow(/already being held/);
+    } finally {
+      rmSync(tmpBlocker, { recursive: true, force: true });
+      // Still tracked → release works normally and frees the mutex.
+      await lock.release();
+    }
+    expect(existsSync(lockMutex)).toBe(false);
+  }, 15_000);
+
+  it('provision level: a quarantine rejection + sidecar-write failure surfaces BOTH errors and never releases', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const quarantineError = new WranglerQuarantineError(77_777, 'round-13: child unconfirmed');
+    const run: RunWrangler = () => Promise.reject(quarantineError);
+    mkdirSync(tmpBlocker);
+    let thrown: unknown;
+    try {
+      await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog, lockOptions: { stale: 2_000 } },
+      );
+    } catch (error) {
+      thrown = error;
+    } finally {
+      rmSync(tmpBlocker, { recursive: true, force: true });
+    }
+    try {
+      expect(thrown).toBeInstanceOf(AggregateError);
+      expect((thrown as AggregateError).message).toMatch(/intentionally still held/);
+      expect((thrown as AggregateError).errors[0]).toBe(quarantineError);
+      expect(String((thrown as AggregateError).errors[1])).toMatch(/could not persist/);
+      // The mutex is still on disk, HELD (tracked) by this process — never released
+      // under the unconfirmed child.
+      expect(existsSync(lockMutex)).toBe(true);
+      expect(existsSync(sidecar)).toBe(false);
+    } finally {
+      // Cleanup: the lock is still tracked by proper-lockfile — release it through the
+      // library so the heartbeat stops before afterEach removes tmpDir.
+      const properLockfile = (await import('proper-lockfile')).default;
+      await properLockfile.unlock(`${wranglerPath}.void-provision.lock`).catch(() => {});
+    }
+    expect(existsSync(lockMutex)).toBe(false);
+  });
+});
+
 describe('createDefaultRunWrangler — F1/F2 signal-path kill failure quarantines the lock (round 12, child-process)', () => {
   const SIG12_TMP = join(import.meta.dirname, '.tmp-f1f2-signal-round12');
   beforeEach(() => {
