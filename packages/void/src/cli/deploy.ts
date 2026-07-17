@@ -602,6 +602,22 @@ function desiredIdentityBindings(
   return out;
 }
 
+/** The CF Vite plugin's deploy-config redirect that a bare `wrangler deploy` follows. */
+function deployPointerPath(root: string): string {
+  return join(root, '.wrangler', 'deploy', 'config.json');
+}
+
+/**
+ * Remove the CF plugin's deploy pointer before building so the post-build
+ * verification can only pass on a pointer THIS build re-created. The CF plugin
+ * overwrites (never deletes) it, and only when the CF Vite plugin runs — a build
+ * that emits no worker artifact would otherwise leave a stale pointer from a prior
+ * run, which a bare `wrangler deploy` would follow to old code.
+ */
+function removeDeployPointer(root: string): void {
+  rmSync(deployPointerPath(root), { force: true });
+}
+
 /**
  * Confirm the deploy config the CF Vite plugin emitted targets the pinned account, the
  * expected worker name, AND the exact resources this deploy provisioned — at the
@@ -626,11 +642,11 @@ export function verifyGeneratedDeployConfig(
     desired?: DesiredResourceSet;
   },
 ): { ok: boolean; reason?: string } {
-  const deployConfigPath = join(root, '.wrangler', 'deploy', 'config.json');
+  const deployConfigPath = deployPointerPath(root);
   if (!existsSync(deployConfigPath)) {
     return {
       ok: false,
-      reason: `expected the CF plugin's deploy config at ${deployConfigPath}, but it was not written by the build.`,
+      reason: `expected the CF plugin's deploy config at ${deployConfigPath}, but it was not written by the build (a stale pointer is removed before building, so only a fresh one from this build is trusted).`,
     };
   }
   let redirectedPath: string;
@@ -1166,6 +1182,29 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
+  // 1c. Framework-class guard — v1 supports only Class-A framework SSR
+  // (tanstack-start, react-router, vinext), which composes the FULL Void plugin
+  // stack (routing + ISR + the CF Vite plugin) through the project's `vite build`.
+  // Class B/C frameworks (sveltekit, nuxt, analog, astro) get a lighter Void
+  // composition (`index.ts`): NO CF Vite plugin — so `vite build` never emits the
+  // `.wrangler/deploy/config.json` this backend deploys — and some drive their own
+  // non-Vite build CLI. Reject them BEFORE any account operation so the app class is
+  // fully settled before we ever trust a build artifact or touch Cloudflare.
+  const framework = detectFramework(root);
+  if (framework && framework.class !== 'a') {
+    log.error(
+      [
+        `deploy: --backend cloudflare does not support ${framework.name} (framework class ${framework.class.toUpperCase()}) in v1.`,
+        'This backend deploys full Void apps and Class-A framework SSR (tanstack-start,',
+        'react-router, vinext) as Cloudflare Workers. This framework builds through its own',
+        'adapter, not the Void Cloudflare plugin, so `vite build` emits no worker artifact',
+        'here. Deploy it with `void deploy` (the managed platform) or the framework’s own',
+        'Cloudflare adapter.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
   // 2. Desired resource set — computed ONCE from SOURCE, pre-build (fail-fast),
   // shared by the provision and drift paths.
   const configPath = discoverRootWranglerConfig(root);
@@ -1178,12 +1217,12 @@ export async function runCloudflareDeploy(
   // 2b. Framework-queue guard — FAIL CLOSED before touching the account. A full
   // Void app wires queues end-to-end through the normal `vite build`
   // (`compileWorkerEntry` emits the native `queue()` handler and the CF plugin binds
-  // the producer/consumer), so those proceed. A detected framework app does NOT:
-  // `index.ts` suppresses queue bindings for a framework, and the framework's own
+  // the producer/consumer), so those proceed. A detected (Class-A) framework app does
+  // NOT: `index.ts` suppresses queue bindings for a framework, and the framework's own
   // worker entry has no queue handler. Provisioning a queue for one would create it
   // with no producer binding and no consumer — an orphan. Full framework-queue
   // support for `--backend cloudflare` is a follow-up.
-  if (detectFramework(root) != null && desired.queues.length > 0) {
+  if (framework != null && desired.queues.length > 0) {
     log.error(
       [
         'deploy: --backend cloudflare cannot yet wire queues for framework SSR apps.',
@@ -1352,12 +1391,18 @@ export async function runCloudflareDeploy(
     }
   }
 
-  // 5. Ensure the worker `name` in the root config (only-when-absent, via the
-  // Task 3 writer). The build defaults a name into dist/ssr/wrangler.json, but
-  // `wrangler secret list -c <root>` (the secrets gate) resolves the worker from
-  // the ROOT config's `name` — so pinning it makes the gate and deploy agree.
+  // 5. Reconcile the worker `name` AND the pinned `account_id` into the root config
+  // BEFORE the build. `name` is only-when-absent (never clobber the user's); the build
+  // defaults a name into dist/ssr/wrangler.json, but `wrangler secret list -c <root>`
+  // (the secrets gate) resolves the worker from the ROOT config's `name`, so pinning it
+  // makes the gate and deploy agree. `account_id` is always overwritten with the
+  // reconciled account: the CF Vite plugin copies `account_id` ONLY from the root config
+  // file (never from CLOUDFLARE_ACCOUNT_ID) into dist/ssr/wrangler.json, so an env-only
+  // pin would otherwise emit an artifact with NO `account_id` and the identity check
+  // below could never confirm the pin. Persisting it makes the documented env-only pin
+  // deploy the verified account.
   const workerName = readWranglerTopLevelString(rootConfig, 'name') ?? deriveWorkerName(root);
-  writeProvisionedWranglerConfig(root, { name: workerName }, { configPath });
+  writeProvisionedWranglerConfig(root, { name: workerName, accountId }, { configPath });
 
   // 6. Remote D1 migrations (sqlite D1 apps only; pg/Hyperdrive apps skip). Only run
   // when the D1 entry declares an explicit `migrations_dir`. wrangler 4.107 does NOT
@@ -1462,6 +1507,14 @@ export async function runCloudflareDeploy(
   // CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH (and pins one account + API base), so the CF
   // plugin generates the pinned TOP-LEVEL config from the CANONICAL root wrangler config,
   // not a named-env / alternate-config one whose account/name/bindings could differ.
+  //
+  // DELETE the CF plugin's deploy pointer (`.wrangler/deploy/config.json`) FIRST. The
+  // plugin OVERWRITES it (never deletes) on each build, but ONLY when the CF Vite plugin
+  // participates — a build that emits no worker artifact leaves a STALE pointer from a
+  // previous run in place, and a bare `wrangler deploy` would follow it to an old
+  // `dist/ssr/wrangler.json`. Removing it now means the verification below (which
+  // requires the pointer to exist) can only pass on a pointer THIS build re-created.
+  removeDeployPointer(root);
   const buildChildEnv = deployChildEnv(accountId, apiBaseUrl);
   delete buildChildEnv.VOID_DEPLOY_PROJECT_ID;
   const runBuild =

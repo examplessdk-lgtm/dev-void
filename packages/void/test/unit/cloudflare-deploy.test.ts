@@ -1099,3 +1099,132 @@ describe('runCloudflareDeploy — managed path does not import the provision mod
     expect(deploySource).toMatch(/await import\('\.\/provision\.ts'\)/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Framework-class guard (finding 6): only Class-A framework SSR coheres with
+// this backend (full Void plugin stack + CF Vite plugin). Class B/C get a
+// lighter Void composition that emits no worker artifact here — reject early.
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — framework-class guard', () => {
+  it('rejects a Class B/C framework SSR app before any account operation', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({
+        name: 'skapp',
+        dependencies: { '@sveltejs/kit': '2.0.0' },
+      }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'skapp' }, null, 2),
+    });
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Rejected before preflight — no whoami, no build, no deploy.
+    expect(trace).toEqual([]);
+  });
+
+  it('lets a Class-A framework SSR app proceed to deploy', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({
+        name: 'tsapp',
+        dependencies: { '@tanstack/react-start': '1.0.0' },
+      }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'tsapp' }, null, 2),
+    });
+    const { deps, trace } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(trace).toContain('wrangler:deploy');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stale deploy pointer (finding 4): the pointer is deleted before building, so a
+// build that emits no fresh one (auto-static / Class B/C) can never upload old
+// code — the verification fails closed on the missing pointer.
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — stale deploy pointer', () => {
+  it('fails closed (no deploy) when the build emits no fresh pointer over a stale one', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    // Plant a STALE pointer + target that WOULD pass the account/name identity check.
+    mkdirSync(join(root, '.wrangler', 'deploy'), { recursive: true });
+    mkdirSync(join(root, 'dist', 'ssr'), { recursive: true });
+    writeFileSync(
+      join(root, 'dist', 'ssr', 'wrangler.json'),
+      JSON.stringify({ account_id: 'acc123', name: 'myapp' }),
+    );
+    writeFileSync(
+      join(root, '.wrangler', 'deploy', 'config.json'),
+      JSON.stringify({ configPath: '../../dist/ssr/wrangler.json' }),
+    );
+    // A build that does NOT re-create the pointer (a non-CF/static build class).
+    const { deps, trace, exitCalls } = harness({
+      runBuild: () => {
+        trace.push('build');
+      },
+      // Use the REAL verifier so the deleted-then-not-recreated pointer fails closed.
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).not.toContain('wrangler:deploy');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Env-only account pin (finding 7): the CF plugin copies account_id only from the
+// root config, so the reconciled account is persisted there before the build —
+// making the documented CLOUDFLARE_ACCOUNT_ID pin actually reach deploy.
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — env-only account pin', () => {
+  it('persists CLOUDFLARE_ACCOUNT_ID into the root config and reaches deploy without --provision', async () => {
+    const saved = process.env.CLOUDFLARE_ACCOUNT_ID;
+    process.env.CLOUDFLARE_ACCOUNT_ID = 'env-acc-999';
+    try {
+      const root = makeProject({
+        'package.json': JSON.stringify({ name: 'myapp' }),
+        'void.json': JSON.stringify({}),
+        'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
+        // Root config has NO account_id — only the env var pins the account.
+        'wrangler.jsonc': JSON.stringify(
+          {
+            name: 'myapp',
+            d1_databases: [
+              {
+                binding: 'DB',
+                database_name: 'myapp-db',
+                database_id: REAL_D1_ID,
+                migrations_dir: './db/migrations',
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+      });
+      const { deps, trace } = harness();
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+      // Reaches deploy (does not false-stop on a missing generated account_id)...
+      expect(trace).toContain('wrangler:deploy');
+      // ...because the env pin was persisted into the root config the build reads.
+      const written = JSON.parse(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8')) as {
+        account_id?: string;
+      };
+      expect(written.account_id).toBe('env-acc-999');
+    } finally {
+      if (saved === undefined) {
+        delete process.env.CLOUDFLARE_ACCOUNT_ID;
+      } else {
+        process.env.CLOUDFLARE_ACCOUNT_ID = saved;
+      }
+    }
+  });
+});
