@@ -403,7 +403,18 @@ function selfHostEnvError(report: EnvValidationReport): SelfHostEnvValidationErr
         'or add a value to .env / .env.production.',
     );
   }
-  return new SelfHostEnvValidationError(lines.join('\n'), report);
+  // Attach a values-free copy of the report: `report.values` holds the RESOLVED
+  // values of keys that validated successfully, and nothing consuming this
+  // error needs them — key names (missing) and pre-redacted messages (invalid)
+  // are enough. Stripping them here means no formatter downstream can ever
+  // echo a secret value from this error object.
+  const safeReport: EnvValidationReport = {
+    valid: report.valid,
+    missing: report.missing,
+    invalid: report.invalid,
+    values: new Map(),
+  };
+  return new SelfHostEnvValidationError(lines.join('\n'), safeReport);
 }
 
 /**
@@ -633,13 +644,34 @@ export function createDefaultSecretListRunner(
  * etc.) is left untouched: this preflight has no second transport to keep in
  * lockstep, and scrubbing would silently redirect a staging/FedRAMP user's
  * `secret list` at the production endpoint.
+ *
+ * Windows environment keys are CASE-INSENSITIVE (same hazard `provisionEnv`
+ * guards): an ambient mixed-case spelling (`Cloudflare_Account_Id`) could
+ * shadow an exact-case pin, so on win32 every case-variant of a scrubbed or
+ * pinned key is removed first. Exported (with a platform seam) for direct
+ * unit testing of that case rule; production callers pass no platform.
  */
-function secretListEnv(accountId?: string): NodeJS.ProcessEnv {
+export function secretListEnv(accountId?: string, platform?: NodeJS.Platform): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.CF_ACCESS_CLIENT_ID;
-  delete env.CF_ACCESS_CLIENT_SECRET;
+  const caseInsensitive = (platform ?? process.platform) === 'win32';
+  const scrub = (name: string): void => {
+    if (!caseInsensitive) {
+      delete env[name];
+      return;
+    }
+    const lower = name.toLowerCase();
+    for (const key of Object.keys(env)) {
+      if (key.toLowerCase() === lower) {
+        delete env[key];
+      }
+    }
+  };
+  scrub('CF_ACCESS_CLIENT_ID');
+  scrub('CF_ACCESS_CLIENT_SECRET');
+  scrub('WRANGLER_LOG_SANITIZE');
   env.WRANGLER_LOG_SANITIZE = 'true';
   if (accountId) {
+    scrub('CLOUDFLARE_ACCOUNT_ID');
     env.CLOUDFLARE_ACCOUNT_ID = accountId;
   }
   return env;

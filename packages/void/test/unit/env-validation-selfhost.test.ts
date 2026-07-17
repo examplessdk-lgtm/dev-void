@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import {
   collectPlaintextVarWarnings,
   createDefaultSecretListRunner,
+  secretListEnv,
   SelfHostEnvValidationError,
   SelfHostSecretListError,
   type SecretListRunResult,
@@ -226,6 +227,29 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
     expect(envError.report.missing).toEqual(['BAR']);
     expect(envError.message).toContain('BAR');
     expect(envError.message).toContain('wrangler secret put');
+  });
+
+  it('strips resolved values from the attached report so the error can never echo them', async () => {
+    const root = createTempProject();
+    defineEnv({ FOO: string(), BAR: string() });
+    // FOO validates successfully from a local file — its resolved value must
+    // NOT ride along on the thrown error's report.
+    writeDotenv(root, '.env.production', 'FOO=local-secret-value\n');
+    const { run } = stubRunner(okList([]));
+
+    const error = await validateSelfHostProdEnv(root, {
+      configPath: CONFIG_PATH,
+      runWrangler: run,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+    const envError = error as SelfHostEnvValidationError;
+    expect(envError.report.missing).toEqual(['BAR']);
+    expect(envError.report.values.size).toBe(0);
+    expect(envError.message).not.toContain('local-secret-value');
   });
 
   it('passes when remote secrets cover every missing key, using the exact pinned argv', async () => {
@@ -479,6 +503,60 @@ describe('createDefaultSecretListRunner — async spawn with fail-closed provena
 
     expect(result.error).toBeTruthy();
     expect(result.status).not.toBe(0);
+  });
+
+  describe('secretListEnv — child env pinning', () => {
+    it('scrubs the CF Access pair, pins sanitized logging, and pins the account id', () => {
+      vi.stubEnv('CF_ACCESS_CLIENT_ID', 'id');
+      vi.stubEnv('CF_ACCESS_CLIENT_SECRET', 'secret');
+      vi.stubEnv('WRANGLER_LOG_SANITIZE', 'false');
+      try {
+        const env = secretListEnv('acct-1');
+        expect(env.CF_ACCESS_CLIENT_ID).toBeUndefined();
+        expect(env.CF_ACCESS_CLIENT_SECRET).toBeUndefined();
+        expect(env.WRANGLER_LOG_SANITIZE).toBe('true');
+        expect(env.CLOUDFLARE_ACCOUNT_ID).toBe('acct-1');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('leaves ambient transport env (CLOUDFLARE_API_BASE_URL) untouched', () => {
+      vi.stubEnv('CLOUDFLARE_API_BASE_URL', 'https://api.staging.example/client/v4');
+      try {
+        const env = secretListEnv('acct-1');
+        expect(env.CLOUDFLARE_API_BASE_URL).toBe('https://api.staging.example/client/v4');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('scrubs every case-variant of scrubbed/pinned keys on win32 so no ambient spelling can shadow a pin', () => {
+      vi.stubEnv('Cloudflare_Account_Id', 'ambient-other-account');
+      vi.stubEnv('Wrangler_Log_Sanitize', 'false');
+      vi.stubEnv('Cf_Access_Client_Id', 'id');
+      try {
+        const env = secretListEnv('acct-1', 'win32');
+        expect(env.Cloudflare_Account_Id).toBeUndefined();
+        expect(env.Wrangler_Log_Sanitize).toBeUndefined();
+        expect(env.Cf_Access_Client_Id).toBeUndefined();
+        expect(env.CLOUDFLARE_ACCOUNT_ID).toBe('acct-1');
+        expect(env.WRANGLER_LOG_SANITIZE).toBe('true');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('keeps case-variants on POSIX (genuinely different variables there)', () => {
+      vi.stubEnv('Cloudflare_Account_Id', 'lowercase-cousin');
+      try {
+        const env = secretListEnv('acct-1', 'linux');
+        expect(env.Cloudflare_Account_Id).toBe('lowercase-cousin');
+        expect(env.CLOUDFLARE_ACCOUNT_ID).toBe('acct-1');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   it('pins CLOUDFLARE_ACCOUNT_ID and scrubs the CF Access pair in the child env', async () => {
