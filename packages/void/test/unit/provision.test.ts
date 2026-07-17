@@ -5435,40 +5435,308 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
     expect(existsSync(lockMutex)).toBe(false);
   }, 15_000);
 
-  it('provision level: a quarantine rejection + sidecar-write failure surfaces BOTH errors and never releases', async () => {
+  it('provision level (F5 round 14): a persistence failure surfaces BOTH errors, arms the retention watchdog, and resolves by confirming the child DEAD (mutex released cleanly)', async () => {
     setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
-    const quarantineError = new WranglerQuarantineError(77_777, 'round-13: child unconfirmed');
+    // A REAL child that is already dead stands in for the unconfirmed wrangler group.
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    const childPid = child.pid!;
+    try {
+      process.kill(-childPid, 'SIGKILL');
+    } catch {
+      child.kill('SIGKILL');
+    }
+    {
+      const deadline = Date.now() + 5_000;
+      let dead = false;
+      while (!dead && Date.now() < deadline) {
+        try {
+          process.kill(childPid, 0);
+        } catch {
+          dead = true;
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(dead).toBe(true);
+    }
+    const quarantineError = new WranglerQuarantineError(childPid, 'round-14: child unconfirmed');
     const run: RunWrangler = () => Promise.reject(quarantineError);
-    mkdirSync(tmpBlocker);
     let thrown: unknown;
     try {
       await provisionCloudflareResources(
         tmpDir,
         wranglerPath,
         { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
-        { runWrangler: run, log: silentLog, lockOptions: { stale: 2_000 } },
+        {
+          runWrangler: run,
+          log: silentLog,
+          lockOptions: {
+            stale: 2_000,
+            // PERSISTENT persistence failure — every attempt (including the watchdog's
+            // retries) fails, so only the death probe can resolve the retention.
+            dirDurability: {
+              fsyncSync: () => {
+                throw Object.assign(new Error('ENOSPC: no space left on device, fsync'), {
+                  code: 'ENOSPC',
+                });
+              },
+            },
+          },
+        },
       );
     } catch (error) {
       thrown = error;
-    } finally {
-      rmSync(tmpBlocker, { recursive: true, force: true });
     }
-    try {
-      expect(thrown).toBeInstanceOf(AggregateError);
-      expect((thrown as AggregateError).message).toMatch(/intentionally still held/);
-      expect((thrown as AggregateError).errors[0]).toBe(quarantineError);
-      expect(String((thrown as AggregateError).errors[1])).toMatch(/could not persist/);
-      // The mutex is still on disk, HELD (tracked) by this process — never released
-      // under the unconfirmed child.
-      expect(existsSync(lockMutex)).toBe(true);
-      expect(existsSync(sidecar)).toBe(false);
-    } finally {
-      // Cleanup: the lock is still tracked by proper-lockfile — release it through the
-      // library so the heartbeat stops before afterEach removes tmpDir.
-      const properLockfile = (await import('proper-lockfile')).default;
-      await properLockfile.unlock(`${wranglerPath}.void-provision.lock`).catch(() => {});
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).message).toMatch(/intentionally still held/);
+    expect((thrown as AggregateError).errors[0]).toBe(quarantineError);
+    expect(String((thrown as AggregateError).errors[1])).toMatch(/could not persist/);
+    // Immediately after the rejection the mutex is still on disk, HELD (tracked) by
+    // this process — never released under the unconfirmed child…
+    expect(existsSync(lockMutex)).toBe(true);
+    expect(existsSync(sidecar)).toBe(false);
+    // …and the RETENTION WATCHDOG (armed by the failure) probes the recorded group,
+    // confirms it dead, and releases the mutex CLEANLY — no manual unlock needed.
+    const deadline = Date.now() + 5_000;
+    while (existsSync(lockMutex) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
     }
     expect(existsSync(lockMutex)).toBe(false);
+    expect(existsSync(sidecar)).toBe(false);
+    // The watchdog resolved — a fresh provision may start again (guard freed).
+    const { run: okRun } = makeRunner([{ match: /^d1 list/, reply: () => ok('[]') }]);
+    await expect(
+      provisionCloudflareResources(tmpDir, wranglerPath, emptyDesired, {
+        runWrangler: okRun,
+        log: silentLog,
+      }),
+    ).resolves.toBeDefined();
+  }, 15_000);
+
+  it('F5 (round 14): while the child LIVES, the watchdog retries persistence with backoff and detaches once it succeeds', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const { spawn } = await import('node:child_process');
+    const live = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    let failPersistence = true;
+    const quarantineError = new WranglerQuarantineError(live.pid, 'round-14: live child');
+    const run: RunWrangler = () => Promise.reject(quarantineError);
+    try {
+      let thrown: unknown;
+      try {
+        await provisionCloudflareResources(
+          tmpDir,
+          wranglerPath,
+          { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+          {
+            runWrangler: run,
+            log: silentLog,
+            lockOptions: {
+              stale: 2_000,
+              dirDurability: {
+                fsyncSync: () => {
+                  if (failPersistence) {
+                    throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' });
+                  }
+                },
+              },
+            },
+          },
+        );
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(AggregateError);
+      expect(existsSync(lockMutex)).toBe(true);
+      expect(existsSync(sidecar)).toBe(false);
+      // The durability problem clears; the watchdog's next retry persists the sidecar
+      // and detaches the lock (mutex retained on disk behind the durable marker).
+      failPersistence = false;
+      const deadline = Date.now() + 5_000;
+      while (!existsSync(sidecar) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(existsSync(sidecar)).toBe(true);
+      const recorded = JSON.parse(readFileSync(sidecar, 'utf-8')) as Record<string, unknown>;
+      expect(recorded.pid).toBe(live.pid);
+      expect(existsSync(lockMutex)).toBe(true); // retained, now safely detached
+      // The retained mutex is guarded by the sidecar: an acquirer fails closed on the
+      // live recorded group even with the mutex aged stale.
+      const old = new Date(Date.now() - 3_600_000);
+      utimesSync(lockMutex, old, old);
+      await expect(
+        acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 0 }),
+      ).rejects.toThrow(/QUARANTINED/);
+    } finally {
+      try {
+        process.kill(-live.pid!, 'SIGKILL');
+      } catch {
+        try {
+          live.kill('SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+      rmSync(lockMutex, { recursive: true, force: true });
+      rmSync(sidecar, { force: true });
+    }
+  }, 15_000);
+
+  it('F5 (round 14, child-process): the watchdog HOLDS the process at natural exit until the child dies, then releases and exits cleanly', async () => {
+    // THE F5 repro: on persistence failure the provision rejects with the lock left
+    // TRACKED — and proper-lockfile's EXIT SWEEP removes every tracked mutex when the
+    // parent naturally exits, leaving the live child with NO mutex and NO sidecar.
+    // Post-fix a REFERENCED watchdog holds the (otherwise drained) process open,
+    // confirms the child's death, releases the mutex normally, and only then lets the
+    // process exit.
+    const F5_TMP = join(import.meta.dirname, '.tmp-f5-round14');
+    rmSync(F5_TMP, { recursive: true, force: true });
+    mkdirSync(F5_TMP, { recursive: true });
+    const appRoot = join(F5_TMP, 'app');
+    const probe = join(F5_TMP, 'probe.mjs');
+    const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
+    writeFileSync(
+      probe,
+      `import { mkdirSync, writeFileSync } from 'node:fs';\n` +
+        `import { spawn } from 'node:child_process';\n` +
+        `import { join } from 'node:path';\n` +
+        `import { provisionCloudflareResources, WranglerQuarantineError } from ${JSON.stringify(provisionUrl)};\n` +
+        `const root = ${JSON.stringify(appRoot)};\n` +
+        `mkdirSync(root, { recursive: true });\n` +
+        `const cfg = join(root, 'wrangler.jsonc');\n` +
+        `writeFileSync(cfg, JSON.stringify({ name: 'app', account_id: 'acct' }));\n` +
+        // A real detached child standing in for the unconfirmed wrangler group; it
+        // exits BY ITSELF after 700ms.
+        `const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 700)'], { detached: true, stdio: 'ignore' });\n` +
+        `child.unref();\n` +
+        `const startedAt = Date.now();\n` +
+        `provisionCloudflareResources(root, cfg, { kvNamespaces: [], queues: [], d1: { binding: 'DB', name: 'myapp-db' } }, {\n` +
+        `  runWrangler: () => Promise.reject(new WranglerQuarantineError(child.pid, 'r14: unconfirmed')),\n` +
+        `  log: { info: () => {}, warn: () => {} },\n` +
+        `  lockOptions: {\n` +
+        `    dirDurability: { fsyncSync: () => { throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }); } },\n` +
+        `  },\n` +
+        `}).then(\n` +
+        `  () => writeFileSync(join(root, 'outcome.txt'), 'RESOLVED'),\n` +
+        `  () => writeFileSync(join(root, 'outcome.txt'), 'REJECTED:' + (Date.now() - startedAt)),\n` +
+        `);\n` +
+        `process.on('exit', () => {\n` +
+        `  let childAlive = true;\n` +
+        `  try { process.kill(child.pid, 0); } catch { childAlive = false; }\n` +
+        `  writeFileSync(join(root, 'exit.txt'), JSON.stringify({ elapsed: Date.now() - startedAt, childAlive }));\n` +
+        `});\n`,
+    );
+    const { spawn } = await import('node:child_process');
+    const parent = spawn(process.execPath, [probe], {
+      cwd: F5_TMP,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    parent.stderr.setEncoding('utf-8');
+    parent.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    const killTimer = setTimeout(() => parent.kill('SIGKILL'), 15_000);
+    try {
+      const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((res) => {
+        parent.on('close', (c, s) => res([c, s]));
+      });
+      clearTimeout(killTimer);
+      // The process exited NORMALLY (the watchdog resolved) — it was not killed.
+      expect(signal).toBeNull();
+      expect(code).toBe(0);
+      // The provision itself rejected fast (persistence failure)…
+      expect(readFileSync(join(appRoot, 'outcome.txt'), 'utf-8')).toContain('REJECTED:');
+      // …but the WATCHDOG held the process past the child's 700ms lifetime: at exit the
+      // child was confirmed dead and ≥ ~700ms had elapsed (pre-fix the loop drained and
+      // the process exited within milliseconds, sweeping the tracked mutex while the
+      // child lived).
+      const exitState = JSON.parse(readFileSync(join(appRoot, 'exit.txt'), 'utf-8')) as {
+        elapsed: number;
+        childAlive: boolean;
+      };
+      expect(exitState.childAlive).toBe(false);
+      expect(exitState.elapsed).toBeGreaterThanOrEqual(650);
+      // The retained state was surfaced loudly, naming the pid + lock path…
+      expect(stderr).toMatch(/RETAINED by this process/);
+      // …and the watchdog released the mutex cleanly after confirming death: no mutex,
+      // no sidecar left behind.
+      const cfgReal = realpathSync(join(appRoot, 'wrangler.jsonc'));
+      expect(existsSync(`${cfgReal}.void-provision.lock.lock`)).toBe(false);
+      expect(existsSync(`${cfgReal}.void-provision.lock.quarantine.json`)).toBe(false);
+    } finally {
+      clearTimeout(killTimer);
+      try {
+        parent.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+      rmSync(F5_TMP, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
+describe('acquireProvisionLock — F6 sidecar DIRECTORY durability failures propagate (round 14)', () => {
+  const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
+  const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
+
+  it('ENOSPC on the directory fsync is a PERSISTENCE FAILURE: no detach, lock stays tracked, hard error', async () => {
+    // Pre-fix ALL directory open/fsync/close failures were swallowed: on a real
+    // EIO/ENOSPC the code still detached the (now heartbeat-less) lock behind a sidecar
+    // whose DIRECTORY ENTRY could vanish on a crash — a stale-reclaimable mutex under a
+    // live child. Now only enumerated platform-unsupported codes are ignored.
+    setup(JSON.stringify({ name: 'app' }));
+    const lock = await acquireProvisionLock(wranglerPath, {
+      stale: 2_000,
+      dirDurability: {
+        fsyncSync: () => {
+          throw Object.assign(new Error('ENOSPC: no space left on device, fsync'), {
+            code: 'ENOSPC',
+          });
+        },
+      },
+    });
+    try {
+      expect(() => lock.quarantine({ pid: 42_424, reason: 'round-14 f6 enospc' })).toThrow(
+        /could not persist quarantine metadata.*ENOSPC/s,
+      );
+      // The non-durable sidecar was rolled back (state matches "not persisted")…
+      expect(existsSync(sidecar)).toBe(false);
+      // …and the lock did NOT detach: past the stale window the still-running heartbeat
+      // keeps the mutex fresh, so a contender sees a HELD lock (no steal).
+      await new Promise((r) => setTimeout(r, 2_600));
+      await expect(
+        acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 0 }),
+      ).rejects.toThrow(/already being held/);
+    } finally {
+      // Still tracked → release works normally and frees the mutex.
+      await lock.release();
+    }
+    expect(existsSync(lockMutex)).toBe(false);
+  }, 15_000);
+
+  it('a platform-unsupported code (EINVAL) is ignored — the quarantine still detaches behind the verified sidecar', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const lock = await acquireProvisionLock(wranglerPath, {
+      stale: 2_000,
+      dirDurability: {
+        fsyncSync: () => {
+          throw Object.assign(new Error('EINVAL: invalid argument, fsync'), { code: 'EINVAL' });
+        },
+      },
+    });
+    lock.quarantine({ pid: 42_425, reason: 'round-14 f6 einval' }); // must not throw
+    expect(existsSync(sidecar)).toBe(true);
+    expect(existsSync(lockMutex)).toBe(true); // retained (detached from the exit sweep)
+    await lock.release(); // no-op after a successful quarantine
+    expect(existsSync(lockMutex)).toBe(true);
+    rmSync(lockMutex, { recursive: true, force: true });
+    rmSync(sidecar, { force: true });
   });
 });
 

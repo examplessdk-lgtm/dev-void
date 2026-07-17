@@ -2017,13 +2017,17 @@ function quarantineSidecarPath(lockTarget: string): string {
  * probes the pid directly there).
  *
  * F3 (round 13) — DURABLE: the temp file is fsync'd before the rename, the directory is
- * fsync'd after it (best-effort where directories cannot be opened), and the final
- * sidecar is READ BACK and verified. Any failure THROWS — callers treat persistence as a
- * PRECONDITION for detaching the lock from proper-lockfile's tracking (see
+ * fsync'd after it (see the F6 classification below), and the final sidecar is READ
+ * BACK and verified. Any failure THROWS — callers treat persistence as a PRECONDITION
+ * for detaching the lock from proper-lockfile's tracking (see
  * {@link ProvisionLock.quarantine}); a sidecar that merely "probably" landed is not a
  * durable marker the acquisition gate can rely on.
  */
-function writeQuarantineSidecar(sidecarPath: string, info: QuarantineInfo): void {
+function writeQuarantineSidecar(
+  sidecarPath: string,
+  info: QuarantineInfo,
+  dirDurability?: ProvisionLockOptions['dirDurability'],
+): void {
   const payload = JSON.stringify(
     {
       pid: info.pid ?? null,
@@ -2059,16 +2063,42 @@ function writeQuarantineSidecar(sidecarPath: string, info: QuarantineInfo): void
     }
     throw error;
   }
+  // F6 (round 14) — the DIRECTORY entry (the rename above) must be durable too: without
+  // a directory fsync a crash can lose the just-renamed sidecar, leaving the retained
+  // heartbeat-less mutex stale-reclaimable under a live child. Only codes meaning "this
+  // platform/filesystem genuinely cannot fsync a directory" are ignored — enumerated:
+  //   - EISDIR / EPERM — Windows cannot open a directory with O_RDONLY at all (libuv
+  //     surfaces one of these depending on the Windows version/path kind);
+  //   - EINVAL         — fsync(2) on a directory fd is rejected by some filesystems
+  //     (certain FUSE/network mounts) and platforms;
+  //   - ENOTSUP/ENOSYS — the operation is not supported/implemented at all.
+  // EVERYTHING else (EIO, ENOSPC, EBADF, …) is a REAL durability failure: the sidecar
+  // is NOT a durable marker, so the just-renamed (non-durable) file is best-effort
+  // rolled back and the error PROPAGATES — the caller keeps the lock fully tracked and
+  // the F5 retention watchdog retries the persistence.
+  const dirOpen = dirDurability?.openSync ?? openSync;
+  const dirFsync = dirDurability?.fsyncSync ?? fsyncSync;
+  const dirClose = dirDurability?.closeSync ?? closeSync;
   try {
-    const dirFd = openSync(dirname(sidecarPath), 'r');
+    const dirFd = dirOpen(dirname(sidecarPath), 'r');
     try {
-      fsyncSync(dirFd);
+      dirFsync(dirFd);
     } finally {
-      closeSync(dirFd);
+      dirClose(dirFd);
     }
-  } catch {
-    // Some platforms (Windows) cannot open/fsync a directory — the read-back below is
-    // still required to pass.
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? '';
+    if (!['EISDIR', 'EPERM', 'EINVAL', 'ENOTSUP', 'ENOSYS'].includes(code)) {
+      try {
+        unlinkSync(sidecarPath);
+      } catch {
+        // Best-effort rollback of the non-durable file — the propagated error below is
+        // the real signal either way (a leftover sidecar is conservative: it makes the
+        // gate fail closed until its recorded pid is probed).
+      }
+      throw error;
+    }
+    // Platform-unsupported directory fsync — the read-back below is still required.
   }
   // VERIFY: the durable marker must be present and carry the recorded owner.
   const readBack: unknown = JSON.parse(readFileSync(sidecarPath, 'utf-8'));
@@ -2604,7 +2634,7 @@ export async function acquireProvisionLock(
       // stays fully TRACKED (heartbeat running, release() functional, NOT stealable)
       // and this throws the hard error below; a later quarantine() call retries.
       try {
-        writeQuarantineSidecar(quarantineSidecarPath(lockTarget), info);
+        writeQuarantineSidecar(quarantineSidecarPath(lockTarget), info, lockOptions?.dirDurability);
       } catch (error) {
         throw new Error(
           `provision: could not persist quarantine metadata to ` +
