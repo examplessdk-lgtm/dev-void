@@ -3285,41 +3285,93 @@ function createSecretRedactor(connectionString?: string): (text: string) => stri
   };
 }
 
+// --- F4 (round 14): THE one no-throw redaction boundary --------------------------
+// ALL classification and inspection of a seam rejection happens INSIDE the boundary
+// ({@link redactRejection}): a hostile Proxy's `instanceof`/property traps can throw an
+// error of the attacker's choosing (potentially secret-bearing), so no read of the
+// original value — not even `isQuarantineError` — may run outside it. If inspection is
+// unsafe anywhere, the boundary FAILS CLOSED AS QUARANTINE: a fresh INERT carrier
+// marked `{ quarantine: true }` propagates, so the whole-provision mutex is RETAINED
+// (conservative — the hostile value could have been hiding a real quarantine) and no
+// trap error ever replaces the rejection. Values bearing user accessors or Proxies are
+// NEVER returned as the original — a stateful/hostile getter can present clean text
+// during sanitization and mint the secret on a later read — they are converted to an
+// inert plain carrier (data properties only, prototype restored only for KNOWN error
+// classes). No logging path may coerce an unknown value (`String()`/template invokes an
+// arbitrary `toString`): {@link safeRedactedErrorMessage} extracts only safely-read
+// fields inside the boundary.
+
 /**
- * F4 (round 13) — deep-redact an UNKNOWN rejection value through the ONE text redactor.
- * THE single redaction carrier every propagated rejection routes through (the runWrangler
- * choke point via {@link redactRejection}, and the Hyperdrive lister's failure warning).
- * A seam may reject with ANYTHING — an Error, a plain STRING, an object, an array, a
- * FROZEN value, a graph carrying secrets in non-enumerable slots (`Error.cause`,
- * `AggregateError.errors`, `message`/`stack`), Maps/Sets, cycles. The contract:
- *   1. NEVER throw (the round-12 in-place mutator threw a TypeError assigning to a
- *      frozen Error's `message` — losing the quarantine classification AND embedding the
- *      secret-bearing message inside the TypeError itself);
- *   2. NEVER propagate an unsanitized value: when the graph can be fully redacted IN
- *      PLACE, the ORIGINAL value returns (identity preserved — quarantine detection and
- *      metadata fields survive untouched); when ANY required mutation is impossible
- *      (frozen/sealed/non-writable/accessor slot holding a secret), a fully sanitized
- *      FALLBACK CARRIER is returned instead — a fresh deep copy with every string
- *      redacted, the original PROTOTYPE restored (so `instanceof` classification
- *      survives) and every own property — enumerable or not — carried over;
+ * F4 (round 14) — the engine's own lazy `Error#stack` accessor pair, captured ONCE at
+ * module init. V8 defines `stack` as an own get/set accessor on every Error instance,
+ * sharing ONE getter/setter function across all of them — so FUNCTION IDENTITY proves
+ * "this is the engine's deterministic lazy-stack slot" (user code cannot forge these
+ * function identities). It is the ONLY accessor the in-place sanitizer may handle;
+ * every other accessor forces the inert fallback carrier.
+ */
+const engineStackDescriptor = Object.getOwnPropertyDescriptor(new Error(), 'stack');
+const ENGINE_STACK_GET = engineStackDescriptor?.get;
+const ENGINE_STACK_SET = engineStackDescriptor?.set;
+
+/**
+ * F4 (round 14) — the ONLY prototypes a rebuilt carrier may have restored. Restoring an
+ * ARBITRARY prototype would reintroduce hostile behavior on the otherwise-inert carrier
+ * (a prototype getter or `toString` the carrier's readers would still hit), so an
+ * unknown prototype degrades to the base Error/Object/Array prototype the fresh carrier
+ * was built with. `WranglerQuarantineError` is included so a rebuilt quarantine carrier
+ * keeps its `instanceof` classification.
+ */
+const KNOWN_SAFE_PROTOTYPES = new Set<object>([
+  Error.prototype,
+  TypeError.prototype,
+  RangeError.prototype,
+  ReferenceError.prototype,
+  SyntaxError.prototype,
+  EvalError.prototype,
+  URIError.prototype,
+  AggregateError.prototype,
+  WranglerQuarantineError.prototype,
+  Object.prototype,
+  Array.prototype,
+]);
+
+/**
+ * F4 (round 13/14) — deep-redact an UNKNOWN rejection value through the ONE text
+ * redactor, inside one no-throw attempt. A seam may reject with ANYTHING — an Error, a
+ * plain STRING, an object, an array, a FROZEN value, a graph carrying secrets in
+ * non-enumerable slots (`Error.cause`, `AggregateError.errors`, `message`/`stack`),
+ * Maps/Sets, cycles, Proxies, accessor-bearing objects. The contract:
+ *   1. NEVER throw — any internal throw (hostile trap/getter anywhere) returns
+ *      `{ ok: false }` so the caller fails closed;
+ *   2. NEVER propagate an unsanitized OR non-inert value: a graph of plain data
+ *      properties (plus the engine's own lazy `stack` slot) that can be fully redacted
+ *      IN PLACE returns the ORIGINAL (identity preserved — quarantine detection and
+ *      metadata fields survive untouched); anything else — a Proxy anywhere, ANY user
+ *      accessor, a frozen/non-writable secret-bearing slot — returns a fully sanitized
+ *      INERT deep copy (data properties only, every string redacted, only KNOWN
+ *      prototypes restored);
  *   3. traverse own property DESCRIPTORS (string + symbol keys, non-enumerable
  *      included — covering `message`, `stack`, `cause`, `errors`), plus Map keys/values
  *      and Set members (whose internal slots `Object.freeze` never covers), cycle-safely.
  */
-function redactUnknownValue(value: unknown, redactText: (text: string) => string): unknown {
+type RedactAttempt = { ok: true; value: unknown } | { ok: false };
+
+function tryRedactValue(value: unknown, redactText: (text: string) => string): RedactAttempt {
   try {
     if (typeof value === 'string') {
-      return redactText(value);
+      return { ok: true, value: redactText(value) };
     }
     if (typeof value !== 'object' || value === null) {
-      return value;
+      return { ok: true, value };
     }
-    return sanitizeInPlace(value, redactText) ? value : deepSanitizedCopy(value, redactText);
+    if (!utilTypes.isProxy(value) && sanitizeInPlace(value, redactText)) {
+      return { ok: true, value };
+    }
+    return { ok: true, value: deepSanitizedCopy(value, redactText) };
   } catch {
-    // Rule 1: never throw. Even a pathological value (throwing getters everywhere, a
-    // hostile Proxy) degrades to a minimal sanitized carrier, never an exception that
-    // would REPLACE the rejection (and destroy its classification) at the choke point.
-    return lastResortRedactedCarrier(value, redactText);
+    // Rule 1: never throw out of the attempt — a pathological value (throwing traps or
+    // getters anywhere) makes the caller fail closed instead.
+    return { ok: false };
   }
 }
 
@@ -3343,6 +3395,14 @@ function sanitizeInPlace(root: object, redactText: (text: string) => string): bo
       return;
     }
     seen.add(v);
+    // F4 (round 14) — a Proxy ANYWHERE in the graph forces the inert fallback carrier:
+    // its traps run arbitrary code on every later read, so a proxied original can mint
+    // fresh secrets (or throw) after "passing" this walk. Detection is native
+    // (`util.types.isProxy`), not trap-observable.
+    if (utilTypes.isProxy(v)) {
+      ok = false;
+      return;
+    }
     // Map/Set data lives in internal slots `Object.freeze` does NOT cover, so their
     // members are always rewritable in place (delete + re-add / set).
     if (v instanceof Map) {
@@ -3391,12 +3451,26 @@ function sanitizeInPlace(root: object, redactText: (text: string) => string): bo
         continue;
       }
       if (desc.get !== undefined || desc.set !== undefined) {
-        // An accessor slot passes when its CURRENT value is verifiably clean, or when a
-        // secret-bearing string can be rewritten THROUGH its setter with the result read
-        // back (V8's lazy `Error#stack` is exactly such a get/set pair — the stack text
-        // embeds the message, so it routinely carries the secret). An unreadable getter,
-        // a setter-less secret, or an unverifiable write forces the fallback carrier
-        // (rule 2: never propagate what we cannot prove sanitized).
+        // F4 (round 14) — ONLY the engine's own lazy `Error#stack` pair may be handled
+        // in place: its getter is deterministic (formats the captured frames + the
+        // current message) and rewriting through its setter morphs the slot into a
+        // verified data property. EVERY other accessor forces the fallback carrier — a
+        // stateful/hostile getter can return clean text during THIS walk and mint the
+        // secret on a later read, so an accessor-bearing original must never be
+        // returned as "sanitized" (rule 2).
+        const isEngineStackSlot =
+          key === 'stack' &&
+          ENGINE_STACK_GET !== undefined &&
+          desc.get === ENGINE_STACK_GET &&
+          desc.set === ENGINE_STACK_SET;
+        if (!isEngineStackSlot) {
+          ok = false;
+          return;
+        }
+        // The engine stack slot passes when its CURRENT text is verifiably clean, or
+        // when a secret-bearing string can be rewritten THROUGH its setter with the
+        // result read back (the stack text embeds the message, so it routinely carries
+        // the secret). An unverifiable write still forces the fallback carrier.
         let current: unknown;
         try {
           current = desc.get !== undefined ? desc.get.call(v) : undefined;
@@ -3511,10 +3585,19 @@ function deepSanitizedCopy(root: unknown, redactText: (text: string) => string):
       return out;
     }
     const out: object = Array.isArray(v) ? [] : v instanceof Error ? new Error() : {};
-    try {
-      Object.setPrototypeOf(out, Object.getPrototypeOf(v));
-    } catch {
-      // Keep the base prototype — the structural fields below still carry the metadata.
+    // F4 (round 14) — restore the prototype ONLY for KNOWN error/base classes. The
+    // carrier must be INERT: an arbitrary prototype could carry hostile getters or a
+    // hostile `toString` that later reads/coercions of the carrier would invoke, so an
+    // unknown prototype degrades to the base one `out` was built with (the structural
+    // fields below still carry the metadata; `redactRejection` restores the quarantine
+    // classification structurally when it was lost this way).
+    const proto: unknown = Object.getPrototypeOf(v);
+    if (typeof proto === 'object' && proto !== null && KNOWN_SAFE_PROTOTYPES.has(proto)) {
+      try {
+        Object.setPrototypeOf(out, proto);
+      } catch {
+        // Keep the base prototype.
+      }
     }
     copies.set(v, out);
     for (const key of Reflect.ownKeys(v)) {
@@ -3549,73 +3632,96 @@ function deepSanitizedCopy(root: unknown, redactText: (text: string) => string):
 }
 
 /**
- * F4 — the last-resort carrier when even building the sanitized copy failed: a minimal
- * fresh Error carrying only provably-redacted text plus the structural quarantine
- * classification when the original had one. Itself exception-safe.
+ * F4 (round 14) — extract a SAFELY-READ, redacted one-line message from an unknown
+ * value, for logging. Never coerces an object (`String()`/template literals invoke an
+ * arbitrary — possibly hostile — `toString`): only primitives are stringified, and for
+ * objects only a plain string `message` field is read (inside the no-throw boundary; a
+ * throwing trap/getter degrades to the generic placeholder). THE one helper every
+ * logging path uses for unknown rejection values (grep-proven: the Hyperdrive lister
+ * warning and the rebuilt-carrier message below).
  */
-function lastResortRedactedCarrier(value: unknown, redactText: (text: string) => string): Error {
-  let message = 'provision: a propagated error could not be sanitized; its content was withheld';
-  let name: string | undefined;
-  let quarantine = false;
-  let pid: number | undefined;
+function safeRedactedErrorMessage(value: unknown, redactText: (text: string) => string): string {
   try {
-    quarantine = isQuarantineError(value);
-    const raw = value as { message?: unknown; name?: unknown; pid?: unknown } | null;
-    if (typeof raw?.message === 'string') {
-      message = redactText(raw.message);
+    if (typeof value === 'string') {
+      return redactText(value);
     }
-    if (typeof raw?.name === 'string') {
-      name = raw.name;
+    if (
+      value === null ||
+      value === undefined ||
+      typeof value === 'number' ||
+      typeof value === 'boolean' ||
+      typeof value === 'bigint'
+    ) {
+      return String(value);
     }
-    if (quarantine && typeof raw?.pid === 'number') {
-      pid = raw.pid;
+    const message = (value as { message?: unknown }).message;
+    if (typeof message === 'string') {
+      return redactText(message);
     }
   } catch {
-    // Keep the generic message — never throw from the redactor.
+    // A throwing trap/getter — fall through to the withheld placeholder.
   }
-  const carrier = new Error(message);
-  if (name !== undefined) {
-    carrier.name = name;
-  }
-  if (quarantine) {
-    Object.assign(carrier, { quarantine: true as const, pid });
-  }
+  return 'the rejection could not be rendered safely; its content was withheld';
+}
+
+/** F4 (round 14) — the conservative carrier for a rejection that resists inspection. */
+function unsafeInspectionQuarantineCarrier(): Error {
+  const carrier = new Error(
+    'provision: a propagated rejection could not be safely inspected (a property or ' +
+      'prototype trap threw during redaction); its content was withheld. Treating it ' +
+      'conservatively as an unconfirmed-wrangler-child (quarantine) failure: the ' +
+      'whole-provision lock is retained, not released.',
+  );
+  Object.assign(carrier, { quarantine: true as const, pid: undefined });
   return carrier;
 }
 
 /**
- * F4 (round 13) — redact a seam REJECTION while GUARANTEEING the quarantine
- * classification survives. The classification (and pid metadata) is captured from the
- * original value BEFORE redaction — never read back off the post-redaction object — so
- * whatever the redactor had to do (in-place, fallback copy, last resort), a quarantined
- * rejection can never degrade into an ordinary failure that would RELEASE the
- * whole-provision lock under a possibly-live wrangler child.
+ * F4 (round 13/14) — redact a seam REJECTION with EVERYTHING — the quarantine
+ * classification included — inside the ONE no-throw boundary, GUARANTEEING:
+ *   1. this function NEVER throws (pre-fix, `isQuarantineError`'s `instanceof` ran on
+ *      the ORIGINAL value before any boundary — a Proxy with throwing
+ *      `getPrototypeOf`/property traps made the redactor itself throw a
+ *      secret-bearing, classification-free replacement error, and the outer path then
+ *      RELEASED the mutex under a possibly-live child);
+ *   2. if inspection is unsafe ANYWHERE (classification, redaction, message reads), it
+ *      FAILS CLOSED AS QUARANTINE: a fresh INERT sanitized carrier marked
+ *      `{ quarantine: true }` propagates, so the mutex is retained (conservative — the
+ *      hostile value could have been hiding a real quarantine) and no trap error or
+ *      secret ever escapes;
+ *   3. a quarantined rejection can never degrade into an ordinary failure: the
+ *      classification + pid are captured inside the boundary and restored structurally
+ *      on the carrier when a rebuild lost them.
  */
 function redactRejection(error: unknown, redactText: (text: string) => string): unknown {
-  const wasQuarantine = isQuarantineError(error);
-  const quarantinePid =
-    wasQuarantine && typeof (error as WranglerQuarantineError).pid === 'number'
-      ? (error as WranglerQuarantineError).pid
-      : undefined;
-  const redacted = redactUnknownValue(error, redactText);
-  if (!wasQuarantine || isQuarantineError(redacted)) {
-    return redacted;
+  try {
+    const wasQuarantine = isQuarantineError(error);
+    const quarantinePid =
+      wasQuarantine && typeof (error as WranglerQuarantineError).pid === 'number'
+        ? (error as WranglerQuarantineError).pid
+        : undefined;
+    const attempt = tryRedactValue(error, redactText);
+    if (!attempt.ok) {
+      return unsafeInspectionQuarantineCarrier();
+    }
+    const redacted = attempt.value;
+    if (!wasQuarantine || isQuarantineError(redacted)) {
+      return redacted;
+    }
+    // The redactor had to rebuild and the carrier lost the classification (e.g. the
+    // original relied on a prototype outside the known-safe set) — restore it
+    // structurally on the (always freshly-built, inert) carrier.
+    const carrier =
+      redacted instanceof Error
+        ? redacted
+        : new Error(safeRedactedErrorMessage(redacted, redactText));
+    Object.assign(carrier, { quarantine: true as const, pid: quarantinePid });
+    return carrier;
+  } catch {
+    // Rule 2 — anything that slipped past the inner boundaries still fails closed as
+    // an inert quarantine-conservative carrier, never a throw out of the redactor.
+    return unsafeInspectionQuarantineCarrier();
   }
-  // The redactor had to rebuild and the carrier lost the classification (e.g. the
-  // original relied on a prototype that could not be restored) — restore it
-  // structurally on the (always freshly-built, mutable) carrier.
-  const carrier =
-    redacted instanceof Error
-      ? redacted
-      : new Error(
-          redactText(
-            error instanceof Error && typeof error.message === 'string'
-              ? error.message
-              : String(error),
-          ),
-        );
-  Object.assign(carrier, { quarantine: true as const, pid: quarantinePid });
-  return carrier;
 }
 
 /**
@@ -4413,13 +4519,13 @@ async function provisionCloudflareResourcesLocked(
           validatedConfigs = result;
           existenceUnknown = false;
         } catch (error) {
-          // F4/F5 — redact through the ONE deep redactor before propagating (a
-          // lister/network error could echo a URL carrying userinfo credentials, and an
-          // injected seam may reject with a plain string instead of an Error).
-          const redacted = redactUnknownValue(error, redactSecrets);
+          // F4/F5 (round 14) — never coerce the unknown rejection (`String()`/template
+          // would invoke an arbitrary — possibly hostile — `toString`, and a lister/
+          // network error could echo a URL carrying userinfo credentials): log ONLY a
+          // safely-extracted, redacted message from inside the no-throw boundary.
           log.warn(
             `Hyperdrive existence check for ${name} failed: ` +
-              (redacted instanceof Error ? redacted.message : String(redacted)),
+              safeRedactedErrorMessage(error, redactSecrets),
           );
           existenceUnknown = true;
           validatedConfigs = undefined;

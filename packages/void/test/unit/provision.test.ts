@@ -15,6 +15,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { types as nodeUtilTypes } from 'node:util';
 import { parse as parseJsoncRaw } from 'jsonc-parser';
 import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
@@ -4387,6 +4388,150 @@ describe('provisionCloudflareResources — F4 redaction carrier: frozen/nested p
     expect(thrown).toBe(rejection);
     expect((thrown as typeof rejection).detail.get('url')).not.toContain('sup3r-secret');
     expect([...(thrown as typeof rejection).seen][0]).not.toContain('sup3r-secret');
+  });
+});
+
+describe('provisionCloudflareResources — F4 hostile values: one no-throw boundary, inert carriers, quarantine-conservative (round 14)', () => {
+  const conn = 'postgres://dbuser:sup3r-secret@db.example.com:5432/app';
+  const hyperdriveDesired: DesiredResourceSet = {
+    ...emptyDesired,
+    hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: conn },
+  };
+  const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
+  const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
+
+  async function provisionRejectingWith(rejection: unknown): Promise<unknown> {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const run: RunWrangler = () => Promise.reject(rejection);
+    let thrown: unknown;
+    try {
+      await provisionCloudflareResources(tmpDir, wranglerPath, hyperdriveDesired, {
+        runWrangler: run,
+        log: silentLog,
+        listHyperdriveConfigs: async () => [],
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeDefined();
+    return thrown;
+  }
+
+  it('a throwing-trap Proxy carrying the secret → inert redacted carrier + QUARANTINE-conservative handling (no release, no leak)', async () => {
+    // Pre-fix `redactRejection` classified the ORIGINAL value before any boundary:
+    // `isQuarantineError`'s `instanceof` invoked this Proxy's getPrototypeOf trap, the
+    // redactor itself THREW the trap's secret-bearing error as the replacement
+    // rejection (classification lost), and the outer path RELEASED the mutex.
+    const hostile = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error(`property trap leaking ${conn}`);
+        },
+        getPrototypeOf() {
+          throw new Error(`prototype trap leaking ${conn}`);
+        },
+        ownKeys() {
+          throw new Error(`ownKeys trap leaking ${conn}`);
+        },
+      },
+    );
+    const thrown = await provisionRejectingWith(hostile);
+    // An INERT fresh carrier — never the Proxy, never a trap error. (Compared via
+    // Object.is: handing the hostile proxy to an expect matcher would itself invoke
+    // its traps.)
+    expect(Object.is(thrown, hostile)).toBe(false);
+    expect(nodeUtilTypes.isProxy(thrown)).toBe(false);
+    expect(thrown).toBeInstanceOf(Error);
+    const rendered = `${(thrown as Error).message}\n${(thrown as Error).stack ?? ''}`;
+    expect(rendered).not.toContain('sup3r-secret');
+    expect(rendered).toMatch(/could not be safely inspected/);
+    // FAIL CLOSED AS QUARANTINE: the value resisted inspection, so it is treated as
+    // potentially-quarantine-bearing…
+    expect((thrown as { quarantine?: boolean }).quarantine).toBe(true);
+    // …and the provision RETAINED the mutex + persisted the sidecar (no release under
+    // a possibly-live child the hostile value could have been hiding).
+    expect(existsSync(lockMutex)).toBe(true);
+    expect(existsSync(sidecar)).toBe(true);
+    const recorded = JSON.parse(readFileSync(sidecar, 'utf-8')) as Record<string, unknown>;
+    expect(String(recorded.reason)).not.toContain('sup3r-secret');
+    rmSync(lockMutex, { recursive: true, force: true });
+    rmSync(sidecar, { force: true });
+  });
+
+  it('an accessor that re-mints the secret on later reads → inert carrier (the original is NEVER returned)', async () => {
+    // Pre-fix the in-place walker verified an accessor's CURRENT value and returned the
+    // ORIGINAL when it looked clean — a stateful getter then minted the secret on every
+    // read AFTER redaction (e.g. while being logged).
+    let reads = 0;
+    const rejection = {
+      code: 'E_STATEFUL',
+      get detail(): string {
+        reads += 1;
+        return reads === 1 ? 'first read looks clean' : `later read mints ${conn}`;
+      },
+    };
+    const thrown = await provisionRejectingWith(rejection);
+    expect(thrown).not.toBe(rejection); // accessor-bearing → inert fallback carrier
+    // The carrier holds a redacted SNAPSHOT as a plain data property: repeated reads
+    // can never re-mint the secret.
+    const first = (thrown as { detail?: unknown }).detail;
+    const second = (thrown as { detail?: unknown }).detail;
+    expect(first).toBe(second);
+    expect(String(first)).not.toContain('sup3r-secret');
+    expect(JSON.stringify(thrown)).not.toContain('sup3r-secret');
+    expect((thrown as { code?: string }).code).toBe('E_STATEFUL');
+  });
+
+  it('a benign (non-throwing) Proxy is still converted to an inert carrier, fully redacted', async () => {
+    const target = { note: `failed using ${conn}` };
+    const benignProxy = new Proxy(target, {});
+    const thrown = await provisionRejectingWith(benignProxy);
+    // Never the Proxy itself (its traps would run on every later read)…
+    expect(thrown).not.toBe(benignProxy);
+    expect(nodeUtilTypes.isProxy(thrown)).toBe(false);
+    // …and the copied data is redacted.
+    expect(JSON.stringify(thrown)).not.toContain('sup3r-secret');
+    expect(JSON.stringify(thrown)).toContain('[REDACTED]');
+  });
+
+  it('the Hyperdrive lister warning path never invokes an arbitrary toString (no coercion, no leak, no crash)', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    let toStringInvoked = false;
+    const hostileRejection = {
+      message: 42, // non-string → the safe extractor must fall back, never coerce
+      toString(): string {
+        toStringInvoked = true;
+        throw new Error(`hostile toString leaking ${conn}`);
+      },
+    };
+    const warnings: Array<string> = [];
+    const { run } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: conn },
+        },
+        {
+          runWrangler: run,
+          log: { info: () => {}, warn: (msg) => warnings.push(msg) },
+          listHyperdriveConfigs: async () => {
+            throw hostileRejection;
+          },
+        },
+      ),
+    ).rejects.toThrow(/cannot verify whether Hyperdrive config/);
+    // The warning was logged from safely-extracted fields only.
+    expect(toStringInvoked).toBe(false);
+    const logged = warnings.join('\n');
+    expect(logged).toContain('Hyperdrive existence check for myapp-hd failed:');
+    expect(logged).toContain('could not be rendered safely');
+    expect(logged).not.toContain('sup3r-secret');
+    // The lister failure is an ordinary fail-closed path — the mutex was released.
+    expect(existsSync(lockMutex)).toBe(false);
   });
 });
 
