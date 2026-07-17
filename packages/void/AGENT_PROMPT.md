@@ -12,4 +12,6 @@ Rewrites and redirects: declare static rules in `void.json` under `routing.redir
 
 Logs: surface app-level errors that should show up under `void project logs --level error` via `import { logger } from "void/log"` and `logger.error(msg, fields?)` (also `.warn` / `.info`). Anything caught and only persisted to your own DB is invisible to Cloudflare Tail; route it through `logger.*` or `console.*` so the platform can see it.
 
+Self-host deploy: `void deploy` targets the Void platform; to deploy to the user's OWN Cloudflare account instead, use `void deploy --backend cloudflare` (add `--provision` on the first deploy to create the D1/KV/R2/Queues/Hyperdrive resources the source needs). It uses local wrangler auth, so pin an account (`account_id` in `wrangler.jsonc` or `CLOUDFLARE_ACCOUNT_ID`) and keep real secrets in `wrangler secret put` — `.env`/`.env.production` values ship as plaintext worker vars. Worker-bearing apps only (full Void app or framework SSR); `--provision` is a single-operator, dev-machine step and is disabled in CI.
+
 Full docs are in `node_modules/void/docs/`. If you have the `void` skill available, use it for a complete API reference covering project structure, routing, pages mode, database, auth, typed fetch, KV, storage, queues, cron jobs, CLI, configuration, and deployment.

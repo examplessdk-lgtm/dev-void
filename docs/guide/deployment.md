@@ -106,6 +106,6 @@ Connect the repository to your project once with `void github connect <project> 
 
 ## Other Targets
 
-If you prefer to deploy directly to your own Cloudflare account instead of using Void's managed platform, see the [Cloudflare integration guide](../integrations/cloudflare.md).
+If you prefer to deploy directly to your own Cloudflare account instead of using Void's managed platform, run `void deploy --backend cloudflare` (add `--provision` on the first deploy to create the D1/KV/R2/Queues/Hyperdrive resources your app needs). This uses your local wrangler auth and root `wrangler.jsonc` -- pin an account (`account_id` or `CLOUDFLARE_ACCOUNT_ID`) and keep real secrets in `wrangler secret put` rather than `.env`. It deploys worker-bearing apps (a full Void app or framework SSR); provision is a single-operator, dev-machine step and is disabled in CI. See the [Cloudflare integration guide](../integrations/cloudflare.md#deploy-to-your-own-cloudflare-account) for the full walk-through.
 
 To deploy to Node.js, Bun, or Deno instead of Cloudflare, set [`target`](../reference/config.md) in `void.json`. This builds a standalone server you can run anywhere, including Docker, Railway, and Fly.io. These targets do not have access to Void platform features such as D1, KV, R2, built-in auth, Workers AI, or cron scheduling. See the [Node.js, Bun, and Deno guide](../integrations/nodejs-bun-deno.md).

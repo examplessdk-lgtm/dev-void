@@ -214,9 +214,53 @@ When deploying via `void deploy` (to the Void platform), the `wrangler.json` in 
 
 ## Deploy to your own Cloudflare account
 
-Void's default deployment path is `void deploy`, which uploads to the Void platform. But the generated worker is a standard Cloudflare Worker -- you can deploy it directly to your own account with `wrangler deploy`.
+Void's default deployment path is `void deploy`, which uploads to the Void platform. But the generated worker is a standard Cloudflare Worker -- you can deploy it directly to your own account. Two paths get you there:
 
-### 1. Create your resources
+- **[`void deploy --backend cloudflare`](#one-command-void-deploy-backend-cloudflare)** -- a first-class flow that provisions bindings, applies remote migrations, checks secrets, builds, and runs `wrangler deploy` for you.
+- **[Manual `vite build && wrangler deploy`](#manual-build-and-deploy-with-wrangler)** -- create resources and edit `wrangler.jsonc` yourself, then build and deploy with wrangler directly.
+
+Either way, the [Local development](#local-development), [AI](#ai-self-host), and [ISR](#isr-self-host) notes below apply.
+
+### One command: `void deploy --backend cloudflare`
+
+`void deploy --backend cloudflare` deploys the built worker to **your own** Cloudflare account. It uses your local wrangler auth and your root `wrangler.jsonc` -- there is no Void login or linked project.
+
+```bash
+# Deploy using the resources already declared in wrangler.jsonc
+void deploy --backend cloudflare
+
+# Create any missing resources first, then deploy
+void deploy --backend cloudflare --provision
+```
+
+**Prerequisites**
+
+- **Pin an account.** Set `account_id` in your root `wrangler.jsonc`, or export `CLOUDFLARE_ACCOUNT_ID`. A multi-account token otherwise makes wrangler prompt (or error in CI), which Void cannot intercept -- so the account must be pinned first.
+- **Authenticate wrangler.** Run `wrangler login`, or set `CLOUDFLARE_API_TOKEN`. Deploy needs a token with `Workers Scripts:Edit` plus read on the resources you bind. `--provision` additionally needs per-product `*:Edit` (D1, KV, R2, Queues, Hyperdrive).
+- **Docker**, if your app uses the sandbox -- the build needs it locally.
+
+**What it does** (in order): guards that the app is worker-bearing (a full Void app or framework SSR -- see [scope](#scope-and-limitations)); pins the account and confirms wrangler auth; provisions or drift-checks resources; applies remote D1 migrations for SQLite apps; warns on plaintext vars and gates on missing required secrets; then builds and runs `wrangler deploy`.
+
+Without `--provision`, deploy is a **drift check**: if a binding your source needs is not yet in `wrangler.jsonc` with a real id, deploy stops and names each missing resource, telling you to run `--provision` once.
+
+**`--provision`** creates any D1 database, KV namespace, R2 bucket, Queues, Hyperdrive config, and the ISR cache namespace your source needs, then lets wrangler write the real ids into your root `wrangler.jsonc`. It is **idempotent** -- it reads existing ids first, so re-running creates nothing that already exists.
+
+#### Scope and limitations
+
+- **Worker-bearing apps only (v1).** This backend deploys a full Void app or a framework SSR app. Static-only / SPA apps are not supported here yet -- deploy those with `void deploy` (the managed platform) or host the built assets on Cloudflare Pages / any static host.
+- **Provision is a single-operator, dev-machine action.** The lock guarding it is per local config path only; it does not coordinate across machines or CI hosts. Two people provisioning the same account at once could create duplicate resources.
+- **Provision fails closed in CI.** In non-interactive shells, `--provision` is disabled unless your committed `wrangler.jsonc` already covers every resource (a provable no-op). The workflow is: provision **locally**, commit the updated `wrangler.jsonc`, then let CI run `void deploy --backend cloudflare` (deploy itself is CI-safe).
+- **Your `wrangler.jsonc` is rewritten on provision.** Wrangler preserves your comments but normalizes the whole file's indentation when it writes the new ids -- expect that in the diff.
+- **`.env` / `.env.production` values ship as plaintext.** They bake into the worker's `vars`. Move real secrets to `wrangler secret put <NAME>` so they are never committed into `wrangler.json`. Deploy warns on likely-plaintext secrets and hard-blocks on missing required secrets.
+- **First deploy of a new worker.** A worker that has never been deployed has no remote secrets to list yet, so the secret gate prints the still-unset required key names and the `wrangler secret put <NAME>` commands that bootstrap them on the draft worker (or add a value to `.env` / `.env.production` and rerun).
+
+The manual steps below are the by-hand equivalent -- reach for them when you want to manage resources and `wrangler.jsonc` yourself.
+
+### Manual: build and deploy with wrangler
+
+Prefer to manage everything by hand? Create the resources, write `wrangler.jsonc`, and run `wrangler deploy` yourself.
+
+#### 1. Create your resources
 
 Create whatever bindings your app uses:
 
@@ -231,7 +275,7 @@ wrangler kv namespace create KV
 wrangler r2 bucket create my-app-storage
 ```
 
-### 2. Add a `wrangler.jsonc`
+#### 2. Add a `wrangler.jsonc`
 
 Create `wrangler.jsonc` in your project root with the resource IDs from step 1:
 
@@ -264,7 +308,7 @@ Create `wrangler.jsonc` in your project root with the resource IDs from step 1:
 
 Only include the bindings your app actually uses. You can also add service bindings, custom routes, environment overrides, and any other standard wrangler fields -- they all flow through to the build output. You don't need `main` or `assets` -- those are set by the plugin.
 
-### 3. Run migrations
+#### 3. Run migrations
 
 If your app uses D1, apply migrations before deploying:
 
@@ -274,7 +318,7 @@ wrangler d1 migrations apply my-app-db --remote
 
 This uses the same `db/migrations/` directory that Void uses locally. `my-app-db` is the database name from your `wrangler.jsonc`; using the database name avoids accidentally applying migrations to the wrong binding.
 
-### 4. Build and deploy
+#### 4. Build and deploy
 
 ```bash
 vite build && wrangler deploy

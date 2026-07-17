@@ -226,19 +226,22 @@ If `--project` is provided, purges that project's cache instead of the linked pr
 
 ```
 void deploy [--project <name>] [--dir <path>] [--spa] [--skip-build] [--debug]
+void deploy --backend cloudflare [--provision]
 ```
 
 Auto-detects your project type and chooses the right pipeline. See [Supported App Types](../guide/app-types.md) and [Deployment](../guide/deployment.md) for details.
 
 For Drizzle projects, deploy performs a read-only schema drift check. If a new migration would be generated, deploy stops and tells you to run `void db generate`, review the migration, commit it yourself, and rerun `void deploy`.
 
-| Flag               | Purpose                                                                      |
-| ------------------ | ---------------------------------------------------------------------------- |
-| `--project <name>` | Target a specific project by slug                                            |
-| `--dir <path>`     | Deploy a pre-built static directory (skips build)                            |
-| `--spa`            | Use SPA mode instead of SSG for static deploys                               |
-| `--skip-build`     | Skip the build step (use existing build output)                              |
-| `--debug`          | Mirror the structured deploy log to stderr (also written to `~/.void/logs/`) |
+| Flag                   | Purpose                                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------- |
+| `--project <name>`     | Target a specific project by slug                                                     |
+| `--dir <path>`         | Deploy a pre-built static directory (skips build)                                     |
+| `--spa`                | Use SPA mode instead of SSG for static deploys                                        |
+| `--skip-build`         | Skip the build step (use existing build output)                                       |
+| `--backend cloudflare` | Deploy to your own Cloudflare account instead of the Void platform                    |
+| `--provision`          | Create missing bindings (D1/KV/R2/Queues/Hyperdrive); requires `--backend cloudflare` |
+| `--debug`              | Mirror the structured deploy log to stderr (also written to `~/.void/logs/`)          |
 
 Every deploy writes a structured JSONL trace to `~/.void/logs/deploy-<timestamp>.jsonl` regardless of `--debug`. On failure the path is printed at the end of the error message so you can attach it when reporting platform issues. `VOID_DEPLOY_DEBUG=1` is accepted as an alternate trigger for stderr mirroring.
 
@@ -251,6 +254,32 @@ Project resolution precedence:
 If no project is linked and no override is provided, CLI prompts to link or create one. In CI (non-TTY), `void deploy` errors out instead — set `VOID_PROJECT` or pass `--project <slug>`.
 
 That fallback is mainly for projects that skipped Void project setup during `void init`.
+
+### `void deploy --backend cloudflare`
+
+Deploy the built worker straight to **your own** Cloudflare account instead of the Void platform. This path uses your local `wrangler` auth and your root `wrangler.jsonc` — no Void login or linked project is involved.
+
+```
+void deploy --backend cloudflare              # deploy using resources already in wrangler.jsonc
+void deploy --backend cloudflare --provision  # create any missing resources first, then deploy
+```
+
+Prerequisites:
+
+- A Cloudflare account must be **pinned**: set `account_id` in your root `wrangler.jsonc`, or export `CLOUDFLARE_ACCOUNT_ID`. A multi-account token otherwise makes wrangler prompt (or error in CI), which Void cannot intercept.
+- Authenticate wrangler (`wrangler login`, or set `CLOUDFLARE_API_TOKEN`). Deploy needs a token with `Workers Scripts:Edit` plus read on the resources you bind; `--provision` additionally needs per-product `*:Edit` (D1, KV, R2, Queues, Hyperdrive).
+- Local Docker is required to build apps that use the sandbox.
+
+What it does, in order: guards that the app is worker-bearing (a full Void app or framework SSR — static/SPA is not supported on this backend yet), pins the account and checks auth, provisions or drift-checks resources, applies remote D1 migrations for SQLite apps, checks production secrets, then builds and runs `wrangler deploy`.
+
+`--provision` creates any D1 database, KV namespace, R2 bucket, Queues, Hyperdrive config, and the ISR cache namespace your source needs, then lets wrangler write the real ids into your root `wrangler.jsonc`. It is **idempotent** — re-running creates nothing that already exists (it reads existing ids first). Notes:
+
+- **Provision is a single-operator, dev-machine action.** The lock that guards it is per local config path only; it does not coordinate across machines. Two people provisioning the same account at once could create duplicate resources. `--provision` also **fails closed in CI / non-interactive shells** unless your committed `wrangler.jsonc` already covers every resource (a provable no-op). Provision locally, commit the updated `wrangler.jsonc`, then let CI run `void deploy --backend cloudflare`.
+- **Your `wrangler.jsonc` is rewritten.** When wrangler writes the new ids, it preserves your comments but normalizes the whole file's indentation — expect that in the diff.
+- **`.env` / `.env.production` values ship as plaintext.** They are baked into the worker's `vars`. Move real secrets to `wrangler secret put <NAME>` so they are not committed into `wrangler.json`. Deploy warns on likely-plaintext secrets and hard-blocks on missing required secrets.
+- **First deploy of a not-yet-deployed worker:** its remote secrets can't be listed yet, so the secret gate prints the required key names and the `wrangler secret put <NAME>` commands to bootstrap them on the draft worker before deploying (or add a value to `.env` / `.env.production` and rerun).
+
+See the [Cloudflare integration guide](../integrations/cloudflare.md#deploy-to-your-own-cloudflare-account) for the full walk-through.
 
 ## Database
 
