@@ -444,6 +444,82 @@ export class SelfHostEnvValidationError extends Error {
   }
 }
 
+/**
+ * F5 — the STABLE, values-free classification of a self-host schema failure.
+ * env.ts evaluation and Standard-Schema validators run ARBITRARY user code that
+ * can embed an env value in a thrown/rejected error (its `message`, `stack`, or
+ * `cause`), and `VOID_ENV_UNMASK` disables redaction — so the original error is
+ * never surfaced. Every {@link SelfHostSchemaError} instead carries only one of
+ * these codes plus fixed text, so neither its message, its `reason` field, nor
+ * its JSON serialization can echo a value.
+ *   - `schema-load-failed`      — importing/evaluating the user's env.ts threw.
+ *   - `schema-validation-error` — a registered validator threw or rejected while
+ *                                 checking a production value.
+ */
+export type SelfHostSchemaFailureReason = 'schema-load-failed' | 'schema-validation-error';
+
+/**
+ * A self-host schema evaluation/validation step threw. DISTINCT from
+ * {@link SelfHostEnvValidationError} (which means "a required value is missing
+ * or invalid", carrying key names): this means the schema machinery itself
+ * raised — env.ts failed to evaluate, or a validator threw/rejected rather than
+ * returning issues. F5 — values-free by construction: the original error's
+ * message/stack/cause are DROPPED at the boundary and only the structural
+ * {@link SelfHostSchemaFailureReason} code + fixed guidance survive, so no env
+ * value the user's code may have embedded can reach the thrown error, even
+ * under `VOID_ENV_UNMASK`.
+ */
+export class SelfHostSchemaError extends Error {
+  override name = 'SelfHostSchemaError';
+  constructor(
+    message: string,
+    /** Stable, values-free failure classification. */
+    public readonly reason: SelfHostSchemaFailureReason,
+  ) {
+    super(message);
+  }
+}
+
+/** F5 — the fixed, values-free message for each schema-failure reason. */
+function schemaFailureMessage(reason: SelfHostSchemaFailureReason): string {
+  switch (reason) {
+    case 'schema-load-failed':
+      return (
+        'env: the project env schema could not be loaded (reason: schema-load-failed). ' +
+        'Check that env.ts evaluates without error, then run the deploy again.'
+      );
+    case 'schema-validation-error':
+      return (
+        'env: an env schema validator raised an error while checking production values ' +
+        '(reason: schema-validation-error). Re-run the validator locally to see its own diagnostics.'
+      );
+  }
+}
+
+/**
+ * F5 — values-free boundary around EVERY self-host schema evaluation +
+ * validation step. `loadSchema` evaluates the user's env.ts and each
+ * `validateProdEnv` / `validateAllEnv` pass runs the registered validators —
+ * all arbitrary code that can throw/reject an error EMBEDDING an env value in
+ * its message, stack, or cause (and `VOID_ENV_UNMASK` disables redaction). Any
+ * throw/reject from `fn` is caught, its original message/stack/cause DROPPED,
+ * and a fixed structural {@link SelfHostSchemaError} rethrown in its place. The
+ * managed `validateProdEnv` itself is NEVER wrapped — only the self-host CALL
+ * SITES pass through here, so the managed path is byte-identical.
+ */
+async function withSchemaBoundary<T>(
+  reason: SelfHostSchemaFailureReason,
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch {
+    // Drop the caught error entirely (message/stack/cause) — it may carry a
+    // value — and rethrow only the structural, values-free classification.
+    throw new SelfHostSchemaError(schemaFailureMessage(reason), reason);
+  }
+}
+
 export type ValidateSelfHostProdEnvOptions = {
   /**
    * Absolute path to the resolved root wrangler config — pinned onto every
@@ -506,19 +582,26 @@ export type SelfHostProdEnvResult = {
  *
  * wrangler is only invoked when remote secrets could change the outcome
  * (remote names can only satisfy MISSING keys, never fix an invalid local
- * value). This keeps first deploys working: a locally-satisfied schema never
- * requires the worker to already exist, while a genuinely missing key on a
- * fresh worker fails the wrangler call (worker not found) — a hard, fail-closed
+ * value, and can be shadowed by an empty overlay). This keeps first deploys
+ * working: a locally-satisfied schema with no empty overlay never requires the
+ * worker to already exist, while a genuinely missing key on a fresh worker
+ * fails the wrangler call (worker not found) — a hard, fail-closed
  * {@link SelfHostFirstDeployError} carrying the missing key names + bootstrap
  * guidance (F4), rather than a false "all secrets present".
  *
- * Two build-fidelity fences guard the discharge (F2/F3):
- *   - A required key that is PRESENT-but-EMPTY locally (`FOO=`) is NOT
- *     discharged by a same-named remote secret — the build still bakes the
- *     empty value into plaintext `vars`, which wrangler 4.107 gives precedence
- *     over the remote secret, so the deploy would ship empty OVER the secret.
- *   - The target account is reconciled against the config's `account_id` BEFORE
- *     spawning wrangler, so `secret list` can never consult a different account.
+ * Three fences guard the discharge (F2/F3/F5):
+ *   - F2 — the check runs over the EFFECTIVE build map, per required key,
+ *     BEFORE the local-valid fast path. A required key that is PRESENT-but-EMPTY
+ *     in that map (`FOO=` in ANY build-loaded overlay — incl. one that overrode
+ *     a non-empty `.env.production` value) is NEVER discharged by a same-named
+ *     remote secret: the build bakes the empty value into plaintext `vars`,
+ *     which wrangler 4.107 gives precedence over the remote secret, so the
+ *     deploy would ship empty OVER the secret. Fail closed naming those keys.
+ *   - F3 — the target account is reconciled against the config's `account_id`
+ *     BEFORE spawning wrangler, so `secret list` can never consult a different
+ *     account.
+ *   - F5 — all schema loading + validation runs inside {@link withSchemaBoundary}
+ *     so a throwing env.ts or validator becomes a values-free structural error.
  */
 export async function validateSelfHostProdEnv(
   root: string,
@@ -526,21 +609,58 @@ export async function validateSelfHostProdEnv(
 ): Promise<SelfHostProdEnvResult> {
   // Skip the wrangler round-trip when the project has no typed env schema
   // (mirrors assertEnvSchemaValid's findEnvFile fast path).
-  if (findEnvFile(root) == null) {
+  const envFile = findEnvFile(root);
+  if (envFile == null) {
     return { hasSchema: false, remoteSecretNames: null };
   }
 
-  const local = await validateProdEnv(root, { productionOnly: true });
-  if (!local.hasSchema) {
+  // F5 — env.ts evaluation runs arbitrary user code that could throw an error
+  // embedding a value; load inside the values-free boundary. `mod` is reused
+  // below to validate the effective build map (F2) without a second import.
+  const mod = await withSchemaBoundary('schema-load-failed', () => loadSchema(envFile));
+  if (!mod) {
     return { hasSchema: false, remoteSecretNames: null };
   }
-  if (local.report.valid) {
-    // Every required key is satisfied by .env/.env.production — remote names
-    // could only ADD presence, so the outcome cannot change. No wrangler call.
+
+  // Primary validation over the productionOnly view (.env + .env.production),
+  // exactly as the managed path does — wrapped (F5) so a throwing/rejecting
+  // validator cannot leak the offending value out of this unit.
+  const local = await withSchemaBoundary('schema-validation-error', () =>
+    validateProdEnv(root, { productionOnly: true }),
+  );
+
+  // F2 — compute the ONE effective sanitized build map FIRST, BEFORE any
+  // local-valid fast path. This is the EXACT map the build bakes into worker
+  // `vars` (loadEnv → filterLoadedEnv → stripInternalEnvKeys over the FULL
+  // build file set: `.env` + `.env.local` + `.env.<mode>` + `.env.<mode>.local`,
+  // honouring a custom `envDir`), reusing {@link loadSanitizedBuildEnv} — the
+  // SAME assembly the WARN unit uses, so the two units can never diverge.
+  // Validate that map to learn which REQUIRED keys it leaves unsatisfied, then
+  // keep only those that are PRESENT-and-EMPTY there. A required key that is
+  // NON-EMPTY in `.env.production` but OVERRIDDEN TO EMPTY by a higher-priority
+  // overlay (`.env.production.local`, `.env.local`, or a custom envDir file) is
+  // invisible to the productionOnly view above (reads as satisfied) yet is
+  // present-and-empty here — exactly the case the fast path must NOT skip.
+  // Only emptiness is inspected; no value leaves this function or any error.
+  const buildEnv = loadSanitizedBuildEnv(root, { envDir: options.envDir, mode: options.mode });
+  const buildReport = await withSchemaBoundary('schema-validation-error', () =>
+    mod.validateAllEnv(buildEnv),
+  );
+  const presentEmptyRequired = buildReport.missing.filter(
+    (key) => Object.hasOwn(buildEnv, key) && buildEnv[key] === '',
+  );
+
+  if (local.report.valid && presentEmptyRequired.length === 0) {
+    // Every required key is satisfied by .env/.env.production AND no overlay
+    // empties a required key, so no empty plaintext var can shadow a remote
+    // secret — remote names could only ADD presence, so the outcome cannot
+    // change. No wrangler call (keeps first deploys of a fully-local schema
+    // working).
     return { hasSchema: true, remoteSecretNames: null };
   }
-  if (local.report.missing.length === 0) {
-    // Only INVALID local values — a remote secret can never fix those.
+  if (local.report.missing.length === 0 && presentEmptyRequired.length === 0) {
+    // Only INVALID local values — a remote secret can never fix those, and no
+    // empty overlay is in play either.
     throw selfHostEnvError(local.report);
   }
 
@@ -551,18 +671,6 @@ export async function validateSelfHostProdEnv(
   // falsely satisfy Y's preflight. Fail closed (naming both) here, before the
   // runner is created or invoked, and pin the ONE reconciled account.
   const effectiveAccountId = reconcileSelfHostAccount(options.configPath, options.accountId);
-
-  // F2 — reconstruct the EXACT sanitized var map the BUILD will bake
-  // (loadEnv → filterLoadedEnv → stripInternalEnvKeys over the FULL build file
-  // set: `.env` + `.env.local` + `.env.<mode>` + `.env.<mode>.local`, honouring
-  // a custom `envDir`), reusing {@link loadSanitizedBuildEnv} — the SAME
-  // assembly the WARN unit uses, so the two units can never diverge on which
-  // empty assignments the build ships. `validateProdEnv` above sees only
-  // `.env` + `.env.production`, so a key emptied in `.env.local` (or a custom
-  // envDir) reads as genuinely ABSENT there and would be wrongly discharged by
-  // a remote secret; this fuller map is what catches that. Only emptiness is
-  // inspected here — no value leaves this function or reaches any error/log.
-  const buildEnv = loadSanitizedBuildEnv(root, { envDir: options.envDir, mode: options.mode });
 
   const run =
     options.runWrangler ??
@@ -576,23 +684,25 @@ export async function validateSelfHostProdEnv(
     local.report.missing,
   );
 
-  // F2 — a required key that is present-and-EMPTY in ANY build-loaded source
+  // F2 — a required key that is present-and-EMPTY in the effective build map
   // AND exists as a remote secret is a shadow collision: the empty plaintext
   // var would overwrite the secret (wrangler gives a config var precedence over
-  // a same-named remote secret). Fail closed naming those keys (never discharge
-  // them) with guidance to remove the empty assignment.
+  // a same-named remote secret). Such a key must NEVER be discharged by the
+  // remote list — fail closed naming those keys with guidance to remove the
+  // empty assignment. (Required keys that are effectively ABSENT are not in
+  // `presentEmptyRequired`, so they stay eligible for remote discharge below.)
   const remoteSet = new Set(remoteSecretNames);
-  const emptyOverrides = local.report.missing.filter(
-    (key) => remoteSet.has(key) && Object.hasOwn(buildEnv, key) && buildEnv[key] === '',
-  );
+  const emptyOverrides = presentEmptyRequired.filter((key) => remoteSet.has(key));
   if (emptyOverrides.length > 0) {
     throw emptyAssignmentError(emptyOverrides);
   }
 
-  const { report } = await validateProdEnv(root, {
-    productionOnly: true,
-    remoteSecrets: remoteSecretNames,
-  });
+  const { report } = await withSchemaBoundary('schema-validation-error', () =>
+    validateProdEnv(root, {
+      productionOnly: true,
+      remoteSecrets: remoteSecretNames,
+    }),
+  );
   if (!report.valid) {
     throw selfHostEnvError(report);
   }
@@ -802,15 +912,38 @@ function secretListArgs(configPath: string): Array<string> {
 
 /**
  * wrangler 4.107's `secret list` worker-not-found signal. When the worker has
- * never been deployed, `fetchSecrets` throws the API worker-not-found error
- * (codes 10007 / 10090) and `secretListCommand.handler` rethrows a `UserError`
- * whose message begins "… not found." and contains this UNIQUE lead-in phrase
- * (verified against wrangler-dist/cli.js — it appears exactly once, in that
- * handler). The phrase carries no secret content, so it survives
- * `WRANGLER_LOG_SANITIZE=true`. Matched against the child's combined output.
+ * never been deployed, `fetchSecrets` throws the API worker-not-found error and
+ * `secretListCommand.handler` — ONLY when `isWorkerNotFoundError(e)` is true
+ * (`e.code === 10007` WORKER_NOT_FOUND or `10090`
+ * WORKER_LEGACY_ENVIRONMENT_NOT_FOUND, per wrangler-dist/cli.js) — rethrows a
+ * `UserError` with this exact fixed diagnostic block:
+ *
+ *   Worker "<name>"[ (env: <env>)] not found.
+ *
+ *   If this is a new Worker, run `wrangler deploy` first to create it.
+ *   Otherwise, check that the Worker name is correct and you're logged into the right account.
+ *
+ * The API code itself is caught and never printed, so the child's stderr
+ * carries this MESSAGE, not `10007`/`10090`. Matching only the bare lead-in
+ * `If this is a new Worker` (M2) misclassifies any unrelated status-1
+ * diagnostic that merely contains that fragment. So we require the COMPLETE
+ * structured block — the `… not found.` lead AND both fixed sentences of the
+ * guidance — after normalizing whitespace (wrangler may wrap/indent the
+ * multi-line UserError when it prints). The block carries no secret content, so
+ * it survives `WRANGLER_LOG_SANITIZE=true`; the combined output is inspected
+ * INTERNALLY only and never copied into any thrown error.
  */
 function isWorkerNotFoundOutput(output: string): boolean {
-  return /If this is a new Worker/i.test(output);
+  // Collapse whitespace runs so wrapped/indented multi-line printing still
+  // matches the fixed sentences below.
+  const normalized = output.replace(/\s+/g, ' ');
+  return (
+    /Worker ".*?"(?: \(env: [^)]*\))? not found\./.test(normalized) &&
+    normalized.includes('If this is a new Worker, run `wrangler deploy` first to create it.') &&
+    normalized.includes(
+      "Otherwise, check that the Worker name is correct and you're logged into the right account.",
+    )
+  );
 }
 
 /**

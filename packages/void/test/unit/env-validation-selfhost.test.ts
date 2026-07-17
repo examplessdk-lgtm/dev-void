@@ -8,6 +8,7 @@ import {
   secretListEnv,
   SelfHostEnvValidationError,
   SelfHostFirstDeployError,
+  SelfHostSchemaError,
   SelfHostSecretListError,
   type SecretListRunResult,
   validateSelfHostProdEnv,
@@ -15,6 +16,7 @@ import {
 import { number, string } from '../../src/runtime/env-helpers.ts';
 import { defineEnv } from '../../src/runtime/env-public.ts';
 import { _resetUnmaskCacheForTests } from '../../src/shared/env-mask.ts';
+import type { StandardSchemaV1 } from '../../src/standard-schema.ts';
 
 /**
  * Unit coverage for the self-host (`void deploy --backend cloudflare`)
@@ -474,6 +476,80 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
         'Remove the empty assignment',
       );
     });
+
+    it('THE REPRO — `.env.production` sets FOO but `.env.production.local` empties it: fails closed (fail-OPEN under the pre-fix fast path)', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string(), BAR: string() });
+      // productionOnly view (.env + .env.production) sees FOO + BAR non-empty,
+      // so `local.report.valid` is TRUE — the pre-fix code returned success
+      // right there (the fast path), before ever consulting the build map.
+      writeDotenv(root, '.env.production', 'FOO=real-foo\nBAR=real-bar\n');
+      // The BUILD (loadEnv) also reads .env.production.local at HIGHER priority,
+      // so the effective var map baked into wrangler.json has FOO="". Both are
+      // remote secrets, so shipping FOO="" would overwrite the remote FOO.
+      writeDotenv(root, '.env.production.local', 'FOO=\n');
+      const { run } = stubRunner(okList(['FOO', 'BAR']));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      const envError = error as SelfHostEnvValidationError;
+      // ONLY the emptied key is named — BAR is genuinely satisfied.
+      expect(envError.report.missing).toEqual(['FOO']);
+      expect(envError.message).toContain('FOO');
+      expect(envError.message).not.toContain('BAR');
+      expect(envError.message).toContain('Remove the empty assignment');
+      expect(envError.message).not.toContain('wrangler secret put');
+    });
+
+    it('THE REPRO (custom envDir) — root `.env.production` satisfies FOO but the envDir overlay empties it: fails closed', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      // validateProdEnv reads the ROOT .env.production → FOO satisfied → local
+      // valid → pre-fix fast path returned success.
+      writeDotenv(root, '.env.production', 'FOO=real-foo\n');
+      // But the BUILD reads envDir=config, whose .env.production empties FOO, so
+      // the effective baked var is FOO="" — which would shadow the remote FOO.
+      mkdirSync(join(root, 'config'));
+      writeFileSync(join(root, 'config', '.env.production'), 'FOO=\n');
+      const { run } = stubRunner(okList(['FOO']));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        envDir: 'config',
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
+      expect((error as SelfHostEnvValidationError).message).toContain(
+        'Remove the empty assignment',
+      );
+    });
+
+    it('a normally-satisfied NON-EMPTY required key passes without a wrangler call', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      writeDotenv(root, '.env.production', 'FOO=real-foo\n');
+      const { run, calls } = stubRunner(okList(['FOO']));
+
+      const result = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      });
+
+      expect(result).toEqual({ hasSchema: true, remoteSecretNames: null });
+      expect(calls).toEqual([]);
+    });
   });
 
   // --- F3: account reconciled against the config before spawning wrangler ---
@@ -545,8 +621,12 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
   // --- F4: first-deploy (worker-not-found) surfaces a structured, actionable error ---
 
   describe('F4 — first-deploy worker-not-found', () => {
-    // The exact UserError wrangler 4.107 emits from `secret list` when the
-    // worker does not exist yet (wrangler-dist/cli.js, secretListCommand.handler).
+    // The EXACT UserError wrangler 4.107 emits from `secret list` when the
+    // worker does not exist yet — the full fixed block rethrown by
+    // secretListCommand.handler after isWorkerNotFoundError(e) (API codes 10007
+    // WORKER_NOT_FOUND / 10090 WORKER_LEGACY_ENVIRONMENT_NOT_FOUND). The child
+    // sees this MESSAGE, not the numeric code (which is caught and swallowed).
+    // Both codes render the identical message, so one positive fixture covers both.
     const WORKER_NOT_FOUND_STDERR =
       'Worker "app" not found.\n\n' +
       'If this is a new Worker, run `wrangler deploy` first to create it.\n' +
@@ -595,6 +675,60 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect(error).toBeInstanceOf(SelfHostSecretListError);
       expect(error).not.toBeInstanceOf(SelfHostFirstDeployError);
       expect((error as Error).message).toContain('status 1');
+    });
+
+    it('M2 — a generic status-1 diagnostic that merely CONTAINS the lead-in phrase is NOT first-deploy', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      // A generic wrangler/config diagnostic that happens to include the bare
+      // "If this is a new Worker" fragment but NOT the complete structured
+      // worker-not-found block (no `Worker "…" not found.` lead, no "Otherwise,
+      // check that the Worker name is correct…" sentence). The old substring
+      // matcher (/If this is a new Worker/i) misclassified this as first-deploy;
+      // it must now stay a GENERIC list failure.
+      const { run } = stubRunner({
+        stdout: '',
+        stderr:
+          'Processing wrangler.jsonc configuration:\n' +
+          '  - Unexpected fields. If this is a new Worker you may have mistyped a binding name.',
+        status: 1,
+      });
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostSecretListError);
+      expect(error).not.toBeInstanceOf(SelfHostFirstDeployError);
+      expect((error as SelfHostSecretListError).reason).toBe('nonzero-exit');
+      expect((error as Error).message).toContain('status 1');
+    });
+
+    it('M2 — the "If this is a new Worker" sentence WITHOUT the "Otherwise…" line is NOT first-deploy', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      // Even the full deploy-guidance sentence, on its own (no `not found.` lead
+      // and no closing "Otherwise…" sentence), is not the complete block.
+      const { run } = stubRunner({
+        stdout: '',
+        stderr: 'Hint: If this is a new Worker, run `wrangler deploy` first to create it.',
+        status: 1,
+      });
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostSecretListError);
+      expect(error).not.toBeInstanceOf(SelfHostFirstDeployError);
     });
   });
 
@@ -862,12 +996,14 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       const root = createTempProject();
       defineEnv({ FOO: string(), API_TOKEN: string() });
       // The worker-not-found signal AND a sentinel share the child's stderr: the
-      // signal must be read (classification), the sentinel must not leak.
+      // signal must be read (classification), the sentinel must not leak. The
+      // full structured block is present (M2), with the sentinel embedded.
       const error = (await throwFrom(root, {
         stdout: '',
         stderr:
-          `Worker "app" not found. ${SENTINEL}\n` +
-          'If this is a new Worker, run `wrangler deploy` first to create it.',
+          `Worker "app" not found. ${SENTINEL}\n\n` +
+          'If this is a new Worker, run `wrangler deploy` first to create it.\n' +
+          "Otherwise, check that the Worker name is correct and you're logged into the right account.",
         status: 1,
       })) as SelfHostFirstDeployError;
       expect(error).toBeInstanceOf(SelfHostFirstDeployError);
@@ -876,6 +1012,130 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect(error.message).toContain('wrangler secret put FOO');
       expect(error.message).not.toContain(SENTINEL);
       expect(fullySerialize(error)).not.toContain(SENTINEL);
+    });
+  });
+
+  // --- F5: thrown schema-load / validator exceptions never carry a value ---
+
+  describe('F5 — schema evaluation/validation throws are values-free even under VOID_ENV_UNMASK', () => {
+    const SENTINEL = 'SENTINEL-schema-sk_live_leak-QQZ';
+
+    /** Everything an observer could read off the thrown schema error. */
+    function serializeSchemaError(error: unknown): string {
+      const e = error as SelfHostSchemaError & Record<string, unknown>;
+      return JSON.stringify({
+        name: e.name,
+        message: e.message,
+        stack: e.stack ?? '',
+        reason: e.reason,
+        own: e,
+        ownStr: String(e),
+      });
+    }
+
+    it('a validator that THROWS synchronously (embedding a value) becomes a values-free schema error', async () => {
+      const root = createTempProject();
+      defineEnv({
+        FOO: {
+          '~standard': {
+            version: 1,
+            vendor: 'test',
+            validate() {
+              throw new Error(`validator rejected ${SENTINEL}`);
+            },
+          },
+        } satisfies StandardSchemaV1<unknown, unknown>,
+      });
+      const { run, calls } = stubRunner(okList([]));
+
+      vi.stubEnv('VOID_ENV_UNMASK', '1');
+      _resetUnmaskCacheForTests();
+      try {
+        const error = await validateSelfHostProdEnv(root, {
+          configPath: CONFIG_PATH,
+          runWrangler: run,
+        }).then(
+          () => null,
+          (e: unknown) => e,
+        );
+
+        expect(error).toBeInstanceOf(SelfHostSchemaError);
+        expect((error as SelfHostSchemaError).reason).toBe('schema-validation-error');
+        expect((error as Error).message).not.toContain(SENTINEL);
+        expect(serializeSchemaError(error)).not.toContain(SENTINEL);
+        // Threw during local validation — wrangler is never consulted.
+        expect(calls).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+        _resetUnmaskCacheForTests();
+      }
+    });
+
+    it('a validator that REJECTS asynchronously (embedding a value) becomes a values-free schema error', async () => {
+      const root = createTempProject();
+      defineEnv({
+        FOO: {
+          '~standard': {
+            version: 1,
+            vendor: 'test',
+            validate() {
+              return Promise.reject(new Error(`async validator rejected ${SENTINEL}`));
+            },
+          },
+        } satisfies StandardSchemaV1<unknown, unknown>,
+      });
+      const { run } = stubRunner(okList([]));
+
+      vi.stubEnv('VOID_ENV_UNMASK', '1');
+      _resetUnmaskCacheForTests();
+      try {
+        const error = await validateSelfHostProdEnv(root, {
+          configPath: CONFIG_PATH,
+          runWrangler: run,
+        }).then(
+          () => null,
+          (e: unknown) => e,
+        );
+
+        expect(error).toBeInstanceOf(SelfHostSchemaError);
+        expect((error as SelfHostSchemaError).reason).toBe('schema-validation-error');
+        expect((error as Error).message).not.toContain(SENTINEL);
+        expect(serializeSchemaError(error)).not.toContain(SENTINEL);
+      } finally {
+        vi.unstubAllEnvs();
+        _resetUnmaskCacheForTests();
+      }
+    });
+
+    it('an env.ts that THROWS at evaluation (embedding a value) becomes a values-free schema error', async () => {
+      const root = createTempProject({ withEnvTs: false });
+      // A module that throws at evaluation, embedding the sentinel. Node's
+      // import() rejects; loadUserEnvFile would fold that message into its
+      // wrapper — the boundary must drop it.
+      writeFileSync(join(root, 'env.ts'), `throw new Error('env boom ${SENTINEL}');\n`);
+      const { run, calls } = stubRunner(okList([]));
+
+      vi.stubEnv('VOID_ENV_UNMASK', '1');
+      _resetUnmaskCacheForTests();
+      try {
+        const error = await validateSelfHostProdEnv(root, {
+          configPath: CONFIG_PATH,
+          runWrangler: run,
+        }).then(
+          () => null,
+          (e: unknown) => e,
+        );
+
+        expect(error).toBeInstanceOf(SelfHostSchemaError);
+        expect((error as SelfHostSchemaError).reason).toBe('schema-load-failed');
+        expect((error as Error).message).not.toContain(SENTINEL);
+        expect(serializeSchemaError(error)).not.toContain(SENTINEL);
+        // Threw during schema load — wrangler is never consulted.
+        expect(calls).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+        _resetUnmaskCacheForTests();
+      }
     });
   });
 });
