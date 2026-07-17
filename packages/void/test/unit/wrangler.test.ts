@@ -1505,6 +1505,72 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
+  it('F8 (round 12): a DEFINED non-string migrations_pattern fails closed BEFORE any fill/keep branch — byte-identical file', () => {
+    // Pre-fix the pattern compatibility check ran only for `typeof === "string"`, so an
+    // object/array/number/null pattern was silently IGNORED, migrations_dir was
+    // committed, provisioning reported success — and wrangler's own d1 migrations
+    // commands later rejected the config we just accepted.
+    const badPatterns: Array<[label: string, json: string]> = [
+      ['object', '{ "glob": "*.sql" }'],
+      ['array', '["*.sql"]'],
+      ['number', '42'],
+      ['null', 'null'],
+    ];
+    for (const [label, json] of badPatterns) {
+      // Once WITHOUT migrations_dir (the fill branch)...
+      setup(
+        'wrangler.jsonc',
+        `{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "app",
+      "database_id": "id",
+      "migrations_pattern": ${json}
+    }
+  ]
+}`,
+      );
+      let before = readRaw('wrangler.jsonc');
+      expect(
+        () =>
+          writeProvisionedWranglerConfig(tmpDir, {
+            d1MigrationsDir: { binding: 'DB', dir: './db/migrations' },
+          }),
+        `pattern kind: ${label} (fill branch)`,
+      ).toThrow(/non-string "migrations_pattern"/);
+      expect(readRaw('wrangler.jsonc'), `pattern kind: ${label} (fill branch)`).toBe(before);
+
+      // ...and once WITH an equivalent migrations_dir (the keep-equivalent branch):
+      // the non-string pattern must be rejected before EVERY branch, not only fill.
+      setup(
+        'wrangler.jsonc',
+        `{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "app",
+      "database_id": "id",
+      "migrations_dir": "./db/migrations",
+      "migrations_pattern": ${json}
+    }
+  ]
+}`,
+      );
+      before = readRaw('wrangler.jsonc');
+      expect(
+        () =>
+          writeProvisionedWranglerConfig(tmpDir, {
+            d1MigrationsDir: { binding: 'DB', dir: './db/migrations' },
+          }),
+        `pattern kind: ${label} (keep-equivalent branch)`,
+      ).toThrow(/non-string "migrations_pattern"/);
+      expect(readRaw('wrangler.jsonc'), `pattern kind: ${label} (keep-equivalent branch)`).toBe(
+        before,
+      );
+    }
+  });
+
   it('migrations_dir upsert proceeds when there is no migrations_pattern (unchanged behavior, idempotent)', () => {
     setup(
       'wrangler.jsonc',

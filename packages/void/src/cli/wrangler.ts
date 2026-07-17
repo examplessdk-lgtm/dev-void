@@ -1042,6 +1042,23 @@ export function writeProvisionedWranglerConfig(
     }
     const index = matchIndices.length === 1 ? matchIndices[0] : -1;
     if (index >= 0) {
+      // F8 (round 12): when this patch manages the D1 migrations dir, a DEFINED
+      // non-string `migrations_pattern` (object/array/number/null) is rejected BEFORE
+      // any keep-equivalent/fill branch runs. Wrangler's `resolveMigrationsConfig`
+      // treats the pattern as a string, so committing `migrations_dir` beside a
+      // malformed pattern would report provisioning success on a config that later
+      // `wrangler d1 migrations` commands reject. Fail closed; the file stays
+      // byte-identical (the write happens only after every gate passes).
+      const existingPattern = d1Entries[index].migrations_pattern;
+      if (existingPattern !== undefined && typeof existingPattern !== 'string') {
+        throw new Error(
+          `deploy: cannot update "${configPath}" — the D1 entry for binding ` +
+            `${JSON.stringify(patch.d1MigrationsDir.binding)} has a non-string ` +
+            `"migrations_pattern" value; expected a string. Wrangler rejects such a config, so ` +
+            `filling "migrations_dir" beside it would commit an invalid file. Fix the config ` +
+            `and retry.`,
+        );
+      }
       // F6 (round 11, user-approved contract): fill-if-absent / keep-equivalent /
       // fail-closed-on-differ. `migrations_dir` is USER-OWNED once set — a reused D1
       // configured with e.g. `./legacy-migrations` must never be silently rewritten to
@@ -1081,9 +1098,9 @@ export function writeProvisionedWranglerConfig(
         // start with `${migrations_dir}/` (unless the dir normalizes to "."), so filling
         // the dir under an incompatible pattern would break `wrangler d1 migrations`.
         // Validate before editing; fail closed and NEVER rewrite the user-owned pattern.
-        const existingPattern = d1Entries[index].migrations_pattern;
+        // (A defined pattern is narrowed to a STRING by the F8 gate above.)
         if (
-          typeof existingPattern === 'string' &&
+          existingPattern !== undefined &&
           !migrationsPatternMatchesDir(existingPattern, patch.d1MigrationsDir.dir)
         ) {
           throw new Error(
