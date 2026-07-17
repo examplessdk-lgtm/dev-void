@@ -3930,7 +3930,10 @@ describe('provisionCloudflareResources — F1 wrangler-exact base resolution ord
     // returned (nullish, not falsy, coalescing) and CLOUDFLARE_* presence beats CF_*.
     expect(resolvePinnedApiBaseUrl({ CLOUDFLARE_API_BASE_URL: '' })).toBe('');
     expect(
-      resolvePinnedApiBaseUrl({ CLOUDFLARE_API_BASE_URL: '', CF_API_BASE_URL: 'https://cf.example' }),
+      resolvePinnedApiBaseUrl({
+        CLOUDFLARE_API_BASE_URL: '',
+        CF_API_BASE_URL: 'https://cf.example',
+      }),
     ).toBe('');
     expect(resolvePinnedApiBaseUrl({ CF_API_BASE_URL: '' })).toBe('');
   });
@@ -3947,7 +3950,10 @@ describe('provisionCloudflareResources — F1 wrangler-exact base resolution ord
     // present, so the env-vs-config conflict is never evaluated there.
     expect(
       resolvePinnedApiBaseUrl(
-        { CLOUDFLARE_API_BASE_URL: 'https://direct.example', CLOUDFLARE_COMPLIANCE_REGION: 'public' },
+        {
+          CLOUDFLARE_API_BASE_URL: 'https://direct.example',
+          CLOUDFLARE_COMPLIANCE_REGION: 'public',
+        },
         'fedramp_high',
       ),
     ).toBe('https://direct.example');
@@ -4047,7 +4053,10 @@ describe('provisionCloudflareResources — F4 Hyperdrive password never reaches 
       await provisionCloudflareResources(
         tmpDir,
         wranglerPath,
-        { ...emptyDesired, hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: conn } },
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: conn },
+        },
         { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
       );
     } catch (error) {
@@ -4257,6 +4266,65 @@ describe('provisionCloudflareResources — F5 dotenv fence file set + case rule 
     expect(calls.length).toBe(0);
   });
 
+  it('F9 (round 12): a benign `.dev.vars.` + a redirect var ONLY in `.dev.vars` is NOT rejected (wrangler never reads the fallback)', async () => {
+    // wrangler's `loadDotDevDotVars` probes `.dev.vars.` FIRST for the empty env and
+    // falls back to `.dev.vars` ONLY when the first is absent — exactly one file is
+    // ever parsed. Pre-fix the fence scanned BOTH, falsely rejecting this config.
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    writeFileSync(join(tmpDir, '.dev.vars.'), 'SOME_APP_SECRET=benign\n');
+    writeFileSync(join(tmpDir, '.dev.vars'), redirect);
+    const { run } = makeRunner([
+      { match: /^d1 list/, reply: () => ok('[]') },
+      {
+        match: /^d1 create/,
+        reply: () => {
+          simulateUpdateConfig('d1_databases', {
+            binding: 'DB',
+            database_name: 'myapp-db',
+            database_id: uuid('db'),
+          });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(result.resources[0].action).toBe('created');
+  });
+
+  it('F9 (round 12): a redirect var in the SELECTED `.dev.vars` (no `.dev.vars.` present) IS rejected', async () => {
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    writeFileSync(join(tmpDir, '.dev.vars'), redirect);
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/refusing to provision.*"\.dev\.vars".*CLOUDFLARE_API_BASE_URL/s);
+    expect(calls.length).toBe(0);
+  });
+
+  it('F9 (round 12): dev-vars keys are case-SENSITIVE on every platform — a mixed-case spelling never trips the fence', () => {
+    // `tryLoadDotDevDotVars` parses via `dotenv.parse` into a PLAIN object;
+    // `caseInsensitiveEnv` applies only to wrangler's `loadDotEnv` (.env family). A
+    // mixed-case key in dev-vars is a DIFFERENT key for wrangler even on win32.
+    setup(JSON.stringify({ name: 'app' }));
+    writeFileSync(join(tmpDir, '.dev.vars'), 'cloudflare_api_base_url=https://evil.example\n');
+    expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'win32')).not.toThrow();
+    expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'darwin')).not.toThrow();
+    // The EXACT spelling still trips it everywhere.
+    writeFileSync(join(tmpDir, '.dev.vars'), 'CLOUDFLARE_API_BASE_URL=https://evil.example\n');
+    expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'win32')).toThrow(/\.dev\.vars/);
+    expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'darwin')).toThrow(/\.dev\.vars/);
+  });
+
   it('compares variable names case-insensitively on win32 (wrangler loads dotenv into a caseInsensitiveEnv there)', () => {
     setup(JSON.stringify({ name: 'app' }));
     writeFileSync(join(tmpDir, '.env'), 'cloudflare_api_base_url=https://evil.example\n');
@@ -4420,7 +4488,9 @@ describe('provisionCloudflareResources — F7 read-first stored-name identity (r
   });
 
   it('R2: a stored bucket_name DIFFERENT from the desired name fails closed (contradiction, never silent reuse)', async () => {
-    setup(JSON.stringify({ r2_buckets: [{ binding: 'STORAGE', bucket_name: 'someone-elses-bucket' }] }));
+    setup(
+      JSON.stringify({ r2_buckets: [{ binding: 'STORAGE', bucket_name: 'someone-elses-bucket' }] }),
+    );
     const { run, calls } = makeRunner([]);
     await expect(
       provisionCloudflareResources(
@@ -4637,9 +4707,7 @@ describe('provisionCloudflareResources — F7 D1 whole-list alias reconciliation
         // authorized authoritative absence and a create.
         match: /^d1 list --json/,
         reply: () =>
-          ok(
-            JSON.stringify([{ name: 'other-db', uuid: uuid('other'), database_id: 'bogus' }]),
-          ),
+          ok(JSON.stringify([{ name: 'other-db', uuid: uuid('other'), database_id: 'bogus' }])),
       },
       { match: /^d1 create /, reply: () => ok() },
     ]);
@@ -4685,11 +4753,7 @@ describe('provisionCloudflareResources — F7 D1 whole-list alias reconciliation
       {
         match: /^d1 list --json/,
         reply: () =>
-          ok(
-            JSON.stringify([
-              { name: 'other-db', uuid: uuid('same'), database_id: uuid('same') },
-            ]),
-          ),
+          ok(JSON.stringify([{ name: 'other-db', uuid: uuid('same'), database_id: uuid('same') }])),
       },
       {
         match: /^d1 create /,
@@ -4717,8 +4781,7 @@ describe('provisionCloudflareResources — F7 D1 whole-list alias reconciliation
     const { run, calls } = makeRunner([
       {
         match: /^d1 list --json/,
-        reply: () =>
-          ok(JSON.stringify([{ name: 'myapp-db', database_id: uuid('db'), uuid: 123 }])),
+        reply: () => ok(JSON.stringify([{ name: 'myapp-db', database_id: uuid('db'), uuid: 123 }])),
       },
     ]);
     await expect(
@@ -5037,9 +5100,9 @@ describe('acquireProvisionLock — F2 quarantine sidecar gate (round 12)', () =>
   it('an unreadable/malformed sidecar FAILS CLOSED (cannot verify the recorded owner)', async () => {
     setup(JSON.stringify({ name: 'app' }));
     writeFileSync(sidecar, '{ not json');
-    await expect(
-      acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 0 }),
-    ).rejects.toThrow(/QUARANTINED.*an unrecorded process/s);
+    await expect(acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 0 })).rejects.toThrow(
+      /QUARANTINED.*an unrecorded process/s,
+    );
     expect(existsSync(sidecar)).toBe(true);
   });
 });
@@ -5147,9 +5210,9 @@ describe('createDefaultRunWrangler — F1/F2 signal-path kill failure quarantine
       expect(() => process.kill(childPid!, 0)).not.toThrow();
       const old = new Date(Date.now() - 3_600_000);
       utimesSync(lockMutex, old, old);
-      await expect(
-        acquireProvisionLock(cfgReal, { stale: 2_000, retries: 0 }),
-      ).rejects.toThrow(/QUARANTINED/);
+      await expect(acquireProvisionLock(cfgReal, { stale: 2_000, retries: 0 })).rejects.toThrow(
+        /QUARANTINED/,
+      );
       // Kill the recorded group; the next acquisition clears the quarantine + proceeds.
       try {
         process.kill(-childPid!, 'SIGKILL');
@@ -5244,9 +5307,7 @@ describe('withListerDeadline — F3 the deadline holds in a REAL process (round 
       expect(stdout).toContain('REJECTED:');
       expect(stdout).not.toContain('RESOLVED');
       // The whole-provision lock was RELEASED on the normal fail-closed path.
-      expect(
-        existsSync(join(appRoot, 'wrangler.jsonc.void-provision.lock.lock')),
-      ).toBe(false);
+      expect(existsSync(join(appRoot, 'wrangler.jsonc.void-provision.lock.lock'))).toBe(false);
     } finally {
       clearTimeout(killTimer);
       try {

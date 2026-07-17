@@ -277,7 +277,10 @@ const TRANSPORT_REDIRECT_ENV_VARS = [
  * (dotenv-expand keeps an already-set truthy `process.env` value), so the pin cannot be
  * overridden into unsanitized logging of the secret-bearing API request.
  */
-const OUTPUT_FILE_ENV_VARS = ['WRANGLER_OUTPUT_FILE_PATH', 'WRANGLER_OUTPUT_FILE_DIRECTORY'] as const;
+const OUTPUT_FILE_ENV_VARS = [
+  'WRANGLER_OUTPUT_FILE_PATH',
+  'WRANGLER_OUTPUT_FILE_DIRECTORY',
+] as const;
 
 /**
  * F1 — resolve the ONE Cloudflare API base URL this provision is pinned to, mirroring
@@ -323,9 +326,7 @@ export function resolvePinnedApiBaseUrl(
       : undefined;
   // (1) — presence (not truthiness) of the direct override wins, CLOUDFLARE_* first.
   const direct =
-    env.CLOUDFLARE_API_BASE_URL !== undefined
-      ? env.CLOUDFLARE_API_BASE_URL
-      : env.CF_API_BASE_URL;
+    env.CLOUDFLARE_API_BASE_URL !== undefined ? env.CLOUDFLARE_API_BASE_URL : env.CF_API_BASE_URL;
   if (direct !== undefined) {
     return direct;
   }
@@ -468,24 +469,37 @@ export function assertNoTransportRedirectInProjectDotenv(
   root: string,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  // F5 (round 11) — scan the EXACT file sets wrangler 4.107 loads for the provisioner's
-  // `--env=` (EMPTY environment string), using a KEY scanner that mirrors wrangler's own
-  // dotenv parser (accepts the optional `export ` prefix + quoting):
-  //   - the per-command `process.env` reload (startup middleware) uses
-  //     `getDefaultEnvFiles("")` = [".env", ".env.local", ".env.", ".env..local"];
-  //   - the dev-vars loader `loadDotDevDotVars(envPath, env)` probes
-  //     `${envPath}.${env}` FIRST when env is defined — `.dev.vars.` for the empty env —
-  //     then falls back to `.dev.vars`. It NEVER loads `.dev.vars.local`, so that file is
-  //     deliberately NOT fenced (blocking it rejected configs wrangler never reads).
+  // F5 (round 11) / F9 (round 12) — scan the EXACT files wrangler 4.107 loads for the
+  // provisioner's `--env=` (EMPTY environment string), with wrangler's own per-family
+  // SELECTION and CASE semantics, using a KEY scanner that mirrors wrangler's dotenv
+  // parser (accepts the optional `export ` prefix + quoting):
+  //   - DOTENV family — the per-command `process.env` reload (the startup middleware's
+  //     `check`) loads ALL of `getDefaultEnvFiles("")` = [".env", ".env.local", ".env.",
+  //     ".env..local"] via `loadDotEnv`, which parses into `caseInsensitiveEnv()` when
+  //     `process.platform === "win32"` (a Proxy canonicalizing property names via
+  //     `toLowerCase`) — so dotenv KEYS fold case ONLY on win32, exactly elsewhere.
+  //   - DEV-VARS family — `loadDotDevDotVars(envPath, env)` is (wrangler-dist/cli.js):
+  //       env !== undefined && tryLoadDotDevDotVars(`${envPath}.${env}`)
+  //         || tryLoadDotDevDotVars(envPath)
+  //     For the empty env it probes `.dev.vars.` FIRST and reads `.dev.vars` ONLY when
+  //     `.dev.vars.` is ABSENT — exactly ONE file is ever parsed, so the fence inspects
+  //     only the SELECTED one (fencing both falsely rejected a benign `.dev.vars.`
+  //     paired with an unused redirect var in `.dev.vars` that wrangler never reads).
+  //     `tryLoadDotDevDotVars` parses via `dotenv.parse` into a PLAIN object —
+  //     case-SENSITIVE on EVERY platform (`caseInsensitiveEnv` is used only by
+  //     `loadDotEnv`), so no case folding applies to dev-vars keys anywhere. It NEVER
+  //     loads `.dev.vars.local`, so that file stays deliberately unfenced.
   // We do NOT expand — presence of the KEY is the signal.
-  const files = [...defaultWranglerEnvFiles(''), '.dev.vars.', '.dev.vars'];
-  // F5 — wrangler's dotenv environment is CASE-INSENSITIVE on Windows: `loadDotEnv` loads
-  // into `caseInsensitiveEnv()` when `process.platform === "win32"` — a Proxy that
-  // canonicalizes property names via `toLowerCase` — so a `cloudflare_api_base_url=` line
-  // redirects the transport there. Compare keys case-insensitively on win32, exactly
-  // elsewhere (POSIX env vars are case-sensitive).
-  const caseInsensitive = platform === 'win32';
-  for (const file of files) {
+  const dotenvCaseInsensitive = platform === 'win32';
+  const devVarsFile = existsSync(join(root, '.dev.vars.')) ? '.dev.vars.' : '.dev.vars';
+  const files: Array<{ file: string; caseInsensitive: boolean }> = [
+    ...defaultWranglerEnvFiles('').map((file) => ({
+      file,
+      caseInsensitive: dotenvCaseInsensitive,
+    })),
+    { file: devVarsFile, caseInsensitive: false },
+  ];
+  for (const { file, caseInsensitive } of files) {
     const keys = scanWranglerDotenvKeys(join(root, file));
     const lowerKeys = caseInsensitive
       ? new Set([...keys].map((key) => key.toLowerCase()))
@@ -704,7 +718,9 @@ export interface QuarantineInfo {
 const quarantineBeforeDeathHooks = new Set<(info: QuarantineInfo) => void>();
 
 function runQuarantineBeforeDeathHooks(info: QuarantineInfo): void {
-  for (const hook of [...quarantineBeforeDeathHooks]) {
+  // Hooks never mutate the registry while running (quarantine() only touches its own
+  // lock state), so direct Set iteration is safe.
+  for (const hook of quarantineBeforeDeathHooks) {
     try {
       hook(info);
     } catch {
@@ -895,7 +911,8 @@ export function createDefaultRunWrangler(
       // keep going regardless (it still has a fatal signal to re-raise).
       const confirmPollNudges: Array<() => void> = [];
       const nudgeConfirmPolls = (): void => {
-        for (const poll of [...confirmPollNudges]) {
+        // A poll never registers new waiters while running, so direct iteration is safe.
+        for (const poll of confirmPollNudges) {
           poll();
         }
       };
@@ -1575,8 +1592,9 @@ type ProperLockfileInternals = {
 
 function loadProperLockfileInternals(): ProperLockfileInternals | undefined {
   try {
-    return createRequire(import.meta.url)('proper-lockfile/lib/lockfile.js') as
-      ProperLockfileInternals;
+    return createRequire(import.meta.url)(
+      'proper-lockfile/lib/lockfile.js',
+    ) as ProperLockfileInternals;
   } catch {
     return undefined;
   }
