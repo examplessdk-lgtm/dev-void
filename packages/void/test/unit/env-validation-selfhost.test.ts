@@ -7,12 +7,14 @@ import {
   createDefaultSecretListRunner,
   secretListEnv,
   SelfHostEnvValidationError,
+  SelfHostFirstDeployError,
   SelfHostSecretListError,
   type SecretListRunResult,
   validateSelfHostProdEnv,
 } from '../../src/cli/env-validation.ts';
 import { number, string } from '../../src/runtime/env-helpers.ts';
 import { defineEnv } from '../../src/runtime/env-public.ts';
+import { _resetUnmaskCacheForTests } from '../../src/shared/env-mask.ts';
 
 /**
  * Unit coverage for the self-host (`void deploy --backend cloudflare`)
@@ -86,16 +88,46 @@ describe('collectPlaintextVarWarnings — plaintext worker-vars classification',
     expect(serialized).not.toContain('hello');
   });
 
-  it('lets an explicit .public() override suppress the name heuristic', async () => {
+  it('still warns a heuristic-looking .public() key — .public() does NOT suppress the heuristic', async () => {
     const root = createTempProject();
-    // WIDGET_TOKEN matches the heuristic (TOKEN) but is explicitly public.
+    // WIDGET_TOKEN matches the heuristic (TOKEN). `.public()` only means "not a
+    // schema secret" — the value still ships as plaintext, so it is still
+    // flagged via the heuristic (F1). It is NOT reason `schema-secret`.
     defineEnv({ WIDGET_TOKEN: string().public() });
     writeDotenv(root, '.env.production', 'WIDGET_TOKEN=https://example.com/widget\n');
 
     const result = await collectPlaintextVarWarnings(root);
 
     expect(result.totalVarKeys).toBe(1);
-    expect(result.secretKeys).toEqual([]);
+    expect(result.secretKeys).toEqual([{ key: 'WIDGET_TOKEN', reason: 'heuristic' }]);
+    // Never the value.
+    expect(JSON.stringify(result)).not.toContain('example.com');
+  });
+
+  it('warns a secret-valued schema DEFAULT the build bakes into vars, even with no dotenv entry (F1)', async () => {
+    const root = createTempProject();
+    // API_KEY has a default and NO dotenv entry — applySchemaDefaultsToWorkerVars
+    // still bakes it into worker vars as plaintext, so it must be classified.
+    // SESSION_SECRET is an explicit .secret() default. GREETING is a benign default.
+    defineEnv({
+      API_KEY: string().default('sk_live_defaultkey'),
+      SESSION_SECRET: string().secret().default('pepper-default'),
+      GREETING: string().default('hello'),
+    });
+    // No .env files at all — the union comes purely from schema defaults.
+
+    const result = await collectPlaintextVarWarnings(root);
+
+    expect(result.totalVarKeys).toBe(3);
+    expect(result.secretKeys).toEqual([
+      { key: 'API_KEY', reason: 'heuristic' },
+      { key: 'SESSION_SECRET', reason: 'schema-secret' },
+    ]);
+    // Default VALUES must never be reachable from the result.
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('sk_live_defaultkey');
+    expect(serialized).not.toContain('pepper-default');
+    expect(serialized).not.toContain('hello');
   });
 
   it('classifies via the heuristic alone when the project has no env.ts schema', async () => {
@@ -329,6 +361,220 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       'PORT',
     ]);
     expect(calls).toEqual([]);
+  });
+
+  // --- F2: present-empty local var must not be discharged by a remote secret ---
+
+  describe('F2 — empty local assignment shadowing a remote secret', () => {
+    it('fails closed naming the key when `FOO=` collides with remote FOO (never ships empty over the secret)', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      // FOO is PRESENT but EMPTY locally — the build bakes `FOO=""` into
+      // plaintext vars, which wrangler gives precedence over the remote secret.
+      writeDotenv(root, '.env.production', 'FOO=\n');
+      const { run } = stubRunner(okList(['FOO']));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      const envError = error as SelfHostEnvValidationError;
+      expect(envError.report.missing).toEqual(['FOO']);
+      expect(envError.message).toContain('FOO');
+      expect(envError.message).toContain('Remove the empty assignment');
+      // Guidance is about removing the assignment, NOT `secret put` (the secret
+      // already exists remotely).
+      expect(envError.message).not.toContain('wrangler secret put');
+    });
+
+    it('a genuinely ABSENT key is still discharged by the same-named remote secret (passes)', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      // No local FOO at all — remote FOO legitimately satisfies it.
+      const { run } = stubRunner(okList(['FOO']));
+
+      const result = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      });
+
+      expect(result).toEqual({ hasSchema: true, remoteSecretNames: ['FOO'] });
+    });
+  });
+
+  // --- F3: account reconciled against the config before spawning wrangler ---
+
+  describe('F3 — account reconciliation before spawn', () => {
+    function writeConfig(root: string, config: Record<string, unknown>): string {
+      const path = join(root, 'wrangler.jsonc');
+      writeFileSync(path, JSON.stringify(config));
+      return path;
+    }
+
+    it('hard-errors (naming both accounts) and NEVER invokes wrangler when config account ≠ option account', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      const configPath = writeConfig(root, { name: 'app', account_id: 'account-X' });
+      const { run, calls } = stubRunner(okList(['FOO']));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath,
+        accountId: 'account-Y',
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostSecretListError);
+      expect(error).not.toBeInstanceOf(SelfHostEnvValidationError);
+      const msg = (error as Error).message;
+      expect(msg).toContain('account-X');
+      expect(msg).toContain('account-Y');
+      // The seam was never consulted — reconciliation failed before any spawn.
+      expect(calls).toEqual([]);
+    });
+
+    it('proceeds when the config account matches the option account', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      const configPath = writeConfig(root, { name: 'app', account_id: 'account-X' });
+      const { run, calls } = stubRunner(okList(['FOO']));
+
+      const result = await validateSelfHostProdEnv(root, {
+        configPath,
+        accountId: 'account-X',
+        runWrangler: run,
+      });
+
+      expect(result).toEqual({ hasSchema: true, remoteSecretNames: ['FOO'] });
+      expect(calls.length).toBe(1);
+    });
+
+    it('proceeds when only one source names an account (config-only)', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      const configPath = writeConfig(root, { name: 'app', account_id: 'account-X' });
+      const { run, calls } = stubRunner(okList(['FOO']));
+
+      const result = await validateSelfHostProdEnv(root, {
+        configPath,
+        // no accountId option
+        runWrangler: run,
+      });
+
+      expect(result.remoteSecretNames).toEqual(['FOO']);
+      expect(calls.length).toBe(1);
+    });
+  });
+
+  // --- F4: first-deploy (worker-not-found) surfaces a structured, actionable error ---
+
+  describe('F4 — first-deploy worker-not-found', () => {
+    // The exact UserError wrangler 4.107 emits from `secret list` when the
+    // worker does not exist yet (wrangler-dist/cli.js, secretListCommand.handler).
+    const WORKER_NOT_FOUND_STDERR =
+      'Worker "app" not found.\n\n' +
+      'If this is a new Worker, run `wrangler deploy` first to create it.\n' +
+      "Otherwise, check that the Worker name is correct and you're logged into the right account.";
+
+    it('throws a structured first-deploy error listing the missing names + secret-put guidance', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string(), API_TOKEN: string() });
+      const { run } = stubRunner({ stdout: '', stderr: WORKER_NOT_FOUND_STDERR, status: 1 });
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostFirstDeployError);
+      const fde = error as SelfHostFirstDeployError;
+      expect(fde.workerNotFound).toBe(true);
+      expect([...fde.missingKeys].sort()).toEqual(['API_TOKEN', 'FOO']);
+      expect(fde.message).toContain('wrangler secret put FOO');
+      expect(fde.message).toContain('wrangler secret put API_TOKEN');
+      // Still a fail-closed list error at heart (subclass).
+      expect(error).toBeInstanceOf(SelfHostSecretListError);
+    });
+
+    it('a generic nonzero exit (auth/network) stays a GENERIC list failure, not first-deploy', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      const { run } = stubRunner({
+        stdout: '',
+        stderr: 'A request to the Cloudflare API failed. [code: 10000]',
+        status: 1,
+      });
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostSecretListError);
+      expect(error).not.toBeInstanceOf(SelfHostFirstDeployError);
+      expect((error as Error).message).toContain('status 1');
+    });
+  });
+
+  // --- F5: self-host errors are values-free even under VOID_ENV_UNMASK ---
+
+  describe('F5 — invalid-value errors are values-free', () => {
+    it('never echoes the raw invalid value in the message, report, or its JSON — even with VOID_ENV_UNMASK', async () => {
+      const root = createTempProject();
+      defineEnv({ PORT: number() });
+      // A benign key + benign value: redaction would normally KEEP this value,
+      // and VOID_ENV_UNMASK disables redaction entirely — yet the self-host
+      // error must still never carry the raw input.
+      writeDotenv(root, '.env.production', 'PORT=not-a-number\n');
+      const { run, calls } = stubRunner(okList([]));
+
+      vi.stubEnv('VOID_ENV_UNMASK', '1');
+      _resetUnmaskCacheForTests();
+      try {
+        const error = await validateSelfHostProdEnv(root, {
+          configPath: CONFIG_PATH,
+          runWrangler: run,
+        }).then(
+          () => null,
+          (e: unknown) => e,
+        );
+
+        expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+        const envError = error as SelfHostEnvValidationError;
+        // Key name is present…
+        expect(envError.message).toContain('PORT');
+        expect(envError.report.invalid.map((i) => i.key)).toEqual(['PORT']);
+        // …but the raw value never is, anywhere.
+        expect(envError.message).not.toContain('not-a-number');
+        const serialized = JSON.stringify({
+          message: envError.message,
+          report: {
+            missing: envError.report.missing,
+            invalid: envError.report.invalid,
+            values: [...envError.report.values],
+          },
+        });
+        expect(serialized).not.toContain('not-a-number');
+        // Invalid-only local values never consult wrangler.
+        expect(calls).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+        _resetUnmaskCacheForTests();
+      }
+    });
   });
 
   describe('fail-closed wrangler failures (DISTINCT from missing-secret errors)', () => {
