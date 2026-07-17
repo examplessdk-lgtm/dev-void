@@ -288,7 +288,7 @@ describe('resolveWranglerArgv (module-resolution launcher)', () => {
     const argv = resolveWranglerArgv(root);
     expect(argv).toHaveLength(2);
     expect(argv[0]).toBe(process.execPath);
-    // F2 — the resolved entry is wrangler's REAL CLI (`wrangler-dist/cli.js`, its
+    // The resolved entry is wrangler's REAL CLI (`wrangler-dist/cli.js`, its
     // package `main`), NOT the signal-swallowing `bin/wrangler.js` wrapper.
     expect(argv[1].replace(/\\/g, '/')).toMatch(/wrangler\/wrangler-dist\/cli\.js$/);
     expect(argv[1].replace(/\\/g, '/')).not.toMatch(/bin\/wrangler\.js$/);
@@ -298,7 +298,7 @@ describe('resolveWranglerArgv (module-resolution launcher)', () => {
     // The app root pins its OWN (potentially older/incompatible) wrangler, and a
     // separate "void-nested" wrangler is resolvable via module resolution. The
     // provisioner targets wrangler 4.107's exact flags/JSON/errors, so void's own
-    // wrangler MUST win — the app-root one must not shadow it. F2 — the resolved entry
+    // wrangler MUST win — the app-root one must not shadow it. The resolved entry
     // is the `main` CLI (`wrangler-dist/cli.js`), NOT the `bin.wrangler` wrapper.
     const root = setupProject({
       pkg: { dependencies: { wrangler: '^3.0.0' } },

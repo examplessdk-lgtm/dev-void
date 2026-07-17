@@ -94,7 +94,7 @@ describe('collectPlaintextVarWarnings — plaintext worker-vars classification',
     const root = createTempProject();
     // WIDGET_TOKEN matches the heuristic (TOKEN). `.public()` only means "not a
     // schema secret" — the value still ships as plaintext, so it is still
-    // flagged via the heuristic (F1). It is NOT reason `schema-secret`.
+    // flagged via the heuristic. It is NOT reason `schema-secret`.
     defineEnv({ WIDGET_TOKEN: string().public() });
     writeDotenv(root, '.env.production', 'WIDGET_TOKEN=https://example.com/widget\n');
 
@@ -301,7 +301,7 @@ describe('collectPlaintextVarWarnings — plaintext worker-vars classification',
 });
 
 // ---------------------------------------------------------------------------
-// WARN unit — F5 values-free schema boundary (env.ts load + default probing)
+// WARN unit — values-free schema boundary (env.ts load + default probing)
 // ---------------------------------------------------------------------------
 
 describe('collectPlaintextVarWarnings — schema load + default probe are values-free', () => {
@@ -579,7 +579,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
     expect(calls).toEqual([]);
   });
 
-  // --- F2: present-empty local var must not be discharged by a remote secret ---
+  // --- present-empty local var must not be discharged by a remote secret ---
 
   describe('empty local assignment shadowing a remote secret', () => {
     it('fails closed naming the key when `FOO=` collides with remote FOO (never ships empty over the secret)', async () => {
@@ -603,7 +603,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect(envError.report.missing).toEqual(['FOO']);
       expect(envError.message).toContain('FOO');
       expect(envError.message).toContain('Remove the empty assignment');
-      // F3 — names the ACTUAL dotenv file the empty value came from.
+      // Names the ACTUAL dotenv file the empty value came from.
       expect(envError.message).toContain('.env.production');
       // Guidance is about removing the assignment, NOT `secret put` (the secret
       // already exists remotely).
@@ -645,7 +645,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       const envError = error as SelfHostEnvValidationError;
       expect(envError.report.missing).toEqual(['FOO']);
       expect(envError.message).toContain('Remove the empty assignment');
-      // F3 — names `.env.local` specifically (the winning file), not a generic list.
+      // Names `.env.local` specifically (the winning file), not a generic list.
       expect(envError.message).toContain('.env.local');
       expect(envError.message).not.toContain('wrangler secret put');
     });
@@ -724,7 +724,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect(envError.message).not.toContain('BAR');
       expect(envError.message).toContain('Remove the empty assignment');
       expect(envError.message).not.toContain('wrangler secret put');
-      // F3 — provenance names the WINNING (highest-precedence) file
+      // Provenance names the WINNING (highest-precedence) file
       // `.env.production.local`, not the lower `.env.production` that set real-foo.
       expect(envError.message).toContain('.env.production.local');
     });
@@ -822,7 +822,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       const root = createTempProject();
       // FOO rejects undefined (required) but ACCEPTS "". `FOO=` therefore never
       // enters validateAllEnv().missing, so the pre-fix presentEmpty check (which
-      // filtered buildReport.missing) saw nothing → the whole F2 gate was bypassed
+      // filtered buildReport.missing) saw nothing → the whole gate was bypassed
       // and remote FOO was overwritten by the plaintext empty. The fix derives
       // requiredness independently (probe undefined), so `FOO=` still fails closed.
       defineEnv({ FOO: acceptsEmptyButRequired });
@@ -895,7 +895,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
   // sanitized dotenv (highest). The gate must judge present/empty/absent over
   // that FINAL resolved map, not the dotenv layer alone — else a configured
   // empty required var reads as ABSENT and a remote secret wrongly discharges
-  // it, while the build ships `FOO=""` OVER that remote secret (the F2 fail-open,
+  // it, while the build ships `FOO=""` OVER that remote secret (the fail-open,
   // new source), and a configured non-empty value is misclassified as absent.
 
   describe('effective build map — configured worker vars', () => {
@@ -928,7 +928,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
       expect((error as Error).message).toContain('Remove the empty assignment');
       expect((error as Error).message).not.toContain('wrangler secret put');
-      // F3 — the error names the ACTUAL source (void.json worker.vars), never .env.
+      // The error names the ACTUAL source (void.json worker.vars), never .env.
       expect((error as Error).message).toContain('void.json');
       expect((error as Error).message).toContain('worker.vars');
       // Rejected BEFORE any wrangler spawn — remote membership is irrelevant.
@@ -952,7 +952,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect(error).toBeInstanceOf(SelfHostEnvValidationError);
       expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
       expect((error as Error).message).toContain('Remove the empty assignment');
-      // F3 — the error names the ACTUAL source (root wrangler.jsonc vars), never .env.
+      // The error names the ACTUAL source (root wrangler.jsonc vars), never .env.
       expect((error as Error).message).toContain('wrangler.jsonc');
       expect((error as Error).message).not.toContain('.env');
       expect(calls).toEqual([]);
@@ -1030,7 +1030,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
     });
   });
 
-  // --- F1: JSON-valued (non-string) configured vars are PRESENT, not absent ---
+  // --- JSON-valued (non-string) configured vars are PRESENT, not absent ---
   //
   // wrangler 4.107 accepts a var value of ANY JSON type and ships every
   // non-string as a `type:"json"` binding (wrangler-dist/cli.js `case "vars"`),
@@ -1144,7 +1144,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
     });
   });
 
-  // --- F3: account reconciled against the config before spawning wrangler ---
+  // --- account reconciled against the config before spawning wrangler ---
 
   describe('account reconciliation before spawn', () => {
     function writeConfig(root: string, config: Record<string, unknown>): string {
@@ -1210,7 +1210,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
     });
   });
 
-  // --- F4: first-deploy (worker-not-found) surfaces a structured, actionable error ---
+  // --- first-deploy (worker-not-found) surfaces a structured, actionable error ---
 
   describe('first-deploy worker-not-found', () => {
     // The EXACT UserError wrangler 4.107 emits from `secret list` when the
@@ -1324,7 +1324,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
     });
   });
 
-  // --- F5: self-host errors are values-free even under VOID_ENV_UNMASK ---
+  // --- self-host errors are values-free even under VOID_ENV_UNMASK ---
 
   describe('invalid-value errors are values-free', () => {
     it('never echoes the raw invalid value in the message, report, or its JSON — even with VOID_ENV_UNMASK', async () => {
@@ -1478,7 +1478,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
     });
   });
 
-  // --- F5: wrangler failure diagnostics never carry a value, anywhere ---
+  // --- wrangler failure diagnostics never carry a value, anywhere ---
 
   describe('wrangler failure diagnostics are values-free even under VOID_ENV_UNMASK', () => {
     // A sentinel "secret" a hostile/leaky wrangler could echo into stderr/stdout
@@ -1589,7 +1589,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       defineEnv({ FOO: string(), API_TOKEN: string() });
       // The worker-not-found signal AND a sentinel share the child's stderr: the
       // signal must be read (classification), the sentinel must not leak. The
-      // full structured block is present (M2), with the sentinel embedded.
+      // full structured block is present, with the sentinel embedded.
       const error = (await throwFrom(root, {
         stdout: '',
         stderr:
@@ -1607,7 +1607,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
     });
   });
 
-  // --- F5: thrown schema-load / validator exceptions never carry a value ---
+  // --- thrown schema-load / validator exceptions never carry a value ---
 
   describe('schema evaluation/validation throws are values-free even under VOID_ENV_UNMASK', () => {
     const SENTINEL = 'SENTINEL-schema-sk_live_leak-QQZ';

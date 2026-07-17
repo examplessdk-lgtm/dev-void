@@ -37,7 +37,7 @@ import {
 
 /**
  * A passthrough of proper-lockfile's callback-style fs seam (mkdir/stat/utimes/rmdir/
- * realpath + a sync rmdir). The F2 unlock-failure test overrides `rmdir` on top of this.
+ * realpath + a sync rmdir). The unlock-failure test overrides `rmdir` on top of this.
  */
 const passthruFs = { mkdir, stat, utimes, rmdir, realpath, rmdirSync };
 
@@ -51,7 +51,7 @@ function setup(content: string): void {
 }
 
 /**
- * F2 — the provisioner requires a resolvable Cloudflare account whenever `desired`
+ * The provisioner requires a resolvable Cloudflare account whenever `desired`
  * implies remote work (the boundary account fence), regardless of injected vs
  * default seams. Real deploys always have one (`CLOUDFLARE_ACCOUNT_ID` or a config
  * `account_id`); mirror that by pinning an ambient account for every test, so the
@@ -113,7 +113,7 @@ function isCall(argv: Array<string>, ...prefix: Array<string>): boolean {
 const ok = (stdout = ''): RunWranglerResult => ({ stdout, stderr: '', status: 0 });
 const fail = (stdout: string, stderr = ''): RunWranglerResult => ({ stdout, stderr, status: 1 });
 
-// Valid-FORMAT synthetic ids for fixtures. F4's validators require REAL shapes:
+// Valid-FORMAT synthetic ids for fixtures. The validators require REAL shapes:
 // D1 database_id is a hyphenated UUID; KV + Hyperdrive ids are 32-char lowercase hex.
 // ASCII-hex of the seed, zero-padded to 32 — deterministic, distinct, and ORDER-PRESERVING
 // on equal-length seeds (so lexicographic tie-break assertions stay valid).
@@ -1202,7 +1202,7 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
 
   it('creates a queue that `queues info` reports missing; verifies with a follow-up info probe', async () => {
     setup(JSON.stringify({ name: 'app' }));
-    // F4: after `queues create`, the provisioner RE-RUNS `queues info` and only
+    // After `queues create`, the provisioner RE-RUNS `queues info` and only
     // records `created` if it now POSITIVELY confirms the queue (queues write no
     // config, so this is the only backstop against a masked-signal create).
     let created = false;
@@ -1542,7 +1542,7 @@ describe('provisionCloudflareResources — account reconciliation + config pin',
       { runWrangler: run, log: silentLog },
     );
     // Every wrangler argv threads the ONE resolved config via `-c <configPath>` AND
-    // the top-level `--env=` pin (F1).
+    // the top-level `--env=` pin.
     expect(calls.length).toBeGreaterThan(0);
     for (const argv of calls) {
       const i = argv.indexOf('-c');
@@ -1721,7 +1721,7 @@ describe('provisionCloudflareResources — pinned transport (one base for wrangl
     );
     expect(seen?.accountId).toBe('config-acct');
     expect(seen?.apiBaseUrl).toBe('https://api.cloudflare.com/client/v4');
-    // F4 — the lister is handed the overall-deadline signal to thread into every fetch.
+    // The lister is handed the overall-deadline signal to thread into every fetch.
     expect(seen?.signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -2114,13 +2114,13 @@ describe('normalizeRunWranglerResult — signal / spawn-error handling', () => {
 });
 
 describe('createDefaultRunWrangler — hard timeout kills the REAL process', () => {
-  const F2_TMP = join(import.meta.dirname, '.tmp-f2-timeout');
+  const TIMEOUT_TMP = join(import.meta.dirname, '.tmp-timeout-kill');
   beforeEach(() => {
-    rmSync(F2_TMP, { recursive: true, force: true });
-    mkdirSync(F2_TMP, { recursive: true });
+    rmSync(TIMEOUT_TMP, { recursive: true, force: true });
+    mkdirSync(TIMEOUT_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(F2_TMP, { recursive: true, force: true });
+    rmSync(TIMEOUT_TMP, { recursive: true, force: true });
   });
 
   /** Poll `process.kill(pid, 0)` until the pid is dead (ESRCH) or the deadline passes. */
@@ -2140,15 +2140,15 @@ describe('createDefaultRunWrangler — hard timeout kills the REAL process', () 
   it('a DIRECT hung CLI is SIGKILLed and the runner REJECTS-as-hard-failure within the timeout', async () => {
     // Simulate the post-fix launcher: a direct CLI entry (no wrapper) that ignores SIGTERM
     // and hangs forever, writing its pid so the test can confirm it was actually killed.
-    const pidFile = join(F2_TMP, 'cli.pid');
-    const hungCli = join(F2_TMP, 'hung-cli.cjs');
+    const pidFile = join(TIMEOUT_TMP, 'cli.pid');
+    const hungCli = join(TIMEOUT_TMP, 'hung-cli.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
         `process.on('SIGTERM', () => {});\n` + // survives a plain SIGTERM (like the wrapper sends)
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const run = createDefaultRunWrangler(F2_TMP, {
+    const run = createDefaultRunWrangler(TIMEOUT_TMP, {
       launcher: [process.execPath, hungCli],
       timeoutMs: 400,
     });
@@ -2170,22 +2170,22 @@ describe('createDefaultRunWrangler — hard timeout kills the REAL process', () 
   }, 20_000);
 
   it('a WRAPPER that re-spawns a hung grandchild: runner still settles in time AND the grandchild is reaped', async () => {
-    // The exact scenario the finding describes: a `bin/wrangler.js`-style wrapper that
+    // The exact scenario: a `bin/wrangler.js`-style wrapper that
     // spawns an inner CLI with inherited stdio and forwards only SIGTERM (never SIGKILL),
     // mapping a signal-killed child to exit 0. Pre-fix this defeated the timeout (the
     // grandchild survived holding the pipes so `close` never fired). The runner now spawns
     // the launcher in its OWN process group and SIGKILLs the WHOLE group on timeout, then
     // settles immediately — so even a wrapper-plus-hung-grandchild rejects within the
     // timeout with NO lingering process.
-    const gcPidFile = join(F2_TMP, 'grandchild.pid');
-    const grandchild = join(F2_TMP, 'grandchild.cjs');
+    const gcPidFile = join(TIMEOUT_TMP, 'grandchild.pid');
+    const grandchild = join(TIMEOUT_TMP, 'grandchild.cjs');
     writeFileSync(
       grandchild,
       `require('fs').writeFileSync(${JSON.stringify(gcPidFile)}, String(process.pid));\n` +
         `process.on('SIGTERM', () => {});\n` + // ignore the wrapper's forwarded SIGTERM
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const wrapper = join(F2_TMP, 'wrapper.cjs');
+    const wrapper = join(TIMEOUT_TMP, 'wrapper.cjs');
     writeFileSync(
       wrapper,
       `const { spawn } = require('child_process');\n` +
@@ -2207,7 +2207,7 @@ describe('createDefaultRunWrangler — hard timeout kills the REAL process', () 
         `process.on('SIGINT', () => { if (child) child.kill(); });\n` +
         `setInterval(() => {}, 1 << 30);\n`, // keep the wrapper alive until the group is killed
     );
-    const run = createDefaultRunWrangler(F2_TMP, {
+    const run = createDefaultRunWrangler(TIMEOUT_TMP, {
       launcher: [process.execPath, wrapper],
       // Generous internal timeout so the wrapper + grandchild reliably establish (and hang)
       // before the timer fires even under load — the timeout-kill path is what we assert.
@@ -2395,7 +2395,7 @@ describe('provisionCloudflareResources — resource-name validation', () => {
   }> = [
     {
       // badNames all start with "-", so the universal option-injection guard fires FIRST
-      // (F5 split) with "refusing to pass an unsafe <label> name", before the grammar check.
+      // with "refusing to pass an unsafe <label> name", before the grammar check.
       label: /unsafe D1 database name/,
       desired: (name) => ({ ...emptyDesired, d1: { binding: 'DB', name } }),
       createPrefix: ['d1', 'create'],
@@ -2609,7 +2609,7 @@ describe('provisionCloudflareResources — strict D1 identity', () => {
         { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
         { runWrangler: run, log: silentLog },
       ),
-      // F7 (round 12): the WHOLE-LIST alias reconciler now rejects the conflicting
+      // The WHOLE-LIST alias reconciler now rejects the conflicting
       // aliases before the claimant-level check even runs — same fail-closed outcome.
     ).rejects.toThrow(/no valid id.*agreeing on one id/s);
     expect(calls.some((c) => isCall(c, 'd1', 'create'))).toBe(false);
@@ -2806,7 +2806,7 @@ describe('provisionCloudflareResources — absolute config path', () => {
 
 describe('provisionCloudflareResources — one D1 normalizer', () => {
   it('fails closed on CONFLICTING name aliases (name vs database_name) for the requested database', async () => {
-    // The exact F5 scenario: a list member claims the requested name via `name` but its
+    // The exact scenario: a list member claims the requested name via `name` but its
     // `database_name` disagrees. The old two-helper split SELECTED it by `name` yet
     // normalized its identity under `database_name` — adopting a WRONG identity. The one
     // normalizer rejects the conflict (fail closed, no adopt/create).
@@ -3025,7 +3025,7 @@ describe('provisionCloudflareResources — Hyperdrive list validation at the cal
   });
 
   it('fails closed on a NON-matching member with a malformed id (no create)', async () => {
-    // A member for a DIFFERENT config carries a bogus (non-hex) id. Before F4 this passed
+    // A member for a DIFFERENT config carries a bogus (non-hex) id. Previously this passed
     // the whole-list gate (only the name-matched member was format-checked), so an ABSENT
     // target authorized a blind create against a possibly-untrustworthy list. Now every
     // member's id is format-validated up front → fail closed, NO create.
@@ -3035,7 +3035,7 @@ describe('provisionCloudflareResources — Hyperdrive list validation at the cal
     expect(readConfig().hyperdrive).toBeUndefined();
   });
 
-  // F3 — a runtime null/undefined/non-array OUTER result must be treated as UNKNOWN
+  // A runtime null/undefined/non-array OUTER result must be treated as UNKNOWN
   // (never coerced to "empty" = confirmed absence), so it fails closed BEFORE any
   // create instead of authorizing a blind `hyperdrive create` on a same-named config.
   for (const [label, bad] of [
@@ -3527,7 +3527,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (p
   });
 
   it('two concurrent provisions in SEPARATE processes race — exactly ONE create, the other reuses, mutex released', async () => {
-    // Round 14 — with at most one provision per process, concurrent provisioning is a
+    // With at most one provision per process, concurrent provisioning is a
     // CROSS-process story by definition, so the serialization proof runs two REAL node
     // processes racing the same config under the on-disk whole-provision lock.
     setup(
@@ -3663,7 +3663,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (p
     // A real config + a symlink alias to it. Both paths hit the SAME underlying file but
     // via DIFFERENT lexical paths. Without realpath canonicalization each derives its
     // own marker dir (`<lexical>.void-provision.lock`), so an alias provision would not
-    // contend on the real path's lock and both could create a duplicate. (Round 14: two
+    // contend on the real path's lock and both could create a duplicate. (Two
     // provisions can no longer race in ONE process — the identity proof is that the
     // alias provision blocks on the CANONICAL mutex, plus create-then-reuse across the
     // two names on the one underlying file.)
@@ -3723,7 +3723,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (p
     // Neither run has a config account_id at start. The first run persists its own
     // account and provisions; the second — reading the now-pinned config — fails closed
     // on the A≠B mismatch BEFORE any create, so it never rebinds the winner's resources.
-    // (Round 14: two provisions can no longer race in ONE process — the guard rejects
+    // (Two provisions can no longer race in ONE process — the guard rejects
     // the second outright — so the reconciliation contract is proven sequentially; the
     // cross-process serialization itself is proven by the child-process race test above.)
     setup(JSON.stringify({ name: 'app' }));
@@ -5161,7 +5161,7 @@ describe('provisionCloudflareResources — quarantine retains the whole-provisio
     // possibly-live wrangler child. (A non-quarantine failure releases it — see the
     // whole-provision lock suite.)
     expect(existsSync(lockMutex)).toBe(true);
-    // F2 (round 12) — the quarantine ALSO persisted its owner metadata beside the lock,
+    // The quarantine ALSO persisted its owner metadata beside the lock,
     // so later acquisitions gate on the recorded group instead of stealing by age.
     const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
     expect(existsSync(sidecar)).toBe(true);
@@ -5191,13 +5191,13 @@ describe('provisionCloudflareResources — quarantine retains the whole-provisio
 });
 
 describe('createDefaultRunWrangler — parent-signal forwarding awaits confirmed teardown', () => {
-  const SIG_TMP = join(import.meta.dirname, '.tmp-f2-signal-round11');
+  const SIGNAL_TEARDOWN_TMP = join(import.meta.dirname, '.tmp-signal-teardown');
   beforeEach(() => {
-    rmSync(SIG_TMP, { recursive: true, force: true });
-    mkdirSync(SIG_TMP, { recursive: true });
+    rmSync(SIGNAL_TEARDOWN_TMP, { recursive: true, force: true });
+    mkdirSync(SIGNAL_TEARDOWN_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(SIG_TMP, { recursive: true, force: true });
+    rmSync(SIGNAL_TEARDOWN_TMP, { recursive: true, force: true });
   });
 
   it('SIGTERM to the parent: the child group is confirmed dead BEFORE the parent re-raises and exits', async () => {
@@ -5206,15 +5206,15 @@ describe('createDefaultRunWrangler — parent-signal forwarding awaits confirmed
     // re-raised immediately — it was dead while the child lived on (proper-lockfile's exit
     // hook would strip the mutex under a live child). Post-fix the parent awaits the
     // confirmed teardown, so AT parent exit the child is deterministically gone.
-    const pidFile = join(SIG_TMP, 'child.pid');
-    const childScript = join(SIG_TMP, 'slow-exit-child.cjs');
+    const pidFile = join(SIGNAL_TEARDOWN_TMP, 'child.pid');
+    const childScript = join(SIGNAL_TEARDOWN_TMP, 'slow-exit-child.cjs');
     writeFileSync(
       childScript,
       `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
         `process.on('SIGTERM', () => setTimeout(() => process.exit(0), 250));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const parentScript = join(SIG_TMP, 'parent.mjs');
+    const parentScript = join(SIGNAL_TEARDOWN_TMP, 'parent.mjs');
     const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
     writeFileSync(
       parentScript,
@@ -5229,7 +5229,7 @@ describe('createDefaultRunWrangler — parent-signal forwarding awaits confirmed
     );
     const { spawn } = await import('node:child_process');
     const parent = spawn(process.execPath, [parentScript], {
-      cwd: SIG_TMP,
+      cwd: SIGNAL_TEARDOWN_TMP,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let childPid: number | undefined;
@@ -5283,27 +5283,27 @@ describe('createDefaultRunWrangler — parent-signal forwarding awaits confirmed
 });
 
 describe('createDefaultRunWrangler — normal close confirms the whole GROUP', () => {
-  const F1R12_TMP = join(import.meta.dirname, '.tmp-f1-round12');
+  const GROUP_CLOSE_TMP = join(import.meta.dirname, '.tmp-group-close');
   beforeEach(() => {
-    rmSync(F1R12_TMP, { recursive: true, force: true });
-    mkdirSync(F1R12_TMP, { recursive: true });
+    rmSync(GROUP_CLOSE_TMP, { recursive: true, force: true });
+    mkdirSync(GROUP_CLOSE_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(F1R12_TMP, { recursive: true, force: true });
+    rmSync(GROUP_CLOSE_TMP, { recursive: true, force: true });
   });
 
   it('an exit-0 leader that leaves a SAME-GROUP grandchild alive: the runner resolves only after the group is dead', async () => {
     // Pre-fix, a normal `close` resolved IMMEDIATELY without probing the detached
     // process group, so a surviving same-group grandchild (own stdio, so `close` fires
     // at the leader's exit) kept running after the whole-provision lock was released.
-    const gcPidFile = join(F1R12_TMP, 'gc.pid');
-    const gc = join(F1R12_TMP, 'gc.cjs');
+    const gcPidFile = join(GROUP_CLOSE_TMP, 'gc.pid');
+    const gc = join(GROUP_CLOSE_TMP, 'gc.cjs');
     writeFileSync(
       gc,
       `require('fs').writeFileSync(${JSON.stringify(gcPidFile)}, String(process.pid));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const leader = join(F1R12_TMP, 'leader.cjs');
+    const leader = join(GROUP_CLOSE_TMP, 'leader.cjs');
     writeFileSync(
       leader,
       `const { spawn } = require('child_process');\n` +
@@ -5316,7 +5316,7 @@ describe('createDefaultRunWrangler — normal close confirms the whole GROUP', (
         `  if (fs.existsSync(${JSON.stringify(gcPidFile)})) { process.exit(0); }\n` +
         `}, 10);\n`,
     );
-    const run = createDefaultRunWrangler(F1R12_TMP, {
+    const run = createDefaultRunWrangler(GROUP_CLOSE_TMP, {
       launcher: [process.execPath, leader],
       timeoutMs: 30_000,
     });
@@ -5482,7 +5482,7 @@ describe('acquireProvisionLock — the gate runs on EVERY attempt + post-acquire
   }
 
   it('a waiter that started while the holder was HEALTHY fails closed when the holder quarantines mid-wait', async () => {
-    // The round-12 code gated ONCE before proper-lockfile's internal retry loop: this
+    // The prior code gated ONCE before proper-lockfile's internal retry loop: this
     // waiter passed that gate (holder healthy, no sidecar), kept retrying while the
     // holder QUARANTINED (heartbeat detached), then stale-took the retained mutex
     // without ever seeing the sidecar — acquiring while the recorded group was ALIVE.
@@ -5496,7 +5496,7 @@ describe('acquireProvisionLock — the gate runs on EVERY attempt + post-acquire
       });
       // Let the waiter run a few healthy attempts first, THEN quarantine the holder.
       await new Promise((r) => setTimeout(r, 400));
-      holder.quarantine({ pid: child.pid, reason: 'round-13: waiter crosses quarantine' });
+      holder.quarantine({ pid: child.pid, reason: 'waiter crosses quarantine' });
       // Post-fix the waiter's NEXT attempt re-runs the gate: sidecar + live group →
       // fail closed (never a stale-take of the detached mutex).
       await expect(waiter).rejects.toThrow(/QUARANTINED.*waiter crosses quarantine/s);
@@ -5524,7 +5524,7 @@ describe('acquireProvisionLock — the gate runs on EVERY attempt + post-acquire
     // (quarantining a live child here would race the waiter's fail-closed gate).
     reap(child);
     expect(await waitForDead(child.pid!, 5_000)).toBe(true);
-    holder.quarantine({ pid: child.pid, reason: 'round-13: waiter proceeds once dead' });
+    holder.quarantine({ pid: child.pid, reason: 'waiter proceeds once dead' });
     // The waiter's next gate probes the recorded group DEAD → clears the sidecar →
     // proper-lockfile's stale lifecycle then reclaims the heartbeat-less mutex.
     const lock = await waiter;
@@ -5548,7 +5548,7 @@ describe('acquireProvisionLock — the gate runs on EVERY attempt + post-acquire
             JSON.stringify({
               pid: child.pid,
               pgid: child.pid,
-              reason: 'round-13: appeared mid-acquisition',
+              reason: 'appeared mid-acquisition',
             }),
           );
           (passthruFs.mkdir as (...a: Array<unknown>) => void)(...args);
@@ -5575,10 +5575,10 @@ describe('acquireProvisionLock — durable sidecar is a PRECONDITION for quarant
   const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
   // Blocking the sidecar's TEMP path (a directory where the temp file goes) makes the
   // durable write fail while leaving the sidecar path itself absent — exactly the
-  // fail-open shape of the finding (no durable marker lands anywhere).
+  // fail-open shape (no durable marker lands anywhere).
   const tmpBlocker = `${sidecar}.tmp-${process.pid}`;
 
-  // F5 (round 14) — a provision-level quarantine whose DURABLE persistence fails arms a
+  // A provision-level quarantine whose DURABLE persistence fails arms a
   // process-wide RETENTION WATCHDOG (a module singleton in provision.ts). It resolves
   // ASYNCHRONOUSLY: it clears the mutex / writes the sidecar and THEN — one microtask
   // later (`lock.release().then(resolveWatchdog)`) — frees the process-wide provision
@@ -5634,7 +5634,7 @@ describe('acquireProvisionLock — durable sidecar is a PRECONDITION for quarant
     const lock = await acquireProvisionLock(wranglerPath, { stale: 2_000 });
     try {
       mkdirSync(tmpBlocker);
-      expect(() => lock.quarantine({ pid: 99_999, reason: 'round-13: sidecar blocked' })).toThrow(
+      expect(() => lock.quarantine({ pid: 99_999, reason: 'sidecar blocked' })).toThrow(
         /intentionally STILL HELD/,
       );
       // No partial/durable marker landed…
@@ -5682,7 +5682,7 @@ describe('acquireProvisionLock — durable sidecar is a PRECONDITION for quarant
       }
       expect(dead).toBe(true);
     }
-    const quarantineError = new WranglerQuarantineError(childPid, 'round-14: child unconfirmed');
+    const quarantineError = new WranglerQuarantineError(childPid, 'child unconfirmed');
     const run: RunWrangler = () => Promise.reject(quarantineError);
     let thrown: unknown;
     try {
@@ -5749,7 +5749,7 @@ describe('acquireProvisionLock — durable sidecar is a PRECONDITION for quarant
       stdio: 'ignore',
     });
     let failPersistence = true;
-    const quarantineError = new WranglerQuarantineError(live.pid, 'round-14: live child');
+    const quarantineError = new WranglerQuarantineError(live.pid, 'live child');
     const run: RunWrangler = () => Promise.reject(quarantineError);
     try {
       let thrown: unknown;
@@ -5814,17 +5814,17 @@ describe('acquireProvisionLock — durable sidecar is a PRECONDITION for quarant
   }, 30_000);
 
   it('the watchdog HOLDS the process at natural exit until the child dies, then releases and exits cleanly', async () => {
-    // THE F5 repro: on persistence failure the provision rejects with the lock left
+    // THE repro: on persistence failure the provision rejects with the lock left
     // TRACKED — and proper-lockfile's EXIT SWEEP removes every tracked mutex when the
     // parent naturally exits, leaving the live child with NO mutex and NO sidecar.
     // Post-fix a REFERENCED watchdog holds the (otherwise drained) process open,
     // confirms the child's death, releases the mutex normally, and only then lets the
     // process exit.
-    const F5_TMP = join(import.meta.dirname, '.tmp-f5-round14');
-    rmSync(F5_TMP, { recursive: true, force: true });
-    mkdirSync(F5_TMP, { recursive: true });
-    const appRoot = join(F5_TMP, 'app');
-    const probe = join(F5_TMP, 'probe.mjs');
+    const WATCHDOG_EXIT_TMP = join(import.meta.dirname, '.tmp-watchdog-exit');
+    rmSync(WATCHDOG_EXIT_TMP, { recursive: true, force: true });
+    mkdirSync(WATCHDOG_EXIT_TMP, { recursive: true });
+    const appRoot = join(WATCHDOG_EXIT_TMP, 'app');
+    const probe = join(WATCHDOG_EXIT_TMP, 'probe.mjs');
     const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
     writeFileSync(
       probe,
@@ -5842,7 +5842,7 @@ describe('acquireProvisionLock — durable sidecar is a PRECONDITION for quarant
         `child.unref();\n` +
         `const startedAt = Date.now();\n` +
         `provisionCloudflareResources(root, cfg, { kvNamespaces: [], queues: [], d1: { binding: 'DB', name: 'myapp-db' } }, {\n` +
-        `  runWrangler: () => Promise.reject(new WranglerQuarantineError(child.pid, 'r14: unconfirmed')),\n` +
+        `  runWrangler: () => Promise.reject(new WranglerQuarantineError(child.pid, 'unconfirmed')),\n` +
         `  log: { info: () => {}, warn: () => {} },\n` +
         `  lockOptions: {\n` +
         `    dirDurability: { fsyncSync: () => { throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }); } },\n` +
@@ -5859,7 +5859,7 @@ describe('acquireProvisionLock — durable sidecar is a PRECONDITION for quarant
     );
     const { spawn } = await import('node:child_process');
     const parent = spawn(process.execPath, [probe], {
-      cwd: F5_TMP,
+      cwd: WATCHDOG_EXIT_TMP,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stderr = '';
@@ -5902,7 +5902,7 @@ describe('acquireProvisionLock — durable sidecar is a PRECONDITION for quarant
       } catch {
         // already gone
       }
-      rmSync(F5_TMP, { recursive: true, force: true });
+      rmSync(WATCHDOG_EXIT_TMP, { recursive: true, force: true });
     }
   }, 20_000);
 });
@@ -5928,7 +5928,7 @@ describe('acquireProvisionLock — sidecar DIRECTORY durability failures propaga
       },
     });
     try {
-      expect(() => lock.quarantine({ pid: 42_424, reason: 'round-14 f6 enospc' })).toThrow(
+      expect(() => lock.quarantine({ pid: 42_424, reason: 'enospc' })).toThrow(
         /could not persist quarantine metadata.*ENOSPC/s,
       );
       // The non-durable sidecar was rolled back (state matches "not persisted")…
@@ -5957,7 +5957,7 @@ describe('acquireProvisionLock — sidecar DIRECTORY durability failures propaga
         },
       },
     });
-    lock.quarantine({ pid: 42_425, reason: 'round-14 f6 einval' }); // must not throw
+    lock.quarantine({ pid: 42_425, reason: 'einval' }); // must not throw
     expect(existsSync(sidecar)).toBe(true);
     expect(existsSync(lockMutex)).toBe(true); // retained (detached from the exit sweep)
     await lock.release(); // no-op after a successful quarantine
@@ -6027,7 +6027,7 @@ describe('acquireProvisionLock — recovery decisions are serialized + generatio
     const pid = await deadPid();
     writeFileSync(
       sidecar,
-      JSON.stringify({ pid, pgid: pid, reason: 'round-14: dead group', generation: 'gen-r14-s' }),
+      JSON.stringify({ pid, pgid: pid, reason: 'dead group', generation: 'gen-r14-s' }),
     );
     writeFileSync(recoveryMarker, '');
     const properLockfile = (await import('proper-lockfile')).default;
@@ -6051,7 +6051,7 @@ describe('acquireProvisionLock — recovery decisions are serialized + generatio
   });
 
   it("a stale recovery decision cannot delete a NEWER quarantine generation (B's decision detects S1; A's retained mutex stays protected)", async () => {
-    // THE round-14 F3 scenario, injected deterministically at the one point the
+    // THE scenario, injected deterministically at the one point the
     // recovery mutex cannot serialize (a main-mutex holder's quarantine write): B
     // inspects dead S0 (generation g0) and decides to clear; before its unlink, A's
     // NEWER live-group quarantine S1 (generation g1) replaces the file. Pre-fix B
@@ -6066,7 +6066,7 @@ describe('acquireProvisionLock — recovery decisions are serialized + generatio
         JSON.stringify({
           pid: dead,
           pgid: dead,
-          reason: 'round-14: S0 (dead group)',
+          reason: 'S0 (dead group)',
           generation: 'gen-r14-s0',
         }),
       );
@@ -6081,7 +6081,7 @@ describe('acquireProvisionLock — recovery decisions are serialized + generatio
           JSON.stringify({
             pid: live.pid,
             pgid: live.pid,
-            reason: 'round-14: S1 (live group, newer quarantine)',
+            reason: 'S1 (live group, newer quarantine)',
             generation: 'gen-r14-s1',
           }),
         );
@@ -6114,13 +6114,13 @@ describe('acquireProvisionLock — recovery decisions are serialized + generatio
 });
 
 describe('createDefaultRunWrangler — signal-path kill failure quarantines the lock (child-process)', () => {
-  const SIG12_TMP = join(import.meta.dirname, '.tmp-f1f2-signal-round12');
+  const SIGNAL_KILL_TMP = join(import.meta.dirname, '.tmp-signal-kill');
   beforeEach(() => {
-    rmSync(SIG12_TMP, { recursive: true, force: true });
-    mkdirSync(SIG12_TMP, { recursive: true });
+    rmSync(SIGNAL_KILL_TMP, { recursive: true, force: true });
+    mkdirSync(SIGNAL_KILL_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(SIG12_TMP, { recursive: true, force: true });
+    rmSync(SIGNAL_KILL_TMP, { recursive: true, force: true });
   });
 
   async function waitForDead(pid: number, timeoutMs: number): Promise<boolean> {
@@ -6140,16 +6140,16 @@ describe('createDefaultRunWrangler — signal-path kill failure quarantines the 
     // Pre-fix, the signal-forwarding path re-raised IMMEDIATELY on a non-ESRCH kill
     // failure — the parent died, proper-lockfile's exit hook removed the still-tracked
     // mutex, and the live wrangler child kept creating resources with NO lock on disk.
-    const appRoot = join(SIG12_TMP, 'app');
-    const pidFile = join(SIG12_TMP, 'child.pid');
-    const hungCli = join(SIG12_TMP, 'hung.cjs');
+    const appRoot = join(SIGNAL_KILL_TMP, 'app');
+    const pidFile = join(SIGNAL_KILL_TMP, 'child.pid');
+    const hungCli = join(SIGNAL_KILL_TMP, 'hung.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
         `process.on('SIGTERM', () => {});\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const parentScript = join(SIG12_TMP, 'parent.mjs');
+    const parentScript = join(SIGNAL_KILL_TMP, 'parent.mjs');
     const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
     writeFileSync(
       parentScript,
@@ -6176,7 +6176,7 @@ describe('createDefaultRunWrangler — signal-path kill failure quarantines the 
     );
     const { spawn } = await import('node:child_process');
     const parent = spawn(process.execPath, [parentScript], {
-      cwd: SIG12_TMP,
+      cwd: SIGNAL_KILL_TMP,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let childPid: number | undefined;
@@ -6211,7 +6211,7 @@ describe('createDefaultRunWrangler — signal-path kill failure quarantines the 
       const recorded = JSON.parse(readFileSync(sidecar, 'utf-8')) as Record<string, unknown>;
       expect(recorded.pid).toBe(childPid);
       expect(String(recorded.reason)).toMatch(/SIGTERM/);
-      // The child is genuinely still alive — and the F2 gate FAILS CLOSED on it even
+      // The child is genuinely still alive — and the gate FAILS CLOSED on it even
       // with the mutex aged far past the stale window.
       expect(() => process.kill(childPid!, 0)).not.toThrow();
       const old = new Date(Date.now() - 3_600_000);
@@ -6249,13 +6249,13 @@ describe('createDefaultRunWrangler — signal-path kill failure quarantines the 
 });
 
 describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals coalesced, teardown bounded, spawns rejected', () => {
-  const F2R13_TMP = join(import.meta.dirname, '.tmp-f2-round13');
+  const COORDINATOR_TMP = join(import.meta.dirname, '.tmp-signal-coordinator');
   beforeEach(() => {
-    rmSync(F2R13_TMP, { recursive: true, force: true });
-    mkdirSync(F2R13_TMP, { recursive: true });
+    rmSync(COORDINATOR_TMP, { recursive: true, force: true });
+    mkdirSync(COORDINATOR_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(F2R13_TMP, { recursive: true, force: true });
+    rmSync(COORDINATOR_TMP, { recursive: true, force: true });
   });
 
   async function waitForPid(pidFile: string, timeoutMs: number): Promise<number | undefined> {
@@ -6276,15 +6276,15 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     // Within one provision every wrangler call is awaited sequentially, and at most one
     // provision runs per process — so a second concurrently-active child is always a
     // caller bug and is rejected fast, before any child is spawned.
-    const slowChild = join(F2R13_TMP, 'slow-child.cjs');
+    const slowChild = join(COORDINATOR_TMP, 'slow-child.cjs');
     writeFileSync(slowChild, `setTimeout(() => process.exit(0), 400);\n`);
-    const runA = createDefaultRunWrangler(F2R13_TMP, {
+    const runA = createDefaultRunWrangler(COORDINATOR_TMP, {
       launcher: [process.execPath, slowChild],
       timeoutMs: 30_000,
     });
     const first = runA(['noop'], { accountId: 'acct' });
     await new Promise((r) => setTimeout(r, 80)); // A's child is alive and registered
-    const runB = createDefaultRunWrangler(F2R13_TMP, {
+    const runB = createDefaultRunWrangler(COORDINATOR_TMP, {
       launcher: [process.execPath, slowChild],
       timeoutMs: 30_000,
     });
@@ -6298,20 +6298,20 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
   }, 15_000);
 
   it('one SIGTERM (+ a repeat mid-teardown) is coalesced: the parent re-raises only after the group is dead', async () => {
-    // Pre-round-13, runners installed per-runner listeners that detached themselves at
+    // Previously, runners installed per-runner listeners that detached themselves at
     // signal entry — a REPEATED signal during the bounded teardown took Node's default
     // action, killing the parent with the child alive, every tracked mutex swept, and
     // no sidecar. The ONE coordinator keeps its handler installed through the teardown,
     // so the repeat is swallowed and the single re-raise fires only after confirmation.
-    const pidFile = join(F2R13_TMP, 'a.pid');
-    const childScript = join(F2R13_TMP, 'slow-exit-child.cjs');
+    const pidFile = join(COORDINATOR_TMP, 'a.pid');
+    const childScript = join(COORDINATOR_TMP, 'slow-exit-child.cjs');
     writeFileSync(
       childScript,
       `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
         `process.on('SIGTERM', () => setTimeout(() => process.exit(0), 600));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const parentScript = join(F2R13_TMP, 'parent.mjs');
+    const parentScript = join(COORDINATOR_TMP, 'parent.mjs');
     const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
     writeFileSync(
       parentScript,
@@ -6326,7 +6326,7 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     );
     const { spawn } = await import('node:child_process');
     const parent = spawn(process.execPath, [parentScript], {
-      cwd: F2R13_TMP,
+      cwd: COORDINATOR_TMP,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let pid: number | undefined;
@@ -6375,16 +6375,16 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
   }, 20_000);
 
   it('a spawn attempted AFTER teardown began is rejected fast (no child spawned, teardown unaffected)', async () => {
-    const pidFile = join(F2R13_TMP, 'c.pid');
-    const childScript = join(F2R13_TMP, 'slow-exit-child2.cjs');
+    const pidFile = join(COORDINATOR_TMP, 'c.pid');
+    const childScript = join(COORDINATOR_TMP, 'slow-exit-child2.cjs');
     writeFileSync(
       childScript,
       `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
         `process.on('SIGTERM', () => setTimeout(() => process.exit(0), 400));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const outcomeFile = join(F2R13_TMP, 'late-spawn-outcome.txt');
-    const parentScript = join(F2R13_TMP, 'parent-spawn-mid-teardown.mjs');
+    const outcomeFile = join(COORDINATOR_TMP, 'late-spawn-outcome.txt');
+    const parentScript = join(COORDINATOR_TMP, 'parent-spawn-mid-teardown.mjs');
     const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
     writeFileSync(
       parentScript,
@@ -6408,7 +6408,7 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     );
     const { spawn } = await import('node:child_process');
     const parent = spawn(process.execPath, [parentScript], {
-      cwd: F2R13_TMP,
+      cwd: COORDINATOR_TMP,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let pid: number | undefined;
@@ -6447,15 +6447,15 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     // injected group-killer claims success but kills nothing) — pre-fix `pending`
     // stayed nonzero for the full 60s and the fatal signal was not re-raised. The
     // coordinator-wide deadline (800ms) quarantines the pair and re-raises at the bound.
-    const pidFile = join(F2R13_TMP, 'd.pid');
-    const hangScript = join(F2R13_TMP, 'hang-child.cjs');
+    const pidFile = join(COORDINATOR_TMP, 'd.pid');
+    const hangScript = join(COORDINATOR_TMP, 'hang-child.cjs');
     writeFileSync(
       hangScript,
       `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
         `process.on('SIGTERM', () => {});\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const parentScript = join(F2R13_TMP, 'parent-deadline.mjs');
+    const parentScript = join(COORDINATOR_TMP, 'parent-deadline.mjs');
     const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
     writeFileSync(
       parentScript,
@@ -6470,7 +6470,7 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     );
     const { spawn } = await import('node:child_process');
     const parent = spawn(process.execPath, [parentScript], {
-      cwd: F2R13_TMP,
+      cwd: COORDINATOR_TMP,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let pid: number | undefined;
@@ -6516,13 +6516,13 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
 });
 
 describe('createDefaultRunWrangler — post-spawn child `error` events confirm/quarantine', () => {
-  const F5R13_TMP = join(import.meta.dirname, '.tmp-f5-round13');
+  const POST_SPAWN_TMP = join(import.meta.dirname, '.tmp-post-spawn-error');
   beforeEach(() => {
-    rmSync(F5R13_TMP, { recursive: true, force: true });
-    mkdirSync(F5R13_TMP, { recursive: true });
+    rmSync(POST_SPAWN_TMP, { recursive: true, force: true });
+    mkdirSync(POST_SPAWN_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(F5R13_TMP, { recursive: true, force: true });
+    rmSync(POST_SPAWN_TMP, { recursive: true, force: true });
   });
 
   function writeHangScript(path: string): void {
@@ -6553,8 +6553,8 @@ describe('createDefaultRunWrangler — post-spawn child `error` events confirm/q
   }
 
   it('pre-spawn ENOENT still settles directly as a hard failure (the one carve-out: no pid, nothing to confirm)', async () => {
-    const run = createDefaultRunWrangler(F5R13_TMP, {
-      launcher: [join(F5R13_TMP, 'no-such-wrangler-binary-round13')],
+    const run = createDefaultRunWrangler(POST_SPAWN_TMP, {
+      launcher: [join(POST_SPAWN_TMP, 'no-such-wrangler-binary')],
     });
     const result = await run(['d1', 'list'], { accountId: 'acct' });
     expect(result.status).toBe(1);
@@ -6566,10 +6566,10 @@ describe('createDefaultRunWrangler — post-spawn child `error` events confirm/q
     // Pre-fix the `error` handler ALWAYS called finish() — a post-spawn error (e.g. a
     // kill-delivery failure) settled as an ordinary hard failure and RELEASED the
     // whole-provision lock while the hung child lived on.
-    const pidFile = join(F5R13_TMP, 'child.pid');
-    const hang = join(F5R13_TMP, 'hang.cjs');
+    const pidFile = join(POST_SPAWN_TMP, 'child.pid');
+    const hang = join(POST_SPAWN_TMP, 'hang.cjs');
     writeHangScript(hang);
-    const run = createDefaultRunWrangler(F5R13_TMP, {
+    const run = createDefaultRunWrangler(POST_SPAWN_TMP, {
       launcher: [process.execPath, hang, pidFile],
       timeoutMs: 30_000,
       onSpawnedChild: (child) => {
@@ -6595,10 +6595,10 @@ describe('createDefaultRunWrangler — post-spawn child `error` events confirm/q
   }, 15_000);
 
   it('a POST-spawn `error` + a FAILED group kill QUARANTINES (rejects; the caller retains the lock)', async () => {
-    const pidFile = join(F5R13_TMP, 'child2.pid');
-    const hang = join(F5R13_TMP, 'hang2.cjs');
+    const pidFile = join(POST_SPAWN_TMP, 'child2.pid');
+    const hang = join(POST_SPAWN_TMP, 'hang2.cjs');
     writeHangScript(hang);
-    const run = createDefaultRunWrangler(F5R13_TMP, {
+    const run = createDefaultRunWrangler(POST_SPAWN_TMP, {
       launcher: [process.execPath, hang, pidFile],
       timeoutMs: 30_000,
       killProcessGroup: () => {
@@ -6636,13 +6636,13 @@ describe('createDefaultRunWrangler — post-spawn child `error` events confirm/q
 });
 
 describe('withListerDeadline — the deadline holds in a REAL process (child-process regression)', () => {
-  const F3R11_TMP = join(import.meta.dirname, '.tmp-f3-round11');
+  const LISTER_DEADLINE_TMP = join(import.meta.dirname, '.tmp-lister-deadline');
   beforeEach(() => {
-    rmSync(F3R11_TMP, { recursive: true, force: true });
-    mkdirSync(F3R11_TMP, { recursive: true });
+    rmSync(LISTER_DEADLINE_TMP, { recursive: true, force: true });
+    mkdirSync(LISTER_DEADLINE_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(F3R11_TMP, { recursive: true, force: true });
+    rmSync(LISTER_DEADLINE_TMP, { recursive: true, force: true });
   });
 
   it('a never-settling lister REJECTS after the deadline — the process does NOT exit 0 early, lock released', async () => {
@@ -6651,8 +6651,8 @@ describe('withListerDeadline — the deadline holds in a REAL process (child-pro
     // process drained its loop and exited STATUS 0 before the deadline fired — silently
     // "succeeding" mid-provision. Vitest's own handles mask this in-worker, so the
     // regression must run in a spawned child process.
-    const appRoot = join(F3R11_TMP, 'app');
-    const probe = join(F3R11_TMP, 'probe.mjs');
+    const appRoot = join(LISTER_DEADLINE_TMP, 'app');
+    const probe = join(LISTER_DEADLINE_TMP, 'probe.mjs');
     const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
     writeFileSync(
       probe,
@@ -6679,7 +6679,7 @@ describe('withListerDeadline — the deadline holds in a REAL process (child-pro
     );
     const { spawn } = await import('node:child_process');
     const child = spawn(process.execPath, [probe], {
-      cwd: F3R11_TMP,
+      cwd: LISTER_DEADLINE_TMP,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -6827,13 +6827,13 @@ describe('provisionCloudflareResources — Hyperdrive lister deadline', () => {
 });
 
 describe('createDefaultRunWrangler — confirmed child termination + kill classification', () => {
-  const F3_TMP = join(import.meta.dirname, '.tmp-f3-round10');
+  const KILL_CLASSIFY_TMP = join(import.meta.dirname, '.tmp-kill-classify');
   beforeEach(() => {
-    rmSync(F3_TMP, { recursive: true, force: true });
-    mkdirSync(F3_TMP, { recursive: true });
+    rmSync(KILL_CLASSIFY_TMP, { recursive: true, force: true });
+    mkdirSync(KILL_CLASSIFY_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(F3_TMP, { recursive: true, force: true });
+    rmSync(KILL_CLASSIFY_TMP, { recursive: true, force: true });
   });
 
   async function waitForDead(pid: number, timeoutMs: number): Promise<boolean> {
@@ -6857,14 +6857,14 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
   });
 
   it('a REAL kill failure (EPERM) on timeout QUARANTINES: the runner REJECTS, never settle-and-release', async () => {
-    const pidFile = join(F3_TMP, 'cli.pid');
-    const hungCli = join(F3_TMP, 'hung.cjs');
+    const pidFile = join(KILL_CLASSIFY_TMP, 'cli.pid');
+    const hungCli = join(KILL_CLASSIFY_TMP, 'hung.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const run = createDefaultRunWrangler(F3_TMP, {
+    const run = createDefaultRunWrangler(KILL_CLASSIFY_TMP, {
       launcher: [process.execPath, hungCli],
       timeoutMs: 300,
       // Simulate a kill that FAILS for a non-ESRCH reason (the child is still alive).
@@ -6899,14 +6899,14 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
   }, 15_000);
 
   it('an unconfirmable termination (grace expiry, child still alive) QUARANTINES too', async () => {
-    const pidFile = join(F3_TMP, 'cli3.pid');
-    const hungCli = join(F3_TMP, 'hung3.cjs');
+    const pidFile = join(KILL_CLASSIFY_TMP, 'cli3.pid');
+    const hungCli = join(KILL_CLASSIFY_TMP, 'hung3.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const run = createDefaultRunWrangler(F3_TMP, {
+    const run = createDefaultRunWrangler(KILL_CLASSIFY_TMP, {
       launcher: [process.execPath, hungCli],
       timeoutMs: 250,
       confirmKillGraceMs: 500,
@@ -6934,14 +6934,14 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
   }, 15_000);
 
   it('an ESRCH kill (already gone) is treated as SUCCESS — settles as the timeout hard-failure, no kill-error text', async () => {
-    const pidFile = join(F3_TMP, 'cli2.pid');
-    const hungCli = join(F3_TMP, 'hung2.cjs');
+    const pidFile = join(KILL_CLASSIFY_TMP, 'cli2.pid');
+    const hungCli = join(KILL_CLASSIFY_TMP, 'hung2.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const run = createDefaultRunWrangler(F3_TMP, {
+    const run = createDefaultRunWrangler(KILL_CLASSIFY_TMP, {
       launcher: [process.execPath, hungCli],
       timeoutMs: 300,
       // Kill FOR REAL, then report ESRCH (the child exited in the race window) → treated as gone.
@@ -6964,12 +6964,12 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
     // Drive a FULL provision whose wrangler runner is the REAL default runner spawning a hung
     // CLI. The `d1 list` times out → confirmed-termination hard failure → provision rejects →
     // the whole-provision lock is released. The child must be dead and the mutex gone.
-    const cfgDir = join(F3_TMP, 'app');
+    const cfgDir = join(KILL_CLASSIFY_TMP, 'app');
     mkdirSync(cfgDir, { recursive: true });
     const cfgPath = join(cfgDir, 'wrangler.jsonc');
     writeFileSync(cfgPath, JSON.stringify({ name: 'app', account_id: 'acct' }));
-    const pidFile = join(F3_TMP, 'prov-cli.pid');
-    const hungCli = join(F3_TMP, 'prov-hung.cjs');
+    const pidFile = join(KILL_CLASSIFY_TMP, 'prov-cli.pid');
+    const hungCli = join(KILL_CLASSIFY_TMP, 'prov-hung.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
@@ -7003,7 +7003,7 @@ describe('provisionCloudflareResources — dangling-symlink lock identity', () =
     // (as DANGLING symlinks) at that same not-yet-created target. Without resolving the dangling
     // final link each alias would canonicalize to ITS OWN lexical path → two marker locks → an
     // alias provision would not contend on the canonical lock and both could create a duplicate.
-    // (Round 14: two provisions can no longer race in ONE process — the identity proof is that
+    // (Two provisions can no longer race in ONE process — the identity proof is that
     // an alias provision blocks on the CANONICAL mutex, plus create-then-reuse across aliases.)
     const sharedDir = join(tmpDir, 'shared');
     mkdirSync(sharedDir, { recursive: true });
@@ -7065,7 +7065,7 @@ describe('provisionCloudflareResources — dangling-symlink lock identity', () =
 
   it('a non-ENOENT realpath error (a self-referential symlink cycle → ELOOP) SURFACES, not swallowed', async () => {
     // `loop.jsonc` → `loop.jsonc` is a symlink cycle: realpath throws ELOOP (NOT ENOENT). The
-    // old broad catch swallowed it and fell back to a bogus lexical path; F2 rethrows it.
+    // old broad catch swallowed it and fell back to a bogus lexical path; the fix rethrows it.
     mkdirSync(tmpDir, { recursive: true });
     const loop = join(tmpDir, 'loop.jsonc');
     symlinkSync(loop, loop);

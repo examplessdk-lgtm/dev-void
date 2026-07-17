@@ -1297,7 +1297,7 @@ describe('writeProvisionedWranglerConfig', () => {
 
   it('worker-wide guard does not fire on the idempotent same-queue producer path (no false collision)', () => {
     // QUEUE_JOBS already exists as a producer for the SAME queue. The worker-wide
-    // collision guard now runs for EVERY producer upsert (F4), but the collector
+    // collision guard now runs for EVERY producer upsert, but the collector
     // deliberately OMITS `queues`, so a producer never self-collides — with no OTHER
     // binding owning QUEUE_JOBS the upsert stays an idempotent no-op.
     setup(
@@ -1409,7 +1409,7 @@ describe('writeProvisionedWranglerConfig', () => {
   });
 
   it('fails closed on an explicit DIFFERENT migrations_dir — names both paths, throws without writing', () => {
-    // User-approved contract (round 11): a reused D1 configured with its own
+    // A reused D1 configured with its own
     // migrations directory must NEVER be silently rewritten to Void's default —
     // that would strand the user's migration files. Fail closed, naming both.
     setup(
@@ -2086,7 +2086,7 @@ describe('writeProvisionedWranglerConfig', () => {
   });
 
   it('fails closed on a composite (non-string) migrations_dir on the matched D1 entry — throws without writing', () => {
-    // F6 rejects the malformed value BEFORE any edit (previously the comment-drop
+    // The provisioner rejects the malformed value BEFORE any edit (previously the comment-drop
     // gate caught it after the fact) — the file is never touched either way.
     const fixture = `{
   "d1_databases": [
@@ -2473,7 +2473,7 @@ describe('writeProvisionedWranglerConfig', () => {
 
   // Adopt collision guards must be built from the CURRENT text, cover MATCHED
   // (existing-target) entries, include queues.producers, and reject duplicate D1
-  // migration targets (F6) — not just the append/initial-parse cases.
+  // migration targets — not just the append/initial-parse cases.
 
   it('adopt fails closed when the binding collides with an existing queue PRODUCER binding — no write', () => {
     // An existing queue producer already binds `DB`; adopting a D1 as `DB` would
@@ -2585,7 +2585,7 @@ describe('writeProvisionedWranglerConfig', () => {
   });
 
   it('binding-list with ALL members malformed ({bindings:[null]}) throws — no plain-map fall-through', () => {
-    // The sibling gap round-4 left open: when NO member is a record, the old
+    // The sibling gap left open: when NO member is a record, the old
     // `some(isRecord)` guard fell through and read the field as a plain map (a bogus
     // binding named "bindings"), hiding the malformed binding entirely. Field-aware
     // strict validation throws even when every member is malformed.
