@@ -4222,6 +4222,126 @@ describe('provisionCloudflareResources — F4 Hyperdrive password never reaches 
   });
 });
 
+describe('provisionCloudflareResources — F4 redaction carrier: frozen/nested payloads (round 13)', () => {
+  const conn = 'postgres://dbuser:sup3r-secret@db.example.com:5432/app';
+  const hyperdriveDesired: DesiredResourceSet = {
+    ...emptyDesired,
+    hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: conn },
+  };
+
+  async function provisionRejectingWith(rejection: unknown): Promise<unknown> {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const run: RunWrangler = () => Promise.reject(rejection);
+    let thrown: unknown;
+    try {
+      await provisionCloudflareResources(tmpDir, wranglerPath, hyperdriveDesired, {
+        runWrangler: run,
+        log: silentLog,
+        listHyperdriveConfigs: async () => [],
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeDefined();
+    return thrown;
+  }
+
+  it('a FROZEN Error carrying the secret propagates as a sanitized carrier (no TypeError, no leak)', async () => {
+    // Pre-fix the in-place mutator threw `TypeError: Cannot assign to read only
+    // property 'message'` — and that TypeError's own message EMBEDDED the frozen
+    // error's secret-bearing text, so the redactor itself became the leak.
+    const frozen = Object.freeze(new Error(`connect failed using ${conn}`));
+    const thrown = await provisionRejectingWith(frozen);
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).name).not.toBe('TypeError');
+    const rendered = `${(thrown as Error).message}\n${(thrown as Error).stack ?? ''}`;
+    expect(rendered).not.toContain('sup3r-secret');
+    expect(rendered).toContain('[REDACTED]');
+  });
+
+  it('a FROZEN WranglerQuarantineError still triggers quarantine handling (mutex retained, pid kept, message redacted)', async () => {
+    // Pre-fix the frozen-message assignment threw, REPLACING the quarantine rejection
+    // with a TypeError — classification lost, so the provision RELEASED the lock while
+    // the unconfirmed wrangler child could still be creating resources.
+    const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
+    const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
+    const frozen = new WranglerQuarantineError(
+      64231,
+      `kill failed while running hyperdrive create --connection-string=${conn}`,
+    );
+    Object.freeze(frozen);
+    const thrown = await provisionRejectingWith(frozen);
+    // Classification + pid metadata survive redaction (captured BEFORE the rebuild)…
+    expect((thrown as { quarantine?: boolean }).quarantine).toBe(true);
+    expect(thrown).toBeInstanceOf(WranglerQuarantineError);
+    expect((thrown as WranglerQuarantineError).pid).toBe(64231);
+    expect((thrown as Error).message).not.toContain('sup3r-secret');
+    expect((thrown as Error).message).toContain('[REDACTED]');
+    // …so the provision-level handling RETAINED the mutex and persisted the sidecar.
+    expect(existsSync(lockMutex)).toBe(true);
+    expect(existsSync(sidecar)).toBe(true);
+    const recorded = JSON.parse(readFileSync(sidecar, 'utf-8')) as Record<string, unknown>;
+    expect(recorded.pid).toBe(64231);
+    expect(String(recorded.reason)).not.toContain('sup3r-secret');
+    rmSync(lockMutex, { recursive: true, force: true });
+    rmSync(sidecar, { force: true });
+  });
+
+  it('a secret in the non-enumerable Error.cause is redacted (Object.keys missed it pre-fix)', async () => {
+    const rejection = new Error('outer wrapper failed', {
+      cause: new Error(`cause says ${conn}`),
+    });
+    const thrown = await provisionRejectingWith(rejection);
+    expect(thrown).toBe(rejection); // mutable graph → redacted in place, identity kept
+    const cause = (thrown as Error).cause as Error;
+    expect(cause.message).not.toContain('sup3r-secret');
+    expect(cause.message).toContain('[REDACTED]');
+  });
+
+  it('a secret in the non-enumerable AggregateError.errors is redacted', async () => {
+    const rejection = new AggregateError(
+      [new Error(`member says ${conn}`), `bare member with ${conn}`],
+      'aggregate outer',
+    );
+    const thrown = await provisionRejectingWith(rejection);
+    expect(thrown).toBe(rejection);
+    const members = (thrown as AggregateError).errors as Array<unknown>;
+    expect((members[0] as Error).message).not.toContain('sup3r-secret');
+    expect((members[0] as Error).message).toContain('[REDACTED]');
+    expect(members[1]).not.toContain('sup3r-secret');
+    expect(members[1]).toContain('[REDACTED]');
+  });
+
+  it('a FROZEN plain object (with a frozen nested array) never propagates unsanitized', async () => {
+    // Pre-fix the in-place assignments were silently swallowed by try/catch, so the
+    // frozen object propagated VERBATIM — connection string intact.
+    const frozen = Object.freeze({
+      code: 'E_CREATE',
+      note: `failed using ${conn}`,
+      attempts: Object.freeze([`first try: ${conn}`]),
+    });
+    const thrown = await provisionRejectingWith(frozen);
+    expect(thrown).not.toBe(frozen); // immutable → a sanitized fallback carrier
+    const rendered = JSON.stringify(thrown);
+    expect(rendered).not.toContain('sup3r-secret');
+    expect(rendered).toContain('[REDACTED]');
+    // Structure preserved for diagnostics.
+    expect((thrown as { code?: string }).code).toBe('E_CREATE');
+    expect(Array.isArray((thrown as { attempts?: unknown }).attempts)).toBe(true);
+  });
+
+  it('secrets inside Map values and Set members are redacted (internal slots, freeze-proof)', async () => {
+    const rejection = {
+      detail: new Map<string, unknown>([['url', `via ${conn}`]]),
+      seen: new Set<string>([`attempt ${conn}`]),
+    };
+    const thrown = await provisionRejectingWith(rejection);
+    expect(thrown).toBe(rejection);
+    expect((thrown as typeof rejection).detail.get('url')).not.toContain('sup3r-secret');
+    expect([...(thrown as typeof rejection).seen][0]).not.toContain('sup3r-secret');
+  });
+});
+
 describe('provisionCloudflareResources — F5 dotenv fence file set + case rule are wrangler-exact (round 11)', () => {
   const redirect = 'CLOUDFLARE_API_BASE_URL=https://api.staging.cloudflare.com/client/v4\n';
 

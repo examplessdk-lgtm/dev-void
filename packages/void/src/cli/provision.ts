@@ -2437,59 +2437,334 @@ function createSecretRedactor(connectionString?: string): (text: string) => stri
 }
 
 /**
- * F5 (round 12) — deep-redact an UNKNOWN rejection value through the ONE text redactor.
- * A seam (runWrangler / the Hyperdrive lister) may reject with ANYTHING — an Error, a
- * plain STRING, an object, an array — and the old `instanceof Error` guard let a
- * password-bearing string propagate verbatim. Strings return a redacted copy; Errors,
- * objects, and arrays are redacted IN PLACE — own enumerable string fields recursively,
- * plus an Error's (non-enumerable) `message` and `stack` — so the value's IDENTITY
- * survives redaction: quarantine detection (`isQuarantineError` checks the SAME object,
- * instanceof AND the structural `quarantine === true` flag) and every metadata field
- * (`pid`, …) are preserved explicitly, never lost to a rebuilt error. Cycle-safe;
- * read-only/getter fields that cannot be reassigned are left as-is (best effort).
+ * F4 (round 13) — deep-redact an UNKNOWN rejection value through the ONE text redactor.
+ * THE single redaction carrier every propagated rejection routes through (the runWrangler
+ * choke point via {@link redactRejection}, and the Hyperdrive lister's failure warning).
+ * A seam may reject with ANYTHING — an Error, a plain STRING, an object, an array, a
+ * FROZEN value, a graph carrying secrets in non-enumerable slots (`Error.cause`,
+ * `AggregateError.errors`, `message`/`stack`), Maps/Sets, cycles. The contract:
+ *   1. NEVER throw (the round-12 in-place mutator threw a TypeError assigning to a
+ *      frozen Error's `message` — losing the quarantine classification AND embedding the
+ *      secret-bearing message inside the TypeError itself);
+ *   2. NEVER propagate an unsanitized value: when the graph can be fully redacted IN
+ *      PLACE, the ORIGINAL value returns (identity preserved — quarantine detection and
+ *      metadata fields survive untouched); when ANY required mutation is impossible
+ *      (frozen/sealed/non-writable/accessor slot holding a secret), a fully sanitized
+ *      FALLBACK CARRIER is returned instead — a fresh deep copy with every string
+ *      redacted, the original PROTOTYPE restored (so `instanceof` classification
+ *      survives) and every own property — enumerable or not — carried over;
+ *   3. traverse own property DESCRIPTORS (string + symbol keys, non-enumerable
+ *      included — covering `message`, `stack`, `cause`, `errors`), plus Map keys/values
+ *      and Set members (whose internal slots `Object.freeze` never covers), cycle-safely.
  */
 function redactUnknownValue(value: unknown, redactText: (text: string) => string): unknown {
+  try {
+    if (typeof value === 'string') {
+      return redactText(value);
+    }
+    if (typeof value !== 'object' || value === null) {
+      return value;
+    }
+    return sanitizeInPlace(value, redactText) ? value : deepSanitizedCopy(value, redactText);
+  } catch (error) {
+    // Rule 1: never throw. Even a pathological value (throwing getters everywhere, a
+    // hostile Proxy) degrades to a minimal sanitized carrier, never an exception that
+    // would REPLACE the rejection (and destroy its classification) at the choke point.
+    return lastResortRedactedCarrier(value, redactText);
+  }
+}
+
+/**
+ * F4 — attempt to redact `root` fully IN PLACE. Returns `true` only when EVERY string
+ * that needed redaction was verifiably rewritten (assignment read back); any immutable
+ * or unverifiable slot holding a secret returns `false` so the caller switches to the
+ * fallback-carrier copy. Partial rewrites applied before a `false` are harmless — they
+ * only ever REMOVE secret text, and the caller then discards the original anyway.
+ */
+function sanitizeInPlace(root: object, redactText: (text: string) => string): boolean {
   const seen = new WeakSet<object>();
-  const visit = (v: unknown): unknown => {
+  let ok = true;
+  const visitChild = (child: unknown): void => {
+    if (typeof child === 'object' && child !== null) {
+      visit(child);
+    }
+  };
+  const visit = (v: object): void => {
+    if (!ok || seen.has(v)) {
+      return;
+    }
+    seen.add(v);
+    // Map/Set data lives in internal slots `Object.freeze` does NOT cover, so their
+    // members are always rewritable in place (delete + re-add / set).
+    if (v instanceof Map) {
+      for (const [key, val] of [...v.entries()]) {
+        const newKey = typeof key === 'string' ? redactText(key) : key;
+        const newVal = typeof val === 'string' ? redactText(val) : val;
+        visitChild(key);
+        visitChild(val);
+        if (newKey !== key) {
+          v.delete(key);
+        }
+        if (newKey !== key || newVal !== val) {
+          v.set(newKey, newVal);
+        }
+        if (!ok) {
+          return;
+        }
+      }
+      return;
+    }
+    if (v instanceof Set) {
+      for (const member of [...v.values()]) {
+        if (typeof member === 'string') {
+          const red = redactText(member);
+          if (red !== member) {
+            v.delete(member);
+            v.add(red);
+          }
+        } else {
+          visitChild(member);
+        }
+        if (!ok) {
+          return;
+        }
+      }
+      return;
+    }
+    // EVERY own property — string AND symbol keys, non-enumerable included (an Error's
+    // `message`/`stack`/`cause` and an AggregateError's `errors` are non-enumerable own
+    // data properties the old `Object.keys` walk missed entirely).
+    for (const key of Reflect.ownKeys(v)) {
+      const desc = Object.getOwnPropertyDescriptor(v, key);
+      if (!desc) {
+        continue;
+      }
+      if (desc.get !== undefined || desc.set !== undefined) {
+        // An accessor slot passes when its CURRENT value is verifiably clean, or when a
+        // secret-bearing string can be rewritten THROUGH its setter with the result read
+        // back (V8's lazy `Error#stack` is exactly such a get/set pair — the stack text
+        // embeds the message, so it routinely carries the secret). An unreadable getter,
+        // a setter-less secret, or an unverifiable write forces the fallback carrier
+        // (rule 2: never propagate what we cannot prove sanitized).
+        let current: unknown;
+        try {
+          current = desc.get !== undefined ? desc.get.call(v) : undefined;
+        } catch {
+          ok = false;
+          return;
+        }
+        if (typeof current === 'string') {
+          const red = redactText(current);
+          if (red !== current) {
+            if (desc.set === undefined) {
+              ok = false;
+              return;
+            }
+            try {
+              desc.set.call(v, red);
+            } catch {
+              ok = false;
+              return;
+            }
+            // The setter may have morphed the slot into a data property (V8's stack
+            // setter does) — verify via a FRESH descriptor read.
+            let after: unknown;
+            try {
+              const afterDesc = Object.getOwnPropertyDescriptor(v, key);
+              after = afterDesc?.get !== undefined ? afterDesc.get.call(v) : afterDesc?.value;
+            } catch {
+              ok = false;
+              return;
+            }
+            if (after !== red) {
+              ok = false;
+              return;
+            }
+          }
+        } else {
+          visitChild(current);
+        }
+        if (!ok) {
+          return;
+        }
+        continue;
+      }
+      const val = desc.value;
+      if (typeof val === 'string') {
+        const red = redactText(val);
+        if (red === val) {
+          continue;
+        }
+        if (desc.writable !== true) {
+          ok = false; // frozen / non-writable data slot holding a secret
+          return;
+        }
+        try {
+          (v as Record<PropertyKey, unknown>)[key] = red;
+        } catch {
+          ok = false;
+          return;
+        }
+        // VERIFY the write took (a sloppy-mode swallow / hostile Proxy must not pass).
+        if (Object.getOwnPropertyDescriptor(v, key)?.value !== red) {
+          ok = false;
+          return;
+        }
+      } else {
+        visitChild(val);
+        if (!ok) {
+          return;
+        }
+      }
+    }
+  };
+  visit(root);
+  return ok;
+}
+
+/**
+ * F4 — the fallback CARRIER: a fully sanitized deep copy of `root`, built when in-place
+ * redaction is impossible. Fresh objects/arrays/Errors/Maps/Sets (all mutable), every
+ * string redacted, every own property — enumerable or not, string or symbol key —
+ * carried over as a plain data property, accessors snapshotted (an unreadable getter
+ * becomes `'[unredactable]'`), the original PROTOTYPE restored so `instanceof`
+ * classification (e.g. {@link WranglerQuarantineError}) survives the rebuild. Cycle-safe
+ * (a cycle in the original maps to the same cycle among the copies).
+ */
+function deepSanitizedCopy(root: unknown, redactText: (text: string) => string): unknown {
+  const copies = new WeakMap<object, unknown>();
+  const copy = (v: unknown): unknown => {
     if (typeof v === 'string') {
       return redactText(v);
     }
     if (typeof v !== 'object' || v === null) {
       return v;
     }
-    if (seen.has(v)) {
-      return v;
+    if (copies.has(v)) {
+      return copies.get(v);
     }
-    seen.add(v);
-    if (v instanceof Error) {
-      // `message`/`stack` are non-enumerable — handle them explicitly.
-      if (typeof v.message === 'string') {
-        v.message = redactText(v.message);
+    if (v instanceof Map) {
+      const out = new Map<unknown, unknown>();
+      copies.set(v, out);
+      for (const [key, val] of v.entries()) {
+        out.set(copy(key), copy(val));
       }
-      if (typeof v.stack === 'string') {
-        v.stack = redactText(v.stack);
-      }
+      return out;
     }
-    if (Array.isArray(v)) {
-      for (let i = 0; i < v.length; i++) {
+    if (v instanceof Set) {
+      const out = new Set<unknown>();
+      copies.set(v, out);
+      for (const member of v.values()) {
+        out.add(copy(member));
+      }
+      return out;
+    }
+    const out: object = Array.isArray(v) ? [] : v instanceof Error ? new Error() : {};
+    try {
+      Object.setPrototypeOf(out, Object.getPrototypeOf(v));
+    } catch {
+      // Keep the base prototype — the structural fields below still carry the metadata.
+    }
+    copies.set(v, out);
+    for (const key of Reflect.ownKeys(v)) {
+      const desc = Object.getOwnPropertyDescriptor(v, key);
+      if (!desc) {
+        continue;
+      }
+      let val: unknown;
+      if (desc.get !== undefined || desc.set !== undefined) {
         try {
-          v[i] = visit(v[i]);
+          val = desc.get !== undefined ? desc.get.call(v) : undefined;
         } catch {
-          // A frozen/getter-only element — leave it (best effort).
+          val = '[unredactable]';
         }
+      } else {
+        val = desc.value;
       }
-      return v;
-    }
-    for (const key of Object.keys(v)) {
       try {
-        (v as Record<string, unknown>)[key] = visit((v as Record<string, unknown>)[key]);
+        Object.defineProperty(out, key, {
+          value: copy(val),
+          writable: true,
+          enumerable: desc.enumerable === true,
+          configurable: true,
+        });
       } catch {
-        // A frozen/getter-only property — leave it (best effort).
+        // e.g. an array's non-configurable `length` — the index copies already set it.
       }
     }
-    return v;
+    return out;
   };
-  return visit(value);
+  return copy(root);
+}
+
+/**
+ * F4 — the last-resort carrier when even building the sanitized copy failed: a minimal
+ * fresh Error carrying only provably-redacted text plus the structural quarantine
+ * classification when the original had one. Itself exception-safe.
+ */
+function lastResortRedactedCarrier(value: unknown, redactText: (text: string) => string): Error {
+  let message = 'provision: a propagated error could not be sanitized; its content was withheld';
+  let name: string | undefined;
+  let quarantine = false;
+  let pid: number | undefined;
+  try {
+    quarantine = isQuarantineError(value);
+    const raw = value as { message?: unknown; name?: unknown; pid?: unknown } | null;
+    if (typeof raw?.message === 'string') {
+      message = redactText(raw.message);
+    }
+    if (typeof raw?.name === 'string') {
+      name = raw.name;
+    }
+    if (quarantine && typeof raw?.pid === 'number') {
+      pid = raw.pid;
+    }
+  } catch {
+    // Keep the generic message — never throw from the redactor.
+  }
+  const carrier = new Error(message);
+  if (name !== undefined) {
+    carrier.name = name;
+  }
+  if (quarantine) {
+    Object.assign(carrier, { quarantine: true as const, pid });
+  }
+  return carrier;
+}
+
+/**
+ * F4 (round 13) — redact a seam REJECTION while GUARANTEEING the quarantine
+ * classification survives. The classification (and pid metadata) is captured from the
+ * original value BEFORE redaction — never read back off the post-redaction object — so
+ * whatever the redactor had to do (in-place, fallback copy, last resort), a quarantined
+ * rejection can never degrade into an ordinary failure that would RELEASE the
+ * whole-provision lock under a possibly-live wrangler child.
+ */
+function redactRejection(error: unknown, redactText: (text: string) => string): unknown {
+  const wasQuarantine = isQuarantineError(error);
+  const quarantinePid =
+    wasQuarantine && typeof (error as WranglerQuarantineError).pid === 'number'
+      ? (error as WranglerQuarantineError).pid
+      : undefined;
+  const redacted = redactUnknownValue(error, redactText);
+  if (!wasQuarantine || isQuarantineError(redacted)) {
+    return redacted;
+  }
+  // The redactor had to rebuild and the carrier lost the classification (e.g. the
+  // original relied on a prototype that could not be restored) — restore it
+  // structurally on the (always freshly-built, mutable) carrier.
+  const carrier =
+    redacted instanceof Error
+      ? redacted
+      : new Error(
+          redactText(
+            error instanceof Error && typeof error.message === 'string'
+              ? error.message
+              : String(error),
+          ),
+        );
+  Object.assign(carrier, { quarantine: true as const, pid: quarantinePid });
+  return carrier;
 }
 
 /**
@@ -2817,10 +3092,12 @@ async function provisionCloudflareResourcesLocked(
       }),
     ).then(redactResult, (error: unknown) => {
       // F4/F5 — a REJECTING runner (an F2 quarantine, an injected seam rejecting a plain
-      // string/object/array) must not smuggle the secret either: EVERY rejection value is
-      // normalized through the ONE deep redactor before propagation. Non-string values
-      // are redacted in place, so quarantine identity/metadata survive.
-      throw redactUnknownValue(error, redactSecrets);
+      // string/object/array/frozen value) must not smuggle the secret either: EVERY
+      // rejection value is normalized through the ONE redaction carrier before
+      // propagation. In-place where possible (identity/metadata survive), a sanitized
+      // fallback carrier otherwise — with the quarantine classification captured BEFORE
+      // redaction so it can never be lost to a rebuild (F4 round 13).
+      throw redactRejection(error, redactSecrets);
     });
 
   // --- D1 ------------------------------------------------------------------
