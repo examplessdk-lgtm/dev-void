@@ -227,6 +227,26 @@ describe('collectPlaintextVarWarnings — plaintext worker-vars classification',
     // Keys only — the configured value must never ride along on the result.
     expect(JSON.stringify(result)).not.toContain('sk_live_configured');
   });
+
+  it('warns a secret-looking JSON-valued root-wrangler var — keys only, value never rides along (F1)', async () => {
+    const root = createTempProject({ withEnvTs: false });
+    // wrangler 4.107 ships a non-string var as a `type:"json"` binding — still
+    // plaintext in the uploaded config. A secret-looking JSON-valued key must be
+    // warned, and the (object) value must never be reachable from the result.
+    // Pre-fix `readConfigVars` dropped every non-string member, so BOTH keys
+    // vanished from the union (totalVarKeys would be 0).
+    const configPath = join(root, 'wrangler.jsonc');
+    writeFileSync(
+      configPath,
+      JSON.stringify({ name: 'app', vars: { API_KEY: { token: 'sk_live_json_leak' }, COUNT: 5 } }),
+    );
+
+    const result = await collectPlaintextVarWarnings(root, { configPath });
+
+    expect(result.totalVarKeys).toBe(2);
+    expect(result.secretKeys).toEqual([{ key: 'API_KEY', reason: 'heuristic' }]);
+    expect(JSON.stringify(result)).not.toContain('sk_live_json_leak');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -943,6 +963,120 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect(error).toBeInstanceOf(SelfHostEnvValidationError);
       expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
       expect((error as Error).message).toContain('Remove the empty assignment');
+    });
+  });
+
+  // --- F1: JSON-valued (non-string) configured vars are PRESENT, not absent ---
+  //
+  // wrangler 4.107 accepts a var value of ANY JSON type and ships every
+  // non-string as a `type:"json"` binding (wrangler-dist/cli.js `case "vars"`),
+  // which `checkRemoteSecretsOverride` gives precedence over a same-named remote
+  // secret. So a required root-wrangler var with a null/number/object value is
+  // PRESENT — satisfied locally, and NEVER discharged by a remote secret. Pre-fix
+  // `readConfigVars` dropped every non-string member, so such a key read as
+  // ABSENT and a same-named remote secret falsely discharged it while the deploy
+  // shipped the JSON var OVER that secret (fail-open).
+
+  describe('effective build map — JSON-valued configured vars (F1)', () => {
+    function writeWranglerConfig(root: string, config: Record<string, unknown>): string {
+      const path = join(root, 'wrangler.jsonc');
+      writeFileSync(path, JSON.stringify(config));
+      return path;
+    }
+
+    // Rejects `undefined` (so it is REQUIRED) but accepts any defined value —
+    // string, number, object, or null — so a present JSON var of any type
+    // satisfies the gate locally regardless of type.
+    const requiredAcceptsAnything: StandardSchemaV1<unknown, unknown> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate(value) {
+          if (value === undefined) {
+            return { issues: [{ message: 'Required' }] };
+          }
+          return { value };
+        },
+      },
+    };
+
+    it.each([
+      { label: 'null', vars: { FOO: null } },
+      { label: 'a number', vars: { FOO: 42 } },
+      { label: 'an object', vars: { FOO: { nested: true } } },
+    ])(
+      'a JSON $label root-wrangler var counts PRESENT — a same-named remote secret does NOT discharge it (fail-OPEN pre-fix)',
+      async ({ vars }) => {
+        const root = createTempProject();
+        defineEnv({ FOO: requiredAcceptsAnything });
+        const configPath = writeWranglerConfig(root, { name: 'app', vars });
+        const { run, calls } = stubRunner(okList(['FOO']));
+
+        const result = await validateSelfHostProdEnv(root, { configPath, runWrangler: run });
+
+        // Present (wrangler ships it as a type:"json" binding) → satisfied
+        // locally, remote never consulted. Pre-fix: the non-string member was
+        // dropped → FOO read ABSENT → remote FOO discharged it (calls length 1).
+        expect(result).toEqual({ hasSchema: true, remoteSecretNames: null });
+        expect(calls).toEqual([]);
+      },
+    );
+
+    it('a non-empty JSON object PASSES as present — no false first-deploy block (wrangler [])', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: requiredAcceptsAnything });
+      const configPath = writeWranglerConfig(root, { name: 'app', vars: { FOO: { k: 'v' } } });
+      const { run, calls } = stubRunner(okList([]));
+
+      const result = await validateSelfHostProdEnv(root, { configPath, runWrangler: run });
+
+      // Present-and-non-empty → satisfied locally, so no wrangler round-trip and
+      // no false "missing secret" block on a never-deployed worker.
+      expect(result).toEqual({ hasSchema: true, remoteSecretNames: null });
+      expect(calls).toEqual([]);
+    });
+
+    it('a present JSON object the schema REJECTS fails CLOSED as invalid — never remote-discharged', async () => {
+      const root = createTempProject();
+      // PORT expects a number; a JSON object is present-and-non-empty but invalid
+      // (number() coerces via String(obj) → NaN → issues → invalid bucket).
+      defineEnv({ PORT: number() });
+      const configPath = writeWranglerConfig(root, { name: 'app', vars: { PORT: { nested: 1 } } });
+      const { run, calls } = stubRunner(okList(['PORT']));
+
+      const error = await validateSelfHostProdEnv(root, { configPath, runWrangler: run }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      expect((error as SelfHostEnvValidationError).report.invalid.map((i) => i.key)).toEqual([
+        'PORT',
+      ]);
+      // Malformed present value → fail closed BEFORE any remote discharge.
+      expect(calls).toEqual([]);
+    });
+
+    it('a present JSON null the schema REJECTS fails CLOSED — never treated as absent/remote-discharged', async () => {
+      const root = createTempProject();
+      // number() rejects null; validateAllEnv buckets present-null as "missing"
+      // (its isMissing covers null), but the gate folds it into invalid (present,
+      // non-empty, unvalidated) so it can never be treated as absent and
+      // discharged by the remote secret.
+      defineEnv({ PORT: number() });
+      const configPath = writeWranglerConfig(root, { name: 'app', vars: { PORT: null } });
+      const { run, calls } = stubRunner(okList(['PORT']));
+
+      const error = await validateSelfHostProdEnv(root, { configPath, runWrangler: run }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      expect((error as SelfHostEnvValidationError).report.invalid.map((i) => i.key)).toEqual([
+        'PORT',
+      ]);
+      expect(calls).toEqual([]);
     });
   });
 

@@ -361,8 +361,13 @@ function resolveEffectiveWorkerVars(
     /** Registered env schema (if any) — source of the `.default(value)` layer. */
     schema?: Record<string, unknown> | null;
   },
-): Record<string, string> {
-  const map: Record<string, string> = {};
+): Record<string, unknown> {
+  // F1 — values are `unknown`, not `string`: the root wrangler layer can carry a
+  // JSON var of any type (see {@link readConfigVars}). Higher layers (schema
+  // defaults, void.json `worker.vars`, the dotenv overlay) are always strings,
+  // but a lower-layer JSON value survives when no higher layer overrides it. The
+  // caller reads only presence/emptiness — never the value itself.
+  const map: Record<string, unknown> = {};
   // 1. root wrangler top-level `vars` (lowest precedence).
   if (options.configPath) {
     Object.assign(map, readConfigVars(options.configPath));
@@ -827,11 +832,16 @@ export async function validateSelfHostProdEnv(
     mod.validateAllEnv(buildEnv),
   );
 
-  // F2a/F2b — a required key that is PRESENT-and-EMPTY (`K=`) in the effective
+  // F2a/F2b — a required key that is PRESENT-and-EMPTY (`K=""`) in the effective
   // build map FAILS CLOSED ALWAYS, independent of whether K exists remotely: the
   // build ships `K=""` as a plaintext var, which wrangler gives precedence over
   // any same-named remote secret. Thrown BEFORE any wrangler spawn — remote
   // membership is irrelevant to this decision. Names K only, never a value.
+  //
+  // F1 — emptiness is the EMPTY STRING alone. A non-string JSON var (number /
+  // boolean / null / object / array) is PRESENT-and-non-empty: wrangler ships it
+  // as a `type:"json"` binding that wins over a same-named remote secret, so it
+  // is satisfied locally and must NEVER be dischargeable by that secret.
   const presentEmptyRequired = [...requiredKeys].filter(
     (key) => Object.hasOwn(buildEnv, key) && buildEnv[key] === '',
   );
@@ -840,22 +850,41 @@ export async function validateSelfHostProdEnv(
   }
 
   // Required keys the effective build map does NOT set at all — the ONLY state a
-  // remote secret can legitimately discharge.
+  // remote secret can legitimately discharge. A key PRESENT with ANY value type
+  // is never here, so a present JSON var can never be treated as absent (F1).
   const absentRequired = [...requiredKeys].filter((key) => !Object.hasOwn(buildEnv, key));
+
+  // F1 — a required key PRESENT with a non-empty value that the schema still
+  // REJECTED is malformed, not absent, and must FAIL CLOSED (never fall through
+  // to remote discharge). validateAllEnv records only the keys whose value
+  // validated in `report.values`; a present-non-empty required key missing from
+  // it failed — whether validateAllEnv bucketed it as `invalid` (e.g. a JSON
+  // object under a `string()` schema) or as `missing` (a present `null`, which
+  // its `isMissing` rule folds in). `""` is excluded (already rejected above).
+  const presentInvalidRequired = [...requiredKeys].filter(
+    (key) => Object.hasOwn(buildEnv, key) && buildEnv[key] !== '' && !buildReport.values.has(key),
+  );
+  // Union with any invalid key validateAllEnv already surfaced (incl. optional
+  // keys with an invalid present value — existing fail-closed behaviour).
+  const invalidKeys = new Set<string>([
+    ...buildReport.invalid.map((i) => i.key),
+    ...presentInvalidRequired,
+  ]);
+  const invalidReport = (missing: Array<string>): EnvValidationReport => ({
+    valid: false,
+    missing,
+    invalid: [...invalidKeys].map((key) => ({ key, messages: [SELF_HOST_INVALID_REASON] })),
+    values: new Map(),
+  });
 
   if (absentRequired.length === 0) {
     // Every required key is PRESENT-and-NON-EMPTY in the effective build map, so
     // presence is fully satisfied locally and a remote secret could not change
     // the outcome — no wrangler call (keeps first deploys of a fully-local
-    // schema working). The only remaining gate is invalid local values, which a
-    // remote secret can never fix.
-    if (buildReport.invalid.length > 0) {
-      throw selfHostEnvError({
-        valid: false,
-        missing: [],
-        invalid: buildReport.invalid,
-        values: new Map(),
-      });
+    // schema working). The only remaining gate is invalid local values (incl. a
+    // present malformed JSON var), which a remote secret can never fix.
+    if (invalidKeys.size > 0) {
+      throw selfHostEnvError(invalidReport([]));
     }
     return { hasSchema: true, remoteSecretNames: null };
   }
@@ -879,16 +908,12 @@ export async function validateSelfHostProdEnv(
   const remoteSecretNames = await fetchSelfHostSecretNames(run, options.configPath, absentRequired);
 
   // Only ABSENT required keys may be discharged by the remote list; a
-  // present-empty key was already rejected above and can never reach here.
+  // present-empty key was already rejected above and can never reach here, and a
+  // present-invalid key (F1) is folded into `invalidKeys` — never discharged.
   const remoteSet = new Set(remoteSecretNames);
   const stillMissing = absentRequired.filter((key) => !remoteSet.has(key));
-  if (stillMissing.length > 0 || buildReport.invalid.length > 0) {
-    throw selfHostEnvError({
-      valid: false,
-      missing: stillMissing,
-      invalid: buildReport.invalid,
-      values: new Map(),
-    });
+  if (stillMissing.length > 0 || invalidKeys.size > 0) {
+    throw selfHostEnvError(invalidReport(stillMissing));
   }
   return { hasSchema: true, remoteSecretNames };
 }
@@ -976,26 +1001,31 @@ function readConfigAccountId(configPath: string): string | undefined {
 }
 
 /**
- * Read the top-level `vars` map (string members only) from the resolved root
- * wrangler config (`-c` target) — the LOWEST-precedence plaintext layer of the
- * build's worker `vars` (the Cloudflare plugin's `defu(mergeBindings-result,
- * resolved)` keeps `resolved.vars` keys the higher layers don't set). Same
- * file/parse as {@link parseRootConfig}, reading the SAME top-level env the
- * deploy pins via `--env=`. Non-string members are dropped (only plaintext
- * string vars ship). An unreadable/malformed config yields `{}` (no root layer).
+ * Read the top-level `vars` map from the resolved root wrangler config (`-c`
+ * target) — the LOWEST-precedence plaintext layer of the build's worker `vars`
+ * (the Cloudflare plugin's `defu(mergeBindings-result, resolved)` keeps
+ * `resolved.vars` keys the higher layers don't set). Same file/parse as
+ * {@link parseRootConfig}, reading the SAME top-level env the deploy pins via
+ * `--env=`.
+ *
+ * F1 — wrangler 4.107 accepts a var value of ANY JSON type (string, number,
+ * boolean, null, object, array), not just strings: its `deployWorkerBindings`
+ * ships a string var as `{ type: "plain_text" }` and EVERY non-string as
+ * `{ type: "json" }` (wrangler-dist/cli.js `case "vars"`). Both are real var
+ * bindings on the deployed worker, and `checkRemoteSecretsOverride` gives ANY
+ * config var (string OR json) precedence over a same-named remote secret. So a
+ * non-string member must be preserved as PRESENT here — dropping it would let a
+ * same-named remote secret falsely discharge a required key while the deploy
+ * ships the JSON var OVER that secret. Every declared member is kept, regardless
+ * of value type; the caller inspects only presence/emptiness (never the value).
+ * An unreadable/malformed config yields `{}` (no root layer).
  */
-function readConfigVars(configPath: string): Record<string, string> {
+function readConfigVars(configPath: string): Record<string, unknown> {
   const parsed = parseRootConfig(configPath);
   if (!parsed || !isConfigRecord(parsed.vars)) {
     return {};
   }
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(parsed.vars)) {
-    if (typeof value === 'string') {
-      out[key] = value;
-    }
-  }
-  return out;
+  return { ...parsed.vars };
 }
 
 /**
