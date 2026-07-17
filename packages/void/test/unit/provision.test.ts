@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
   acquireProvisionLock,
   assertNoTransportRedirectInProjectDotenv,
+  checkCloudflareProvisionDrift,
   createDefaultRunWrangler,
   isAlreadyGoneKillError,
   normalizeRunWranglerResult,
@@ -7169,5 +7170,87 @@ describe('provisionCloudflareResources — F6 dotenv fence: export prefix + empt
       { runWrangler: run, log: silentLog },
     );
     expect(result.resources.find((r) => r.kind === 'd1')?.action).toBe('created');
+  });
+});
+
+describe('checkCloudflareProvisionDrift — id-drift vs the committed wrangler config', () => {
+  it('reports every desired id-bearing resource as missing when the config file is absent', () => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    mkdirSync(tmpDir, { recursive: true });
+    const { missing } = checkCloudflareProvisionDrift(wranglerPath, {
+      d1: { binding: 'DB', name: 'myapp-db' },
+      kvNamespaces: [
+        { binding: 'KV', title: 'myapp-kv' },
+        { binding: 'ISR_CACHE', title: 'myapp-isr-cache' },
+      ],
+      r2: { binding: 'STORAGE', bucketName: 'myapp-storage' },
+      queues: ['jobs'],
+      hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hyperdrive', connectionString: '' },
+    });
+    // Queues are name-bearing, not id-bearing → excluded from the id-drift check.
+    expect(missing.map((m) => m.binding).sort()).toEqual([
+      'DB',
+      'HYPERDRIVE',
+      'ISR_CACHE',
+      'KV',
+      'STORAGE',
+    ]);
+  });
+
+  it('treats placeholder ids (local / default) as NOT provisioned', () => {
+    setup(
+      JSON.stringify({
+        d1_databases: [{ binding: 'DB', database_name: 'default', database_id: 'local' }],
+        kv_namespaces: [{ binding: 'ISR_CACHE', id: 'local' }],
+        r2_buckets: [{ binding: 'STORAGE', bucket_name: 'default' }],
+      }),
+    );
+    const { missing } = checkCloudflareProvisionDrift(wranglerPath, {
+      d1: { binding: 'DB', name: 'myapp-db' },
+      kvNamespaces: [{ binding: 'ISR_CACHE', title: 'myapp-isr-cache' }],
+      r2: { binding: 'STORAGE', bucketName: 'myapp-storage' },
+      queues: [],
+    });
+    expect(missing.map((m) => m.kind).sort()).toEqual(['d1', 'kv', 'r2']);
+  });
+
+  it('reports NO drift when every desired resource has a real id', () => {
+    setup(
+      JSON.stringify({
+        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: uuid('db') }],
+        kv_namespaces: [
+          { binding: 'KV', id: hex32('kv') },
+          { binding: 'ISR_CACHE', id: hex32('isr') },
+        ],
+        r2_buckets: [{ binding: 'STORAGE', bucket_name: 'myapp-storage' }],
+        hyperdrive: [{ binding: 'HYPERDRIVE', id: hex32('hd') }],
+      }),
+    );
+    const { missing } = checkCloudflareProvisionDrift(wranglerPath, {
+      d1: { binding: 'DB', name: 'myapp-db' },
+      kvNamespaces: [
+        { binding: 'KV', title: 'myapp-kv' },
+        { binding: 'ISR_CACHE', title: 'myapp-isr-cache' },
+      ],
+      r2: { binding: 'STORAGE', bucketName: 'myapp-storage' },
+      queues: [],
+      hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hyperdrive', connectionString: '' },
+    });
+    expect(missing).toEqual([]);
+  });
+
+  it('flags only the newly-desired resource when the rest are already provisioned', () => {
+    setup(
+      JSON.stringify({
+        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: uuid('db') }],
+        // ISR_CACHE not yet declared — routes just started using `revalidate`.
+      }),
+    );
+    const { missing } = checkCloudflareProvisionDrift(wranglerPath, {
+      d1: { binding: 'DB', name: 'myapp-db' },
+      kvNamespaces: [{ binding: 'ISR_CACHE', title: 'myapp-isr-cache' }],
+      queues: [],
+    });
+    expect(missing).toEqual([{ binding: 'ISR_CACHE', kind: 'kv', name: 'myapp-isr-cache' }]);
   });
 });

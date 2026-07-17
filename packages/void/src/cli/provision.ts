@@ -50,6 +50,84 @@ export interface DesiredResourceSet {
   hyperdrive?: { binding: string; name: string; connectionString: string };
 }
 
+/** One DESIRED id-bearing resource absent (or placeholder-only) in the config. */
+export interface ProvisionDriftEntry {
+  /** Binding name (`DB`, `KV`, `ISR_CACHE`, `STORAGE`, `HYPERDRIVE`). */
+  binding: string;
+  kind: 'd1' | 'kv' | 'r2' | 'hyperdrive';
+  /** Resource name / KV title / bucket name the deploy wants. */
+  name: string;
+}
+
+export interface ProvisionDriftResult {
+  /** Desired id-bearing resources not yet provisioned (real-id) in the config. */
+  missing: Array<ProvisionDriftEntry>;
+}
+
+/**
+ * Diff the DESIRED id-bearing resources against the ACTUAL bindings in the root
+ * wrangler config, WITHOUT any remote/wrangler call. A resource counts as
+ * provisioned ONLY when its binding entry exists with a REAL (non-placeholder)
+ * identifier — the SAME predicate the provisioner's read-first uses:
+ *   - D1 `database_id` is a real UUID ({@link isRealD1Id}, not `'local'`);
+ *   - KV `id` is a real 32-hex ({@link isRealKvId}, not `'local'`);
+ *   - R2 `bucket_name` names a real bucket ({@link isRealStoredR2BucketName}, not `'default'`);
+ *   - Hyperdrive `id` is a real 32-hex ({@link isRealHyperdriveId}).
+ *
+ * Queues are NAME-bearing (no id in the config), so they are NOT part of this
+ * id-drift check. A missing config file yields every desired resource as missing.
+ *
+ * Used by the deploy orchestrator (Task 6) for BOTH the no-`--provision` DRIFT
+ * CHECK (any `missing` → guidance error) and the CI `--provision` no-op gate
+ * (`missing.length === 0` ⇒ a provable no-op the committed config already covers).
+ * A malformed/duplicate-binding config makes {@link readProvisionedBindingEntry}
+ * throw — fail closed, exactly as the provisioner would.
+ */
+export function checkCloudflareProvisionDrift(
+  configPath: string,
+  desired: DesiredResourceSet,
+): ProvisionDriftResult {
+  const config = readRootConfig(configPath);
+  const missing: Array<ProvisionDriftEntry> = [];
+  const isProvisioned = (
+    field: string,
+    binding: string,
+    hasRealId: (entry: Record<string, unknown>) => boolean,
+  ): boolean => {
+    const entry = readProvisionedBindingEntry(config, field, binding, configPath);
+    return entry !== undefined && hasRealId(entry);
+  };
+  if (desired.d1) {
+    if (!isProvisioned('d1_databases', desired.d1.binding, (e) => isRealD1Id(e.database_id))) {
+      missing.push({ binding: desired.d1.binding, kind: 'd1', name: desired.d1.name });
+    }
+  }
+  for (const kv of desired.kvNamespaces) {
+    if (!isProvisioned('kv_namespaces', kv.binding, (e) => isRealKvId(e.id))) {
+      missing.push({ binding: kv.binding, kind: 'kv', name: kv.title });
+    }
+  }
+  if (desired.r2) {
+    if (
+      !isProvisioned('r2_buckets', desired.r2.binding, (e) =>
+        isRealStoredR2BucketName(e.bucket_name),
+      )
+    ) {
+      missing.push({ binding: desired.r2.binding, kind: 'r2', name: desired.r2.bucketName });
+    }
+  }
+  if (desired.hyperdrive) {
+    if (!isProvisioned('hyperdrive', desired.hyperdrive.binding, (e) => isRealHyperdriveId(e.id))) {
+      missing.push({
+        binding: desired.hyperdrive.binding,
+        kind: 'hyperdrive',
+        name: desired.hyperdrive.name,
+      });
+    }
+  }
+  return { missing };
+}
+
 /**
  * Result of one `runWrangler` invocation, carrying STRUCTURED PROVENANCE so a
  * signal-killed or unspawnable child is never mistaken for a clean exit. The
