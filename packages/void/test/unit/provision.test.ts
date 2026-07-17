@@ -6027,7 +6027,7 @@ describe('acquireProvisionLock — recovery decisions are serialized + generatio
     const pid = await deadPid();
     writeFileSync(
       sidecar,
-      JSON.stringify({ pid, pgid: pid, reason: 'dead group', generation: 'gen-r14-s' }),
+      JSON.stringify({ pid, pgid: pid, reason: 'dead group', generation: 'gen-stale' }),
     );
     writeFileSync(recoveryMarker, '');
     const properLockfile = (await import('proper-lockfile')).default;
@@ -6067,7 +6067,7 @@ describe('acquireProvisionLock — recovery decisions are serialized + generatio
           pid: dead,
           pgid: dead,
           reason: 'S0 (dead group)',
-          generation: 'gen-r14-s0',
+          generation: 'gen-first',
         }),
       );
       // A's retained mutex: on disk, heartbeat-less, aged far past the stale window —
@@ -6082,7 +6082,7 @@ describe('acquireProvisionLock — recovery decisions are serialized + generatio
             pid: live.pid,
             pgid: live.pid,
             reason: 'S1 (live group, newer quarantine)',
-            generation: 'gen-r14-s1',
+            generation: 'gen-second',
           }),
         );
       };
@@ -6095,7 +6095,7 @@ describe('acquireProvisionLock — recovery decisions are serialized + generatio
       ).rejects.toThrow(/changed while this recovery decision was being made/);
       // THE crux: S1 SURVIVES the stale decision…
       const recorded = JSON.parse(readFileSync(sidecar, 'utf-8')) as Record<string, unknown>;
-      expect(recorded.generation).toBe('gen-r14-s1');
+      expect(recorded.generation).toBe('gen-second');
       expect(recorded.pid).toBe(live.pid);
       // …and A's retained mutex was not touched, so the next acquisition gates on S1's
       // LIVE group and fails closed instead of stale-reclaiming it.

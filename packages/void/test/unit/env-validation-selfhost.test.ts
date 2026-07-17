@@ -1269,7 +1269,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect((error as Error).message).toContain('status 1');
     });
 
-    it('M2 — a generic status-1 diagnostic that merely CONTAINS the lead-in phrase is NOT first-deploy', async () => {
+    it('a generic status-1 diagnostic that merely CONTAINS the lead-in phrase is NOT first-deploy', async () => {
       const root = createTempProject();
       defineEnv({ FOO: string() });
       // A generic wrangler/config diagnostic that happens to include the bare
@@ -1300,7 +1300,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect((error as Error).message).toContain('status 1');
     });
 
-    it('M2 — the "If this is a new Worker" sentence WITHOUT the "Otherwise…" line is NOT first-deploy', async () => {
+    it('the "If this is a new Worker" sentence WITHOUT the "Otherwise…" line is NOT first-deploy', async () => {
       const root = createTempProject();
       defineEnv({ FOO: string() });
       // Even the full deploy-guidance sentence, on its own (no `not found.` lead
