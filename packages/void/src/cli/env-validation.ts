@@ -21,6 +21,7 @@ import type { EnvValidationReport } from '../runtime/env-public.ts';
 import { mergeAndExpand, parseDotenvFile } from '../shared/dotenv.ts';
 import { isLikelySecretKey } from '../shared/env-mask.ts';
 import { filterLoadedEnv, stripInternalEnvKeys } from '../shared/env.ts';
+import type { StandardSchemaV1 } from '../standard-schema.ts';
 import type { PlatformClient } from './client.ts';
 import { resolveWranglerArgv } from './preset.ts';
 
@@ -235,6 +236,71 @@ function loadSanitizedBuildEnv(
   return sanitized;
 }
 
+/** Minimal structural view of a Standard Schema validator's probe entrypoint. */
+type SchemaProbe = StandardSchemaV1<unknown, unknown>['~standard'];
+
+/**
+ * F2 — the REQUIRED-key set, derived INDEPENDENTLY of how any validator treats
+ * the empty string. A key is required iff its validator REJECTS the ABSENT
+ * value (probe with `undefined`) — the SAME notion of "required" the managed
+ * gate uses (a key lands in `validateAllEnv().missing` when its absent value
+ * yields issues; `_getSchemaDefaults` probes `undefined` the exact same way).
+ * Requiredness is NEVER inferred from whether `""` validates, so a schema that
+ * ACCEPTS `""` (e.g. a bare Zod `z.string()`) is still correctly required.
+ *
+ * Runs the user's validators (arbitrary code), so callers MUST invoke this
+ * inside {@link withSchemaBoundary}: a validator that THROWS synchronously or
+ * REJECTS (async) on the probe surfaces as a values-free structural error, and
+ * the awaited async probe can never float as an unhandled rejection carrying a
+ * value. A NORMAL rejection (an `{ issues }` Result, not a thrown/rejected
+ * error) simply marks the key required.
+ */
+async function requiredSchemaKeys(schema: Record<string, unknown>): Promise<Set<string>> {
+  const required = new Set<string>();
+  for (const [key, validator] of Object.entries(schema)) {
+    const probe = (validator as { '~standard': SchemaProbe })['~standard'];
+    const resultMaybe = probe.validate(undefined);
+    const result = resultMaybe instanceof Promise ? await resultMaybe : resultMaybe;
+    if ((result as { issues?: unknown }).issues) {
+      required.add(key);
+    }
+  }
+  return required;
+}
+
+/**
+ * F5 — the KEY NAMES the schema contributes as `.default(value)` worker vars,
+ * derived via a values-free, boundary-safe probe. Mirrors `_getSchemaDefaults`
+ * (probe `undefined`; a non-undefined, issue-free result means the key has a
+ * default) but (a) returns key NAMES only — default VALUES are never read here
+ * — and (b) attaches a rejection handler to any async probe so a rejecting
+ * validator can NEVER float as an unhandled rejection carrying the original
+ * value (the exact leak `_getSchemaDefaults` has and that the WARN path must
+ * not reintroduce). A validator that THROWS synchronously is left to propagate
+ * to the caller's {@link withSchemaBoundary}, which drops its (value-carrying)
+ * message/stack/cause and rethrows a structural error.
+ */
+function schemaDefaultKeys(schema: Record<string, unknown>): Array<string> {
+  const keys: Array<string> = [];
+  for (const [key, validator] of Object.entries(schema)) {
+    const probe = (validator as { '~standard': SchemaProbe })['~standard'];
+    // A sync throw propagates to the caller's withSchemaBoundary (values-free).
+    const result = probe.validate(undefined);
+    if (result instanceof Promise) {
+      // Consume the rejection so a rejecting async probe never becomes an
+      // unhandled rejection carrying the value. Async → no sync default.
+      result.catch(() => {});
+      continue;
+    }
+    const r = result as { value?: unknown; issues?: unknown };
+    if (r.issues || r.value === undefined || r.value === null) {
+      continue;
+    }
+    keys.push(key);
+  }
+  return keys;
+}
+
 /**
  * WARN unit — determine exactly the keys the BUILD will merge into worker
  * `vars` and classify the secret-looking ones.
@@ -271,18 +337,32 @@ export async function collectPlaintextVarWarnings(
 
   // Registered schema (if the project has an env.ts) for explicit overrides
   // AND its registered defaults — the build merges BOTH into workerConfig.vars.
+  //
+  // F5 — env.ts evaluation runs ARBITRARY user code that can throw an error
+  // embedding an env value (loadUserEnvFile rethrows with the ORIGINAL message);
+  // load inside the values-free boundary so a throwing env.ts becomes a
+  // structural error, never a leak — even under VOID_ENV_UNMASK.
   const envFile = findEnvFile(root);
-  const mod = envFile ? await loadSchema(envFile) : null;
+  const mod = envFile
+    ? await withSchemaBoundary('schema-load-failed', () => loadSchema(envFile))
+    : null;
   const schema = mod?._getRegisteredSchema() ?? null;
 
   // The COMPLETE key-only var set the build assembles: sanitized dotenv keys
-  // UNION registered-default keys (keys only — `_getSchemaDefaults` values are
-  // never read). `applySchemaDefaultsToWorkerVars` fills a default key only
-  // when the dotenv left it unset, so the resulting key set is exactly this
-  // union either way.
+  // UNION registered-default keys (keys only — default VALUES are never read).
+  // `applySchemaDefaultsToWorkerVars` fills a default key only when the dotenv
+  // left it unset, so the resulting key set is exactly this union either way.
+  //
+  // F5 — the default probe invokes validators (arbitrary code) too, so it also
+  // runs behind the same boundary: {@link schemaDefaultKeys} lets a sync throw
+  // reach the boundary (values-free structural error) and consumes any async
+  // rejection so it can never float as an unhandled rejection carrying a value.
   const varKeys = new Set<string>(Object.keys(sanitized));
-  if (mod) {
-    for (const key of Object.keys(mod._getSchemaDefaults())) {
+  if (schema) {
+    const defaultKeys = await withSchemaBoundary('schema-validation-error', () =>
+      Promise.resolve(schemaDefaultKeys(schema)),
+    );
+    for (const key of defaultKeys) {
       varKeys.add(key);
     }
   }
@@ -563,8 +643,8 @@ export type SelfHostProdEnvResult = {
   hasSchema: boolean;
   /**
    * Remote secret names consulted via `wrangler secret list`, or `null` when
-   * wrangler was never invoked (no schema, or local `.env`/`.env.production`
-   * already satisfied every required key).
+   * wrangler was never invoked (no schema, or the effective build map already
+   * satisfied every required key present-and-non-empty).
    */
   remoteSecretNames: Array<string> | null;
 };
@@ -573,30 +653,35 @@ export type SelfHostProdEnvResult = {
  * GATE unit — the platform-free analogue of deploy.ts's `assertEnvSchemaValid`
  * for `void deploy --backend cloudflare`.
  *
- * Derives required secret names from the registered env.ts schema exactly the
- * way {@link validateProdEnv} does (productionOnly: `.env` + `.env.production`).
- * When local files leave required keys unfilled, fetches the REMOTE secret
- * names via `wrangler secret list` and feeds them into `validateProdEnv`'s
- * existing `remoteSecrets` hook. Still-missing keys → throws
- * {@link SelfHostEnvValidationError} with `wrangler secret put <NAME>` guidance.
+ * The ONE effective sanitized build map ({@link loadSanitizedBuildEnv} — the
+ * EXACT bytes the build bakes into worker `vars`, full Vite overlay precedence
+ * incl. `.env.local` / `.env.production.local` / a custom `envDir` / mode) is
+ * the SINGLE SOURCE OF TRUTH. Requiredness is derived INDEPENDENTLY of that map
+ * (probe each schema key with `undefined`; reject ⇒ required — {@link
+ * requiredSchemaKeys}). For EVERY required key K, the effective value decides:
+ *   - PRESENT and NON-EMPTY  → satisfied locally (presence). Not a gate failure
+ *     for the shadow/absence concern; an invalid value is still caught below.
+ *   - PRESENT and EMPTY (`K=`) → FAIL CLOSED ALWAYS, independent of whether K
+ *     exists remotely. The build ships `K=""` as a plaintext var, which wrangler
+ *     4.107 gives precedence over any same-named remote secret, so the deploy
+ *     would ship empty for a required secret (overwriting a remote one if
+ *     present). Thrown BEFORE any wrangler spawn — remote membership is
+ *     irrelevant. Message: remove the empty assignment (names K, never a value).
+ *   - ABSENT → must be discharged by `wrangler secret list` (K present remotely)
+ *     else FAIL CLOSED with `wrangler secret put <NAME>` guidance.
  *
- * wrangler is only invoked when remote secrets could change the outcome
- * (remote names can only satisfy MISSING keys, never fix an invalid local
- * value, and can be shadowed by an empty overlay). This keeps first deploys
- * working: a locally-satisfied schema with no empty overlay never requires the
- * worker to already exist, while a genuinely missing key on a fresh worker
- * fails the wrangler call (worker not found) — a hard, fail-closed
+ * wrangler is only invoked when the effective map leaves a required key ABSENT
+ * (the only state a remote secret can discharge). A fully-local satisfied schema
+ * never requires the worker to already exist, while a genuinely absent key on a
+ * fresh worker fails the wrangler call (worker not found) — a hard, fail-closed
  * {@link SelfHostFirstDeployError} carrying the missing key names + bootstrap
  * guidance (F4), rather than a false "all secrets present".
  *
- * Three fences guard the discharge (F2/F3/F5):
- *   - F2 — the check runs over the EFFECTIVE build map, per required key,
- *     BEFORE the local-valid fast path. A required key that is PRESENT-but-EMPTY
- *     in that map (`FOO=` in ANY build-loaded overlay — incl. one that overrode
- *     a non-empty `.env.production` value) is NEVER discharged by a same-named
- *     remote secret: the build bakes the empty value into plaintext `vars`,
- *     which wrangler 4.107 gives precedence over the remote secret, so the
- *     deploy would ship empty OVER the secret. Fail closed naming those keys.
+ * Three fences (F2/F3/F5):
+ *   - F2 — the present-empty rejection above is authoritative: it is NEVER gated
+ *     on remote membership (F2a) and requiredness is NEVER sourced from
+ *     `validateAllEnv().missing` (F2b), so a schema that accepts `""` is still
+ *     rejected when a required key is emptied.
  *   - F3 — the target account is reconciled against the config's `account_id`
  *     BEFORE spawning wrangler, so `secret list` can never consult a different
  *     account.
@@ -616,52 +701,69 @@ export async function validateSelfHostProdEnv(
 
   // F5 — env.ts evaluation runs arbitrary user code that could throw an error
   // embedding a value; load inside the values-free boundary. `mod` is reused
-  // below to validate the effective build map (F2) without a second import.
+  // below (schema + validateAllEnv) without a second import.
   const mod = await withSchemaBoundary('schema-load-failed', () => loadSchema(envFile));
   if (!mod) {
     return { hasSchema: false, remoteSecretNames: null };
   }
+  const schema = mod._getRegisteredSchema() ?? {};
 
-  // Primary validation over the productionOnly view (.env + .env.production),
-  // exactly as the managed path does — wrapped (F5) so a throwing/rejecting
-  // validator cannot leak the offending value out of this unit.
-  const local = await withSchemaBoundary('schema-validation-error', () =>
-    validateProdEnv(root, { productionOnly: true }),
+  // The ONE effective sanitized build map — the EXACT bytes the build bakes into
+  // worker `vars` (loadEnv → filterLoadedEnv → stripInternalEnvKeys over the FULL
+  // overlay `.env` + `.env.local` + `.env.<mode>` + `.env.<mode>.local`,
+  // honouring a custom `envDir`), via the SAME {@link loadSanitizedBuildEnv} the
+  // WARN unit uses so the two can never diverge. Every presence/emptiness
+  // decision below reads ONLY this map; no value ever leaves this function.
+  const buildEnv = loadSanitizedBuildEnv(root, { envDir: options.envDir, mode: options.mode });
+
+  // F2b — requiredness is derived INDEPENDENTLY of whether a validator accepts
+  // `""` (probe each key with `undefined`; reject ⇒ required), NOT from
+  // `validateAllEnv().missing`. Wrapped (F5) so a throwing/rejecting validator
+  // becomes a values-free structural error rather than leaking the probed value.
+  const requiredKeys = await withSchemaBoundary('schema-validation-error', () =>
+    requiredSchemaKeys(schema),
   );
 
-  // F2 — compute the ONE effective sanitized build map FIRST, BEFORE any
-  // local-valid fast path. This is the EXACT map the build bakes into worker
-  // `vars` (loadEnv → filterLoadedEnv → stripInternalEnvKeys over the FULL
-  // build file set: `.env` + `.env.local` + `.env.<mode>` + `.env.<mode>.local`,
-  // honouring a custom `envDir`), reusing {@link loadSanitizedBuildEnv} — the
-  // SAME assembly the WARN unit uses, so the two units can never diverge.
-  // Validate that map to learn which REQUIRED keys it leaves unsatisfied, then
-  // keep only those that are PRESENT-and-EMPTY there. A required key that is
-  // NON-EMPTY in `.env.production` but OVERRIDDEN TO EMPTY by a higher-priority
-  // overlay (`.env.production.local`, `.env.local`, or a custom envDir file) is
-  // invisible to the productionOnly view above (reads as satisfied) yet is
-  // present-and-empty here — exactly the case the fast path must NOT skip.
-  // Only emptiness is inspected; no value leaves this function or any error.
-  const buildEnv = loadSanitizedBuildEnv(root, { envDir: options.envDir, mode: options.mode });
+  // Validate the effective build map to surface INVALID values (present,
+  // non-empty, failed validation) — a remote secret can NEVER fix those.
+  // Wrapped (F5) so a throwing/rejecting validator cannot leak the offending
+  // value. Emptiness/absence are decided from `requiredKeys` above, NOT from
+  // this report's `missing` (which a schema accepting `""` would understate).
   const buildReport = await withSchemaBoundary('schema-validation-error', () =>
     mod.validateAllEnv(buildEnv),
   );
-  const presentEmptyRequired = buildReport.missing.filter(
+
+  // F2a/F2b — a required key that is PRESENT-and-EMPTY (`K=`) in the effective
+  // build map FAILS CLOSED ALWAYS, independent of whether K exists remotely: the
+  // build ships `K=""` as a plaintext var, which wrangler gives precedence over
+  // any same-named remote secret. Thrown BEFORE any wrangler spawn — remote
+  // membership is irrelevant to this decision. Names K only, never a value.
+  const presentEmptyRequired = [...requiredKeys].filter(
     (key) => Object.hasOwn(buildEnv, key) && buildEnv[key] === '',
   );
-
-  if (local.report.valid && presentEmptyRequired.length === 0) {
-    // Every required key is satisfied by .env/.env.production AND no overlay
-    // empties a required key, so no empty plaintext var can shadow a remote
-    // secret — remote names could only ADD presence, so the outcome cannot
-    // change. No wrangler call (keeps first deploys of a fully-local schema
-    // working).
-    return { hasSchema: true, remoteSecretNames: null };
+  if (presentEmptyRequired.length > 0) {
+    throw emptyAssignmentError(presentEmptyRequired);
   }
-  if (local.report.missing.length === 0 && presentEmptyRequired.length === 0) {
-    // Only INVALID local values — a remote secret can never fix those, and no
-    // empty overlay is in play either.
-    throw selfHostEnvError(local.report);
+
+  // Required keys the effective build map does NOT set at all — the ONLY state a
+  // remote secret can legitimately discharge.
+  const absentRequired = [...requiredKeys].filter((key) => !Object.hasOwn(buildEnv, key));
+
+  if (absentRequired.length === 0) {
+    // Every required key is PRESENT-and-NON-EMPTY in the effective build map, so
+    // presence is fully satisfied locally and a remote secret could not change
+    // the outcome — no wrangler call (keeps first deploys of a fully-local
+    // schema working). The only remaining gate is invalid local values, which a
+    // remote secret can never fix.
+    if (buildReport.invalid.length > 0) {
+      throw selfHostEnvError({
+        valid: false,
+        missing: [],
+        invalid: buildReport.invalid,
+        values: new Map(),
+      });
+    }
+    return { hasSchema: true, remoteSecretNames: null };
   }
 
   // F3 — reconcile the effective account BEFORE any wrangler spawn. wrangler
@@ -678,33 +780,21 @@ export async function validateSelfHostProdEnv(
       accountId: effectiveAccountId,
       timeoutMs: options.timeoutMs,
     });
-  const remoteSecretNames = await fetchSelfHostSecretNames(
-    run,
-    options.configPath,
-    local.report.missing,
-  );
+  // `absentRequired` seeds the first-deploy (worker-not-found) guidance with the
+  // still-unsatisfied required key NAMES (values-free).
+  const remoteSecretNames = await fetchSelfHostSecretNames(run, options.configPath, absentRequired);
 
-  // F2 — a required key that is present-and-EMPTY in the effective build map
-  // AND exists as a remote secret is a shadow collision: the empty plaintext
-  // var would overwrite the secret (wrangler gives a config var precedence over
-  // a same-named remote secret). Such a key must NEVER be discharged by the
-  // remote list — fail closed naming those keys with guidance to remove the
-  // empty assignment. (Required keys that are effectively ABSENT are not in
-  // `presentEmptyRequired`, so they stay eligible for remote discharge below.)
+  // Only ABSENT required keys may be discharged by the remote list; a
+  // present-empty key was already rejected above and can never reach here.
   const remoteSet = new Set(remoteSecretNames);
-  const emptyOverrides = presentEmptyRequired.filter((key) => remoteSet.has(key));
-  if (emptyOverrides.length > 0) {
-    throw emptyAssignmentError(emptyOverrides);
-  }
-
-  const { report } = await withSchemaBoundary('schema-validation-error', () =>
-    validateProdEnv(root, {
-      productionOnly: true,
-      remoteSecrets: remoteSecretNames,
-    }),
-  );
-  if (!report.valid) {
-    throw selfHostEnvError(report);
+  const stillMissing = absentRequired.filter((key) => !remoteSet.has(key));
+  if (stillMissing.length > 0 || buildReport.invalid.length > 0) {
+    throw selfHostEnvError({
+      valid: false,
+      missing: stillMissing,
+      invalid: buildReport.invalid,
+      values: new Map(),
+    });
   }
   return { hasSchema: true, remoteSecretNames };
 }
@@ -833,29 +923,34 @@ function selfHostEnvError(report: EnvValidationReport): SelfHostEnvValidationErr
 }
 
 /**
- * F2 — the hard error for EMPTY local assignments (`FOO=`) that would shadow a
- * same-named remote secret. Values-free (key names only). The build bakes the
- * empty string into plaintext `vars`, and wrangler 4.107 gives a config var
- * precedence over the remote secret (`checkRemoteSecretsOverride` in
- * wrangler-dist/cli.js warns "… will replace these remote secrets with the
- * configuration values"), so shipping this would overwrite the secret with
- * empty. The fix is to REMOVE the empty assignment, not `secret put`.
+ * F2 — the hard error for a REQUIRED key set to an EMPTY value (`FOO=`) in the
+ * effective build map. Values-free (key names only), thrown ALWAYS — independent
+ * of whether the key exists as a remote secret. The build bakes the empty string
+ * into plaintext `vars`, and wrangler 4.107 gives a config var precedence over a
+ * same-named remote secret (`checkRemoteSecretsOverride` in wrangler-dist/cli.js
+ * warns "… will replace these remote secrets with the configuration values"), so
+ * shipping this would ship an empty value for a required secret (overwriting a
+ * remote one if it exists). The fix is to REMOVE the empty assignment, not
+ * `secret put`.
  */
 function emptyAssignmentError(keys: Array<string>): SelfHostEnvValidationError {
   const sorted = [...keys].sort((a, b) => a.localeCompare(b));
   const lines = [
-    'Empty env assignment would shadow a remote secret:',
+    'Empty value for a required env var:',
     ...sorted.map((key) => `  • ${key}`),
     '',
-    'These keys are set to an EMPTY value in one of your build-loaded .env files (.env, ' +
-      '.env.local, .env.production, .env.production.local, or your configured envDir) but also ' +
-      'exist as remote worker secrets. The build bakes the empty value into the worker config as a ' +
-      'plaintext var, and Cloudflare gives a config var precedence over the remote secret — so the ' +
-      'deploy would overwrite the secret with an empty value.',
+    'These keys are REQUIRED by your env schema but set to an EMPTY value in one of your ' +
+      'build-loaded .env files (.env, .env.local, .env.production, .env.production.local, or your ' +
+      'configured envDir). The build bakes the empty value into the worker config as a plaintext ' +
+      'var, and Cloudflare gives a config var precedence over any same-named remote secret — so the ' +
+      'deploy would ship an empty value for a required secret (overwriting a remote secret if one ' +
+      'exists).',
     '',
     `Remove the empty assignment (${sorted
       .map((key) => `\`${key}=\``)
-      .join(', ')}) from your .env files so the remote secret takes effect, or set a real value.`,
+      .join(
+        ', ',
+      )}) from your .env files (so a remote secret can take effect), or set a real value.`,
   ];
   const safeReport: EnvValidationReport = {
     valid: false,

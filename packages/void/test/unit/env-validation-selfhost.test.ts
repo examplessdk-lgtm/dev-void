@@ -211,6 +211,130 @@ describe('collectPlaintextVarWarnings — plaintext worker-vars classification',
 });
 
 // ---------------------------------------------------------------------------
+// WARN unit — F5 values-free schema boundary (env.ts load + default probing)
+// ---------------------------------------------------------------------------
+
+describe('collectPlaintextVarWarnings — F5 schema load + default probe are values-free', () => {
+  const SENTINEL = 'SENTINEL-warn-sk_live_leak-WZX';
+
+  /** Everything an observer could read off the thrown schema error. */
+  function serializeSchemaError(error: unknown): string {
+    const e = error as SelfHostSchemaError & Record<string, unknown>;
+    return JSON.stringify({
+      name: e.name,
+      message: e.message,
+      stack: e.stack ?? '',
+      reason: e.reason,
+      own: e,
+      ownStr: String(e),
+    });
+  }
+
+  it('a throwing env.ts becomes a values-free SelfHostSchemaError (sentinel nowhere, even under VOID_ENV_UNMASK)', async () => {
+    const root = createTempProject({ withEnvTs: false });
+    // env.ts evaluation embeds the sentinel; loadUserEnvFile would fold that
+    // original message into its wrapper — the WARN-side boundary must drop it.
+    writeFileSync(join(root, 'env.ts'), `throw new Error('warn env boom ${SENTINEL}');\n`);
+
+    vi.stubEnv('VOID_ENV_UNMASK', '1');
+    _resetUnmaskCacheForTests();
+    try {
+      const error = await collectPlaintextVarWarnings(root).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostSchemaError);
+      expect((error as SelfHostSchemaError).reason).toBe('schema-load-failed');
+      expect((error as Error).message).not.toContain(SENTINEL);
+      expect(serializeSchemaError(error)).not.toContain(SENTINEL);
+    } finally {
+      vi.unstubAllEnvs();
+      _resetUnmaskCacheForTests();
+    }
+  });
+
+  it('a validator that THROWS synchronously during default-probing becomes a values-free SelfHostSchemaError', async () => {
+    const root = createTempProject();
+    defineEnv({
+      FOO: {
+        '~standard': {
+          version: 1,
+          vendor: 'test',
+          validate() {
+            throw new Error(`warn sync default probe ${SENTINEL}`);
+          },
+        },
+      } satisfies StandardSchemaV1<unknown, unknown>,
+    });
+    writeDotenv(root, '.env.production', 'API_KEY=x\n');
+
+    vi.stubEnv('VOID_ENV_UNMASK', '1');
+    _resetUnmaskCacheForTests();
+    try {
+      const error = await collectPlaintextVarWarnings(root).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostSchemaError);
+      expect((error as SelfHostSchemaError).reason).toBe('schema-validation-error');
+      expect((error as Error).message).not.toContain(SENTINEL);
+      expect(serializeSchemaError(error)).not.toContain(SENTINEL);
+    } finally {
+      vi.unstubAllEnvs();
+      _resetUnmaskCacheForTests();
+    }
+  });
+
+  it('a rejecting ASYNC default probe never leaks the value nor floats as an unhandled rejection (even under VOID_ENV_UNMASK)', async () => {
+    const root = createTempProject();
+    // The default probe (validate(undefined)) rejects ASYNC with the sentinel.
+    // Under the pre-fix WARN unit, `_getSchemaDefaults` skipped the Promise with
+    // no `.catch`, so the rejection floated as an unhandled rejection carrying
+    // the sentinel. The fix consumes it and simply skips the key.
+    defineEnv({
+      FOO: {
+        '~standard': {
+          version: 1,
+          vendor: 'test',
+          validate() {
+            return Promise.reject(new Error(`warn async default probe ${SENTINEL}`));
+          },
+        },
+      } satisfies StandardSchemaV1<unknown, unknown>,
+    });
+    writeDotenv(root, '.env.production', 'API_KEY=x\n');
+
+    const unhandled: Array<unknown> = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    vi.stubEnv('VOID_ENV_UNMASK', '1');
+    _resetUnmaskCacheForTests();
+    try {
+      // Does not throw — the async probe is consumed and the key skipped.
+      const result = await collectPlaintextVarWarnings(root);
+      // Give any (buggy) floating rejection a tick to surface.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // API_KEY (from dotenv) is still classified; FOO is not a known default.
+      expect(result.secretKeys).toEqual([{ key: 'API_KEY', reason: 'heuristic' }]);
+      expect(JSON.stringify(result)).not.toContain(SENTINEL);
+      const dump = unhandled
+        .map((u) => (u instanceof Error ? `${u.message}\n${u.stack ?? ''}` : String(u)))
+        .join('\n');
+      expect(dump).not.toContain(SENTINEL);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      vi.unstubAllEnvs();
+      _resetUnmaskCacheForTests();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GATE unit — validateSelfHostProdEnv
 // ---------------------------------------------------------------------------
 
@@ -549,6 +673,121 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
 
       expect(result).toEqual({ hasSchema: true, remoteSecretNames: null });
       expect(calls).toEqual([]);
+    });
+
+    // A required Standard Schema validator that REJECTS `undefined` (so it is
+    // required) but ACCEPTS `""` — exactly like a bare Zod `z.string()`. Used to
+    // prove requiredness is derived independently of whether `""` validates.
+    const acceptsEmptyButRequired: StandardSchemaV1<unknown, string> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate(value) {
+          if (typeof value !== 'string') {
+            return { issues: [{ message: 'Required' }] };
+          }
+          return { value };
+        },
+      },
+    };
+
+    it('F2a — `.env.production.local` empties a required FOO that is NOT remote: fails CLOSED (fail-OPEN under the pre-fix remote-gated empty check)', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      // productionOnly view (.env + .env.production) sees FOO=real-foo → valid,
+      // so the pre-fix fast path / final validateProdEnv both treat FOO as
+      // satisfied. The BUILD overlay (.env.production.local) empties it, so the
+      // effective baked var is FOO="". wrangler returns [] (FOO is NOT a remote
+      // secret), so the pre-fix `emptyOverrides = presentEmpty ∩ remote` is empty
+      // → the gate passed and the build shipped FOO="". The fix rejects any
+      // present-empty required key regardless of remote membership.
+      writeDotenv(root, '.env.production', 'FOO=real-foo\n');
+      writeDotenv(root, '.env.production.local', 'FOO=\n');
+      const { run } = stubRunner(okList([]));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      const envError = error as SelfHostEnvValidationError;
+      expect(envError.report.missing).toEqual(['FOO']);
+      expect(envError.message).toContain('FOO');
+      expect(envError.message).toContain('Remove the empty assignment');
+      expect(envError.message).not.toContain('wrangler secret put');
+    });
+
+    it('F2b — a required validator that ACCEPTS "" still fails CLOSED on `FOO=` (fail-OPEN under the pre-fix buildReport.missing source)', async () => {
+      const root = createTempProject();
+      // FOO rejects undefined (required) but ACCEPTS "". `FOO=` therefore never
+      // enters validateAllEnv().missing, so the pre-fix presentEmpty check (which
+      // filtered buildReport.missing) saw nothing → the whole F2 gate was bypassed
+      // and remote FOO was overwritten by the plaintext empty. The fix derives
+      // requiredness independently (probe undefined), so `FOO=` still fails closed.
+      defineEnv({ FOO: acceptsEmptyButRequired });
+      writeDotenv(root, '.env.production', 'FOO=\n');
+      const { run } = stubRunner(okList(['FOO']));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      const envError = error as SelfHostEnvValidationError;
+      expect(envError.report.missing).toEqual(['FOO']);
+      expect(envError.message).toContain('Remove the empty assignment');
+      expect(envError.message).not.toContain('wrangler secret put');
+    });
+
+    it('effectively-absent required key (root has FOO but a custom envDir makes it absent) is discharged by the remote secret', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      // Root .env.production satisfies FOO in the productionOnly view, so the
+      // pre-fix fast path returned success WITHOUT consulting wrangler. But the
+      // BUILD reads envDir=config (empty), so the effective build map has NO FOO
+      // — it must be discharged by the remote secret, requiring a wrangler call.
+      writeDotenv(root, '.env.production', 'FOO=real-foo\n');
+      mkdirSync(join(root, 'config'));
+      const { run, calls } = stubRunner(okList(['FOO']));
+
+      const result = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        envDir: 'config',
+        runWrangler: run,
+      });
+
+      expect(result).toEqual({ hasSchema: true, remoteSecretNames: ['FOO'] });
+      expect(calls.length).toBe(1);
+    });
+
+    it('effectively-absent required key with NO remote secret fails CLOSED as a missing secret', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      writeDotenv(root, '.env.production', 'FOO=real-foo\n');
+      mkdirSync(join(root, 'config'));
+      const { run } = stubRunner(okList([]));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        envDir: 'config',
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      const envError = error as SelfHostEnvValidationError;
+      expect(envError.report.missing).toEqual(['FOO']);
+      expect(envError.message).toContain('wrangler secret put');
     });
   });
 
