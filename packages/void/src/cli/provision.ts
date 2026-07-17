@@ -39,8 +39,12 @@ import {
  * verbatim.
  */
 export interface DesiredResourceSet {
-  /** D1 database — `{ binding: 'DB', name: 'myapp-db' }`. */
-  d1?: { binding: string; name: string };
+  /**
+   * D1 database — `{ binding: 'DB', name: 'myapp-db' }`. `migrationsDir` is the
+   * config-relative `migrations_dir` to write on the D1 entry (sourceDir-aware);
+   * when omitted the provisioner falls back to the default `./db/migrations`.
+   */
+  d1?: { binding: string; name: string; migrationsDir?: string };
   /** KV namespaces (app KV + `ISR_CACHE`). Titles are NOT account-unique. */
   kvNamespaces: Array<{ binding: string; title: string }>;
   /** R2 bucket — bucket names ARE account-unique. */
@@ -4179,6 +4183,10 @@ async function provisionCloudflareResourcesLocked(
   // --- D1 ------------------------------------------------------------------
   if (desired.d1) {
     const { binding, name } = desired.d1;
+    // The config-relative `migrations_dir` to stamp on the D1 entry. The orchestrator
+    // passes the sourceDir-aware value; fall back to the default when unset so a direct
+    // provisioner call (no orchestrator) keeps the historical `./db/migrations`.
+    const migrationsDir = desired.d1.migrationsDir ?? D1_MIGRATIONS_DIR;
     const entry = readBindingEntry(configPath, 'd1_databases', binding);
     if (entry && isRealD1Id(entry.database_id)) {
       // Stored-name identity: when the entry
@@ -4202,7 +4210,7 @@ async function provisionCloudflareResourcesLocked(
       // crashed BEFORE migrations_dir was set, so ensure + verify it here too —
       // idempotent when already present — so the retry converges rather than
       // leaving the gap unfilled forever.
-      const res = write({ d1MigrationsDir: { binding, dir: D1_MIGRATIONS_DIR } });
+      const res = write({ d1MigrationsDir: { binding, dir: migrationsDir } });
       assertD1MigrationsDirApplied(res, binding, configPath);
       resources.push({ kind: 'd1', binding, name, action: 'reused', id: entry.database_id });
     } else {
@@ -4266,7 +4274,7 @@ async function provisionCloudflareResourcesLocked(
         log.info(`adopted existing D1 database ${name} (${existing.id})`);
         const res = write({
           d1: { binding, databaseName: name, databaseId: existing.id },
-          d1MigrationsDir: { binding, dir: D1_MIGRATIONS_DIR },
+          d1MigrationsDir: { binding, dir: migrationsDir },
         });
         assertD1MigrationsDirApplied(res, binding, configPath);
         resources.push({ kind: 'd1', binding, name, action: 'adopted', id: existing.id });
@@ -4297,7 +4305,7 @@ async function provisionCloudflareResourcesLocked(
             binding,
             name,
           );
-          const res = write({ d1MigrationsDir: { binding, dir: D1_MIGRATIONS_DIR } });
+          const res = write({ d1MigrationsDir: { binding, dir: migrationsDir } });
           assertD1MigrationsDirApplied(res, binding, configPath);
           resources.push({ kind: 'd1', binding, name, action: 'created' });
         } else if (isCleanFailure(created) && isAlreadyExistsError(created)) {
@@ -4322,7 +4330,7 @@ async function provisionCloudflareResourcesLocked(
           log.info(`adopted existing D1 database ${name} (${info.id})`);
           const res = write({
             d1: { binding, databaseName: name, databaseId: info.id },
-            d1MigrationsDir: { binding, dir: D1_MIGRATIONS_DIR },
+            d1MigrationsDir: { binding, dir: migrationsDir },
           });
           assertD1MigrationsDirApplied(res, binding, configPath);
           resources.push({ kind: 'd1', binding, name, action: 'adopted', id: info.id });

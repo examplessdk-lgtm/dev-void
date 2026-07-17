@@ -608,6 +608,27 @@ function deployPointerPath(root: string): string {
 }
 
 /**
+ * Resolve the RAW Vite `envDir` the production build honors — exactly the
+ * `userConfig.envDir` the CF plugin's `void:env` config hook reads (index.ts). The
+ * self-host secret WARN + GATE units default to the project root, but the build
+ * loads `.env*` from a custom `envDir`; without threading the same value a custom
+ * `envDir` project would preflight a DIFFERENT env set than it ships. Loaded via a
+ * dynamic `import('vite')` so this CLI file never pulls Vite into a managed deploy.
+ * Returns the raw string (relative, as written) or `undefined` (→ root, matching how
+ * the build treats a missing / non-string / `false` envDir).
+ */
+async function resolveViteEnvDir(root: string): Promise<string | undefined> {
+  const { loadConfigFromFile } = await import('vite');
+  const loaded = await loadConfigFromFile(
+    { command: 'build', mode: 'production' },
+    undefined,
+    root,
+  );
+  const envDir = loaded?.config.envDir;
+  return typeof envDir === 'string' && envDir.length > 0 ? envDir : undefined;
+}
+
+/**
  * Remove the CF plugin's deploy pointer before building so the post-build
  * verification can only pass on a pointer THIS build re-created. The CF plugin
  * overwrites (never deletes) it, and only when the CF Vite plugin runs — a build
@@ -754,6 +775,10 @@ export interface CloudflareDeployDeps {
   validateSelfHostProdEnv?: typeof validateSelfHostProdEnv;
   /** Generated-deploy-config verification seam (default: {@link verifyGeneratedDeployConfig}). */
   verifyDeployConfig?: typeof verifyGeneratedDeployConfig;
+  /** Pre-remote-migrate gate seam (default: {@link assertRemoteMigrationsDeployable}). */
+  assertMigrationsDeployable?: typeof assertRemoteMigrationsDeployable;
+  /** Raw Vite `envDir` resolver seam (default: {@link resolveViteEnvDir}). */
+  resolveEnvDir?: (root: string) => string | undefined | Promise<string | undefined>;
   /** Override CI / non-interactive detection (default: `!stdin.isTTY || getTokenSource()==='ci'`). */
   isCI?: boolean;
   /** Override `process.exit` (tests assert the exit code without halting). */
@@ -945,7 +970,18 @@ export async function computeDesiredCloudflareResources(
   root: string,
   voidConfig: VoidConfig,
   configPath: string,
-): Promise<{ desired: DesiredResourceSet; reasons: Map<string, string> }> {
+): Promise<{
+  desired: DesiredResourceSet;
+  reasons: Map<string, string>;
+  /** Whether Void-managed auth is enabled (drives the auth-migration gate). */
+  authEnabled: boolean;
+  /** Resolved database dialect (sqlite → D1, postgresql → Hyperdrive). */
+  dialect: DatabaseDialect;
+  /** Absolute migrations dir on disk (sourceDir-aware) — used by the migrate gates. */
+  migrationsDir: string;
+  /** Checked-in migrations (`db/migrations/*.sql`) collected pre-build. */
+  migrations: Array<{ name: string; sql: string }>;
+}> {
   // `isRealD1Id` is resolved via the memoized dynamic import so this exported
   // helper works when called directly in unit tests (outside the fork) without a
   // static provision edge that would eagerly load the provision lifecycle.
@@ -975,8 +1011,18 @@ export async function computeDesiredCloudflareResources(
   // Checked-in migrations count toward the database gate, matching the managed
   // manifest (`buildVoidManifest`: `needsD1 || needsAuth || hasMigrations`). Without
   // this a migration-only SQLite app would provision no D1 and silently skip remote
-  // migrations. Collected pre-build from `db/migrations/`.
-  const hasMigrations = collectMigrations(paths.migrationsDir).length > 0;
+  // migrations. Collected ONCE pre-build from `db/migrations/` (sourceDir-aware) and
+  // carried through so the migrate step can skip when there are none and run the
+  // deploy gates on the exact same files.
+  const migrations = collectMigrations(paths.migrationsDir);
+  const hasMigrations = migrations.length > 0;
+  // Config-relative migrations dir wrangler will resolve from the config-file dir
+  // (the root). sourceDir moves the files to `<sourceDir>/db/migrations`, so the
+  // written `migrations_dir` must include it — a hardcoded `./db/migrations` would
+  // point wrangler at the wrong (or missing) folder for a sourceDir project.
+  const migrationsDirRelative = paths.sourceDir
+    ? `./${paths.sourceDir}/db/migrations`
+    : './db/migrations';
 
   const desired: DesiredResourceSet = { kvNamespaces: [], queues: [] };
   const reasons = new Map<string, string>();
@@ -1004,7 +1050,9 @@ export async function computeDesiredCloudflareResources(
       storedName != null && isRealD1Id(storedId)
         ? storedName
         : toValidWorkerName(`${workerName}-db`);
-    desired.d1 = { binding, name };
+    // Carry the sourceDir-aware config-relative migrations dir so the provisioner
+    // writes the correct `migrations_dir` (it otherwise hardcodes `./db/migrations`).
+    desired.d1 = { binding, name, migrationsDir: migrationsDirRelative };
     reasons.set(binding, databaseReason);
   }
 
@@ -1056,7 +1104,41 @@ export async function computeDesiredCloudflareResources(
     reasons.set(binding, 'routes use `revalidate` (ISR) — needs an ISR_CACHE KV namespace');
   }
 
-  return { desired, reasons };
+  return {
+    desired,
+    reasons,
+    authEnabled,
+    dialect,
+    migrationsDir: paths.migrationsDir,
+    migrations,
+  };
+}
+
+/**
+ * The core Void-managed Better Auth tables (`buildCreateTableSql` in
+ * `runtime/auth-migrations.ts` emits exactly these plus any plugin tables). Every
+ * Better Auth config creates these four, so a checked-in migration set that creates
+ * them is the v1 signal that auth is self-host-deployable on this backend.
+ */
+const REQUIRED_AUTH_TABLES = ['user', 'session', 'account', 'verification'] as const;
+
+/**
+ * Which of the core Better Auth tables are NOT created by any checked-in migration.
+ * Scans the collected migration SQL for a `CREATE TABLE [IF NOT EXISTS] <name>`
+ * matching each table (bare or quoted with `"`, backtick, or `[...]`,
+ * case-insensitive). Returns the uncovered table names (empty when all are covered).
+ */
+function uncoveredAuthTables(migrations: Array<{ name: string; sql: string }>): Array<string> {
+  const sql = migrations.map((m) => m.sql).join('\n');
+  return REQUIRED_AUTH_TABLES.filter((table) => {
+    const pattern = new RegExp(
+      String.raw`create\s+table\s+(?:if\s+not\s+exists\s+)?["\`\[]?` +
+        table +
+        String.raw`["\`\]]?(?:\s|\()`,
+      'i',
+    );
+    return !pattern.test(sql);
+  });
 }
 
 /** Format the drift / CI-gate guidance naming each un-provisioned resource. */
@@ -1072,6 +1154,32 @@ function formatCloudflareDriftMessage(
     return `  • ${entry.binding} (${label})${reason ? ` — ${reason}` : ''}`;
   });
   return [header, ...lines, '', footer].join('\n');
+}
+
+/**
+ * Run the SAME migration validations the MANAGED deploy runs before applying
+ * migrations to remote D1 — schema drift (drizzle-kit), journal coherence, and
+ * destructive-op-without-pragma — reusing the managed building blocks
+ * ({@link hasDeploySchemaDrift} / {@link getDeploySchemaDriftMessage} /
+ * `assertJournalCoherence` / `validateMigrations`). Unlike the managed
+ * `assertDeploySchemaDriftFree` (which calls `process.exit` itself), this THROWS on
+ * any failure so the Cloudflare orchestrator routes the exit through its injectable
+ * seam. This is the default of the {@link CloudflareDeployDeps.assertMigrationsDeployable}
+ * seam; tests inject a stub to avoid spawning drizzle-kit.
+ */
+export function assertRemoteMigrationsDeployable(
+  root: string,
+  dialect: DatabaseDialect,
+  migrationsDir: string,
+  migrations: Array<{ name: string; sql: string }>,
+): void {
+  if (hasDeploySchemaDrift(root, dialect)) {
+    throw new Error(getDeploySchemaDriftMessage());
+  }
+  assertJournalCoherence(migrationsDir, migrations);
+  if (migrations.length > 0) {
+    validateMigrations(migrations);
+  }
 }
 
 /**
@@ -1206,13 +1314,11 @@ export async function runCloudflareDeploy(
   }
 
   // 2. Desired resource set — computed ONCE from SOURCE, pre-build (fail-fast),
-  // shared by the provision and drift paths.
+  // shared by the provision and drift paths. `authEnabled` / `migrations` /
+  // `migrationsDir` / `dialect` drive the auth + migration gates below.
   const configPath = discoverRootWranglerConfig(root);
-  const { desired, reasons } = await computeDesiredCloudflareResources(
-    root,
-    voidConfig,
-    configPath,
-  );
+  const { desired, reasons, authEnabled, dialect, migrationsDir, migrations } =
+    await computeDesiredCloudflareResources(root, voidConfig, configPath);
 
   // 2b. Framework-queue guard — FAIL CLOSED before touching the account. A full
   // Void app wires queues end-to-end through the normal `vite build`
@@ -1235,6 +1341,38 @@ export async function runCloudflareDeploy(
     );
     return exit(1);
   }
+
+  // 2c. Auth-migration guard — FAIL CLOSED before any account operation. The managed
+  // platform creates Void-managed Better Auth tables at RUNTIME via the worker's
+  // `/__void/migrate/auth` endpoint, which it invokes after dispatch. This self-host
+  // backend never calls that endpoint — it only applies checked-in `db/migrations/*.sql`
+  // — so an auth app whose core tables (user/session/account/verification) are not created
+  // by a checked-in migration would deploy auth code against a schema that lacks them.
+  // v1 supports auth only when the tables ARE covered by checked-in migrations.
+  if (authEnabled) {
+    const missingAuthTables = uncoveredAuthTables(migrations);
+    if (missingAuthTables.length > 0) {
+      log.error(
+        [
+          'deploy: --backend cloudflare cannot provision Void-managed Better Auth tables.',
+          'The managed platform creates them at runtime (POST /__void/migrate/auth) after',
+          'deploy; this self-host backend only applies checked-in db/migrations/*.sql and',
+          'never calls that endpoint. These auth tables are not created by any checked-in',
+          `migration: ${missingAuthTables.join(', ')}.`,
+          'Generate a migration that creates the Better Auth tables (e.g. define them in',
+          '`db/schema.ts` and run `void db generate`), commit it, then rerun — or deploy',
+          'this app with `void deploy` (the managed platform).',
+        ].join('\n'),
+      );
+      return exit(1);
+    }
+  }
+
+  // 2d. Resolve the raw Vite `envDir` the production build honors, BEFORE preflight,
+  // so the secret WARN + GATE units read the SAME `.env*` set the build ships (a custom
+  // `envDir` would otherwise make them validate the root env while the build bakes a
+  // different one — leaking a plaintext secret unwarned or shadowing a remote secret).
+  const deployEnvDir = await (deps.resolveEnvDir ?? resolveViteEnvDir)(root);
 
   // 3. Preflight — pin ONE transport, pin the account, confirm wrangler auth.
   const rootConfig = parseRootWranglerConfig(configPath);
@@ -1404,13 +1542,14 @@ export async function runCloudflareDeploy(
   const workerName = readWranglerTopLevelString(rootConfig, 'name') ?? deriveWorkerName(root);
   writeProvisionedWranglerConfig(root, { name: workerName, accountId }, { configPath });
 
-  // 6. Remote D1 migrations (sqlite D1 apps only; pg/Hyperdrive apps skip). Only run
-  // when the D1 entry declares an explicit `migrations_dir`. wrangler 4.107 does NOT
-  // no-op a missing `migrations_dir`: it defaults to `./migrations` (relative to the
-  // config file) and either applies that unrelated folder to REMOTE D1 or hard-errors
-  // when it is absent. The provisioner writes `./db/migrations`, so a missing value
-  // means the app was never provisioned here — fail closed rather than guess a folder.
-  if (desired.d1) {
+  // 6. Remote D1 migrations (sqlite D1 apps only; pg/Hyperdrive apps skip). Run ONLY
+  // when there ARE checked-in migrations: a D1 desired purely from DB-use or auth can
+  // have no `db/migrations` at all, and wrangler 4.107 HARD-FAILS `d1 migrations apply`
+  // on a missing/empty folder (it never no-ops), so a zero-migration app must skip the
+  // command entirely rather than error. When migrations DO exist, `migrations_dir` must
+  // be present in the config: wrangler defaults a missing value to `./migrations`
+  // (relative to the config) and would apply an unrelated folder to REMOTE D1.
+  if (desired.d1 && migrations.length > 0) {
     const migrateConfig = parseRootWranglerConfig(configPath);
     const d1MigrationsDir = readStoredResourceName(
       migrateConfig,
@@ -1449,6 +1588,25 @@ export async function runCloudflareDeploy(
       );
       return exit(1);
     }
+
+    // 6a. Run the SAME gates the managed deploy runs BEFORE any remote apply —
+    // schema drift, journal coherence, and destructive-op-without-pragma. wrangler
+    // auto-applies destructive SQL in CI (its confirmation defaults to "yes" in
+    // non-interactive shells), so without these gates a destructive migration with no
+    // explicit `-- void:allow-destructive` pragma would run unattended against remote D1.
+    try {
+      (deps.assertMigrationsDeployable ?? assertRemoteMigrationsDeployable)(
+        root,
+        dialect,
+        migrationsDir,
+        migrations,
+      );
+    } catch (err) {
+      log.error(getErrorMessage(err));
+      return exit(1);
+    }
+
+    // 6b. Apply pending migrations to remote D1.
     const migrate = await Promise.resolve(
       runWrangler(
         ['d1', 'migrations', 'apply', migrateTarget.token, '--remote', '-c', configPath, '--env='],
@@ -1463,12 +1621,44 @@ export async function runCloudflareDeploy(
       );
       return exit(1);
     }
+
+    // 6c. Verify NO migrations remain pending on remote. `d1 migrations apply` EXITS 0
+    // when an interactive user DECLINES its confirmation (a no-op that reads as success),
+    // and prints no machine-readable applied set. A separate `d1 migrations list --remote`
+    // queries the remote `d1_migrations` table and prints "Migrations to be applied:" when
+    // any remain — so a declined/partial apply can never pass as a clean deploy.
+    const migrateList = await Promise.resolve(
+      runWrangler(
+        ['d1', 'migrations', 'list', migrateTarget.token, '--remote', '-c', configPath, '--env='],
+        { capture: true },
+      ),
+    );
+    if (!isCleanWranglerExit(migrateList)) {
+      log.error(
+        `deploy: could not verify the remote migration state for "${migrateTarget.token}" ` +
+          `(\`d1 migrations list\` exit ${String(migrateList.status)}). Refusing to deploy against ` +
+          'an unverified schema — rerun once wrangler can reach your account.',
+      );
+      return exit(1);
+    }
+    if (migrateList.stdout.includes('Migrations to be applied:')) {
+      log.error(
+        [
+          `deploy: remote D1 still has UNAPPLIED migrations for "${migrateTarget.token}" after apply.`,
+          '`wrangler d1 migrations apply` exits 0 even when its confirmation is declined, so',
+          'the schema may be un-migrated while the code that needs it is about to deploy.',
+          'Re-run and confirm the migration (or apply it non-interactively), then rerun.',
+        ].join('\n'),
+      );
+      return exit(1);
+    }
   }
 
   // 7. Secrets preflight — WARN (plaintext .env→vars), then GATE (required
   // secrets). Runs AFTER provision/migrate resolve, BEFORE build/deploy.
   const warnings = await (deps.collectPlaintextVarWarnings ?? collectPlaintextVarWarnings)(root, {
     configPath,
+    envDir: deployEnvDir,
     mode: 'production',
   });
   if (warnings.secretKeys.length > 0) {
@@ -1486,6 +1676,7 @@ export async function runCloudflareDeploy(
     await (deps.validateSelfHostProdEnv ?? validateSelfHostProdEnv)(root, {
       configPath,
       accountId,
+      envDir: deployEnvDir,
       mode: 'production',
     });
   } catch (err) {
@@ -1565,9 +1756,21 @@ export async function runCloudflareDeploy(
   // globalFlags, wrangler-dist/cli.js), so ONLY `provisionCloudflareResources` may create
   // resources — a bare deploy can never auto-create a missing binding (e.g. an R2 bucket
   // absent remotely but passing the local drift predicate), even in CI.
+  // `--autoconfig=false` disables wrangler 4.107's framework detection + auto-config
+  // (`autoconfig` defaults true, deployCommand cli.js:292315). Without it, and because we
+  // pass no `-c`, a detected framework marker (e.g. OpenNext) makes wrangler DELEGATE the
+  // deploy to another tool (`maybeDelegateToOpenNextDeployCommand`, cli.js:292343) — which
+  // would upload something OTHER than the artifact Void just built and verified. Forcing it
+  // off guarantees wrangler uploads exactly the verified `dist/ssr/wrangler.json`.
   const deployResult = await Promise.resolve(
     runWrangler(
-      ['deploy', '--env=', '--experimental-provision=false', '--experimental-auto-create=false'],
+      [
+        'deploy',
+        '--env=',
+        '--experimental-provision=false',
+        '--experimental-auto-create=false',
+        '--autoconfig=false',
+      ],
       { capture: false },
     ),
   );

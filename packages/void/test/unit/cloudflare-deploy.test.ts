@@ -107,20 +107,37 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     // verification would have nothing to read — pass it by default; dedicated tests
     // exercise the real verifier and the fail-closed branch.
     verifyDeployConfig: () => ({ ok: true }),
+    // Stub the migration gate so orchestration tests never spawn drizzle-kit; dedicated
+    // tests inject a throwing stub (drift) or exercise the real pure gates (journal /
+    // destructive) directly.
+    assertMigrationsDeployable: () => {
+      trace.push('migrate-gate');
+    },
+    // Stub the Vite envDir resolver so orchestration tests never load a vite config.
+    resolveEnvDir: () => undefined,
     ...overrides,
   };
   return { deps, trace, wranglerArgs, exitCalls };
 }
 
 /** A worker-bearing D1 app fixture with a fully-provisioned wrangler.jsonc. */
-function d1Project(wrangler: Record<string, unknown>): string {
+function d1Project(
+  wrangler: Record<string, unknown>,
+  extraFiles: Record<string, string> = {},
+): string {
   return makeProject({
     'package.json': JSON.stringify({ name: 'myapp' }),
     'void.json': JSON.stringify({}),
     'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
     'wrangler.jsonc': JSON.stringify(wrangler, null, 2),
+    ...extraFiles,
   });
 }
+
+/** One non-destructive checked-in migration so the remote migrate path runs. */
+const INIT_MIGRATION = {
+  'db/migrations/0000_init.sql': `CREATE TABLE notes (id integer primary key);`,
+};
 
 const PROVISIONED_D1 = {
   account_id: 'acc123',
@@ -156,7 +173,11 @@ describe('computeDesiredCloudflareResources — desired set from source', () => 
       readConfig(root),
       join(root, 'wrangler.jsonc'),
     );
-    expect(desired.d1).toEqual({ binding: 'DB', name: 'myapp-db' });
+    expect(desired.d1).toEqual({
+      binding: 'DB',
+      name: 'myapp-db',
+      migrationsDir: './db/migrations',
+    });
     expect(desired.kvNamespaces).toEqual([{ binding: 'KV', title: 'myapp-kv' }]);
     expect(desired.r2).toEqual({ binding: 'STORAGE', bucketName: 'myapp-storage' });
     expect(desired.queues).toEqual(['jobs']);
@@ -257,7 +278,11 @@ describe('computeDesiredCloudflareResources — desired set from source', () => 
       readConfig(root),
       join(root, 'wrangler.jsonc'),
     );
-    expect(desired.d1).toEqual({ binding: 'MYDB', name: 'myapp-db' });
+    expect(desired.d1).toEqual({
+      binding: 'MYDB',
+      name: 'myapp-db',
+      migrationsDir: './db/migrations',
+    });
   });
 
   it('desires D1 for a migration-only SQLite app (no env.DB use, no auth)', async () => {
@@ -272,7 +297,11 @@ describe('computeDesiredCloudflareResources — desired set from source', () => 
       readConfig(root),
       join(root, 'wrangler.jsonc'),
     );
-    expect(desired.d1).toEqual({ binding: 'DB', name: 'myapp-db' });
+    expect(desired.d1).toEqual({
+      binding: 'DB',
+      name: 'myapp-db',
+      migrationsDir: './db/migrations',
+    });
     expect(reasons.get('DB')).toMatch(/migrations/);
   });
 
@@ -368,21 +397,29 @@ describe('runCloudflareDeploy — drift check (no --provision)', () => {
     expect(trace).toEqual(['wrangler:whoami']);
   });
 
-  it('proceeds through migrate → warn → gate → build → deploy when fully provisioned', async () => {
-    const root = d1Project(PROVISIONED_D1);
+  it('proceeds through gate → migrate → verify → warn → gate → build → deploy when fully provisioned', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'myapp' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
+      'db/migrations/0000_init.sql': `CREATE TABLE notes (id integer primary key);`,
+      'wrangler.jsonc': JSON.stringify(PROVISIONED_D1, null, 2),
+    });
     const { deps, trace, wranglerArgs } = harness();
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
     expect(trace).toEqual([
       'wrangler:whoami',
-      'wrangler:d1',
+      'migrate-gate',
+      'wrangler:d1', // migrations apply
+      'wrangler:d1', // migrations list (pending verify)
       'warn',
       'gate',
       'build',
       'wrangler:deploy',
     ]);
     // migrate targets the stored db name with --remote + pinned config
-    const migrate = wranglerArgs.find((a) => a[0] === 'd1');
-    expect(migrate).toEqual([
+    const d1Calls = wranglerArgs.filter((a) => a[0] === 'd1');
+    expect(d1Calls[0]).toEqual([
       'd1',
       'migrations',
       'apply',
@@ -392,13 +429,25 @@ describe('runCloudflareDeploy — drift check (no --provision)', () => {
       join(root, 'wrangler.jsonc'),
       '--env=',
     ]);
-    // deploy follows the .wrangler/deploy redirect, pins the top-level env, and disables
-    // wrangler's own implicit provisioning + auto-create (both default true in 4.107).
+    // the post-apply pending verification lists remote migrations for the same target
+    expect(d1Calls[1]).toEqual([
+      'd1',
+      'migrations',
+      'list',
+      'myapp-db',
+      '--remote',
+      '-c',
+      join(root, 'wrangler.jsonc'),
+      '--env=',
+    ]);
+    // deploy follows the .wrangler/deploy redirect, pins the top-level env, disables
+    // wrangler's own implicit provisioning + auto-create + framework autoconfig.
     expect(wranglerArgs.find((a) => a[0] === 'deploy')).toEqual([
       'deploy',
       '--env=',
       '--experimental-provision=false',
       '--experimental-auto-create=false',
+      '--autoconfig=false',
     ]);
   });
 });
@@ -535,13 +584,17 @@ describe('runCloudflareDeploy — pg/Hyperdrive app skips D1 migrations', () => 
 
 describe('runCloudflareDeploy — D1 migrations_dir gate', () => {
   it('fails closed (no `d1 migrations apply`) when migrations_dir is absent', async () => {
-    // Real D1 id (drift passes) but the entry declares no migrations_dir — running
-    // wrangler would default to `./migrations` and apply an unrelated folder.
-    const root = d1Project({
-      account_id: 'acc123',
-      name: 'myapp',
-      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
-    });
+    // Real D1 id (drift passes) + a checked-in migration, but the entry declares no
+    // migrations_dir — running wrangler would default to `./migrations` and apply an
+    // unrelated folder.
+    const root = d1Project(
+      {
+        account_id: 'acc123',
+        name: 'myapp',
+        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+      },
+      INIT_MIGRATION,
+    );
     const { deps, wranglerArgs, trace, exitCalls } = harness();
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
@@ -850,24 +903,27 @@ describe('runCloudflareDeploy — D1 migrate targets the unique validated entry'
   it('fails closed when an earlier alias entry shares the migrate token', async () => {
     // Two D1 entries share database_name "myapp-db" with DIFFERENT migrations_dir. The
     // gate validated binding DB, but wrangler would first-match the earlier OLD entry.
-    const root = d1Project({
-      account_id: 'acc123',
-      name: 'myapp',
-      d1_databases: [
-        {
-          binding: 'OLD',
-          database_name: 'myapp-db',
-          database_id: REAL_D1_ID,
-          migrations_dir: './legacy',
-        },
-        {
-          binding: 'DB',
-          database_name: 'myapp-db',
-          database_id: REAL_D1_ID,
-          migrations_dir: './db/migrations',
-        },
-      ],
-    });
+    const root = d1Project(
+      {
+        account_id: 'acc123',
+        name: 'myapp',
+        d1_databases: [
+          {
+            binding: 'OLD',
+            database_name: 'myapp-db',
+            database_id: REAL_D1_ID,
+            migrations_dir: './legacy',
+          },
+          {
+            binding: 'DB',
+            database_name: 'myapp-db',
+            database_id: REAL_D1_ID,
+            migrations_dir: './db/migrations',
+          },
+        ],
+      },
+      INIT_MIGRATION,
+    );
     const { deps, wranglerArgs, trace, exitCalls } = harness();
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
@@ -879,27 +935,31 @@ describe('runCloudflareDeploy — D1 migrate targets the unique validated entry'
   });
 
   it('migrates by the unique token even when the validated entry is not first', async () => {
-    const root = d1Project({
-      account_id: 'acc123',
-      name: 'myapp',
-      d1_databases: [
-        {
-          binding: 'OLD',
-          database_name: 'legacy-db',
-          database_id: REAL_D1_ID,
-          migrations_dir: './legacy',
-        },
-        {
-          binding: 'DB',
-          database_name: 'myapp-db',
-          database_id: REAL_D1_ID,
-          migrations_dir: './db/migrations',
-        },
-      ],
-    });
+    const root = d1Project(
+      {
+        account_id: 'acc123',
+        name: 'myapp',
+        d1_databases: [
+          {
+            binding: 'OLD',
+            database_name: 'legacy-db',
+            database_id: REAL_D1_ID,
+            migrations_dir: './legacy',
+          },
+          {
+            binding: 'DB',
+            database_name: 'myapp-db',
+            database_id: REAL_D1_ID,
+            migrations_dir: './db/migrations',
+          },
+        ],
+      },
+      INIT_MIGRATION,
+    );
     const { deps, wranglerArgs, trace } = harness();
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
     // Targets the validated entry's own unique database_name (resolves to DB, not OLD).
+    // `.find` returns the first d1 call — the apply (the list verify follows it).
     expect(wranglerArgs.find((a) => a[0] === 'd1')).toEqual([
       'd1',
       'migrations',
@@ -939,6 +999,7 @@ describe('runCloudflareDeploy — wrangler implicit provisioning disabled on dep
       '--env=',
       '--experimental-provision=false',
       '--experimental-auto-create=false',
+      '--autoconfig=false',
     ]);
   });
 });
@@ -1226,5 +1287,211 @@ describe('runCloudflareDeploy — env-only account pin', () => {
         process.env.CLOUDFLARE_ACCOUNT_ID = saved;
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migrations dir/intent + auth tables (finding 5)
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — migrations dir / count / auth', () => {
+  it('carries the sourceDir-aware config-relative migrations_dir into the desired set', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'myapp' }),
+      'void.json': JSON.stringify({ sourceDir: 'src' }),
+      'src/routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
+      'wrangler.jsonc': JSON.stringify({ name: 'myapp' }, null, 2),
+    });
+    const { desired } = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    );
+    expect(desired.d1?.migrationsDir).toBe('./src/db/migrations');
+  });
+
+  it('skips the remote migrate when a D1 app has no checked-in migrations', async () => {
+    const root = d1Project(PROVISIONED_D1); // migrations_dir set, but NO .sql files
+    const { deps, wranglerArgs, trace } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    // wrangler 4.107 hard-fails on an empty/absent folder — so we must not call it.
+    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
+    expect(trace).not.toContain('migrate-gate');
+    expect(trace).toContain('wrangler:deploy');
+  });
+
+  it('fails closed for an auth app whose auth tables are not in checked-in migrations', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'authapp' }),
+      'void.json': JSON.stringify({ auth: {} }),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'wrangler.jsonc': JSON.stringify(
+        {
+          account_id: 'acc123',
+          name: 'authapp',
+          d1_databases: [
+            {
+              binding: 'DB',
+              database_name: 'authapp-db',
+              database_id: REAL_D1_ID,
+              migrations_dir: './db/migrations',
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    });
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Rejected before any account operation (the auth guard runs pre-preflight).
+    expect(trace).toEqual([]);
+  });
+
+  it('lets an auth app proceed when checked-in migrations create the auth tables', async () => {
+    const authSql = ['user', 'session', 'account', 'verification']
+      .map((t) => `CREATE TABLE "${t}" (id text primary key);`)
+      .join('\n');
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'authapp' }),
+      'void.json': JSON.stringify({ auth: {} }),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'db/migrations/0000_auth.sql': authSql,
+      'wrangler.jsonc': JSON.stringify(
+        {
+          account_id: 'acc123',
+          name: 'authapp',
+          d1_databases: [
+            {
+              binding: 'DB',
+              database_name: 'authapp-db',
+              database_id: REAL_D1_ID,
+              migrations_dir: './db/migrations',
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    });
+    const { deps, trace } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(trace).toContain('wrangler:deploy');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Remote D1 migration safety gates (finding 2)
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — remote migration gates', () => {
+  it('fails closed before applying when the deploy migration gate throws (drift/journal/destructive)', async () => {
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, wranglerArgs, trace, exitCalls } = harness({
+      assertMigrationsDeployable: () => {
+        throw new Error('Schema drift detected between your Drizzle schema and db/migrations/.');
+      },
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Gate fires BEFORE apply — no d1 call, no build/deploy.
+    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
+    expect(trace).not.toContain('build');
+    expect(trace).not.toContain('wrangler:deploy');
+  });
+
+  it('runs the real gate: a destructive migration without the pragma fails closed', async () => {
+    const root = d1Project(PROVISIONED_D1, {
+      'db/migrations/0000_init.sql': 'DROP TABLE notes;',
+    });
+    // No db/schema.ts → the drift check short-circuits (no drizzle-kit spawn); the real
+    // destructive-op validation runs and rejects the un-pragma'd DROP.
+    const { deps, wranglerArgs, exitCalls } = harness({ assertMigrationsDeployable: undefined });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
+  });
+
+  it('fails closed when remote still has pending migrations after apply (declined prompt)', async () => {
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const localTrace: Array<string> = [];
+    const { deps, exitCalls } = harness({
+      runWrangler: (args) => {
+        localTrace.push(`wrangler:${args[0]}:${args[2] ?? ''}`);
+        if (args[0] === 'whoami') {
+          return { ...cleanExit, stdout: '{"loggedIn":true}' };
+        }
+        // `apply` exits 0 (a declined no-op); `list` still reports pending.
+        if (args[0] === 'd1' && args[2] === 'list') {
+          return { ...cleanExit, stdout: 'Migrations to be applied:\n0000_init' };
+        }
+        return cleanExit;
+      },
+      runBuild: () => {
+        localTrace.push('build');
+      },
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Reached the list-verify, then failed closed before building/deploying.
+    expect(localTrace).toContain('wrangler:d1:list');
+    expect(localTrace).not.toContain('build');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Custom Vite envDir threaded to the secret units (finding 3)
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — custom envDir', () => {
+  it('passes the resolved raw Vite envDir to the secret warn + gate units', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    const seen: { warn?: string; gate?: string } = {};
+    const { deps } = harness({
+      resolveEnvDir: () => 'config',
+      collectPlaintextVarWarnings: (async (_root: string, opts: { envDir?: string }) => {
+        seen.warn = opts.envDir;
+        return { secretKeys: [], totalVarKeys: 0 };
+      }) as CloudflareDeployDeps['collectPlaintextVarWarnings'],
+      validateSelfHostProdEnv: (async (_root: string, opts: { envDir?: string }) => {
+        seen.gate = opts.envDir;
+        return { hasSchema: false, remoteSecretNames: null };
+      }) as CloudflareDeployDeps['validateSelfHostProdEnv'],
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    // Both units validate against the SAME custom envDir the build ships from.
+    expect(seen.warn).toBe('config');
+    expect(seen.gate).toBe('config');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// wrangler framework autoconfig / OpenNext delegation disabled (finding 1)
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — wrangler autoconfig disabled', () => {
+  it('always passes --autoconfig=false so a framework marker cannot delegate the deploy', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'onext' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      // An OpenNext-style marker: wrangler's autoconfig would otherwise delegate the
+      // deploy to another tool. --autoconfig=false makes that impossible.
+      'open-next.config.ts': `export default {};`,
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'onext' }, null, 2),
+    });
+    const { deps, wranglerArgs } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    const deployArgs = wranglerArgs.find((a) => a[0] === 'deploy');
+    expect(deployArgs).toContain('--autoconfig=false');
   });
 });
