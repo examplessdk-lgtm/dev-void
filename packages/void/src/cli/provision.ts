@@ -2881,7 +2881,7 @@ function redactUnknownValue(value: unknown, redactText: (text: string) => string
       return value;
     }
     return sanitizeInPlace(value, redactText) ? value : deepSanitizedCopy(value, redactText);
-  } catch (error) {
+  } catch {
     // Rule 1: never throw. Even a pathological value (throwing getters everywhere, a
     // hostile Proxy) degrades to a minimal sanitized carrier, never an exception that
     // would REPLACE the rejection (and destroy its classification) at the choke point.
@@ -2912,7 +2912,8 @@ function sanitizeInPlace(root: object, redactText: (text: string) => string): bo
     // Map/Set data lives in internal slots `Object.freeze` does NOT cover, so their
     // members are always rewritable in place (delete + re-add / set).
     if (v instanceof Map) {
-      for (const [key, val] of [...v.entries()]) {
+      // Snapshot first — the loop mutates the Map while iterating.
+      for (const [key, val] of Array.from(v.entries())) {
         const newKey = typeof key === 'string' ? redactText(key) : key;
         const newVal = typeof val === 'string' ? redactText(val) : val;
         visitChild(key);
@@ -2930,7 +2931,8 @@ function sanitizeInPlace(root: object, redactText: (text: string) => string): bo
       return;
     }
     if (v instanceof Set) {
-      for (const member of [...v.values()]) {
+      // Snapshot first — the loop mutates the Set while iterating.
+      for (const member of Array.from(v.values())) {
         if (typeof member === 'string') {
           const red = redactText(member);
           if (red !== member) {
