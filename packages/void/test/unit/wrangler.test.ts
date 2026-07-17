@@ -1317,7 +1317,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('F3: fails closed when an ARRAY-shaped `queues` (present) would hide a producer/D1 binding collision on adopt — throws without writing', () => {
+  it('fails closed when an ARRAY-shaped `queues` (present) would hide a producer/D1 binding collision on adopt — throws without writing', () => {
     // wrangler 4.107 REQUIRES `queues` to be an OBJECT `{ producers, consumers }`.
     // A PRESENT array-shaped `queues` makes the old `isRecord(queues)` guard in
     // `addQueueProducerOwners` return early, so a producer-like `{ binding: "DB" }`
@@ -1343,7 +1343,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('F3: fails closed when a WRONG-SHAPE `secrets` (present, non-object) would hide a secret binding collision on producer upsert — throws without writing', () => {
+  it('fails closed when a WRONG-SHAPE `secrets` (present, non-object) would hide a secret binding collision on producer upsert — throws without writing', () => {
     // wrangler requires `secrets` to be an OBJECT `{ required: string[] }`. A
     // present-but-array `secrets` was silently skipped by the old `isRecord(secrets)`
     // guard in `collectWorkerBindingNames`, so a producer could collide with a real
@@ -1366,7 +1366,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('F3: fails closed when an ARRAY-shaped `queues` (present) is seen on the producer UPSERT path — throws without writing (no bypass)', () => {
+  it('fails closed when an ARRAY-shaped `queues` (present) is seen on the producer UPSERT path — throws without writing (no bypass)', () => {
     // The producer-upsert path (`upsertQueueEntries`) is ALSO routed through
     // `assertObjectContainer`, so an array-shaped `queues` throws there too — proving
     // no path can bypass the outer-shape validator.
@@ -1388,7 +1388,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('F3: ABSENT `queues` and `secrets` containers are a NO-OP — a D1 adopt with neither present succeeds normally', () => {
+  it('ABSENT `queues` and `secrets` containers are a NO-OP — a D1 adopt with neither present succeeds normally', () => {
     // Regression guard: `assertObjectContainer(undefined, …)` returns undefined (a
     // no-op, NOT an error). A config with NO `queues` and NO `secrets` adopts a D1
     // binding normally.
@@ -1408,7 +1408,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(d1[0]).toMatchObject({ binding: 'DB', database_id: 'real-id' });
   });
 
-  it('F6: fails closed on an explicit DIFFERENT migrations_dir — names both paths, throws without writing', () => {
+  it('fails closed on an explicit DIFFERENT migrations_dir — names both paths, throws without writing', () => {
     // User-approved contract (round 11): a reused D1 configured with its own
     // migrations directory must NEVER be silently rewritten to Void's default —
     // that would strand the user's migration files. Fail closed, naming both.
@@ -1440,7 +1440,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('F6: an explicit legacy migrations_dir on a reused D1 is never overwritten', () => {
+  it('an explicit legacy migrations_dir on a reused D1 is never overwritten', () => {
     setup(
       'wrangler.jsonc',
       `{
@@ -1458,7 +1458,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('F6: normalized-EQUIVALENT migrations_dir spellings are kept untouched (byte-identical file)', () => {
+  it('normalized-EQUIVALENT migrations_dir spellings are kept untouched (byte-identical file)', () => {
     // `db/migrations` vs `./db/migrations` vs `db/migrations/` all normalize equal
     // (wrangler's normalizeRelativePath rule) — the user's spelling survives.
     for (const existing of ['db/migrations', './db/migrations', 'db/migrations/']) {
@@ -1480,7 +1480,7 @@ describe('writeProvisionedWranglerConfig', () => {
     }
   });
 
-  it('F6: fill-if-absent still validates a companion migrations_pattern — throws without writing', () => {
+  it('fill-if-absent still validates a companion migrations_pattern — throws without writing', () => {
     // The entry has a pattern but NO migrations_dir; filling Void's default dir would
     // invalidate the pattern (wrangler requires it to start with `${migrations_dir}/`).
     setup(
@@ -1505,7 +1505,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('F8 (round 12): a DEFINED non-string migrations_pattern fails closed BEFORE any fill/keep branch — byte-identical file', () => {
+  it('a DEFINED non-string migrations_pattern fails closed BEFORE any fill/keep branch — byte-identical file', () => {
     // Pre-fix the pattern compatibility check ran only for `typeof === "string"`, so an
     // object/array/number/null pattern was silently IGNORED, migrations_dir was
     // committed, provisioning reported success — and wrangler's own d1 migrations
@@ -2531,7 +2531,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('adopt fails closed when a collected field has a malformed member masking a real binding (round-4 F6) — no write', () => {
+  it('adopt fails closed when a collected field has a malformed member masking a real binding — no write', () => {
     // kv_namespaces holds a null member AND a valid { binding: 'DB' }. The collector
     // must NOT silently drop the null and lose the 'DB' binding — adopting a D1 as
     // 'DB' would then emit an undeployable cross-type duplicate. Reject the whole
@@ -2549,7 +2549,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('producer append fails closed on a mixed-malformed binding field rather than silently dropping (round-4 F6)', () => {
+  it('producer append fails closed on a mixed-malformed binding field rather than silently dropping', () => {
     // A namespace field with a null member alongside a valid binding must reject the
     // whole config when the worker-wide uniqueness collector reads it — never a
     // partial read that could hide a collision.
@@ -2566,7 +2566,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('collector fails closed on a malformed binding-list member (round-4 F6) — no write', () => {
+  it('collector fails closed on a malformed binding-list member — no write', () => {
     // The `{ bindings: [...] }` shape (durable_objects/unsafe) is equally strict: a
     // malformed member throws rather than falling through to a partial read.
     setup(
@@ -2584,7 +2584,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('binding-list with ALL members malformed ({bindings:[null]}) throws — no plain-map fall-through (round-5 F6)', () => {
+  it('binding-list with ALL members malformed ({bindings:[null]}) throws — no plain-map fall-through', () => {
     // The sibling gap round-4 left open: when NO member is a record, the old
     // `some(isRecord)` guard fell through and read the field as a plain map (a bogus
     // binding named "bindings"), hiding the malformed binding entirely. Field-aware
@@ -2599,7 +2599,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('singleton binding with a non-string binding (ai:{binding:123}) throws — not a silent empty set (round-5 F6)', () => {
+  it('singleton binding with a non-string binding (ai:{binding:123}) throws — not a silent empty set', () => {
     // wrangler's getBindingNames returns `[value.binding]` for a singleton with NO type
     // check, so a non-string slips in as a bogus name and a malformed one contributes
     // nothing. Field-aware strict validation rejects the whole config.
@@ -2613,7 +2613,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('malformed secrets.required member throws — never a silent skip (round-5 F6)', () => {
+  it('malformed secrets.required member throws — never a silent skip', () => {
     setup('wrangler.jsonc', JSON.stringify({ secrets: { required: ['API_KEY', null] } }));
     const before = readRaw('wrangler.jsonc');
     expect(() =>
@@ -2624,7 +2624,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('malformed queues.producers member throws on the adopt path — never a silent skip (round-5 F6)', () => {
+  it('malformed queues.producers member throws on the adopt path — never a silent skip', () => {
     // The adopt guard layers existing producers into its owner map
     // (addQueueProducerOwners); a null producer must reject the whole config rather
     // than be dropped (which could hide a real producer-binding collision).
@@ -2641,7 +2641,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('adopt TARGET array with a mixed valid+malformed member throws — not a silent skip (round-5 F6)', () => {
+  it('adopt TARGET array with a mixed valid+malformed member throws — not a silent skip', () => {
     // Adopting into kv_namespaces whose array holds a null beside a valid { binding:'KV' }.
     // The owner collector EXCLUDES the target field, so the malformed member is caught
     // only by the strict target-field validation the adopt path now runs before mutating.
@@ -2677,7 +2677,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('producer upsert fails closed when the EXISTING queues.producers list has a null member (round-6 F5)', () => {
+  it('producer upsert fails closed when the EXISTING queues.producers list has a null member', () => {
     // The producer-upsert path previously cloned queues.producers and silently skipped
     // non-record members, committing a new producer beside a corrupt list. It now routes
     // the existing list through the SAME strict validator the adopt guard uses.
@@ -2691,7 +2691,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('collector fails closed on a malformed stream/media/websearch singleton binding (round-6 F5)', () => {
+  it('collector fails closed on a malformed stream/media/websearch singleton binding', () => {
     // These singleton `{ binding }` fields were OMITTED from the strict set, so a
     // present-but-non-string binding silently contributed nothing (wrangler quirk).
     for (const field of ['stream', 'media', 'websearch']) {
@@ -2706,7 +2706,7 @@ describe('writeProvisionedWranglerConfig', () => {
     }
   });
 
-  it('collector fails closed on a wrong-shaped binding-list field (durable_objects as array) (round-6 F5)', () => {
+  it('collector fails closed on a wrong-shaped binding-list field (durable_objects as array)', () => {
     // durable_objects must be `{ bindings: [...] }`; an array is the wrong outer shape
     // and must throw rather than fall back to generic key collection (under-collection
     // could hide a real binding collision).
@@ -2720,7 +2720,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('collector fails closed on a wrong-shaped name-keyed field (send_email as object) (round-6 F5)', () => {
+  it('collector fails closed on a wrong-shaped name-keyed field (send_email as object)', () => {
     // send_email must be an array of `{ name }`; a non-array is the wrong outer shape and
     // must throw rather than be re-read as a key-map.
     setup('wrangler.jsonc', JSON.stringify({ send_email: { EMAIL: {} } }));
@@ -2733,7 +2733,7 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('negative control: valid stream/media/websearch singletons + unsafe-with-only-metadata do NOT throw (round-6 F5)', () => {
+  it('negative control: valid stream/media/websearch singletons + unsafe-with-only-metadata do NOT throw', () => {
     // A well-formed singleton contributes its binding name; `unsafe` with only metadata
     // (no bindings) contributes nothing — neither should trip the strict collector.
     setup(
@@ -2757,7 +2757,7 @@ describe('writeProvisionedWranglerConfig', () => {
   });
 });
 
-describe('writeProvisionedWranglerConfig — producer collision on EVERY upsert (round 7 F4)', () => {
+describe('writeProvisionedWranglerConfig — producer collision on EVERY upsert', () => {
   const readRaw = (f: string): string => readFileSync(join(tmpDir, f), 'utf-8');
   const parseRaw = (f: string): Record<string, unknown> =>
     parseJsoncRaw(readRaw(f)) as Record<string, unknown>;
@@ -2849,7 +2849,7 @@ describe('writeProvisionedWranglerConfig — producer collision on EVERY upsert 
   });
 });
 
-describe('worker-wide binding collector — schema-metadata field shapes (round 7 F5)', () => {
+describe('worker-wide binding collector — schema-metadata field shapes', () => {
   const readRaw = (f: string): string => readFileSync(join(tmpDir, f), 'utf-8');
   const parseRaw = (f: string): Record<string, unknown> =>
     parseJsoncRaw(readRaw(f)) as Record<string, unknown>;
@@ -2989,7 +2989,7 @@ describe('worker-wide binding collector — schema-metadata field shapes (round 
   });
 });
 
-describe('name-keyed collector — send_email/ratelimits identity is `.name` only (round 10 F7)', () => {
+describe('name-keyed collector — send_email/ratelimits identity is `.name` only', () => {
   const readRaw = (f: string): string => readFileSync(join(tmpDir, f), 'utf-8');
   const parseRaw = (f: string): Record<string, unknown> =>
     parseJsoncRaw(readRaw(f)) as Record<string, unknown>;
@@ -3059,7 +3059,7 @@ describe('name-keyed collector — send_email/ratelimits identity is `.name` onl
   });
 });
 
-describe('readProvisionedBindingEntry (F5 strict canonical binding reader)', () => {
+describe('readProvisionedBindingEntry (strict canonical binding reader)', () => {
   const P = '/tmp/wrangler.jsonc';
 
   it('returns the single matching entry when the binding is unique across the worker', () => {

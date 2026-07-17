@@ -931,7 +931,7 @@ export function writeProvisionedWranglerConfig(
     // adopt the same binding into two arrays without noticing the collision.
     const currentConfig = parseJsonc(text);
     const rawList = currentConfig[field];
-    // F6 — strictly validate the TARGET field's own shape too. The owner collector
+    // Strictly validate the TARGET field's own shape too. The owner collector
     // below EXCLUDES this field (so the matched entry does not self-collide), so
     // without this a malformed member in the target array (e.g. a `null` beside a
     // valid `{binding}`) would be silently skipped by the match loop and could hide a
@@ -1042,7 +1042,7 @@ export function writeProvisionedWranglerConfig(
     }
     const index = matchIndices.length === 1 ? matchIndices[0] : -1;
     if (index >= 0) {
-      // F8 (round 12): when this patch manages the D1 migrations dir, a DEFINED
+      // When this patch manages the D1 migrations dir, a DEFINED
       // non-string `migrations_pattern` (object/array/number/null) is rejected BEFORE
       // any keep-equivalent/fill branch runs. Wrangler's `resolveMigrationsConfig`
       // treats the pattern as a string, so committing `migrations_dir` beside a
@@ -1059,7 +1059,7 @@ export function writeProvisionedWranglerConfig(
             `and retry.`,
         );
       }
-      // F6 (round 11, user-approved contract): fill-if-absent / keep-equivalent /
+      // Fill-if-absent / keep-equivalent /
       // fail-closed-on-differ. `migrations_dir` is USER-OWNED once set — a reused D1
       // configured with e.g. `./legacy-migrations` must never be silently rewritten to
       // Void's default, which would strand the user's migration files.
@@ -1098,7 +1098,7 @@ export function writeProvisionedWranglerConfig(
         // start with `${migrations_dir}/` (unless the dir normalizes to "."), so filling
         // the dir under an incompatible pattern would break `wrangler d1 migrations`.
         // Validate before editing; fail closed and NEVER rewrite the user-owned pattern.
-        // (A defined pattern is narrowed to a STRING by the F8 gate above.)
+        // (A defined pattern is narrowed to a STRING by the gate above.)
         if (
           existingPattern !== undefined &&
           !migrationsPatternMatchesDir(existingPattern, patch.d1MigrationsDir.dir)
@@ -1142,7 +1142,7 @@ export function writeProvisionedWranglerConfig(
     // Re-parse `text` (not the initial `parsed`) so earlier edits in this call
     // are reflected; track appends locally to keep indices valid.
     const currentQueues = assertObjectContainer(parseJsonc(text).queues, 'queues');
-    // F5 — before mutating producers, route the EXISTING `queues.producers` list
+    // Before mutating producers, route the EXISTING `queues.producers` list
     // through the SAME strict validator the adopt guard uses. Without this, a corrupt
     // list (e.g. `[null]`) would be cloned, its non-record members silently skipped by
     // the match loop below, and a new producer committed beside the corruption.
@@ -1199,7 +1199,7 @@ export function writeProvisionedWranglerConfig(
           }
         }
         index = matches.length === 1 ? matches[0] : -1;
-        // F4 — run the canonical worker-wide binding-name collision check for EVERY
+        // Run the canonical worker-wide binding-name collision check for EVERY
         // producer upsert (matched/idempotent AND append), not only the `index === -1`
         // append path. wrangler requires every binding NAME to be unique across the
         // ENTIRE worker — not just within `queues.producers` — so a producer binding
@@ -1696,7 +1696,7 @@ function collectWorkerBindingNames(config: Record<string, unknown>): Map<string,
   // collide with one.
   const secrets = assertObjectContainer(config.secrets, 'secrets');
   if (secrets && secrets.required !== undefined) {
-    // F6 — `secrets.required` is a string[] folded into wrangler's uniqueness set
+    // `secrets.required` is a string[] folded into wrangler's uniqueness set
     // under "Secret". Validate it STRICTLY: a non-array, or any non-empty-string
     // member, throws (fail closed) rather than being silently skipped, which would
     // let a queue producer collide with a real secret binding name unnoticed.
@@ -1747,7 +1747,7 @@ function addQueueProducerOwners(
   if (!queues || queues.producers === undefined) {
     return;
   }
-  // F5/F6 — validate `queues.producers` STRICTLY (the ONE shared validator, also used
+  // Validate `queues.producers` STRICTLY (the ONE shared validator, also used
   // by the producer-upsert path) so a non-array or a malformed member fails closed
   // rather than being silently skipped, which would let the adopt guard miss a real
   // producer-binding collision.
@@ -1760,7 +1760,7 @@ function addQueueProducerOwners(
 }
 
 /**
- * F5 — the ONE strict `queues.producers` validator, shared by BOTH the adopt-guard's
+ * The ONE strict `queues.producers` validator, shared by BOTH the adopt-guard's
  * owner collection ({@link addQueueProducerOwners}) and the producer-upsert path (which
  * otherwise clones the list and silently skips non-record members, committing a new
  * producer beside a corrupt list). A non-array, or any member that is not a record with
@@ -1796,7 +1796,7 @@ function assertValidQueueProducers(producers: unknown): Array<Record<string, unk
 }
 
 /**
- * F3 — validate the OUTER shape of a wrangler container field that wrangler 4.107
+ * Validate the OUTER shape of a wrangler container field that wrangler 4.107
  * requires to be an OBJECT (`queues`, `secrets`). A PRESENT-but-non-object container
  * (array/string/number/null) is malformed for wrangler AND would bypass the binding
  * collectors, HIDING a real cross-type binding collision — so it THROWS (fail closed).
@@ -1822,7 +1822,7 @@ function assertObjectContainer(value: unknown, field: string): Record<string, un
 }
 
 /**
- * F5 — the STRICT canonical reader for a single provisioned binding entry in a wrangler
+ * The STRICT canonical reader for a single provisioned binding entry in a wrangler
  * config field (`d1_databases` / `kv_namespaces` / `r2_buckets` / `hyperdrive`). Replaces
  * the provisioner's loose first-match `.find()` — which validated no outer shape,
  * silently picked among duplicates, and bypassed the worker-wide collision check, so a
@@ -1877,7 +1877,7 @@ export function readProvisionedBindingEntry(
 }
 
 /**
- * F5 — the OUTER binding-name SHAPE of a wrangler config field, so the collector reads
+ * The OUTER binding-name SHAPE of a wrangler config field, so the collector reads
  * binding NAMES by KNOWN structure instead of GUESSING from a value's content (which
  * misreads a `vars` value that happens to look like a binding list/object, and lets a
  * required-but-missing binding pass). Each variant + its required-ness is derived
@@ -1904,7 +1904,7 @@ type BindingFieldShape =
   | { kind: 'binding-list'; bindingsRequired: boolean };
 
 /**
- * F5 — explicit per-field shape metadata (see {@link BindingFieldShape}), transcribed
+ * Explicit per-field shape metadata (see {@link BindingFieldShape}), transcribed
  * from wrangler 4.107's config schema. Any `FRIENDLY_BINDING_NAMES` field absent here is
  * a `namespace-array` (`[{ binding }]`) — the shape wrangler's `getBindingNames` reads
  * via its `isNamespaceList` branch.
@@ -1938,7 +1938,7 @@ const BINDING_FIELD_SHAPES: Record<string, BindingFieldShape> = {
 };
 
 /**
- * F5 — the ONE field-aware strict binding-name reader for a single config field. Routes
+ * The ONE field-aware strict binding-name reader for a single config field. Routes
  * each field to its KNOWN shape (see {@link BINDING_FIELD_SHAPES}) and FAILS CLOSED on
  * any malformed/missing REQUIRED identity or wrong outer shape — never content-guessing.
  * wrangler is lenient and would silently drop such a member, letting the worker-wide
@@ -1961,7 +1961,7 @@ function bindingNamesForField(field: string, value: unknown): Array<string> {
 }
 
 /**
- * F5 — read binding names from a KEY-MAP field (`vars`/`wasm_modules`/`text_blobs`/
+ * Read binding names from a KEY-MAP field (`vars`/`wasm_modules`/`text_blobs`/
  * `data_blobs`): the object's KEYS are the binding names. Reads ONLY the keys — never
  * the values — so a value that happens to look like a binding list (`{bindings:[…]}`)
  * or a singleton (`{binding:'x'}`) is NOT misread (the old generic path returned the
@@ -1984,7 +1984,7 @@ function keyMapBindingNames(field: string, value: unknown): Array<string> {
 }
 
 /**
- * F5 — read binding names from a NAMESPACE-array field (`[{ binding }]`: kv_namespaces,
+ * Read binding names from a NAMESPACE-array field (`[{ binding }]`: kv_namespaces,
  * d1_databases, r2_buckets, hyperdrive, services, vectorize, …). A PRESENT value that
  * is not an array is the wrong outer shape and THROWS rather than being re-read as a
  * key-map (which could under-collect and hide a real collision); every member is
@@ -2005,7 +2005,7 @@ function namespaceArrayBindingNames(field: string, value: unknown): Array<string
 }
 
 /**
- * F5/F7 — read binding names from a NAME-keyed array field (`send_email` / `ratelimits`:
+ * Read binding names from a NAME-keyed array field (`send_email` / `ratelimits`:
  * an array of `{ name }`). Encodes the field's REQUIRED outer shape: a PRESENT value that
  * is not an array THROWS (fail closed) rather than falling back to generic key collection —
  * wrangler validates these via `validateBindingArray`, so a non-array is malformed and
@@ -2013,7 +2013,7 @@ function namespaceArrayBindingNames(field: string, value: unknown): Array<string
  * nothing. Every array member is strictly validated (a malformed one rejects the whole
  * config).
  *
- * F7 — identity is the `.name` ONLY. Verified against wrangler 4.107's bundle +
+ * Identity is the `.name` ONLY. Verified against wrangler 4.107's bundle +
  * `config-schema.json`: NEITHER `send_email` NOR `ratelimits` has a `.binding` property in
  * the schema, and on UPLOAD wrangler keys them by `.name` (send_email:
  * `output[name] = { type: "send_email", ...}`; ratelimits push `{ name: binding.name, … }`).
@@ -2038,7 +2038,7 @@ function nameKeyedBindingNames(field: string, value: unknown): Array<string> {
 }
 
 /**
- * F5 — read the binding names from a binding-LIST field (`{ bindings: [{ name }] }`:
+ * Read the binding names from a binding-LIST field (`{ bindings: [{ name }] }`:
  * durable_objects / logfwdr / unsafe). A PRESENT value that is not an object is the
  * wrong outer shape and THROWS. When `bindingsRequired` (durable_objects / logfwdr per
  * schema), a MISSING `bindings` array THROWS (never a silent empty read); `unsafe` is
@@ -2080,7 +2080,7 @@ function bindingListNames(field: string, value: unknown, bindingsRequired: boole
 }
 
 /**
- * F5 — read the binding name from a SINGLETON field (`{ binding }`: ai / browser /
+ * Read the binding name from a SINGLETON field (`{ binding }`: ai / browser /
  * images / stream / media / websearch / version_metadata / assets). A PRESENT value
  * that is not an object is the wrong outer shape and THROWS. A PRESENT-but-malformed
  * `binding` (non-string / empty) THROWS. When `bindingRequired` (every singleton except
@@ -2125,7 +2125,7 @@ function singletonBindingName(
 }
 
 /**
- * F6 — strictly read `keyField` (a non-empty string) from EVERY member of a
+ * Strictly read `keyField` (a non-empty string) from EVERY member of a
  * binding-bearing array. THROWS (fail closed) on ANY malformed member — never
  * silently drops one. Dropping a malformed member could convert a mixed-validity
  * array (e.g. `[null, { binding: 'DB', id: '…' }]`) into an empty/partial binding

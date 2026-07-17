@@ -216,7 +216,7 @@ export function resolveWranglerCommand(root: string, subcommand: string): string
  *   2. FALLBACK: the app-root `node_modules/wrangler` probe, used only when void's
  *      own wrangler cannot be resolved (e.g. a bundled/vendored layout).
  *
- * F2 — the resolved entry is wrangler's REAL CLI (`wrangler-dist/cli.js`, its
+ * The resolved entry is wrangler's REAL CLI (`wrangler-dist/cli.js`, its
  * package `main`/`exports["."]`), NOT the `bin.wrangler` WRAPPER. The wrapper
  * (`bin/wrangler.js`) merely does a Node-version guard and then RE-SPAWNS
  * `wrangler-dist/cli.js`, forwarding only SIGINT/SIGTERM to the grandchild (via a
@@ -296,7 +296,7 @@ function resolveLocalWranglerJsBin(
 }
 
 /**
- * F2 — resolve wrangler's REAL CLI entry from its `package.json` at `pkgPath`. Reads the
+ * Resolve wrangler's REAL CLI entry from its `package.json` at `pkgPath`. Reads the
  * `main` field (`wrangler-dist/cli.js`), falling back to `exports["."]` (its `default`
  * condition, or a bare string), and resolves it to an absolute JS entry relative to the
  * manifest's own directory (so it works for BOTH the app-root probe and module

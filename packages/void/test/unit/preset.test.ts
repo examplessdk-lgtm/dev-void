@@ -294,7 +294,7 @@ describe('resolveWranglerArgv (module-resolution launcher)', () => {
     expect(argv[1].replace(/\\/g, '/')).not.toMatch(/bin\/wrangler\.js$/);
   });
 
-  it("prefers void's own wrangler over an incompatible app-root wrangler (F6), resolving its REAL cli.js (F2)", () => {
+  it("prefers void's own wrangler over an incompatible app-root wrangler, resolving its REAL cli.js", () => {
     // The app root pins its OWN (potentially older/incompatible) wrangler, and a
     // separate "void-nested" wrangler is resolvable via module resolution. The
     // provisioner targets wrangler 4.107's exact flags/JSON/errors, so void's own
@@ -326,7 +326,7 @@ describe('resolveWranglerArgv (module-resolution launcher)', () => {
     ]);
   });
 
-  it('resolves the CLI via `exports["."].default` when `main` is absent (F2)', () => {
+  it('resolves the CLI via `exports["."].default` when `main` is absent', () => {
     // A manifest that exposes its CLI only through the `.` export condition still
     // resolves to the real cli.js (never the wrapper).
     const root = setupProject({
@@ -348,7 +348,7 @@ describe('resolveWranglerArgv (module-resolution launcher)', () => {
     ]);
   });
 
-  it('falls back to the app-root wrangler only when void resolution fails (F6), resolving its real cli.js (F2)', () => {
+  it('falls back to the app-root wrangler only when void resolution fails, resolving its real cli.js', () => {
     const root = setupProject({
       pkg: { dependencies: { wrangler: '^4.0.0' } },
       files: {

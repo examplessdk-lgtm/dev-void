@@ -106,7 +106,7 @@ describe('collectPlaintextVarWarnings — plaintext worker-vars classification',
     expect(JSON.stringify(result)).not.toContain('example.com');
   });
 
-  it('warns a secret-valued schema DEFAULT the build bakes into vars, even with no dotenv entry (F1)', async () => {
+  it('warns a secret-valued schema DEFAULT the build bakes into vars, even with no dotenv entry', async () => {
     const root = createTempProject();
     // API_KEY has a default and NO dotenv entry — applySchemaDefaultsToWorkerVars
     // still bakes it into worker vars as plaintext, so it must be classified.
@@ -228,7 +228,7 @@ describe('collectPlaintextVarWarnings — plaintext worker-vars classification',
     expect(JSON.stringify(result)).not.toContain('sk_live_configured');
   });
 
-  it('warns a secret-looking JSON-valued root-wrangler var — keys only, value never rides along (F1)', async () => {
+  it('warns a secret-looking JSON-valued root-wrangler var — keys only, value never rides along', async () => {
     const root = createTempProject({ withEnvTs: false });
     // wrangler 4.107 ships a non-string var as a `type:"json"` binding — still
     // plaintext in the uploaded config. A secret-looking JSON-valued key must be
@@ -248,7 +248,7 @@ describe('collectPlaintextVarWarnings — plaintext worker-vars classification',
     expect(JSON.stringify(result)).not.toContain('sk_live_json_leak');
   });
 
-  it('DEFAULT invocation (no configPath) still folds in the discovered root-wrangler layer — string + JSON keys (F2)', async () => {
+  it('DEFAULT invocation (no configPath) still folds in the discovered root-wrangler layer — string + JSON keys', async () => {
     const root = createTempProject({ withEnvTs: false });
     // The build's LOWEST plaintext layer is the root `wrangler.jsonc` `vars`. The
     // DEFAULT `collectPlaintextVarWarnings(root)` (no configPath) must DISCOVER it
@@ -304,7 +304,7 @@ describe('collectPlaintextVarWarnings — plaintext worker-vars classification',
 // WARN unit — F5 values-free schema boundary (env.ts load + default probing)
 // ---------------------------------------------------------------------------
 
-describe('collectPlaintextVarWarnings — F5 schema load + default probe are values-free', () => {
+describe('collectPlaintextVarWarnings — schema load + default probe are values-free', () => {
   const SENTINEL = 'SENTINEL-warn-sk_live_leak-WZX';
 
   /** Everything an observer could read off the thrown schema error. */
@@ -581,7 +581,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
 
   // --- F2: present-empty local var must not be discharged by a remote secret ---
 
-  describe('F2 — empty local assignment shadowing a remote secret', () => {
+  describe('empty local assignment shadowing a remote secret', () => {
     it('fails closed naming the key when `FOO=` collides with remote FOO (never ships empty over the secret)', async () => {
       const root = createTempProject();
       defineEnv({ FOO: string() });
@@ -788,7 +788,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       },
     };
 
-    it('F2a — `.env.production.local` empties a required FOO that is NOT remote: fails CLOSED (fail-OPEN under the pre-fix remote-gated empty check)', async () => {
+    it('`.env.production.local` empties a required FOO that is NOT remote: fails CLOSED (fail-OPEN under the pre-fix remote-gated empty check)', async () => {
       const root = createTempProject();
       defineEnv({ FOO: string() });
       // productionOnly view (.env + .env.production) sees FOO=real-foo → valid,
@@ -818,7 +818,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect(envError.message).not.toContain('wrangler secret put');
     });
 
-    it('F2b — a required validator that ACCEPTS "" still fails CLOSED on `FOO=` (fail-OPEN under the pre-fix buildReport.missing source)', async () => {
+    it('a required validator that ACCEPTS "" still fails CLOSED on `FOO=` (fail-OPEN under the pre-fix buildReport.missing source)', async () => {
       const root = createTempProject();
       // FOO rejects undefined (required) but ACCEPTS "". `FOO=` therefore never
       // enters validateAllEnv().missing, so the pre-fix presentEmpty check (which
@@ -1041,7 +1041,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
   // ABSENT and a same-named remote secret falsely discharged it while the deploy
   // shipped the JSON var OVER that secret (fail-open).
 
-  describe('effective build map — JSON-valued configured vars (F1)', () => {
+  describe('effective build map — JSON-valued configured vars', () => {
     function writeWranglerConfig(root: string, config: Record<string, unknown>): string {
       const path = join(root, 'wrangler.jsonc');
       writeFileSync(path, JSON.stringify(config));
@@ -1146,7 +1146,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
 
   // --- F3: account reconciled against the config before spawning wrangler ---
 
-  describe('F3 — account reconciliation before spawn', () => {
+  describe('account reconciliation before spawn', () => {
     function writeConfig(root: string, config: Record<string, unknown>): string {
       const path = join(root, 'wrangler.jsonc');
       writeFileSync(path, JSON.stringify(config));
@@ -1212,7 +1212,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
 
   // --- F4: first-deploy (worker-not-found) surfaces a structured, actionable error ---
 
-  describe('F4 — first-deploy worker-not-found', () => {
+  describe('first-deploy worker-not-found', () => {
     // The EXACT UserError wrangler 4.107 emits from `secret list` when the
     // worker does not exist yet — the full fixed block rethrown by
     // secretListCommand.handler after isWorkerNotFoundError(e) (API codes 10007
@@ -1326,7 +1326,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
 
   // --- F5: self-host errors are values-free even under VOID_ENV_UNMASK ---
 
-  describe('F5 — invalid-value errors are values-free', () => {
+  describe('invalid-value errors are values-free', () => {
     it('never echoes the raw invalid value in the message, report, or its JSON — even with VOID_ENV_UNMASK', async () => {
       const root = createTempProject();
       defineEnv({ PORT: number() });
@@ -1480,7 +1480,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
 
   // --- F5: wrangler failure diagnostics never carry a value, anywhere ---
 
-  describe('F5 — wrangler failure diagnostics are values-free even under VOID_ENV_UNMASK', () => {
+  describe('wrangler failure diagnostics are values-free even under VOID_ENV_UNMASK', () => {
     // A sentinel "secret" a hostile/leaky wrangler could echo into stderr/stdout
     // or a spawn/rejection message. It must appear NOWHERE in the thrown error.
     const SENTINEL = 'SENTINEL-sk_live_51H8xLeak-abcXYZ';
@@ -1609,7 +1609,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
 
   // --- F5: thrown schema-load / validator exceptions never carry a value ---
 
-  describe('F5 — schema evaluation/validation throws are values-free even under VOID_ENV_UNMASK', () => {
+  describe('schema evaluation/validation throws are values-free even under VOID_ENV_UNMASK', () => {
     const SENTINEL = 'SENTINEL-schema-sk_live_leak-QQZ';
 
     /** Everything an observer could read off the thrown schema error. */

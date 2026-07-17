@@ -209,7 +209,7 @@ export type CollectPlaintextVarWarningsOptions = {
    * Resolved root wrangler config path (the same `-c` target the GATE pins). Its
    * top-level `vars` (the build's LOWEST-precedence plaintext layer) is folded
    * into the effective var union so configured root-wrangler keys are warned too.
-   * F2 — when omitted, the root config is DISCOVERED from `root` the same way the
+   * When omitted, the root config is DISCOVERED from `root` the same way the
    * build does ({@link discoverRootWranglerConfigPath}), so the DEFAULT
    * invocation still covers the root-wrangler layer; an explicit path wins.
    */
@@ -231,7 +231,7 @@ export type CollectPlaintextVarWarningsOptions = {
  * can NEVER diverge on which keys/values the build actually ships. `envDir`
  * resolution matches `envPlugin.config` exactly: a non-empty string `envDir` is
  * joined to `root`, else `root`; `mode` defaults to the deploy build's
- * `'production'`. Callers that only need emptiness (F2) inspect values locally
+ * `'production'`. Callers that only need emptiness inspect values locally
  * and never let one escape.
  */
 function loadSanitizedBuildEnv(
@@ -256,7 +256,7 @@ function resolveBuildEnvDir(root: string, envDir?: string): string {
 }
 
 /**
- * F3 — map each `.env*` key to the SPECIFIC file whose assignment WINS in the
+ * Map each `.env*` key to the SPECIFIC file whose assignment WINS in the
  * build's dotenv overlay, so a configured-empty error can name the exact source
  * (never a value). Mirrors Vite `loadEnv`'s `getEnvFilesForMode` precedence: the
  * files are read `.env` < `.env.local` < `.env.<mode>` < `.env.<mode>.local`,
@@ -286,7 +286,7 @@ function dotenvKeyProvenance(
 type SchemaProbe = StandardSchemaV1<unknown, unknown>['~standard'];
 
 /**
- * F2 — the REQUIRED-key set, derived INDEPENDENTLY of how any validator treats
+ * The required-key set, derived independently of how any validator treats
  * the empty string. A key is required iff its validator REJECTS the ABSENT
  * value (probe with `undefined`) — the SAME notion of "required" the managed
  * gate uses (a key lands in `validateAllEnv().missing` when its absent value
@@ -315,7 +315,7 @@ async function requiredSchemaKeys(schema: Record<string, unknown>): Promise<Set<
 }
 
 /**
- * F5 — the `.default(value)` ENTRIES (`[key, stringified value]`) the schema
+ * The `.default(value)` ENTRIES (`[key, stringified value]`) the schema
  * contributes to worker `vars`, via a values-free, boundary-safe probe. Mirrors
  * `_getSchemaDefaults` (probe `undefined`; a non-undefined, issue-free result is
  * the default value, stringified the same way — `String(value)` for non-strings)
@@ -354,7 +354,7 @@ function schemaDefaultEntries(schema: Record<string, unknown>): Array<[string, s
 }
 
 /**
- * F3 — which of the four build layers supplied a key's WINNING value, so a
+ * Which of the four build layers supplied a key's WINNING value, so a
  * configured-empty error can name the ACTUAL source (never a value, just the
  * source + key). A `file` is a plain filename (`.env.production`, `wrangler.jsonc`)
  * — never a path or a value.
@@ -367,7 +367,7 @@ type VarSource =
 
 /**
  * The FINAL effective worker-vars map plus the per-key {@link VarSource}
- * provenance (F3). Only `values` presence/emptiness and `sources` (filenames +
+ * provenance. Only `values` presence/emptiness and `sources` (filenames +
  * kinds) are ever read by the units — a value never leaves.
  */
 type EffectiveWorkerVars = {
@@ -398,7 +398,7 @@ type EffectiveWorkerVars = {
  * ships.
  *
  * The SINGLE source of truth for BOTH self-host units, so neither can drift from
- * the build. F5 — schema-default probing runs arbitrary user code: a SYNC throw
+ * the build. Schema-default probing runs arbitrary user code: a SYNC throw
  * propagates to the caller's {@link withSchemaBoundary} (values-free structural
  * error); an ASYNC probe rejection is consumed by {@link schemaDefaultEntries}
  * so it can never float as an unhandled rejection carrying a value. The config
@@ -412,7 +412,7 @@ function resolveEffectiveWorkerVars(
   options: {
     /**
      * Resolved root wrangler config path (`-c` target); its top-level `vars` is
-     * the lowest layer. F2 — omitted → discovered from `root`
+     * the lowest layer. Omitted → discovered from `root`
      * ({@link discoverRootWranglerConfigPath}) so the root layer is never skipped
      * on a default invocation; an explicit path wins.
      */
@@ -425,13 +425,13 @@ function resolveEffectiveWorkerVars(
     schema?: Record<string, unknown> | null;
   },
 ): EffectiveWorkerVars {
-  // F1 — values are `unknown`, not `string`: the root wrangler layer can carry a
+  // Values are `unknown`, not `string`: the root wrangler layer can carry a
   // JSON var of any type (see {@link readConfigVars}). Higher layers (schema
   // defaults, void.json `worker.vars`, the dotenv overlay) are always strings,
   // but a lower-layer JSON value survives when no higher layer overrides it. The
   // caller reads only presence/emptiness — never the value itself.
   //
-  // F3 — each `set` also records which layer supplied the WINNING value; a later
+  // Each `set` also records which layer supplied the WINNING value; a later
   // (higher-precedence) layer overwrites both the value AND its provenance, so
   // `sources[key]` always names the source the deploy actually ships from.
   const values: Record<string, unknown> = {};
@@ -440,7 +440,7 @@ function resolveEffectiveWorkerVars(
     values[key] = value;
     sources[key] = source;
   };
-  // 1. root wrangler top-level `vars` (lowest precedence). F2 — when the caller
+  // 1. root wrangler top-level `vars` (lowest precedence). When the caller
   // did not pin an explicit `configPath`, DISCOVER the root config the same way
   // the build does so the default `collectPlaintextVarWarnings(root)` still folds
   // in the root-wrangler layer. An explicit `configPath` always wins.
@@ -481,7 +481,7 @@ function resolveEffectiveWorkerVars(
 /**
  * Extract the plain filename from a config path (`/proj/wrangler.jsonc` →
  * `wrangler.jsonc`), handling both POSIX and Windows separators. Used only to
- * name a source in a values-free error (F3) — never the path itself.
+ * name a source in a values-free error — never the path itself.
  */
 function configFileName(configPath: string): string {
   const parts = configPath.split(/[/\\]+/);
@@ -517,7 +517,7 @@ export async function collectPlaintextVarWarnings(
   // Registered schema (if the project has an env.ts) for explicit overrides
   // AND its registered defaults — the build merges BOTH into workerConfig.vars.
   //
-  // F5 — env.ts evaluation runs ARBITRARY user code that can throw an error
+  // env.ts evaluation runs ARBITRARY user code that can throw an error
   // embedding an env value (loadUserEnvFile rethrows with the ORIGINAL message);
   // load inside the values-free boundary so a throwing env.ts becomes a
   // structural error, never a leak — even under VOID_ENV_UNMASK.
@@ -531,7 +531,7 @@ export async function collectPlaintextVarWarnings(
   // SAME resolver the GATE uses so the two units can never diverge. Only its
   // KEY NAMES are read below — values stay internal.
   //
-  // F5 — the resolver probes schema defaults (arbitrary code) and reads config,
+  // The resolver probes schema defaults (arbitrary code) and reads config,
   // so it runs behind the values-free boundary: a sync throw becomes a
   // structural error, and {@link schemaDefaultEntries} consumes any async
   // default-probe rejection so it can never float carrying a value.
@@ -595,7 +595,7 @@ export type RunSecretList = (
 ) => SecretListRunResult | Promise<SecretListRunResult>;
 
 /**
- * F5 — the STABLE, values-free classification of a hard secret-list failure.
+ * The stable, values-free classification of a hard secret-list failure.
  * The child inherits `process.env`, so a wrangler/OS/config diagnostic can
  * embed an env value; the raw rejection/stderr/stdout text is therefore used
  * only INTERNALLY (worker-not-found classification) and NEVER copied into a
@@ -608,7 +608,7 @@ export type RunSecretList = (
  *   - `signal`           — terminated by a signal (includes the timeout SIGKILL).
  *   - `malformed-output` — exit 0 but stdout was not the expected JSON array of
  *                          `{ name }` secret objects.
- *   - `account-mismatch` — F3 config-vs-requested account gate (thrown before any
+ *   - `account-mismatch` — config-vs-requested account gate (thrown before any
  *                          spawn; its message names the account IDs, which are
  *                          caller/config identifiers, not wrangler output).
  */
@@ -636,7 +636,7 @@ export type SecretListFailureDetail = {
  * {@link SelfHostEnvValidationError}: this means "we could not learn what
  * secrets exist" (fail closed), never "a required secret is missing".
  *
- * F5 — the message and attached fields are values-free by construction: only
+ * The message and attached fields are values-free by construction: only
  * the structural {@link SecretListFailureReason} code and safe scalars
  * ({@link SecretListFailureDetail}) are exposed. Raw wrangler output (stderr,
  * stdout, rejection/spawn-error text) is NEVER stored here, so no env value the
@@ -707,7 +707,7 @@ export class SelfHostEnvValidationError extends Error {
 }
 
 /**
- * F5 — the STABLE, values-free classification of a self-host schema failure.
+ * The stable, values-free classification of a self-host schema failure.
  * env.ts evaluation and Standard-Schema validators run ARBITRARY user code that
  * can embed an env value in a thrown/rejected error (its `message`, `stack`, or
  * `cause`), and `VOID_ENV_UNMASK` disables redaction — so the original error is
@@ -725,7 +725,7 @@ export type SelfHostSchemaFailureReason = 'schema-load-failed' | 'schema-validat
  * {@link SelfHostEnvValidationError} (which means "a required value is missing
  * or invalid", carrying key names): this means the schema machinery itself
  * raised — env.ts failed to evaluate, or a validator threw/rejected rather than
- * returning issues. F5 — values-free by construction: the original error's
+ * returning issues. Values-free by construction: the original error's
  * message/stack/cause are DROPPED at the boundary and only the structural
  * {@link SelfHostSchemaFailureReason} code + fixed guidance survive, so no env
  * value the user's code may have embedded can reach the thrown error, even
@@ -742,7 +742,7 @@ export class SelfHostSchemaError extends Error {
   }
 }
 
-/** F5 — the fixed, values-free message for each schema-failure reason. */
+/** The fixed, values-free message for each schema-failure reason. */
 function schemaFailureMessage(reason: SelfHostSchemaFailureReason): string {
   switch (reason) {
     case 'schema-load-failed':
@@ -759,7 +759,7 @@ function schemaFailureMessage(reason: SelfHostSchemaFailureReason): string {
 }
 
 /**
- * F5 — values-free boundary around EVERY self-host schema evaluation +
+ * Values-free boundary around EVERY self-host schema evaluation +
  * validation step. `loadSchema` evaluates the user's env.ts and each
  * `validateProdEnv` / `validateAllEnv` pass runs the registered validators —
  * all arbitrary code that can throw/reject an error EMBEDDING an env value in
@@ -791,7 +791,7 @@ export type ValidateSelfHostProdEnvOptions = {
   configPath: string;
   /**
    * The Cloudflare account id the deploy targets. Reconciled against the pinned
-   * config's top-level `account_id` BEFORE any wrangler spawn (F3): wrangler
+   * config's top-level `account_id` BEFORE any wrangler spawn: wrangler
    * resolves the config's `account_id` with PRECEDENCE over
    * `CLOUDFLARE_ACCOUNT_ID`, so a config pinning a different account is a hard,
    * fail-closed mismatch (naming both). The reconciled effective account is
@@ -802,7 +802,7 @@ export type ValidateSelfHostProdEnvOptions = {
   /**
    * The user's Vite `envDir`, passed RAW — MUST be the same value handed to
    * {@link collectPlaintextVarWarnings} and the build. Used only to reconstruct
-   * the EXACT sanitized build var map for the F2 empty-collision fence (via
+   * the EXACT sanitized build var map for the empty-collision fence (via
    * {@link loadSanitizedBuildEnv}), so the gate sees precisely the `.env*`
    * sources the build bakes (incl. `.env.local` / a custom envDir). Resolved
    * the same way the build does: non-empty string → `join(root, envDir)`, else
@@ -812,7 +812,7 @@ export type ValidateSelfHostProdEnvOptions = {
   /**
    * The Vite mode the build runs under — MUST match the build / WARN unit.
    * Deploy builds use `'production'` (default). Selects the `.env.<mode>` files
-   * the F2 build-map fence reads.
+   * the build-map fence reads.
    */
   mode?: string;
   /** Test seam — injectable wrangler runner. Defaults to the real spawn-based runner. */
@@ -861,17 +861,17 @@ export type SelfHostProdEnvResult = {
  * never requires the worker to already exist, while a genuinely absent key on a
  * fresh worker fails the wrangler call (worker not found) — a hard, fail-closed
  * {@link SelfHostFirstDeployError} carrying the missing key names + bootstrap
- * guidance (F4), rather than a false "all secrets present".
+ * guidance, rather than a false "all secrets present".
  *
- * Three fences (F2/F3/F5):
- *   - F2 — the present-empty rejection above is authoritative: it is NEVER gated
- *     on remote membership (F2a) and requiredness is NEVER sourced from
- *     `validateAllEnv().missing` (F2b), so a schema that accepts `""` is still
+ * Three fences:
+ *   - the present-empty rejection above is authoritative: it is NEVER gated
+ *     on remote membership and requiredness is NEVER sourced from
+ *     `validateAllEnv().missing`, so a schema that accepts `""` is still
  *     rejected when a required key is emptied.
- *   - F3 — the target account is reconciled against the config's `account_id`
+ *   - the target account is reconciled against the config's `account_id`
  *     BEFORE spawning wrangler, so `secret list` can never consult a different
  *     account.
- *   - F5 — all schema loading + validation runs inside {@link withSchemaBoundary}
+ *   - all schema loading + validation runs inside {@link withSchemaBoundary}
  *     so a throwing env.ts or validator becomes a values-free structural error.
  */
 export async function validateSelfHostProdEnv(
@@ -885,7 +885,7 @@ export async function validateSelfHostProdEnv(
     return { hasSchema: false, remoteSecretNames: null };
   }
 
-  // F5 — env.ts evaluation runs arbitrary user code that could throw an error
+  // env.ts evaluation runs arbitrary user code that could throw an error
   // embedding a value; load inside the values-free boundary. `mod` is reused
   // below (schema + validateAllEnv) without a second import.
   const mod = await withSchemaBoundary('schema-load-failed', () => loadSchema(envFile));
@@ -902,12 +902,12 @@ export async function validateSelfHostProdEnv(
   // diverge from each other OR the build. Every presence/emptiness decision below
   // reads ONLY this map; no value ever leaves this function.
   //
-  // F5 — the resolver probes schema defaults (arbitrary user code) and reads
+  // The resolver probes schema defaults (arbitrary user code) and reads
   // config, so it runs inside the values-free boundary: a sync throw becomes a
   // structural error, and {@link schemaDefaultEntries} consumes any async
   // default-probe rejection so it can never float carrying a value.
   // `buildEnv` holds the winning VALUES (presence/emptiness only); `buildSources`
-  // carries the per-key provenance (F3) used to name the ACTUAL source of a
+  // carries the per-key provenance used to name the ACTUAL source of a
   // configured-empty key — filenames + kinds, never a value.
   const { values: buildEnv, sources: buildSources } = await withSchemaBoundary(
     'schema-validation-error',
@@ -922,9 +922,9 @@ export async function validateSelfHostProdEnv(
       ),
   );
 
-  // F2b — requiredness is derived INDEPENDENTLY of whether a validator accepts
+  // Requiredness is derived INDEPENDENTLY of whether a validator accepts
   // `""` (probe each key with `undefined`; reject ⇒ required), NOT from
-  // `validateAllEnv().missing`. Wrapped (F5) so a throwing/rejecting validator
+  // `validateAllEnv().missing`. Wrapped so a throwing/rejecting validator
   // becomes a values-free structural error rather than leaking the probed value.
   const requiredKeys = await withSchemaBoundary('schema-validation-error', () =>
     requiredSchemaKeys(schema),
@@ -932,20 +932,20 @@ export async function validateSelfHostProdEnv(
 
   // Validate the effective build map to surface INVALID values (present,
   // non-empty, failed validation) — a remote secret can NEVER fix those.
-  // Wrapped (F5) so a throwing/rejecting validator cannot leak the offending
+  // Wrapped so a throwing/rejecting validator cannot leak the offending
   // value. Emptiness/absence are decided from `requiredKeys` above, NOT from
   // this report's `missing` (which a schema accepting `""` would understate).
   const buildReport = await withSchemaBoundary('schema-validation-error', () =>
     mod.validateAllEnv(buildEnv),
   );
 
-  // F2a/F2b — a required key that is PRESENT-and-EMPTY (`K=""`) in the effective
+  // A required key that is PRESENT-and-EMPTY (`K=""`) in the effective
   // build map FAILS CLOSED ALWAYS, independent of whether K exists remotely: the
   // build ships `K=""` as a plaintext var, which wrangler gives precedence over
   // any same-named remote secret. Thrown BEFORE any wrangler spawn — remote
   // membership is irrelevant to this decision. Names K only, never a value.
   //
-  // F1 — emptiness is the EMPTY STRING alone. A non-string JSON var (number /
+  // Emptiness is the EMPTY STRING alone. A non-string JSON var (number /
   // boolean / null / object / array) is PRESENT-and-non-empty: wrangler ships it
   // as a `type:"json"` binding that wins over a same-named remote secret, so it
   // is satisfied locally and must NEVER be dischargeable by that secret.
@@ -958,10 +958,10 @@ export async function validateSelfHostProdEnv(
 
   // Required keys the effective build map does NOT set at all — the ONLY state a
   // remote secret can legitimately discharge. A key PRESENT with ANY value type
-  // is never here, so a present JSON var can never be treated as absent (F1).
+  // is never here, so a present JSON var can never be treated as absent.
   const absentRequired = [...requiredKeys].filter((key) => !Object.hasOwn(buildEnv, key));
 
-  // F1 — a required key PRESENT with a non-empty value that the schema still
+  // A required key PRESENT with a non-empty value that the schema still
   // REJECTED is malformed, not absent, and must FAIL CLOSED (never fall through
   // to remote discharge). validateAllEnv records only the keys whose value
   // validated in `report.values`; a present-non-empty required key missing from
@@ -996,7 +996,7 @@ export async function validateSelfHostProdEnv(
     return { hasSchema: true, remoteSecretNames: null };
   }
 
-  // F3 — reconcile the effective account BEFORE any wrangler spawn. wrangler
+  // Reconcile the effective account BEFORE any wrangler spawn. wrangler
   // 4.107 resolves the config's top-level `account_id` with precedence over
   // CLOUDFLARE_ACCOUNT_ID, so a config pinning account X while options.accountId
   // requests Y would list X's secrets; a same-named secret in X could then
@@ -1016,7 +1016,7 @@ export async function validateSelfHostProdEnv(
 
   // Only ABSENT required keys may be discharged by the remote list; a
   // present-empty key was already rejected above and can never reach here, and a
-  // present-invalid key (F1) is folded into `invalidKeys` — never discharged.
+  // present-invalid key is folded into `invalidKeys` — never discharged.
   const remoteSet = new Set(remoteSecretNames);
   const stillMissing = absentRequired.filter((key) => !remoteSet.has(key));
   if (stillMissing.length > 0 || invalidKeys.size > 0) {
@@ -1026,7 +1026,7 @@ export async function validateSelfHostProdEnv(
 }
 
 /**
- * F3 — read the pinned config's top-level `account_id` and reconcile it with
+ * Read the pinned config's top-level `account_id` and reconcile it with
  * the caller's requested account, mirroring the provisioner's account gate
  * (provision.ts `provisionCloudflareResourcesLocked`). wrangler 4.107 gives the
  * config's `account_id` PRECEDENCE over `CLOUDFLARE_ACCOUNT_ID`, so a real
@@ -1066,7 +1066,7 @@ const UTF8_BOM = '﻿';
 const ROOT_WRANGLER_CONFIG_NAMES = ['wrangler.jsonc', 'wrangler.json'] as const;
 
 /**
- * F2 — discover the root wrangler config path the SAME way the build / bindings
+ * Discover the root wrangler config path the SAME way the build / bindings
  * writer do (first existing of {@link ROOT_WRANGLER_CONFIG_NAMES} under `root`),
  * used ONLY when the caller did not pin an explicit `configPath`. Without it the
  * DEFAULT `collectPlaintextVarWarnings(root)` produced a THREE-source map that
@@ -1143,7 +1143,7 @@ function readConfigAccountId(configPath: string): string | undefined {
  * {@link parseRootConfig}, reading the SAME top-level env the deploy pins via
  * `--env=`.
  *
- * F1 — wrangler 4.107 accepts a var value of ANY JSON type (string, number,
+ * wrangler 4.107 accepts a var value of ANY JSON type (string, number,
  * boolean, null, object, array), not just strings: its `deployWorkerBindings`
  * ships a string var as `{ type: "plain_text" }` and EVERY non-string as
  * `{ type: "json" }` (wrangler-dist/cli.js `case "vars"`). Both are real var
@@ -1164,7 +1164,7 @@ function readConfigVars(configPath: string): Record<string, unknown> {
 }
 
 /**
- * F5 — stable, values-free reason code stamped on every invalid key on the
+ * Stable, values-free reason code stamped on every invalid key on the
  * self-host path. The raw validator message (e.g. `Expected a number, got
  * "not-a-number"`) can EMBED the offending input, and redaction preserves
  * benign values / can be disabled via `VOID_ENV_UNMASK`, so the message text is
@@ -1173,7 +1173,7 @@ function readConfigVars(configPath: string): Record<string, unknown> {
 const SELF_HOST_INVALID_REASON = 'failed schema validation';
 
 /**
- * F5 — build the hard error for an unsatisfied schema from KEY NAMES + the
+ * Build the hard error for an unsatisfied schema from KEY NAMES + the
  * stable {@link SELF_HOST_INVALID_REASON} code ONLY. It never reads
  * `report.invalid[].messages` (which can embed raw input) and never resolved
  * `report.values`, and it attaches a freshly-sanitized report of the same
@@ -1220,7 +1220,7 @@ function selfHostEnvError(report: EnvValidationReport): SelfHostEnvValidationErr
 }
 
 /**
- * F3 — the values-free description of a var's WINNING source, used to name the
+ * The values-free description of a var's WINNING source, used to name the
  * ACTUAL origin of a configured-empty key in the remediation. Only the source
  * KIND and a plain filename (`.env.production`, `wrangler.jsonc`) ever appear —
  * never a value. `schema-default` is defensive only: a key with a `.default()`
@@ -1245,7 +1245,7 @@ function describeVarSource(source: VarSource | undefined): string {
 }
 
 /**
- * F2/F3 — the hard error for a REQUIRED key set to an EMPTY value (`FOO=""`) in
+ * The hard error for a REQUIRED key set to an EMPTY value (`FOO=""`) in
  * the effective build map. Values-free (key names + source KIND/filename only),
  * thrown ALWAYS — independent of whether the key exists as a remote secret. The
  * build bakes the empty string into plaintext `vars`, and wrangler 4.107 gives a
@@ -1255,7 +1255,7 @@ function describeVarSource(source: VarSource | undefined): string {
  * required secret (overwriting a remote one if it exists). The fix is to REMOVE
  * the empty assignment, not `secret put`.
  *
- * F3 — the empty value can come from ANY of the four build layers, so the
+ * The empty value can come from ANY of the four build layers, so the
  * remediation names each key's ACTUAL source (its {@link VarSource} provenance)
  * — a dotenv file / `void.json` `worker.vars` / root `wrangler.jsonc` `vars` —
  * instead of misdirecting the user to `.env` files.
@@ -1287,7 +1287,7 @@ function emptyAssignmentError(
 }
 
 /**
- * F4 — actionable, values-free bootstrap guidance for the FIRST-DEPLOY case:
+ * Actionable, values-free bootstrap guidance for the FIRST-DEPLOY case:
  * the worker does not exist yet, so its remote secrets can't be listed. Lists
  * the still-unsatisfied required key NAMES and the `wrangler secret put <NAME>`
  * command that bootstraps each on the draft worker (wrangler can `secret put`
@@ -1345,7 +1345,7 @@ function secretListArgs(configPath: string): Array<string> {
  *
  * The API code itself is caught and never printed, so the child's stderr
  * carries this MESSAGE, not `10007`/`10090`. Matching only the bare lead-in
- * `If this is a new Worker` (M2) misclassifies any unrelated status-1
+ * `If this is a new Worker` misclassifies any unrelated status-1
  * diagnostic that merely contains that fragment. So we require the COMPLETE
  * structured block — the `… not found.` lead AND both fixed sentences of the
  * guidance — after normalizing whitespace (wrangler may wrap/indent the
@@ -1367,7 +1367,7 @@ function isWorkerNotFoundOutput(output: string): boolean {
 }
 
 /**
- * F5 — build the THROWN message for a wrangler-run failure from the structural
+ * Build the THROWN message for a wrangler-run failure from the structural
  * reason code + safe scalars ONLY. It NEVER interpolates `result.stderr`,
  * `result.stdout`, a spawn-error string, or a rejection message — those are
  * unconstrained (the child inherits `process.env`) and could embed an env
@@ -1419,11 +1419,11 @@ function secretListError(
  * with required secrets actually missing on the worker.
  *
  * A nonzero exit whose output carries wrangler's worker-not-found signal is a
- * DISTINCT, structured {@link SelfHostFirstDeployError} (F4) carrying the still
+ * DISTINCT, structured {@link SelfHostFirstDeployError} carrying the still
  * unsatisfied required `missingKeys` + `wrangler secret put` bootstrap guidance,
  * instead of the generic "list exited nonzero" dead end.
  *
- * F5 — raw child output (stderr/stdout, spawn-error text, rejection messages)
+ * Raw child output (stderr/stdout, spawn-error text, rejection messages)
  * is used ONLY internally: for worker-not-found classification the combined
  * output is matched to a boolean that never leaves this function. Every THROWN
  * error carries only a structural {@link SecretListFailureReason} code and safe
@@ -1454,7 +1454,7 @@ async function fetchSelfHostSecretNames(
   }
   if (typeof result.status !== 'number' || result.status !== 0) {
     const exitCode = typeof result.status === 'number' ? result.status : undefined;
-    // F4 — a not-yet-deployed worker: classify from the child's combined output
+    // A not-yet-deployed worker: classify from the child's combined output
     // INTERNALLY (the match result is a boolean that never leaves), then surface
     // the missing key names + bootstrap guidance rather than the circular
     // "deploy first" list failure. Only a clean nonzero exit reaches here
