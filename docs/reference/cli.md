@@ -270,7 +270,7 @@ Prerequisites:
 - Authenticate wrangler (`wrangler login`, or set `CLOUDFLARE_API_TOKEN`). Deploy needs a token with `Workers Scripts:Edit` plus read on the resources you bind; `--provision` additionally needs per-product `*:Edit` (D1, KV, R2, Queues, Hyperdrive).
 - Local Docker is required to build apps that use the sandbox.
 
-What it does, in order: guards that the app is worker-bearing (a full Void app or framework SSR — static/SPA is not supported on this backend yet), pins the account and checks auth, provisions or drift-checks resources, applies remote D1 migrations for SQLite apps, checks production secrets, then builds and runs `wrangler deploy`.
+What it does, in order: settles the app class before any account op (v1 supports **full Void apps and Class-A framework SSR — TanStack Start, React Router, vinext — on the Cloudflare Workers target**; Class B/C frameworks like SvelteKit/Nuxt/Analog/Astro, static/SPA apps, node/bun/deno targets, and framework queues all fail closed with guidance), pins the account and checks auth, provisions or drift-checks resources, validates then applies remote D1 migrations for SQLite apps (verifying none remain pending), checks production secrets, then builds and runs `wrangler deploy` on exactly the verified artifact. Auth apps must ship checked-in migrations that create the Better Auth tables — the managed platform's runtime auth-migration step does not run on this backend.
 
 `--provision` creates any D1 database, KV namespace, R2 bucket, Queues, Hyperdrive config, and the ISR cache namespace your source needs, then lets wrangler write the real ids into your root `wrangler.jsonc`. It is **idempotent** — re-running creates nothing that already exists (it reads existing ids first). Notes:
 

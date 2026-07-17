@@ -239,7 +239,7 @@ void deploy --backend cloudflare --provision
 - **Authenticate wrangler.** Run `wrangler login`, or set `CLOUDFLARE_API_TOKEN`. Deploy needs a token with `Workers Scripts:Edit` plus read on the resources you bind. `--provision` additionally needs per-product `*:Edit` (D1, KV, R2, Queues, Hyperdrive).
 - **Docker**, if your app uses the sandbox -- the build needs it locally.
 
-**What it does** (in order): guards that the app is worker-bearing (a full Void app or framework SSR -- see [scope](#scope-and-limitations)); pins the account and confirms wrangler auth; provisions or drift-checks resources; applies remote D1 migrations for SQLite apps; warns on plaintext vars and gates on missing required secrets; then builds and runs `wrangler deploy`.
+**What it does** (in order): settles the app class (a full Void app or **Class-A** framework SSR on the Cloudflare Workers target -- see [scope](#scope-and-limitations)) before any account operation; pins the account and confirms wrangler auth; provisions or drift-checks resources; validates then applies remote D1 migrations for SQLite apps (and verifies none remain pending); warns on plaintext vars and gates on missing required secrets; then builds and runs `wrangler deploy` on exactly the artifact it verified.
 
 Without `--provision`, deploy is a **drift check**: if a binding your source needs is not yet in `wrangler.jsonc` with a real id, deploy stops and names each missing resource, telling you to run `--provision` once.
 
@@ -247,7 +247,12 @@ Without `--provision`, deploy is a **drift check**: if a binding your source nee
 
 #### Scope and limitations
 
-- **Worker-bearing apps only (v1).** This backend deploys a full Void app or a framework SSR app. Static-only / SPA apps are not supported here yet -- deploy those with `void deploy` (the managed platform) or host the built assets on Cloudflare Pages / any static host.
+- **Supported apps (v1): full Void apps and Class-A framework SSR, Cloudflare Workers target only.** Class-A frameworks are the ones where Void owns the Cloudflare integration -- **TanStack Start, React Router, and vinext**. Everything else fails closed **before** any account operation, with guidance:
+  - **Class B/C frameworks are not supported here** -- SvelteKit, Nuxt, Analog, and Astro build through their own Cloudflare adapter (not the Void Cloudflare plugin), so `vite build` emits no worker artifact for this backend. Deploy them with `void deploy` (the managed platform) or the framework's own Cloudflare adapter.
+  - **Static-only / SPA apps are not supported here** -- deploy those with `void deploy` (the managed platform) or host the built assets on Cloudflare Pages / any static host.
+  - **Non-Cloudflare targets (`node` / `bun` / `deno`) are not supported here** -- this backend deploys Cloudflare Workers only.
+- **Framework queues are not wired yet.** A Class-A framework build binds no queue producer and no consumer handler, so a queue would be provisioned as an orphan. A framework app that declares a queue fails closed; deploy it with `void deploy` or remove the queue. (Full Void apps wire queues end-to-end and deploy normally.)
+- **Auth requires checked-in migrations.** The managed platform creates Void-managed Better Auth tables at runtime after deploy; this self-host backend never runs that step. An auth app whose core tables (`user`/`session`/`account`/`verification`) are not created by a checked-in migration fails closed -- generate a migration that creates them (define them in `db/schema.ts`, run `void db generate`, commit), or deploy with `void deploy`.
 - **Provision is a single-operator, dev-machine action.** The lock guarding it is per local config path only; it does not coordinate across machines or CI hosts. Two people provisioning the same account at once could create duplicate resources.
 - **Provision fails closed in CI.** In non-interactive shells, `--provision` is disabled unless your committed `wrangler.jsonc` already covers every resource (a provable no-op). The workflow is: provision **locally**, commit the updated `wrangler.jsonc`, then let CI run `void deploy --backend cloudflare` (deploy itself is CI-safe).
 - **Your `wrangler.jsonc` is rewritten on provision.** Wrangler preserves your comments but normalizes the whole file's indentation when it writes the new ids -- expect that in the diff.
