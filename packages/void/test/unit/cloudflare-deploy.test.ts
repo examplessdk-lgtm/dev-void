@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vite-plus/test';
 import {
   computeDesiredCloudflareResources,
   runCloudflareDeploy,
+  verifyGeneratedDeployConfig,
   type CloudflareDeployDeps,
   type DeployWranglerRun,
   type DeployWranglerRunResult,
@@ -101,6 +102,10 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
       trace.push('gate');
       return { hasSchema: false, remoteSecretNames: null };
     }) as CloudflareDeployDeps['validateSelfHostProdEnv'],
+    // The stubbed build never writes dist/ssr/wrangler.json, so the real config
+    // verification would have nothing to read — pass it by default; dedicated tests
+    // exercise the real verifier and the fail-closed branch.
+    verifyDeployConfig: () => ({ ok: true }),
     ...overrides,
   };
   return { deps, trace, wranglerArgs, exitCalls };
@@ -199,6 +204,90 @@ describe('computeDesiredCloudflareResources — desired set from source', () => 
       join(root, 'wrangler.jsonc'),
     );
     expect(desired.d1?.name).toBe('legacy-db');
+  });
+
+  it('ignores a synced placeholder database_name paired with the local id', async () => {
+    // A not-yet-provisioned entry: `database_id: "local"` with a placeholder name.
+    // The stored name must NOT become the prod DB identity — derive the worker name.
+    const root = d1Project({
+      d1_databases: [{ binding: 'DB', database_name: 'default', database_id: 'local' }],
+    });
+    const { desired } = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    );
+    expect(desired.d1?.name).toBe('myapp-db');
+  });
+
+  it('honors inference.bindings overrides (disabled D1, custom KV, forced R2)', async () => {
+    // Route uses env.DB/KV/STORAGE, but void.json disables D1 and renames KV — the
+    // desired set must match the build (which consumes the same overrides), so D1 is
+    // absent and KV uses the custom binding name.
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'myapp' }),
+      'void.json': JSON.stringify({
+        inference: { bindings: { db: false, kv: 'MYKV', storage: true } },
+      }),
+      'routes/index.ts': `export const GET = async (c) => {
+        await c.env.KV.get('k');
+        await c.env.STORAGE.put('a', 'b');
+        return c.env.DB.prepare('SELECT 1').first();
+      };`,
+    });
+    const { desired } = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    );
+    expect(desired.d1).toBeUndefined();
+    expect(desired.kvNamespaces).toEqual([{ binding: 'MYKV', title: 'myapp-kv' }]);
+    expect(desired.r2).toEqual({ binding: 'STORAGE', bucketName: 'myapp-storage' });
+  });
+
+  it('forces D1 with a custom binding via inference.bindings', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'myapp' }),
+      'void.json': JSON.stringify({ inference: { bindings: { db: 'MYDB' } } }),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+    });
+    const { desired } = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    );
+    expect(desired.d1).toEqual({ binding: 'MYDB', name: 'myapp-db' });
+  });
+
+  it('desires D1 for a migration-only SQLite app (no env.DB use, no auth)', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'myapp' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'db/migrations/0000_init.sql': `CREATE TABLE t (id INTEGER PRIMARY KEY);`,
+    });
+    const { desired, reasons } = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    );
+    expect(desired.d1).toEqual({ binding: 'DB', name: 'myapp-db' });
+    expect(reasons.get('DB')).toMatch(/migrations/);
+  });
+
+  it('does not require Hyperdrive for a pg app with no DB use, auth, or migrations', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'pgapp' }),
+      'void.json': JSON.stringify({ database: 'pg' }),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+    });
+    const { desired } = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    );
+    expect(desired.hyperdrive).toBeUndefined();
+    expect(desired.d1).toBeUndefined();
   });
 });
 
@@ -302,8 +391,8 @@ describe('runCloudflareDeploy — drift check (no --provision)', () => {
       join(root, 'wrangler.jsonc'),
       '--env=',
     ]);
-    // deploy is bare (follows the .wrangler/deploy redirect)
-    expect(wranglerArgs.find((a) => a[0] === 'deploy')).toEqual(['deploy']);
+    // deploy follows the .wrangler/deploy redirect and pins the top-level env
+    expect(wranglerArgs.find((a) => a[0] === 'deploy')).toEqual(['deploy', '--env=']);
   });
 });
 
@@ -434,5 +523,171 @@ describe('runCloudflareDeploy — pg/Hyperdrive app skips D1 migrations', () => 
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
     expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
     expect(trace).toContain('wrangler:deploy');
+  });
+});
+
+describe('runCloudflareDeploy — D1 migrations_dir gate', () => {
+  it('fails closed (no `d1 migrations apply`) when migrations_dir is absent', async () => {
+    // Real D1 id (drift passes) but the entry declares no migrations_dir — running
+    // wrangler would default to `./migrations` and apply an unrelated folder.
+    const root = d1Project({
+      account_id: 'acc123',
+      name: 'myapp',
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+    });
+    const { deps, wranglerArgs, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
+    expect(trace).not.toContain('build');
+    expect(trace).not.toContain('wrangler:deploy');
+  });
+});
+
+describe('runCloudflareDeploy — framework queue guard', () => {
+  it('fails closed before touching the account for a framework app with a queue', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({
+        name: 'fwapp',
+        dependencies: { '@tanstack/react-start': '1.0.0' },
+      }),
+      'void.json': JSON.stringify({}),
+      'queues/jobs.ts': `export default {};`,
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'fwapp' }, null, 2),
+    });
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Guard fires before preflight/provision — nothing ran.
+    expect(trace).toEqual([]);
+  });
+
+  it('lets a full Void app with a queue proceed (queues wire through the build)', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'qapp' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'queues/jobs.ts': `export default {};`,
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'qapp' }, null, 2),
+    });
+    const { deps, trace } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(trace).toContain('build');
+    expect(trace).toContain('wrangler:deploy');
+  });
+});
+
+describe('runCloudflareDeploy — CI queue provision gate', () => {
+  it('fails closed on a queue under CI --provision (queues cannot be proven created)', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'qapp' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'queues/jobs.ts': `export default {};`,
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'qapp' }, null, 2),
+    });
+    const { deps, trace, exitCalls } = harness({ isCI: true });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Gated after preflight, before provisioning — no `queues create`.
+    expect(trace).toEqual(['wrangler:whoami']);
+    expect(trace).not.toContain('provision');
+  });
+});
+
+describe('runCloudflareDeploy — skipped desired resource is fatal', () => {
+  it('fails closed when the provisioner skips a desired Hyperdrive; never builds/deploys', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'pgapp' }),
+      'void.json': JSON.stringify({ database: 'pg' }),
+      'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'pgapp' }, null, 2),
+    });
+    const { deps, trace, exitCalls } = harness({
+      provision: (async (_root, configPath): Promise<ProvisionResult> => {
+        trace.push('provision');
+        return {
+          resources: [
+            {
+              kind: 'hyperdrive',
+              binding: 'HYPERDRIVE',
+              name: 'pgapp-hyperdrive',
+              action: 'skipped',
+              reason: 'no connection string provided',
+            },
+          ],
+          configPath,
+          accountIdWritten: false,
+        };
+      }) as CloudflareDeployDeps['provision'],
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toContain('provision');
+    expect(trace).not.toContain('build');
+    expect(trace).not.toContain('wrangler:deploy');
+  });
+});
+
+describe('runCloudflareDeploy — generated config verification', () => {
+  it('fails closed after build when the generated config mismatches; never deploys', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, trace, exitCalls } = harness({
+      verifyDeployConfig: () => ({ ok: false, reason: 'account mismatch' }),
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toContain('build'); // build ran
+    expect(trace).not.toContain('wrangler:deploy'); // deploy blocked
+  });
+});
+
+describe('verifyGeneratedDeployConfig', () => {
+  function deployConfigProject(generated: Record<string, unknown>): string {
+    return makeProject({
+      '.wrangler/deploy/config.json': JSON.stringify({
+        configPath: '../../dist/ssr/wrangler.json',
+      }),
+      'dist/ssr/wrangler.json': JSON.stringify(generated),
+    });
+  }
+
+  it('passes when account_id and name match the pinned target', () => {
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    expect(verifyGeneratedDeployConfig(root, { accountId: 'acc123', workerName: 'myapp' })).toEqual(
+      {
+        ok: true,
+      },
+    );
+  });
+
+  it('fails when the generated account_id differs (named-env redirect)', () => {
+    const root = deployConfigProject({ account_id: 'other-acc', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, { accountId: 'acc123', workerName: 'myapp' });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/account_id/);
+  });
+
+  it('fails when the generated worker name differs (e.g. env-suffixed name)', () => {
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp-prod' });
+    const result = verifyGeneratedDeployConfig(root, { accountId: 'acc123', workerName: 'myapp' });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/worker name/);
+  });
+
+  it('fails closed when the deploy config was not emitted', () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'myapp' }) });
+    const result = verifyGeneratedDeployConfig(root, { accountId: 'acc123', workerName: 'myapp' });
+    expect(result.ok).toBe(false);
   });
 });
