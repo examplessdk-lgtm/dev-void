@@ -582,7 +582,12 @@ export async function computeDesiredCloudflareResources(
   const config = parseRootWranglerConfig(configPath);
   const workerName = readWranglerTopLevelString(config, 'name') ?? deriveWorkerName(root);
 
-  const bindings = inferProjectBindings(root, { paths }, voidConfig.inference?.scanDirs);
+  // Match runFullDeploy's inference: framework (Class-A) apps expand the scan
+  // dirs so bindings used in framework-specific dirs are still discovered.
+  const isFrameworkMode = detectFramework(root) != null;
+  const scanDirs =
+    voidConfig.inference?.scanDirs ?? (isFrameworkMode ? FRAMEWORK_SCAN_DIRS : undefined);
+  const bindings = inferProjectBindings(root, { paths }, scanDirs);
   const authEnabled =
     bindings.needsAuth || findVoidAuthConfig(root, paths) !== null || voidConfig.auth !== undefined;
   const dialect = getDatabaseDialect(voidConfig);
