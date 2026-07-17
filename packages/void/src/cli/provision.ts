@@ -526,25 +526,55 @@ export function assertNoTransportRedirectInProjectDotenv(
  * {@link assertNoTransportRedirectInProjectDotenv} (which blocks a project dotenv from
  * repopulating any of them via wrangler's per-command reload), the pin cannot be moved.
  */
-export function provisionEnv(ctx?: { accountId?: string; apiBaseUrl?: string }): NodeJS.ProcessEnv {
+export function provisionEnv(ctx?: {
+  accountId?: string;
+  apiBaseUrl?: string;
+  /** Test seam for the win32 case rule; production always uses the real platform. */
+  platform?: NodeJS.Platform;
+}): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  delete env.CF_ACCESS_CLIENT_ID;
-  delete env.CF_ACCESS_CLIENT_SECRET;
+  // F3 (round 12) — Windows environment keys are CASE-INSENSITIVE: the spawned child's
+  // `process.env` resolves `WRANGLER_OUTPUT_FILE_PATH` from an ambient
+  // `Wrangler_Output_File_Path` too, so an exact-case `delete` left every scrub below
+  // bypassable by a mixed-case spelling (wrangler would then see the sink var and
+  // persist the raw argv — Hyperdrive password included — to disk). Scrub EVERY
+  // case-insensitive spelling of EVERY scrubbed/pinned key on win32; exact-case
+  // elsewhere (POSIX env vars are case-sensitive, so other spellings are genuinely
+  // different variables).
+  const caseInsensitive = (ctx?.platform ?? process.platform) === 'win32';
+  const scrub = (name: string): void => {
+    if (!caseInsensitive) {
+      delete env[name];
+      return;
+    }
+    const lower = name.toLowerCase();
+    for (const key of Object.keys(env)) {
+      if (key.toLowerCase() === lower) {
+        delete env[key];
+      }
+    }
+  };
+  scrub('CF_ACCESS_CLIENT_ID');
+  scrub('CF_ACCESS_CLIENT_SECRET');
   // Scrub EVERY transport-redirecting selector (CLOUDFLARE_ENV, the API-base overrides,
   // WRANGLER_API_ENVIRONMENT, CLOUDFLARE_COMPLIANCE_REGION). CLOUDFLARE_ENV would select a
   // named env-block whose account_id/bindings differ; the others would re-derive a
   // different API base. We fold their effect into the ONE explicit base below.
   for (const name of TRANSPORT_REDIRECT_ENV_VARS) {
-    delete env[name];
+    scrub(name);
   }
   // F4 — scrub wrangler's session-output sinks (they would persist the raw argv —
   // a Hyperdrive connection string's password included — to disk) and PIN sanitized
   // logging: never pass through an ambient `WRANGLER_LOG_SANITIZE=false` for a
   // secret-bearing invocation. A truthy pinned value also survives wrangler's
   // per-command dotenv reload (dotenv-expand keeps a set truthy process.env value).
+  // The pinned keys' case-variants are scrubbed FIRST (F3) so the canonical spelling
+  // below is the ONLY one the child sees — a mixed-case ambient value must never
+  // shadow a pin on win32.
   for (const name of OUTPUT_FILE_ENV_VARS) {
-    delete env[name];
+    scrub(name);
   }
+  scrub('WRANGLER_LOG_SANITIZE');
   env.WRANGLER_LOG_SANITIZE = 'true';
   // Pin the ONE resolved API base so wrangler's `getCloudflareApiBaseUrlFromEnv()` returns
   // exactly the endpoint the Hyperdrive REST lister uses (no staging/FedRAMP/arbitrary
@@ -560,7 +590,9 @@ export function provisionEnv(ctx?: { accountId?: string; apiBaseUrl?: string }):
   // Pin the target account non-interactively (CI-safe) when known, so
   // `wrangler <res> list/create` never prompts for disambiguation AND never falls
   // back to a DIFFERENT ambient account than the one we resolved + persisted.
+  // F3 — case-variants scrubbed first so the pin is unambiguous on win32.
   if (ctx?.accountId) {
+    scrub('CLOUDFLARE_ACCOUNT_ID');
     env.CLOUDFLARE_ACCOUNT_ID = ctx.accountId;
   }
   return env;
@@ -1174,7 +1206,20 @@ function createDefaultListHyperdriveConfigs(apiToken?: string): ListHyperdriveCo
   // account at the SAME endpoint the spawned wrangler uses (never a hardcoded prod base
   // while wrangler was redirected to staging/FedRAMP/an arbitrary endpoint).
   return async ({ accountId, apiBaseUrl, signal }) => {
-    const base = apiBaseUrl.replace(/\/+$/, '');
+    // F4 (round 12) — build every request URL with wrangler 4.107's EXACT concatenation
+    // semantics. wrangler's `performApiFetchBase` (wrangler-dist/cli.js) fetches
+    //   `${getCloudflareApiBaseUrl(complianceConfig)}${resource}${queryString}`
+    // where the pinned base is used VERBATIM (a direct CLOUDFLARE_API_BASE_URL override
+    // is returned as-is by `getCloudflareApiBaseUrlFromEnv() ?? …` — never trimmed or
+    // normalized) and its hyperdrive `listConfigs` resource interpolates the account id
+    // RAW: `/accounts/${accountId}/hyperdrive/configs`. The old one-sided
+    // trailing-slash strip made this lister and the spawned wrangler hit DIFFERENT
+    // endpoints on a custom base ending in `/` (`…/api/accounts/…` vs
+    // `…/api//accounts/…`), so the existence check could disagree with the create.
+    // Mirror the concatenation byte-for-byte instead — no trimming, no encoding.
+    const perPage = 100;
+    const listUrl = (page: number): string =>
+      `${apiBaseUrl}/accounts/${accountId}/hyperdrive/configs?page=${page}&per_page=${perPage}`;
     // Fetch ALL pages (Hyperdrive names are NOT unique — paid accounts allow
     // ~25 configs, paginated) and FAIL CLOSED on any non-2xx, `success !== true`,
     // or a malformed entry. Never coerce a malformed envelope/entry to "absence":
@@ -1187,12 +1232,11 @@ function createDefaultListHyperdriveConfigs(apiToken?: string): ListHyperdriveCo
     // overshoot — throws (fail closed) rather than silently declaring the list
     // complete (which could miss a same-named config on an unread page and mint a
     // duplicate).
-    const perPage = 100;
     const byId = new Map<string, HyperdriveConfig>();
     let expectedTotal: number | undefined;
     for (let page = 1; ; page++) {
       const res = await fetch(
-        `${base}/accounts/${encodeURIComponent(accountId)}/hyperdrive/configs?page=${page}&per_page=${perPage}`,
+        listUrl(page),
         // F4 — apply the caller's deadline signal to EVERY paginated request, so a stalled
         // body / never-settling page is aborted rather than holding the provision lock forever.
         { headers: { Authorization: `Bearer ${token}` }, signal },
@@ -2332,6 +2376,62 @@ function createSecretRedactor(connectionString?: string): (text: string) => stri
 }
 
 /**
+ * F5 (round 12) — deep-redact an UNKNOWN rejection value through the ONE text redactor.
+ * A seam (runWrangler / the Hyperdrive lister) may reject with ANYTHING — an Error, a
+ * plain STRING, an object, an array — and the old `instanceof Error` guard let a
+ * password-bearing string propagate verbatim. Strings return a redacted copy; Errors,
+ * objects, and arrays are redacted IN PLACE — own enumerable string fields recursively,
+ * plus an Error's (non-enumerable) `message` and `stack` — so the value's IDENTITY
+ * survives redaction: quarantine detection (`isQuarantineError` checks the SAME object,
+ * instanceof AND the structural `quarantine === true` flag) and every metadata field
+ * (`pid`, …) are preserved explicitly, never lost to a rebuilt error. Cycle-safe;
+ * read-only/getter fields that cannot be reassigned are left as-is (best effort).
+ */
+function redactUnknownValue(value: unknown, redactText: (text: string) => string): unknown {
+  const seen = new WeakSet<object>();
+  const visit = (v: unknown): unknown => {
+    if (typeof v === 'string') {
+      return redactText(v);
+    }
+    if (typeof v !== 'object' || v === null) {
+      return v;
+    }
+    if (seen.has(v)) {
+      return v;
+    }
+    seen.add(v);
+    if (v instanceof Error) {
+      // `message`/`stack` are non-enumerable — handle them explicitly.
+      if (typeof v.message === 'string') {
+        v.message = redactText(v.message);
+      }
+      if (typeof v.stack === 'string') {
+        v.stack = redactText(v.stack);
+      }
+    }
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length; i++) {
+        try {
+          v[i] = visit(v[i]);
+        } catch {
+          // A frozen/getter-only element — leave it (best effort).
+        }
+      }
+      return v;
+    }
+    for (const key of Object.keys(v)) {
+      try {
+        (v as Record<string, unknown>)[key] = visit((v as Record<string, unknown>)[key]);
+      } catch {
+        // A frozen/getter-only property — leave it (best effort).
+      }
+    }
+    return v;
+  };
+  return visit(value);
+}
+
+/**
  * Ensure every resource in `desired` exists in the user's own Cloudflare account,
  * creating the missing ones by shelling out to `wrangler` and letting
  * `wrangler <res> create --update-config` write real ids into the root config.
@@ -2655,11 +2755,11 @@ async function provisionCloudflareResourcesLocked(
         apiBaseUrl: transportApiBaseUrl,
       }),
     ).then(redactResult, (error: unknown) => {
-      // F4 — a REJECTING runner (e.g. an F2 quarantine) must not smuggle the secret either.
-      if (error instanceof Error && typeof error.message === 'string') {
-        error.message = redactSecrets(error.message);
-      }
-      throw error;
+      // F4/F5 — a REJECTING runner (an F2 quarantine, an injected seam rejecting a plain
+      // string/object/array) must not smuggle the secret either: EVERY rejection value is
+      // normalized through the ONE deep redactor before propagation. Non-string values
+      // are redacted in place, so quarantine identity/metadata survive.
+      throw redactUnknownValue(error, redactSecrets);
     });
 
   // --- D1 ------------------------------------------------------------------
@@ -3050,11 +3150,13 @@ async function provisionCloudflareResourcesLocked(
           validatedConfigs = result;
           existenceUnknown = false;
         } catch (error) {
-          // F4 — redact before propagating (a lister/network error could echo a URL
-          // carrying userinfo credentials).
+          // F4/F5 — redact through the ONE deep redactor before propagating (a
+          // lister/network error could echo a URL carrying userinfo credentials, and an
+          // injected seam may reject with a plain string instead of an Error).
+          const redacted = redactUnknownValue(error, redactSecrets);
           log.warn(
             `Hyperdrive existence check for ${name} failed: ` +
-              redactSecrets((error as Error).message),
+              (redacted instanceof Error ? redacted.message : String(redacted)),
           );
           existenceUnknown = true;
           validatedConfigs = undefined;

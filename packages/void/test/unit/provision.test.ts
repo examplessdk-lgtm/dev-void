@@ -1650,6 +1650,53 @@ describe('provisionCloudflareResources — F1 pinned transport (one base for wra
     expect(urls[0]).toContain('/accounts/config-acct/hyperdrive/configs');
   });
 
+  it('F4 (round 12): the lister URL uses the pinned base with wrangler-EXACT concatenation (no trailing-slash trim)', async () => {
+    // wrangler 4.107's `performApiFetchBase` fetches
+    // `${getCloudflareApiBaseUrl(...)}${resource}${queryString}` with the direct env
+    // base used VERBATIM and the resource `/accounts/${accountId}/hyperdrive/configs`
+    // interpolated RAW. A base ending in `/` therefore yields `…//accounts/…` for
+    // wrangler; the lister must produce the SAME bytes (the old one-sided trim made the
+    // existence check and the create hit different endpoints on a custom proxy base).
+    const prev = process.env.CLOUDFLARE_API_BASE_URL;
+    const pinnedBase = 'https://proxy.example/api/'; // note the trailing slash
+    process.env.CLOUDFLARE_API_BASE_URL = pinnedBase;
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    const urls: Array<string> = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      urls.push(String(url));
+      return new Response(
+        JSON.stringify({ success: true, result: [], result_info: { total_count: 0 } }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    try {
+      const { run } = makeRunner([]);
+      await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+        },
+        { runWrangler: run, apiToken: 'tok', log: silentLog },
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prev === undefined) {
+        delete process.env.CLOUDFLARE_API_BASE_URL;
+      } else {
+        process.env.CLOUDFLARE_API_BASE_URL = prev;
+      }
+    }
+    // Byte-for-byte wrangler's concatenation: `${base}${resource}${queryString}` —
+    // the double slash included.
+    expect(urls[0]).toBe(
+      `${pinnedBase}/accounts/config-acct/hyperdrive/configs?page=1&per_page=100`,
+    );
+    expect(urls[0]).toContain('/api//accounts/');
+  });
+
   it('the injected lister receives the pinned apiBaseUrl + a deadline AbortSignal in its transport context', async () => {
     setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
     let seen: { accountId: string; apiBaseUrl: string; signal: AbortSignal } | undefined;
@@ -4011,6 +4058,127 @@ describe('provisionCloudflareResources — F4 Hyperdrive password never reaches 
     expect(thrown!.message).toContain('[REDACTED]');
   });
 
+  it('F5 (round 12): a seam rejecting a password-bearing plain STRING is redacted before propagation', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const conn = 'postgres://dbuser:sup3r-secret@db.example.com:5432/app';
+    // A rejecting runner is supported control flow; pre-fix only `instanceof Error`
+    // rejections were redacted, so this string propagated VERBATIM to the caller.
+    const run: RunWrangler = () => Promise.reject(`hyperdrive create failed for ${conn}`);
+    let thrown: unknown;
+    try {
+      await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: conn },
+        },
+        { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(typeof thrown).toBe('string');
+    expect(thrown as string).not.toContain('sup3r-secret');
+    expect(thrown as string).not.toContain(conn);
+    expect(thrown as string).toContain('[REDACTED]');
+  });
+
+  it('F5 (round 12): an OBJECT rejection has its enumerable string fields (nested + arrays) redacted', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const conn = 'postgres://dbuser:sup3r-secret@db.example.com:5432/app';
+    const rejection = {
+      code: 'E_CREATE',
+      detail: `could not connect using ${conn}`,
+      attempts: [`first try: ${conn}`, { url: conn }],
+    };
+    const run: RunWrangler = () => Promise.reject(rejection);
+    let thrown: unknown;
+    try {
+      await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: conn },
+        },
+        { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    // Identity preserved (redacted in place), every string field scrubbed.
+    expect(thrown).toBe(rejection);
+    expect(JSON.stringify(thrown)).not.toContain('sup3r-secret');
+    expect(JSON.stringify(thrown)).toContain('[REDACTED]');
+  });
+
+  it('F5 (round 12): a QUARANTINE rejection keeps its identity/metadata while its message is redacted', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
+    const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
+    const conn = 'postgres://dbuser:sup3r-secret@db.example.com:5432/app';
+    const quarantineError = new WranglerQuarantineError(
+      54321,
+      `kill failed while running hyperdrive create --connection-string=${conn}`,
+    );
+    const run: RunWrangler = () => Promise.reject(quarantineError);
+    let thrown: unknown;
+    try {
+      await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: conn },
+        },
+        { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    // The SAME object propagates (identity + pid metadata preserved — not rebuilt), so
+    // the provision-level quarantine handling still recognized it and RETAINED the lock.
+    expect(thrown).toBe(quarantineError);
+    expect((thrown as WranglerQuarantineError).pid).toBe(54321);
+    expect((thrown as Error).message).not.toContain('sup3r-secret');
+    expect((thrown as Error).message).toContain('[REDACTED]');
+    expect(existsSync(lockMutex)).toBe(true);
+    // Cleanup the retained mutex + sidecar for later tests.
+    rmSync(lockMutex, { recursive: true, force: true });
+    rmSync(sidecar, { force: true });
+  });
+
+  it('F5 (round 12): a lister rejecting a plain STRING is redacted in the warning', async () => {
+    setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
+    const warns: Array<string> = [];
+    const { run } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: {
+            binding: 'HYPERDRIVE',
+            name: 'myapp-hd',
+            connectionString: 'postgres://u:leaky-pass@h/db',
+          },
+        },
+        {
+          runWrangler: run,
+          log: { info: () => {}, warn: (msg) => warns.push(msg) },
+          listHyperdriveConfigs: () =>
+            Promise.reject('fetch failed for postgres://u:leaky-pass@h/db'),
+        },
+      ),
+    ).rejects.toThrow(/cannot verify/);
+    const listerWarn = warns.find((w) => w.includes('existence check'));
+    expect(listerWarn).toBeDefined();
+    expect(listerWarn).not.toContain('leaky-pass');
+    expect(listerWarn).toContain('[REDACTED]');
+  });
+
   it('redacts a userinfo password from the Hyperdrive lister failure warning', async () => {
     setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
     const warns: Array<string> = [];
@@ -4106,6 +4274,71 @@ describe('provisionCloudflareResources — F5 dotenv fence file set + case rule 
       /session diagnostics/,
     );
     expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'darwin')).not.toThrow();
+  });
+});
+
+describe('provisionEnv — F3 win32 case-insensitive credential scrub (round 12)', () => {
+  const MIXED_CASE_KEYS = [
+    'Wrangler_Output_File_Path', // output sink — would persist the raw argv (password!)
+    'wrangler_output_file_directory',
+    'cloudflare_api_base_url', // transport redirect
+    'Cf_Api_Base_Url',
+    'Cloudflare_Env',
+    'cf_access_client_id', // CF Access token pair
+    'Cf_Access_Client_Secret',
+    'Wrangler_Log_Sanitize', // pinned key — a mixed-case 'false' must not shadow the pin
+  ] as const;
+
+  function withMixedCaseEnv<T>(fn: () => T): T {
+    const saved: Record<string, string | undefined> = {};
+    for (const key of MIXED_CASE_KEYS) {
+      saved[key] = process.env[key];
+      process.env[key] = key === 'Wrangler_Log_Sanitize' ? 'false' : 'ambient-value';
+    }
+    try {
+      return fn();
+    } finally {
+      for (const key of MIXED_CASE_KEYS) {
+        if (saved[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = saved[key];
+        }
+      }
+    }
+  }
+
+  it('on win32, EVERY case-insensitive spelling of every scrubbed key set is removed before pinning', () => {
+    withMixedCaseEnv(() => {
+      const env = provisionEnv({
+        accountId: 'acct',
+        apiBaseUrl: 'https://api.cloudflare.com/client/v4',
+        platform: 'win32',
+      });
+      // No case variant of any scrubbed key survives — on win32 the child's process.env
+      // is case-insensitive, so `Wrangler_Output_File_Path` WOULD be read as
+      // WRANGLER_OUTPUT_FILE_PATH and wrangler would write the raw argv (with the
+      // Hyperdrive password) to disk.
+      for (const key of MIXED_CASE_KEYS) {
+        expect(env[key]).toBeUndefined();
+      }
+      // The canonical pins are present and unshadowed.
+      expect(env.WRANGLER_LOG_SANITIZE).toBe('true');
+      expect(env.CLOUDFLARE_API_BASE_URL).toBe('https://api.cloudflare.com/client/v4');
+      expect(env.CLOUDFLARE_ACCOUNT_ID).toBe('acct');
+    });
+  });
+
+  it('on POSIX, mixed-case spellings are DIFFERENT variables and survive (exact-case scrub only)', () => {
+    withMixedCaseEnv(() => {
+      const env = provisionEnv({ accountId: 'acct', platform: 'linux' });
+      // POSIX env vars are case-sensitive: these spellings are unrelated variables that
+      // wrangler never reads as the scrubbed keys — leave them alone.
+      expect(env.Wrangler_Output_File_Path).toBe('ambient-value');
+      expect(env.cloudflare_api_base_url).toBe('ambient-value');
+      // The canonical pins still apply.
+      expect(env.WRANGLER_LOG_SANITIZE).toBe('true');
+    });
   });
 });
 
