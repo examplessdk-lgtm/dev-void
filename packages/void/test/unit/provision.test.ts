@@ -5472,6 +5472,152 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
   });
 });
 
+describe('acquireProvisionLock — F3 recovery decisions are serialized + generation-verified (round 14)', () => {
+  const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
+  const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
+  const recoveryMarker = `${wranglerPath}.void-provision.lock.recovery`;
+
+  async function waitForDead(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
+  }
+
+  async function spawnHang(): Promise<import('node:child_process').ChildProcess> {
+    const { spawn } = await import('node:child_process');
+    return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+  }
+
+  async function deadPid(): Promise<number> {
+    const child = await spawnHang();
+    const pid = child.pid!;
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      child.kill('SIGKILL');
+    }
+    expect(await waitForDead(pid, 5_000)).toBe(true);
+    return pid;
+  }
+
+  function reap(child: import('node:child_process').ChildProcess): void {
+    try {
+      process.kill(-child.pid!, 'SIGKILL');
+    } catch {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+  }
+
+  it('a held RECOVERY mutex blocks another acquirer from acting on the sidecar at all (decision serialized)', async () => {
+    // Pre-fix, recovery decisions (read → probe → clear) ran UNSERIALIZED: recoverer B
+    // could base its clear on a read that recoverer A had already invalidated. Now the
+    // WHOLE gate→probe→clear→acquire→revalidate protocol runs under one small recovery
+    // mutex, so while another recoverer holds it, no decision — not even the sidecar
+    // read — is acted upon.
+    setup(JSON.stringify({ name: 'app' }));
+    const pid = await deadPid();
+    writeFileSync(
+      sidecar,
+      JSON.stringify({ pid, pgid: pid, reason: 'round-14: dead group', generation: 'gen-r14-s' }),
+    );
+    writeFileSync(recoveryMarker, '');
+    const properLockfile = (await import('proper-lockfile')).default;
+    const releaseRecovery = await properLockfile.lock(recoveryMarker, { stale: 6_000 });
+    try {
+      // The dead-group sidecar WOULD be cleared — but the recovery mutex is held, so
+      // the acquirer cannot even enter the decision (retries: 0 → fail fast).
+      await expect(acquireProvisionLock(wranglerPath, { retries: 0 })).rejects.toThrow(
+        /already being held/,
+      );
+      expect(existsSync(sidecar)).toBe(true); // the decision was NOT made
+    } finally {
+      await releaseRecovery();
+    }
+    // With the recovery mutex free the same acquirer clears the dead-group quarantine
+    // and proceeds.
+    const lock = await acquireProvisionLock(wranglerPath, { retries: 2 });
+    expect(existsSync(sidecar)).toBe(false);
+    await lock.release();
+    expect(existsSync(lockMutex)).toBe(false);
+  });
+
+  it("a stale recovery decision cannot delete a NEWER quarantine generation (B's decision detects S1; A's retained mutex stays protected)", async () => {
+    // THE round-14 F3 scenario, injected deterministically at the one point the
+    // recovery mutex cannot serialize (a main-mutex holder's quarantine write): B
+    // inspects dead S0 (generation g0) and decides to clear; before its unlink, A's
+    // NEWER live-group quarantine S1 (generation g1) replaces the file. Pre-fix B
+    // unlinked the PATHNAME — deleting S1 — and A's retained heartbeat-less mutex was
+    // then stale-reclaimable under A's live child.
+    setup(JSON.stringify({ name: 'app' }));
+    const dead = await deadPid();
+    const live = await spawnHang();
+    try {
+      writeFileSync(
+        sidecar,
+        JSON.stringify({
+          pid: dead,
+          pgid: dead,
+          reason: 'round-14: S0 (dead group)',
+          generation: 'gen-r14-s0',
+        }),
+      );
+      // A's retained mutex: on disk, heartbeat-less, aged far past the stale window —
+      // exactly what B would stale-reclaim if its stale decision deleted S1.
+      mkdirSync(lockMutex);
+      const old = new Date(Date.now() - 3_600_000);
+      utimesSync(lockMutex, old, old);
+      const swapInNewerGeneration = (): void => {
+        writeFileSync(
+          sidecar,
+          JSON.stringify({
+            pid: live.pid,
+            pgid: live.pid,
+            reason: 'round-14: S1 (live group, newer quarantine)',
+            generation: 'gen-r14-s1',
+          }),
+        );
+      };
+      await expect(
+        acquireProvisionLock(wranglerPath, {
+          stale: 2_000,
+          retries: 0,
+          onBeforeQuarantineClear: swapInNewerGeneration,
+        }),
+      ).rejects.toThrow(/changed while this recovery decision was being made/);
+      // THE crux: S1 SURVIVES the stale decision…
+      const recorded = JSON.parse(readFileSync(sidecar, 'utf-8')) as Record<string, unknown>;
+      expect(recorded.generation).toBe('gen-r14-s1');
+      expect(recorded.pid).toBe(live.pid);
+      // …and A's retained mutex was not touched, so the next acquisition gates on S1's
+      // LIVE group and fails closed instead of stale-reclaiming it.
+      expect(existsSync(lockMutex)).toBe(true);
+      await expect(
+        acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 0 }),
+      ).rejects.toThrow(/QUARANTINED/);
+      expect(existsSync(lockMutex)).toBe(true);
+    } finally {
+      reap(live);
+    }
+    expect(await waitForDead(live.pid!, 5_000)).toBe(true);
+    rmSync(lockMutex, { recursive: true, force: true });
+    rmSync(sidecar, { force: true });
+  });
+});
+
 describe('createDefaultRunWrangler — F1/F2 signal-path kill failure quarantines the lock (round 12, child-process)', () => {
   const SIG12_TMP = join(import.meta.dirname, '.tmp-f1f2-signal-round12');
   beforeEach(() => {

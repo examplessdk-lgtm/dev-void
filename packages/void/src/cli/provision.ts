@@ -2031,6 +2031,12 @@ function writeQuarantineSidecar(sidecarPath: string, info: QuarantineInfo): void
       reason: info.reason,
       quarantinedAt: new Date().toISOString(),
       quarantinedBy: process.pid,
+      // F3 (round 14) — the sidecar GENERATION: a recovery decision may only remove the
+      // exact generation it just inspected under the recovery mutex (see
+      // {@link assertQuarantineClearedOrClear}), so a decision made against a dead
+      // generation can never delete a NEWER quarantine persisted meanwhile. Random UUID
+      // + a monotonic timestamp so two generations can never collide.
+      generation: `${randomUUID()}.${process.hrtime.bigint().toString()}`,
     },
     null,
     2,
@@ -2098,8 +2104,17 @@ function readPositiveInt(value: unknown): number | undefined {
  * during the acquisition below — a manual rmdir here could race a concurrent acquirer's
  * fresh mutex (remove-then-acquire is not atomic across processes) and let two
  * provisions hold the lock at once.
+ *
+ * F3 (round 14) — this gate now ALWAYS runs under the RECOVERY mutex (see
+ * {@link acquireProvisionLock}), so its read IS the re-read-under-the-mutex every
+ * recoverer must base its decision on, and a clear may only remove the exact sidecar
+ * GENERATION it just inspected: the sidecar is re-read immediately before the unlink
+ * and the decision fails closed if the generation changed (a newer quarantine was
+ * persisted by the current main-mutex holder — whose quarantine writes are the one
+ * interleaving the recovery mutex cannot serialize — while this decision was pending).
+ * `onBeforeClear` is a test seam injecting exactly that interleaving deterministically.
  */
-function assertQuarantineClearedOrClear(lockTarget: string): void {
+function assertQuarantineClearedOrClear(lockTarget: string, onBeforeClear?: () => void): void {
   const sidecarPath = quarantineSidecarPath(lockTarget);
   if (!existsSync(sidecarPath)) {
     return;
@@ -2149,6 +2164,35 @@ function assertQuarantineClearedOrClear(lockTarget: string): void {
   }
   // Confirmed dead → clear the sidecar ONLY (see the doc comment: the retained mutex
   // directory is reclaimed by proper-lockfile's stale lifecycle, never by hand).
+  //
+  // F3 (round 14) — generation-verified: RE-READ the sidecar and remove it ONLY if it
+  // still carries the exact generation this decision inspected. A holder quarantining
+  // (the one write the recovery mutex cannot serialize) between the read above and this
+  // unlink would otherwise have its NEWER sidecar deleted by this now-stale decision.
+  const inspectedGeneration =
+    typeof recorded?.generation === 'string' ? recorded.generation : undefined;
+  onBeforeClear?.();
+  let current: Record<string, unknown> | undefined;
+  try {
+    const reread: unknown = JSON.parse(readFileSync(sidecarPath, 'utf-8'));
+    current = isRecord(reread) ? reread : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // Concurrently cleared — nothing left to remove; proceed to normal acquisition.
+      return;
+    }
+    // Unreadable at the re-read → the generation cannot be verified → fail closed below.
+    current = undefined;
+  }
+  const currentGeneration =
+    typeof current?.generation === 'string' ? current.generation : undefined;
+  if (current === undefined || currentGeneration !== inspectedGeneration) {
+    throw new Error(
+      `provision: refusing to clear the quarantine sidecar "${sidecarPath}" — it changed while ` +
+        `this recovery decision was being made (a newer quarantine generation was persisted). ` +
+        `Re-run to re-evaluate the current quarantine.`,
+    );
+  }
   try {
     unlinkSync(sidecarPath);
   } catch (error) {
@@ -2256,6 +2300,23 @@ export interface ProvisionLockOptions {
   update?: number;
   retries?: number | { retries: number; factor?: number; minTimeout?: number; maxTimeout?: number };
   fs?: unknown;
+  /**
+   * F3 (round 14) test seam — runs between a confirmed-dead recovery decision and its
+   * generation-verified sidecar clear, so a test can deterministically inject the ONE
+   * interleaving the recovery mutex cannot serialize (the current main-mutex holder
+   * persisting a NEWER quarantine generation). Never set in production.
+   */
+  onBeforeQuarantineClear?: () => void;
+  /**
+   * F6 (round 14) test seam — overrides the fs functions used for the quarantine
+   * sidecar's DIRECTORY fsync, so a test can inject ENOSPC/EINVAL and exercise the
+   * durability classification. Never set in production.
+   */
+  dirDurability?: {
+    openSync?: typeof openSync;
+    fsyncSync?: typeof fsyncSync;
+    closeSync?: typeof closeSync;
+  };
 }
 
 /**
@@ -2283,6 +2344,15 @@ const LOCK_UPDATE_MS = 20_000;
  * until the holder releases, then proceeds.
  */
 const LOCK_RETRIES = { retries: 100, factor: 1.5, minTimeout: 200, maxTimeout: 2_000 } as const;
+
+/**
+ * F3 (round 14) — the stale window of the RECOVERY mutex (the small proper-lockfile
+ * lock serializing every gate→probe→clear→acquire→revalidate decision — see
+ * {@link acquireProvisionLock}). Deliberately SHORT: its critical section is a few
+ * synchronous fs reads plus one mkdir, so a crashed recoverer frees it within seconds
+ * (proper-lockfile's own heartbeat keeps a live recoverer's window fresh).
+ */
+const RECOVERY_LOCK_STALE_MS = 6_000;
 
 /**
  * F1 (round 13) — normalize the `retries` knob into the ONE backoff schedule OUR
@@ -2328,17 +2398,42 @@ function normalizeLockRetries(retries: ProvisionLockOptions['retries']): {
  * a mutex whose holder QUARANTINED mid-wait; the post-acquire revalidation catches a
  * sidecar that appeared between the last gate and the acquisition itself (the fresh
  * lock is released and the acquisition fails closed).
+ *
+ * F3 (round 14) — the ENTIRE per-attempt protocol runs under a second small
+ * proper-lockfile RECOVERY mutex (`<lockTarget>.recovery`, `retries: 0`, short stale):
+ * without it, two recoverers could interleave ACROSS processes — B reads a dead sidecar
+ * S0, gets descheduled; A clears S0, acquires the main mutex, quarantines again writing
+ * a LIVE sidecar S1; B resumes and unlinks the PATHNAME (now S1) on its stale decision,
+ * then stale-reclaims A's retained mutex (the revalidation sees no sidecar). Under the
+ * recovery mutex every decision re-reads the sidecar after acquiring it, and the clear
+ * is additionally GENERATION-verified (see {@link assertQuarantineClearedOrClear}) for
+ * the one interleaving the recovery mutex cannot serialize (the current MAIN-mutex
+ * holder quarantining mid-decision). The recovery mutex deliberately does NOT take the
+ * caller's `fs` seam — that seam simulates main-mutex failures.
  */
 export async function acquireProvisionLock(
   configPath: string,
   lockOptions?: ProvisionLockOptions,
 ): Promise<ProvisionLock> {
   const lockTarget = `${configPath}.void-provision.lock`;
+  const recoveryTarget = `${lockTarget}.recovery`;
   if (!existsSync(lockTarget)) {
     writeFileSync(lockTarget, '');
   }
+  if (!existsSync(recoveryTarget)) {
+    writeFileSync(recoveryTarget, '');
+  }
   const staleMs = lockOptions?.stale ?? LOCK_STALE_MS;
   const retryCfg = normalizeLockRetries(lockOptions?.retries);
+  const isElocked = (error: unknown): boolean =>
+    (error as { code?: string } | null)?.code === 'ELOCKED';
+  const backoffDelay = (attempt: number): Promise<void> =>
+    new Promise((resolveSleep) =>
+      setTimeout(
+        resolveSleep,
+        Math.min(retryCfg.minTimeout * retryCfg.factor ** attempt, retryCfg.maxTimeout),
+      ),
+    );
   // One NON-retrying proper-lockfile acquisition (it still performs the library's own
   // internal stale-reclaim of an abandoned mutex within the single attempt).
   const acquireOnce = (): ReturnType<typeof lockfile.lock> =>
@@ -2353,9 +2448,21 @@ export async function acquireProvisionLock(
         throw error;
       },
     });
+  // F3 (round 14) — one non-retrying RECOVERY-mutex acquisition (retrying is owned by
+  // the loop below, so contention on a recovery decision backs off like a held main
+  // mutex). Always the default fs — never the caller's failure-injection seam.
+  const acquireRecoveryOnce = (): ReturnType<typeof lockfile.lock> =>
+    lockfile.lock(recoveryTarget, {
+      stale: RECOVERY_LOCK_STALE_MS,
+      retries: 0,
+      onCompromised: (error) => {
+        throw error;
+      },
+    });
   // F1 (round 13) — ONE atomic recovery protocol: gate → acquire → revalidate →
-  // clear-or-abort, on EVERY attempt. This function is the single acquisition choke
-  // point for every provision (grep-proven: no other code calls `lockfile.lock`), and
+  // clear-or-abort, on EVERY attempt — and (F3 round 14) every attempt's WHOLE protocol
+  // runs under the recovery mutex. This function is the single acquisition choke point
+  // for every provision (grep-proven: no other code calls `lockfile.lock`), and
   // proper-lockfile's INTERNAL retrying is disabled (`retries: 0` above) in favor of
   // OUR loop, because the round-12 code gated on the quarantine sidecar ONCE before the
   // library's retry loop: a contender could pass that gate while the holder was still
@@ -2364,51 +2471,78 @@ export async function acquireProvisionLock(
   // acquiring the lock while the recorded wrangler group was alive.
   let release: Awaited<ReturnType<typeof lockfile.lock>> | undefined;
   for (let attempt = 0; ; attempt++) {
-    // (1) the GATE, before every attempt: fail closed while a recorded group may live;
-    // clear the sidecar once the group is confirmed dead.
-    assertQuarantineClearedOrClear(lockTarget);
-    // (2) one acquisition attempt; a held (non-stale) mutex backs off and loops.
+    // (0) the RECOVERY mutex, serializing this whole attempt's decision across
+    // processes. Held by another recoverer → back off and re-run the WHOLE protocol.
+    let releaseRecovery: Awaited<ReturnType<typeof lockfile.lock>>;
     try {
-      release = await acquireOnce();
+      releaseRecovery = await acquireRecoveryOnce();
     } catch (error) {
-      if ((error as { code?: string } | null)?.code === 'ELOCKED' && attempt < retryCfg.retries) {
-        const delay = Math.min(
-          retryCfg.minTimeout * retryCfg.factor ** attempt,
-          retryCfg.maxTimeout,
-        );
-        await new Promise((resolveSleep) => setTimeout(resolveSleep, delay));
+      if (isElocked(error) && attempt < retryCfg.retries) {
+        await backoffDelay(attempt);
         continue;
       }
       throw error;
     }
-    // (3) REVALIDATE under ownership, before the provision body may run: a holder can
-    // have quarantined between this attempt's gate and the acquisition (its retained
-    // mutex going mtime-stale and being reclaimed by the very `acquireOnce` above). A
-    // recorded group that is alive/unprobeable → release the fresh mutex + fail closed;
-    // a dead group → the gate cleared the sidecar → ownership is valid.
+    let mainHeldByOther = false;
     try {
-      assertQuarantineClearedOrClear(lockTarget);
-      break;
-    } catch (gateError) {
-      let revalidateReleaseError: unknown;
+      // (1) the GATE, on every attempt UNDER the recovery mutex (this read is the
+      // re-read every recoverer's decision must be based on): fail closed while a
+      // recorded group may live; generation-verified clear once it is confirmed dead.
+      assertQuarantineClearedOrClear(lockTarget, lockOptions?.onBeforeQuarantineClear);
+      // (2) one acquisition attempt; a held (non-stale) mutex backs off and loops.
       try {
-        await release();
+        release = await acquireOnce();
       } catch (error) {
-        revalidateReleaseError = error;
+        if (isElocked(error) && attempt < retryCfg.retries) {
+          mainHeldByOther = true; // back off AFTER releasing the recovery mutex
+        } else {
+          throw error;
+        }
       }
-      release = undefined;
-      if (revalidateReleaseError !== undefined) {
-        throw new AggregateError(
-          [gateError, revalidateReleaseError],
-          `provision: a quarantine was found right after acquiring the provision lock AND the ` +
-            `fresh lock could not be released afterward. Quarantine: ` +
-            `${(gateError as Error).message}; release error: ` +
-            `${(revalidateReleaseError as Error).message}`,
-          { cause: gateError },
-        );
+      if (!mainHeldByOther) {
+        // (3) REVALIDATE under ownership, before the provision body may run: the one
+        // writer the recovery mutex cannot serialize — the PREVIOUS main-mutex holder
+        // quarantining — can have persisted a sidecar between this attempt's gate and
+        // the acquisition (its retained mutex going mtime-stale and being reclaimed by
+        // the very `acquireOnce` above). A recorded group that is alive/unprobeable →
+        // release the fresh mutex + fail closed; a dead group → the gate cleared the
+        // sidecar → ownership is valid.
+        try {
+          assertQuarantineClearedOrClear(lockTarget, lockOptions?.onBeforeQuarantineClear);
+        } catch (gateError) {
+          let revalidateReleaseError: unknown;
+          try {
+            await release!();
+          } catch (error) {
+            revalidateReleaseError = error;
+          }
+          release = undefined;
+          if (revalidateReleaseError !== undefined) {
+            throw new AggregateError(
+              [gateError, revalidateReleaseError],
+              `provision: a quarantine was found right after acquiring the provision lock AND the ` +
+                `fresh lock could not be released afterward. Quarantine: ` +
+                `${(gateError as Error).message}; release error: ` +
+                `${(revalidateReleaseError as Error).message}`,
+              { cause: gateError },
+            );
+          }
+          throw gateError;
+        }
       }
-      throw gateError;
+    } finally {
+      try {
+        await releaseRecovery();
+      } catch {
+        // The recovery mutex has a SHORT stale window (seconds), so a failed rmdir
+        // self-heals promptly and must never fail an otherwise-valid acquisition (or
+        // mask the real error propagating out of the protocol above).
+      }
     }
+    if (!mainHeldByOther) {
+      break;
+    }
+    await backoffDelay(attempt);
   }
   // F2 — cache ONE shared release promise so a double-release is idempotent (the SAME
   // settled promise is returned, never a second `proper-lockfile` unlock), and PROPAGATE
