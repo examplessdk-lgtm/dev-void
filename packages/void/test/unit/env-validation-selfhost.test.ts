@@ -603,6 +603,8 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect(envError.report.missing).toEqual(['FOO']);
       expect(envError.message).toContain('FOO');
       expect(envError.message).toContain('Remove the empty assignment');
+      // F3 — names the ACTUAL dotenv file the empty value came from.
+      expect(envError.message).toContain('.env.production');
       // Guidance is about removing the assignment, NOT `secret put` (the secret
       // already exists remotely).
       expect(envError.message).not.toContain('wrangler secret put');
@@ -643,6 +645,8 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       const envError = error as SelfHostEnvValidationError;
       expect(envError.report.missing).toEqual(['FOO']);
       expect(envError.message).toContain('Remove the empty assignment');
+      // F3 — names `.env.local` specifically (the winning file), not a generic list.
+      expect(envError.message).toContain('.env.local');
       expect(envError.message).not.toContain('wrangler secret put');
     });
 
@@ -720,6 +724,9 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect(envError.message).not.toContain('BAR');
       expect(envError.message).toContain('Remove the empty assignment');
       expect(envError.message).not.toContain('wrangler secret put');
+      // F3 — provenance names the WINNING (highest-precedence) file
+      // `.env.production.local`, not the lower `.env.production` that set real-foo.
+      expect(envError.message).toContain('.env.production.local');
     });
 
     it('THE REPRO (custom envDir) — root `.env.production` satisfies FOO but the envDir overlay empties it: fails closed', async () => {
@@ -921,6 +928,9 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
       expect((error as Error).message).toContain('Remove the empty assignment');
       expect((error as Error).message).not.toContain('wrangler secret put');
+      // F3 — the error names the ACTUAL source (void.json worker.vars), never .env.
+      expect((error as Error).message).toContain('void.json');
+      expect((error as Error).message).toContain('worker.vars');
       // Rejected BEFORE any wrangler spawn — remote membership is irrelevant.
       expect(calls).toEqual([]);
     });
@@ -942,6 +952,9 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       expect(error).toBeInstanceOf(SelfHostEnvValidationError);
       expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
       expect((error as Error).message).toContain('Remove the empty assignment');
+      // F3 — the error names the ACTUAL source (root wrangler.jsonc vars), never .env.
+      expect((error as Error).message).toContain('wrangler.jsonc');
+      expect((error as Error).message).not.toContain('.env');
       expect(calls).toEqual([]);
     });
 

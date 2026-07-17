@@ -239,13 +239,47 @@ function loadSanitizedBuildEnv(
   options: { envDir?: string; mode?: string },
 ): Record<string, string> {
   const mode = options.mode ?? 'production';
-  const envDir =
-    typeof options.envDir === 'string' && options.envDir.length > 0
-      ? join(root, options.envDir)
-      : root;
-  const filtered = filterLoadedEnv(loadEnv(mode, envDir, ''));
+  const filtered = filterLoadedEnv(loadEnv(mode, resolveBuildEnvDir(root, options.envDir), ''));
   const { sanitized } = stripInternalEnvKeys(filtered);
   return sanitized;
+}
+
+/**
+ * Resolve the directory the build reads `.env*` files from, EXACTLY like
+ * `envPlugin.config`: a non-empty string `envDir` is joined to `root`, else
+ * `root`. Shared by {@link loadSanitizedBuildEnv} (the winning values) and
+ * {@link dotenvKeyProvenance} (the winning file) so the two can never disagree
+ * on which directory the overlay came from.
+ */
+function resolveBuildEnvDir(root: string, envDir?: string): string {
+  return typeof envDir === 'string' && envDir.length > 0 ? join(root, envDir) : root;
+}
+
+/**
+ * F3 — map each `.env*` key to the SPECIFIC file whose assignment WINS in the
+ * build's dotenv overlay, so a configured-empty error can name the exact source
+ * (never a value). Mirrors Vite `loadEnv`'s `getEnvFilesForMode` precedence: the
+ * files are read `.env` < `.env.local` < `.env.<mode>` < `.env.<mode>.local`,
+ * later overriding earlier — so the LAST file to assign a key is its winning
+ * source. Same `envDir`/`mode` resolution as {@link loadSanitizedBuildEnv}.
+ * Presence-only (values are never returned here; the winning value comes from
+ * {@link loadSanitizedBuildEnv}).
+ */
+function dotenvKeyProvenance(
+  root: string,
+  options: { envDir?: string; mode?: string },
+): Record<string, string> {
+  const dir = resolveBuildEnvDir(root, options.envDir);
+  const mode = options.mode ?? 'production';
+  const provenance: Record<string, string> = {};
+  for (const file of ['.env', '.env.local', `.env.${mode}`, `.env.${mode}.local`]) {
+    const parsed = parseDotenvFile(join(dir, file), { expand: false });
+    for (const key of Object.keys(parsed)) {
+      // Later (higher-precedence) file overwrites — matching loadEnv's merge.
+      provenance[key] = file;
+    }
+  }
+  return provenance;
 }
 
 /** Minimal structural view of a Standard Schema validator's probe entrypoint. */
@@ -320,6 +354,28 @@ function schemaDefaultEntries(schema: Record<string, unknown>): Array<[string, s
 }
 
 /**
+ * F3 — which of the four build layers supplied a key's WINNING value, so a
+ * configured-empty error can name the ACTUAL source (never a value, just the
+ * source + key). A `file` is a plain filename (`.env.production`, `wrangler.jsonc`)
+ * — never a path or a value.
+ */
+type VarSource =
+  | { kind: 'dotenv'; file: string }
+  | { kind: 'void-json' }
+  | { kind: 'schema-default' }
+  | { kind: 'wrangler'; file: string };
+
+/**
+ * The FINAL effective worker-vars map plus the per-key {@link VarSource}
+ * provenance (F3). Only `values` presence/emptiness and `sources` (filenames +
+ * kinds) are ever read by the units — a value never leaves.
+ */
+type EffectiveWorkerVars = {
+  values: Record<string, unknown>;
+  sources: Record<string, VarSource>;
+};
+
+/**
  * Reproduce the build's FINAL resolved worker `vars` map — the EXACT key→value
  * bytes wrangler deploys — from ALL FOUR sources the build assembles it from, in
  * the build's real precedence (LOWEST → HIGHEST, later wins):
@@ -368,35 +424,68 @@ function resolveEffectiveWorkerVars(
     /** Registered env schema (if any) — source of the `.default(value)` layer. */
     schema?: Record<string, unknown> | null;
   },
-): Record<string, unknown> {
+): EffectiveWorkerVars {
   // F1 — values are `unknown`, not `string`: the root wrangler layer can carry a
   // JSON var of any type (see {@link readConfigVars}). Higher layers (schema
   // defaults, void.json `worker.vars`, the dotenv overlay) are always strings,
   // but a lower-layer JSON value survives when no higher layer overrides it. The
   // caller reads only presence/emptiness — never the value itself.
-  const map: Record<string, unknown> = {};
+  //
+  // F3 — each `set` also records which layer supplied the WINNING value; a later
+  // (higher-precedence) layer overwrites both the value AND its provenance, so
+  // `sources[key]` always names the source the deploy actually ships from.
+  const values: Record<string, unknown> = {};
+  const sources: Record<string, VarSource> = {};
+  const set = (key: string, value: unknown, source: VarSource): void => {
+    values[key] = value;
+    sources[key] = source;
+  };
   // 1. root wrangler top-level `vars` (lowest precedence). F2 — when the caller
   // did not pin an explicit `configPath`, DISCOVER the root config the same way
   // the build does so the default `collectPlaintextVarWarnings(root)` still folds
   // in the root-wrangler layer. An explicit `configPath` always wins.
   const configPath = options.configPath ?? discoverRootWranglerConfigPath(root);
   if (configPath) {
-    Object.assign(map, readConfigVars(configPath));
+    const file = configFileName(configPath);
+    for (const [key, value] of Object.entries(readConfigVars(configPath))) {
+      set(key, value, { kind: 'wrangler', file });
+    }
   }
   // 2. schema `.default(value)` keys (overwrite root wrangler; overwritten below).
   if (options.schema) {
     for (const [key, value] of schemaDefaultEntries(options.schema)) {
-      map[key] = value;
+      set(key, value, { kind: 'schema-default' });
     }
   }
   // 3. void.json `worker.vars`.
   const voidJsonVars = readConfig(root).worker?.vars;
   if (voidJsonVars) {
-    Object.assign(map, voidJsonVars);
+    for (const [key, value] of Object.entries(voidJsonVars)) {
+      set(key, value, { kind: 'void-json' });
+    }
   }
-  // 4. sanitized dotenv overlay (highest precedence).
-  Object.assign(map, loadSanitizedBuildEnv(root, { envDir: options.envDir, mode: options.mode }));
-  return map;
+  // 4. sanitized dotenv overlay (highest precedence). Provenance is the SPECIFIC
+  // `.env*` file whose assignment wins ({@link dotenvKeyProvenance}).
+  const dotenv = loadSanitizedBuildEnv(root, { envDir: options.envDir, mode: options.mode });
+  const dotenvFiles = dotenvKeyProvenance(root, { envDir: options.envDir, mode: options.mode });
+  const mode = options.mode ?? 'production';
+  for (const [key, value] of Object.entries(dotenv)) {
+    // Every sanitized overlay key comes from an actual `.env*` file (shell-env
+    // pollution is stripped by filterLoadedEnv), so dotenvFiles has it; the
+    // `.env.<mode>` fallback is only a defensive default.
+    set(key, value, { kind: 'dotenv', file: dotenvFiles[key] ?? `.env.${mode}` });
+  }
+  return { values, sources };
+}
+
+/**
+ * Extract the plain filename from a config path (`/proj/wrangler.jsonc` →
+ * `wrangler.jsonc`), handling both POSIX and Windows separators. Used only to
+ * name a source in a values-free error (F3) — never the path itself.
+ */
+function configFileName(configPath: string): string {
+  const parts = configPath.split(/[/\\]+/);
+  return parts[parts.length - 1] || configPath;
 }
 
 /**
@@ -456,7 +545,9 @@ export async function collectPlaintextVarWarnings(
       }),
     ),
   );
-  const varKeys = Object.keys(effective);
+  // KEYS ONLY — the resolver's values (and provenance filenames) are never read
+  // here; the WARN unit classifies key names alone.
+  const varKeys = Object.keys(effective.values);
 
   const secretKeys: Array<PlaintextVarWarning> = [];
   for (const key of varKeys) {
@@ -815,15 +906,20 @@ export async function validateSelfHostProdEnv(
   // config, so it runs inside the values-free boundary: a sync throw becomes a
   // structural error, and {@link schemaDefaultEntries} consumes any async
   // default-probe rejection so it can never float carrying a value.
-  const buildEnv = await withSchemaBoundary('schema-validation-error', () =>
-    Promise.resolve(
-      resolveEffectiveWorkerVars(root, {
-        configPath: options.configPath,
-        envDir: options.envDir,
-        mode: options.mode,
-        schema,
-      }),
-    ),
+  // `buildEnv` holds the winning VALUES (presence/emptiness only); `buildSources`
+  // carries the per-key provenance (F3) used to name the ACTUAL source of a
+  // configured-empty key — filenames + kinds, never a value.
+  const { values: buildEnv, sources: buildSources } = await withSchemaBoundary(
+    'schema-validation-error',
+    () =>
+      Promise.resolve(
+        resolveEffectiveWorkerVars(root, {
+          configPath: options.configPath,
+          envDir: options.envDir,
+          mode: options.mode,
+          schema,
+        }),
+      ),
   );
 
   // F2b — requiredness is derived INDEPENDENTLY of whether a validator accepts
@@ -857,7 +953,7 @@ export async function validateSelfHostProdEnv(
     (key) => Object.hasOwn(buildEnv, key) && buildEnv[key] === '',
   );
   if (presentEmptyRequired.length > 0) {
-    throw emptyAssignmentError(presentEmptyRequired);
+    throw emptyAssignmentError(presentEmptyRequired, buildSources);
   }
 
   // Required keys the effective build map does NOT set at all — the ONLY state a
@@ -1124,34 +1220,62 @@ function selfHostEnvError(report: EnvValidationReport): SelfHostEnvValidationErr
 }
 
 /**
- * F2 — the hard error for a REQUIRED key set to an EMPTY value (`FOO=`) in the
- * effective build map. Values-free (key names only), thrown ALWAYS — independent
- * of whether the key exists as a remote secret. The build bakes the empty string
- * into plaintext `vars`, and wrangler 4.107 gives a config var precedence over a
- * same-named remote secret (`checkRemoteSecretsOverride` in wrangler-dist/cli.js
- * warns "… will replace these remote secrets with the configuration values"), so
- * shipping this would ship an empty value for a required secret (overwriting a
- * remote one if it exists). The fix is to REMOVE the empty assignment, not
- * `secret put`.
+ * F3 — the values-free description of a var's WINNING source, used to name the
+ * ACTUAL origin of a configured-empty key in the remediation. Only the source
+ * KIND and a plain filename (`.env.production`, `wrangler.jsonc`) ever appear —
+ * never a value. `schema-default` is defensive only: a key with a `.default()`
+ * is never REQUIRED (its `undefined` probe returns the default, not issues), so
+ * it can never reach the present-empty gate.
  */
-function emptyAssignmentError(keys: Array<string>): SelfHostEnvValidationError {
+function describeVarSource(source: VarSource | undefined): string {
+  switch (source?.kind) {
+    case 'dotenv':
+      return `the \`${source.file}\` file`;
+    case 'void-json':
+      return '`void.json` `worker.vars`';
+    case 'wrangler':
+      return `\`${source.file}\` \`vars\``;
+    case 'schema-default':
+      return 'your env schema `.default()`';
+    default:
+      // Unreachable — a present key always has a recorded source. Fall back to a
+      // generic, values-free phrasing rather than naming a wrong source.
+      return 'your build env configuration';
+  }
+}
+
+/**
+ * F2/F3 — the hard error for a REQUIRED key set to an EMPTY value (`FOO=""`) in
+ * the effective build map. Values-free (key names + source KIND/filename only),
+ * thrown ALWAYS — independent of whether the key exists as a remote secret. The
+ * build bakes the empty string into plaintext `vars`, and wrangler 4.107 gives a
+ * config var precedence over a same-named remote secret (`checkRemoteSecretsOverride`
+ * in wrangler-dist/cli.js warns "… will replace these remote secrets with the
+ * configuration values"), so shipping this would ship an empty value for a
+ * required secret (overwriting a remote one if it exists). The fix is to REMOVE
+ * the empty assignment, not `secret put`.
+ *
+ * F3 — the empty value can come from ANY of the four build layers, so the
+ * remediation names each key's ACTUAL source (its {@link VarSource} provenance)
+ * — a dotenv file / `void.json` `worker.vars` / root `wrangler.jsonc` `vars` —
+ * instead of misdirecting the user to `.env` files.
+ */
+function emptyAssignmentError(
+  keys: Array<string>,
+  sources: Record<string, VarSource>,
+): SelfHostEnvValidationError {
   const sorted = [...keys].sort((a, b) => a.localeCompare(b));
   const lines = [
     'Empty value for a required env var:',
-    ...sorted.map((key) => `  • ${key}`),
+    ...sorted.map((key) => `  • ${key} (from ${describeVarSource(sources[key])})`),
     '',
-    'These keys are REQUIRED by your env schema but set to an EMPTY value in one of your ' +
-      'build-loaded .env files (.env, .env.local, .env.production, .env.production.local, or your ' +
-      'configured envDir). The build bakes the empty value into the worker config as a plaintext ' +
-      'var, and Cloudflare gives a config var precedence over any same-named remote secret — so the ' +
-      'deploy would ship an empty value for a required secret (overwriting a remote secret if one ' +
-      'exists).',
+    'These keys are REQUIRED by your env schema but assigned an EMPTY value in the source noted ' +
+      'above. The build bakes the empty value into the worker config as a plaintext var, and ' +
+      'Cloudflare gives a config var precedence over any same-named remote secret — so the deploy ' +
+      'would ship an empty value for a required secret (overwriting a remote secret if one exists).',
     '',
-    `Remove the empty assignment (${sorted
-      .map((key) => `\`${key}=\``)
-      .join(
-        ', ',
-      )}) from your .env files (so a remote secret can take effect), or set a real value.`,
+    'Remove the empty assignment (so a remote secret can take effect), or set a real value:',
+    ...sorted.map((key) => `  • ${key} — from ${describeVarSource(sources[key])}`),
   ];
   const safeReport: EnvValidationReport = {
     valid: false,
