@@ -208,6 +208,25 @@ describe('collectPlaintextVarWarnings — plaintext worker-vars classification',
     expect(result.totalVarKeys).toBe(2);
     expect(result.secretKeys).toEqual([{ key: 'NESTED_API_KEY', reason: 'heuristic' }]);
   });
+
+  it('warns a secret-looking void.json worker.vars key the build bakes into vars, even with no dotenv entry', async () => {
+    const root = createTempProject({ withEnvTs: false });
+    // The build seeds worker vars from void.json `worker.vars` (index.ts ~924)
+    // as PLAINTEXT — with no dotenv entry and no schema default. The effective
+    // var union must include it and the heuristic must flag the secret-looking
+    // key; the benign one stays out of secretKeys but counts toward the total.
+    writeFileSync(
+      join(root, 'void.json'),
+      JSON.stringify({ worker: { vars: { API_SECRET: 'sk_live_configured', PLAIN: '1' } } }),
+    );
+
+    const result = await collectPlaintextVarWarnings(root);
+
+    expect(result.totalVarKeys).toBe(2);
+    expect(result.secretKeys).toEqual([{ key: 'API_SECRET', reason: 'heuristic' }]);
+    // Keys only — the configured value must never ride along on the result.
+    expect(JSON.stringify(result)).not.toContain('sk_live_configured');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -788,6 +807,142 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       const envError = error as SelfHostEnvValidationError;
       expect(envError.report.missing).toEqual(['FOO']);
       expect(envError.message).toContain('wrangler secret put');
+    });
+  });
+
+  // --- Effective build map: configured worker vars (void.json / root wrangler) ---
+  //
+  // The build assembles the deployed `vars` from FOUR sources (index.ts): root
+  // wrangler `vars` (lowest) < schema defaults < void.json `worker.vars` <
+  // sanitized dotenv (highest). The gate must judge present/empty/absent over
+  // that FINAL resolved map, not the dotenv layer alone — else a configured
+  // empty required var reads as ABSENT and a remote secret wrongly discharges
+  // it, while the build ships `FOO=""` OVER that remote secret (the F2 fail-open,
+  // new source), and a configured non-empty value is misclassified as absent.
+
+  describe('effective build map — configured worker vars', () => {
+    function writeVoidJson(root: string, vars: Record<string, string>): void {
+      writeFileSync(join(root, 'void.json'), JSON.stringify({ worker: { vars } }));
+    }
+    function writeWranglerConfig(root: string, config: Record<string, unknown>): string {
+      const path = join(root, 'wrangler.jsonc');
+      writeFileSync(path, JSON.stringify(config));
+      return path;
+    }
+
+    it('void.json worker.vars.FOO="" + remote FOO fails CLOSED (fail-OPEN under the dotenv-only pre-fix map)', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      // Configured empty required var — the build bakes `FOO=""` into plaintext
+      // vars, which wrangler gives precedence over the same-named remote secret.
+      writeVoidJson(root, { FOO: '' });
+      const { run, calls } = stubRunner(okList(['FOO']));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
+      expect((error as Error).message).toContain('Remove the empty assignment');
+      expect((error as Error).message).not.toContain('wrangler secret put');
+      // Rejected BEFORE any wrangler spawn — remote membership is irrelevant.
+      expect(calls).toEqual([]);
+    });
+
+    it('root wrangler.jsonc vars.FOO="" + remote FOO fails CLOSED (same fail-open source via the root config)', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      const configPath = writeWranglerConfig(root, { name: 'app', vars: { FOO: '' } });
+      const { run, calls } = stubRunner(okList(['FOO']));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
+      expect((error as Error).message).toContain('Remove the empty assignment');
+      expect(calls).toEqual([]);
+    });
+
+    it('void.json worker.vars.FOO="realvalue" counts PRESENT — first deploy passes with wrangler [] (no false block)', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      writeVoidJson(root, { FOO: 'realvalue' });
+      const { run, calls } = stubRunner(okList([]));
+
+      const result = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      });
+
+      // Present-and-non-empty in the effective map → satisfied locally, so no
+      // wrangler round-trip and no false "missing secret" on a first deploy.
+      expect(result).toEqual({ hasSchema: true, remoteSecretNames: null });
+      expect(calls).toEqual([]);
+    });
+
+    it('a non-empty void.json value shadows a root wrangler empty (precedence: void.json > root wrangler) → passes', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      // Root wrangler has FOO="" (lowest), void.json overrides it non-empty.
+      const configPath = writeWranglerConfig(root, { name: 'app', vars: { FOO: '' } });
+      writeVoidJson(root, { FOO: 'from-void-json' });
+      const { run, calls } = stubRunner(okList([]));
+
+      const result = await validateSelfHostProdEnv(root, {
+        configPath,
+        runWrangler: run,
+      });
+
+      expect(result).toEqual({ hasSchema: true, remoteSecretNames: null });
+      expect(calls).toEqual([]);
+    });
+
+    it('dotenv OVERRIDES a configured empty back to non-empty (final precedence: dotenv > void.json)', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      writeVoidJson(root, { FOO: '' }); // configured empty (lower precedence)
+      writeDotenv(root, '.env.production', 'FOO=real-foo\n'); // dotenv wins
+      const { run, calls } = stubRunner(okList([]));
+
+      const result = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      });
+
+      // dotenv value wins → FOO present-non-empty → satisfied locally, no throw.
+      expect(result).toEqual({ hasSchema: true, remoteSecretNames: null });
+      expect(calls).toEqual([]);
+    });
+
+    it('dotenv OVERRIDES a configured non-empty to empty → fails CLOSED (final precedence: dotenv > void.json)', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      writeVoidJson(root, { FOO: 'configured-real' }); // configured non-empty (lower)
+      writeDotenv(root, '.env.production', 'FOO=\n'); // dotenv empties it (wins)
+      const { run } = stubRunner(okList(['FOO']));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
+      expect((error as Error).message).toContain('Remove the empty assignment');
     });
   });
 
