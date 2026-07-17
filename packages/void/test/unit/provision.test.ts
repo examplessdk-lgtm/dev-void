@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdir,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpath,
   realpathSync,
@@ -4253,10 +4254,18 @@ describe('provisionCloudflareResources — F2 quarantine retains the whole-provi
     // possibly-live wrangler child. (A non-quarantine failure releases it — see the
     // whole-provision lock suite.)
     expect(existsSync(lockMutex)).toBe(true);
-    // Cleanup: remove the retained mutex so later tests can lock again. quarantine()
-    // detached the lock from proper-lockfile's tracking, so no heartbeat/compromise
-    // callback fires after this removal.
+    // F2 (round 12) — the quarantine ALSO persisted its owner metadata beside the lock,
+    // so later acquisitions gate on the recorded group instead of stealing by age.
+    const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
+    expect(existsSync(sidecar)).toBe(true);
+    const recorded = JSON.parse(readFileSync(sidecar, 'utf-8')) as Record<string, unknown>;
+    expect(recorded.pid).toBe(43210);
+    expect(String(recorded.reason)).toMatch(/pid 43210/);
+    // Cleanup: remove the retained mutex + sidecar so later tests can lock again.
+    // quarantine() detached the lock from proper-lockfile's tracking, so no
+    // heartbeat/compromise callback fires after this removal.
     rmSync(lockMutex, { recursive: true, force: true });
+    rmSync(sidecar, { force: true });
   });
 
   it('a NON-quarantine failure still releases the mutex (baseline)', async () => {
@@ -4364,6 +4373,303 @@ describe('createDefaultRunWrangler — F2 parent-signal forwarding awaits confir
       }
     }
   }, 20_000);
+});
+
+describe('createDefaultRunWrangler — F1 normal close confirms the whole GROUP (round 12)', () => {
+  const F1R12_TMP = join(import.meta.dirname, '.tmp-f1-round12');
+  beforeEach(() => {
+    rmSync(F1R12_TMP, { recursive: true, force: true });
+    mkdirSync(F1R12_TMP, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(F1R12_TMP, { recursive: true, force: true });
+  });
+
+  it('an exit-0 leader that leaves a SAME-GROUP grandchild alive: the runner resolves only after the group is dead', async () => {
+    // Pre-fix, a normal `close` resolved IMMEDIATELY without probing the detached
+    // process group, so a surviving same-group grandchild (own stdio, so `close` fires
+    // at the leader's exit) kept running after the whole-provision lock was released.
+    const gcPidFile = join(F1R12_TMP, 'gc.pid');
+    const gc = join(F1R12_TMP, 'gc.cjs');
+    writeFileSync(
+      gc,
+      `require('fs').writeFileSync(${JSON.stringify(gcPidFile)}, String(process.pid));\n` +
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const leader = join(F1R12_TMP, 'leader.cjs');
+    writeFileSync(
+      leader,
+      `const { spawn } = require('child_process');\n` +
+        `const fs = require('fs');\n` +
+        // Same process group (not detached), but its OWN stdio — so the leader's exit
+        // fires `close` while the grandchild lives on in the group.
+        `const c = spawn(process.execPath, [${JSON.stringify(gc)}], { stdio: 'ignore' });\n` +
+        `c.unref();\n` +
+        `setInterval(() => {\n` +
+        `  if (fs.existsSync(${JSON.stringify(gcPidFile)})) { process.exit(0); }\n` +
+        `}, 10);\n`,
+    );
+    const run = createDefaultRunWrangler(F1R12_TMP, {
+      launcher: [process.execPath, leader],
+      timeoutMs: 30_000,
+    });
+    const result = await run(['d1', 'list', '--json'], { accountId: 'acct' });
+    // The leader's own clean exit is reported faithfully...
+    expect(result.status).toBe(0);
+    expect(result.signal).toBeNull();
+    // ...but ONLY once the whole group is confirmed dead: the surviving grandchild was
+    // reaped BEFORE the promise resolved (pre-fix it was still alive here).
+    const gcPid = Number(readFileSync(gcPidFile, 'utf-8'));
+    expect(Number.isInteger(gcPid)).toBe(true);
+    let alive = true;
+    try {
+      process.kill(gcPid, 0);
+    } catch {
+      alive = false;
+    }
+    try {
+      process.kill(gcPid, 'SIGKILL'); // belt + braces: never leak on assertion failure
+    } catch {
+      // already gone
+    }
+    expect(alive).toBe(false);
+  }, 15_000);
+});
+
+describe('acquireProvisionLock — F2 quarantine sidecar gate (round 12)', () => {
+  const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
+  const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
+
+  async function waitForDead(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
+  }
+
+  it('a quarantined mutex is NOT stealable by age while the recorded group lives (fail closed, sidecar atomic)', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { spawn } = await import('node:child_process');
+    // A REAL live process group standing in for the unconfirmed wrangler child.
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    try {
+      const lock = await acquireProvisionLock(wranglerPath);
+      lock.quarantine({ pid: child.pid, reason: 'test quarantine (child unconfirmed)' });
+      // The sidecar is complete, valid JSON (atomic tmp+rename — a concurrent gate can
+      // never read partial JSON) with no temp-file leftovers.
+      const recorded = JSON.parse(readFileSync(sidecar, 'utf-8')) as Record<string, unknown>;
+      expect(recorded).toMatchObject({
+        pid: child.pid,
+        pgid: child.pid,
+        reason: 'test quarantine (child unconfirmed)',
+      });
+      expect(typeof recorded.quarantinedAt).toBe('string');
+      expect(readdirSync(tmpDir).filter((f) => f.includes('.tmp-'))).toEqual([]);
+      expect(existsSync(lockMutex)).toBe(true);
+      // Age the retained mutex FAR past any stale window — pre-fix, proper-lockfile's
+      // mtime-stale path deleted + reacquired it here while the child group was alive.
+      const old = new Date(Date.now() - 3_600_000);
+      utimesSync(lockMutex, old, old);
+      await expect(
+        acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 0 }),
+      ).rejects.toThrow(
+        new RegExp(`QUARANTINED.*process group ${child.pid}.*test quarantine`, 's'),
+      );
+      // The gate did NOT clear the quarantine (the group still lives).
+      expect(existsSync(sidecar)).toBe(true);
+      expect(existsSync(lockMutex)).toBe(true);
+    } finally {
+      try {
+        process.kill(-child.pid!, 'SIGKILL');
+      } catch {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    }
+    expect(await waitForDead(child.pid!, 5_000)).toBe(true);
+  });
+
+  it('once the recorded group is DEAD, the next acquisition clears the sidecar and proceeds', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    const lock = await acquireProvisionLock(wranglerPath);
+    lock.quarantine({ pid: child.pid, reason: 'test quarantine' });
+    try {
+      process.kill(-child.pid!, 'SIGKILL');
+    } catch {
+      child.kill('SIGKILL');
+    }
+    expect(await waitForDead(child.pid!, 5_000)).toBe(true);
+    // Backdate the retained mutex so proper-lockfile's ordinary stale lifecycle reclaims
+    // it promptly (the gate itself never removes the mutex directory by hand).
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(lockMutex, old, old);
+    const second = await acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 5 });
+    // The gate probed the recorded group dead → cleared the sidecar → acquisition ran.
+    expect(existsSync(sidecar)).toBe(false);
+    await second.release();
+    expect(existsSync(lockMutex)).toBe(false);
+  });
+
+  it('an unreadable/malformed sidecar FAILS CLOSED (cannot verify the recorded owner)', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    writeFileSync(sidecar, '{ not json');
+    await expect(
+      acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 0 }),
+    ).rejects.toThrow(/QUARANTINED.*an unrecorded process/s);
+    expect(existsSync(sidecar)).toBe(true);
+  });
+});
+
+describe('createDefaultRunWrangler — F1/F2 signal-path kill failure quarantines the lock (round 12, child-process)', () => {
+  const SIG12_TMP = join(import.meta.dirname, '.tmp-f1f2-signal-round12');
+  beforeEach(() => {
+    rmSync(SIG12_TMP, { recursive: true, force: true });
+    mkdirSync(SIG12_TMP, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(SIG12_TMP, { recursive: true, force: true });
+  });
+
+  async function waitForDead(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
+  }
+
+  it('SIGTERM + an injected kill FAILURE: the parent dies with mutex + sidecar RETAINED; the gate blocks until the child dies', async () => {
+    // Pre-fix, the signal-forwarding path re-raised IMMEDIATELY on a non-ESRCH kill
+    // failure — the parent died, proper-lockfile's exit hook removed the still-tracked
+    // mutex, and the live wrangler child kept creating resources with NO lock on disk.
+    const appRoot = join(SIG12_TMP, 'app');
+    const pidFile = join(SIG12_TMP, 'child.pid');
+    const hungCli = join(SIG12_TMP, 'hung.cjs');
+    writeFileSync(
+      hungCli,
+      `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
+        `process.on('SIGTERM', () => {});\n` +
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const parentScript = join(SIG12_TMP, 'parent.mjs');
+    const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
+    writeFileSync(
+      parentScript,
+      `import { mkdirSync, writeFileSync } from 'node:fs';\n` +
+        `import { join } from 'node:path';\n` +
+        `import { provisionCloudflareResources, createDefaultRunWrangler } from ${JSON.stringify(provisionUrl)};\n` +
+        `const root = ${JSON.stringify(appRoot)};\n` +
+        `mkdirSync(root, { recursive: true });\n` +
+        `const cfg = join(root, 'wrangler.jsonc');\n` +
+        `writeFileSync(cfg, JSON.stringify({ name: 'app', account_id: 'acct' }));\n` +
+        `const runner = createDefaultRunWrangler(root, {\n` +
+        `  launcher: [process.execPath, ${JSON.stringify(hungCli)}, ${JSON.stringify(pidFile)}],\n` +
+        `  killProcessGroup: () => {\n` +
+        `    throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });\n` +
+        `  },\n` +
+        `});\n` +
+        `provisionCloudflareResources(root, cfg, { kvNamespaces: [], queues: [], d1: { binding: 'DB', name: 'myapp-db' } }, {\n` +
+        `  runWrangler: runner,\n` +
+        `  log: { info: () => {}, warn: () => {} },\n` +
+        `}).then(\n` +
+        `  () => console.log('RESOLVED'),\n` +
+        `  (e) => console.log('REJECTED:' + e.message),\n` +
+        `);\n`,
+    );
+    const { spawn } = await import('node:child_process');
+    const parent = spawn(process.execPath, [parentScript], {
+      cwd: SIG12_TMP,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let childPid: number | undefined;
+    try {
+      // Wait until the hung "wrangler" wrote its pid (mid-provision, lock held).
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        if (existsSync(pidFile)) {
+          const raw = readFileSync(pidFile, 'utf-8');
+          if (raw.length > 0) {
+            childPid = Number(raw);
+            break;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(childPid).toBeDefined();
+      parent.kill('SIGTERM');
+      const [, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((res) => {
+        parent.on('exit', (code, sig) => res([code, sig]));
+      });
+      // The parent still dies of the re-raised SIGTERM (default action) — not exit 0.
+      expect(signal).toBe('SIGTERM');
+      // THE crux: at parent exit the mutex + sidecar are STILL ON DISK — quarantine ran
+      // BEFORE the re-raise, so proper-lockfile's exit sweep skipped the detached lock
+      // while the wrangler child is still alive.
+      const cfgReal = realpathSync(join(appRoot, 'wrangler.jsonc'));
+      const lockMutex = `${cfgReal}.void-provision.lock.lock`;
+      const sidecar = `${cfgReal}.void-provision.lock.quarantine.json`;
+      expect(existsSync(lockMutex)).toBe(true);
+      expect(existsSync(sidecar)).toBe(true);
+      const recorded = JSON.parse(readFileSync(sidecar, 'utf-8')) as Record<string, unknown>;
+      expect(recorded.pid).toBe(childPid);
+      expect(String(recorded.reason)).toMatch(/SIGTERM/);
+      // The child is genuinely still alive — and the F2 gate FAILS CLOSED on it even
+      // with the mutex aged far past the stale window.
+      expect(() => process.kill(childPid!, 0)).not.toThrow();
+      const old = new Date(Date.now() - 3_600_000);
+      utimesSync(lockMutex, old, old);
+      await expect(
+        acquireProvisionLock(cfgReal, { stale: 2_000, retries: 0 }),
+      ).rejects.toThrow(/QUARANTINED/);
+      // Kill the recorded group; the next acquisition clears the quarantine + proceeds.
+      try {
+        process.kill(-childPid!, 'SIGKILL');
+      } catch {
+        process.kill(childPid!, 'SIGKILL');
+      }
+      expect(await waitForDead(childPid!, 5_000)).toBe(true);
+      const lock = await acquireProvisionLock(cfgReal, { stale: 2_000, retries: 5 });
+      expect(existsSync(sidecar)).toBe(false);
+      await lock.release();
+      expect(existsSync(lockMutex)).toBe(false);
+    } finally {
+      // Belt + braces: never leak processes even on assertion failure.
+      try {
+        parent.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+      if (childPid !== undefined) {
+        try {
+          process.kill(childPid, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    }
+  }, 30_000);
 });
 
 describe('withListerDeadline — F3 the deadline holds in a REAL process (round 11, child-process regression)', () => {
