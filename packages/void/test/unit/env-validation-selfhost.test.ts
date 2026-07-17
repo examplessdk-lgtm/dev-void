@@ -405,6 +405,75 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
 
       expect(result).toEqual({ hasSchema: true, remoteSecretNames: ['FOO'] });
     });
+
+    it('fails closed when `FOO=` lives in .env.local — a build-loaded file validateProdEnv does NOT read', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      // .env.local is loaded by the BUILD (loadEnv) but NOT by validateProdEnv's
+      // productionOnly view — the empty-check must consult the full build map,
+      // else FOO reads as ABSENT and the remote secret wrongly discharges it.
+      writeDotenv(root, '.env.local', 'FOO=\n');
+      const { run } = stubRunner(okList(['FOO']));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      const envError = error as SelfHostEnvValidationError;
+      expect(envError.report.missing).toEqual(['FOO']);
+      expect(envError.message).toContain('Remove the empty assignment');
+      expect(envError.message).not.toContain('wrangler secret put');
+    });
+
+    it('fails closed when `FOO=` lives in a custom envDir file the build honours', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      mkdirSync(join(root, 'config'));
+      // Empty FOO in the custom envDir the build reads via userConfig.envDir.
+      writeFileSync(join(root, 'config', '.env.production'), 'FOO=\n');
+      const { run } = stubRunner(okList(['FOO']));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        envDir: 'config',
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
+      expect((error as SelfHostEnvValidationError).message).toContain(
+        'Remove the empty assignment',
+      );
+    });
+
+    it('fails closed when `FOO=` lives in .env.production.local (build overlay)', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      writeDotenv(root, '.env.production.local', 'FOO=\n');
+      const { run } = stubRunner(okList(['FOO']));
+
+      const error = await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+      expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
+      expect((error as SelfHostEnvValidationError).message).toContain(
+        'Remove the empty assignment',
+      );
+    });
   });
 
   // --- F3: account reconciled against the config before spawning wrangler ---
@@ -601,15 +670,18 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       return root;
     }
 
-    it('nonzero exit is a hard failure, never "no secrets exist"', async () => {
+    it('nonzero exit is a hard failure classified structurally (never echoes stderr)', async () => {
       const root = projectMissingFoo();
       const error = await expectSecretListError(root, {
         stdout: '',
         stderr: 'A request to the Cloudflare API failed.',
         status: 1,
       });
+      // Structural code + safe scalar exit code — but never wrangler's stderr.
+      expect(error.reason).toBe('nonzero-exit');
+      expect(error.detail.exitCode).toBe(1);
       expect(error.message).toContain('status 1');
-      expect(error.message).toContain('A request to the Cloudflare API failed.');
+      expect(error.message).not.toContain('A request to the Cloudflare API failed.');
     });
 
     it('a signal-killed child is a hard failure even with status 0', async () => {
@@ -620,10 +692,12 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
         status: 0,
         signal: 'SIGKILL',
       });
+      expect(error.reason).toBe('signal');
+      expect(error.detail.signal).toBe('SIGKILL');
       expect(error.message).toContain('SIGKILL');
     });
 
-    it('a spawn error is a hard failure even with status 0', async () => {
+    it('a spawn error is a hard failure classified structurally (never echoes the spawn text)', async () => {
       const root = projectMissingFoo();
       const error = await expectSecretListError(root, {
         stdout: '[]',
@@ -631,7 +705,8 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
         status: 0,
         error: 'spawn ENOENT',
       });
-      expect(error.message).toContain('spawn ENOENT');
+      expect(error.reason).toBe('spawn-error');
+      expect(error.message).not.toContain('spawn ENOENT');
     });
 
     it('unparseable stdout is a hard failure', async () => {
@@ -662,7 +737,7 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       });
     });
 
-    it('a rejecting seam is wrapped as a hard failure', async () => {
+    it('a rejecting seam is wrapped as a hard failure (never echoes the rejection message)', async () => {
       const root = projectMissingFoo();
       const error = await validateSelfHostProdEnv(root, {
         configPath: CONFIG_PATH,
@@ -672,7 +747,135 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
         (e: unknown) => e,
       );
       expect(error).toBeInstanceOf(SelfHostSecretListError);
-      expect((error as Error).message).toContain('boom');
+      expect((error as SelfHostSecretListError).reason).toBe('spawn-error');
+      expect((error as Error).message).not.toContain('boom');
+    });
+  });
+
+  // --- F5: wrangler failure diagnostics never carry a value, anywhere ---
+
+  describe('F5 — wrangler failure diagnostics are values-free even under VOID_ENV_UNMASK', () => {
+    // A sentinel "secret" a hostile/leaky wrangler could echo into stderr/stdout
+    // or a spawn/rejection message. It must appear NOWHERE in the thrown error.
+    const SENTINEL = 'SENTINEL-sk_live_51H8xLeak-abcXYZ';
+
+    /** Everything an observer could read off the thrown error. */
+    function fullySerialize(error: unknown): string {
+      const e = error as SelfHostSecretListError & {
+        missingKeys?: Array<string>;
+        workerNotFound?: boolean;
+      };
+      return JSON.stringify({
+        name: e.name,
+        message: e.message,
+        stack: e.stack ?? '',
+        reason: e.reason,
+        detail: e.detail,
+        missingKeys: e.missingKeys,
+        workerNotFound: e.workerNotFound,
+        // The error's own enumerable fields (what JSON.stringify(error) exposes).
+        own: e,
+        ownStr: String(e),
+      });
+    }
+
+    async function throwFrom(root: string, result: SecretListRunResult): Promise<unknown> {
+      const { run } = stubRunner(result);
+      return validateSelfHostProdEnv(root, { configPath: CONFIG_PATH, runWrangler: run }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+    }
+
+    function missingFooProject(): string {
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      return root;
+    }
+
+    it.each([
+      {
+        label: 'nonzero exit (sentinel in stderr)',
+        result: { stdout: '', stderr: `boom ${SENTINEL}`, status: 1 } as SecretListRunResult,
+        reason: 'nonzero-exit',
+      },
+      {
+        label: 'signal (sentinel in stderr)',
+        result: {
+          stdout: '',
+          stderr: `killed ${SENTINEL}`,
+          status: 0,
+          signal: 'SIGKILL',
+        } as SecretListRunResult,
+        reason: 'signal',
+      },
+      {
+        label: 'spawn error (sentinel in the error text)',
+        result: {
+          stdout: '',
+          stderr: '',
+          status: 0,
+          error: `spawn failed leaking ${SENTINEL}`,
+        } as SecretListRunResult,
+        reason: 'spawn-error',
+      },
+      {
+        label: 'malformed stdout (sentinel in stdout)',
+        result: { stdout: `not-json ${SENTINEL}`, stderr: '', status: 0 } as SecretListRunResult,
+        reason: 'malformed-output',
+      },
+    ])(
+      'the thrown error is sentinel-free in message/fields/JSON — $label',
+      async ({ result, reason }) => {
+        const root = missingFooProject();
+        vi.stubEnv('VOID_ENV_UNMASK', '1');
+        _resetUnmaskCacheForTests();
+        try {
+          const error = (await throwFrom(root, result)) as SelfHostSecretListError;
+          expect(error).toBeInstanceOf(SelfHostSecretListError);
+          expect(error.reason).toBe(reason);
+          expect(error.message).not.toContain(SENTINEL);
+          expect(fullySerialize(error)).not.toContain(SENTINEL);
+        } finally {
+          vi.unstubAllEnvs();
+          _resetUnmaskCacheForTests();
+        }
+      },
+    );
+
+    it('a rejecting seam whose message carries the sentinel throws sentinel-free', async () => {
+      const root = missingFooProject();
+      const error = (await validateSelfHostProdEnv(root, {
+        configPath: CONFIG_PATH,
+        runWrangler: () => Promise.reject(new Error(`rejected with ${SENTINEL}`)),
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      )) as SelfHostSecretListError;
+      expect(error).toBeInstanceOf(SelfHostSecretListError);
+      expect(error.reason).toBe('spawn-error');
+      expect(error.message).not.toContain(SENTINEL);
+      expect(fullySerialize(error)).not.toContain(SENTINEL);
+    });
+
+    it('first-deploy classification STILL fires from the (internal-only) output, sentinel-free', async () => {
+      const root = createTempProject();
+      defineEnv({ FOO: string(), API_TOKEN: string() });
+      // The worker-not-found signal AND a sentinel share the child's stderr: the
+      // signal must be read (classification), the sentinel must not leak.
+      const error = (await throwFrom(root, {
+        stdout: '',
+        stderr:
+          `Worker "app" not found. ${SENTINEL}\n` +
+          'If this is a new Worker, run `wrangler deploy` first to create it.',
+        status: 1,
+      })) as SelfHostFirstDeployError;
+      expect(error).toBeInstanceOf(SelfHostFirstDeployError);
+      expect(error.workerNotFound).toBe(true);
+      expect([...error.missingKeys].sort()).toEqual(['API_TOKEN', 'FOO']);
+      expect(error.message).toContain('wrangler secret put FOO');
+      expect(error.message).not.toContain(SENTINEL);
+      expect(fullySerialize(error)).not.toContain(SENTINEL);
     });
   });
 });

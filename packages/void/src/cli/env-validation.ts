@@ -74,39 +74,6 @@ function emptyReport(): EnvValidationReport {
   return { valid: true, missing: [], invalid: [], values: new Map() };
 }
 
-/** UTF-8 BOM, stripped before JSONC parsing (matches provision.ts readRootConfig). */
-const UTF8_BOM = '﻿';
-
-/**
- * The `.env*` files a validation reads, in precedence order. Deploy mode
- * (`productionOnly`) reads only `.env` + `.env.production`; env-check mode also
- * reads the `.local` overlays.
- */
-function envFilesFor(productionOnly: boolean): Array<string> {
-  return productionOnly
-    ? ['.env', '.env.production']
-    : ['.env', '.env.local', '.env.production', '.env.production.local'];
-}
-
-/**
- * Parse the relevant `.env*` files with expansion disabled, then merge + expand
- * across the union so that (e.g.) `.env.local` can reference a key declared in
- * `.env`. Shared by {@link validateProdEnv} (managed + env-check paths) and the
- * self-host gate's PRESENT-vs-ABSENT classification so both see the identical
- * merged view. `onWarn` lets the self-host reuse pass a no-op so expansion
- * warnings are surfaced exactly once (by validateProdEnv's own merge).
- */
-function loadMergedEnvFiles(
-  root: string,
-  productionOnly: boolean,
-  onWarn: (msg: string) => void,
-): Record<string, unknown> {
-  const parsedFiles = envFilesFor(productionOnly).map((file) =>
-    parseDotenvFile(join(root, file), { expand: false }),
-  );
-  return mergeAndExpand(parsedFiles, { onWarn });
-}
-
 /**
  * Validate the user's env schema against the union of .env files and
  * remote secret names. Remote secrets are treated as "present" (we can't
@@ -125,7 +92,15 @@ export async function validateProdEnv(
     return { hasSchema: false, report: emptyReport() };
   }
 
-  const merged = loadMergedEnvFiles(root, options.productionOnly, (msg) => voidWarn(msg));
+  const files = options.productionOnly
+    ? ['.env', '.env.production']
+    : ['.env', '.env.local', '.env.production', '.env.production.local'];
+  // Parse each file with expansion disabled, then merge + expand across the
+  // union so that (e.g.) `.env.local` can reference a key declared in `.env`.
+  const parsedFiles = files.map((file) => parseDotenvFile(join(root, file), { expand: false }));
+  const merged: Record<string, unknown> = mergeAndExpand(parsedFiles, {
+    onWarn: (msg) => voidWarn(msg),
+  });
 
   const report = await mod.validateAllEnv(merged);
   // Remote secrets are present on the deployed worker but not readable here,
@@ -231,6 +206,36 @@ export type CollectPlaintextVarWarningsOptions = {
 };
 
 /**
+ * The EXACT sanitized worker-vars map the BUILD assembles from `.env*` files,
+ * mirroring `envPlugin.config` in index.ts byte-for-byte: `loadEnv(mode, envDir,
+ * '')` (all `.env*` files for the mode + process.env) → {@link filterLoadedEnv}
+ * (drop shell-env pollution, keep only `.env`-file keys) → {@link
+ * stripInternalEnvKeys} (drop reserved `__VOID_*` keys). Returns the surviving
+ * `sanitized` map — the values baked into `wrangler.json` `vars` as PLAINTEXT.
+ *
+ * Shared by the WARN unit ({@link collectPlaintextVarWarnings}) and the GATE's
+ * F2 empty-collision fence ({@link validateSelfHostProdEnv}) so the two units
+ * can NEVER diverge on which keys/values the build actually ships. `envDir`
+ * resolution matches `envPlugin.config` exactly: a non-empty string `envDir` is
+ * joined to `root`, else `root`; `mode` defaults to the deploy build's
+ * `'production'`. Callers that only need emptiness (F2) inspect values locally
+ * and never let one escape.
+ */
+function loadSanitizedBuildEnv(
+  root: string,
+  options: { envDir?: string; mode?: string },
+): Record<string, string> {
+  const mode = options.mode ?? 'production';
+  const envDir =
+    typeof options.envDir === 'string' && options.envDir.length > 0
+      ? join(root, options.envDir)
+      : root;
+  const filtered = filterLoadedEnv(loadEnv(mode, envDir, ''));
+  const { sanitized } = stripInternalEnvKeys(filtered);
+  return sanitized;
+}
+
+/**
  * WARN unit — determine exactly the keys the BUILD will merge into worker
  * `vars` and classify the secret-looking ones.
  *
@@ -260,18 +265,9 @@ export async function collectPlaintextVarWarnings(
   root: string,
   options: CollectPlaintextVarWarningsOptions = {},
 ): Promise<PlaintextVarWarningsResult> {
-  const mode = options.mode ?? 'production';
-  // Same envDir resolution as envPlugin.config: honour a non-empty string
-  // `envDir` relative to root, else fall back to the project root.
-  const envDir =
-    typeof options.envDir === 'string' && options.envDir.length > 0
-      ? join(root, options.envDir)
-      : root;
-  // loadEnv with prefix "" returns .env-file vars AND all process.env vars;
-  // filterLoadedEnv keeps only the .env-file ones, stripInternalEnvKeys drops
-  // reserved __VOID_* keys — byte-for-byte the build's dotenv assembly.
-  const filtered = filterLoadedEnv(loadEnv(mode, envDir, ''));
-  const { sanitized } = stripInternalEnvKeys(filtered);
+  // The build's exact plaintext var map (loadEnv → filterLoadedEnv →
+  // stripInternalEnvKeys), reused verbatim by the F2 empty-collision fence.
+  const sanitized = loadSanitizedBuildEnv(root, options);
 
   // Registered schema (if the project has an env.ts) for explicit overrides
   // AND its registered defaults — the build merges BOTH into workerConfig.vars.
@@ -337,13 +333,65 @@ export type RunSecretList = (
 ) => SecretListRunResult | Promise<SecretListRunResult>;
 
 /**
+ * F5 — the STABLE, values-free classification of a hard secret-list failure.
+ * The child inherits `process.env`, so a wrangler/OS/config diagnostic can
+ * embed an env value; the raw rejection/stderr/stdout text is therefore used
+ * only INTERNALLY (worker-not-found classification) and NEVER copied into a
+ * thrown error. Every {@link SelfHostSecretListError} instead carries one of
+ * these codes plus safe scalars (exit code / signal name), so neither the
+ * message, the attached fields, nor the JSON serialization can echo a value.
+ *   - `spawn-error`      — the child could not be launched (runner threw, or
+ *                          reported a spawn `error`).
+ *   - `nonzero-exit`     — clean nonzero exit (wrangler's own error).
+ *   - `signal`           — terminated by a signal (includes the timeout SIGKILL).
+ *   - `malformed-output` — exit 0 but stdout was not the expected JSON array of
+ *                          `{ name }` secret objects.
+ *   - `account-mismatch` — F3 config-vs-requested account gate (thrown before any
+ *                          spawn; its message names the account IDs, which are
+ *                          caller/config identifiers, not wrangler output).
+ */
+export type SecretListFailureReason =
+  | 'spawn-error'
+  | 'nonzero-exit'
+  | 'signal'
+  | 'malformed-output'
+  | 'account-mismatch';
+
+/** Wrangler-run failure reasons (excludes the pre-spawn `account-mismatch`). */
+type SecretListRunFailureReason = Exclude<SecretListFailureReason, 'account-mismatch'>;
+
+/** Safe scalars attached to a {@link SelfHostSecretListError} — never wrangler output. */
+export type SecretListFailureDetail = {
+  /** The child's exit code, when it exited (nonzero-exit). */
+  exitCode?: number;
+  /** The terminating signal name, when killed (signal). */
+  signal?: string;
+};
+
+/**
  * Hard failure fetching the remote secret list (spawn error, signal, nonzero
  * exit, timeout, or malformed output). DISTINCT from
  * {@link SelfHostEnvValidationError}: this means "we could not learn what
  * secrets exist" (fail closed), never "a required secret is missing".
+ *
+ * F5 — the message and attached fields are values-free by construction: only
+ * the structural {@link SecretListFailureReason} code and safe scalars
+ * ({@link SecretListFailureDetail}) are exposed. Raw wrangler output (stderr,
+ * stdout, rejection/spawn-error text) is NEVER stored here, so no env value the
+ * child may have echoed can reach `Error.message`, the `reason`/`detail`
+ * fields, or their JSON serialization — even under `VOID_ENV_UNMASK`.
  */
 export class SelfHostSecretListError extends Error {
   override name = 'SelfHostSecretListError';
+  constructor(
+    message: string,
+    /** Stable, values-free failure classification. */
+    public readonly reason: SecretListFailureReason,
+    /** Safe scalars (exit code / signal name) — never contain wrangler output. */
+    public readonly detail: SecretListFailureDetail = {},
+  ) {
+    super(message);
+  }
 }
 
 /**
@@ -368,8 +416,12 @@ export class SelfHostFirstDeployError extends SelfHostSecretListError {
     message: string,
     /** Required schema key NAMES still unsatisfied locally (values-free). */
     public readonly missingKeys: Array<string>,
+    /** The clean nonzero exit code wrangler surfaced (safe scalar). */
+    exitCode?: number,
   ) {
-    super(message);
+    // Structurally still a nonzero-exit; `message` is the values-free
+    // first-deploy guidance and `missingKeys` carries the names.
+    super(message, 'nonzero-exit', { exitCode });
   }
 }
 
@@ -409,6 +461,22 @@ export type ValidateSelfHostProdEnvOptions = {
    * `secret list` can never consult a different ambient account.
    */
   accountId?: string;
+  /**
+   * The user's Vite `envDir`, passed RAW — MUST be the same value handed to
+   * {@link collectPlaintextVarWarnings} and the build. Used only to reconstruct
+   * the EXACT sanitized build var map for the F2 empty-collision fence (via
+   * {@link loadSanitizedBuildEnv}), so the gate sees precisely the `.env*`
+   * sources the build bakes (incl. `.env.local` / a custom envDir). Resolved
+   * the same way the build does: non-empty string → `join(root, envDir)`, else
+   * `root`.
+   */
+  envDir?: string;
+  /**
+   * The Vite mode the build runs under — MUST match the build / WARN unit.
+   * Deploy builds use `'production'` (default). Selects the `.env.<mode>` files
+   * the F2 build-map fence reads.
+   */
+  mode?: string;
   /** Test seam — injectable wrangler runner. Defaults to the real spawn-based runner. */
   runWrangler?: RunSecretList;
   /** Test seam — hard timeout for the default runner (ms). */
@@ -484,10 +552,17 @@ export async function validateSelfHostProdEnv(
   // runner is created or invoked, and pin the ONE reconciled account.
   const effectiveAccountId = reconcileSelfHostAccount(options.configPath, options.accountId);
 
-  // F2 — classify each required-missing key as PRESENT-but-EMPTY (`FOO=`) vs
-  // genuinely ABSENT, using the same merged .env view validateProdEnv sees
-  // (onWarn no-op: validateProdEnv's own merge already surfaced any warnings).
-  const mergedLocal = loadMergedEnvFiles(root, true, () => {});
+  // F2 — reconstruct the EXACT sanitized var map the BUILD will bake
+  // (loadEnv → filterLoadedEnv → stripInternalEnvKeys over the FULL build file
+  // set: `.env` + `.env.local` + `.env.<mode>` + `.env.<mode>.local`, honouring
+  // a custom `envDir`), reusing {@link loadSanitizedBuildEnv} — the SAME
+  // assembly the WARN unit uses, so the two units can never diverge on which
+  // empty assignments the build ships. `validateProdEnv` above sees only
+  // `.env` + `.env.production`, so a key emptied in `.env.local` (or a custom
+  // envDir) reads as genuinely ABSENT there and would be wrongly discharged by
+  // a remote secret; this fuller map is what catches that. Only emptiness is
+  // inspected here — no value leaves this function or reaches any error/log.
+  const buildEnv = loadSanitizedBuildEnv(root, { envDir: options.envDir, mode: options.mode });
 
   const run =
     options.runWrangler ??
@@ -501,13 +576,14 @@ export async function validateSelfHostProdEnv(
     local.report.missing,
   );
 
-  // F2 — a required key that is empty locally AND exists as a remote secret is
-  // a shadow collision: the empty plaintext var would overwrite the secret.
-  // Fail closed naming those keys (never discharge them) with guidance to
-  // remove the empty assignment.
+  // F2 — a required key that is present-and-EMPTY in ANY build-loaded source
+  // AND exists as a remote secret is a shadow collision: the empty plaintext
+  // var would overwrite the secret (wrangler gives a config var precedence over
+  // a same-named remote secret). Fail closed naming those keys (never discharge
+  // them) with guidance to remove the empty assignment.
   const remoteSet = new Set(remoteSecretNames);
   const emptyOverrides = local.report.missing.filter(
-    (key) => remoteSet.has(key) && Object.hasOwn(mergedLocal, key) && mergedLocal[key] === '',
+    (key) => remoteSet.has(key) && Object.hasOwn(buildEnv, key) && buildEnv[key] === '',
   );
   if (emptyOverrides.length > 0) {
     throw emptyAssignmentError(emptyOverrides);
@@ -547,10 +623,14 @@ function reconcileSelfHostAccount(
         `${JSON.stringify(requestedAccountId)} — a same-named secret there could falsely pass this ` +
         `preflight. Reconcile them (correct or remove the config's account_id, or deploy to the ` +
         `pinned account) and retry.`,
+      'account-mismatch',
     );
   }
   return configAccountId ?? requestedAccountId;
 }
+
+/** UTF-8 BOM, stripped before JSONC parsing (matches provision.ts readRootConfig). */
+const UTF8_BOM = '﻿';
 
 /** True when `value` is a non-array object (JSONC-parsed config record). */
 function isConfigRecord(value: unknown): value is Record<string, unknown> {
@@ -657,16 +737,15 @@ function emptyAssignmentError(keys: Array<string>): SelfHostEnvValidationError {
     'Empty env assignment would shadow a remote secret:',
     ...sorted.map((key) => `  • ${key}`),
     '',
-    'These keys are set to an EMPTY value in .env / .env.production but also exist as remote ' +
-      'worker secrets. The build bakes the empty value into the worker config as a plaintext var, ' +
-      'and Cloudflare gives a config var precedence over the remote secret — so the deploy would ' +
-      'overwrite the secret with an empty value.',
+    'These keys are set to an EMPTY value in one of your build-loaded .env files (.env, ' +
+      '.env.local, .env.production, .env.production.local, or your configured envDir) but also ' +
+      'exist as remote worker secrets. The build bakes the empty value into the worker config as a ' +
+      'plaintext var, and Cloudflare gives a config var precedence over the remote secret — so the ' +
+      'deploy would overwrite the secret with an empty value.',
     '',
     `Remove the empty assignment (${sorted
       .map((key) => `\`${key}=\``)
-      .join(
-        ', ',
-      )}) from .env / .env.production so the remote secret takes effect, or set a real value.`,
+      .join(', ')}) from your .env files so the remote secret takes effect, or set a real value.`,
   ];
   const safeReport: EnvValidationReport = {
     valid: false,
@@ -735,6 +814,51 @@ function isWorkerNotFoundOutput(output: string): boolean {
 }
 
 /**
+ * F5 — build the THROWN message for a wrangler-run failure from the structural
+ * reason code + safe scalars ONLY. It NEVER interpolates `result.stderr`,
+ * `result.stdout`, a spawn-error string, or a rejection message — those are
+ * unconstrained (the child inherits `process.env`) and could embed an env
+ * value. Where wrangler's own diagnostics would help, the message tells the
+ * user to re-run wrangler themselves rather than echoing its output here.
+ */
+function secretListFailureMessage(
+  reason: SecretListRunFailureReason,
+  detail: SecretListFailureDetail,
+): string {
+  const base = 'env: `wrangler secret list` could not confirm the remote secrets';
+  switch (reason) {
+    case 'spawn-error':
+      return (
+        `${base} (reason: spawn-error) — the wrangler process could not be started. ` +
+        'Check that wrangler is installed and the pinned config path is valid.'
+      );
+    case 'signal':
+      return (
+        `${base} (reason: signal) — the process was terminated by ` +
+        `${detail.signal ?? 'a signal'} before completing.`
+      );
+    case 'nonzero-exit':
+      return (
+        `${base} (reason: nonzero-exit, status ${detail.exitCode ?? 'unknown'}). ` +
+        'Re-run `wrangler secret list -c <config>` to see wrangler’s own diagnostics.'
+      );
+    case 'malformed-output':
+      return (
+        `${base} (reason: malformed-output) — \`wrangler secret list --format=json\` ` +
+        'did not return the expected JSON array of secret objects.'
+      );
+  }
+}
+
+/** Construct a values-free {@link SelfHostSecretListError} for a run failure. */
+function secretListError(
+  reason: SecretListRunFailureReason,
+  detail: SecretListFailureDetail = {},
+): SelfHostSecretListError {
+  return new SelfHostSecretListError(secretListFailureMessage(reason, detail), reason, detail);
+}
+
+/**
  * Run `wrangler secret list` through the seam and parse STRICTLY, failing
  * CLOSED: any signal, spawn error, nonzero exit, unparseable stdout, or
  * malformed list member throws {@link SelfHostSecretListError}. A failure here
@@ -745,6 +869,13 @@ function isWorkerNotFoundOutput(output: string): boolean {
  * DISTINCT, structured {@link SelfHostFirstDeployError} (F4) carrying the still
  * unsatisfied required `missingKeys` + `wrangler secret put` bootstrap guidance,
  * instead of the generic "list exited nonzero" dead end.
+ *
+ * F5 — raw child output (stderr/stdout, spawn-error text, rejection messages)
+ * is used ONLY internally: for worker-not-found classification the combined
+ * output is matched to a boolean that never leaves this function. Every THROWN
+ * error carries only a structural {@link SecretListFailureReason} code and safe
+ * scalars (exit code / signal name), so no env value the child may have echoed
+ * can reach the error's message, fields, or JSON — even under `VOID_ENV_UNMASK`.
  */
 async function fetchSelfHostSecretNames(
   run: RunSecretList,
@@ -754,49 +885,42 @@ async function fetchSelfHostSecretNames(
   let result: SecretListRunResult;
   try {
     result = await Promise.resolve(run(secretListArgs(configPath)));
-  } catch (err) {
-    throw new SelfHostSecretListError(
-      `env: failed to run \`wrangler secret list\`: ${(err as Error).message}`,
-    );
+  } catch {
+    // The runner threw — the child produced no usable result. The rejection
+    // message is unconstrained (could embed a value), so it is DROPPED; only
+    // the structural code survives.
+    throw secretListError('spawn-error');
   }
   if (result.error != null && result.error !== '') {
-    throw new SelfHostSecretListError(
-      `env: \`wrangler secret list\` could not be started: ${result.error}`,
-    );
+    // Spawn-error string is unconstrained wrangler/OS text — dropped.
+    throw secretListError('spawn-error');
   }
   if (result.signal != null) {
-    throw new SelfHostSecretListError(
-      `env: \`wrangler secret list\` was terminated by ${result.signal} before completing.` +
-        formatStderrTail(result.stderr),
-    );
+    // Signal name is a safe scalar; stderr is NOT surfaced.
+    throw secretListError('signal', { signal: String(result.signal) });
   }
   if (typeof result.status !== 'number' || result.status !== 0) {
-    // F4 — a not-yet-deployed worker: surface the missing key names + bootstrap
-    // guidance rather than the circular "deploy first" list failure. Only a
-    // clean nonzero exit reaches here (signal/spawn-error handled above), which
-    // is exactly how wrangler's worker-not-found UserError surfaces.
+    const exitCode = typeof result.status === 'number' ? result.status : undefined;
+    // F4 — a not-yet-deployed worker: classify from the child's combined output
+    // INTERNALLY (the match result is a boolean that never leaves), then surface
+    // the missing key names + bootstrap guidance rather than the circular
+    // "deploy first" list failure. Only a clean nonzero exit reaches here
+    // (signal/spawn-error handled above), exactly how wrangler's worker-not-found
+    // UserError surfaces. The output itself is NOT copied into the thrown error.
     if (isWorkerNotFoundOutput(`${result.stdout}\n${result.stderr}`)) {
-      throw new SelfHostFirstDeployError(firstDeployMessage(missingKeys), missingKeys);
+      throw new SelfHostFirstDeployError(firstDeployMessage(missingKeys), missingKeys, exitCode);
     }
-    throw new SelfHostSecretListError(
-      `env: \`wrangler secret list\` exited with status ${String(result.status)}.` +
-        formatStderrTail(result.stderr),
-    );
+    throw secretListError('nonzero-exit', { exitCode });
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(result.stdout);
   } catch {
-    throw new SelfHostSecretListError(
-      `env: \`wrangler secret list --format=json\` produced unparseable output` +
-        formatSnippet(result.stdout),
-    );
+    // The unparseable stdout is NOT echoed (it could embed a value).
+    throw secretListError('malformed-output');
   }
   if (!Array.isArray(parsed)) {
-    throw new SelfHostSecretListError(
-      `env: \`wrangler secret list --format=json\` did not return a JSON array` +
-        formatSnippet(result.stdout),
-    );
+    throw secretListError('malformed-output');
   }
   const names: Array<string> = [];
   for (const member of parsed) {
@@ -807,34 +931,11 @@ async function fetchSelfHostSecretNames(
         ? (member as { name?: unknown }).name
         : undefined;
     if (typeof name !== 'string' || name.length === 0) {
-      throw new SelfHostSecretListError(
-        'env: `wrangler secret list --format=json` returned a malformed list member ' +
-          '(expected every member to be an object with a non-empty string `name`).',
-      );
+      throw secretListError('malformed-output');
     }
     names.push(name);
   }
   return names;
-}
-
-/** Bounded stderr tail for diagnostics (secret list stderr carries no values). */
-function formatStderrTail(stderr: string): string {
-  const trimmed = stderr.trim();
-  if (trimmed.length === 0) {
-    return '';
-  }
-  const tail = trimmed.length > 2000 ? `…${trimmed.slice(-2000)}` : trimmed;
-  return `\n${tail}`;
-}
-
-/** Bounded stdout snippet for parse-failure diagnostics. */
-function formatSnippet(stdout: string): string {
-  const trimmed = stdout.trim();
-  if (trimmed.length === 0) {
-    return ' (stdout was empty).';
-  }
-  const snippet = trimmed.length > 400 ? `${trimmed.slice(0, 400)}…` : trimmed;
-  return `:\n${snippet}`;
 }
 
 /**
