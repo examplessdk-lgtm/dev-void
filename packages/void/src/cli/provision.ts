@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import {
   closeSync,
   existsSync,
@@ -712,12 +712,13 @@ export interface QuarantineInfo {
  * could NOT be confirmed, proper-lockfile's signal-exit sweep would remove every
  * still-TRACKED provision mutex — releasing the lock under a possibly-live child.
  * {@link provisionCloudflareResources} registers its lock's `quarantine` here for the
- * duration of the provision; the default runner's signal path invokes every hook
- * SYNCHRONOUSLY (the async quarantine rejection alone might never be observed by a
- * dying event loop) BEFORE re-raising, so the mutex directory + sidecar outlive the
- * process. Conservative on purpose: with multiple concurrent provisions in one process,
- * ALL their locks are retained at signal death (each has in-flight children of its own);
- * a needlessly-retained lock self-heals once its recorded group is confirmed dead.
+ * duration of the provision; the signal COORDINATOR (F2 round 13, below) invokes every
+ * hook SYNCHRONOUSLY (the async quarantine rejection alone might never be observed by a
+ * dying event loop) for each unresolved pair BEFORE re-raising, so the mutex directory +
+ * sidecar outlive the process. Conservative on purpose: with multiple concurrent
+ * provisions in one process, ALL their locks are retained at signal death (each has
+ * in-flight children of its own); a needlessly-retained lock self-heals once its
+ * recorded group is confirmed dead.
  */
 const quarantineBeforeDeathHooks = new Set<(info: QuarantineInfo) => void>();
 
@@ -745,6 +746,219 @@ export function isQuarantineError(error: unknown): error is WranglerQuarantineEr
     error instanceof WranglerQuarantineError ||
     (error as { quarantine?: boolean } | null)?.quarantine === true
   );
+}
+
+// --- F2 (round 13): THE process-wide signal coordinator -------------------------
+// The round-12 code installed per-runner SIGINT/SIGTERM listeners that (a) detached
+// themselves IMMEDIATELY on the first signal — so a REPEATED signal during the bounded
+// teardown took Node's default exit action, killing the parent with every tracked mutex
+// swept and NO sidecar — and (b) re-raised after only THEIR OWN child confirmed — so
+// with concurrent runners the first confirmer killed the parent while another child was
+// still pending. There is now ONE coordinator: runners register their {child
+// process-group, quarantine} pair for the duration of the spawn; listeners are
+// installed only while the registry is non-empty; on the FIRST SIGINT/SIGTERM the
+// coordinator forwards the signal to EVERY registered group, awaits EVERY bounded
+// both-facts confirmation, quarantines each unresolved pair (before-death hooks with
+// that pair's own pid metadata + the runner promise's quarantine rejection), and then
+// re-raises EXACTLY ONCE. Repeated signals during the teardown are coalesced by the
+// still-installed handler (no second re-raise, no default-action bypass). A runner that
+// registers MID-teardown joins it, so the single re-raise never fires over an
+// unsignalled child.
+
+/** F2 (round 13) — what a runner registers with the coordinator for its child's lifetime. */
+interface TerminationRegistrant {
+  /** The child's pid (its process-GROUP id on POSIX), for quarantine metadata. */
+  pid: () => number | undefined;
+  /** Forward `signal` to the child's whole process group (see the runner's signalGroup). */
+  signalGroup: (signal: NodeJS.Signals) => 'signaled' | 'gone' | { error: Error };
+  /** Record that the group is already confirmed gone (an ESRCH outcome of the forward). */
+  markGroupGone: () => void;
+  /** Start the runner's bounded both-facts confirmation; exactly one callback fires. */
+  awaitConfirmedDead: (
+    onDone: (outcome: { confirmed: true } | { confirmed: false; detail: string }) => void,
+  ) => void;
+  /** Reject the runner promise with a quarantine error (idempotent once settled). */
+  quarantine: (detail: string) => void;
+}
+
+interface CoordinatorTeardown {
+  signal: NodeJS.Signals;
+  pending: number;
+  persistFailed: boolean;
+  finished: boolean;
+}
+
+const activeRunners = new Set<TerminationRegistrant>();
+let coordinatorListenersInstalled = false;
+let activeTeardown: CoordinatorTeardown | undefined;
+let reRaisedOnce = false;
+
+const onCoordinatorSigint = (): void => coordinatorHandleSignal('SIGINT');
+const onCoordinatorSigterm = (): void => coordinatorHandleSignal('SIGTERM');
+
+function installCoordinatorListeners(): void {
+  if (coordinatorListenersInstalled) {
+    return;
+  }
+  coordinatorListenersInstalled = true;
+  process.on('SIGINT', onCoordinatorSigint);
+  process.on('SIGTERM', onCoordinatorSigterm);
+}
+
+function removeCoordinatorListeners(): void {
+  if (!coordinatorListenersInstalled) {
+    return;
+  }
+  coordinatorListenersInstalled = false;
+  process.removeListener('SIGINT', onCoordinatorSigint);
+  process.removeListener('SIGTERM', onCoordinatorSigterm);
+}
+
+function registerRunner(registrant: TerminationRegistrant): void {
+  activeRunners.add(registrant);
+  installCoordinatorListeners();
+  // A child spawned while a teardown is ALREADY in progress joins it: it must be
+  // signalled + confirmed (or quarantined) too before the single re-raise, else the
+  // re-raise would kill the parent over a never-signalled child.
+  if (activeTeardown !== undefined && !activeTeardown.finished) {
+    coordinatorTearDownRegistrant(activeTeardown, registrant);
+  }
+}
+
+function deregisterRunner(registrant: TerminationRegistrant): void {
+  activeRunners.delete(registrant);
+  // Keep the listeners through an active teardown — they are what COALESCES repeated
+  // signals (removing them would hand a repeat to Node's default exit action).
+  if (activeRunners.size === 0 && activeTeardown === undefined) {
+    removeCoordinatorListeners();
+  }
+}
+
+function coordinatorHandleSignal(signal: NodeJS.Signals): void {
+  // Coalesce: repeated signals during an in-flight teardown are swallowed by this
+  // still-installed handler — no second re-raise, no bypass of the confirmation
+  // barrier.
+  if (activeTeardown !== undefined) {
+    return;
+  }
+  const teardown: CoordinatorTeardown = {
+    signal,
+    pending: 0,
+    persistFailed: false,
+    finished: false,
+  };
+  activeTeardown = teardown;
+  const registrants = [...activeRunners];
+  if (registrants.length === 0) {
+    finishCoordinatorTeardown(teardown);
+    return;
+  }
+  for (const registrant of registrants) {
+    coordinatorTearDownRegistrant(teardown, registrant);
+  }
+}
+
+function coordinatorTearDownRegistrant(
+  teardown: CoordinatorTeardown,
+  registrant: TerminationRegistrant,
+): void {
+  teardown.pending += 1;
+  let done = false;
+  const complete = (): void => {
+    if (done) {
+      return;
+    }
+    done = true;
+    teardown.pending -= 1;
+    if (teardown.pending === 0) {
+      finishCoordinatorTeardown(teardown);
+    }
+  };
+  const quarantinePair = (detail: string): void => {
+    // Before-death retention with THIS pair's own pid metadata: every active provision
+    // lock is quarantined synchronously (sidecar persisted + lock detached from the
+    // exit sweep) before the process could die of the re-raise. First quarantine wins
+    // per lock; with multiple concurrent provisions in one process this is conservative
+    // by design (see the hooks doc above).
+    const failures = runQuarantineBeforeDeathHooks({
+      pid: registrant.pid(),
+      reason:
+        `the spawned wrangler could not be confirmed terminated after a forwarded ` +
+        `${teardown.signal} — ${detail}`,
+    });
+    if (failures.length > 0) {
+      teardown.persistFailed = true;
+      for (const failure of failures) {
+        process.stderr.write(`provision: ${failure.message}\n`);
+      }
+    }
+    const pid = registrant.pid();
+    process.stderr.write(
+      `provision: warning — the wrangler child process group` +
+        `${typeof pid === 'number' ? ` (pid ${pid})` : ''} could not be confirmed terminated ` +
+        `after ${teardown.signal} (${detail}). It may still be running; the provision lock is ` +
+        `retained (quarantined) — verify the process is dead before re-running provision.\n`,
+    );
+    registrant.quarantine(detail);
+    complete();
+  };
+  const outcome = registrant.signalGroup(teardown.signal);
+  if (typeof outcome === 'object') {
+    quarantinePair(`the process group could not be signalled: ${outcome.error.message}`);
+    return;
+  }
+  if (outcome === 'gone') {
+    registrant.markGroupGone();
+  }
+  registrant.awaitConfirmedDead((result) => {
+    if (result.confirmed) {
+      complete();
+    } else {
+      quarantinePair(result.detail);
+    }
+  });
+}
+
+function finishCoordinatorTeardown(teardown: CoordinatorTeardown): void {
+  if (teardown.finished) {
+    return;
+  }
+  teardown.finished = true;
+  // Remove the listeners so the re-raise below takes Node's DEFAULT exit-on-signal
+  // action instead of being swallowed by this very handler.
+  removeCoordinatorListeners();
+  if (teardown.persistFailed) {
+    // F3 (round 13) — at least one provision lock could NOT be quarantined durably; it
+    // stays TRACKED (heartbeat running — see {@link ProvisionLock.quarantine}).
+    // Re-raising would kill this process, whose exit sweep releases every tracked
+    // mutex under the possibly-live child — so do NOT re-raise. The quarantine
+    // rejections above fail the provisions, whose callers keep holding the tracked
+    // locks and surface the hard errors.
+    activeTeardown = undefined;
+    if (activeRunners.size > 0) {
+      installCoordinatorListeners();
+    }
+    process.stderr.write(
+      `provision: NOT re-raising ${teardown.signal} — a provision lock's quarantine ` +
+        `metadata could not be persisted, so the lock is intentionally still held by this ` +
+        `process to keep it from being stolen while the unconfirmed wrangler child may ` +
+        `live.\n`,
+    );
+    return;
+  }
+  // Exactly-once re-raise (process-wide): every registered group is now confirmed dead
+  // or durably quarantined, so the parent may take the signal's default action.
+  if (reRaisedOnce) {
+    return;
+  }
+  reRaisedOnce = true;
+  process.kill(process.pid, teardown.signal);
+  // Signals are delivered asynchronously: if the event loop has drained by now, the
+  // process would exit NORMALLY (status 0) before the pending signal lands. A short
+  // REFERENCED no-op keeps the loop alive so the re-raised signal's default action
+  // terminates the process (it fires within milliseconds; the timer is only a bounded
+  // fallback if something else swallowed the signal).
+  setTimeout(() => {}, 2_000);
 }
 
 /**
@@ -779,6 +993,11 @@ export function createDefaultRunWrangler(
      * {@link CONFIRM_KILL_GRACE_MS}. Tests shrink it to exercise the quarantine expiry.
      */
     confirmKillGraceMs?: number;
+    /**
+     * F5 test seam — observe the spawned ChildProcess (unit tests use it to inject a
+     * post-spawn `error` event). Never set in production.
+     */
+    onSpawnedChild?: (child: ChildProcess) => void;
   },
 ): RunWrangler {
   // F2 — `resolveWranglerArgv` now yields wrangler's REAL CLI entry
@@ -816,10 +1035,17 @@ export function createDefaultRunWrangler(
       let stderr = '';
       let timedOut = false;
       let settled = false;
+      // F5 (round 13) — whether the spawn SUCCEEDED. The direct-settle carve-out in the
+      // `error` handler is reserved for a GENUINE pre-spawn failure (no pid, `spawn`
+      // never fired — the child never ran, so there is nothing to confirm dead).
+      let spawned = false;
+      // F5 (round 13) — a post-spawn `error` event routes through the termination
+      // machine; this makes the `close` handler defer to that path (like `timedOut`).
+      let postSpawnError: Error | undefined;
       // F1 (round 12) — ONE termination state machine for EVERY spawned-child outcome
-      // (normal close, timeout, parent signal, kill failure). The TWO facts every path
-      // must confirm before the promise may settle — and before a forwarded parent
-      // signal may be re-raised:
+      // (normal close, timeout, parent signal, post-spawn error, kill failure). The TWO
+      // facts every path must confirm before the promise may settle — and before a
+      // forwarded parent signal may be re-raised:
       //   `closed`    — the child's `close` event fired (process exited + stdio drained);
       //   `groupGone` — the whole process GROUP is confirmed gone (`kill(-pid, 0)` → ESRCH;
       //                 trivially true where no group exists: Windows, or no pid).
@@ -829,6 +1055,9 @@ export function createDefaultRunWrangler(
       // it synchronously first).
       let closed = false;
       let groupGone = false;
+      child.once('spawn', () => {
+        spawned = true;
+      });
       child.stdout?.setEncoding('utf-8');
       child.stderr?.setEncoding('utf-8');
       child.stdout?.on('data', (chunk: string) => {
@@ -845,10 +1074,21 @@ export function createDefaultRunWrangler(
         try {
           if (!isWindows && typeof child.pid === 'number') {
             killProcessGroup(-child.pid, signal); // negative pid → the whole group
-          } else {
-            child.kill(signal);
+            return 'signaled';
           }
-          return 'signaled';
+          if (child.kill(signal)) {
+            return 'signaled';
+          }
+          // F5 (round 13) — `child.kill()` returning FALSE is Node's non-throwing way of
+          // reporting a failed signal delivery. An already-exited child has nothing left
+          // to signal ("gone"); otherwise it is a FAILED signal attempt that must be
+          // surfaced (same path as a thrown non-ESRCH kill error), never read as sent.
+          if (child.exitCode !== null || child.signalCode !== null) {
+            return 'gone';
+          }
+          return {
+            error: new Error(`child.kill(${signal}) returned false (signal not delivered)`),
+          };
         } catch (error) {
           return isAlreadyGoneKillError(error) ? 'gone' : { error: error as Error };
         }
@@ -881,10 +1121,9 @@ export function createDefaultRunWrangler(
           .filter(Boolean)
           .join('\n');
 
-      const detachSignals = (): void => {
-        process.removeListener('SIGINT', onSigint);
-        process.removeListener('SIGTERM', onSigterm);
-      };
+      // F2 (round 13) — this runner's pair is registered with the ONE process-wide
+      // signal coordinator (below) for the child's lifetime; settling deregisters it.
+      const deregisterSelf = (): void => deregisterRunner(registrant);
 
       const finish = (result: RunWranglerResult): void => {
         if (settled) {
@@ -892,7 +1131,7 @@ export function createDefaultRunWrangler(
         }
         settled = true;
         clearTimeout(commandTimer);
-        detachSignals();
+        deregisterSelf();
         resolvePromise(result);
       };
 
@@ -905,7 +1144,7 @@ export function createDefaultRunWrangler(
         }
         settled = true;
         clearTimeout(commandTimer);
-        detachSignals();
+        deregisterSelf();
         rejectPromise(new WranglerQuarantineError(child.pid, detail));
       };
 
@@ -968,85 +1207,34 @@ export function createDefaultRunWrangler(
 
       // F3/F2 — forward a parent SIGINT/SIGTERM to the child's process GROUP so a Ctrl-C /
       // termination tears the DETACHED child (+ grandchildren) down instead of orphaning it.
-      // After forwarding, AWAIT confirmed (bounded) teardown — BOTH facts — BEFORE
-      // re-raising the signal on the parent: re-raising kills the parent, whose
-      // proper-lockfile exit hook removes the whole-provision mutex while the child may
-      // STILL be creating resources.
-      // F1 (round 12): an UNCONFIRMED teardown (kill failure OR grace expiry) FIRST
-      // transitions to quarantine — the before-death hooks retain every active provision
-      // mutex SYNCHRONOUSLY (writing the F2 sidecar) and the promise rejects with a
-      // {@link WranglerQuarantineError} — and only THEN warns + re-raises. It never
-      // re-raises straight over a possibly-live child.
-      const forwardSignal = (signal: NodeJS.Signals) => (): void => {
-        // Detach first so the re-raise takes Node's default exit-on-signal action.
-        detachSignals();
-        const reRaise = (): void => {
-          process.kill(process.pid, signal);
-          // Signals are delivered asynchronously: if the event loop has drained by now,
-          // the process would exit NORMALLY (status 0) before the pending signal lands.
-          // A short REFERENCED no-op keeps the loop alive so the re-raised signal's
-          // default action terminates the process (it fires within milliseconds; the
-          // timer is only a bounded fallback if something else swallowed the signal).
-          setTimeout(() => {}, 2_000);
-        };
-        const quarantineThenReRaise = (detail: string): void => {
-          const hookFailures = runQuarantineBeforeDeathHooks({
-            pid: child.pid,
-            reason:
-              `the spawned wrangler could not be confirmed terminated after a forwarded ` +
-              `${signal} — ${detail}`,
-          });
-          process.stderr.write(
-            `provision: warning — the wrangler child process group` +
-              `${typeof child.pid === 'number' ? ` (pid ${child.pid})` : ''} could not be ` +
-              `confirmed terminated after ${signal} (${detail}). It may still be running; the ` +
-              `provision lock is retained (quarantined) — verify the process is dead before ` +
-              `re-running provision.\n`,
-          );
-          quarantine(detail);
-          if (hookFailures.length > 0) {
-            // F3 (round 13) — at least one provision lock could NOT be quarantined
-            // durably; it remains TRACKED (heartbeat running). Re-raising would kill
-            // this process, whose exit sweep releases every tracked mutex under the
-            // possibly-live child — so do NOT re-raise. The quarantine rejection above
-            // fails the provision, whose caller keeps holding the tracked lock.
-            for (const failure of hookFailures) {
-              process.stderr.write(`provision: ${failure.message}\n`);
-            }
-            process.stderr.write(
-              `provision: NOT re-raising ${signal} — a provision lock's quarantine metadata ` +
-                `could not be persisted, so the lock is intentionally still held by this ` +
-                `process to keep it from being stolen.\n`,
-            );
-            return;
-          }
-          reRaise();
-        };
-        const outcome = signalGroup(signal);
-        if (typeof outcome === 'object') {
-          quarantineThenReRaise(
-            `the process group could not be signalled: ${outcome.error.message}`,
-          );
-          return;
-        }
-        if (outcome === 'gone') {
+      // F2 (round 13): signal handling lives in the ONE process-wide coordinator (see
+      // {@link registerRunner}); this runner only registers its pair. The coordinator
+      // forwards the first SIGINT/SIGTERM to EVERY registered group, awaits EVERY
+      // bounded both-facts confirmation (via this registrant's `awaitConfirmedDead`),
+      // quarantines each unresolved pair, coalesces repeated signals during the
+      // teardown, and re-raises EXACTLY ONCE — never over a pending child.
+      const registrant: TerminationRegistrant = {
+        pid: () => child.pid,
+        signalGroup,
+        markGroupGone: () => {
           // ESRCH ⇒ the whole group already exited — only `close` remains to be seen.
           groupGone = true;
-        }
-        awaitConfirmedDead({
-          stopWhenSettled: false,
-          onConfirmed: reRaise,
-          onExpiry: () =>
-            quarantineThenReRaise(
-              `the process group did not terminate within ${confirmGraceMs}ms of the ` +
-                `forwarded ${signal}`,
-            ),
-        });
+        },
+        awaitConfirmedDead: (onDone) => {
+          awaitConfirmedDead({
+            stopWhenSettled: false,
+            onConfirmed: () => onDone({ confirmed: true }),
+            onExpiry: () =>
+              onDone({
+                confirmed: false,
+                detail:
+                  `the process group did not terminate within ${confirmGraceMs}ms of the ` +
+                  `forwarded signal`,
+              }),
+          });
+        },
+        quarantine,
       };
-      const onSigint = forwardSignal('SIGINT');
-      const onSigterm = forwardSignal('SIGTERM');
-      process.on('SIGINT', onSigint);
-      process.on('SIGTERM', onSigterm);
 
       // Hard timeout: SIGKILL the whole group, then AWAIT CONFIRMED termination before
       // settling — so the whole-provision lock (released only after this promise settles)
@@ -1079,18 +1267,63 @@ export function createDefaultRunWrangler(
       // exit 0 mid-command. It is cleared in finish/quarantine, so a completed call never
       // holds the loop open.
 
-      // A spawn error (ENOENT, EACCES) may fire `error` WITHOUT a later `close`, so
-      // settle here too — a HARD failure (never mistaken for a clean/absent exit). The
-      // child never RAN (no live pid/group), so there is nothing to confirm dead — the
-      // one deliberate carve-out from the both-facts rule.
+      // F5 (round 13) — Node emits `error` on a ChildProcess AFTER a successful spawn
+      // too (e.g. a failed in-flight signal delivery; the Windows timeout/signal paths
+      // go through `child.kill()`), and the old handler ALWAYS settled directly — an
+      // ordinary hard failure that RELEASED the whole-provision lock while the child
+      // could still be alive. The direct-settle carve-out is reserved for a GENUINE
+      // pre-spawn failure (ENOENT/EACCES: no pid, `spawn` never fired — the child never
+      // ran, so there is nothing to confirm dead, and `close` may never follow). Every
+      // POST-spawn `error` routes through the ONE bounded termination-confirmation →
+      // quarantine machine like any other outcome.
       child.on('error', (error: Error) => {
-        finish(normalizeRunWranglerResult({ stdout, stderr, status: null, signal: null, error }));
+        if (!spawned && typeof child.pid !== 'number') {
+          finish(normalizeRunWranglerResult({ stdout, stderr, status: null, signal: null, error }));
+          return;
+        }
+        if (settled || timedOut || postSpawnError !== undefined) {
+          // Already settling through another arm of the machine (its confirm poll
+          // still owns the outcome) — never double-drive it.
+          return;
+        }
+        postSpawnError = error;
+        // The command is over as far as the caller is concerned — the machine's own
+        // grace window bounds the rest.
+        clearTimeout(commandTimer);
+        const outcome = signalGroup('SIGKILL');
+        if (typeof outcome === 'object') {
+          quarantine(
+            `a post-spawn child error (${error.message}) was followed by a failed ` +
+              `process-group kill: ${outcome.error.message}`,
+          );
+          return;
+        }
+        if (outcome === 'gone') {
+          groupGone = true;
+        }
+        confirmThenSettle(
+          () =>
+            normalizeRunWranglerResult({
+              stdout,
+              stderr: [
+                stderr,
+                `provision: the spawned wrangler child emitted an error after spawn: ` +
+                  `${error.message}`,
+              ]
+                .filter(Boolean)
+                .join('\n'),
+              status: null,
+              signal: 'SIGKILL',
+            }),
+          `a post-spawn child error (${error.message}; the group was SIGKILLed)`,
+        );
       });
       child.on('close', (code, signal) => {
         closed = true;
-        if (timedOut) {
-          // The timeout path's confirm poll settles once the group is ALSO confirmed
-          // gone (both facts). Nudge every active poll now for promptness.
+        if (timedOut || postSpawnError !== undefined) {
+          // The timeout / post-spawn-error path's confirm poll settles once the group
+          // is ALSO confirmed gone (both facts). Nudge every active poll now for
+          // promptness.
           nudgeConfirmPolls();
           return;
         }
@@ -1128,6 +1361,12 @@ export function createDefaultRunWrangler(
         // Let the signal-side poll (if any) observe `closed` promptly too.
         nudgeConfirmPolls();
       });
+
+      // F2 (round 13) — register with the coordinator LAST (after commandTimer + every
+      // handler exists): a registration during an in-flight teardown is torn down
+      // immediately, which may drive quarantine/confirm paths that use them.
+      registerRunner(registrant);
+      options?.onSpawnedChild?.(child);
     });
 }
 

@@ -5559,6 +5559,249 @@ describe('createDefaultRunWrangler — F1/F2 signal-path kill failure quarantine
   }, 30_000);
 });
 
+describe('createDefaultRunWrangler — F2 ONE signal coordinator: concurrent runners + repeated signals (round 13, child-process)', () => {
+  const F2R13_TMP = join(import.meta.dirname, '.tmp-f2-round13');
+  beforeEach(() => {
+    rmSync(F2R13_TMP, { recursive: true, force: true });
+    mkdirSync(F2R13_TMP, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(F2R13_TMP, { recursive: true, force: true });
+  });
+
+  it('one SIGTERM (+ a repeat mid-teardown) with TWO concurrent runners: the parent re-raises only after BOTH groups are dead', async () => {
+    // Pre-fix, each runner had its OWN SIGINT/SIGTERM listeners that (a) detached
+    // themselves at signal entry — a REPEATED signal during the bounded teardown took
+    // Node's default action, killing the parent with both children alive, every
+    // tracked mutex swept, and no sidecar — and (b) re-raised after only THEIR child
+    // confirmed, so the fast child's runner killed the parent while the slow child
+    // (600ms) was still pending.
+    const pidFileA = join(F2R13_TMP, 'a.pid');
+    const pidFileB = join(F2R13_TMP, 'b.pid');
+    const childScript = join(F2R13_TMP, 'slow-exit-child.cjs');
+    writeFileSync(
+      childScript,
+      `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
+        `const delay = Number(process.argv[3]);\n` +
+        `process.on('SIGTERM', () => setTimeout(() => process.exit(0), delay));\n` +
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const parentScript = join(F2R13_TMP, 'parent.mjs');
+    const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
+    writeFileSync(
+      parentScript,
+      `import { createDefaultRunWrangler } from ${JSON.stringify(provisionUrl)};\n` +
+        `const runA = createDefaultRunWrangler(process.cwd(), {\n` +
+        `  launcher: [process.execPath, ${JSON.stringify(childScript)}, ${JSON.stringify(pidFileA)}, '300'],\n` +
+        `});\n` +
+        `const runB = createDefaultRunWrangler(process.cwd(), {\n` +
+        `  launcher: [process.execPath, ${JSON.stringify(childScript)}, ${JSON.stringify(pidFileB)}, '600'],\n` +
+        `});\n` +
+        `runA(['noop'], { accountId: 'acct' }).then(\n` +
+        `  (r) => console.log('A-settled', r.status, r.signal),\n` +
+        `  (e) => console.log('A-rejected', e.message),\n` +
+        `);\n` +
+        `runB(['noop'], { accountId: 'acct' }).then(\n` +
+        `  (r) => console.log('B-settled', r.status, r.signal),\n` +
+        `  (e) => console.log('B-rejected', e.message),\n` +
+        `);\n`,
+    );
+    const { spawn } = await import('node:child_process');
+    const parent = spawn(process.execPath, [parentScript], {
+      cwd: F2R13_TMP,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let pidA: number | undefined;
+    let pidB: number | undefined;
+    try {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && (pidA === undefined || pidB === undefined)) {
+        if (pidA === undefined && existsSync(pidFileA)) {
+          const raw = readFileSync(pidFileA, 'utf-8');
+          if (raw.length > 0) {
+            pidA = Number(raw);
+          }
+        }
+        if (pidB === undefined && existsSync(pidFileB)) {
+          const raw = readFileSync(pidFileB, 'utf-8');
+          if (raw.length > 0) {
+            pidB = Number(raw);
+          }
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(pidA).toBeDefined();
+      expect(pidB).toBeDefined();
+      parent.kill('SIGTERM');
+      // The REPEATED signal lands mid-teardown (both children still alive at 120ms).
+      // The coordinator's still-installed handler must coalesce it — no bypass.
+      setTimeout(() => {
+        try {
+          parent.kill('SIGTERM');
+        } catch {
+          // parent already gone (that itself would fail the assertions below)
+        }
+      }, 120);
+      const [, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((res) => {
+        parent.on('exit', (code, sig) => res([code, sig]));
+      });
+      // The parent died of the single re-raised SIGTERM (default action) — not exit 0.
+      expect(signal).toBe('SIGTERM');
+      // THE crux: at parent exit BOTH children are already dead — the slow one too.
+      let aAlive = true;
+      try {
+        process.kill(pidA!, 0);
+      } catch {
+        aAlive = false;
+      }
+      let bAlive = true;
+      try {
+        process.kill(pidB!, 0);
+      } catch {
+        bAlive = false;
+      }
+      expect(aAlive).toBe(false);
+      expect(bAlive).toBe(false);
+    } finally {
+      // Belt + braces: never leak processes even on assertion failure.
+      try {
+        parent.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+      for (const pid of [pidA, pidB]) {
+        if (pid !== undefined) {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            // already gone
+          }
+        }
+      }
+    }
+  }, 20_000);
+});
+
+describe('createDefaultRunWrangler — F5 post-spawn child `error` events confirm/quarantine (round 13)', () => {
+  const F5R13_TMP = join(import.meta.dirname, '.tmp-f5-round13');
+  beforeEach(() => {
+    rmSync(F5R13_TMP, { recursive: true, force: true });
+    mkdirSync(F5R13_TMP, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(F5R13_TMP, { recursive: true, force: true });
+  });
+
+  function writeHangScript(path: string): void {
+    // Ignores SIGTERM; only the machine's SIGKILL can end it.
+    writeFileSync(
+      path,
+      `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
+        `process.on('SIGTERM', () => {});\n` +
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+  }
+
+  function reapPidFile(pidFile: string): number | undefined {
+    if (!existsSync(pidFile)) {
+      return undefined;
+    }
+    const pid = Number(readFileSync(pidFile, 'utf-8'));
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+    return pid;
+  }
+
+  it('pre-spawn ENOENT still settles directly as a hard failure (the one carve-out: no pid, nothing to confirm)', async () => {
+    const run = createDefaultRunWrangler(F5R13_TMP, {
+      launcher: [join(F5R13_TMP, 'no-such-wrangler-binary-round13')],
+    });
+    const result = await run(['d1', 'list'], { accountId: 'acct' });
+    expect(result.status).toBe(1);
+    expect(result.error).toContain('ENOENT');
+    expect(result.signal).toBeNull();
+  });
+
+  it('an injected POST-spawn `error` routes through the termination machine: the group is DEAD before the promise settles', async () => {
+    // Pre-fix the `error` handler ALWAYS called finish() — a post-spawn error (e.g. a
+    // kill-delivery failure) settled as an ordinary hard failure and RELEASED the
+    // whole-provision lock while the hung child lived on.
+    const pidFile = join(F5R13_TMP, 'child.pid');
+    const hang = join(F5R13_TMP, 'hang.cjs');
+    writeHangScript(hang);
+    const run = createDefaultRunWrangler(F5R13_TMP, {
+      launcher: [process.execPath, hang, pidFile],
+      timeoutMs: 30_000,
+      onSpawnedChild: (child) => {
+        setTimeout(() => child.emit('error', new Error('injected kill-delivery failure')), 150);
+      },
+    });
+    const result = await run(['d1', 'list'], { accountId: 'acct' });
+    // Settled as a HARD failure carrying the injected error + kill provenance…
+    expect(result.status).toBe(1);
+    expect(result.signal).toBe('SIGKILL');
+    expect(result.stderr).toContain('injected kill-delivery failure');
+    // …and ONLY once the whole group was confirmed dead: the hung child was reaped
+    // BEFORE the promise settled (pre-fix it was still alive here).
+    const pid = Number(readFileSync(pidFile, 'utf-8'));
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch {
+      alive = false;
+    }
+    reapPidFile(pidFile); // belt + braces: never leak on assertion failure
+    expect(alive).toBe(false);
+  }, 15_000);
+
+  it('a POST-spawn `error` + a FAILED group kill QUARANTINES (rejects; the caller retains the lock)', async () => {
+    const pidFile = join(F5R13_TMP, 'child2.pid');
+    const hang = join(F5R13_TMP, 'hang2.cjs');
+    writeHangScript(hang);
+    const run = createDefaultRunWrangler(F5R13_TMP, {
+      launcher: [process.execPath, hang, pidFile],
+      timeoutMs: 30_000,
+      killProcessGroup: () => {
+        throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+      },
+      onSpawnedChild: (child) => {
+        setTimeout(() => child.emit('error', new Error('injected post-spawn failure')), 150);
+      },
+    });
+    let thrown: unknown;
+    try {
+      await run(['d1', 'list'], { accountId: 'acct' });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(WranglerQuarantineError);
+    expect((thrown as Error).message).toMatch(
+      /post-spawn child error \(injected post-spawn failure\).*could not be signalled|post-spawn child error \(injected post-spawn failure\).*failed process-group kill/s,
+    );
+    // The (really alive) child is reaped by the test, then confirmed gone.
+    const pid = reapPidFile(pidFile);
+    expect(pid).toBeDefined();
+    const deadline = Date.now() + 5_000;
+    let dead = false;
+    while (!dead && Date.now() < deadline) {
+      try {
+        process.kill(pid!, 0);
+      } catch {
+        dead = true;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(dead).toBe(true);
+  }, 15_000);
+});
+
 describe('withListerDeadline — F3 the deadline holds in a REAL process (round 11, child-process regression)', () => {
   const F3R11_TMP = join(import.meta.dirname, '.tmp-f3-round11');
   beforeEach(() => {
