@@ -539,7 +539,7 @@ describe('provisionCloudflareResources — D1', () => {
   });
 });
 
-describe('provisionCloudflareResources — D1 discovery gate + strict validation (F4)', () => {
+describe('provisionCloudflareResources — D1 discovery gate + strict validation', () => {
   const d1Desired: DesiredResourceSet = {
     ...emptyDesired,
     d1: { binding: 'DB', name: 'myapp-db' },
@@ -1200,7 +1200,7 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
     expect(readConfig().queues).toBeUndefined();
   });
 
-  it('creates a queue that `queues info` reports missing; verifies with a follow-up info probe (F4)', async () => {
+  it('creates a queue that `queues info` reports missing; verifies with a follow-up info probe', async () => {
     setup(JSON.stringify({ name: 'app' }));
     // F4: after `queues create`, the provisioner RE-RUNS `queues info` and only
     // records `created` if it now POSITIVELY confirms the queue (queues write no
@@ -1290,7 +1290,7 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
     expect(calls.some((c) => isCall(c, 'queues', 'create'))).toBe(false);
   });
 
-  it('does NOT create on a generic/unrelated "not found" (e.g. Account not found) — fails closed (F5)', async () => {
+  it('does NOT create on a generic/unrelated "not found" (e.g. Account not found) — fails closed', async () => {
     // The OLD broad `/not found|no such/` regex misread "Account not found" as
     // queue absence and blindly created. It must fail closed instead.
     setup(JSON.stringify({ name: 'app' }));
@@ -1311,7 +1311,7 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
     expect(calls.some((c) => isCall(c, 'queues', 'create'))).toBe(false);
   });
 
-  it('is name-aware: a "does not exist" for a DIFFERENT queue name is NOT absence for this one (F5)', async () => {
+  it('is name-aware: a "does not exist" for a DIFFERENT queue name is NOT absence for this one', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
       {
@@ -1330,7 +1330,7 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
     expect(calls.some((c) => isCall(c, 'queues', 'create'))).toBe(false);
   });
 
-  it('creates ONLY on the exact `Queue "<name>" does not exist` signal for THAT name (F5)', async () => {
+  it('creates ONLY on the exact `Queue "<name>" does not exist` signal for THAT name', async () => {
     setup(JSON.stringify({ name: 'app' }));
     let created = false;
     const { run, calls } = makeRunner([
@@ -1361,7 +1361,7 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
     expect(result.resources).toEqual([{ kind: 'queue', name: 'jobs', action: 'created' }]);
   });
 
-  it('fails closed when a masked-signal `queues create` (wrapper exit 0) did NOT create the queue (F4)', async () => {
+  it('fails closed when a masked-signal `queues create` (wrapper exit 0) did NOT create the queue', async () => {
     // wrangler's bin wrapper maps a signal-killed inner CLI to exit 0. Queues write
     // no config, so the ONLY backstop is the post-create verify probe: a create that
     // reports clean 0 but whose follow-up `queues info` still does not confirm the
@@ -1394,7 +1394,7 @@ describe('provisionCloudflareResources — Queues (resource only)', () => {
   });
 });
 
-describe('provisionCloudflareResources — account reconciliation + config pin (F1)', () => {
+describe('provisionCloudflareResources — account reconciliation + config pin', () => {
   it('fails closed BEFORE any wrangler/REST call when config account_id differs from opts.accountId', async () => {
     setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
     let restCalled = false;
@@ -1420,7 +1420,7 @@ describe('provisionCloudflareResources — account reconciliation + config pin (
     expect(restCalled).toBe(false);
   });
 
-  it('persists account_id BEFORE any remote op so a later different-account retry fails closed (F1)', async () => {
+  it('persists account_id BEFORE any remote op so a later different-account retry fails closed', async () => {
     // Run 1 under account A: D1 create writes a real id, THEN a later op fails.
     setup(JSON.stringify({ name: 'app' }));
     const run1 = makeRunner([
@@ -1591,7 +1591,7 @@ describe('provisionCloudflareResources — account reconciliation + config pin (
   });
 });
 
-describe('provisionCloudflareResources — F1 pinned transport (one base for wrangler + REST)', () => {
+describe('provisionCloudflareResources — pinned transport (one base for wrangler + REST)', () => {
   it('resolvePinnedApiBaseUrl mirrors wrangler: default prod, direct override, staging, fedramp', () => {
     expect(resolvePinnedApiBaseUrl({})).toBe('https://api.cloudflare.com/client/v4');
     expect(resolvePinnedApiBaseUrl({ CLOUDFLARE_API_BASE_URL: 'https://api.example/v9' })).toBe(
@@ -1652,7 +1652,7 @@ describe('provisionCloudflareResources — F1 pinned transport (one base for wra
     expect(urls[0]).toContain('/accounts/config-acct/hyperdrive/configs');
   });
 
-  it('F4 (round 12): the lister URL uses the pinned base with wrangler-EXACT concatenation (no trailing-slash trim)', async () => {
+  it('the lister URL uses the pinned base with wrangler-EXACT concatenation (no trailing-slash trim)', async () => {
     // wrangler 4.107's `performApiFetchBase` fetches
     // `${getCloudflareApiBaseUrl(...)}${resource}${queryString}` with the direct env
     // base used VERBATIM and the resource `/accounts/${accountId}/hyperdrive/configs`
@@ -1787,7 +1787,7 @@ describe('provisionCloudflareResources — F1 pinned transport (one base for wra
   });
 });
 
-describe('provisionCloudflareResources — Hyperdrive discovery (F2 pagination + fail closed)', () => {
+describe('provisionCloudflareResources — Hyperdrive discovery (pagination + fail closed)', () => {
   function stubFetch(pages: Array<{ status?: number; body: unknown }>): {
     restore: () => void;
     urls: Array<string>;
@@ -2015,7 +2015,7 @@ describe('provisionCloudflareResources — Hyperdrive discovery (F2 pagination +
   });
 });
 
-describe('provisionCloudflareResources — KV/R2 fail closed on schema-valid ambiguity (F3)', () => {
+describe('provisionCloudflareResources — KV/R2 fail closed on schema-valid ambiguity', () => {
   it('KV: fails closed (no create) when the target title matches but the entry has no id', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
@@ -2075,7 +2075,7 @@ describe('provisionCloudflareResources — KV/R2 fail closed on schema-valid amb
   });
 });
 
-describe('normalizeRunWranglerResult — signal / spawn-error handling (F5)', () => {
+describe('normalizeRunWranglerResult — signal / spawn-error handling', () => {
   it('treats a SIGTERM-killed child (status null, signal set) as FAILURE, not success', () => {
     const r = normalizeRunWranglerResult({
       stdout: '',
@@ -2101,7 +2101,7 @@ describe('normalizeRunWranglerResult — signal / spawn-error handling (F5)', ()
     expect(normalizeRunWranglerResult({ status: 2, stderr: 'boom' }).status).toBe(2);
   });
 
-  it('carries structured signal/error provenance (round-4 F3)', () => {
+  it('carries structured signal/error provenance', () => {
     const killed = normalizeRunWranglerResult({ status: null, signal: 'SIGTERM' });
     expect(killed.signal).toBe('SIGTERM');
     expect(killed.error).toBeNull();
@@ -2113,7 +2113,7 @@ describe('normalizeRunWranglerResult — signal / spawn-error handling (F5)', ()
   });
 });
 
-describe('createDefaultRunWrangler — hard timeout kills the REAL process (F2)', () => {
+describe('createDefaultRunWrangler — hard timeout kills the REAL process', () => {
   const F2_TMP = join(import.meta.dirname, '.tmp-f2-timeout');
   beforeEach(() => {
     rmSync(F2_TMP, { recursive: true, force: true });
@@ -2169,7 +2169,7 @@ describe('createDefaultRunWrangler — hard timeout kills the REAL process (F2)'
     expect(await waitForDead(pid, 10_000)).toBe(true);
   }, 20_000);
 
-  it('a WRAPPER that re-spawns a hung grandchild: runner still settles in time AND the grandchild is reaped (F2)', async () => {
+  it('a WRAPPER that re-spawns a hung grandchild: runner still settles in time AND the grandchild is reaped', async () => {
     // The exact scenario the finding describes: a `bin/wrangler.js`-style wrapper that
     // spawns an inner CLI with inherited stdio and forwards only SIGTERM (never SIGKILL),
     // mapping a signal-killed child to exit 0. Pre-fix this defeated the timeout (the
@@ -2228,8 +2228,8 @@ describe('createDefaultRunWrangler — hard timeout kills the REAL process (F2)'
   }, 25_000);
 });
 
-describe('provisionCloudflareResources — F1 account gate + env scrub (round 4)', () => {
-  it('provisionEnv scrubs CLOUDFLARE_ENV + the CF Access token pair and pins the account (F1)', () => {
+describe('provisionCloudflareResources — account gate + env scrub', () => {
+  it('provisionEnv scrubs CLOUDFLARE_ENV + the CF Access token pair and pins the account', () => {
     const saved: Record<string, string | undefined> = {};
     const set = (k: string, v: string): void => {
       saved[k] = process.env[k];
@@ -2256,7 +2256,7 @@ describe('provisionCloudflareResources — F1 account gate + env scrub (round 4)
     }
   });
 
-  it('provisionEnv scrubs EVERY transport-redirect var and pins the ONE resolved API base (F1)', () => {
+  it('provisionEnv scrubs EVERY transport-redirect var and pins the ONE resolved API base', () => {
     const saved: Record<string, string | undefined> = {};
     const set = (k: string, v: string): void => {
       saved[k] = process.env[k];
@@ -2386,7 +2386,7 @@ describe('provisionCloudflareResources — F1 account gate + env scrub (round 4)
   });
 });
 
-describe('provisionCloudflareResources — F2 resource-name validation (round 4)', () => {
+describe('provisionCloudflareResources — resource-name validation', () => {
   const badNames = ['--help', '--config', '-h'];
   const kinds: Array<{
     label: RegExp;
@@ -2444,7 +2444,7 @@ describe('provisionCloudflareResources — F2 resource-name validation (round 4)
   });
 });
 
-describe('provisionCloudflareResources — F3 signal-killed probe never authorizes create (round 4)', () => {
+describe('provisionCloudflareResources — signal-killed probe never authorizes create', () => {
   it('queues: a SIGTERM-killed probe with buffered "does not exist" text fails closed (no create)', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const killed = normalizeRunWranglerResult({
@@ -2486,7 +2486,7 @@ describe('provisionCloudflareResources — F3 signal-killed probe never authoriz
   });
 });
 
-describe('provisionCloudflareResources — F4 create postcondition (round 4)', () => {
+describe('provisionCloudflareResources — create postcondition', () => {
   it('KV: a create that reports success but writes NO id fails closed', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
@@ -2570,7 +2570,7 @@ describe('provisionCloudflareResources — F4 create postcondition (round 4)', (
   });
 });
 
-describe('provisionCloudflareResources — F5 strict D1 identity (round 4)', () => {
+describe('provisionCloudflareResources — strict D1 identity', () => {
   it('adopts (not create) a list member with uuid:"" but a valid database_id', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const { run, calls } = makeRunner([
@@ -2655,7 +2655,7 @@ describe('provisionCloudflareResources — F5 strict D1 identity (round 4)', () 
   });
 });
 
-describe('provisionCloudflareResources — F1 top-level env pin via --env= (round 5)', () => {
+describe('provisionCloudflareResources — top-level env pin via --env=', () => {
   it('pins the top-level env on EVERY wrangler call even when CLOUDFLARE_ENV names a different env/account', async () => {
     // wrangler 4.107 reloads a project `.env`/`.env.local` into process.env on every
     // command, so a project `.env` with `CLOUDFLARE_ENV=staging` would reselect the
@@ -2721,7 +2721,7 @@ describe('provisionCloudflareResources — F1 top-level env pin via --env= (roun
   });
 });
 
-describe('provisionCloudflareResources — F2 boundary account fence (round 5)', () => {
+describe('provisionCloudflareResources — boundary account fence', () => {
   it('fails closed BEFORE any INJECTED seam call when no account is resolvable', async () => {
     // The prior fence was gated on `!opts.runWrangler`, so an INJECTED runWrangler /
     // Hyperdrive lister did remote work with no effective (persisted) account — a
@@ -2769,7 +2769,7 @@ describe('provisionCloudflareResources — F2 boundary account fence (round 5)',
   });
 });
 
-describe('provisionCloudflareResources — F3 absolute config path (round 5)', () => {
+describe('provisionCloudflareResources — absolute config path', () => {
   it('resolves a RELATIVE rootWranglerPath against root (not cwd) so reads + wrangler ops target ONE file', async () => {
     // root !== process.cwd(): a bare relative config path would make Node reads/writes
     // resolve against cwd while the default wrangler (cwd: root) resolves `-c` against
@@ -2804,7 +2804,7 @@ describe('provisionCloudflareResources — F3 absolute config path (round 5)', (
   });
 });
 
-describe('provisionCloudflareResources — F5 one D1 normalizer (round 5)', () => {
+describe('provisionCloudflareResources — one D1 normalizer', () => {
   it('fails closed on CONFLICTING name aliases (name vs database_name) for the requested database', async () => {
     // The exact F5 scenario: a list member claims the requested name via `name` but its
     // `database_name` disagrees. The old two-helper split SELECTED it by `name` yet
@@ -2883,7 +2883,7 @@ describe('provisionCloudflareResources — F5 one D1 normalizer (round 5)', () =
   });
 });
 
-describe('provisionCloudflareResources — transport account context (round 6 F1)', () => {
+describe('provisionCloudflareResources — transport account context', () => {
   it('threads the reconciled account into EVERY wrangler call AND the Hyperdrive lister', async () => {
     // Config pins the account → it is the reconciled effective account (config wins
     // over the ambient CLOUDFLARE_ACCOUNT_ID). Every seam invocation must receive it.
@@ -2941,7 +2941,7 @@ describe('provisionCloudflareResources — transport account context (round 6 F1
   });
 });
 
-describe('provisionCloudflareResources — boundary duplicate-member guard (round 6 F2)', () => {
+describe('provisionCloudflareResources — boundary duplicate-member guard', () => {
   it('fails closed at entry on a config with duplicate kv_namespaces members — NO wrangler/REST calls', async () => {
     // jsonc-parser.parse() (used by readRootConfig) silently resolves a duplicate to
     // the LAST member, so without the boundary guard a `kv namespace create` could
@@ -2974,7 +2974,7 @@ describe('provisionCloudflareResources — boundary duplicate-member guard (roun
   });
 });
 
-describe('provisionCloudflareResources — Hyperdrive list validation at the caller (round 6 F3)', () => {
+describe('provisionCloudflareResources — Hyperdrive list validation at the caller', () => {
   const hdDesired: DesiredResourceSet = {
     ...emptyDesired,
     hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
@@ -3024,7 +3024,7 @@ describe('provisionCloudflareResources — Hyperdrive list validation at the cal
     expect(readConfig().hyperdrive).toBeUndefined();
   });
 
-  it('F4 — fails closed on a NON-matching member with a malformed id (no create)', async () => {
+  it('fails closed on a NON-matching member with a malformed id (no create)', async () => {
     // A member for a DIFFERENT config carries a bogus (non-hex) id. Before F4 this passed
     // the whole-list gate (only the name-matched member was format-checked), so an ABSENT
     // target authorized a blind create against a possibly-untrustworthy list. Now every
@@ -3061,7 +3061,7 @@ describe('provisionCloudflareResources — Hyperdrive list validation at the cal
   }
 });
 
-describe('provisionCloudflareResources — F4 whole-list id-format gate (D1 + KV, before name filtering)', () => {
+describe('provisionCloudflareResources — whole-list id-format gate (D1 + KV, before name filtering)', () => {
   it('D1: a NON-matching list member with a malformed id fails the whole list closed (no create)', async () => {
     setup(JSON.stringify({ account_id: 'acct' }));
     const { run, calls } = makeRunner([
@@ -3133,7 +3133,7 @@ describe('provisionCloudflareResources — F4 whole-list id-format gate (D1 + KV
   });
 });
 
-describe('provisionCloudflareResources — F5 strict duplicate-safe binding reader', () => {
+describe('provisionCloudflareResources — strict duplicate-safe binding reader', () => {
   it('read-first fails closed on DUPLICATE same-binding entries in the target field (not reused)', async () => {
     // Two d1_databases entries share binding "DB" — the old first-match `.find()` would
     // silently pick one and report `reused`. The strict reader fails closed.
@@ -3226,7 +3226,7 @@ describe('provisionCloudflareResources — F5 strict duplicate-safe binding read
   });
 });
 
-describe('provisionCloudflareResources — resource-specific create postcondition (round 6 F4)', () => {
+describe('provisionCloudflareResources — resource-specific create postcondition', () => {
   it('R2: fails closed when create writes a DIFFERENT bucket_name than requested', async () => {
     setup(JSON.stringify({ account_id: 'acct' }));
     const { run } = makeRunner([
@@ -3281,7 +3281,7 @@ describe('provisionCloudflareResources — resource-specific create postconditio
   });
 });
 
-describe('provisionCloudflareResources — F4 resource-specific real-id validators', () => {
+describe('provisionCloudflareResources — resource-specific real-id validators', () => {
   it('KV: an id of " " is NOT real — runs discovery instead of read-first reuse', async () => {
     setup(JSON.stringify({ account_id: 'acct', kv_namespaces: [{ binding: 'KV', id: ' ' }] }));
     const { run, calls } = makeRunner([
@@ -3364,7 +3364,7 @@ describe('provisionCloudflareResources — F4 resource-specific real-id validato
   });
 });
 
-describe('provisionCloudflareResources — F5 KV title grammar vs option-injection guard', () => {
+describe('provisionCloudflareResources — KV title grammar vs option-injection guard', () => {
   it('accepts a KV title with spaces ("My Own Namespace") and passes it as ONE literal argv element', async () => {
     setup(JSON.stringify({ account_id: 'acct' }));
     const { run, calls } = makeRunner([
@@ -3427,7 +3427,7 @@ describe('provisionCloudflareResources — F5 KV title grammar vs option-injecti
   });
 });
 
-describe('provisionCloudflareResources — F6 queue name grammar (Cloudflare Queues)', () => {
+describe('provisionCloudflareResources — queue name grammar (Cloudflare Queues)', () => {
   const provisionQueue = (name: string): Promise<unknown> => {
     setup(JSON.stringify({ account_id: 'acct' }));
     const { run, calls } = makeRunner([
@@ -3475,7 +3475,7 @@ describe('provisionCloudflareResources — F6 queue name grammar (Cloudflare Que
   }
 });
 
-describe('provisionCloudflareResources — whole-provision cross-process lock (F1/F2, proper-lockfile)', () => {
+describe('provisionCloudflareResources — whole-provision cross-process lock (proper-lockfile)', () => {
   // proper-lockfile locks a dedicated adjacent MARKER file (persists between runs) and
   // implements the mutex as `${marker}.lock` DIRECTORY (removed on release). "No leak"
   // therefore means the MUTEX dir is gone (not the marker file).
@@ -3483,7 +3483,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
   const lockMutex = `${lockMarker}.lock`;
   const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-  it('round 14 — a SECOND in-process provision fails fast with a clear hard error (at most one per process)', async () => {
+  it('a SECOND in-process provision fails fast with a clear hard error (at most one per process)', async () => {
     setup(
       JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
     );
@@ -3659,7 +3659,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
     expect(existsSync(lockMutex)).toBe(false);
   });
 
-  it('F3 — a provision via a SYMLINK ALIAS contends on the SAME canonical lock and reuses the id written via the real path', async () => {
+  it('a provision via a SYMLINK ALIAS contends on the SAME canonical lock and reuses the id written via the real path', async () => {
     // A real config + a symlink alias to it. Both paths hit the SAME underlying file but
     // via DIFFERENT lexical paths. Without realpath canonicalization each derives its
     // own marker dir (`<lexical>.void-provision.lock`), so an alias provision would not
@@ -3719,7 +3719,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
     expect(existsSync(`${realpathSync(wranglerPath)}.void-provision.lock.lock`)).toBe(false);
   });
 
-  it('F1 — a SECOND first-run under a different account fails closed on the persisted pin, no cross-account write', async () => {
+  it('a SECOND first-run under a different account fails closed on the persisted pin, no cross-account write', async () => {
     // Neither run has a config account_id at start. The first run persists its own
     // account and provisions; the second — reading the now-pinned config — fails closed
     // on the A≠B mismatch BEFORE any create, so it never rebinds the winner's resources.
@@ -3776,7 +3776,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
     }
   });
 
-  it('F1 — a wrangler call blocking past a SHORT stale window does NOT let a second process steal the mutex (async heartbeat keeps it fresh)', async () => {
+  it('a wrangler call blocking past a SHORT stale window does NOT let a second process steal the mutex (async heartbeat keeps it fresh)', async () => {
     setup(JSON.stringify({ account_id: 'acct', kv_namespaces: [{ binding: 'KV', id: 'local' }] }));
     const run: RunWrangler = async (args) => {
       if (isCall(args, 'kv', 'namespace', 'list')) {
@@ -3803,7 +3803,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
     expect(existsSync(lockMutex)).toBe(false);
   }, 15000);
 
-  it('F2 — a genuine unlock failure REJECTS the provision (leaked mutex surfaced, not swallowed)', async () => {
+  it('a genuine unlock failure REJECTS the provision (leaked mutex surfaced, not swallowed)', async () => {
     setup(JSON.stringify({ account_id: 'acct' }));
     const failingFs = {
       ...passthruFs,
@@ -3818,7 +3818,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
     ).rejects.toThrow(/failed to release the cross-process provision lock/);
   });
 
-  it('F7 — a body failure COMBINED with an unlock failure surfaces BOTH (AggregateError)', async () => {
+  it('a body failure COMBINED with an unlock failure surfaces BOTH (AggregateError)', async () => {
     setup(
       JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
     );
@@ -3863,7 +3863,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
   });
 });
 
-describe('provisionCloudflareResources — F1 config compliance_region pins the transport (round 10)', () => {
+describe('provisionCloudflareResources — config compliance_region pins the transport', () => {
   it('resolvePinnedApiBaseUrl honors the config compliance_region (fedramp) with no ambient override', () => {
     // Config says fedramp_high, no CLOUDFLARE_COMPLIANCE_REGION ambient → the FedRAMP base.
     expect(resolvePinnedApiBaseUrl({}, 'fedramp_high')).toBe(
@@ -3982,7 +3982,7 @@ describe('provisionCloudflareResources — F1 config compliance_region pins the 
   });
 });
 
-describe('provisionCloudflareResources — F1 wrangler-exact base resolution order (round 11)', () => {
+describe('provisionCloudflareResources — wrangler-exact base resolution order', () => {
   it('an INVALID WRANGLER_API_ENVIRONMENT fails closed (wrangler assertOneOf) instead of pinning prod', () => {
     // wrangler's env factory has choices ["production","staging"]; a present out-of-choices
     // value (typo'd "stagng", or an empty string) throws — never silently public production.
@@ -4046,7 +4046,7 @@ describe('provisionCloudflareResources — F1 wrangler-exact base resolution ord
   });
 });
 
-describe('provisionCloudflareResources — F4 Hyperdrive password never reaches wrangler diagnostics (round 11)', () => {
+describe('provisionCloudflareResources — Hyperdrive password never reaches wrangler diagnostics', () => {
   it('provisionEnv scrubs the session-output sinks and PINS sanitized logging', () => {
     const saved: Record<string, string | undefined> = {};
     const set = (k: string, v: string): void => {
@@ -4142,7 +4142,7 @@ describe('provisionCloudflareResources — F4 Hyperdrive password never reaches 
     expect(thrown!.message).toContain('[REDACTED]');
   });
 
-  it('F5 (round 12): a seam rejecting a password-bearing plain STRING is redacted before propagation', async () => {
+  it('a seam rejecting a password-bearing plain STRING is redacted before propagation', async () => {
     setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
     const conn = 'postgres://dbuser:sup3r-secret@db.example.com:5432/app';
     // A rejecting runner is supported control flow; pre-fix only `instanceof Error`
@@ -4168,7 +4168,7 @@ describe('provisionCloudflareResources — F4 Hyperdrive password never reaches 
     expect(thrown as string).toContain('[REDACTED]');
   });
 
-  it('F5 (round 12): an OBJECT rejection has its enumerable string fields (nested + arrays) redacted', async () => {
+  it('an OBJECT rejection has its enumerable string fields (nested + arrays) redacted', async () => {
     setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
     const conn = 'postgres://dbuser:sup3r-secret@db.example.com:5432/app';
     const rejection = {
@@ -4197,7 +4197,7 @@ describe('provisionCloudflareResources — F4 Hyperdrive password never reaches 
     expect(JSON.stringify(thrown)).toContain('[REDACTED]');
   });
 
-  it('F5 (round 12): a QUARANTINE rejection keeps its identity/metadata while its message is redacted', async () => {
+  it('a QUARANTINE rejection keeps its identity/metadata while its message is redacted', async () => {
     setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
     const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
     const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
@@ -4233,7 +4233,7 @@ describe('provisionCloudflareResources — F4 Hyperdrive password never reaches 
     rmSync(sidecar, { force: true });
   });
 
-  it('F5 (round 12): a lister rejecting a plain STRING is redacted in the warning', async () => {
+  it('a lister rejecting a plain STRING is redacted in the warning', async () => {
     setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
     const warns: Array<string> = [];
     const { run } = makeRunner([]);
@@ -4295,7 +4295,7 @@ describe('provisionCloudflareResources — F4 Hyperdrive password never reaches 
   });
 });
 
-describe('provisionCloudflareResources — F4 redaction carrier: frozen/nested payloads (round 13)', () => {
+describe('provisionCloudflareResources — redaction carrier: frozen/nested payloads', () => {
   const conn = 'postgres://dbuser:sup3r-secret@db.example.com:5432/app';
   const hyperdriveDesired: DesiredResourceSet = {
     ...emptyDesired,
@@ -4415,7 +4415,7 @@ describe('provisionCloudflareResources — F4 redaction carrier: frozen/nested p
   });
 });
 
-describe('provisionCloudflareResources — F4 hostile values: one no-throw boundary, inert carriers, quarantine-conservative (round 14)', () => {
+describe('provisionCloudflareResources — hostile values: one no-throw boundary, inert carriers, quarantine-conservative', () => {
   const conn = 'postgres://dbuser:sup3r-secret@db.example.com:5432/app';
   const hyperdriveDesired: DesiredResourceSet = {
     ...emptyDesired,
@@ -4559,7 +4559,7 @@ describe('provisionCloudflareResources — F4 hostile values: one no-throw bound
   });
 });
 
-describe('provisionCloudflareResources — F5 dotenv fence file set + case rule are wrangler-exact (round 11)', () => {
+describe('provisionCloudflareResources — dotenv fence file set + case rule are wrangler-exact', () => {
   const redirect = 'CLOUDFLARE_API_BASE_URL=https://api.staging.cloudflare.com/client/v4\n';
 
   it('`.dev.vars.local` no longer blocks — wrangler never loads that file', async () => {
@@ -4603,7 +4603,7 @@ describe('provisionCloudflareResources — F5 dotenv fence file set + case rule 
     expect(calls.length).toBe(0);
   });
 
-  it('F9 (round 12): a benign `.dev.vars.` + a redirect var ONLY in `.dev.vars` is NOT rejected (wrangler never reads the fallback)', async () => {
+  it('a benign `.dev.vars.` + a redirect var ONLY in `.dev.vars` is NOT rejected (wrangler never reads the fallback)', async () => {
     // wrangler's `loadDotDevDotVars` probes `.dev.vars.` FIRST for the empty env and
     // falls back to `.dev.vars` ONLY when the first is absent — exactly one file is
     // ever parsed. Pre-fix the fence scanned BOTH, falsely rejecting this config.
@@ -4633,7 +4633,7 @@ describe('provisionCloudflareResources — F5 dotenv fence file set + case rule 
     expect(result.resources[0].action).toBe('created');
   });
 
-  it('F9 (round 12): a redirect var in the SELECTED `.dev.vars` (no `.dev.vars.` present) IS rejected', async () => {
+  it('a redirect var in the SELECTED `.dev.vars` (no `.dev.vars.` present) IS rejected', async () => {
     setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
     writeFileSync(join(tmpDir, '.dev.vars'), redirect);
     const { run, calls } = makeRunner([]);
@@ -4648,7 +4648,7 @@ describe('provisionCloudflareResources — F5 dotenv fence file set + case rule 
     expect(calls.length).toBe(0);
   });
 
-  it('F9 (round 12): dev-vars keys are case-SENSITIVE on every platform — a mixed-case spelling never trips the fence', () => {
+  it('dev-vars keys are case-SENSITIVE on every platform — a mixed-case spelling never trips the fence', () => {
     // `tryLoadDotDevDotVars` parses via `dotenv.parse` into a PLAIN object;
     // `caseInsensitiveEnv` applies only to wrangler's `loadDotEnv` (.env family). A
     // mixed-case key in dev-vars is a DIFFERENT key for wrangler even on win32.
@@ -4684,7 +4684,7 @@ describe('provisionCloudflareResources — F5 dotenv fence file set + case rule 
   });
 });
 
-describe('provisionEnv — F3 win32 case-insensitive credential scrub (round 12)', () => {
+describe('provisionEnv — win32 case-insensitive credential scrub', () => {
   const MIXED_CASE_KEYS = [
     'Wrangler_Output_File_Path', // output sink — would persist the raw argv (password!)
     'wrangler_output_file_directory',
@@ -4749,7 +4749,7 @@ describe('provisionEnv — F3 win32 case-insensitive credential scrub (round 12)
   });
 });
 
-describe('provisionCloudflareResources — F7 read-first stored-name identity (round 11)', () => {
+describe('provisionCloudflareResources — read-first stored-name identity', () => {
   it('D1: a stored database_name EQUAL to the desired name is reused (as before)', async () => {
     setup(
       JSON.stringify({
@@ -4868,7 +4868,7 @@ describe('provisionCloudflareResources — F7 read-first stored-name identity (r
   });
 });
 
-describe('provisionCloudflareResources — F6 per-resource placeholder rules (round 12)', () => {
+describe('provisionCloudflareResources — per-resource placeholder rules', () => {
   it('R2: a stored bucket_name of "local" is a REAL name — a different desired bucket fails closed (no silent rewrite)', async () => {
     // "local" is grammar-valid and is NOT R2's placeholder (only "default" is); the old
     // shared check treated it as a placeholder, skipped the stored-name contradiction
@@ -5034,7 +5034,7 @@ describe('provisionCloudflareResources — F6 per-resource placeholder rules (ro
   });
 });
 
-describe('provisionCloudflareResources — F7 D1 whole-list alias reconciliation (round 12)', () => {
+describe('provisionCloudflareResources — D1 whole-list alias reconciliation', () => {
   it('a NON-target member with a valid uuid but a CONFLICTING/malformed database_id rejects the WHOLE list (no create)', async () => {
     setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
     const { run, calls } = makeRunner([
@@ -5133,7 +5133,7 @@ describe('provisionCloudflareResources — F7 D1 whole-list alias reconciliation
   });
 });
 
-describe('provisionCloudflareResources — F2 quarantine retains the whole-provision lock (round 11)', () => {
+describe('provisionCloudflareResources — quarantine retains the whole-provision lock', () => {
   const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
 
   it('a quarantine rejection RETAINS the mutex (not released) and surfaces the quarantine error', async () => {
@@ -5190,7 +5190,7 @@ describe('provisionCloudflareResources — F2 quarantine retains the whole-provi
   });
 });
 
-describe('createDefaultRunWrangler — F2 parent-signal forwarding awaits confirmed teardown (round 11)', () => {
+describe('createDefaultRunWrangler — parent-signal forwarding awaits confirmed teardown', () => {
   const SIG_TMP = join(import.meta.dirname, '.tmp-f2-signal-round11');
   beforeEach(() => {
     rmSync(SIG_TMP, { recursive: true, force: true });
@@ -5282,7 +5282,7 @@ describe('createDefaultRunWrangler — F2 parent-signal forwarding awaits confir
   }, 20_000);
 });
 
-describe('createDefaultRunWrangler — F1 normal close confirms the whole GROUP (round 12)', () => {
+describe('createDefaultRunWrangler — normal close confirms the whole GROUP', () => {
   const F1R12_TMP = join(import.meta.dirname, '.tmp-f1-round12');
   beforeEach(() => {
     rmSync(F1R12_TMP, { recursive: true, force: true });
@@ -5343,7 +5343,7 @@ describe('createDefaultRunWrangler — F1 normal close confirms the whole GROUP 
   }, 15_000);
 });
 
-describe('acquireProvisionLock — F2 quarantine sidecar gate (round 12)', () => {
+describe('acquireProvisionLock — quarantine sidecar gate', () => {
   const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
   const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
 
@@ -5444,7 +5444,7 @@ describe('acquireProvisionLock — F2 quarantine sidecar gate (round 12)', () =>
   });
 });
 
-describe('acquireProvisionLock — F1 the gate runs on EVERY attempt + post-acquire revalidation (round 13)', () => {
+describe('acquireProvisionLock — the gate runs on EVERY attempt + post-acquire revalidation', () => {
   const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
   const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
 
@@ -5570,7 +5570,7 @@ describe('acquireProvisionLock — F1 the gate runs on EVERY attempt + post-acqu
   });
 });
 
-describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quarantine (round 13)', () => {
+describe('acquireProvisionLock — durable sidecar is a PRECONDITION for quarantine', () => {
   const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
   const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
   // Blocking the sidecar's TEMP path (a directory where the temp file goes) makes the
@@ -5655,7 +5655,7 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
     expect(existsSync(lockMutex)).toBe(false);
   }, 15_000);
 
-  it('provision level (F5 round 14): a persistence failure surfaces BOTH errors, arms the retention watchdog, and resolves by confirming the child DEAD (mutex released cleanly)', async () => {
+  it('provision level: a persistence failure surfaces BOTH errors, arms the retention watchdog, and resolves by confirming the child DEAD (mutex released cleanly)', async () => {
     setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
     // A REAL child that is already dead stands in for the unconfirmed wrangler group.
     const { spawn } = await import('node:child_process');
@@ -5741,7 +5741,7 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
     ).resolves.toBeDefined();
   }, 30_000);
 
-  it('F5 (round 14): while the child LIVES, the watchdog retries persistence with backoff and detaches once it succeeds', async () => {
+  it('while the child LIVES, the watchdog retries persistence with backoff and detaches once it succeeds', async () => {
     setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
     const { spawn } = await import('node:child_process');
     const live = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
@@ -5813,7 +5813,7 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
     }
   }, 30_000);
 
-  it('F5 (round 14, child-process): the watchdog HOLDS the process at natural exit until the child dies, then releases and exits cleanly', async () => {
+  it('the watchdog HOLDS the process at natural exit until the child dies, then releases and exits cleanly', async () => {
     // THE F5 repro: on persistence failure the provision rejects with the lock left
     // TRACKED — and proper-lockfile's EXIT SWEEP removes every tracked mutex when the
     // parent naturally exits, leaving the live child with NO mutex and NO sidecar.
@@ -5907,7 +5907,7 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
   }, 20_000);
 });
 
-describe('acquireProvisionLock — F6 sidecar DIRECTORY durability failures propagate (round 14)', () => {
+describe('acquireProvisionLock — sidecar DIRECTORY durability failures propagate', () => {
   const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
   const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
 
@@ -5967,7 +5967,7 @@ describe('acquireProvisionLock — F6 sidecar DIRECTORY durability failures prop
   });
 });
 
-describe('acquireProvisionLock — F3 recovery decisions are serialized + generation-verified (round 14)', () => {
+describe('acquireProvisionLock — recovery decisions are serialized + generation-verified', () => {
   const sidecar = `${wranglerPath}.void-provision.lock.quarantine.json`;
   const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
   const recoveryMarker = `${wranglerPath}.void-provision.lock.recovery`;
@@ -6113,7 +6113,7 @@ describe('acquireProvisionLock — F3 recovery decisions are serialized + genera
   });
 });
 
-describe('createDefaultRunWrangler — F1/F2 signal-path kill failure quarantines the lock (round 12, child-process)', () => {
+describe('createDefaultRunWrangler — signal-path kill failure quarantines the lock (child-process)', () => {
   const SIG12_TMP = join(import.meta.dirname, '.tmp-f1f2-signal-round12');
   beforeEach(() => {
     rmSync(SIG12_TMP, { recursive: true, force: true });
@@ -6248,7 +6248,7 @@ describe('createDefaultRunWrangler — F1/F2 signal-path kill failure quarantine
   }, 30_000);
 });
 
-describe('createDefaultRunWrangler — F2/F7 ONE signal coordinator: repeated signals coalesced, teardown bounded, spawns rejected (round 13/14)', () => {
+describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals coalesced, teardown bounded, spawns rejected', () => {
   const F2R13_TMP = join(import.meta.dirname, '.tmp-f2-round13');
   beforeEach(() => {
     rmSync(F2R13_TMP, { recursive: true, force: true });
@@ -6272,7 +6272,7 @@ describe('createDefaultRunWrangler — F2/F7 ONE signal coordinator: repeated si
     return undefined;
   }
 
-  it('a SECOND concurrently-active wrangler child is rejected PRE-SPAWN (round 14: at most one registrant)', async () => {
+  it('a SECOND concurrently-active wrangler child is rejected PRE-SPAWN (at most one registrant)', async () => {
     // Within one provision every wrangler call is awaited sequentially, and at most one
     // provision runs per process — so a second concurrently-active child is always a
     // caller bug and is rejected fast, before any child is spawned.
@@ -6374,7 +6374,7 @@ describe('createDefaultRunWrangler — F2/F7 ONE signal coordinator: repeated si
     }
   }, 20_000);
 
-  it('F7 — a spawn attempted AFTER teardown began is rejected fast (no child spawned, teardown unaffected)', async () => {
+  it('a spawn attempted AFTER teardown began is rejected fast (no child spawned, teardown unaffected)', async () => {
     const pidFile = join(F2R13_TMP, 'c.pid');
     const childScript = join(F2R13_TMP, 'slow-exit-child2.cjs');
     writeFileSync(
@@ -6442,7 +6442,7 @@ describe('createDefaultRunWrangler — F2/F7 ONE signal coordinator: repeated si
     }
   }, 20_000);
 
-  it('F7 — the coordinator-WIDE deadline bounds an unconfirmable teardown (quarantine + re-raise, never a wedge)', async () => {
+  it('the coordinator-WIDE deadline bounds an unconfirmable teardown (quarantine + re-raise, never a wedge)', async () => {
     // The runner's own confirmation window is 60s here and the child never dies (the
     // injected group-killer claims success but kills nothing) — pre-fix `pending`
     // stayed nonzero for the full 60s and the fatal signal was not re-raised. The
@@ -6515,7 +6515,7 @@ describe('createDefaultRunWrangler — F2/F7 ONE signal coordinator: repeated si
   }, 20_000);
 });
 
-describe('createDefaultRunWrangler — F5 post-spawn child `error` events confirm/quarantine (round 13)', () => {
+describe('createDefaultRunWrangler — post-spawn child `error` events confirm/quarantine', () => {
   const F5R13_TMP = join(import.meta.dirname, '.tmp-f5-round13');
   beforeEach(() => {
     rmSync(F5R13_TMP, { recursive: true, force: true });
@@ -6635,7 +6635,7 @@ describe('createDefaultRunWrangler — F5 post-spawn child `error` events confir
   }, 15_000);
 });
 
-describe('withListerDeadline — F3 the deadline holds in a REAL process (round 11, child-process regression)', () => {
+describe('withListerDeadline — the deadline holds in a REAL process (child-process regression)', () => {
   const F3R11_TMP = join(import.meta.dirname, '.tmp-f3-round11');
   beforeEach(() => {
     rmSync(F3R11_TMP, { recursive: true, force: true });
@@ -6712,7 +6712,7 @@ describe('withListerDeadline — F3 the deadline holds in a REAL process (round 
   }, 20_000);
 });
 
-describe('provisionCloudflareResources — F5 R2 absence needs the STRUCTURED code (round 10)', () => {
+describe('provisionCloudflareResources — R2 absence needs the STRUCTURED code', () => {
   it('a failure whose text merely contains 10006 inside a bucket name is NOT absence (fails closed, no create)', async () => {
     setup(JSON.stringify({ name: 'app', account_id: 'acct' }));
     const { run, calls } = makeRunner([
@@ -6764,7 +6764,7 @@ describe('provisionCloudflareResources — F5 R2 absence needs the STRUCTURED co
   });
 });
 
-describe('provisionCloudflareResources — F4 Hyperdrive lister deadline (round 10)', () => {
+describe('provisionCloudflareResources — Hyperdrive lister deadline', () => {
   const lockMutex = `${wranglerPath}.void-provision.lock.lock`;
 
   it('a never-settling lister makes the boundary REJECT within the deadline (no infinite hold, lock released)', async () => {
@@ -6826,7 +6826,7 @@ describe('provisionCloudflareResources — F4 Hyperdrive lister deadline (round 
   }, 10_000);
 });
 
-describe('createDefaultRunWrangler — F3 confirmed child termination + kill classification (round 10)', () => {
+describe('createDefaultRunWrangler — confirmed child termination + kill classification', () => {
   const F3_TMP = join(import.meta.dirname, '.tmp-f3-round10');
   beforeEach(() => {
     rmSync(F3_TMP, { recursive: true, force: true });
@@ -6856,7 +6856,7 @@ describe('createDefaultRunWrangler — F3 confirmed child termination + kill cla
     expect(isAlreadyGoneKillError(null)).toBe(false);
   });
 
-  it('a REAL kill failure (EPERM) on timeout QUARANTINES: the runner REJECTS, never settle-and-release (round 11)', async () => {
+  it('a REAL kill failure (EPERM) on timeout QUARANTINES: the runner REJECTS, never settle-and-release', async () => {
     const pidFile = join(F3_TMP, 'cli.pid');
     const hungCli = join(F3_TMP, 'hung.cjs');
     writeFileSync(
@@ -6898,7 +6898,7 @@ describe('createDefaultRunWrangler — F3 confirmed child termination + kill cla
     expect(await waitForDead(pid, 10_000)).toBe(true);
   }, 15_000);
 
-  it('an unconfirmable termination (grace expiry, child still alive) QUARANTINES too (round 11)', async () => {
+  it('an unconfirmable termination (grace expiry, child still alive) QUARANTINES too', async () => {
     const pidFile = join(F3_TMP, 'cli3.pid');
     const hungCli = join(F3_TMP, 'hung3.cjs');
     writeFileSync(
@@ -6997,7 +6997,7 @@ describe('createDefaultRunWrangler — F3 confirmed child termination + kill cla
   }, 15_000);
 });
 
-describe('provisionCloudflareResources — F2 dangling-symlink lock identity (round 10)', () => {
+describe('provisionCloudflareResources — dangling-symlink lock identity', () => {
   it('provisions via dangling-symlink aliases to the SAME not-yet-created target share ONE lock identity (one create)', async () => {
     // A `shared/` dir exists but `shared/wrangler.jsonc` does NOT yet. Two aliases both point
     // (as DANGLING symlinks) at that same not-yet-created target. Without resolving the dangling
@@ -7081,7 +7081,7 @@ describe('provisionCloudflareResources — F2 dangling-symlink lock identity (ro
   });
 });
 
-describe('provisionCloudflareResources — F6 dotenv fence: export prefix + empty-env files (round 10)', () => {
+describe('provisionCloudflareResources — dotenv fence: export prefix + empty-env files', () => {
   const redirect = 'CLOUDFLARE_API_BASE_URL=https://api.staging.cloudflare.com/client/v4\n';
   const runFail = () => {
     const { run, calls } = makeRunner([]);
