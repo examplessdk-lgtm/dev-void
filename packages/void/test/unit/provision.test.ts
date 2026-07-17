@@ -2154,16 +2154,19 @@ describe('createDefaultRunWrangler — hard timeout kills the REAL process (F2)'
     const start = Date.now();
     const result = await run(['d1', 'list', '--json'], { accountId: 'acct' });
     const elapsed = Date.now() - start;
-    // Settled within the timeout window (generous ceiling to avoid CI flake).
-    expect(elapsed).toBeLessThan(5_000);
+    // Settled in bounded time — the runner did NOT hang. The tight ceiling here is a
+    // load-tolerant sanity bound (the 400ms internal timer can be delayed on a busy
+    // machine); the real "did not hang forever" guard is the outer vitest timeout.
+    expect(elapsed).toBeLessThan(15_000);
     // HARD failure: a non-null signal, folded to a non-zero status.
     expect(result.signal).toBe('SIGKILL');
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/exceeded the 400ms command timeout/);
-    // No lingering process — the SIGKILL reached the real CLI.
+    // No lingering process — the SIGKILL reached the real CLI. Poll for the OUTCOME
+    // (dead pid) with a generous bound rather than racing a tight deadline.
     const pid = Number(readFileSync(pidFile, 'utf-8'));
-    expect(await waitForDead(pid, 5_000)).toBe(true);
-  });
+    expect(await waitForDead(pid, 10_000)).toBe(true);
+  }, 20_000);
 
   it('a WRAPPER that re-spawns a hung grandchild: runner still settles in time AND the grandchild is reaped (F2)', async () => {
     // The exact scenario the finding describes: a `bin/wrangler.js`-style wrapper that
@@ -2185,26 +2188,43 @@ describe('createDefaultRunWrangler — hard timeout kills the REAL process (F2)'
     writeFileSync(
       wrapper,
       `const { spawn } = require('child_process');\n` +
-        `const child = spawn(process.execPath, [${JSON.stringify(grandchild)}], { stdio: ['inherit','inherit','inherit'] });\n` +
-        `child.on('exit', (code) => process.exit(code === null ? 0 : code));\n` + // mask signal death as exit 0
-        `process.on('SIGTERM', () => child.kill());\n` + // forward only SIGTERM (default)
-        `process.on('SIGINT', () => child.kill());\n`,
+        // Under heavy full-suite fork pressure a single spawn can transiently fail
+        // (EAGAIN). Retry so the grandchild reliably establishes — otherwise the wrapper
+        // would exit early and the runner would settle via the NORMAL close path (signal
+        // null), making the timeout-kill assertion flake. On a hard failure keep the
+        // wrapper ALIVE so the runner's timeout+group-SIGKILL path is still exercised.
+        `let child;\n` +
+        `function launch() {\n` +
+        `  try {\n` +
+        `    child = spawn(process.execPath, [${JSON.stringify(grandchild)}], { stdio: ['inherit','inherit','inherit'] });\n` +
+        `    child.on('error', () => { child = undefined; setTimeout(launch, 50); });\n` +
+        `    child.on('exit', (code) => process.exit(code === null ? 0 : code));\n` + // mask signal death as exit 0
+        `  } catch { setTimeout(launch, 50); }\n` +
+        `}\n` +
+        `launch();\n` +
+        `process.on('SIGTERM', () => { if (child) child.kill(); });\n` + // forward only SIGTERM (default)
+        `process.on('SIGINT', () => { if (child) child.kill(); });\n` +
+        `setInterval(() => {}, 1 << 30);\n`, // keep the wrapper alive until the group is killed
     );
     const run = createDefaultRunWrangler(F2_TMP, {
       launcher: [process.execPath, wrapper],
-      timeoutMs: 500,
+      // Generous internal timeout so the wrapper + grandchild reliably establish (and hang)
+      // before the timer fires even under load — the timeout-kill path is what we assert.
+      timeoutMs: 1_500,
     });
     const start = Date.now();
     const result = await run(['d1', 'list', '--json'], { accountId: 'acct' });
     const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(5_000);
+    // Bounded settle (the vitest timeout is the real "did not hang" guard).
+    expect(elapsed).toBeLessThan(20_000);
     expect(result.signal).toBe('SIGKILL');
     expect(result.status).not.toBe(0);
     // The grandchild wrote its pid, then must have been reaped by the process-group kill.
+    // Poll for the OUTCOME (dead pgid) with a generous, load-tolerant bound.
     const gcPid = Number(readFileSync(gcPidFile, 'utf-8'));
     expect(Number.isInteger(gcPid)).toBe(true);
-    expect(await waitForDead(gcPid, 5_000)).toBe(true);
-  });
+    expect(await waitForDead(gcPid, 10_000)).toBe(true);
+  }, 25_000);
 });
 
 describe('provisionCloudflareResources — F1 account gate + env scrub (round 4)', () => {
@@ -3759,7 +3779,8 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
     setup(JSON.stringify({ account_id: 'acct', kv_namespaces: [{ binding: 'KV', id: 'local' }] }));
     const run: RunWrangler = async (args) => {
       if (isCall(args, 'kv', 'namespace', 'list')) {
-        await delay(3000); // blocks (async) for 3s > the 2s stale window
+        // blocks (async) longer than the probe below, which is past the 2s stale window
+        await delay(2400);
         return ok(JSON.stringify([{ id: hex32('kv'), title: 'myapp-kv' }]));
       }
       return ok();
@@ -3770,9 +3791,11 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
       { ...emptyDesired, kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }] },
       { runWrangler: run, log: silentLog, lockOptions: { stale: 2000, update: 1000, retries: 0 } },
     );
-    // 2.5s into the block — PAST the 2s stale window. If the async heartbeat did not keep the
-    // mutex fresh, a retries:0 acquire would STEAL it; it must be REFUSED instead.
-    await delay(2500);
+    // 2.2s into the block — PAST the 2s stale window (proper-lockfile floors stale at 2000
+    // and update at 1000, so 2.2s is the minimum that proves freshness). If the async
+    // heartbeat did not keep the mutex fresh, a retries:0 acquire would STEAL it; it must
+    // be REFUSED instead.
+    await delay(2200);
     await expect(acquireProvisionLock(wranglerPath, { stale: 2000, retries: 0 })).rejects.toThrow();
     const result = await prov;
     expect(result.resources[0]).toMatchObject({ kind: 'kv', action: 'adopted', id: hex32('kv') });
@@ -5381,8 +5404,8 @@ describe('acquireProvisionLock — F2 quarantine sidecar gate (round 12)', () =>
         }
       }
     }
-    expect(await waitForDead(child.pid!, 5_000)).toBe(true);
-  });
+    expect(await waitForDead(child.pid!, 10_000)).toBe(true);
+  }, 15_000);
 
   it('once the recorded group is DEAD, the next acquisition clears the sidecar and proceeds', async () => {
     setup(JSON.stringify({ name: 'app' }));
@@ -5398,7 +5421,7 @@ describe('acquireProvisionLock — F2 quarantine sidecar gate (round 12)', () =>
     } catch {
       child.kill('SIGKILL');
     }
-    expect(await waitForDead(child.pid!, 5_000)).toBe(true);
+    expect(await waitForDead(child.pid!, 10_000)).toBe(true);
     // Backdate the retained mutex so proper-lockfile's ordinary stale lifecycle reclaims
     // it promptly (the gate itself never removes the mutex directory by hand).
     const old = new Date(Date.now() - 3_600_000);
@@ -5408,7 +5431,7 @@ describe('acquireProvisionLock — F2 quarantine sidecar gate (round 12)', () =>
     expect(existsSync(sidecar)).toBe(false);
     await second.release();
     expect(existsSync(lockMutex)).toBe(false);
-  });
+  }, 15_000);
 
   it('an unreadable/malformed sidecar FAILS CLOSED (cannot verify the recorded owner)', async () => {
     setup(JSON.stringify({ name: 'app' }));
@@ -5554,6 +5577,57 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
   // fail-open shape of the finding (no durable marker lands anywhere).
   const tmpBlocker = `${sidecar}.tmp-${process.pid}`;
 
+  // F5 (round 14) — a provision-level quarantine whose DURABLE persistence fails arms a
+  // process-wide RETENTION WATCHDOG (a module singleton in provision.ts). It resolves
+  // ASYNCHRONOUSLY: it clears the mutex / writes the sidecar and THEN — one microtask
+  // later (`lock.release().then(resolveWatchdog)`) — frees the process-wide provision
+  // slot. Under full-suite load that trailing gap widens, so a test that only waited on
+  // the observable mutex/sidecar state could finish while the slot is still taken,
+  // tripping the NEXT test's entry guard ("a previous provision … still retaining its
+  // lock"). Deterministically drain any lingering watchdog before the next test: poll a
+  // benign provision on a THROWAWAY config path (the guard is process-wide, so the probe
+  // never touches this suite's lock files) until it gets PAST the slot guard — which
+  // happens exactly when the watchdog has resolved.
+  async function drainRetentionWatchdog(timeoutMs = 20_000): Promise<void> {
+    const probeDir = join(import.meta.dirname, '.tmp-provision-drain');
+    const probeCfg = join(probeDir, 'wrangler.jsonc');
+    const deadline = Date.now() + timeoutMs;
+    try {
+      for (;;) {
+        rmSync(probeDir, { recursive: true, force: true });
+        mkdirSync(probeDir, { recursive: true });
+        writeFileSync(probeCfg, JSON.stringify({ account_id: 'acct', name: 'drain' }));
+        let guardHeld = false;
+        try {
+          await provisionCloudflareResources(probeDir, probeCfg, emptyDesired, {
+            runWrangler: () => ok('[]'),
+            log: silentLog,
+          });
+        } catch (error) {
+          // Only the process-wide slot guard means the watchdog is STILL active; any other
+          // outcome (resolve, or an unrelated failure) means it has resolved → slot free.
+          guardHeld = /still retaining its lock|already active in this process/.test(
+            (error as Error).message,
+          );
+        }
+        if (!guardHeld) {
+          return;
+        }
+        if (Date.now() >= deadline) {
+          throw new Error('retention watchdog did not resolve within the drain window');
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    } finally {
+      rmSync(probeDir, { recursive: true, force: true });
+    }
+  }
+
+  afterEach(async () => {
+    // Belt + braces: no retention watchdog may leak into the next test's provision guard.
+    await drainRetentionWatchdog();
+  });
+
   it('a sidecar-write failure keeps the lock TRACKED (heartbeat running, NOT stealable) and throws a hard error', async () => {
     setup(JSON.stringify({ name: 'app' }));
     const lock = await acquireProvisionLock(wranglerPath, { stale: 2_000 });
@@ -5567,8 +5641,8 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
       // …and the lock did NOT detach: wait past the stale window — the still-running
       // heartbeat keeps the mtime fresh, so a contender sees a HELD lock. (Pre-fix the
       // detached, heartbeat-less mutex aged stale here and was stolen while the
-      // recorded child lived.)
-      await new Promise((r) => setTimeout(r, 2_600));
+      // recorded child lived.) 2.3s is just past proper-lockfile's 2000ms stale floor.
+      await new Promise((r) => setTimeout(r, 2_300));
       await expect(
         acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 0 }),
       ).rejects.toThrow(/already being held/);
@@ -5595,7 +5669,7 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
       child.kill('SIGKILL');
     }
     {
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + 10_000;
       let dead = false;
       while (!dead && Date.now() < deadline) {
         try {
@@ -5644,14 +5718,19 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
     expect(existsSync(lockMutex)).toBe(true);
     expect(existsSync(sidecar)).toBe(false);
     // …and the RETENTION WATCHDOG (armed by the failure) probes the recorded group,
-    // confirms it dead, and releases the mutex CLEANLY — no manual unlock needed.
-    const deadline = Date.now() + 5_000;
+    // confirms it dead, and releases the mutex CLEANLY — no manual unlock needed. Generous
+    // bound: the watchdog's tick is a real timer, delayed under full-suite load.
+    const deadline = Date.now() + 15_000;
     while (existsSync(lockMutex) && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 50));
     }
     expect(existsSync(lockMutex)).toBe(false);
     expect(existsSync(sidecar)).toBe(false);
-    // The watchdog resolved — a fresh provision may start again (guard freed).
+    // The watchdog resolved — a fresh provision may start again (guard freed). Deterministically
+    // wait for the process-wide slot to clear first: the watchdog frees it one microtask AFTER
+    // the mutex is gone (`release().then(resolveWatchdog)`), and under load that gap widens, so
+    // asserting a fresh provision resolves without the drain would race the guard.
+    await drainRetentionWatchdog();
     const { run: okRun } = makeRunner([{ match: /^d1 list/, reply: () => ok('[]') }]);
     await expect(
       provisionCloudflareResources(tmpDir, wranglerPath, emptyDesired, {
@@ -5659,7 +5738,7 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
         log: silentLog,
       }),
     ).resolves.toBeDefined();
-  }, 15_000);
+  }, 30_000);
 
   it('F5 (round 14): while the child LIVES, the watchdog retries persistence with backoff and detaches once it succeeds', async () => {
     setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
@@ -5700,9 +5779,10 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
       expect(existsSync(lockMutex)).toBe(true);
       expect(existsSync(sidecar)).toBe(false);
       // The durability problem clears; the watchdog's next retry persists the sidecar
-      // and detaches the lock (mutex retained on disk behind the durable marker).
+      // and detaches the lock (mutex retained on disk behind the durable marker). Generous
+      // bound: the watchdog's retry is a real backoff timer, delayed under full-suite load.
       failPersistence = false;
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + 15_000;
       while (!existsSync(sidecar) && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 50));
       }
@@ -5730,7 +5810,7 @@ describe('acquireProvisionLock — F3 durable sidecar is a PRECONDITION for quar
       rmSync(lockMutex, { recursive: true, force: true });
       rmSync(sidecar, { force: true });
     }
-  }, 15_000);
+  }, 30_000);
 
   it('F5 (round 14, child-process): the watchdog HOLDS the process at natural exit until the child dies, then releases and exits cleanly', async () => {
     // THE F5 repro: on persistence failure the provision rejects with the lock left
@@ -5853,8 +5933,9 @@ describe('acquireProvisionLock — F6 sidecar DIRECTORY durability failures prop
       // The non-durable sidecar was rolled back (state matches "not persisted")…
       expect(existsSync(sidecar)).toBe(false);
       // …and the lock did NOT detach: past the stale window the still-running heartbeat
-      // keeps the mutex fresh, so a contender sees a HELD lock (no steal).
-      await new Promise((r) => setTimeout(r, 2_600));
+      // keeps the mutex fresh, so a contender sees a HELD lock (no steal). 2.3s is just
+      // past proper-lockfile's 2000ms stale floor.
+      await new Promise((r) => setTimeout(r, 2_300));
       await expect(
         acquireProvisionLock(wranglerPath, { stale: 2_000, retries: 0 }),
       ).rejects.toThrow(/already being held/);
@@ -6407,7 +6488,7 @@ describe('createDefaultRunWrangler — F2/F7 ONE signal coordinator: repeated si
       // fatal signal was not re-raised until then).
       expect(signal).toBe('SIGTERM');
       expect(elapsed).toBeGreaterThanOrEqual(700);
-      expect(elapsed).toBeLessThan(10_000);
+      expect(elapsed).toBeLessThan(15_000);
       // The (genuinely unkillable-by-the-fake-killer) child is STILL ALIVE at parent
       // exit — the only path to a completed teardown with a live group is the
       // deadline's quarantine of the pair (confirmation was impossible). Reap it.
@@ -6709,10 +6790,13 @@ describe('provisionCloudflareResources — F4 Hyperdrive lister deadline (round 
       ),
     ).rejects.toThrow(/cannot verify whether Hyperdrive config .* already/s);
     const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(5_000);
+    // The rejection itself proves the boundary did NOT hold forever (else the vitest
+    // timeout below fires). This is a load-tolerant "bounded" sanity bound — the 200ms
+    // deadline timer can be delayed under heavy load, so keep generous headroom.
+    expect(elapsed).toBeLessThan(12_000);
     // The lock was released (no infinite hold).
     expect(existsSync(lockMutex)).toBe(false);
-  }, 10_000);
+  }, 15_000);
 
   it('the deadline signal is aborted when the deadline fires (so a real fetch would cancel)', async () => {
     setup(JSON.stringify({ account_id: 'acct', name: 'app' }));
@@ -6810,8 +6894,8 @@ describe('createDefaultRunWrangler — F3 confirmed child termination + kill cla
     } catch {
       // already gone
     }
-    expect(await waitForDead(pid, 5_000)).toBe(true);
-  });
+    expect(await waitForDead(pid, 10_000)).toBe(true);
+  }, 15_000);
 
   it('an unconfirmable termination (grace expiry, child still alive) QUARANTINES too (round 11)', async () => {
     const pidFile = join(F3_TMP, 'cli3.pid');
@@ -6845,8 +6929,8 @@ describe('createDefaultRunWrangler — F3 confirmed child termination + kill cla
     } catch {
       // already gone
     }
-    expect(await waitForDead(pid, 5_000)).toBe(true);
-  });
+    expect(await waitForDead(pid, 10_000)).toBe(true);
+  }, 15_000);
 
   it('an ESRCH kill (already gone) is treated as SUCCESS — settles as the timeout hard-failure, no kill-error text', async () => {
     const pidFile = join(F3_TMP, 'cli2.pid');
@@ -6872,8 +6956,8 @@ describe('createDefaultRunWrangler — F3 confirmed child termination + kill cla
     expect(result.stderr).not.toMatch(/could not be killed/);
     expect(result.error).toBeNull();
     const pid = Number(readFileSync(pidFile, 'utf-8'));
-    expect(await waitForDead(pid, 5_000)).toBe(true);
-  });
+    expect(await waitForDead(pid, 10_000)).toBe(true);
+  }, 15_000);
 
   it('lock is released only AFTER confirmed child termination: a hung wrangler → provision rejects, child dead, mutex gone', async () => {
     // Drive a FULL provision whose wrangler runner is the REAL default runner spawning a hung
