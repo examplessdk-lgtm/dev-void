@@ -294,8 +294,13 @@ const HEX32_ID_RE = /^[0-9a-f]{32}$/i;
 /** R2 bucket names ARE the identity: wrangler 4.107's `isValidR2BucketName`. */
 const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
 
-/** A D1 `database_id` that is a real (non-placeholder) hyphenated UUID. */
-function isRealD1Id(value: unknown): value is string {
+/**
+ * A D1 `database_id` that is a real (non-placeholder) hyphenated UUID. Exported so
+ * the deploy orchestrator applies the SAME placeholder rule when deciding whether a
+ * stored `database_name` names a real DB (a synced `database_id: "local"` must not
+ * let its paired name become the production database identity).
+ */
+export function isRealD1Id(value: unknown): value is string {
   return typeof value === 'string' && value !== D1_ID_PLACEHOLDER && D1_ID_RE.test(value);
 }
 /** A KV namespace `id` that is a real (non-placeholder) 32-hex string. */
