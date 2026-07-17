@@ -239,3 +239,39 @@ export function mergeAndExpand(
   }
   return expandDotenv(merged, options);
 }
+
+/**
+ * Wrangler 4.107's bundled `dotenv` LINE regex (verbatim), used ONLY to detect the
+ * declared KEYS wrangler would load — including the OPTIONAL `export ` prefix, the `KEY: val`
+ * form, and single/double/backtick quoting — so a transport-redirect / config-override fence
+ * sees exactly what wrangler's per-command dotenv reload would. We read keys, never values.
+ */
+const WRANGLER_DOTENV_LINE =
+  /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
+
+/**
+ * The set of declared dotenv KEYS in `filePath`, parsed the way wrangler does.
+ * Lives in this leaf module (no `proper-lockfile` / lifecycle side effects) so both
+ * the provisioner's transport fence and the deploy orchestrator's config-override
+ * fence can read keys exactly as wrangler's per-command reload would, without either
+ * caller pulling in the provision lifecycle just to parse dotenv keys.
+ */
+export function scanWranglerDotenvKeys(filePath: string): Set<string> {
+  const keys = new Set<string>();
+  if (!existsSync(filePath)) {
+    return keys;
+  }
+  const content = readFileSync(filePath, 'utf-8');
+  WRANGLER_DOTENV_LINE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = WRANGLER_DOTENV_LINE.exec(content)) !== null) {
+    if (match[1]) {
+      keys.add(match[1]);
+    }
+    // Guard against a zero-width match wedging the loop.
+    if (match.index === WRANGLER_DOTENV_LINE.lastIndex) {
+      WRANGLER_DOTENV_LINE.lastIndex++;
+    }
+  }
+  return keys;
+}

@@ -56,7 +56,7 @@ import {
   requiresSandboxPlatformImage,
   resolveSandboxConfig,
 } from '../sandbox/config.ts';
-import { mergeAndExpand, parseDotenvFile } from '../shared/dotenv.ts';
+import { mergeAndExpand, parseDotenvFile, scanWranglerDotenvKeys } from '../shared/dotenv.ts';
 import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env.ts';
 import { validateSsrEntry } from '../ssr/entry.ts';
 import { getApiUrl, getToken, getTokenSource } from './auth.ts';
@@ -116,18 +116,46 @@ import {
 } from './preset.ts';
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project.ts';
 import { promptProjectSelection, promptProjectSetupAction } from './prompt.ts';
-import {
-  assertNoTransportRedirectInProjectDotenv,
-  checkCloudflareProvisionDrift,
-  deleteEnvVarCaseAware,
-  isRealD1Id,
+// The provision module pulls in the whole-provision cross-process lock
+// (`proper-lockfile` → `signal-exit`), which patches `process.emit` /
+// `process.reallyExit` and installs exit handlers the moment it is imported. An
+// ordinary MANAGED `void deploy` never enters the Cloudflare-backend fork, so it
+// must not pay that side effect. Keep ONLY erasable `import type` at module scope
+// and load the runtime values with a DYNAMIC `import()` inside the fork
+// (`loadProvisionModule`), so importing this file (which `cli.ts` does for every
+// deploy) never evaluates the provision lifecycle.
+import type {
+  DesiredResourceSet,
+  ProvisionDriftEntry,
   provisionCloudflareResources,
-  provisionEnv,
-  resolvePinnedApiBaseUrl,
-  scanWranglerDotenvKeys,
-  type DesiredResourceSet,
-  type ProvisionDriftEntry,
 } from './provision.ts';
+
+/** The provision module, loaded lazily inside the Cloudflare fork only. */
+type ProvisionModule = typeof import('./provision.ts');
+let loadedProvisionModule: ProvisionModule | undefined;
+
+/**
+ * Dynamically load the provision module (memoized). Called only from the async
+ * Cloudflare fork (`runCloudflareDeploy` / `computeDesiredCloudflareResources`)
+ * so a managed deploy never imports it — and thus never loads `proper-lockfile`.
+ */
+async function loadProvisionModule(): Promise<ProvisionModule> {
+  loadedProvisionModule ??= await import('./provision.ts');
+  return loadedProvisionModule;
+}
+
+/**
+ * The provision module after it has been loaded by the fork, for the SYNC helpers
+ * (`resolveDeployTransport` / `deployChildEnv` / `createDeployWranglerRunner`)
+ * that cannot await. They only ever run after {@link loadProvisionModule} has
+ * resolved inside {@link runCloudflareDeploy}, so this never throws in practice.
+ */
+function requireProvisionModule(): ProvisionModule {
+  if (!loadedProvisionModule) {
+    throw new Error('internal: provision module accessed before it was loaded');
+  }
+  return loadedProvisionModule;
+}
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
 import type {
   AssetConfig,
@@ -518,10 +546,11 @@ export function assertNoConfigOverrideInProjectDotenv(
  * Returns the single resolved API base URL to pin into every child env.
  */
 function resolveDeployTransport(root: string, rootConfig: Record<string, unknown>): string {
+  const provision = requireProvisionModule();
   assertNoAmbientConfigOverride();
-  assertNoTransportRedirectInProjectDotenv(root);
+  provision.assertNoTransportRedirectInProjectDotenv(root);
   assertNoConfigOverrideInProjectDotenv(root);
-  return resolvePinnedApiBaseUrl(
+  return provision.resolvePinnedApiBaseUrl(
     process.env,
     readWranglerTopLevelString(rootConfig, 'compliance_region'),
   );
@@ -534,9 +563,10 @@ function resolveDeployTransport(root: string, rootConfig: Record<string, unknown
  * then scrubs the deploy-specific config-override selectors on top.
  */
 function deployChildEnv(accountId: string, apiBaseUrl: string): NodeJS.ProcessEnv {
-  const env = provisionEnv({ accountId, apiBaseUrl });
+  const provision = requireProvisionModule();
+  const env = provision.provisionEnv({ accountId, apiBaseUrl });
   for (const name of DEPLOY_CONFIG_OVERRIDE_ENV_VARS) {
-    deleteEnvVarCaseAware(env, name);
+    provision.deleteEnvVarCaseAware(env, name);
   }
   return env;
 }
@@ -700,7 +730,7 @@ export interface CloudflareDeployDeps {
   runWrangler?: DeployWranglerRun;
   /** Run the project's `vite build` (inherited stdio). Throws on a nonzero build. */
   runBuild?: (env: NodeJS.ProcessEnv) => void;
-  /** Provisioner seam (default: {@link provisionCloudflareResources}). */
+  /** Provisioner seam (default: `provisionCloudflareResources`, loaded dynamically). */
   provision?: typeof provisionCloudflareResources;
   /** WARN unit seam (default: {@link collectPlaintextVarWarnings}). */
   collectPlaintextVarWarnings?: typeof collectPlaintextVarWarnings;
@@ -900,6 +930,10 @@ export async function computeDesiredCloudflareResources(
   voidConfig: VoidConfig,
   configPath: string,
 ): Promise<{ desired: DesiredResourceSet; reasons: Map<string, string> }> {
+  // `isRealD1Id` is resolved via the memoized dynamic import so this exported
+  // helper works when called directly in unit tests (outside the fork) without a
+  // static provision edge that would eagerly load the provision lifecycle.
+  const { isRealD1Id } = await loadProvisionModule();
   const paths = resolveProjectPaths(root, voidConfig);
   const config = parseRootWranglerConfig(configPath);
   const workerName = readWranglerTopLevelString(config, 'name') ?? deriveWorkerName(root);
@@ -1095,6 +1129,12 @@ export async function runCloudflareDeploy(
     provision: options.provision === true ? true : undefined,
   });
 
+  // Load the provision module ONCE, dynamically, so the sync deploy helpers can
+  // reach its transport/drift/scrub primitives without a static import that would
+  // make every managed `void deploy` eagerly load the provision lifecycle. Awaited
+  // here BEFORE any sync helper that calls `requireProvisionModule()`.
+  const provisionModule = await loadProvisionModule();
+
   // 1. App-class guard — v1 supports WORKER-BEARING apps only (full Void app +
   // framework SSR). `resolveStaticDeployPreset` returns non-null for static/SPA.
   const staticPreset = resolveStaticDeployPreset(root, voidConfig, options);
@@ -1211,7 +1251,7 @@ export async function runCloudflareDeploy(
   // CI cannot commit back the ids a create would mint, so a re-run would dup.
   const isCI = deps.isCI ?? (!process.stdin.isTTY || getTokenSource() === 'ci');
   if (options.provision && isCI) {
-    const { missing } = checkCloudflareProvisionDrift(configPath, desired);
+    const { missing } = provisionModule.checkCloudflareProvisionDrift(configPath, desired);
     // Queues are name-bearing (no id in the committed config), so the id-drift check
     // CANNOT prove a desired queue is already created — and `provisionCloudflareResources`
     // would run `wrangler queues create` for it, mutating the account. That breaks the
@@ -1248,7 +1288,7 @@ export async function runCloudflareDeploy(
 
   // 4. Provision (--provision) OR drift-check (no --provision).
   if (options.provision) {
-    const provision = deps.provision ?? provisionCloudflareResources;
+    const provision = deps.provision ?? provisionModule.provisionCloudflareResources;
     let result;
     try {
       result = await provision(root, configPath, desired, {
@@ -1285,7 +1325,7 @@ export async function runCloudflareDeploy(
     // Re-run the id-drift predicate AFTER provisioning: any desired id-bearing
     // resource the provisioner did not write a real id for still drifts and must
     // block the build/deploy (the desired set is the single source of truth).
-    const { missing } = checkCloudflareProvisionDrift(configPath, desired);
+    const { missing } = provisionModule.checkCloudflareProvisionDrift(configPath, desired);
     if (missing.length > 0) {
       log.error(
         formatCloudflareDriftMessage(
@@ -1298,7 +1338,7 @@ export async function runCloudflareDeploy(
       return exit(1);
     }
   } else {
-    const { missing } = checkCloudflareProvisionDrift(configPath, desired);
+    const { missing } = provisionModule.checkCloudflareProvisionDrift(configPath, desired);
     if (missing.length > 0) {
       log.error(
         formatCloudflareDriftMessage(

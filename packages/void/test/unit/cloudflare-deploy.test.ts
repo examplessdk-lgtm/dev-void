@@ -1068,3 +1068,34 @@ describe('verifyGeneratedDeployConfig', () => {
     expect(result).toEqual({ ok: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Managed deploy must NOT eagerly load the provision lifecycle (proper-lockfile
+// → signal-exit patches process.emit / reallyExit ON IMPORT). deploy.ts is
+// imported by cli.ts for every deploy, so its module-scope import of
+// ./provision.ts must be TYPE-ONLY; the runtime values load via a dynamic
+// import() inside the Cloudflare fork only. Assert that at the source level so a
+// regression re-introducing a static runtime import fails fast (a real
+// module-registry check would be polluted by this test file's own provision
+// import, and a subprocess check would be slow/flaky).
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — managed path does not import the provision module', () => {
+  const deploySource = readFileSync(join(import.meta.dirname, '../../src/cli/deploy.ts'), 'utf-8');
+
+  it('imports ./provision.ts as TYPE-ONLY at module scope (dynamic import inside the fork)', () => {
+    // Every static `... from './provision.ts'` at module scope must be `import type`.
+    // `[^']*?` keeps each clause from spanning across a previous `from '...'`.
+    const staticImports = [
+      ...deploySource.matchAll(/^import\s+([^']*?)\s+from\s+'\.\/provision\.ts';/gm),
+    ];
+    expect(staticImports.length).toBeGreaterThan(0);
+    for (const [, clause] of staticImports) {
+      expect(clause.startsWith('type')).toBe(true);
+    }
+  });
+
+  it('loads the provision module via a dynamic import()', () => {
+    expect(deploySource).toMatch(/await import\('\.\/provision\.ts'\)/);
+  });
+});
