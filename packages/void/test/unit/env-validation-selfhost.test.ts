@@ -247,6 +247,57 @@ describe('collectPlaintextVarWarnings — plaintext worker-vars classification',
     expect(result.secretKeys).toEqual([{ key: 'API_KEY', reason: 'heuristic' }]);
     expect(JSON.stringify(result)).not.toContain('sk_live_json_leak');
   });
+
+  it('DEFAULT invocation (no configPath) still folds in the discovered root-wrangler layer — string + JSON keys (F2)', async () => {
+    const root = createTempProject({ withEnvTs: false });
+    // The build's LOWEST plaintext layer is the root `wrangler.jsonc` `vars`. The
+    // DEFAULT `collectPlaintextVarWarnings(root)` (no configPath) must DISCOVER it
+    // the same way the build does and warn its secret-looking members — a
+    // string-valued one AND a JSON-valued one. Pre-fix the default call forwarded
+    // no configPath, so the root layer was skipped entirely (a THREE-source map).
+    writeFileSync(
+      join(root, 'wrangler.jsonc'),
+      JSON.stringify({
+        name: 'app',
+        vars: {
+          ROOT_API_KEY: 'sk_live_root_string',
+          ROOT_TOKEN: { jwt: 'sk_live_root_json' },
+          ROOT_PLAIN: 'benign',
+        },
+      }),
+    );
+
+    // No configPath — discovery must find the root wrangler.jsonc.
+    const result = await collectPlaintextVarWarnings(root);
+
+    expect(result.totalVarKeys).toBe(3);
+    expect(result.secretKeys).toEqual([
+      { key: 'ROOT_API_KEY', reason: 'heuristic' },
+      { key: 'ROOT_TOKEN', reason: 'heuristic' },
+    ]);
+    // Keys only — neither the string nor the JSON value may appear anywhere.
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('sk_live_root_string');
+    expect(serialized).not.toContain('sk_live_root_json');
+  });
+
+  it('prefers wrangler.jsonc over wrangler.json when both exist (discovery order)', async () => {
+    const root = createTempProject({ withEnvTs: false });
+    writeFileSync(
+      join(root, 'wrangler.jsonc'),
+      JSON.stringify({ name: 'app', vars: { ALPHA: 'x' } }),
+    );
+    writeFileSync(
+      join(root, 'wrangler.json'),
+      JSON.stringify({ name: 'app', vars: { BETA: 'y' } }),
+    );
+
+    const result = await collectPlaintextVarWarnings(root);
+
+    // Only the higher-priority wrangler.jsonc layer is read (build discovery order).
+    expect(result.totalVarKeys).toBe(1);
+    expect(result.secretKeys).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------

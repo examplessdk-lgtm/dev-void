@@ -206,10 +206,12 @@ export type CollectPlaintextVarWarningsOptions = {
   /** Vite mode the build runs under. Deploy builds use `'production'` (default). */
   mode?: string;
   /**
-   * Resolved root wrangler config path (the same `-c` target the GATE pins).
-   * When provided, its top-level `vars` (the build's LOWEST-precedence plaintext
-   * layer) is folded into the effective var union so configured root-wrangler
-   * keys are warned too. Omitted → the root wrangler layer is skipped.
+   * Resolved root wrangler config path (the same `-c` target the GATE pins). Its
+   * top-level `vars` (the build's LOWEST-precedence plaintext layer) is folded
+   * into the effective var union so configured root-wrangler keys are warned too.
+   * F2 — when omitted, the root config is DISCOVERED from `root` the same way the
+   * build does ({@link discoverRootWranglerConfigPath}), so the DEFAULT
+   * invocation still covers the root-wrangler layer; an explicit path wins.
    */
   configPath?: string;
 };
@@ -352,7 +354,12 @@ function schemaDefaultEntries(schema: Record<string, unknown>): Array<[string, s
 function resolveEffectiveWorkerVars(
   root: string,
   options: {
-    /** Resolved root wrangler config path (`-c` target); its top-level `vars` is the lowest layer. */
+    /**
+     * Resolved root wrangler config path (`-c` target); its top-level `vars` is
+     * the lowest layer. F2 — omitted → discovered from `root`
+     * ({@link discoverRootWranglerConfigPath}) so the root layer is never skipped
+     * on a default invocation; an explicit path wins.
+     */
     configPath?: string;
     /** Raw Vite `envDir` — resolved exactly like the build (see {@link loadSanitizedBuildEnv}). */
     envDir?: string;
@@ -368,9 +375,13 @@ function resolveEffectiveWorkerVars(
   // but a lower-layer JSON value survives when no higher layer overrides it. The
   // caller reads only presence/emptiness — never the value itself.
   const map: Record<string, unknown> = {};
-  // 1. root wrangler top-level `vars` (lowest precedence).
-  if (options.configPath) {
-    Object.assign(map, readConfigVars(options.configPath));
+  // 1. root wrangler top-level `vars` (lowest precedence). F2 — when the caller
+  // did not pin an explicit `configPath`, DISCOVER the root config the same way
+  // the build does so the default `collectPlaintextVarWarnings(root)` still folds
+  // in the root-wrangler layer. An explicit `configPath` always wins.
+  const configPath = options.configPath ?? discoverRootWranglerConfigPath(root);
+  if (configPath) {
+    Object.assign(map, readConfigVars(configPath));
   }
   // 2. schema `.default(value)` keys (overwrite root wrangler; overwritten below).
   if (options.schema) {
@@ -950,6 +961,34 @@ function reconcileSelfHostAccount(
 
 /** UTF-8 BOM, stripped before JSONC parsing (matches provision.ts readRootConfig). */
 const UTF8_BOM = '﻿';
+
+/**
+ * Root wrangler config filenames, in the SAME discovery order the build and the
+ * bindings writer use (`syncWranglerBindings` / `ensureWrangler*` in cli/wrangler.ts,
+ * `readWranglerDurableObjectBindings`): `wrangler.jsonc` first, then `wrangler.json`.
+ */
+const ROOT_WRANGLER_CONFIG_NAMES = ['wrangler.jsonc', 'wrangler.json'] as const;
+
+/**
+ * F2 — discover the root wrangler config path the SAME way the build / bindings
+ * writer do (first existing of {@link ROOT_WRANGLER_CONFIG_NAMES} under `root`),
+ * used ONLY when the caller did not pin an explicit `configPath`. Without it the
+ * DEFAULT `collectPlaintextVarWarnings(root)` produced a THREE-source map that
+ * missed the root `wrangler.jsonc` `vars` layer (the build's lowest plaintext
+ * layer), so a configured secret-looking / JSON-valued var went unwarned. An
+ * explicit `configPath` (the GATE always pins one) still wins. Returns undefined
+ * when no root config exists — then the root layer is simply absent, exactly as
+ * the build would resolve it.
+ */
+function discoverRootWranglerConfigPath(root: string): string | undefined {
+  for (const name of ROOT_WRANGLER_CONFIG_NAMES) {
+    const candidate = join(root, name);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
 
 /** True when `value` is a non-array object (JSONC-parsed config record). */
 function isConfigRecord(value: unknown): value is Record<string, unknown> {
