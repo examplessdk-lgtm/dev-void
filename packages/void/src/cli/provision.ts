@@ -507,8 +507,13 @@ function resolveComplianceRegion(
 const WRANGLER_DOTENV_LINE =
   /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
 
-/** The set of declared dotenv KEYS in `filePath`, parsed the way wrangler does. */
-function scanWranglerDotenvKeys(filePath: string): Set<string> {
+/**
+ * The set of declared dotenv KEYS in `filePath`, parsed the way wrangler does.
+ * Exported so the deploy orchestrator's own dotenv fence (worker-name override /
+ * build-config-path selectors) reads keys exactly as wrangler's per-command reload
+ * would, instead of re-deriving the parser.
+ */
+export function scanWranglerDotenvKeys(filePath: string): Set<string> {
   const keys = new Set<string>();
   if (!existsSync(filePath)) {
     return keys;
@@ -642,6 +647,33 @@ export function assertNoTransportRedirectInProjectDotenv(
  * {@link assertNoTransportRedirectInProjectDotenv} (which blocks a project dotenv from
  * repopulating any of them via wrangler's per-command reload), the pin cannot be moved.
  */
+/**
+ * Delete `name` from `env` IN PLACE, honoring the platform's env-key case rule.
+ * Windows environment keys are CASE-INSENSITIVE: a spawned child's `process.env`
+ * resolves `WRANGLER_OUTPUT_FILE_PATH` from an ambient `Wrangler_Output_File_Path`
+ * too, so an exact-case `delete` leaves a mixed-case spelling live. On win32 every
+ * case-insensitive spelling is removed; elsewhere POSIX env vars are case-sensitive,
+ * so only the exact key is a match. Exported so the deploy orchestrator scrubs its
+ * OWN extra deploy-time keys (worker-name override, build-config-path) through the
+ * SAME rule the provisioner uses, instead of re-deriving it.
+ */
+export function deleteEnvVarCaseAware(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform !== 'win32') {
+    delete env[name];
+    return;
+  }
+  const lower = name.toLowerCase();
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === lower) {
+      delete env[key];
+    }
+  }
+}
+
 export function provisionEnv(ctx?: {
   accountId?: string;
   apiBaseUrl?: string;
@@ -657,19 +689,8 @@ export function provisionEnv(ctx?: {
   // case-insensitive spelling of EVERY scrubbed/pinned key on win32; exact-case
   // elsewhere (POSIX env vars are case-sensitive, so other spellings are genuinely
   // different variables).
-  const caseInsensitive = (ctx?.platform ?? process.platform) === 'win32';
-  const scrub = (name: string): void => {
-    if (!caseInsensitive) {
-      delete env[name];
-      return;
-    }
-    const lower = name.toLowerCase();
-    for (const key of Object.keys(env)) {
-      if (key.toLowerCase() === lower) {
-        delete env[key];
-      }
-    }
-  };
+  const platform = ctx?.platform ?? process.platform;
+  const scrub = (name: string): void => deleteEnvVarCaseAware(env, name, platform);
   scrub('CF_ACCESS_CLIENT_ID');
   scrub('CF_ACCESS_CLIENT_SECRET');
   // Scrub EVERY transport-redirecting selector (CLOUDFLARE_ENV, the API-base overrides,
