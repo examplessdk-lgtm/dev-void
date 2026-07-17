@@ -9,7 +9,8 @@ import {
   rmSync,
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join, relative, resolve } from 'pathe';
+import { parse as parseJsoncConfig, type ParseError } from 'jsonc-parser';
+import { basename, join, relative, resolve } from 'pathe';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
@@ -33,7 +34,7 @@ import {
 import { scanJobsSync } from '../crons/scan.ts';
 import { writeDrizzleConfig } from '../drizzle/config.ts';
 import { discoverSchema } from '../drizzle/discover.ts';
-import { collectRevalidate, collectPages } from '../isr-config.ts';
+import { collectRevalidate, collectPages, hasRevalidate } from '../isr-config.ts';
 import { voidWarn } from '../log.ts';
 import { collectMigrations } from '../migrations/collect.ts';
 import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
@@ -73,10 +74,16 @@ import {
 } from './deploy-errors.ts';
 import { uploadAssetsToR2, type DirectR2PutItem } from './direct-r2-upload.ts';
 import {
+  collectPlaintextVarWarnings,
   fetchRemoteSecretNames,
   formatEnvReport,
   getDeployEnvDefaults,
+  SelfHostEnvValidationError,
+  SelfHostFirstDeployError,
+  SelfHostSchemaError,
+  SelfHostSecretListError,
   validateProdEnv,
+  validateSelfHostProdEnv,
 } from './env-validation.ts';
 import { collectGitDeployMetadata, type GitDeployMetadata } from './git-metadata.ts';
 import {
@@ -103,11 +110,18 @@ import {
   FRAMEWORK_PRESETS,
   formatProjectCommand,
   resolveProjectCommand,
+  resolveWranglerArgv,
   type StaticPreset,
   type FrameworkPreset,
 } from './preset.ts';
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project.ts';
 import { promptProjectSelection, promptProjectSetupAction } from './prompt.ts';
+import {
+  checkCloudflareProvisionDrift,
+  provisionCloudflareResources,
+  type DesiredResourceSet,
+  type ProvisionDriftEntry,
+} from './provision.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
 import type {
   AssetConfig,
@@ -122,6 +136,7 @@ import {
   ensureWranglerCompat,
   resolveLiveBindingConfig,
   syncWranglerBindings,
+  writeProvisionedWranglerConfig,
   type LiveBindingConfig,
   type WranglerCompat,
 } from './wrangler.ts';
@@ -384,19 +399,566 @@ export function buildEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
   return env;
 }
 
+/** Result of one orchestrator-owned wrangler invocation (whoami/migrate/deploy). */
+export type DeployWranglerRunResult = {
+  status: number;
+  stdout: string;
+  stderr: string;
+  /** Non-null ONLY when the child was killed by a signal — a HARD failure. */
+  signal?: NodeJS.Signals | null;
+  /** Spawn-error message when the child could not start — a HARD failure. */
+  error?: string | null;
+};
+
+/**
+ * Injectable seam over the orchestrator's OWN wrangler calls (`whoami`,
+ * `d1 migrations apply`, `deploy`). `capture:true` pipes stdout/stderr (so
+ * `whoami --json` can be classified); `capture:false` inherits the terminal
+ * (migrate/deploy stream their own progress + URL). Unit tests inject a stub so
+ * no real wrangler runs. Mirrors the provisioner's `RunWrangler` structured
+ * provenance so a signal-killed / unspawnable child is never read as success.
+ */
+export type DeployWranglerRun = (
+  args: Array<string>,
+  opts: { capture: boolean },
+) => DeployWranglerRunResult | Promise<DeployWranglerRunResult>;
+
+/**
+ * Injectable seams for {@link runCloudflareDeploy}, so the whole orchestration
+ * is unit-testable with NO real wrangler / network / Cloudflare account — the
+ * same pattern the provisioner (`cli/provision.ts`) and the self-host secret
+ * units (`cli/env-validation.ts`) use.
+ */
+export interface CloudflareDeployDeps {
+  /** wrangler runner for the orchestrator's own whoami/migrate/deploy calls. */
+  runWrangler?: DeployWranglerRun;
+  /** Run the project's `vite build` (inherited stdio). Throws on a nonzero build. */
+  runBuild?: (env: NodeJS.ProcessEnv) => void;
+  /** Provisioner seam (default: {@link provisionCloudflareResources}). */
+  provision?: typeof provisionCloudflareResources;
+  /** WARN unit seam (default: {@link collectPlaintextVarWarnings}). */
+  collectPlaintextVarWarnings?: typeof collectPlaintextVarWarnings;
+  /** GATE unit seam (default: {@link validateSelfHostProdEnv}). */
+  validateSelfHostProdEnv?: typeof validateSelfHostProdEnv;
+  /** Override CI / non-interactive detection (default: `!stdin.isTTY || getTokenSource()==='ci'`). */
+  isCI?: boolean;
+  /** Override `process.exit` (tests assert the exit code without halting). */
+  exit?: (code: number) => never;
+}
+
+/** Human labels for a drifted resource kind, used in guidance messages. */
+const CLOUDFLARE_RESOURCE_LABELS: Record<ProvisionDriftEntry['kind'], string> = {
+  d1: 'D1 database',
+  kv: 'KV namespace',
+  r2: 'R2 bucket',
+  hyperdrive: 'Hyperdrive config',
+};
+
+/** True only for a wrangler child that ran to completion with a clean exit 0. */
+function isCleanWranglerExit(result: DeployWranglerRunResult): boolean {
+  return (
+    result.status === 0 && result.signal == null && (result.error == null || result.error === '')
+  );
+}
+
+/**
+ * Parse the root wrangler config (BOM-aware, trailing commas allowed), matching
+ * the provisioner's `readRootConfig`. Returns `{}` when the file is absent or
+ * unreadable — callers then treat every field as unset (safe: a genuinely broken
+ * config fails later in wrangler with a clear error).
+ */
+function parseRootWranglerConfig(configPath: string): Record<string, unknown> {
+  if (!existsSync(configPath)) {
+    return {};
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(configPath, 'utf-8');
+  } catch {
+    return {};
+  }
+  const content = raw.startsWith('﻿') ? raw.slice(1) : raw;
+  const errors: Array<ParseError> = [];
+  const parsed = parseJsoncConfig(content, errors, { allowTrailingComma: true });
+  if (errors.length > 0 || typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return {};
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** Read a non-empty top-level string field (`account_id` / `name`) from the config. */
+function readWranglerTopLevelString(
+  config: Record<string, unknown>,
+  field: string,
+): string | undefined {
+  const value = config[field];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/** Read the stored resource name (`database_name` / `bucket_name`) for a binding. */
+function readStoredResourceName(
+  config: Record<string, unknown>,
+  field: string,
+  binding: string,
+  nameField: string,
+): string | undefined {
+  const list = config[field];
+  if (!Array.isArray(list)) {
+    return undefined;
+  }
+  for (const entry of list) {
+    if (
+      entry &&
+      typeof entry === 'object' &&
+      (entry as { binding?: unknown }).binding === binding
+    ) {
+      const name = (entry as Record<string, unknown>)[nameField];
+      return typeof name === 'string' && name.length > 0 ? name : undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Sanitize a raw name into a valid Cloudflare Worker name — the SAME rule
+ * `@cloudflare/vite-plugin`'s `toValidWorkerName` applies (lowercase, `_`→`-`,
+ * any non `[a-z0-9-]`→`-`, strip leading/trailing dashes, ≤63 chars, empty →
+ * `my-worker`). Deriving it identically means the name we pin in the config and
+ * the name the build emits into `dist/ssr/wrangler.json` agree, so
+ * `wrangler secret list -c <root>` and `wrangler deploy` target one worker.
+ */
+function toValidWorkerName(raw: string): string {
+  const name = raw
+    .toLowerCase()
+    .replace(/_/g, '-')
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 63)
+    .replace(/-+$/g, '');
+  return name.length > 0 ? name : 'my-worker';
+}
+
+/**
+ * Derive the worker name with the SAME precedence the CF plugin uses
+ * (`getWorkerNameFromProject`): `WRANGLER_CI_OVERRIDE_NAME` → package.json
+ * `name` → directory basename → `my-worker`.
+ */
+function deriveWorkerName(root: string): string {
+  const override = process.env.WRANGLER_CI_OVERRIDE_NAME;
+  if (override && override.trim().length > 0) {
+    return toValidWorkerName(override.trim());
+  }
+  let pkgName: string | undefined;
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8')) as { name?: unknown };
+    if (typeof pkg.name === 'string' && pkg.name.length > 0) {
+      pkgName = pkg.name;
+    }
+  } catch {
+    // no package.json / unreadable — fall through to the directory basename.
+  }
+  return toValidWorkerName(pkgName ?? basename(root) ?? '');
+}
+
+/**
+ * Compute the DESIRED id/name-bearing Cloudflare resources from SOURCE
+ * (pre-build, fail-fast) — the single set shared by the provision and drift
+ * paths. Reuses the deploy-time inference primitives directly
+ * (`inferProjectBindings` + the scanners + the pg-dialect / `hasRevalidate`
+ * signals) rather than `assembleVoidManifest`, which runs only inside the
+ * managed `runFullDeploy` branches that need a `PlatformClient`.
+ *
+ * Resource NAMES prefer the value already stored in the root wrangler config
+ * (so a re-provision reuses the same database/bucket and the provisioner's
+ * stored-name identity check passes); otherwise they default off the worker
+ * name. Returns a per-binding REASON map used to explain drift.
+ */
+export async function computeDesiredCloudflareResources(
+  root: string,
+  voidConfig: VoidConfig,
+  configPath: string,
+): Promise<{ desired: DesiredResourceSet; reasons: Map<string, string> }> {
+  const paths = resolveProjectPaths(root, voidConfig);
+  const config = parseRootWranglerConfig(configPath);
+  const workerName = readWranglerTopLevelString(config, 'name') ?? deriveWorkerName(root);
+
+  const bindings = inferProjectBindings(root, { paths }, voidConfig.inference?.scanDirs);
+  const authEnabled =
+    bindings.needsAuth || findVoidAuthConfig(root, paths) !== null || voidConfig.auth !== undefined;
+  const dialect = getDatabaseDialect(voidConfig);
+  const bindingNames = resolveBindingNames(voidConfig.inference?.bindings);
+
+  const desired: DesiredResourceSet = { kvNamespaces: [], queues: [] };
+  const reasons = new Map<string, string>();
+
+  // D1 (sqlite dialect). Auth also implies a D1 (matches runFullDeploy).
+  if ((bindings.needsD1 || authEnabled) && dialect !== 'postgresql') {
+    const binding = bindingNames?.d1 ?? 'DB';
+    const storedName = readStoredResourceName(config, 'd1_databases', binding, 'database_name');
+    desired.d1 = { binding, name: storedName ?? toValidWorkerName(`${workerName}-db`) };
+    reasons.set(
+      binding,
+      authEnabled && !bindings.needsD1 ? 'auth requires a D1 database' : 'app uses env.DB (D1)',
+    );
+  }
+
+  // KV
+  if (bindings.needsKV) {
+    const binding = bindingNames?.kv ?? 'KV';
+    desired.kvNamespaces.push({ binding, title: toValidWorkerName(`${workerName}-kv`) });
+    reasons.set(binding, 'app uses env.KV');
+  }
+
+  // R2
+  if (bindings.needsR2) {
+    const binding = bindingNames?.r2 ?? 'STORAGE';
+    const storedName = readStoredResourceName(config, 'r2_buckets', binding, 'bucket_name');
+    const bucketName =
+      storedName && storedName !== 'default'
+        ? storedName
+        : toValidWorkerName(`${workerName}-storage`);
+    desired.r2 = { binding, bucketName };
+    reasons.set(binding, 'app uses env.STORAGE (R2)');
+  }
+
+  // Queues (resource names — account-unique; the build binds them for native apps).
+  desired.queues = scanQueuesSync(root, paths.queuesDir).map((q) => q.name);
+
+  // Hyperdrive (PostgreSQL apps). The connection string is only consumed on a
+  // fresh create; a re-provision reads-first from the config id and never needs it.
+  if (dialect === 'postgresql') {
+    const binding = 'HYPERDRIVE';
+    desired.hyperdrive = {
+      binding,
+      name: toValidWorkerName(`${workerName}-hyperdrive`),
+      connectionString: process.env.DATABASE_URL ?? '',
+    };
+    reasons.set(binding, 'app uses PostgreSQL (needs a Hyperdrive config)');
+  }
+
+  // ISR_CACHE (a KV namespace) — self-host-only, not in the import walk. Desired
+  // when the merged revalidate config (void.json `routing.revalidate` + per-page
+  // `export const revalidate`) turns ISR on — the SAME gate the build's `emitIsr`
+  // uses (`plugin-routing.ts`).
+  const pageScan = existsSync(paths.pagesDir)
+    ? await scanPages(root, { output: voidConfig.output, paths })
+    : null;
+  if (hasRevalidate(collectRevalidate(voidConfig, pageScan))) {
+    const binding = 'ISR_CACHE';
+    desired.kvNamespaces.push({ binding, title: toValidWorkerName(`${workerName}-isr-cache`) });
+    reasons.set(binding, 'routes use `revalidate` (ISR) — needs an ISR_CACHE KV namespace');
+  }
+
+  return { desired, reasons };
+}
+
+/** Format the drift / CI-gate guidance naming each un-provisioned resource. */
+function formatCloudflareDriftMessage(
+  missing: Array<ProvisionDriftEntry>,
+  reasons: Map<string, string>,
+  header: string,
+  footer: string,
+): string {
+  const lines = missing.map((entry) => {
+    const reason = reasons.get(entry.binding);
+    const label = CLOUDFLARE_RESOURCE_LABELS[entry.kind];
+    return `  • ${entry.binding} (${label})${reason ? ` — ${reason}` : ''}`;
+  });
+  return [header, ...lines, '', footer].join('\n');
+}
+
+/**
+ * Default {@link DeployWranglerRun}: spawns the project-local wrangler REAL CLI
+ * (via {@link resolveWranglerArgv}, shell-free) with the Cloudflare account
+ * pinned into the child env, so `whoami`/`migrate`/`deploy` can never consult a
+ * different ambient account. `capture` pipes or inherits stdio per call.
+ */
+function createDeployWranglerRunner(
+  root: string,
+  accountId: string | undefined,
+): DeployWranglerRun {
+  const launcher = resolveWranglerArgv(root);
+  const [command, ...prefix] = launcher;
+  return (args, opts) => {
+    const result = spawnSync(command as string, [...prefix, ...args], {
+      cwd: root,
+      stdio: opts.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+      encoding: 'utf-8',
+      env: buildEnv(accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {}),
+      shell: false,
+      windowsHide: true,
+    });
+    return {
+      status: typeof result.status === 'number' ? result.status : 1,
+      stdout: result.stdout ?? '',
+      stderr: result.stderr ?? '',
+      signal: result.signal ?? null,
+      error: result.error ? result.error.message : null,
+    };
+  };
+}
+
 /**
  * Deploy to the user's OWN Cloudflare account (no Void platform).
  *
- * Stub: the real orchestration (provisioning, config writing, wrangler deploy)
- * lands in a later task. It intentionally reads its own config later, so it
- * takes `root`/`options`/`cliLog` rather than any managed-platform state.
+ * Orchestrates the existing units — it does NOT re-implement provisioning
+ * (`cli/provision.ts`), the config writer (`cli/wrangler.ts`), or the self-host
+ * secret preflight (`cli/env-validation.ts`). Flow:
+ *
+ *   app-class guard → desired set (from source, pre-build) → preflight (auth +
+ *   account pin + CI gate) → provision OR drift-check → ensure worker name →
+ *   remote D1 migrate → secrets (warn + gate) → clean-env build → wrangler deploy
+ *
+ * ORDERING DECISION (documented): the secrets GATE runs AFTER provision + remote
+ * migrations resolve but BEFORE build + deploy — the brief's recommended default.
+ * Provision and D1 migrations are idempotent (read-first / tracked in wrangler's
+ * `d1_migrations` table), so re-running them after a gate failure is safe, while
+ * build + `wrangler deploy` (the non-idempotent worker upload) is what the gate
+ * protects. The warning is emitted first (non-fatal); a first-deploy secret-list
+ * failure (worker not yet created) renders actionable `wrangler secret put`
+ * bootstrap guidance rather than dead-ending.
+ *
+ * Every wrangler / provisioner / secret-unit call is an injected seam
+ * ({@link CloudflareDeployDeps}) so the whole orchestration is unit-testable with
+ * no real wrangler, network, or Cloudflare account.
  */
-async function runCloudflareDeploy(
-  _root: string,
-  _options: RunDeployOptions,
-  _cliLog: CliLogger,
+export async function runCloudflareDeploy(
+  root: string,
+  options: RunDeployOptions,
+  cliLog: CliLogger,
+  deps: CloudflareDeployDeps = {},
 ): Promise<void> {
-  throw new Error('void deploy --backend cloudflare is not yet implemented (Task 6)');
+  const exit = deps.exit ?? ((code: number): never => process.exit(code));
+  const voidConfig = readConfig(root);
+  cliLog.info('cloudflare_deploy_start', {
+    provision: options.provision === true ? true : undefined,
+  });
+
+  // 1. App-class guard — v1 supports WORKER-BEARING apps only (full Void app +
+  // framework SSR). `resolveStaticDeployPreset` returns non-null for static/SPA.
+  const staticPreset = resolveStaticDeployPreset(root, voidConfig, options);
+  if (staticPreset) {
+    log.error(
+      [
+        `deploy: --backend cloudflare does not yet support ${staticPreset.appType} apps.`,
+        'The Cloudflare backend currently deploys worker-bearing apps (a full Void app',
+        'or a framework SSR app). Deploy this app with `void deploy` (the managed',
+        'platform), or host the built assets on Cloudflare Pages / any static host.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
+  // 2. Desired resource set — computed ONCE from SOURCE, pre-build (fail-fast),
+  // shared by the provision and drift paths.
+  const configPath = discoverRootWranglerConfig(root);
+  const { desired, reasons } = await computeDesiredCloudflareResources(
+    root,
+    voidConfig,
+    configPath,
+  );
+
+  // 3. Preflight — pin the account and confirm wrangler auth.
+  const rootConfig = parseRootWranglerConfig(configPath);
+  const accountId =
+    readWranglerTopLevelString(rootConfig, 'account_id') ??
+    (process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || undefined);
+  const runWrangler = deps.runWrangler ?? createDeployWranglerRunner(root, accountId);
+
+  const whoami = await Promise.resolve(runWrangler(['whoami', '--json'], { capture: true }));
+  if (!isCleanWranglerExit(whoami)) {
+    log.error(
+      [
+        'deploy: not authenticated with Cloudflare.',
+        'Run `wrangler login`, or set CLOUDFLARE_API_TOKEN (a token with',
+        'Workers Scripts:Edit + read on your bound resources; --provision also needs',
+        'per-product *:Edit for D1/KV/R2/Queues/Hyperdrive). Then rerun.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
+  if (!accountId) {
+    log.error(
+      [
+        'deploy: no Cloudflare account is pinned.',
+        'Set `account_id` in your root wrangler.jsonc, or export CLOUDFLARE_ACCOUNT_ID.',
+        'A multi-account token makes wrangler prompt (or error in CI) on its own, which',
+        'void cannot intercept — so the account must be pinned before deploying.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
+  // CI gate for --provision: fail closed in non-interactive shells unless the
+  // committed config already covers every desired resource (a provable no-op) —
+  // CI cannot commit back the ids a create would mint, so a re-run would dup.
+  const isCI = deps.isCI ?? (!process.stdin.isTTY || getTokenSource() === 'ci');
+  if (options.provision && isCI) {
+    const { missing } = checkCloudflareProvisionDrift(configPath, desired);
+    if (missing.length > 0) {
+      log.error(
+        formatCloudflareDriftMessage(
+          missing,
+          reasons,
+          'deploy: --provision is disabled in CI / non-interactive shells, and these ' +
+            'resources are not yet in your committed wrangler.jsonc:',
+          'Provision them locally (`void deploy --backend cloudflare --provision`), commit ' +
+            'the updated wrangler.jsonc, then let CI run `void deploy --backend cloudflare`.',
+        ),
+      );
+      return exit(1);
+    }
+  }
+
+  // 4. Provision (--provision) OR drift-check (no --provision).
+  if (options.provision) {
+    const provision = deps.provision ?? provisionCloudflareResources;
+    try {
+      const result = await provision(root, configPath, desired, {
+        accountId,
+        log: { info: (msg) => log.info(msg), warn: (msg) => log.warn(msg) },
+      });
+      cliLog.info('cloudflare_provisioned', {
+        resources: result.resources.map((r) => `${r.kind}:${r.action}`),
+      });
+    } catch (err) {
+      log.error(`deploy: provisioning failed — ${getErrorMessage(err)}`);
+      return exit(1);
+    }
+  } else {
+    const { missing } = checkCloudflareProvisionDrift(configPath, desired);
+    if (missing.length > 0) {
+      log.error(
+        formatCloudflareDriftMessage(
+          missing,
+          reasons,
+          'Deploy blocked — resources not yet provisioned in your Cloudflare account:',
+          'Run:  void deploy --backend cloudflare --provision',
+        ),
+      );
+      return exit(1);
+    }
+  }
+
+  // 5. Ensure the worker `name` in the root config (only-when-absent, via the
+  // Task 3 writer). The build defaults a name into dist/ssr/wrangler.json, but
+  // `wrangler secret list -c <root>` (the secrets gate) resolves the worker from
+  // the ROOT config's `name` — so pinning it makes the gate and deploy agree.
+  const workerName = readWranglerTopLevelString(rootConfig, 'name') ?? deriveWorkerName(root);
+  writeProvisionedWranglerConfig(root, { name: workerName }, { configPath });
+
+  // 6. Remote D1 migrations (sqlite D1 apps only; pg/Hyperdrive apps skip). The
+  // provisioner writes `migrations_dir`; on the drift path a missing one means
+  // migrations silently no-op, so warn.
+  if (desired.d1) {
+    if (!options.provision) {
+      const d1MigrationsDir = readStoredResourceName(
+        parseRootWranglerConfig(configPath),
+        'd1_databases',
+        desired.d1.binding,
+        'migrations_dir',
+      );
+      if (!d1MigrationsDir) {
+        log.warn(
+          `deploy: D1 binding ${desired.d1.binding} has no "migrations_dir" in ${configPath} — ` +
+            'remote migrations will no-op. Run `--provision` once to set it (or add it yourself).',
+        );
+      }
+    }
+    const migrate = await Promise.resolve(
+      runWrangler(
+        ['d1', 'migrations', 'apply', desired.d1.name, '--remote', '-c', configPath, '--env='],
+        { capture: false },
+      ),
+    );
+    if (!isCleanWranglerExit(migrate)) {
+      log.error(
+        `deploy: remote D1 migrations failed for "${desired.d1.name}" (exit ${String(migrate.status)}). ` +
+          'Fix the migration and rerun. Note: D1 always enforces foreign_keys=ON — a Drizzle ' +
+          'table-rebuild using PRAGMA foreign_keys=OFF must use PRAGMA defer_foreign_keys instead.',
+      );
+      return exit(1);
+    }
+  }
+
+  // 7. Secrets preflight — WARN (plaintext .env→vars), then GATE (required
+  // secrets). Runs AFTER provision/migrate resolve, BEFORE build/deploy.
+  const warnings = await (deps.collectPlaintextVarWarnings ?? collectPlaintextVarWarnings)(root, {
+    configPath,
+    mode: 'production',
+  });
+  if (warnings.secretKeys.length > 0) {
+    log.warn(
+      [
+        'deploy: these worker vars ship as PLAINTEXT in the deployed config:',
+        ...warnings.secretKeys.map(
+          (k) => `  • ${k.key}${k.reason === 'schema-secret' ? ' (env.ts .secret())' : ''}`,
+        ),
+        'Move real secrets to `wrangler secret put <NAME>` so they are not baked into wrangler.json.',
+      ].join('\n'),
+    );
+  }
+  try {
+    await (deps.validateSelfHostProdEnv ?? validateSelfHostProdEnv)(root, {
+      configPath,
+      accountId,
+      mode: 'production',
+    });
+  } catch (err) {
+    if (
+      err instanceof SelfHostFirstDeployError ||
+      err instanceof SelfHostSecretListError ||
+      err instanceof SelfHostEnvValidationError ||
+      err instanceof SelfHostSchemaError
+    ) {
+      log.error(err.message);
+      return exit(1);
+    }
+    throw err;
+  }
+
+  // 8. Build with a CLEAN env — WITHOUT VOID_DEPLOY_PROJECT_ID — so self-host ISR
+  // emits and the CF plugin merges the wrangler.jsonc real ids into
+  // dist/ssr/wrangler.json.
+  const buildChildEnv = buildEnv({ CLOUDFLARE_ACCOUNT_ID: accountId });
+  delete buildChildEnv.VOID_DEPLOY_PROJECT_ID;
+  const runBuild =
+    deps.runBuild ??
+    ((env: NodeJS.ProcessEnv) => {
+      execSync(resolveProjectCommand(root, 'vite build'), { cwd: root, stdio: 'inherit', env });
+    });
+  try {
+    runBuild(buildChildEnv);
+  } catch (err) {
+    log.error(`deploy: build failed — ${getErrorMessage(err)}`);
+    return exit(getExitCode(err));
+  }
+
+  // 9. Deploy — bare `wrangler deploy` follows .wrangler/deploy/config.json →
+  // dist/ssr/wrangler.json (which carries the real ids + pinned account).
+  const deployResult = await Promise.resolve(runWrangler(['deploy'], { capture: false }));
+  if (!isCleanWranglerExit(deployResult)) {
+    log.error(`deploy: \`wrangler deploy\` failed (exit ${String(deployResult.status)}).`);
+    return exit(1);
+  }
+  cliLog.info('cloudflare_deploy_end', { ok: true, worker: workerName });
+  log.success(`Deployed "${workerName}" to your Cloudflare account.`);
+}
+
+/**
+ * Discover the root wrangler config path the same way the build / bindings
+ * writer do (wrangler.jsonc first, then wrangler.json). Falls back to the
+ * default wrangler.jsonc path when none exists yet — the provisioner creates it.
+ */
+function discoverRootWranglerConfig(root: string): string {
+  for (const name of ['wrangler.jsonc', 'wrangler.json']) {
+    const candidate = join(root, name);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return join(root, 'wrangler.jsonc');
 }
 
 async function runDeployInner(
