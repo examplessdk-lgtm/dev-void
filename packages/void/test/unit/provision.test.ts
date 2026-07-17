@@ -3461,53 +3461,109 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
   const lockMutex = `${lockMarker}.lock`;
   const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-  it('two concurrent Hyperdrive provisions race — exactly ONE create, the other reuses, mutex released', async () => {
+  it('round 14 — a SECOND in-process provision fails fast with a clear hard error (at most one per process)', async () => {
     setup(
       JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
     );
     let createCalls = 0;
-    const makeProv = (): Promise<{ resources: Array<{ kind: string; action: string }> }> => {
-      const run: RunWrangler = (args) => {
-        if (isCall(args, 'hyperdrive', 'create')) {
-          createCalls++;
-          simulateUpdateConfig('hyperdrive', {
-            binding: 'HYPERDRIVE',
-            id: hex32('hd-' + createCalls),
-          });
-          return ok();
-        }
+    const run: RunWrangler = (args) => {
+      if (isCall(args, 'hyperdrive', 'create')) {
+        createCalls++;
+        simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: hex32('hd-1') });
         return ok();
-      };
-      return provisionCloudflareResources(
-        tmpDir,
-        wranglerPath,
-        {
-          ...emptyDesired,
-          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
-        },
-        {
-          runWrangler: run,
-          log: silentLog,
-          // Barrier: the winner holds the lock while LISTING (40ms), so the loser blocks
-          // on the lock — proving the LOCK (not accidental sequencing) serializes them.
-          listHyperdriveConfigs: async () => {
-            await delay(40);
-            return [];
-          },
-        },
-      ) as Promise<{ resources: Array<{ kind: string; action: string }> }>;
+      }
+      return ok();
     };
-    const [a, b] = await Promise.all([makeProv(), makeProv()]);
-    const actions = [...a.resources, ...b.resources]
-      .filter((r) => r.kind === 'hyperdrive')
-      .map((r) => r.action)
-      .sort();
-    // Exactly one create; the second read-first (inside the lock) reused the first's id.
+    const desired = {
+      ...emptyDesired,
+      hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+    };
+    const opts = {
+      runWrangler: run,
+      log: silentLog,
+      // Keep the first provision ACTIVE long enough that the second demonstrably starts
+      // while it runs (the guard is taken synchronously at entry regardless).
+      listHyperdriveConfigs: async (): Promise<Array<never>> => {
+        await delay(60);
+        return [];
+      },
+    };
+    const first = provisionCloudflareResources(tmpDir, wranglerPath, desired, opts);
+    // The second provision starts while the first is active → the process-wide guard
+    // rejects it OUTRIGHT (no lock contention, no wrangler work, no config read).
+    await expect(provisionCloudflareResources(tmpDir, wranglerPath, desired, opts)).rejects.toThrow(
+      /a provision is already active in this process.*run provisions sequentially/s,
+    );
+    const result = await first;
+    expect(result.resources.find((r) => r.kind === 'hyperdrive')?.action).toBe('created');
     expect(createCalls).toBe(1);
+    // Mutex always released — no leak; and the slot freed: a THIRD (sequential) run works.
+    expect(existsSync(lockMutex)).toBe(false);
+    const third = await provisionCloudflareResources(tmpDir, wranglerPath, desired, opts);
+    expect(third.resources.find((r) => r.kind === 'hyperdrive')?.action).toBe('reused');
+    expect(createCalls).toBe(1);
+  });
+
+  it('two concurrent provisions in SEPARATE processes race — exactly ONE create, the other reuses, mutex released', async () => {
+    // Round 14 — with at most one provision per process, concurrent provisioning is a
+    // CROSS-process story by definition, so the serialization proof runs two REAL node
+    // processes racing the same config under the on-disk whole-provision lock.
+    setup(
+      JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
+    );
+    const probe = join(tmpDir, 'race-probe.mjs');
+    const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
+    writeFileSync(
+      probe,
+      `import { readFileSync, writeFileSync } from 'node:fs';\n` +
+        `import { provisionCloudflareResources } from ${JSON.stringify(provisionUrl)};\n` +
+        `const cfgPath = ${JSON.stringify(wranglerPath)};\n` +
+        `const run = (args) => {\n` +
+        `  if (args[0] === 'hyperdrive' && args[1] === 'create') {\n` +
+        `    const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8'));\n` +
+        `    cfg.hyperdrive = [{ binding: 'HYPERDRIVE', id: process.argv[2] }];\n` +
+        `    writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));\n` +
+        `  }\n` +
+        `  return { stdout: '', stderr: '', status: 0 };\n` +
+        `};\n` +
+        `provisionCloudflareResources(${JSON.stringify(tmpDir)}, cfgPath, {\n` +
+        `  kvNamespaces: [],\n` +
+        `  queues: [],\n` +
+        `  hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },\n` +
+        `}, {\n` +
+        `  runWrangler: run,\n` +
+        `  log: { info: () => {}, warn: () => {} },\n` +
+        `  // Barrier: the winner holds the lock while LISTING, so the loser must block\n` +
+        `  // on the on-disk lock (proving the LOCK, not sequencing, serializes them).\n` +
+        `  listHyperdriveConfigs: () => new Promise((r) => setTimeout(() => r([]), 300)),\n` +
+        `}).then(\n` +
+        `  (res) => console.log('ACTION:' + res.resources.find((r) => r.kind === 'hyperdrive').action),\n` +
+        `  (err) => { console.log('REJECTED:' + err.message); process.exitCode = 7; },\n` +
+        `);\n`,
+    );
+    const { spawn } = await import('node:child_process');
+    const runChild = (id: string): Promise<{ code: number | null; stdout: string }> =>
+      new Promise((res) => {
+        const child = spawn(process.execPath, [probe, hex32(id)], {
+          cwd: tmpDir,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        child.stdout.setEncoding('utf-8');
+        child.stdout.on('data', (chunk: string) => {
+          stdout += chunk;
+        });
+        child.on('close', (code) => res({ code, stdout }));
+      });
+    const [a, b] = await Promise.all([runChild('hd-a'), runChild('hd-b')]);
+    expect(a.code).toBe(0);
+    expect(b.code).toBe(0);
+    const actions = [a.stdout, b.stdout].map((s) => s.match(/ACTION:(\w+)/)?.[1]).sort();
+    // Exactly one create; the loser's read-first (under the lock) reused the winner's id.
     expect(actions).toEqual(['created', 'reused']);
     // Mutex always released — no leak.
     expect(existsSync(lockMutex)).toBe(false);
-  });
+  }, 30_000);
 
   it('recovers a STALE/abandoned lock (old mtime, crashed owner) and proceeds', async () => {
     setup(
@@ -3581,12 +3637,14 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
     expect(existsSync(lockMutex)).toBe(false);
   });
 
-  it('F3 — concurrent provisions through a SYMLINK ALIAS to the same config serialize (one lock, one create)', async () => {
-    // A real config + a symlink alias to it. Both provisions hit the SAME underlying file
-    // but via DIFFERENT lexical paths. Without realpath canonicalization each derives its
-    // own marker dir (`<lexical>.void-provision.lock`), so both acquire "the" lock at once
-    // and both create a duplicate. With F3 both canonicalize to ONE identity → one lock →
-    // the loser blocks, then read-first (under the lock) reuses the winner's id.
+  it('F3 — a provision via a SYMLINK ALIAS contends on the SAME canonical lock and reuses the id written via the real path', async () => {
+    // A real config + a symlink alias to it. Both paths hit the SAME underlying file but
+    // via DIFFERENT lexical paths. Without realpath canonicalization each derives its
+    // own marker dir (`<lexical>.void-provision.lock`), so an alias provision would not
+    // contend on the real path's lock and both could create a duplicate. (Round 14: two
+    // provisions can no longer race in ONE process — the identity proof is that the
+    // alias provision blocks on the CANONICAL mutex, plus create-then-reuse across the
+    // two names on the one underlying file.)
     setup(
       JSON.stringify({ account_id: 'acct', hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
     );
@@ -3595,21 +3653,22 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
     // Sanity: the alias and the real config canonicalize to the same real file.
     expect(realpathSync(join(tmpDir, aliasName))).toBe(realpathSync(wranglerPath));
     let createCalls = 0;
+    const run: RunWrangler = (args) => {
+      if (isCall(args, 'hyperdrive', 'create')) {
+        createCalls++;
+        simulateUpdateConfig('hyperdrive', {
+          binding: 'HYPERDRIVE',
+          id: hex32('hd-' + createCalls),
+        });
+        return ok();
+      }
+      return ok();
+    };
     const makeProv = (
       configArg: string,
-    ): Promise<{ resources: Array<{ kind: string; action: string }> }> => {
-      const run: RunWrangler = (args) => {
-        if (isCall(args, 'hyperdrive', 'create')) {
-          createCalls++;
-          simulateUpdateConfig('hyperdrive', {
-            binding: 'HYPERDRIVE',
-            id: hex32('hd-' + createCalls),
-          });
-          return ok();
-        }
-        return ok();
-      };
-      return provisionCloudflareResources(
+      retries?: number,
+    ): Promise<{ resources: Array<{ kind: string; action: string }> }> =>
+      provisionCloudflareResources(
         tmpDir,
         configArg,
         {
@@ -3619,32 +3678,32 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
         {
           runWrangler: run,
           log: silentLog,
-          // Barrier: the winner holds the lock while LISTING (40ms), so the loser blocks
-          // on the shared lock — proving canonicalization (not sequencing) serializes them.
-          listHyperdriveConfigs: async () => {
-            await delay(40);
-            return [];
-          },
+          listHyperdriveConfigs: async () => [],
+          ...(retries !== undefined ? { lockOptions: { retries } } : {}),
         },
       ) as Promise<{ resources: Array<{ kind: string; action: string }> }>;
-    };
-    // One via the REAL absolute path, one via the SYMLINK ALIAS (relative).
-    const [a, b] = await Promise.all([makeProv(wranglerPath), makeProv(aliasName)]);
-    const actions = [...a.resources, ...b.resources]
-      .filter((r) => r.kind === 'hyperdrive')
-      .map((r) => r.action)
-      .sort();
+    // IDENTITY: while the CANONICAL lock is held, an alias-path provision cannot acquire
+    // (it resolves to the same mutex — pre-fix it would derive its own and proceed).
+    const held = await acquireProvisionLock(realpathSync(wranglerPath));
+    await expect(makeProv(aliasName, 0)).rejects.toThrow(/already being held/);
+    await held.release();
+    // One underlying file: a create via the REAL path is read-first-REUSED via the alias.
+    const a = await makeProv(wranglerPath);
+    const b = await makeProv(aliasName);
+    expect(a.resources.find((r) => r.kind === 'hyperdrive')?.action).toBe('created');
+    expect(b.resources.find((r) => r.kind === 'hyperdrive')?.action).toBe('reused');
     expect(createCalls).toBe(1);
-    expect(actions).toEqual(['created', 'reused']);
     // The single canonical mutex was released.
     expect(existsSync(`${realpathSync(wranglerPath)}.void-provision.lock.lock`)).toBe(false);
   });
 
-  it('F1 — two racing FIRST-RUNS (accounts A and B) serialize; the second fails closed on mismatch, no cross-account write', async () => {
-    // Neither run has a config account_id at start. The whole-provision lock forces them
-    // to serialize: the winner reads no account, persists its own, and provisions; the
-    // loser — under the lock — re-reads the persisted account and fails closed on the
-    // A≠B mismatch BEFORE any create, so it never rebinds the winner's resources.
+  it('F1 — a SECOND first-run under a different account fails closed on the persisted pin, no cross-account write', async () => {
+    // Neither run has a config account_id at start. The first run persists its own
+    // account and provisions; the second — reading the now-pinned config — fails closed
+    // on the A≠B mismatch BEFORE any create, so it never rebinds the winner's resources.
+    // (Round 14: two provisions can no longer race in ONE process — the guard rejects
+    // the second outright — so the reconciliation contract is proven sequentially; the
+    // cross-process serialization itself is proven by the child-process race test above.)
     setup(JSON.stringify({ name: 'app' }));
     const savedAmbient = process.env.CLOUDFLARE_ACCOUNT_ID;
     delete process.env.CLOUDFLARE_ACCOUNT_ID; // force reconciliation via opts.accountId only
@@ -3667,12 +3726,7 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
         return provisionCloudflareResources(
           tmpDir,
           wranglerPath,
-          {
-            ...emptyDesired,
-            // A slow lister keeps the winner holding the lock long enough that the loser
-            // is forced to wait on it (serialization, not accidental sequencing).
-            d1: { binding: 'DB', name: 'myapp-db' },
-          },
+          { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
           {
             runWrangler: run,
             accountId: account,
@@ -3681,20 +3735,14 @@ describe('provisionCloudflareResources — whole-provision cross-process lock (F
           },
         );
       };
-      const results = await Promise.allSettled([makeProv('acct-A'), makeProv('acct-B')]);
-      const fulfilled = results.filter((r) => r.status === 'fulfilled');
-      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
-      // Exactly one wins; the other fails closed on the account mismatch.
-      expect(fulfilled.length).toBe(1);
-      expect(rejected.length).toBe(1);
-      expect(String(rejected[0].reason)).toMatch(/account mismatch/);
-      // The config is pinned to the WINNER, with the winner's D1 id — no cross-account
-      // overwrite (both never wrote; the loser never ran a wrangler create).
+      await makeProv('acct-A');
+      await expect(makeProv('acct-B')).rejects.toThrow(/account mismatch/);
+      // The config stays pinned to the WINNER, with the winner's D1 id — no
+      // cross-account overwrite (the loser never ran a wrangler create).
       const cfg = readConfig();
-      const winner = cfg.account_id as string;
-      expect(['acct-A', 'acct-B']).toContain(winner);
+      expect(cfg.account_id).toBe('acct-A');
       const d1 = (cfg.d1_databases as Array<Record<string, unknown>>)[0];
-      expect(d1.database_id).toBe(uuid('db-' + winner));
+      expect(d1.database_id).toBe(uuid('db-acct-A'));
       // Mutex released — no leak.
       expect(existsSync(lockMutex)).toBe(false);
     } finally {
@@ -5559,7 +5607,7 @@ describe('createDefaultRunWrangler — F1/F2 signal-path kill failure quarantine
   }, 30_000);
 });
 
-describe('createDefaultRunWrangler — F2 ONE signal coordinator: concurrent runners + repeated signals (round 13, child-process)', () => {
+describe('createDefaultRunWrangler — F2/F7 ONE signal coordinator: repeated signals coalesced, teardown bounded, spawns rejected (round 13/14)', () => {
   const F2R13_TMP = join(import.meta.dirname, '.tmp-f2-round13');
   beforeEach(() => {
     rmSync(F2R13_TMP, { recursive: true, force: true });
@@ -5569,21 +5617,57 @@ describe('createDefaultRunWrangler — F2 ONE signal coordinator: concurrent run
     rmSync(F2R13_TMP, { recursive: true, force: true });
   });
 
-  it('one SIGTERM (+ a repeat mid-teardown) with TWO concurrent runners: the parent re-raises only after BOTH groups are dead', async () => {
-    // Pre-fix, each runner had its OWN SIGINT/SIGTERM listeners that (a) detached
-    // themselves at signal entry — a REPEATED signal during the bounded teardown took
-    // Node's default action, killing the parent with both children alive, every
-    // tracked mutex swept, and no sidecar — and (b) re-raised after only THEIR child
-    // confirmed, so the fast child's runner killed the parent while the slow child
-    // (600ms) was still pending.
-    const pidFileA = join(F2R13_TMP, 'a.pid');
-    const pidFileB = join(F2R13_TMP, 'b.pid');
+  async function waitForPid(pidFile: string, timeoutMs: number): Promise<number | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (existsSync(pidFile)) {
+        const raw = readFileSync(pidFile, 'utf-8');
+        if (raw.length > 0) {
+          return Number(raw);
+        }
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return undefined;
+  }
+
+  it('a SECOND concurrently-active wrangler child is rejected PRE-SPAWN (round 14: at most one registrant)', async () => {
+    // Within one provision every wrangler call is awaited sequentially, and at most one
+    // provision runs per process — so a second concurrently-active child is always a
+    // caller bug and is rejected fast, before any child is spawned.
+    const slowChild = join(F2R13_TMP, 'slow-child.cjs');
+    writeFileSync(slowChild, `setTimeout(() => process.exit(0), 400);\n`);
+    const runA = createDefaultRunWrangler(F2R13_TMP, {
+      launcher: [process.execPath, slowChild],
+      timeoutMs: 30_000,
+    });
+    const first = runA(['noop'], { accountId: 'acct' });
+    await new Promise((r) => setTimeout(r, 80)); // A's child is alive and registered
+    const runB = createDefaultRunWrangler(F2R13_TMP, {
+      launcher: [process.execPath, slowChild],
+      timeoutMs: 30_000,
+    });
+    await expect(runB(['noop'], { accountId: 'acct' })).rejects.toThrow(
+      /another wrangler child is already active in this process/,
+    );
+    // The first runner is unaffected and settles cleanly.
+    const result = await first;
+    expect(result.status).toBe(0);
+    expect(result.signal).toBeNull();
+  }, 15_000);
+
+  it('one SIGTERM (+ a repeat mid-teardown) is coalesced: the parent re-raises only after the group is dead', async () => {
+    // Pre-round-13, runners installed per-runner listeners that detached themselves at
+    // signal entry — a REPEATED signal during the bounded teardown took Node's default
+    // action, killing the parent with the child alive, every tracked mutex swept, and
+    // no sidecar. The ONE coordinator keeps its handler installed through the teardown,
+    // so the repeat is swallowed and the single re-raise fires only after confirmation.
+    const pidFile = join(F2R13_TMP, 'a.pid');
     const childScript = join(F2R13_TMP, 'slow-exit-child.cjs');
     writeFileSync(
       childScript,
       `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
-        `const delay = Number(process.argv[3]);\n` +
-        `process.on('SIGTERM', () => setTimeout(() => process.exit(0), delay));\n` +
+        `process.on('SIGTERM', () => setTimeout(() => process.exit(0), 600));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
     const parentScript = join(F2R13_TMP, 'parent.mjs');
@@ -5592,18 +5676,11 @@ describe('createDefaultRunWrangler — F2 ONE signal coordinator: concurrent run
       parentScript,
       `import { createDefaultRunWrangler } from ${JSON.stringify(provisionUrl)};\n` +
         `const runA = createDefaultRunWrangler(process.cwd(), {\n` +
-        `  launcher: [process.execPath, ${JSON.stringify(childScript)}, ${JSON.stringify(pidFileA)}, '300'],\n` +
-        `});\n` +
-        `const runB = createDefaultRunWrangler(process.cwd(), {\n` +
-        `  launcher: [process.execPath, ${JSON.stringify(childScript)}, ${JSON.stringify(pidFileB)}, '600'],\n` +
+        `  launcher: [process.execPath, ${JSON.stringify(childScript)}, ${JSON.stringify(pidFile)}],\n` +
         `});\n` +
         `runA(['noop'], { accountId: 'acct' }).then(\n` +
         `  (r) => console.log('A-settled', r.status, r.signal),\n` +
         `  (e) => console.log('A-rejected', e.message),\n` +
-        `);\n` +
-        `runB(['noop'], { accountId: 'acct' }).then(\n` +
-        `  (r) => console.log('B-settled', r.status, r.signal),\n` +
-        `  (e) => console.log('B-rejected', e.message),\n` +
         `);\n`,
     );
     const { spawn } = await import('node:child_process');
@@ -5611,29 +5688,12 @@ describe('createDefaultRunWrangler — F2 ONE signal coordinator: concurrent run
       cwd: F2R13_TMP,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let pidA: number | undefined;
-    let pidB: number | undefined;
+    let pid: number | undefined;
     try {
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline && (pidA === undefined || pidB === undefined)) {
-        if (pidA === undefined && existsSync(pidFileA)) {
-          const raw = readFileSync(pidFileA, 'utf-8');
-          if (raw.length > 0) {
-            pidA = Number(raw);
-          }
-        }
-        if (pidB === undefined && existsSync(pidFileB)) {
-          const raw = readFileSync(pidFileB, 'utf-8');
-          if (raw.length > 0) {
-            pidB = Number(raw);
-          }
-        }
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(pidA).toBeDefined();
-      expect(pidB).toBeDefined();
+      pid = await waitForPid(pidFile, 10_000);
+      expect(pid).toBeDefined();
       parent.kill('SIGTERM');
-      // The REPEATED signal lands mid-teardown (both children still alive at 120ms).
+      // The REPEATED signal lands mid-teardown (the child is still alive at 120ms).
       // The coordinator's still-installed handler must coalesce it — no bypass.
       setTimeout(() => {
         try {
@@ -5647,21 +5707,15 @@ describe('createDefaultRunWrangler — F2 ONE signal coordinator: concurrent run
       });
       // The parent died of the single re-raised SIGTERM (default action) — not exit 0.
       expect(signal).toBe('SIGTERM');
-      // THE crux: at parent exit BOTH children are already dead — the slow one too.
-      let aAlive = true;
+      // THE crux: at parent exit the (slow, 600ms) child is already dead — the repeat
+      // did not bypass the confirmation barrier.
+      let alive = true;
       try {
-        process.kill(pidA!, 0);
+        process.kill(pid!, 0);
       } catch {
-        aAlive = false;
+        alive = false;
       }
-      let bAlive = true;
-      try {
-        process.kill(pidB!, 0);
-      } catch {
-        bAlive = false;
-      }
-      expect(aAlive).toBe(false);
-      expect(bAlive).toBe(false);
+      expect(alive).toBe(false);
     } finally {
       // Belt + braces: never leak processes even on assertion failure.
       try {
@@ -5669,8 +5723,146 @@ describe('createDefaultRunWrangler — F2 ONE signal coordinator: concurrent run
       } catch {
         // already gone
       }
-      for (const pid of [pidA, pidB]) {
-        if (pid !== undefined) {
+      if (pid !== undefined) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    }
+  }, 20_000);
+
+  it('F7 — a spawn attempted AFTER teardown began is rejected fast (no child spawned, teardown unaffected)', async () => {
+    const pidFile = join(F2R13_TMP, 'c.pid');
+    const childScript = join(F2R13_TMP, 'slow-exit-child2.cjs');
+    writeFileSync(
+      childScript,
+      `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
+        `process.on('SIGTERM', () => setTimeout(() => process.exit(0), 400));\n` +
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const outcomeFile = join(F2R13_TMP, 'late-spawn-outcome.txt');
+    const parentScript = join(F2R13_TMP, 'parent-spawn-mid-teardown.mjs');
+    const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
+    writeFileSync(
+      parentScript,
+      `import { writeFileSync } from 'node:fs';\n` +
+        `import { createDefaultRunWrangler } from ${JSON.stringify(provisionUrl)};\n` +
+        `const run = createDefaultRunWrangler(process.cwd(), {\n` +
+        `  launcher: [process.execPath, ${JSON.stringify(childScript)}, ${JSON.stringify(pidFile)}],\n` +
+        `});\n` +
+        `run(['noop'], { accountId: 'acct' }).catch(() => {});\n` +
+        // A ONCE listener (consumed by the first SIGTERM, so it can never swallow the
+        // coordinator's later re-raise) schedules a mid-teardown spawn attempt. The
+        // outcome is written SYNCHRONOUSLY to a file so the re-raise death cannot lose it.
+        `process.once('SIGTERM', () => {\n` +
+        `  setTimeout(() => {\n` +
+        `    run(['noop-late'], { accountId: 'acct' }).then(\n` +
+        `      () => writeFileSync(${JSON.stringify(outcomeFile)}, 'LATE-SPAWN-ALLOWED'),\n` +
+        `      (e) => writeFileSync(${JSON.stringify(outcomeFile)}, 'LATE-SPAWN-REJECTED:' + e.message),\n` +
+        `    );\n` +
+        `  }, 50);\n` +
+        `});\n`,
+    );
+    const { spawn } = await import('node:child_process');
+    const parent = spawn(process.execPath, [parentScript], {
+      cwd: F2R13_TMP,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let pid: number | undefined;
+    try {
+      pid = await waitForPid(pidFile, 10_000);
+      expect(pid).toBeDefined();
+      parent.kill('SIGTERM');
+      const [, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((res) => {
+        parent.on('exit', (code, sig) => res([code, sig]));
+      });
+      // The teardown still completed with the single re-raise (child confirmed first)…
+      expect(signal).toBe('SIGTERM');
+      // …and the mid-teardown spawn was rejected outright — fail fast, no child, no
+      // fresh per-runner deadline joining the teardown.
+      const outcome = readFileSync(outcomeFile, 'utf-8');
+      expect(outcome).toContain('LATE-SPAWN-REJECTED:');
+      expect(outcome).toMatch(/refusing to spawn wrangler.*fatal SIGTERM.*terminating/s);
+    } finally {
+      try {
+        parent.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+      if (pid !== undefined) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    }
+  }, 20_000);
+
+  it('F7 — the coordinator-WIDE deadline bounds an unconfirmable teardown (quarantine + re-raise, never a wedge)', async () => {
+    // The runner's own confirmation window is 60s here and the child never dies (the
+    // injected group-killer claims success but kills nothing) — pre-fix `pending`
+    // stayed nonzero for the full 60s and the fatal signal was not re-raised. The
+    // coordinator-wide deadline (800ms) quarantines the pair and re-raises at the bound.
+    const pidFile = join(F2R13_TMP, 'd.pid');
+    const hangScript = join(F2R13_TMP, 'hang-child.cjs');
+    writeFileSync(
+      hangScript,
+      `require('fs').writeFileSync(process.argv[2], String(process.pid));\n` +
+        `process.on('SIGTERM', () => {});\n` +
+        `setInterval(() => {}, 1 << 30);\n`,
+    );
+    const parentScript = join(F2R13_TMP, 'parent-deadline.mjs');
+    const provisionUrl = `file://${join(import.meta.dirname, '../../src/cli/provision.ts')}`;
+    writeFileSync(
+      parentScript,
+      `import { createDefaultRunWrangler } from ${JSON.stringify(provisionUrl)};\n` +
+        `const run = createDefaultRunWrangler(process.cwd(), {\n` +
+        `  launcher: [process.execPath, ${JSON.stringify(hangScript)}, ${JSON.stringify(pidFile)}],\n` +
+        `  confirmKillGraceMs: 60_000,\n` +
+        `  signalTeardownDeadlineMs: 800,\n` +
+        `  killProcessGroup: () => {},\n` + // claims success, kills nothing
+        `});\n` +
+        `run(['noop'], { accountId: 'acct' }).catch(() => {});\n`,
+    );
+    const { spawn } = await import('node:child_process');
+    const parent = spawn(process.execPath, [parentScript], {
+      cwd: F2R13_TMP,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let pid: number | undefined;
+    try {
+      pid = await waitForPid(pidFile, 10_000);
+      expect(pid).toBeDefined();
+      const killedAt = Date.now();
+      parent.kill('SIGTERM');
+      const [, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((res) => {
+        parent.on('exit', (code, sig) => res([code, sig]));
+      });
+      const elapsed = Date.now() - killedAt;
+      // The parent died of the re-raised SIGTERM AT the coordinator-wide bound — the
+      // deadline was honored (≥ ~800ms) and nowhere near the 60s runner window
+      // (pre-fix `pending` stayed nonzero for the full 60s confirmation window and the
+      // fatal signal was not re-raised until then).
+      expect(signal).toBe('SIGTERM');
+      expect(elapsed).toBeGreaterThanOrEqual(700);
+      expect(elapsed).toBeLessThan(10_000);
+      // The (genuinely unkillable-by-the-fake-killer) child is STILL ALIVE at parent
+      // exit — the only path to a completed teardown with a live group is the
+      // deadline's quarantine of the pair (confirmation was impossible). Reap it.
+      expect(() => process.kill(pid!, 0)).not.toThrow();
+    } finally {
+      try {
+        parent.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+      if (pid !== undefined) {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
           try {
             process.kill(pid, 'SIGKILL');
           } catch {
@@ -6162,12 +6354,13 @@ describe('createDefaultRunWrangler — F3 confirmed child termination + kill cla
 });
 
 describe('provisionCloudflareResources — F2 dangling-symlink lock identity (round 10)', () => {
-  it('two concurrent provisions via a dangling-symlink alias to the SAME not-yet-created target serialize (one lock, one create)', async () => {
+  it('provisions via dangling-symlink aliases to the SAME not-yet-created target share ONE lock identity (one create)', async () => {
     // A `shared/` dir exists but `shared/wrangler.jsonc` does NOT yet. Two aliases both point
     // (as DANGLING symlinks) at that same not-yet-created target. Without resolving the dangling
-    // final link each alias would canonicalize to ITS OWN lexical path → two marker locks → both
-    // create a duplicate. With F2 both resolve to the ONE real target → one lock → the loser
-    // blocks, then read-first (under the lock) reuses the winner's id.
+    // final link each alias would canonicalize to ITS OWN lexical path → two marker locks → an
+    // alias provision would not contend on the canonical lock and both could create a duplicate.
+    // (Round 14: two provisions can no longer race in ONE process — the identity proof is that
+    // an alias provision blocks on the CANONICAL mutex, plus create-then-reuse across aliases.)
     const sharedDir = join(tmpDir, 'shared');
     mkdirSync(sharedDir, { recursive: true });
     const target = join(sharedDir, 'wrangler.jsonc'); // NOT created yet — dangling
@@ -6177,25 +6370,25 @@ describe('provisionCloudflareResources — F2 dangling-symlink lock identity (ro
     symlinkSync(target, aliasB);
     expect(existsSync(target)).toBe(false); // both aliases are dangling at start
 
-    const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
     let createCalls = 0;
+    const run: RunWrangler = (args) => {
+      if (isCall(args, 'hyperdrive', 'create')) {
+        createCalls++;
+        // --update-config writes to the CANONICAL target (both aliases resolve to it).
+        simulateUpdateConfig(
+          'hyperdrive',
+          { binding: 'HYPERDRIVE', id: hex32('hd-' + createCalls) },
+          target,
+        );
+        return ok();
+      }
+      return ok();
+    };
     const makeProv = (
       aliasPath: string,
-    ): Promise<{ resources: Array<{ kind: string; action: string }> }> => {
-      const run: RunWrangler = (args) => {
-        if (isCall(args, 'hyperdrive', 'create')) {
-          createCalls++;
-          // --update-config writes to the CANONICAL target (both aliases resolve to it).
-          simulateUpdateConfig(
-            'hyperdrive',
-            { binding: 'HYPERDRIVE', id: hex32('hd-' + createCalls) },
-            target,
-          );
-          return ok();
-        }
-        return ok();
-      };
-      return provisionCloudflareResources(
+      retries?: number,
+    ): Promise<{ resources: Array<{ kind: string; action: string }> }> =>
+      provisionCloudflareResources(
         tmpDir,
         aliasPath,
         {
@@ -6205,22 +6398,23 @@ describe('provisionCloudflareResources — F2 dangling-symlink lock identity (ro
         {
           runWrangler: run,
           log: silentLog,
-          // Barrier: the winner holds the lock while LISTING (40ms) so the loser must wait on
-          // the SHARED lock — proving the dangling-link canonicalization (not sequencing) serializes.
-          listHyperdriveConfigs: async () => {
-            await delay(40);
-            return [];
-          },
+          listHyperdriveConfigs: async () => [],
+          ...(retries !== undefined ? { lockOptions: { retries } } : {}),
         },
       ) as Promise<{ resources: Array<{ kind: string; action: string }> }>;
-    };
-    const [a, b] = await Promise.all([makeProv(aliasA), makeProv(aliasB)]);
-    const actions = [...a.resources, ...b.resources]
-      .filter((r) => r.kind === 'hyperdrive')
-      .map((r) => r.action)
-      .sort();
+    // IDENTITY: while the CANONICAL (real-target) lock is held, a dangling-alias
+    // provision cannot acquire — it resolves to the same mutex.
+    const canonicalTarget = join(realpathSync(sharedDir), 'wrangler.jsonc');
+    const held = await acquireProvisionLock(canonicalTarget);
+    await expect(makeProv(aliasA, 0)).rejects.toThrow(/already being held/);
+    await held.release();
+    // One underlying (initially not-yet-created) file: a create via alias A is
+    // read-first-REUSED via alias B.
+    const a = await makeProv(aliasA);
+    const b = await makeProv(aliasB);
+    expect(a.resources.find((r) => r.kind === 'hyperdrive')?.action).toBe('created');
+    expect(b.resources.find((r) => r.kind === 'hyperdrive')?.action).toBe('reused');
     expect(createCalls).toBe(1);
-    expect(actions).toEqual(['created', 'reused']);
     // The ONE canonical mutex (keyed on the real target) is released.
     expect(existsSync(`${realpathSync(target)}.void-provision.lock.lock`)).toBe(false);
   }, 15_000);

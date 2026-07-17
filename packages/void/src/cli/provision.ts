@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -14,6 +15,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
+import { types as utilTypes } from 'node:util';
 import { parse, type ParseError } from 'jsonc-parser';
 import { basename, dirname, join, resolve } from 'pathe';
 import lockfile from 'proper-lockfile';
@@ -653,6 +655,12 @@ const COMMAND_TIMEOUT_MS = 120_000;
 const CONFIRM_KILL_GRACE_MS = 5_000;
 /** F3 — the pid-poll interval while confirming post-SIGKILL termination. */
 const CONFIRM_KILL_POLL_MS = 20;
+/**
+ * F7 (round 14) — the margin the coordinator-WIDE teardown deadline adds on top of a
+ * runner's own confirmation grace window: a signal teardown is bounded at
+ * `confirmGraceMs + this` even if the runner's bounded confirmation never calls back.
+ */
+const SIGNAL_TEARDOWN_DEADLINE_MARGIN_MS = 5_000;
 
 /**
  * F3 — classify a process-group kill error. `ESRCH` means the group ALREADY exited (there was
@@ -706,39 +714,65 @@ export interface QuarantineInfo {
   reason: string;
 }
 
-/**
- * F1/F2 (round 12) — before-death quarantine hooks. When the parent process is about to
- * DIE re-raising a forwarded SIGINT/SIGTERM while a spawned wrangler child's teardown
- * could NOT be confirmed, proper-lockfile's signal-exit sweep would remove every
- * still-TRACKED provision mutex — releasing the lock under a possibly-live child.
- * {@link provisionCloudflareResources} registers its lock's `quarantine` here for the
- * duration of the provision; the signal COORDINATOR (F2 round 13, below) invokes every
- * hook SYNCHRONOUSLY (the async quarantine rejection alone might never be observed by a
- * dying event loop) for each unresolved pair BEFORE re-raising, so the mutex directory +
- * sidecar outlive the process. Conservative on purpose: with multiple concurrent
- * provisions in one process, ALL their locks are retained at signal death (each has
- * in-flight children of its own); a needlessly-retained lock self-heals once its
- * recorded group is confirmed dead.
- */
-const quarantineBeforeDeathHooks = new Set<(info: QuarantineInfo) => void>();
+// --- Round 14: AT MOST ONE active provision per process --------------------------
+// THE structural invariant the signal coordinator (below) relies on: a single CLI
+// process runs AT MOST ONE provision at a time — the deploy orchestrator (Task 6)
+// calls `provisionCloudflareResources` exactly once per process, and CROSS-process
+// concurrency is what the on-disk whole-provision lock serializes. Because every
+// wrangler call inside a provision is awaited sequentially, this guard means the
+// signal coordinator manages AT MOST ONE {wrangler child group, provision lock} pair
+// at any moment — which is what makes its dispatch barrier (F1), its 1:1 quarantine
+// binding (F2), and its bounded teardown (F7) structurally simple instead of racy.
+// A second in-process provision fails fast and loudly here rather than eroding those
+// invariants. The slot is taken SYNCHRONOUSLY at provision entry (before the first
+// await), so two same-tick calls cannot both pass.
+let activeProvisionSlot: symbol | undefined;
 
-function runQuarantineBeforeDeathHooks(info: QuarantineInfo): Array<Error> {
-  // Hooks never mutate the registry while running (quarantine() only touches its own
-  // lock state), so direct Set iteration is safe.
-  const failures: Array<Error> = [];
-  for (const hook of quarantineBeforeDeathHooks) {
-    try {
-      hook(info);
-    } catch (error) {
-      // F3 (round 13) — a hook failure means a provision lock could NOT be quarantined
-      // durably (its sidecar did not persist), so it stays TRACKED instead. Collected
-      // so the signal path can refuse to re-raise: a dying process's exit sweep would
-      // release every still-tracked mutex under the possibly-live child.
-      failures.push(error as Error);
-    }
+function acquireProcessProvisionSlot(): () => void {
+  if (activeProvisionSlot !== undefined) {
+    throw new Error(
+      'provision: a provision is already active in this process — run provisions ' +
+        'sequentially. provisionCloudflareResources supports at most one concurrent ' +
+        'provision per process; concurrent provisions across PROCESSES are serialized ' +
+        'by the on-disk provision lock instead.',
+    );
   }
-  return failures;
+  // F5 (round 14) — while a previous provision's retention watchdog is still nursing an
+  // undurably-quarantined lock (unconfirmed child, no durable sidecar yet), a new
+  // provision would hand the coordinator a second pair; refuse until it resolves.
+  if (retentionWatchdog !== undefined) {
+    throw new Error(
+      'provision: a previous provision in this process is still retaining its lock — an ' +
+        `unconfirmed wrangler child` +
+        `${retentionWatchdog.info.pid !== undefined ? ` (pid ${retentionWatchdog.info.pid})` : ''} ` +
+        'could not be quarantined durably yet. No new provision may start until that ' +
+        'retention resolves (the child is confirmed dead, or the quarantine metadata ' +
+        'persists durably).',
+    );
+  }
+  const token = Symbol('void-provision-slot');
+  activeProvisionSlot = token;
+  return () => {
+    if (activeProvisionSlot === token) {
+      activeProvisionSlot = undefined;
+    }
+  };
 }
+
+/**
+ * F2 (round 14) — the ONE active provision's lock-quarantine hook, 1:1 with the
+ * provision slot above. When the parent process is about to DIE re-raising a forwarded
+ * SIGINT/SIGTERM while a spawned wrangler child's teardown could NOT be confirmed,
+ * proper-lockfile's signal-exit sweep would remove the still-TRACKED provision mutex —
+ * releasing the lock under a possibly-live child. {@link provisionCloudflareResources}
+ * sets this for the duration of the provision; a registering wrangler child CAPTURES it
+ * at registration (see {@link registerRunner}) so an unresolved teardown quarantines
+ * exactly ITS OWNING provision lock with ITS OWN pid metadata — never a broadcast
+ * through every lock (the round-13 Set this replaces stamped the FIRST unresolved
+ * registrant's pid into every lock's sidecar, so a foreign group's death could clear a
+ * quarantine whose real child was alive).
+ */
+let activeProvisionQuarantineHook: ((info: QuarantineInfo) => void) | undefined;
 
 /** F2 — true when `error` is a quarantine failure whose provision lock must stay retained. */
 export function isQuarantineError(error: unknown): error is WranglerQuarantineError {
@@ -748,22 +782,22 @@ export function isQuarantineError(error: unknown): error is WranglerQuarantineEr
   );
 }
 
-// --- F2 (round 13): THE process-wide signal coordinator -------------------------
-// The round-12 code installed per-runner SIGINT/SIGTERM listeners that (a) detached
-// themselves IMMEDIATELY on the first signal — so a REPEATED signal during the bounded
-// teardown took Node's default exit action, killing the parent with every tracked mutex
-// swept and NO sidecar — and (b) re-raised after only THEIR OWN child confirmed — so
-// with concurrent runners the first confirmer killed the parent while another child was
-// still pending. There is now ONE coordinator: runners register their {child
-// process-group, quarantine} pair for the duration of the spawn; listeners are
-// installed only while the registry is non-empty; on the FIRST SIGINT/SIGTERM the
-// coordinator forwards the signal to EVERY registered group, awaits EVERY bounded
-// both-facts confirmation, quarantines each unresolved pair (before-death hooks with
-// that pair's own pid metadata + the runner promise's quarantine rejection), and then
-// re-raises EXACTLY ONCE. Repeated signals during the teardown are coalesced by the
-// still-installed handler (no second re-raise, no default-action bypass). A runner that
-// registers MID-teardown joins it, so the single re-raise never fires over an
-// unsignalled child.
+// --- F2 (round 13/14): THE process-wide signal coordinator ----------------------
+// ONE coordinator owns forward → confirm → quarantine → re-raise for the (at most one
+// — see the provision slot above) active {wrangler child group, provision lock} pair:
+// the runner registers its pair for the child's lifetime; listeners are installed only
+// while a registration / teardown / retention watchdog is active; on the FIRST
+// SIGINT/SIGTERM the coordinator forwards the signal to the registered group, awaits
+// its bounded both-facts confirmation, quarantines it if unresolved (the OWNING lock's
+// hook, bound at registration, with THIS pair's own pid metadata), and then re-raises
+// EXACTLY ONCE. Repeated signals during the teardown are coalesced by the
+// still-installed handler (no second re-raise, no default-action bypass).
+// Round 14 (F1/F7): the barrier is PRE-ACCOUNTED from a snapshot taken BEFORE dispatch
+// (a synchronously-failing registrant can never finish the teardown mid-dispatch), new
+// wrangler spawns are REJECTED outright once a teardown began (fail fast, no child
+// spawned → nothing to confirm — never a late join with a fresh deadline), and one
+// coordinator-WIDE deadline backstops the whole teardown (an unconfirmable pair is
+// quarantined at the bound, so `pending` can never wedge the re-raise forever).
 
 /** F2 (round 13) — what a runner registers with the coordinator for its child's lifetime. */
 interface TerminationRegistrant {
@@ -779,16 +813,40 @@ interface TerminationRegistrant {
   ) => void;
   /** Reject the runner promise with a quarantine error (idempotent once settled). */
   quarantine: (detail: string) => void;
+  /**
+   * F7 (round 14) — the coordinator-WIDE teardown deadline for this pair: if the bounded
+   * both-facts confirmation has not called back by then, the coordinator quarantines the
+   * pair itself, so a fatal signal's teardown is ALWAYS globally bounded.
+   */
+  teardownDeadlineMs: number;
+}
+
+/**
+ * F2 (round 14) — a registration binds the registrant to ITS OWNING provision lock's
+ * quarantine hook (captured from the single active provision at registration time), so
+ * an unresolved teardown quarantines exactly that lock with exactly this pair's pid.
+ */
+interface ActiveRegistration {
+  registrant: TerminationRegistrant;
+  lockQuarantine: ((info: QuarantineInfo) => void) | undefined;
 }
 
 interface CoordinatorTeardown {
   signal: NodeJS.Signals;
+  /** F1 (round 14) — pre-accounted from the registration snapshot BEFORE dispatch. */
   pending: number;
+  /** F1 (round 14) — true while the initial dispatch is still running (finish latch). */
+  dispatching: boolean;
   persistFailed: boolean;
   finished: boolean;
+  /** F7 (round 14) — the coordinator-wide deadline backstop (referenced; cleared at finish). */
+  deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  /** F7 — expire the still-pending pair at the deadline (idempotent via its done flag). */
+  expirePendingPair: ((detail: string) => void) | undefined;
 }
 
-const activeRunners = new Set<TerminationRegistrant>();
+/** Round 14 — the (at most one) currently-registered {runner, owning-lock} pair. */
+let activeRegistration: ActiveRegistration | undefined;
 let coordinatorListenersInstalled = false;
 let activeTeardown: CoordinatorTeardown | undefined;
 let reRaisedOnce = false;
@@ -815,21 +873,37 @@ function removeCoordinatorListeners(): void {
 }
 
 function registerRunner(registrant: TerminationRegistrant): void {
-  activeRunners.add(registrant);
-  installCoordinatorListeners();
-  // A child spawned while a teardown is ALREADY in progress joins it: it must be
-  // signalled + confirmed (or quarantined) too before the single re-raise, else the
-  // re-raise would kill the parent over a never-signalled child.
-  if (activeTeardown !== undefined && !activeTeardown.finished) {
-    coordinatorTearDownRegistrant(activeTeardown, registrant);
+  // Unreachable backstop: the runner REJECTS pre-spawn while another child is active or
+  // a teardown is in progress (same synchronous block as the spawn, so no signal can
+  // interleave), which is what makes this invariant structural rather than checked-late.
+  if (activeRegistration !== undefined) {
+    throw new Error(
+      'provision: internal invariant violated — a second wrangler child tried to register ' +
+        'while one is already active in this process',
+    );
   }
+  activeRegistration = {
+    registrant,
+    // F2 (round 14) — bind the OWNING provision lock at registration (1:1). Undefined
+    // for a bare runner used outside a provision (unit tests): there is no lock to
+    // retain, so an unresolved pair only rejects its own promise.
+    lockQuarantine: activeProvisionQuarantineHook,
+  };
+  installCoordinatorListeners();
 }
 
 function deregisterRunner(registrant: TerminationRegistrant): void {
-  activeRunners.delete(registrant);
-  // Keep the listeners through an active teardown — they are what COALESCES repeated
-  // signals (removing them would hand a repeat to Node's default exit action).
-  if (activeRunners.size === 0 && activeTeardown === undefined) {
+  if (activeRegistration?.registrant === registrant) {
+    activeRegistration = undefined;
+  }
+  // Keep the listeners through an active teardown (they COALESCE repeated signals) and
+  // while a retention watchdog is unresolved (F5 — a default-action death would sweep
+  // the still-tracked mutex under the possibly-live child).
+  if (
+    activeRegistration === undefined &&
+    activeTeardown === undefined &&
+    retentionWatchdog === undefined
+  ) {
     removeCoordinatorListeners();
   }
 }
@@ -841,28 +915,68 @@ function coordinatorHandleSignal(signal: NodeJS.Signals): void {
   if (activeTeardown !== undefined) {
     return;
   }
+  // F5 (round 14) — while the retention watchdog holds an undurably-quarantined lock,
+  // the process must NOT die of a re-raise: the exit sweep would release the tracked
+  // mutex under the possibly-live child. Swallow the signal with a warning; the
+  // watchdog resolves by confirming the child dead or persisting the sidecar.
+  if (retentionWatchdog !== undefined && activeRegistration === undefined) {
+    process.stderr.write(
+      `provision: ignoring ${signal} — a provision lock is retained while an unconfirmed ` +
+        `wrangler child may live and its quarantine metadata is not yet durable. The ` +
+        `process exits once the child is confirmed dead or the metadata persists.\n`,
+    );
+    return;
+  }
   const teardown: CoordinatorTeardown = {
     signal,
     pending: 0,
+    dispatching: true,
     persistFailed: false,
     finished: false,
+    deadlineTimer: undefined,
+    expirePendingPair: undefined,
   };
   activeTeardown = teardown;
-  const registrants = [...activeRunners];
-  if (registrants.length === 0) {
-    finishCoordinatorTeardown(teardown);
-    return;
+  // F1 (round 14) — snapshot + PRE-ACCOUNT the barrier BEFORE dispatch: `pending` is
+  // initialized from the snapshot size, so a registrant that fails/settles
+  // SYNCHRONOUSLY during dispatch can never drop it to 0 and finish the teardown while
+  // the dispatch loop is still outstanding (the at-most-one guard makes the snapshot
+  // ≤ 1; the barrier stays structurally sound regardless), and the `dispatching` latch
+  // defers the finish until the loop below has fully completed.
+  const snapshot = activeRegistration !== undefined ? [activeRegistration] : [];
+  teardown.pending = snapshot.length;
+  if (snapshot.length > 0) {
+    // F7 (round 14) — the coordinator-WIDE deadline backstop: even if a pair's bounded
+    // confirmation never calls back, the teardown quarantines the pair and completes at
+    // this bound. REFERENCED — the teardown must hold the loop open until resolved.
+    const deadlineMs = Math.max(...snapshot.map((r) => r.registrant.teardownDeadlineMs));
+    teardown.deadlineTimer = setTimeout(() => {
+      teardown.expirePendingPair?.(
+        `the coordinator-wide ${deadlineMs}ms teardown deadline expired before the process ` +
+          `group's termination was confirmed`,
+      );
+    }, deadlineMs);
   }
-  for (const registrant of registrants) {
-    coordinatorTearDownRegistrant(teardown, registrant);
+  for (const registration of snapshot) {
+    coordinatorTearDownRegistrant(teardown, registration);
+  }
+  teardown.dispatching = false;
+  maybeFinishCoordinatorTeardown(teardown);
+}
+
+/** F1 (round 14) — finish only after the initial dispatch fully completed AND every
+ * snapshot registrant resolved (confirmed or quarantined). */
+function maybeFinishCoordinatorTeardown(teardown: CoordinatorTeardown): void {
+  if (!teardown.dispatching && teardown.pending === 0) {
+    finishCoordinatorTeardown(teardown);
   }
 }
 
 function coordinatorTearDownRegistrant(
   teardown: CoordinatorTeardown,
-  registrant: TerminationRegistrant,
+  registration: ActiveRegistration,
 ): void {
-  teardown.pending += 1;
+  const { registrant, lockQuarantine } = registration;
   let done = false;
   const complete = (): void => {
     if (done) {
@@ -870,26 +984,31 @@ function coordinatorTearDownRegistrant(
     }
     done = true;
     teardown.pending -= 1;
-    if (teardown.pending === 0) {
-      finishCoordinatorTeardown(teardown);
-    }
+    maybeFinishCoordinatorTeardown(teardown);
   };
   const quarantinePair = (detail: string): void => {
-    // Before-death retention with THIS pair's own pid metadata: every active provision
-    // lock is quarantined synchronously (sidecar persisted + lock detached from the
-    // exit sweep) before the process could die of the re-raise. First quarantine wins
-    // per lock; with multiple concurrent provisions in one process this is conservative
-    // by design (see the hooks doc above).
-    const failures = runQuarantineBeforeDeathHooks({
-      pid: registrant.pid(),
-      reason:
-        `the spawned wrangler could not be confirmed terminated after a forwarded ` +
-        `${teardown.signal} — ${detail}`,
-    });
-    if (failures.length > 0) {
-      teardown.persistFailed = true;
-      for (const failure of failures) {
-        process.stderr.write(`provision: ${failure.message}\n`);
+    if (done) {
+      return;
+    }
+    // F2 (round 14) — before-death retention of ONLY this pair's OWNING provision lock,
+    // with THIS registrant's own pid metadata (bound 1:1 at registration — never a
+    // broadcast through every lock hook, which stamped a foreign pair's pid into
+    // unrelated sidecars). Synchronous: the sidecar must be persisted and the lock
+    // detached from the exit sweep before the process could die of the re-raise.
+    if (lockQuarantine !== undefined) {
+      try {
+        lockQuarantine({
+          pid: registrant.pid(),
+          reason:
+            `the spawned wrangler could not be confirmed terminated after a forwarded ` +
+            `${teardown.signal} — ${detail}`,
+        });
+      } catch (failure) {
+        // F3 (round 13) / F5 (round 14) — the lock could NOT be quarantined durably; it
+        // stays TRACKED and the retention watchdog (armed by the hook wrapper) now owns
+        // the unresolved state. The finish below must not re-raise.
+        teardown.persistFailed = true;
+        process.stderr.write(`provision: ${(failure as Error).message}\n`);
       }
     }
     const pid = registrant.pid();
@@ -902,6 +1021,8 @@ function coordinatorTearDownRegistrant(
     registrant.quarantine(detail);
     complete();
   };
+  // F7 — the coordinator-wide deadline expires the pair through the same idempotent path.
+  teardown.expirePendingPair = quarantinePair;
   const outcome = registrant.signalGroup(teardown.signal);
   if (typeof outcome === 'object') {
     quarantinePair(`the process group could not be signalled: ${outcome.error.message}`);
@@ -924,20 +1045,21 @@ function finishCoordinatorTeardown(teardown: CoordinatorTeardown): void {
     return;
   }
   teardown.finished = true;
+  if (teardown.deadlineTimer !== undefined) {
+    clearTimeout(teardown.deadlineTimer);
+  }
   // Remove the listeners so the re-raise below takes Node's DEFAULT exit-on-signal
   // action instead of being swallowed by this very handler.
   removeCoordinatorListeners();
-  if (teardown.persistFailed) {
-    // F3 (round 13) — at least one provision lock could NOT be quarantined durably; it
-    // stays TRACKED (heartbeat running — see {@link ProvisionLock.quarantine}).
-    // Re-raising would kill this process, whose exit sweep releases every tracked
-    // mutex under the possibly-live child — so do NOT re-raise. The quarantine
-    // rejections above fail the provisions, whose callers keep holding the tracked
-    // locks and surface the hard errors.
+  if (teardown.persistFailed || retentionWatchdog !== undefined) {
+    // F3 (round 13) / F5 (round 14) — a provision lock could NOT be quarantined durably;
+    // it stays TRACKED (heartbeat running — see {@link ProvisionLock.quarantine}) under
+    // the retention watchdog. Re-raising would kill this process, whose exit sweep
+    // releases the tracked mutex under the possibly-live child — so do NOT re-raise.
+    // The watchdog keeps signal handling installed, retries durable persistence, and
+    // probes the recorded group for death.
     activeTeardown = undefined;
-    if (activeRunners.size > 0) {
-      installCoordinatorListeners();
-    }
+    installCoordinatorListeners();
     process.stderr.write(
       `provision: NOT re-raising ${teardown.signal} — a provision lock's quarantine ` +
         `metadata could not be persisted, so the lock is intentionally still held by this ` +
@@ -946,7 +1068,7 @@ function finishCoordinatorTeardown(teardown: CoordinatorTeardown): void {
     );
     return;
   }
-  // Exactly-once re-raise (process-wide): every registered group is now confirmed dead
+  // Exactly-once re-raise (process-wide): the registered group is now confirmed dead
   // or durably quarantined, so the parent may take the signal's default action.
   if (reRaisedOnce) {
     return;
@@ -959,6 +1081,112 @@ function finishCoordinatorTeardown(teardown: CoordinatorTeardown): void {
   // terminates the process (it fires within milliseconds; the timer is only a bounded
   // fallback if something else swallowed the signal).
   setTimeout(() => {}, 2_000);
+}
+
+// --- F5 (round 14): the retention WATCHDOG for an undurable quarantine -----------
+// When quarantine persistence FAILS, the lock stays TRACKED (heartbeat running, not
+// stealable) — but a tracked mutex is exactly what proper-lockfile's exit sweep removes
+// when the process drains and exits naturally, leaving the possibly-live wrangler child
+// with NO mutex and NO sidecar. While that state is unresolved the process must not
+// drain unprotected: a REFERENCED watchdog timer holds the loop open and, each tick,
+//   (a) probes the recorded group for death (ESRCH → clear state, release the mutex
+//       normally, resolve), then
+//   (b) retries the DURABLE quarantine persistence with backoff (success → sidecar
+//       durable + lock detached from the sweep → safe to resume normal exit semantics).
+// Signal handling stays installed throughout (the coordinator swallows further
+// SIGINT/SIGTERM with a warning — see {@link coordinatorHandleSignal}) and no new
+// provision may start in this process until the watchdog resolves (see the slot guard).
+
+const RETENTION_RETRY_MIN_MS = 250;
+const RETENTION_RETRY_MAX_MS = 5_000;
+
+interface RetentionWatchdogState {
+  lock: ProvisionLock;
+  info: QuarantineInfo;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+let retentionWatchdog: RetentionWatchdogState | undefined;
+
+/**
+ * F5 (round 14) — quarantine `lock`, and on a PERSISTENCE failure arm the retention
+ * watchdog BEFORE rethrowing. THE single quarantine entry point for provision-level
+ * code (the body-error path and the signal coordinator's hook both route through it),
+ * so no persistence failure can leave the process free to drain unprotected.
+ */
+function retainQuarantinedLock(lock: ProvisionLock, info: QuarantineInfo): void {
+  try {
+    lock.quarantine(info);
+  } catch (error) {
+    armRetentionWatchdog(lock, info);
+    throw error;
+  }
+}
+
+function armRetentionWatchdog(lock: ProvisionLock, info: QuarantineInfo): void {
+  // At most one provision per process → at most one retention; re-arming is a no-op.
+  if (retentionWatchdog !== undefined) {
+    return;
+  }
+  // Surface the retained state LOUDLY, once, naming the pid and the lock path.
+  process.stderr.write(
+    `provision: warning — quarantine metadata for the unconfirmed wrangler child` +
+      `${info.pid !== undefined ? ` (pid ${info.pid})` : ''} could not be persisted, so the ` +
+      `provision lock "${lock.lockTargetPath}.lock" is RETAINED by this process, which stays ` +
+      `alive until the child is confirmed dead or the metadata persists durably.\n`,
+  );
+  installCoordinatorListeners();
+  let attempt = 0;
+  const resolveWatchdog = (): void => {
+    if (retentionWatchdog !== undefined) {
+      clearTimeout(retentionWatchdog.timer);
+    }
+    retentionWatchdog = undefined;
+    if (activeRegistration === undefined && activeTeardown === undefined) {
+      removeCoordinatorListeners();
+    }
+  };
+  const tick = (): void => {
+    // (a) probe the recorded group for death FIRST: a dead group needs no quarantine —
+    // release the mutex normally and resume normal exit semantics.
+    if (info.pid !== undefined) {
+      let dead = false;
+      try {
+        process.kill(process.platform === 'win32' ? info.pid : -info.pid, 0);
+      } catch (error) {
+        dead = (error as NodeJS.ErrnoException).code === 'ESRCH';
+      }
+      if (dead) {
+        lock.release().then(
+          () => resolveWatchdog(),
+          (error: unknown) => {
+            process.stderr.write(
+              `provision: the retained provision lock could not be released after the ` +
+                `child's death was confirmed (${(error as Error).message}); the mutex ` +
+                `self-heals once stale.\n`,
+            );
+            resolveWatchdog();
+          },
+        );
+        return;
+      }
+    }
+    // (b) retry the DURABLE persistence: success detaches the lock behind a durable
+    // sidecar, so the process may exit while the retained mutex keeps blocking.
+    try {
+      lock.quarantine(info);
+      resolveWatchdog();
+      return;
+    } catch {
+      // Still failing — keep holding the process open and retry with backoff.
+    }
+    attempt += 1;
+    const delay = Math.min(RETENTION_RETRY_MIN_MS * 2 ** attempt, RETENTION_RETRY_MAX_MS);
+    if (retentionWatchdog !== undefined) {
+      retentionWatchdog.timer = setTimeout(tick, delay); // REFERENCED — holds the process
+    }
+  };
+  retentionWatchdog = { lock, info, timer: setTimeout(tick, RETENTION_RETRY_MIN_MS) };
 }
 
 /**
@@ -994,6 +1222,12 @@ export function createDefaultRunWrangler(
      */
     confirmKillGraceMs?: number;
     /**
+     * F7 (round 14) test seam — the coordinator-WIDE signal-teardown deadline for this
+     * runner's pair. Defaults to `confirmKillGraceMs + `{@link SIGNAL_TEARDOWN_DEADLINE_MARGIN_MS}.
+     * Tests shrink it to exercise the backstop quarantine.
+     */
+    signalTeardownDeadlineMs?: number;
+    /**
      * F5 test seam — observe the spawned ChildProcess (unit tests use it to inject a
      * post-spawn `error` event). Never set in production.
      */
@@ -1017,8 +1251,38 @@ export function createDefaultRunWrangler(
   // Windows has no process groups here; the direct (wrapper-free) CLI has no grandchild
   // to strand, so a plain `child.kill` suffices.
   const isWindows = process.platform === 'win32';
+  const teardownDeadlineMs =
+    options?.signalTeardownDeadlineMs ?? confirmGraceMs + SIGNAL_TEARDOWN_DEADLINE_MARGIN_MS;
   return (args, opts) =>
     new Promise<RunWranglerResult>((resolvePromise, rejectPromise) => {
+      // F7 (round 14) — once a fatal-signal teardown has begun, this process is
+      // terminating: REJECT new wrangler work outright BEFORE spawning (fail fast — no
+      // child spawned means nothing to confirm), never join the teardown late with a
+      // fresh deadline.
+      if (activeTeardown !== undefined) {
+        rejectPromise(
+          new Error(
+            `provision: refusing to spawn wrangler — a fatal ${activeTeardown.signal} is being ` +
+              `handled and this process is terminating; no new wrangler work may start.`,
+          ),
+        );
+        return;
+      }
+      // Round 14 — the at-most-one invariant, enforced BEFORE the spawn: within one
+      // provision every wrangler call is awaited sequentially (and at most one
+      // provision runs per process), so a second concurrently-active child is always a
+      // caller bug. This check and the spawn+registration below run in ONE synchronous
+      // block, so no signal dispatch can interleave between them.
+      if (activeRegistration !== undefined) {
+        rejectPromise(
+          new Error(
+            'provision: refusing to spawn wrangler — another wrangler child is already active ' +
+              'in this process (wrangler calls must run sequentially; provisions run at most ' +
+              'one per process).',
+          ),
+        );
+        return;
+      }
       const child = spawn(command, [...prefix, ...args], {
         cwd: opts.cwd ?? root,
         shell: false,
@@ -1207,15 +1471,17 @@ export function createDefaultRunWrangler(
 
       // F3/F2 — forward a parent SIGINT/SIGTERM to the child's process GROUP so a Ctrl-C /
       // termination tears the DETACHED child (+ grandchildren) down instead of orphaning it.
-      // F2 (round 13): signal handling lives in the ONE process-wide coordinator (see
-      // {@link registerRunner}); this runner only registers its pair. The coordinator
-      // forwards the first SIGINT/SIGTERM to EVERY registered group, awaits EVERY
-      // bounded both-facts confirmation (via this registrant's `awaitConfirmedDead`),
-      // quarantines each unresolved pair, coalesces repeated signals during the
-      // teardown, and re-raises EXACTLY ONCE — never over a pending child.
+      // F2 (round 13/14): signal handling lives in the ONE process-wide coordinator (see
+      // {@link registerRunner}); this runner only registers its pair (at most one exists
+      // — the pre-spawn checks above enforce it). The coordinator forwards the first
+      // SIGINT/SIGTERM to the registered group, awaits its bounded both-facts
+      // confirmation (via this registrant's `awaitConfirmedDead`), quarantines it if
+      // unresolved, coalesces repeated signals during the teardown, and re-raises
+      // EXACTLY ONCE — never over a pending child.
       const registrant: TerminationRegistrant = {
         pid: () => child.pid,
         signalGroup,
+        teardownDeadlineMs,
         markGroupGone: () => {
           // ESRCH ⇒ the whole group already exited — only `close` remains to be seen.
           groupGone = true;
@@ -1362,9 +1628,10 @@ export function createDefaultRunWrangler(
         nudgeConfirmPolls();
       });
 
-      // F2 (round 13) — register with the coordinator LAST (after commandTimer + every
-      // handler exists): a registration during an in-flight teardown is torn down
-      // immediately, which may drive quarantine/confirm paths that use them.
+      // F2 (round 13/14) — register with the coordinator LAST (after commandTimer +
+      // every handler exists). The pre-spawn checks at the top of this executor ran in
+      // the SAME synchronous block, so no teardown can have begun and no other
+      // registration can exist by the time this runs.
       registerRunner(registrant);
       options?.onSpawnedChild?.(child);
     });
@@ -1700,6 +1967,8 @@ function selectHyperdriveMatch(
 // ownership-scoped release.
 
 interface ProvisionLock {
+  /** The locked marker path (`<configPath>.void-provision.lock`), for diagnostics (F5). */
+  readonly lockTargetPath: string;
   /**
    * Drop the mutex. F2 — REJECTS on a genuine (non-`onCompromised`) unlock failure so a
    * LEAKED lock is surfaced, never hidden behind a "successful" provision. Idempotent:
@@ -2174,6 +2443,7 @@ export async function acquireProvisionLock(
     }
   };
   return {
+    lockTargetPath: lockTarget,
     release: () => (releasePromise ??= doRelease()),
     // F2 (round 11) — quarantine: detach this lock from proper-lockfile's internal
     // tracking WITHOUT removing the on-disk mutex directory, so:
@@ -3200,6 +3470,25 @@ export async function provisionCloudflareResources(
   desired: DesiredResourceSet,
   opts?: ProvisionOptions,
 ): Promise<ProvisionResult> {
+  // Round 14 — the at-most-one-provision-per-process guard, taken SYNCHRONOUSLY at
+  // entry (before the first await) so two same-tick calls cannot both pass. See the
+  // invariant documented at {@link acquireProcessProvisionSlot}: the signal coordinator
+  // manages at most one {wrangler child group, provision lock} pair because of it.
+  const releaseProvisionSlot = acquireProcessProvisionSlot();
+  try {
+    return await provisionWithProcessSlot(root, rootWranglerPath, desired, opts);
+  } finally {
+    releaseProvisionSlot();
+  }
+}
+
+/** The provision body, run while holding this process's single provision slot. */
+async function provisionWithProcessSlot(
+  root: string,
+  rootWranglerPath: string,
+  desired: DesiredResourceSet,
+  opts?: ProvisionOptions,
+): Promise<ProvisionResult> {
   await Promise.resolve();
   // ONE ABSOLUTE config path threaded through read-first, wrangler `-c`, AND the
   // writer, so reads and writes can never hit different files (no split-brain).
@@ -3233,12 +3522,15 @@ export async function provisionCloudflareResources(
   // design: provision is a single-operator dev-machine action, so no remote coordination
   // is built. (Documented in the Task 7 docs.)
   const lock = await acquireProvisionLock(configPath, opts?.lockOptions);
-  // F1/F2 (round 12) — while this provision runs, a fatal-signal death under an
-  // UNCONFIRMED wrangler child must RETAIN the mutex: register the lock's quarantine as
-  // a before-death hook (the default runner's signal path invokes it SYNCHRONOUSLY —
-  // sidecar written, lock detached from the exit sweep — before re-raising the signal).
-  const quarantineHook = (info: QuarantineInfo): void => lock.quarantine(info);
-  quarantineBeforeDeathHooks.add(quarantineHook);
+  // F1/F2 (round 12/14) — while this provision runs, a fatal-signal death under an
+  // UNCONFIRMED wrangler child must RETAIN the mutex: publish the lock's quarantine as
+  // THE single active hook (1:1 with this process's one provision slot). A registering
+  // wrangler child captures it at registration, and the coordinator's signal path
+  // invokes it SYNCHRONOUSLY — sidecar written, lock detached from the exit sweep —
+  // before re-raising the signal. Routed through {@link retainQuarantinedLock} so a
+  // persistence failure arms the F5 retention watchdog.
+  const quarantineHook = (info: QuarantineInfo): void => retainQuarantinedLock(lock, info);
+  activeProvisionQuarantineHook = quarantineHook;
   // F2 — ALWAYS release, but do NOT swallow a release failure. On body SUCCESS a failed
   // unlock means the mutex leaked, so the provision must FAIL (surfaced, not hidden). On
   // body FAILURE the body error is primary, but a release failure means the mutex LEAKED,
@@ -3256,7 +3548,9 @@ export async function provisionCloudflareResources(
   }
   // Every wrangler call has settled by here (each is awaited), so the before-death hook
   // is no longer needed on any terminal path below.
-  quarantineBeforeDeathHooks.delete(quarantineHook);
+  if (activeProvisionQuarantineHook === quarantineHook) {
+    activeProvisionQuarantineHook = undefined;
+  }
   if (threw) {
     // F2 (round 11) — QUARANTINE: the failure means a spawned wrangler child could not be
     // confirmed dead — it may STILL be creating resources — so the mutex is INTENTIONALLY
@@ -3265,17 +3559,18 @@ export async function provisionCloudflareResources(
     // concurrent provision race the surviving child on the same config/account.
     if (isQuarantineError(bodyError)) {
       try {
-        lock.quarantine({
+        retainQuarantinedLock(lock, {
           // Defensive reads: `isQuarantineError` also accepts a structural match (a
           // `{ quarantine: true }` carrier that is not the class instance).
           pid: typeof bodyError.pid === 'number' ? bodyError.pid : undefined,
           reason: typeof bodyError.message === 'string' ? bodyError.message : String(bodyError),
         });
       } catch (quarantineError) {
-        // F3 (round 13) — the quarantine sidecar could not be persisted, so the lock is
-        // intentionally STILL HELD (tracked, heartbeat running — see
-        // {@link ProvisionLock.quarantine}). NEVER release it here: the unconfirmed
-        // wrangler child may still be creating resources. Surface BOTH errors.
+        // F3 (round 13) / F5 (round 14) — the quarantine sidecar could not be persisted,
+        // so the lock is intentionally STILL HELD (tracked, heartbeat running) under the
+        // retention watchdog {@link retainQuarantinedLock} just armed: the process will
+        // not drain unprotected while the unconfirmed wrangler child may still be
+        // creating resources. NEVER release the lock here. Surface BOTH errors.
         throw new AggregateError(
           [bodyError, quarantineError],
           `provision failed with an unconfirmed wrangler child AND its quarantine metadata ` +
