@@ -117,9 +117,14 @@ import {
 import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project.ts';
 import { promptProjectSelection, promptProjectSetupAction } from './prompt.ts';
 import {
+  assertNoTransportRedirectInProjectDotenv,
   checkCloudflareProvisionDrift,
+  deleteEnvVarCaseAware,
   isRealD1Id,
   provisionCloudflareResources,
+  provisionEnv,
+  resolvePinnedApiBaseUrl,
+  scanWranglerDotenvKeys,
   type DesiredResourceSet,
   type ProvisionDriftEntry,
 } from './provision.ts';
@@ -401,41 +406,195 @@ export function buildEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
 }
 
 /**
- * Remove `CLOUDFLARE_ENV` from a child env IN PLACE. Both bare `wrangler deploy`
- * (via `getCloudflareEnv()`) and the CF Vite plugin (via `loadEnv`) read this var
- * to select a NAMED environment whose `account_id`/`name` can differ from the
- * top-level config this self-host flow pins and preflights — so it must not survive
- * into the build or the deploy child, or the deploy could target a different account
- * / env than preflight validated. Only the environment-SELECTION var is scrubbed;
- * API-base / compliance-region vars are left intact so an enterprise or
- * compliance-region deploy still reaches its correct Cloudflare endpoint. Windows
- * env names are case-insensitive, so every spelling is removed there.
+ * Deploy-time env selectors that pin the WRONG worker/config out from under the
+ * top-level config this flow provisions + preflights. Scrubbed from every child env
+ * and fenced in the project dotenv (see below), on top of the provisioner's transport
+ * scrub/fence which owns the endpoint-redirect + `CLOUDFLARE_ENV` vars:
+ *   - `WRANGLER_CI_OVERRIDE_NAME` — wrangler 4.107 applies it AFTER config load
+ *     (`mergeSharedConfigArgs` → `getCIOverrideName()`), REPLACING the upload name, so a
+ *     bare `wrangler deploy` uploads a worker whose name the generated-config check never
+ *     validated.
+ *   - `CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH` — the CF Vite plugin points the build at an
+ *     ALTERNATE wrangler config, flattening a different binding set into
+ *     `dist/ssr/wrangler.json`.
  */
-function scrubCloudflareEnvSelection(env: NodeJS.ProcessEnv): void {
-  delete env.CLOUDFLARE_ENV;
-  if (process.platform === 'win32') {
-    for (const key of Object.keys(env)) {
-      if (key.toLowerCase() === 'cloudflare_env') {
-        delete env[key];
-      }
+const DEPLOY_CONFIG_OVERRIDE_ENV_VARS = [
+  'WRANGLER_CI_OVERRIDE_NAME',
+  'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH',
+] as const;
+
+/**
+ * The dotenv files wrangler 4.107 reloads into `process.env` (`override: true`) for
+ * the orchestrator's `--env=` calls (`getDefaultEnvFiles("")`), so a repo dotenv here
+ * would resurrect `WRANGLER_CI_OVERRIDE_NAME` at the DEPLOY step after the child-env
+ * scrub removed it.
+ */
+const DEPLOY_WRANGLER_DOTENV_FILES = ['.env', '.env.local', '.env.', '.env..local'];
+
+/**
+ * The dotenv files Vite's `loadEnv(mode, …)` reads for a production `vite build`
+ * (`.env`, `.env.local`, `.env.production`, `.env.production.local`), where the CF Vite
+ * plugin picks up `CLOUDFLARE_ENV` / `CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH` — a set
+ * DISJOINT from wrangler's `--env=` files, so it is fenced separately for the build.
+ */
+const DEPLOY_VITE_DOTENV_FILES = ['.env', '.env.local', '.env.production', '.env.production.local'];
+
+/**
+ * FAIL CLOSED when the AMBIENT env selects a non-top-level worker/config for the
+ * Cloudflare backend, which deploys the top-level environment of the canonical root
+ * config ONLY. `CLOUDFLARE_ENV` picks a named env block (different account/name/bindings);
+ * `CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH` points the build at a different config. We refuse
+ * rather than silently deploy a target the drift-check / provision never reasoned about.
+ */
+function assertNoAmbientConfigOverride(): void {
+  const cloudflareEnv = process.env.CLOUDFLARE_ENV;
+  if (typeof cloudflareEnv === 'string' && cloudflareEnv.trim().length > 0) {
+    throw new Error(
+      'CLOUDFLARE_ENV is set. --backend cloudflare deploys the TOP-LEVEL environment of ' +
+        'your root wrangler config only (a named environment can carry a different account, ' +
+        'worker name, or binding set). Unset CLOUDFLARE_ENV and retry.',
+    );
+  }
+  const configPathOverride = process.env.CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH;
+  if (typeof configPathOverride === 'string' && configPathOverride.trim().length > 0) {
+    throw new Error(
+      'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH is set. --backend cloudflare builds from the ' +
+        'canonical root wrangler config only. Unset it and retry.',
+    );
+  }
+}
+
+/**
+ * FAIL CLOSED when the project's dotenv files declare a deploy-time config-override
+ * selector. wrangler / Vite reload dotenv on every command, so a repo dotenv would
+ * reintroduce a scrubbed var AFTER the child-env scrub — reselecting the upload worker
+ * name (wrangler `--env=` files) or the build's wrangler config (Vite production files).
+ * The provisioner's transport fence ({@link assertNoTransportRedirectInProjectDotenv})
+ * owns `CLOUDFLARE_ENV` + the endpoint-redirect vars; this closes the deploy-specific
+ * name/config-path selectors it does not cover, across BOTH consumers' file sets.
+ * Exported for direct unit testing of the file-set + win32 case rule.
+ */
+export function assertNoConfigOverrideInProjectDotenv(
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  const caseInsensitive = platform === 'win32';
+  const declaresAny = (file: string, names: ReadonlyArray<string>): string | undefined => {
+    const rawKeys = scanWranglerDotenvKeys(join(root, file));
+    const keys = caseInsensitive ? new Set([...rawKeys].map((key) => key.toLowerCase())) : rawKeys;
+    return names.find((name) => keys.has(caseInsensitive ? name.toLowerCase() : name));
+  };
+  // WRANGLER_CI_OVERRIDE_NAME reaches the DEPLOY step via wrangler's `--env=` dotenv reload.
+  for (const file of DEPLOY_WRANGLER_DOTENV_FILES) {
+    if (declaresAny(file, ['WRANGLER_CI_OVERRIDE_NAME'])) {
+      throw new Error(
+        `the project file "${file}" sets WRANGLER_CI_OVERRIDE_NAME, which wrangler reloads on ` +
+          `every command and applies AFTER config load to REPLACE the deployed worker name — so ` +
+          `\`wrangler deploy\` would upload a worker whose name was never validated. Remove it from ` +
+          `"${file}" (set it in your shell/CI only if you truly need a CI name override).`,
+      );
+    }
+  }
+  // CLOUDFLARE_ENV / CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH reach the BUILD via Vite's
+  // production `loadEnv`, whose file set is disjoint from wrangler's `--env=` files.
+  for (const file of DEPLOY_VITE_DOTENV_FILES) {
+    const offender = declaresAny(file, ['CLOUDFLARE_ENV', 'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH']);
+    if (offender) {
+      throw new Error(
+        `the project file "${file}" sets ${offender}, which the Cloudflare Vite plugin reads at ` +
+          `build time to select a named environment or an ALTERNATE wrangler config — flattening a ` +
+          `different binding set into dist/ssr/wrangler.json than this deploy provisioned. Remove ` +
+          `${offender} from "${file}".`,
+      );
     }
   }
 }
 
 /**
- * Confirm the deploy config the CF Vite plugin emitted targets the pinned account
- * and the expected worker name at the TOP-LEVEL environment, BEFORE a bare
- * `wrangler deploy` uploads anything. `wrangler deploy` (no `-c`) follows
- * `.wrangler/deploy/config.json` → the generated `dist/.../wrangler.json`; if a
- * `CLOUDFLARE_ENV` in the ambient env or a production `.env` selected a named
- * environment at BUILD time, that generated config carries a different
- * `account_id`/`name` (Cloudflare resolves them from the named block). Returns
- * `{ ok:false, reason }` on any mismatch — or when the config is missing/unreadable
- * — so the caller fails closed rather than shipping a worker to the wrong account.
+ * Resolve + validate the ONE pinned transport for the whole deploy, and FAIL CLOSED
+ * on any ambient/dotenv redirect that would move the target out from under the pinned
+ * top-level config. Reuses the provisioner's resolver + dotenv fence so provision AND
+ * the deploy tail (build / whoami / migrate / deploy) share one source of truth.
+ * Returns the single resolved API base URL to pin into every child env.
+ */
+function resolveDeployTransport(root: string, rootConfig: Record<string, unknown>): string {
+  assertNoAmbientConfigOverride();
+  assertNoTransportRedirectInProjectDotenv(root);
+  assertNoConfigOverrideInProjectDotenv(root);
+  return resolvePinnedApiBaseUrl(
+    process.env,
+    readWranglerTopLevelString(rootConfig, 'compliance_region'),
+  );
+}
+
+/**
+ * Build a child env for an orchestrator-owned wrangler / build invocation. Reuses the
+ * provisioner's {@link provisionEnv} (scrubs the CF Access pair + EVERY transport
+ * selector incl. `CLOUDFLARE_ENV` + win32 case variants, pins ONE account + API base),
+ * then scrubs the deploy-specific config-override selectors on top.
+ */
+function deployChildEnv(accountId: string, apiBaseUrl: string): NodeJS.ProcessEnv {
+  const env = provisionEnv({ accountId, apiBaseUrl });
+  for (const name of DEPLOY_CONFIG_OVERRIDE_ENV_VARS) {
+    deleteEnvVarCaseAware(env, name);
+  }
+  return env;
+}
+
+/** The id-bearing binding fields whose identity must survive the build unchanged. */
+const DEPLOY_BINDING_IDENTITY_FIELDS: Record<
+  ProvisionDriftEntry['kind'],
+  { field: string; idField: string }
+> = {
+  d1: { field: 'd1_databases', idField: 'database_id' },
+  kv: { field: 'kv_namespaces', idField: 'id' },
+  r2: { field: 'r2_buckets', idField: 'bucket_name' },
+  hyperdrive: { field: 'hyperdrive', idField: 'id' },
+};
+
+/** Every id-bearing binding in the desired set, as `{ kind, binding }` pairs. */
+function desiredIdentityBindings(
+  desired: DesiredResourceSet,
+): Array<{ kind: ProvisionDriftEntry['kind']; binding: string }> {
+  const out: Array<{ kind: ProvisionDriftEntry['kind']; binding: string }> = [];
+  if (desired.d1) {
+    out.push({ kind: 'd1', binding: desired.d1.binding });
+  }
+  for (const kv of desired.kvNamespaces) {
+    out.push({ kind: 'kv', binding: kv.binding });
+  }
+  if (desired.r2) {
+    out.push({ kind: 'r2', binding: desired.r2.binding });
+  }
+  if (desired.hyperdrive) {
+    out.push({ kind: 'hyperdrive', binding: desired.hyperdrive.binding });
+  }
+  return out;
+}
+
+/**
+ * Confirm the deploy config the CF Vite plugin emitted targets the pinned account, the
+ * expected worker name, AND the exact resources this deploy provisioned — at the
+ * TOP-LEVEL environment, BEFORE a bare `wrangler deploy` uploads anything.
+ * `wrangler deploy` (no `-c`) follows `.wrangler/deploy/config.json` → the generated
+ * `dist/.../wrangler.json`. A `CLOUDFLARE_ENV` / `CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH`
+ * in the ambient env or a production `.env` can make the build FLATTEN a named env or an
+ * alternate config into that artifact — keeping the same `account_id`/`name` while
+ * swapping the binding set, so `wrangler deploy --env=` ships it as top-level with no
+ * mismatch. When `rootConfigPath` + `desired` are given we therefore also assert every
+ * desired id-bearing binding's IDENTITY (D1 database_id / KV id / R2 bucket_name /
+ * Hyperdrive id) in the generated artifact equals the identity in the canonical root
+ * config the drift-check / provision resolved. Returns `{ ok:false, reason }` on any
+ * mismatch — or when the config is missing/unreadable — so the caller fails closed.
  */
 export function verifyGeneratedDeployConfig(
   root: string,
-  expected: { accountId: string; workerName: string },
+  expected: {
+    accountId: string;
+    workerName: string;
+    rootConfigPath?: string;
+    desired?: DesiredResourceSet;
+  },
 ): { ok: boolean; reason?: string } {
   const deployConfigPath = join(root, '.wrangler', 'deploy', 'config.json');
   if (!existsSync(deployConfigPath)) {
@@ -457,12 +616,9 @@ export function verifyGeneratedDeployConfig(
   if (!existsSync(redirectedPath)) {
     return { ok: false, reason: `generated wrangler config ${redirectedPath} does not exist.` };
   }
-  let generated: { account_id?: unknown; name?: unknown };
+  let generated: Record<string, unknown>;
   try {
-    generated = JSON.parse(readFileSync(redirectedPath, 'utf-8')) as {
-      account_id?: unknown;
-      name?: unknown;
-    };
+    generated = JSON.parse(readFileSync(redirectedPath, 'utf-8')) as Record<string, unknown>;
   } catch {
     return { ok: false, reason: `generated wrangler config ${redirectedPath} is not valid JSON.` };
   }
@@ -477,6 +633,34 @@ export function verifyGeneratedDeployConfig(
       ok: false,
       reason: `generated config worker name ${JSON.stringify(generated.name)} does not match the expected worker ${JSON.stringify(expected.workerName)}.`,
     };
+  }
+  // Binding-identity check: the generated artifact's provisioned resources must be the
+  // SAME ones (by id) as the canonical root config. A flattened named-env / alternate
+  // config keeps account+name but swaps identities — caught here.
+  if (expected.rootConfigPath && expected.desired) {
+    const rootConfig = parseRootWranglerConfig(expected.rootConfigPath);
+    for (const { kind, binding } of desiredIdentityBindings(expected.desired)) {
+      const { field, idField } = DEPLOY_BINDING_IDENTITY_FIELDS[kind];
+      const rootId = readStoredResourceName(rootConfig, field, binding, idField);
+      // Presence of a real id in root is the drift-check's job; here we only assert the
+      // generated artifact did not DIVERGE from whatever the root config resolved.
+      if (rootId === undefined) {
+        continue;
+      }
+      const generatedId = readStoredResourceName(generated, field, binding, idField);
+      if (generatedId === undefined) {
+        return {
+          ok: false,
+          reason: `generated config is missing the ${field} binding ${JSON.stringify(binding)} (root config provisioned identity ${JSON.stringify(rootId)}) — a named environment or alternate config flattened a different binding set.`,
+        };
+      }
+      if (generatedId !== rootId) {
+        return {
+          ok: false,
+          reason: `generated config ${field} binding ${JSON.stringify(binding)} has identity ${JSON.stringify(generatedId)} but the provisioned root config has ${JSON.stringify(rootId)} — refusing to deploy a flattened/alternate binding set.`,
+        };
+      }
+    }
   }
   return { ok: true };
 }
@@ -603,6 +787,60 @@ function readStoredResourceName(
   return undefined;
 }
 
+/** Read a `d1_databases` entry's string field. */
+function readD1EntryString(entry: unknown, field: string): string | undefined {
+  if (!entry || typeof entry !== 'object') {
+    return undefined;
+  }
+  const value = (entry as Record<string, unknown>)[field];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Resolve the token to pass to `wrangler d1 migrations apply` so wrangler's OWN
+ * resolution (`getDatabaseInfoFromConfig`, wrangler 4.107 src/d1/utils.ts) selects
+ * EXACTLY the `d1_databases` entry the gate validated (matched by `binding`). wrangler
+ * iterates the array and returns the FIRST entry where
+ * `token === database_name || token === binding`, then uses that entry's `migrations_dir`.
+ * We prefer the validated entry's own `database_name` as the token (falling back to the
+ * binding), and FAIL CLOSED when an EARLIER entry also matches it — because wrangler would
+ * then select the earlier entry (a different DB / an unrelated migrations folder) though
+ * the gate validated ours.
+ */
+function resolveD1MigrateTarget(
+  config: Record<string, unknown>,
+  binding: string,
+): { ok: true; token: string } | { ok: false; reason: string } {
+  const list = config.d1_databases;
+  if (!Array.isArray(list)) {
+    return { ok: false, reason: `the root config has no "d1_databases" array` };
+  }
+  const validatedIndex = list.findIndex((entry) => readD1EntryString(entry, 'binding') === binding);
+  if (validatedIndex === -1) {
+    return { ok: false, reason: `no d1_databases entry has binding ${JSON.stringify(binding)}` };
+  }
+  const validated = list[validatedIndex];
+  // wrangler matches by database_name OR binding; the validated entry always matches its
+  // own binding, so the binding is a safe fallback token when it has no database_name.
+  const token = readD1EntryString(validated, 'database_name') ?? binding;
+  for (let i = 0; i < validatedIndex; i++) {
+    const earlier = list[i];
+    if (
+      readD1EntryString(earlier, 'database_name') === token ||
+      readD1EntryString(earlier, 'binding') === token
+    ) {
+      return {
+        ok: false,
+        reason:
+          `an earlier d1_databases entry (binding ${JSON.stringify(readD1EntryString(earlier, 'binding'))}, ` +
+          `database_name ${JSON.stringify(readD1EntryString(earlier, 'database_name'))}) also matches the ` +
+          `token ${JSON.stringify(token)}, so wrangler would migrate it instead`,
+      };
+    }
+  }
+  return { ok: true, token };
+}
+
 /**
  * Sanitize a raw name into a valid Cloudflare Worker name — the SAME rule
  * `@cloudflare/vite-plugin`'s `toValidWorkerName` applies (lowercase, `_`→`-`,
@@ -623,15 +861,15 @@ function toValidWorkerName(raw: string): string {
 }
 
 /**
- * Derive the worker name with the SAME precedence the CF plugin uses
- * (`getWorkerNameFromProject`): `WRANGLER_CI_OVERRIDE_NAME` → package.json
- * `name` → directory basename → `my-worker`.
+ * Derive the worker name the way the CF plugin's `getWorkerNameFromProject` does
+ * MINUS the `WRANGLER_CI_OVERRIDE_NAME` precedence: package.json `name` → directory
+ * basename → `my-worker`. The override is deliberately NOT consulted — this backend
+ * scrubs it from every child env and fences it in the project dotenv (see
+ * {@link deployChildEnv} / {@link assertNoConfigOverrideInProjectDotenv}), so the
+ * build emits (and the deploy uploads) the non-override name; deriving from the
+ * override here would pin a name the scrubbed build never produces.
  */
 function deriveWorkerName(root: string): string {
-  const override = process.env.WRANGLER_CI_OVERRIDE_NAME;
-  if (override && override.trim().length > 0) {
-    return toValidWorkerName(override.trim());
-  }
   let pkgName: string | undefined;
   try {
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8')) as { name?: unknown };
@@ -788,22 +1026,21 @@ function formatCloudflareDriftMessage(
 
 /**
  * Default {@link DeployWranglerRun}: spawns the project-local wrangler REAL CLI
- * (via {@link resolveWranglerArgv}, shell-free) with the Cloudflare account
- * pinned into the child env, so `whoami`/`migrate`/`deploy` can never consult a
- * different ambient account. `capture` pipes or inherits stdio per call.
+ * (via {@link resolveWranglerArgv}, shell-free) with ONE pinned transport in the
+ * child env (via {@link deployChildEnv} — reused provisioner scrub/pin: CF Access +
+ * every transport selector incl. `CLOUDFLARE_ENV` + the deploy config-override vars
+ * scrubbed, one account + API base pinned), so `whoami`/`migrate`/`deploy` can never
+ * consult a different ambient account or endpoint. `capture` pipes or inherits stdio.
  */
 function createDeployWranglerRunner(
   root: string,
-  accountId: string | undefined,
+  accountId: string,
+  apiBaseUrl: string,
 ): DeployWranglerRun {
   const launcher = resolveWranglerArgv(root);
   const [command, ...prefix] = launcher;
   return (args, opts) => {
-    const childEnv = buildEnv(accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {});
-    // Never let an ambient CLOUDFLARE_ENV reselect a named environment for the
-    // orchestrator's own whoami / migrate / deploy calls (the orchestrator also
-    // passes `--env=` on the env-selecting calls as belt-and-suspenders).
-    scrubCloudflareEnvSelection(childEnv);
+    const childEnv = deployChildEnv(accountId, apiBaseUrl);
     const result = spawnSync(command as string, [...prefix, ...args], {
       cwd: root,
       stdio: opts.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
@@ -873,6 +1110,22 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
+  // 1b. Target guard — this backend deploys Cloudflare Workers ONLY. A node/bun/deno
+  // target builds a non-CF worker (no CF producer binding, no consumer handler), yet its
+  // queue files would still enter the desired set — so `--provision` could create orphan
+  // queues before the build reveals the mismatch. Reject BEFORE the desired set or any
+  // account operation.
+  if (isNodeTarget(voidConfig.target)) {
+    log.error(
+      [
+        `deploy: --backend cloudflare is not supported for the "${voidConfig.target}" target.`,
+        'This backend deploys Cloudflare Workers only. Deploy a node/bun/deno build with its',
+        'own host/runtime, or use the default Cloudflare target for --backend cloudflare.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
   // 2. Desired resource set — computed ONCE from SOURCE, pre-build (fail-fast),
   // shared by the provision and drift paths.
   const configPath = discoverRootWranglerConfig(root);
@@ -904,26 +1157,25 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
-  // 3. Preflight — pin the account and confirm wrangler auth.
+  // 3. Preflight — pin ONE transport, pin the account, confirm wrangler auth.
   const rootConfig = parseRootWranglerConfig(configPath);
-  const accountId =
-    readWranglerTopLevelString(rootConfig, 'account_id') ??
-    (process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || undefined);
-  const runWrangler = deps.runWrangler ?? createDeployWranglerRunner(root, accountId);
 
-  const whoami = await Promise.resolve(runWrangler(['whoami', '--json'], { capture: true }));
-  if (!isCleanWranglerExit(whoami)) {
-    log.error(
-      [
-        'deploy: not authenticated with Cloudflare.',
-        'Run `wrangler login`, or set CLOUDFLARE_API_TOKEN (a token with',
-        'Workers Scripts:Edit + read on your bound resources; --provision also needs',
-        'per-product *:Edit for D1/KV/R2/Queues/Hyperdrive). Then rerun.',
-      ].join('\n'),
-    );
+  // 3a. Resolve + pin the ONE transport for the WHOLE deploy (build + whoami + migrate +
+  // deploy), reusing the provisioner's resolver + dotenv fence. Fail closed on any
+  // ambient/dotenv redirect (endpoint, named env, worker-name override, alternate
+  // build config) BEFORE any wrangler call — so every child shares one account + API base.
+  let apiBaseUrl: string;
+  try {
+    apiBaseUrl = resolveDeployTransport(root, rootConfig);
+  } catch (err) {
+    log.error(`deploy: ${getErrorMessage(err)}`);
     return exit(1);
   }
 
+  // 3b. Pin the account (static check — no network) BEFORE spawning wrangler.
+  const accountId =
+    readWranglerTopLevelString(rootConfig, 'account_id') ??
+    (process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || undefined);
   if (!accountId) {
     log.error(
       [
@@ -931,6 +1183,24 @@ export async function runCloudflareDeploy(
         'Set `account_id` in your root wrangler.jsonc, or export CLOUDFLARE_ACCOUNT_ID.',
         'A multi-account token makes wrangler prompt (or error in CI) on its own, which',
         'void cannot intercept — so the account must be pinned before deploying.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
+  // 3c. Confirm wrangler auth. `whoami` gets the SAME `-c`/`--env=`/pinned-transport
+  // context as migrate/deploy, so it authenticates against the exact endpoint they use.
+  const runWrangler = deps.runWrangler ?? createDeployWranglerRunner(root, accountId, apiBaseUrl);
+  const whoami = await Promise.resolve(
+    runWrangler(['whoami', '--json', '-c', configPath, '--env='], { capture: true }),
+  );
+  if (!isCleanWranglerExit(whoami)) {
+    log.error(
+      [
+        'deploy: not authenticated with Cloudflare.',
+        'Run `wrangler login`, or set CLOUDFLARE_API_TOKEN (a token with',
+        'Workers Scripts:Edit + read on your bound resources; --provision also needs',
+        'per-product *:Edit for D1/KV/R2/Queues/Hyperdrive). Then rerun.',
       ].join('\n'),
     );
     return exit(1);
@@ -1056,8 +1326,9 @@ export async function runCloudflareDeploy(
   // when it is absent. The provisioner writes `./db/migrations`, so a missing value
   // means the app was never provisioned here — fail closed rather than guess a folder.
   if (desired.d1) {
+    const migrateConfig = parseRootWranglerConfig(configPath);
     const d1MigrationsDir = readStoredResourceName(
-      parseRootWranglerConfig(configPath),
+      migrateConfig,
       'd1_databases',
       desired.d1.binding,
       'migrations_dir',
@@ -1074,15 +1345,34 @@ export async function runCloudflareDeploy(
       );
       return exit(1);
     }
+    // wrangler 4.107 resolves the migrate target by FIRST-matching the passed token
+    // against `database_name` OR `binding` (getDatabaseInfoFromConfig, src/d1/utils.ts)
+    // and reads THAT entry's `migrations_dir`. The gate validated the entry matched by
+    // BINDING, so migrate by a token that resolves to exactly that entry — fail closed
+    // when an earlier alias entry would shadow it (else wrangler could migrate the wrong
+    // DB / an unrelated folder though the gate passed).
+    const migrateTarget = resolveD1MigrateTarget(migrateConfig, desired.d1.binding);
+    if (!migrateTarget.ok) {
+      log.error(
+        [
+          `deploy: cannot safely run D1 migrations for binding ${desired.d1.binding} — ${migrateTarget.reason}`,
+          'wrangler resolves `d1 migrations apply <name>` by first-matching the name against',
+          "each entry's database_name OR binding, so an ambiguous token could migrate a",
+          'different database than the one validated. Give each D1 database a unique',
+          'database_name (and binding), then rerun.',
+        ].join('\n'),
+      );
+      return exit(1);
+    }
     const migrate = await Promise.resolve(
       runWrangler(
-        ['d1', 'migrations', 'apply', desired.d1.name, '--remote', '-c', configPath, '--env='],
+        ['d1', 'migrations', 'apply', migrateTarget.token, '--remote', '-c', configPath, '--env='],
         { capture: false },
       ),
     );
     if (!isCleanWranglerExit(migrate)) {
       log.error(
-        `deploy: remote D1 migrations failed for "${desired.d1.name}" (exit ${String(migrate.status)}). ` +
+        `deploy: remote D1 migrations failed for "${migrateTarget.token}" (exit ${String(migrate.status)}). ` +
           'Fix the migration and rerun. Note: D1 always enforces foreign_keys=ON — a Drizzle ' +
           'table-rebuild using PRAGMA foreign_keys=OFF must use PRAGMA defer_foreign_keys instead.',
       );
@@ -1126,14 +1416,14 @@ export async function runCloudflareDeploy(
     throw err;
   }
 
-  // 8. Build with a CLEAN env — WITHOUT VOID_DEPLOY_PROJECT_ID — so self-host ISR
-  // emits and the CF plugin merges the wrangler.jsonc real ids into
-  // dist/ssr/wrangler.json. Scrub CLOUDFLARE_ENV so the CF plugin generates the
-  // pinned TOP-LEVEL config (not a named-env one whose account/name could differ
-  // from the account this flow preflighted).
-  const buildChildEnv = buildEnv({ CLOUDFLARE_ACCOUNT_ID: accountId });
+  // 8. Build with the pinned deploy transport — WITHOUT VOID_DEPLOY_PROJECT_ID — so
+  // self-host ISR emits and the CF plugin merges the wrangler.jsonc real ids into
+  // dist/ssr/wrangler.json. `deployChildEnv` scrubs CLOUDFLARE_ENV +
+  // CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH (and pins one account + API base), so the CF
+  // plugin generates the pinned TOP-LEVEL config from the CANONICAL root wrangler config,
+  // not a named-env / alternate-config one whose account/name/bindings could differ.
+  const buildChildEnv = deployChildEnv(accountId, apiBaseUrl);
   delete buildChildEnv.VOID_DEPLOY_PROJECT_ID;
-  scrubCloudflareEnvSelection(buildChildEnv);
   const runBuild =
     deps.runBuild ??
     ((env: NodeJS.ProcessEnv) => {
@@ -1146,22 +1436,27 @@ export async function runCloudflareDeploy(
     return exit(getExitCode(err));
   }
 
-  // 8b. Verify the generated deploy config targets the pinned account + expected
-  // worker BEFORE uploading. A `CLOUDFLARE_ENV` in a production `.env` the CF plugin
-  // loaded could still have baked a different account_id/name into
-  // dist/ssr/wrangler.json — fail closed on any mismatch rather than deploy to it.
+  // 8b. Verify the generated deploy config targets the pinned account + expected worker
+  // AND the exact provisioned binding IDENTITIES BEFORE uploading. A `CLOUDFLARE_ENV` /
+  // `CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH` the CF plugin loaded could have baked a
+  // different account/name — or the SAME account/name with a flattened, DIFFERENT binding
+  // set — into dist/ssr/wrangler.json; passing `desired` + the root config lets the check
+  // reject a divergent binding set, not only an account/name mismatch.
   const verification = (deps.verifyDeployConfig ?? verifyGeneratedDeployConfig)(root, {
     accountId,
     workerName,
+    rootConfigPath: configPath,
+    desired,
   });
   if (!verification.ok) {
     log.error(
       [
         'deploy: the generated deploy config does not match the pinned target — refusing to deploy.',
         verification.reason,
-        'This typically means CLOUDFLARE_ENV (in the environment or a production `.env`)',
-        'selected a different named environment at build time. This backend always deploys',
-        'the top-level config — remove CLOUDFLARE_ENV and rebuild.',
+        'This typically means CLOUDFLARE_ENV / CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH (in the',
+        'environment or a production `.env`) selected a different named environment or config',
+        'at build time. This backend always deploys the canonical top-level config — remove',
+        'them and rebuild.',
       ]
         .filter(Boolean)
         .join('\n'),
@@ -1170,9 +1465,19 @@ export async function runCloudflareDeploy(
   }
 
   // 9. Deploy — bare `wrangler deploy` follows .wrangler/deploy/config.json →
-  // dist/ssr/wrangler.json (which carries the real ids + pinned account). `--env=`
-  // pins the top-level env so an ambient CLOUDFLARE_ENV cannot reselect a named one.
-  const deployResult = await Promise.resolve(runWrangler(['deploy', '--env='], { capture: false }));
+  // dist/ssr/wrangler.json (which carries the real ids + pinned account). `--env=` pins
+  // the top-level env so an ambient CLOUDFLARE_ENV cannot reselect a named one.
+  // `--experimental-provision=false` / `--experimental-auto-create=false` disable
+  // wrangler 4.107's OWN resource provisioning (both default true, deployCommand +
+  // globalFlags, wrangler-dist/cli.js), so ONLY `provisionCloudflareResources` may create
+  // resources — a bare deploy can never auto-create a missing binding (e.g. an R2 bucket
+  // absent remotely but passing the local drift predicate), even in CI.
+  const deployResult = await Promise.resolve(
+    runWrangler(
+      ['deploy', '--env=', '--experimental-provision=false', '--experimental-auto-create=false'],
+      { capture: false },
+    ),
+  );
   if (!isCleanWranglerExit(deployResult)) {
     log.error(`deploy: \`wrangler deploy\` failed (exit ${String(deployResult.status)}).`);
     return exit(1);
