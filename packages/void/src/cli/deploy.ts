@@ -620,25 +620,41 @@ function deployPointerPath(root: string): string {
   return join(root, '.wrangler', 'deploy', 'config.json');
 }
 
+/** The `{ mode, envDir }` the deploy build's `void:env` config hook observes. */
+export type DeployBuildConfig = { mode: string; envDir: string | undefined };
+
 /**
- * Resolve the RAW Vite `envDir` the production build honors — exactly the
- * `userConfig.envDir` the CF plugin's `void:env` config hook reads (index.ts). The
- * self-host secret WARN + GATE units default to the project root, but the build
- * loads `.env*` from a custom `envDir`; without threading the same value a custom
- * `envDir` project would preflight a DIFFERENT env set than it ships. Loaded via a
- * dynamic `import('vite')` so this CLI file never pulls Vite into a managed deploy.
- * Returns the raw string (relative, as written) or `undefined` (→ root, matching how
- * the build treats a missing / non-string / `false` envDir).
+ * Resolve the EXACT `{ mode, envDir }` the deploy build's `void:env` config hook observes,
+ * so the secret WARN + GATE units validate the SAME `.env*` set the build ships. Runs the
+ * FULL Vite config-hook pipeline via `resolveConfig(inlineConfig, 'build', 'production',
+ * 'production')` — exactly what `vite build` calls internally — so, unlike
+ * `loadConfigFromFile`, it captures a top-level `mode` (a config file may set
+ * `mode: 'staging'`, which `void:env` then reads and the old hardcoded `'production'`
+ * missed) AND an `envDir` an earlier plugin's `config` hook set. Run under the SANITIZED
+ * build env (CLOUDFLARE_ENV etc. scrubbed) so it can never resolve a different env than the
+ * build. `resolved.envDir` is ABSOLUTE; convert it back to the RAW, root-relative form the
+ * secret units re-join (equal to root → `undefined`, matching `void:env`). Dynamic
+ * `import('vite')` so this CLI file never pulls Vite into a managed deploy. On a throw the
+ * caller fails closed — the real build would throw too, and validating a wrong env set is
+ * exactly the leak this closes.
  */
-async function resolveViteEnvDir(root: string): Promise<string | undefined> {
-  const { loadConfigFromFile } = await import('vite');
-  const loaded = await loadConfigFromFile(
-    { command: 'build', mode: 'production' },
-    undefined,
-    root,
-  );
-  const envDir = loaded?.config.envDir;
-  return typeof envDir === 'string' && envDir.length > 0 ? envDir : undefined;
+async function resolveDeployBuildConfig(
+  root: string,
+  env: NodeJS.ProcessEnv,
+): Promise<DeployBuildConfig> {
+  const { resolveConfig } = await import('vite');
+  const saved = process.env;
+  process.env = env;
+  try {
+    const resolved = await resolveConfig({ root }, 'build', 'production', 'production');
+    const envDir =
+      typeof resolved.envDir === 'string' && resolved.envDir !== resolved.root
+        ? relative(resolved.root, resolved.envDir)
+        : undefined;
+    return { mode: resolved.mode, envDir: envDir && envDir.length > 0 ? envDir : undefined };
+  } finally {
+    process.env = saved;
+  }
 }
 
 /**
@@ -792,8 +808,15 @@ export interface CloudflareDeployDeps {
   assertMigrationsDeployable?: typeof assertRemoteMigrationsDeployable;
   /** Migration apply-set equality gate seam (default: {@link checkWranglerMigrationApplySet}). */
   checkMigrationApplySet?: typeof checkWranglerMigrationApplySet;
-  /** Raw Vite `envDir` resolver seam (default: {@link resolveViteEnvDir}). */
-  resolveEnvDir?: (root: string) => string | undefined | Promise<string | undefined>;
+  /**
+   * Effective build `{ mode, envDir }` resolver seam (default:
+   * {@link resolveDeployBuildConfig}). Receives the sanitized build env so it resolves
+   * the SAME Vite config the deploy build will.
+   */
+  resolveBuildConfig?: (
+    root: string,
+    env: NodeJS.ProcessEnv,
+  ) => DeployBuildConfig | Promise<DeployBuildConfig>;
   /** Override CI / non-interactive detection (default: `!stdin.isTTY || getTokenSource()==='ci'`). */
   isCI?: boolean;
   /** Override `process.exit` (tests assert the exit code without halting). */
@@ -1543,12 +1566,6 @@ export async function runCloudflareDeploy(
     }
   }
 
-  // 2d. Resolve the raw Vite `envDir` the production build honors, BEFORE preflight,
-  // so the secret WARN + GATE units read the SAME `.env*` set the build ships (a custom
-  // `envDir` would otherwise make them validate the root env while the build bakes a
-  // different one — leaking a plaintext secret unwarned or shadowing a remote secret).
-  const deployEnvDir = await (deps.resolveEnvDir ?? resolveViteEnvDir)(root);
-
   // 3. Preflight — pin ONE transport, pin the account, confirm wrangler auth.
   const rootConfig = parseRootWranglerConfig(configPath);
 
@@ -1875,11 +1892,31 @@ export async function runCloudflareDeploy(
   }
 
   // 7. Secrets preflight — WARN (plaintext .env→vars), then GATE (required
-  // secrets). Runs AFTER provision/migrate resolve, BEFORE build/deploy.
+  // secrets). Runs AFTER provision/migrate resolve (so the config carries real ids the
+  // build will bake), BEFORE build/deploy.
+  //
+  // Resolve the EXACT `{ mode, envDir }` the build's `void:env` hook will observe, under the
+  // SAME sanitized env the build runs with, and feed BOTH secret units that pair — so they
+  // validate the identical `.env*` set the build ships. A top-level `mode: 'staging'` or a
+  // plugin-set `envDir` would otherwise diverge from the hardcoded `production`/root and
+  // leak a plaintext secret unwarned or shadow a remote secret. `resolveConfig` failing is
+  // fatal (the build would fail too — never validate a wrong env set).
+  let buildConfig: DeployBuildConfig;
+  try {
+    buildConfig = await (deps.resolveBuildConfig ?? resolveDeployBuildConfig)(
+      root,
+      deployChildEnv(accountId, apiBaseUrl),
+    );
+  } catch (err) {
+    log.error(
+      `deploy: could not resolve the Vite build config (mode / envDir) — ${getErrorMessage(err)}`,
+    );
+    return exit(1);
+  }
   const warnings = await (deps.collectPlaintextVarWarnings ?? collectPlaintextVarWarnings)(root, {
     configPath,
-    envDir: deployEnvDir,
-    mode: 'production',
+    envDir: buildConfig.envDir,
+    mode: buildConfig.mode,
   });
   if (warnings.secretKeys.length > 0) {
     log.warn(
@@ -1896,8 +1933,8 @@ export async function runCloudflareDeploy(
     await (deps.validateSelfHostProdEnv ?? validateSelfHostProdEnv)(root, {
       configPath,
       accountId,
-      envDir: deployEnvDir,
-      mode: 'production',
+      envDir: buildConfig.envDir,
+      mode: buildConfig.mode,
     });
   } catch (err) {
     if (

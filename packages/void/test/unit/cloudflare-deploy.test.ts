@@ -122,8 +122,8 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     // Stub the migration apply-set equality gate so orchestration tests need no on-disk
     // migration dir; a dedicated suite exercises the real `checkWranglerMigrationApplySet`.
     checkMigrationApplySet: async () => ({ ok: true }),
-    // Stub the Vite envDir resolver so orchestration tests never load a vite config.
-    resolveEnvDir: () => undefined,
+    // Stub the effective build-config resolver so orchestration tests never load Vite.
+    resolveBuildConfig: () => ({ mode: 'production', envDir: undefined }),
     ...overrides,
   };
   return { deps, trace, wranglerArgs, exitCalls };
@@ -1670,25 +1670,50 @@ describe('checkWranglerMigrationApplySet', () => {
 // Custom Vite envDir threaded to the secret units (finding 3)
 // ---------------------------------------------------------------------------
 
-describe('runCloudflareDeploy — custom envDir', () => {
-  it('passes the resolved raw Vite envDir to the secret warn + gate units', async () => {
+describe('runCloudflareDeploy — effective build mode/envDir', () => {
+  it('passes the build-resolved mode + envDir to the secret warn + gate units', async () => {
     const root = d1Project(PROVISIONED_D1);
-    const seen: { warn?: string; gate?: string } = {};
+    const seen: {
+      warn?: { mode?: string; envDir?: string };
+      gate?: { mode?: string; envDir?: string };
+    } = {};
     const { deps } = harness({
-      resolveEnvDir: () => 'config',
-      collectPlaintextVarWarnings: (async (_root: string, opts: { envDir?: string }) => {
-        seen.warn = opts.envDir;
+      // The real resolver runs `resolveConfig` under the sanitized env; here we assert the
+      // orchestrator threads whatever it returns (a staging mode + a custom envDir) to BOTH
+      // units — the pair the build itself will observe.
+      resolveBuildConfig: () => ({ mode: 'staging', envDir: 'config' }),
+      collectPlaintextVarWarnings: (async (
+        _root: string,
+        opts: { mode?: string; envDir?: string },
+      ) => {
+        seen.warn = { mode: opts.mode, envDir: opts.envDir };
         return { secretKeys: [], totalVarKeys: 0 };
       }) as CloudflareDeployDeps['collectPlaintextVarWarnings'],
-      validateSelfHostProdEnv: (async (_root: string, opts: { envDir?: string }) => {
-        seen.gate = opts.envDir;
+      validateSelfHostProdEnv: (async (_root: string, opts: { mode?: string; envDir?: string }) => {
+        seen.gate = { mode: opts.mode, envDir: opts.envDir };
         return { hasSchema: false, remoteSecretNames: null };
       }) as CloudflareDeployDeps['validateSelfHostProdEnv'],
     });
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
-    // Both units validate against the SAME custom envDir the build ships from.
-    expect(seen.warn).toBe('config');
-    expect(seen.gate).toBe('config');
+    // Both units validate against the SAME (mode, envDir) the build ships from.
+    expect(seen.warn).toEqual({ mode: 'staging', envDir: 'config' });
+    expect(seen.gate).toEqual({ mode: 'staging', envDir: 'config' });
+  });
+
+  it('fails closed when the build config cannot be resolved (never validates a wrong env set)', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, trace, exitCalls } = harness({
+      resolveBuildConfig: () => {
+        throw new Error('invalid vite.config.ts');
+      },
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Resolved after provision/migrate, before the secret gate + build.
+    expect(trace).not.toContain('gate');
+    expect(trace).not.toContain('build');
   });
 });
 
