@@ -71,6 +71,7 @@ import {
   type ManifestOnlyDeployPayload,
 } from './client.ts';
 import { promptAndCreateProject } from './create-project.ts';
+import type { DeployBuildContextInput, DeployBuildContextResult } from './deploy-build-probe.ts';
 import {
   formatConnectionLostMessage,
   formatDeployFailureMessage,
@@ -78,16 +79,16 @@ import {
 } from './deploy-errors.ts';
 import { uploadAssetsToR2, type DirectR2PutItem } from './direct-r2-upload.ts';
 import {
-  collectPlaintextVarWarnings,
+  dischargeSelfHostEnvContext,
   fetchRemoteSecretNames,
   formatEnvReport,
   getDeployEnvDefaults,
+  selfHostSchemaFailureMessage,
   SelfHostEnvValidationError,
   SelfHostFirstDeployError,
   SelfHostSchemaError,
   SelfHostSecretListError,
   validateProdEnv,
-  validateSelfHostProdEnv,
 } from './env-validation.ts';
 import { collectGitDeployMetadata, type GitDeployMetadata } from './git-metadata.ts';
 import {
@@ -624,49 +625,43 @@ function deployPointerPath(root: string): string {
 export type DeployBuildConfig = { mode: string; envDir: string | undefined };
 
 /**
- * Resolve the EXACT `{ mode, envDir }` the deploy build's `void:env` config hook observes,
- * so the secret WARN + GATE units validate the SAME `.env*` set the build ships. Runs the
- * FULL Vite config-hook pipeline via `resolveConfig(inlineConfig, 'build', 'production',
- * 'production')` — exactly what `vite build` calls internally — so it captures a top-level
- * `mode` (a config file may set `mode: 'staging'`, which `void:env` then reads and the old
- * hardcoded `'production'` missed). Run under the SANITIZED build env (CLOUDFLARE_ENV etc.
- * scrubbed) so it can never resolve a different env than the build.
- *
- * The value is read from the `void:env` plugin's `api` — the RAW `{ mode, envDir }` that hook
- * OBSERVED at its own position — NOT from the final `resolved.envDir`. `void:env` loads its
- * dotenv from the config visible at its hook, and Vite folds a LATER plugin's `config`-hook
- * `envDir` into `resolved.envDir`; reading the final value would validate a `.env*` dir the
- * build never loaded. Every self-host app runs `voidPlugin()` (this fork rejects everything
- * else), so `void:env` is always present; if its captured value is somehow absent we fail
- * closed. Dynamic `import('vite')` so this CLI file never pulls Vite into a managed deploy. On
- * a throw the caller fails closed — the real build would throw too, and validating a wrong env
- * set is exactly the leak this closes.
+ * Default {@link CloudflareDeployDeps.resolveBuildContext} seam: derive the build
+ * context in an ISOLATED SUBPROCESS ({@link resolveDeployBuildContextViaSubprocess})
+ * under the scrubbed build `env`. The parent runs NO project code and NO project-env
+ * `loadEnv` — resolving the Vite config (arbitrary plugin pipeline) and loading the
+ * `.env*` overlay both happen in the child, so a deferred plugin handler can never
+ * read the parent's CF Access token and the effective-var map is resolved under the
+ * build's own env, never the parent's credentialed one. Loaded lazily so a managed
+ * deploy never pulls the probe (or Vite) in.
  */
-export async function resolveDeployBuildConfig(
-  root: string,
+async function resolveDeployBuildContextDefault(
+  input: DeployBuildContextInput,
   env: NodeJS.ProcessEnv,
-): Promise<DeployBuildConfig> {
-  const { resolveConfig } = await import('vite');
-  const saved = process.env;
-  process.env = env;
-  try {
-    const resolved = await resolveConfig({ root }, 'build', 'production', 'production');
-    const envPlugin = resolved.plugins.find((p) => p.name === 'void:env');
-    const captured = (
-      envPlugin?.api as
-        | { getVoidDeployBuildConfig?: () => DeployBuildConfig | undefined }
-        | undefined
-    )?.getVoidDeployBuildConfig?.();
-    if (!captured) {
-      throw new Error(
-        "the build config did not expose the void:env hook's mode/envDir — is voidPlugin() in your vite.config?",
-      );
-    }
-    const envDir = captured.envDir && captured.envDir.length > 0 ? captured.envDir : undefined;
-    return { mode: captured.mode, envDir };
-  } finally {
-    process.env = saved;
+): Promise<DeployBuildContextResult> {
+  const { resolveDeployBuildContextViaSubprocess } = await import('./deploy-build-probe.ts');
+  return resolveDeployBuildContextViaSubprocess(input, env);
+}
+
+/** Fail-closed, pre-account guidance for a v1-unsupported build context (custom envDir / mode). */
+function formatBuildContextReject(
+  reject: Extract<DeployBuildContextResult, { kind: 'reject' }>,
+): string {
+  if (reject.reason === 'custom-envdir') {
+    return [
+      `deploy: --backend cloudflare does not support a custom Vite envDir (${JSON.stringify(reject.envDir)}).`,
+      'v1 reads .env* from the project root only — the same directory the build generates auth',
+      'migrations from — so a custom envDir would validate a different .env* set than the worker',
+      'ships. Move your .env* files to the project root (remove `envDir` from your Vite config),',
+      'then rerun — or deploy this app with `void deploy` (the managed platform). A custom envDir',
+      'is a follow-up.',
+    ].join('\n');
   }
+  return [
+    `deploy: --backend cloudflare builds in production mode, but your Vite config resolves to mode ${JSON.stringify(reject.mode)}.`,
+    'v1 validates and ships the production .env* set only. Remove the non-production build mode',
+    '(or set it to `production`), then rerun — or deploy this app with `void deploy` (the managed',
+    'platform). A custom build mode is a follow-up.',
+  ].join('\n');
 }
 
 /**
@@ -810,10 +805,8 @@ export interface CloudflareDeployDeps {
   runBuild?: (env: NodeJS.ProcessEnv) => void;
   /** Provisioner seam (default: `provisionCloudflareResources`, loaded dynamically). */
   provision?: typeof provisionCloudflareResources;
-  /** WARN unit seam (default: {@link collectPlaintextVarWarnings}). */
-  collectPlaintextVarWarnings?: typeof collectPlaintextVarWarnings;
-  /** GATE unit seam (default: {@link validateSelfHostProdEnv}). */
-  validateSelfHostProdEnv?: typeof validateSelfHostProdEnv;
+  /** Parent-side secret-gate discharge seam (default: {@link dischargeSelfHostEnvContext}). */
+  dischargeSelfHostEnv?: typeof dischargeSelfHostEnvContext;
   /** Generated-deploy-config verification seam (default: {@link verifyGeneratedDeployConfig}). */
   verifyDeployConfig?: typeof verifyGeneratedDeployConfig;
   /** Pre-remote-migrate gate seam (default: {@link assertRemoteMigrationsDeployable}). */
@@ -823,14 +816,17 @@ export interface CloudflareDeployDeps {
   /** Auth-schema validation seam (default: {@link validateAuthMigrationSchema}). */
   validateAuthMigrations?: typeof validateAuthMigrationSchema;
   /**
-   * Effective build `{ mode, envDir }` resolver seam (default:
-   * {@link resolveDeployBuildConfig}). Receives the sanitized build env so it resolves
-   * the SAME Vite config the deploy build will.
+   * Isolated build-context probe seam (default: the {@link DeployBuildContextInput}
+   * subprocess). Receives the scrubbed build env and returns the effective build
+   * mode, the plaintext-var warnings, and the required-secret gate inputs — all
+   * derived under that scrubbed env, so the parent runs no project code / no
+   * project-env `loadEnv`. A `reject` (custom envDir / non-production mode) fails
+   * the deploy closed pre-account.
    */
-  resolveBuildConfig?: (
-    root: string,
+  resolveBuildContext?: (
+    input: DeployBuildContextInput,
     env: NodeJS.ProcessEnv,
-  ) => DeployBuildConfig | Promise<DeployBuildConfig>;
+  ) => DeployBuildContextResult | Promise<DeployBuildContextResult>;
   /** Override CI / non-interactive detection (default: `!stdin.isTTY || getTokenSource()==='ci'`). */
   isCI?: boolean;
   /** Override `process.exit` (tests assert the exit code without halting). */
@@ -1226,8 +1222,9 @@ export async function assertMigrationsProduceAuthSchema(
 }
 
 /**
- * The build's EFFECTIVE `{ mode, envDir }` (from {@link resolveDeployBuildConfig}) plus the
- * SCRUBBED build `env` the auth config must be derived under — so an env-conditioned auth config
+ * The build's EFFECTIVE `{ mode, envDir }` (narrowed to `production` / root by the build-context
+ * probe) plus the SCRUBBED build `env` the auth config must be derived under — so an
+ * env-conditioned auth config
  * is resolved exactly as the deployed worker would see it, and the arbitrary auth-config code
  * never runs with the parent's live credentials.
  */
@@ -1780,25 +1777,40 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
-  // 3c. Resolve the ONE shared build config `{ mode, envDir }` the whole deploy validates
-  // against, under the SAME scrubbed env (`deployChildEnv`) the build's project code runs with.
-  // Resolved ONCE here (a `vite build` config resolution — read-only, no account mutation) and
-  // fed to BOTH the auth-schema guard (3d) and the secret preflight (7), so they cannot diverge
-  // from what the build ships. `resolveConfig` failing is fatal — the build would fail too, and
-  // validating a wrong env set is exactly the leak this closes.
+  // 3c. Resolve the ONE shared build CONTEXT the whole deploy validates against — the effective
+  // build mode, the plaintext-var warnings, and the required-secret gate inputs — in an ISOLATED
+  // SUBPROCESS under the SAME scrubbed env (`deployChildEnv`) the build runs with. The parent runs
+  // NO project code and NO project-env `loadEnv`: resolving the Vite config (arbitrary plugin
+  // pipeline) and loading the `.env*` overlay BOTH happen in the child, so a deferred plugin
+  // handler can never read this credential-bearing parent's CF Access token, and the effective-var
+  // map is derived under the build's own env (never the parent's ambient/credentialed one). A
+  // custom Vite envDir or a non-`production` build mode is unsupported in v1 → the child returns a
+  // REJECT the parent turns into clear pre-account guidance (so root === envDir for every supported
+  // app — the auth-schema probe and the build's auth generation can never diverge). Derived ONCE
+  // and fed to BOTH the auth-schema guard (3d) and the secret preflight (7).
   const buildProjectEnv = deployChildEnv(accountId, apiBaseUrl);
-  let buildConfig: DeployBuildConfig;
+  let buildContext: DeployBuildContextResult;
   try {
-    buildConfig = await (deps.resolveBuildConfig ?? resolveDeployBuildConfig)(
-      root,
+    buildContext = await (deps.resolveBuildContext ?? resolveDeployBuildContextDefault)(
+      { root, configPath },
       buildProjectEnv,
     );
   } catch (err) {
     log.error(
-      `deploy: could not resolve the Vite build config (mode / envDir) — ${getErrorMessage(err)}`,
+      `deploy: could not resolve the Vite build context (mode / envDir / worker vars) — ${getErrorMessage(err)}`,
     );
     return exit(1);
   }
+  if (buildContext.kind === 'reject') {
+    log.error(formatBuildContextReject(buildContext));
+    return exit(1);
+  }
+  if (buildContext.kind === 'schema-error') {
+    log.error(`deploy: ${selfHostSchemaFailureMessage(buildContext.reason)}`);
+    return exit(1);
+  }
+  // Accepted: the narrowing guarantees `mode === 'production'` and `envDir === root`.
+  const buildConfig: DeployBuildConfig = { mode: buildContext.mode, envDir: undefined };
 
   // 3d. Auth-migration guard — FAIL CLOSED before whoami / provision / build. The managed
   // platform creates Void-managed Better Auth tables at RUNTIME via the worker's
@@ -2130,17 +2142,14 @@ export async function runCloudflareDeploy(
     }
   }
 
-  // 7. Secrets preflight — WARN (plaintext .env→vars), then GATE (required secrets). Runs BEFORE
-  // build/deploy, reusing the ONE shared `buildConfig` resolved at 3c — the EXACT `{ mode,
-  // envDir }` the build's `void:env` hook observes — so both secret units validate the identical
-  // `.env*` set the build ships. A top-level `mode: 'staging'` or a plugin-set `envDir` would
-  // otherwise diverge from a hardcoded `production`/root and leak a plaintext secret unwarned or
-  // shadow a remote secret.
-  const warnings = await (deps.collectPlaintextVarWarnings ?? collectPlaintextVarWarnings)(root, {
-    configPath,
-    envDir: buildConfig.envDir,
-    mode: buildConfig.mode,
-  });
+  // 7. Secrets preflight — WARN (plaintext .env→vars), then GATE (required secrets). Both were
+  // DERIVED at 3c inside the isolated build-context subprocess (under the scrubbed build env, so
+  // `loadEnv` saw the EXACT vars the build ships — never the parent's ambient/credentialed env),
+  // and cross to the parent as VALUES-FREE structured data. The parent does ONLY pure work here:
+  // print the warnings, then DISCHARGE the gate (compare the required-secret names to `wrangler
+  // secret list`) — no project code, no project-env `loadEnv`, no env.ts import in this
+  // credential-bearing process.
+  const { warnings, envContext } = buildContext;
   if (warnings.secretKeys.length > 0) {
     log.warn(
       [
@@ -2153,11 +2162,10 @@ export async function runCloudflareDeploy(
     );
   }
   try {
-    await (deps.validateSelfHostProdEnv ?? validateSelfHostProdEnv)(root, {
+    await (deps.dischargeSelfHostEnv ?? dischargeSelfHostEnvContext)(envContext, {
+      root,
       configPath,
       accountId,
-      envDir: buildConfig.envDir,
-      mode: buildConfig.mode,
     });
   } catch (err) {
     if (

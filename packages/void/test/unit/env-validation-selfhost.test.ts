@@ -757,6 +757,49 @@ describe('validateSelfHostProdEnv — self-host secret gate', () => {
       );
     });
 
+    it('the ambient shadow (a scrubbed key set in the parent env) fails CLOSED under the build env', async () => {
+      // The build ships `FOO=""` ONLY when FOO is absent from the BUILD's process.env; when FOO is
+      // present (ambient), Vite's `loadEnv` lets it override the dotenv empty and `filterLoadedEnv`
+      // drops it as shell pollution → nothing shipped. So the gate MUST derive the effective map
+      // under the SAME (scrubbed) env the build runs with — NOT the credential-bearing parent's,
+      // which differs on exactly the scrubbed keys. Deriving under the parent env (with FOO set)
+      // would read FOO as ABSENT and let the remote secret discharge it (fail OPEN), while the
+      // scrubbed build ships `FOO=""` over that secret.
+      const root = createTempProject();
+      defineEnv({ FOO: string() });
+      // FOO=ambient-parent-value is set in THIS process's env (the parent). The build env
+      // (`buildEnv`) is the scrubbed child env that does NOT carry it — exactly the divergence
+      // between the credential-bearing parent and the build subprocess.
+      process.env.FOO = 'ambient-parent-value';
+      try {
+        writeDotenv(root, '.env.production', 'FOO=\n'); // dotenv empties the required key
+        const scrubbedBuildEnv: NodeJS.ProcessEnv = { ...process.env };
+        delete scrubbedBuildEnv.FOO;
+        const { run } = stubRunner(okList(['FOO'])); // remote FOO exists
+
+        const error = await validateSelfHostProdEnv(root, {
+          configPath: CONFIG_PATH,
+          runWrangler: run,
+          // The gate derives the effective map under the BUILD's env (FOO absent), so it sees the
+          // dotenv `FOO=""` the build ships — never the parent's ambient FOO.
+          buildEnv: scrubbedBuildEnv,
+        }).then(
+          () => null,
+          (e: unknown) => e,
+        );
+
+        // Fails CLOSED (present-empty), NOT fooled by the ambient shadow into discharging via remote.
+        expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+        expect((error as SelfHostEnvValidationError).report.missing).toEqual(['FOO']);
+        expect((error as SelfHostEnvValidationError).message).toContain(
+          'Remove the empty assignment',
+        );
+        expect((error as SelfHostEnvValidationError).message).not.toContain('wrangler secret put');
+      } finally {
+        delete process.env.FOO;
+      }
+    });
+
     it('a normally-satisfied NON-EMPTY required key passes without a wrangler call', async () => {
       const root = createTempProject();
       defineEnv({ FOO: string() });

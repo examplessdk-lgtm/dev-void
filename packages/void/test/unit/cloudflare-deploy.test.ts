@@ -3,12 +3,15 @@ import { dirname, join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { resolveRequiredAuthSchemaViaSubprocess } from '../../src/cli/auth-schema-probe.ts';
 import {
+  resolveDeployBuildContextViaSubprocess,
+  type DeployBuildContextResult,
+} from '../../src/cli/deploy-build-probe.ts';
+import {
   assertMigrationsProduceAuthSchema,
   assertNoConfigOverrideInProjectDotenv,
   checkWranglerMigrationApplySet,
   compareWranglerMigrationPaths,
   computeDesiredCloudflareResources,
-  resolveDeployBuildConfig,
   runCloudflareDeploy,
   validateAuthMigrationSchema,
   verifyGeneratedDeployConfig,
@@ -16,6 +19,7 @@ import {
   type DeployWranglerRun,
   type DeployWranglerRunResult,
 } from '../../src/cli/deploy.ts';
+import type { SelfHostEnvContext } from '../../src/cli/env-validation.ts';
 import type { CliLogger } from '../../src/cli/log-file.ts';
 import type { ProvisionResult } from '../../src/cli/provision.ts';
 import { readConfig } from '../../src/config.ts';
@@ -65,6 +69,28 @@ const cleanExit: DeployWranglerRunResult = {
   error: null,
 };
 
+/** A no-schema (nothing-to-gate) {@link SelfHostEnvContext}. */
+const EMPTY_ENV_CONTEXT: SelfHostEnvContext = {
+  hasSchema: false,
+  presentEmptyRequired: [],
+  presentEmptySources: {},
+  absentRequired: [],
+  invalidKeys: [],
+};
+
+/** A default-passing build-context probe result (production, no warnings, nothing to gate). */
+function okBuildContext(
+  overrides: Partial<Extract<DeployBuildContextResult, { kind: 'ok' }>> = {},
+): DeployBuildContextResult {
+  return {
+    kind: 'ok',
+    mode: 'production',
+    warnings: { secretKeys: [], totalVarKeys: 0 },
+    envContext: EMPTY_ENV_CONTEXT,
+    ...overrides,
+  };
+}
+
 /**
  * Build a seam bag whose default seams all PASS, recording a call trace so tests
  * assert ordering + that later steps are skipped on an exit. Individual seams are
@@ -106,14 +132,16 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
       trace.push('provision');
       return { resources: [], configPath, accountIdWritten: false };
     }) as CloudflareDeployDeps['provision'],
-    collectPlaintextVarWarnings: (async () => {
-      trace.push('warn');
-      return { secretKeys: [], totalVarKeys: 0 };
-    }) as CloudflareDeployDeps['collectPlaintextVarWarnings'],
-    validateSelfHostProdEnv: (async () => {
+    // Stub the isolated build-context probe so orchestration tests never spawn Vite; the
+    // warnings + gate inputs it would derive are returned inline. Silent (no trace) — like
+    // the real subprocess, it runs pre-account and is not a step these tests order around.
+    resolveBuildContext: (() => okBuildContext()) as CloudflareDeployDeps['resolveBuildContext'],
+    // Parent-side gate discharge (the wrangler `secret list` comparison). Dedicated tests
+    // inject a throwing stub or exercise the real derive+discharge units directly.
+    dischargeSelfHostEnv: (async () => {
       trace.push('gate');
       return { hasSchema: false, remoteSecretNames: null };
-    }) as CloudflareDeployDeps['validateSelfHostProdEnv'],
+    }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
     // The stubbed build never writes dist/ssr/wrangler.json, so the real config
     // verification would have nothing to read — pass it by default; dedicated tests
     // exercise the real verifier and the fail-closed branch.
@@ -130,8 +158,6 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     // Stub auth-schema validation so orchestration tests never load Better Auth; dedicated
     // tests exercise the real `validateAuthMigrationSchema` + `assertMigrationsProduceAuthSchema`.
     validateAuthMigrations: async () => {},
-    // Stub the effective build-config resolver so orchestration tests never load Vite.
-    resolveBuildConfig: () => ({ mode: 'production', envDir: undefined }),
     ...overrides,
   };
   return { deps, trace, wranglerArgs, exitCalls };
@@ -549,7 +575,7 @@ describe('runCloudflareDeploy — drift check (no --provision)', () => {
     expect(trace).toEqual(['wrangler:whoami']);
   });
 
-  it('proceeds through gate → migrate → verify → warn → gate → build → deploy when fully provisioned', async () => {
+  it('proceeds through whoami → migrate → verify → gate → build → deploy when fully provisioned', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'myapp' }),
       'void.json': JSON.stringify({}),
@@ -564,7 +590,6 @@ describe('runCloudflareDeploy — drift check (no --provision)', () => {
       'migrate-gate',
       'wrangler:d1', // migrations apply
       'wrangler:d1', // migrations list (pending verify)
-      'warn',
       'gate',
       'build',
       'wrangler:deploy',
@@ -661,24 +686,26 @@ describe('runCloudflareDeploy — CI provision gate', () => {
 describe('runCloudflareDeploy — secrets gate', () => {
   it('warns about a plaintext secret-looking key without blocking', async () => {
     const root = d1Project(PROVISIONED_D1);
+    // The warning is DERIVED in the build-context probe and returned inline; the parent
+    // just prints it. A secret-looking key is non-fatal — the deploy still proceeds.
     const { deps, trace } = harness({
-      collectPlaintextVarWarnings: (async () => {
-        trace.push('warn');
-        return {
-          secretKeys: [{ key: 'API_TOKEN', reason: 'heuristic' as const }],
-          totalVarKeys: 3,
-        };
-      }) as CloudflareDeployDeps['collectPlaintextVarWarnings'],
+      resolveBuildContext: (() =>
+        okBuildContext({
+          warnings: {
+            secretKeys: [{ key: 'API_TOKEN', reason: 'heuristic' as const }],
+            totalVarKeys: 3,
+          },
+        })) as CloudflareDeployDeps['resolveBuildContext'],
     });
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
     expect(trace).toContain('wrangler:deploy'); // warning is non-fatal
   });
 
-  it('blocks with exit(1) when the gate throws (missing required secret); never deploys', async () => {
+  it('blocks with exit(1) when the gate discharge throws (missing required secret); never deploys', async () => {
     const { SelfHostEnvValidationError } = await import('../../src/cli/env-validation.ts');
     const root = d1Project(PROVISIONED_D1);
     const { deps, trace, exitCalls } = harness({
-      validateSelfHostProdEnv: (async () => {
+      dischargeSelfHostEnv: (async () => {
         trace.push('gate');
         throw new SelfHostEnvValidationError('env: missing required secret STRIPE_KEY', {
           valid: false,
@@ -686,7 +713,7 @@ describe('runCloudflareDeploy — secrets gate', () => {
           invalid: [],
           values: new Map(),
         });
-      }) as CloudflareDeployDeps['validateSelfHostProdEnv'],
+      }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
     });
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
@@ -700,9 +727,9 @@ describe('runCloudflareDeploy — secrets gate', () => {
     const { SelfHostFirstDeployError } = await import('../../src/cli/env-validation.ts');
     const root = d1Project(PROVISIONED_D1);
     const { deps, exitCalls } = harness({
-      validateSelfHostProdEnv: (async () => {
+      dischargeSelfHostEnv: (async () => {
         throw new SelfHostFirstDeployError('worker not deployed yet', ['STRIPE_KEY'], 1);
-      }) as CloudflareDeployDeps['validateSelfHostProdEnv'],
+      }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
     });
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
@@ -1311,6 +1338,38 @@ describe('runCloudflareDeploy — managed path does not import the provision mod
   it('loads the provision module via a dynamic import()', () => {
     expect(deploySource).toMatch(/await import\('\.\/provision\.ts'\)/);
   });
+
+  it('loads the build-context probe via a dynamic import() (never a static module-scope import)', () => {
+    // deploy.ts must only `import type` from the probe at module scope; the runtime helper
+    // loads via dynamic import() inside the fork, so a managed deploy never pulls Vite in.
+    const staticImports = [
+      ...deploySource.matchAll(/^import\s+([^']*?)\s+from\s+'\.\/deploy-build-probe\.ts';/gm),
+    ];
+    for (const [, clause] of staticImports) {
+      expect(clause.startsWith('type')).toBe(true);
+    }
+    expect(deploySource).toMatch(/await import\('\.\/deploy-build-probe\.ts'\)/);
+  });
+
+  it('the build-context probe pulls Vite / env-validation only dynamically and no backend statically', () => {
+    // The probe is imported (dynamically) during a self-host deploy, but a plain LIBRARY import of
+    // it (the parent-side helper) must not eagerly evaluate Vite / the env stack, and it must never
+    // statically pull provision / Better Auth / proper-lockfile into any bundle.
+    const probeSource = readFileSync(
+      join(import.meta.dirname, '../../src/cli/deploy-build-probe.ts'),
+      'utf-8',
+    );
+    // No static module-scope `... from 'vite'|'./env-validation.ts'` runtime import — dynamic only.
+    for (const spec of ["'vite'", "'./env-validation.ts'"]) {
+      const staticRe = new RegExp(`^import\\s+(?!type\\b)[^;]*?\\s+from\\s+${spec};`, 'gm');
+      expect(probeSource).not.toMatch(staticRe);
+      expect(probeSource).toContain(`await import(${spec})`);
+    }
+    // No static backend imports at all (provision / Better Auth / proper-lockfile).
+    expect(probeSource).not.toMatch(/from\s+'\.\/provision\.ts'/);
+    expect(probeSource).not.toMatch(/better-auth/);
+    expect(probeSource).not.toMatch(/proper-lockfile/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1749,7 +1808,6 @@ describe('F5: isolated auth-schema subprocess', () => {
       });
       let seen: { mode?: string; envDir?: string; env?: NodeJS.ProcessEnv } | undefined;
       const { deps } = harness({
-        resolveBuildConfig: () => ({ mode: 'staging', envDir: 'config' }),
         validateAuthMigrations: (async (
           _root: string,
           _paths: unknown,
@@ -1761,9 +1819,10 @@ describe('F5: isolated auth-schema subprocess', () => {
         }) as CloudflareDeployDeps['validateAuthMigrations'],
       });
       await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
-      // Effective mode + envDir from the shared build-config resolver.
-      expect(seen?.mode).toBe('staging');
-      expect(seen?.envDir).toBe('config');
+      // The narrowing guarantees production + root, so the auth-schema probe (envDir) and the
+      // build's root-relative auth generation can never diverge.
+      expect(seen?.mode).toBe('production');
+      expect(seen?.envDir).toBeUndefined();
       // The child env the arbitrary auth code runs under has CF Access scrubbed.
       expect(seen?.env?.CF_ACCESS_CLIENT_ID).toBeUndefined();
       expect(seen?.env?.CF_ACCESS_CLIENT_SECRET).toBeUndefined();
@@ -2053,43 +2112,48 @@ describe('compareWranglerMigrationPaths (wrangler 4.107 numeric-prefix comparato
 });
 
 // ---------------------------------------------------------------------------
-// Custom Vite envDir threaded to the secret units (finding 3)
+// Isolated build-context probe consumption (findings F1/F2/F3): the parent runs
+// NO project code / project-env loadEnv — it consumes the subprocess's structured
+// result and REJECTS a custom envDir / non-production mode pre-account.
 // ---------------------------------------------------------------------------
 
-describe('runCloudflareDeploy — effective build mode/envDir', () => {
-  it('passes the build-resolved mode + envDir to the secret warn + gate units', async () => {
+describe('runCloudflareDeploy — build-context probe', () => {
+  it('prints the probe-derived warnings and discharges the probe-derived gate inputs', async () => {
     const root = d1Project(PROVISIONED_D1);
-    const seen: {
-      warn?: { mode?: string; envDir?: string };
-      gate?: { mode?: string; envDir?: string };
-    } = {};
-    const { deps } = harness({
-      // The real resolver runs `resolveConfig` under the sanitized env; here we assert the
-      // orchestrator threads whatever it returns (a staging mode + a custom envDir) to BOTH
-      // units — the pair the build itself will observe.
-      resolveBuildConfig: () => ({ mode: 'staging', envDir: 'config' }),
-      collectPlaintextVarWarnings: (async (
-        _root: string,
-        opts: { mode?: string; envDir?: string },
-      ) => {
-        seen.warn = { mode: opts.mode, envDir: opts.envDir };
-        return { secretKeys: [], totalVarKeys: 0 };
-      }) as CloudflareDeployDeps['collectPlaintextVarWarnings'],
-      validateSelfHostProdEnv: (async (_root: string, opts: { mode?: string; envDir?: string }) => {
-        seen.gate = { mode: opts.mode, envDir: opts.envDir };
-        return { hasSchema: false, remoteSecretNames: null };
-      }) as CloudflareDeployDeps['validateSelfHostProdEnv'],
+    let dischargedContext: SelfHostEnvContext | undefined;
+    const envContext: SelfHostEnvContext = {
+      hasSchema: true,
+      presentEmptyRequired: [],
+      presentEmptySources: {},
+      absentRequired: ['STRIPE_KEY'],
+      invalidKeys: [],
+    };
+    const { deps, trace } = harness({
+      resolveBuildContext: (() =>
+        okBuildContext({
+          warnings: {
+            secretKeys: [{ key: 'API_KEY', reason: 'heuristic' as const }],
+            totalVarKeys: 4,
+          },
+          envContext,
+        })) as CloudflareDeployDeps['resolveBuildContext'],
+      dischargeSelfHostEnv: (async (context: SelfHostEnvContext) => {
+        trace.push('gate');
+        dischargedContext = context;
+        return { hasSchema: true, remoteSecretNames: ['STRIPE_KEY'] };
+      }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
     });
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
-    // Both units validate against the SAME (mode, envDir) the build ships from.
-    expect(seen.warn).toEqual({ mode: 'staging', envDir: 'config' });
-    expect(seen.gate).toEqual({ mode: 'staging', envDir: 'config' });
+    // The parent discharges EXACTLY the values-free context the subprocess derived.
+    expect(dischargedContext).toEqual(envContext);
+    expect(trace).toContain('gate');
+    expect(trace).toContain('wrangler:deploy');
   });
 
-  it('fails closed when the build config cannot be resolved (never validates a wrong env set)', async () => {
+  it('fails closed when the build-context probe cannot be resolved (never validates a wrong env)', async () => {
     const root = d1Project(PROVISIONED_D1);
     const { deps, trace, exitCalls } = harness({
-      resolveBuildConfig: () => {
+      resolveBuildContext: () => {
         throw new Error('invalid vite.config.ts');
       },
     });
@@ -2097,36 +2161,167 @@ describe('runCloudflareDeploy — effective build mode/envDir', () => {
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
-    // Resolved before the secret gate + build.
-    expect(trace).not.toContain('gate');
-    expect(trace).not.toContain('build');
+    // Resolved before ANY account op — no whoami / gate / build.
+    expect(trace).toEqual([]);
   });
 
-  // F4: the REAL resolver runs the full `resolveConfig` config-hook pipeline. A later plugin
-  // that returns a different `envDir` folds into `resolved.envDir`, but the build's `void:env`
-  // hook loaded its dotenv from the value IT observed (the root) — a seam-only test can't catch
-  // this, so exercise the real resolver end-to-end and prove preflight == build.
-  it('F4: reads the void:env HOOK-TIME envDir, not the final resolved.envDir a later plugin sets', async () => {
-    const srcIndex = join(import.meta.dirname, '..', '..', 'src', 'index.ts');
+  it('F3: REJECTS a custom Vite envDir pre-account (no whoami / gate / build)', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      resolveBuildContext: (() => ({
+        kind: 'reject',
+        reason: 'custom-envdir',
+        mode: 'production',
+        envDir: 'config',
+      })) as CloudflareDeployDeps['resolveBuildContext'],
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toEqual([]);
+    expect(wranglerArgs).toEqual([]);
+  });
+
+  it('REJECTS a non-production build mode pre-account (no whoami / gate / build)', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      resolveBuildContext: (() => ({
+        kind: 'reject',
+        reason: 'non-production-mode',
+        mode: 'staging',
+        envDir: null,
+      })) as CloudflareDeployDeps['resolveBuildContext'],
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toEqual([]);
+    expect(wranglerArgs).toEqual([]);
+  });
+
+  it('fails closed (values-free) when the probe reports a schema-load failure', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, trace, exitCalls } = harness({
+      resolveBuildContext: (() => ({
+        kind: 'schema-error',
+        reason: 'schema-load-failed',
+      })) as CloudflareDeployDeps['resolveBuildContext'],
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F1/F3 end-to-end: the REAL build-context subprocess. The parent runs NO project
+// code — resolveConfig (the full plugin pipeline) executes in the child under the
+// SCRUBBED env, so no config handler (sync OR deferred) can read the parent's CF
+// Access token, and a custom envDir is rejected under real config resolution.
+// ---------------------------------------------------------------------------
+
+describe('build-context probe (real subprocess)', () => {
+  const srcIndex = join(import.meta.dirname, '..', '..', 'src', 'index.ts');
+
+  function scrubbedBuildEnv(): NodeJS.ProcessEnv {
+    // The env the orchestrator passes the probe: a copy of the parent env with the CF Access
+    // service token pair scrubbed (as `deployChildEnv` does). The parent's process.env KEEPS the
+    // creds — the test asserts the child (project code) never sees them.
+    const env = { ...process.env };
+    delete env.CF_ACCESS_CLIENT_ID;
+    delete env.CF_ACCESS_CLIENT_SECRET;
+    return env;
+  }
+
+  it('F1: a deferred config handler cannot read the parent CF Access token (parent runs no project code)', async () => {
+    const leakFile = join(tmpDir, 'leaked.json');
     const root = makeProject({
-      'package.json': JSON.stringify({ name: 'f4app', type: 'module' }),
+      'package.json': JSON.stringify({ name: 'f1app', type: 'module' }),
       'void.json': JSON.stringify({}),
       'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
-      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'f4app' }, null, 2),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'f1app' }, null, 2),
+      // A plugin that reads process.env creds SYNCHRONOUSLY during config() AND schedules a
+      // DEFERRED (timer) read — exactly the leak the old in-parent resolveConfig had. Both write
+      // the same file; whichever runs last wins, and both run in the CHILD under the scrubbed env.
       'vite.config.ts': [
+        `import { writeFileSync } from 'node:fs';`,
         `import { voidPlugin } from ${JSON.stringify(srcIndex)};`,
+        `function leak() {`,
+        `  writeFileSync(${JSON.stringify(leakFile)}, JSON.stringify({`,
+        `    secret: process.env.CF_ACCESS_CLIENT_SECRET ?? null,`,
+        `    id: process.env.CF_ACCESS_CLIENT_ID ?? null,`,
+        `  }));`,
+        `}`,
         `export default {`,
         `  plugins: [`,
         `    voidPlugin(),`,
-        `    { name: 'later-envdir', config() { return { envDir: 'some/other/dir' }; } },`,
+        `    { name: 'app:leaker', config() { leak(); setTimeout(leak, 0); return {}; } },`,
         `  ],`,
         `};`,
       ].join('\n'),
     });
-    const resolved = await resolveDeployBuildConfig(root, { ...process.env });
-    // The later plugin makes resolved.envDir = '<root>/some/other/dir', but void:env loaded
-    // from the root — the preflight must use the hook-time value (root → undefined).
-    expect(resolved).toEqual({ mode: 'production', envDir: undefined });
+
+    // The PARENT holds the CF Access service token, as the real deploy does.
+    const savedId = process.env.CF_ACCESS_CLIENT_ID;
+    const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+    process.env.CF_ACCESS_CLIENT_ID = 'super-secret-id';
+    process.env.CF_ACCESS_CLIENT_SECRET = 'super-secret-token';
+    try {
+      const result = await resolveDeployBuildContextViaSubprocess(
+        { root, configPath: join(root, 'wrangler.jsonc') },
+        scrubbedBuildEnv(),
+      );
+      expect(result.kind).toBe('ok');
+      // The config pipeline ran in the SCRUBBED child — the handler read null creds. The parent
+      // never ran the pipeline, so its live token was never in scope of any project code.
+      const leaked = JSON.parse(readFileSync(leakFile, 'utf-8')) as {
+        secret: string | null;
+        id: string | null;
+      };
+      expect(leaked.secret).toBeNull();
+      expect(leaked.id).toBeNull();
+    } finally {
+      if (savedId === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_ID;
+      } else {
+        process.env.CF_ACCESS_CLIENT_ID = savedId;
+      }
+      if (savedSecret === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_SECRET;
+      } else {
+        process.env.CF_ACCESS_CLIENT_SECRET = savedSecret;
+      }
+    }
+  });
+
+  it('F3: rejects a custom Vite envDir (custom-envdir) under real config resolution', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'f3app', type: 'module' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'f3app' }, null, 2),
+      // Conflicting root vs custom-envDir env files: the root .env.production has FOO, the custom
+      // envDir has a DIFFERENT FOO. v1 rejects the custom envDir before it can matter.
+      '.env.production': 'FOO=root-value\n',
+      'config/.env.production': 'FOO=envdir-value\n',
+      'vite.config.ts': [
+        `import { voidPlugin } from ${JSON.stringify(srcIndex)};`,
+        `export default { envDir: 'config', plugins: [voidPlugin()] };`,
+      ].join('\n'),
+    });
+    const result = await resolveDeployBuildContextViaSubprocess(
+      { root, configPath: join(root, 'wrangler.jsonc') },
+      scrubbedBuildEnv(),
+    );
+    expect(result.kind).toBe('reject');
+    if (result.kind === 'reject') {
+      expect(result.reason).toBe('custom-envdir');
+      expect(result.envDir).toBe('config');
+    }
   });
 });
 

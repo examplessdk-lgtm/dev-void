@@ -214,6 +214,14 @@ export type CollectPlaintextVarWarningsOptions = {
    * invocation still covers the root-wrangler layer; an explicit path wins.
    */
   configPath?: string;
+  /**
+   * The EXACT env the build runs under (the scrubbed `buildProjectEnv`). Threaded
+   * to {@link resolveEffectiveWorkerVars} so the sanitized dotenv overlay is
+   * resolved against the build's env, never the credential-bearing parent's. In
+   * the isolated build-context subprocess `process.env` already IS that env, so it
+   * is omitted there; a test seam supplies it in-process.
+   */
+  buildEnv?: NodeJS.ProcessEnv;
 };
 
 /**
@@ -359,7 +367,7 @@ function schemaDefaultEntries(schema: Record<string, unknown>): Array<[string, s
  * source + key). A `file` is a plain filename (`.env.production`, `wrangler.jsonc`)
  * — never a path or a value.
  */
-type VarSource =
+export type VarSource =
   | { kind: 'dotenv'; file: string }
   | { kind: 'void-json' }
   | { kind: 'schema-default' }
@@ -422,6 +430,49 @@ function resolveEffectiveWorkerVars(
     /** Vite build mode — selects the `.env.<mode>` files. Defaults to `'production'`. */
     mode?: string;
     /** Registered env schema (if any) — source of the `.default(value)` layer. */
+    schema?: Record<string, unknown> | null;
+    /**
+     * The EXACT env the build runs `vite build` under (the scrubbed `buildProjectEnv`).
+     * Vite `loadEnv(mode, dir, '')` merges `process.env` OVER the `.env*` files and
+     * {@link filterLoadedEnv} classifies shell pollution against `process.env`, so the
+     * sanitized dotenv overlay depends on the ambient env. To reproduce the build's
+     * `vars` byte-for-byte the overlay must be resolved under the SAME env the build
+     * uses — NOT the credential-bearing parent's `process.env`, which differs from
+     * `buildProjectEnv` on exactly the scrubbed keys (CF Access / transport selectors)
+     * and would judge a map the build never ships. When provided, `process.env` is
+     * SYNCHRONOUSLY swapped to it strictly around this (fully synchronous) resolution
+     * and restored in `finally` — no `await` runs under the swap, so no deferred handler
+     * can observe it. In the isolated build-context subprocess `process.env` already IS
+     * `buildProjectEnv`, so this is omitted there (the swap would be a no-op).
+     */
+    buildEnv?: NodeJS.ProcessEnv;
+  },
+): EffectiveWorkerVars {
+  const savedProcessEnv = process.env;
+  if (options.buildEnv) {
+    process.env = options.buildEnv;
+  }
+  try {
+    return resolveEffectiveWorkerVarsUnderEnv(root, options);
+  } finally {
+    if (options.buildEnv) {
+      process.env = savedProcessEnv;
+    }
+  }
+}
+
+/**
+ * The body of {@link resolveEffectiveWorkerVars}, run under whatever `process.env`
+ * the caller pinned (the build env when `buildEnv` was supplied, else the ambient
+ * one). Fully SYNCHRONOUS — no `await` — so the caller's `process.env` swap has no
+ * deferred window.
+ */
+function resolveEffectiveWorkerVarsUnderEnv(
+  root: string,
+  options: {
+    configPath?: string;
+    envDir?: string;
+    mode?: string;
     schema?: Record<string, unknown> | null;
   },
 ): EffectiveWorkerVars {
@@ -542,6 +593,7 @@ export async function collectPlaintextVarWarnings(
         envDir: options.envDir,
         mode: options.mode,
         schema,
+        buildEnv: options.buildEnv,
       }),
     ),
   );
@@ -645,14 +697,20 @@ export type SecretListFailureDetail = {
  */
 export class SelfHostSecretListError extends Error {
   override name = 'SelfHostSecretListError';
+  /** Stable, values-free failure classification. */
+  readonly reason: SecretListFailureReason;
+  /** Safe scalars (exit code / signal name) — never contain wrangler output. */
+  readonly detail: SecretListFailureDetail;
+  // Explicit fields (not TS parameter properties) so this module type-strips under
+  // plain Node — the build-context probe imports it in a subprocess.
   constructor(
     message: string,
-    /** Stable, values-free failure classification. */
-    public readonly reason: SecretListFailureReason,
-    /** Safe scalars (exit code / signal name) — never contain wrangler output. */
-    public readonly detail: SecretListFailureDetail = {},
+    reason: SecretListFailureReason,
+    detail: SecretListFailureDetail = {},
   ) {
     super(message);
+    this.reason = reason;
+    this.detail = detail;
   }
 }
 
@@ -674,16 +732,13 @@ export class SelfHostFirstDeployError extends SelfHostSecretListError {
   override name = 'SelfHostFirstDeployError';
   /** Always true — distinguishes this from a generic list failure structurally. */
   readonly workerNotFound = true;
-  constructor(
-    message: string,
-    /** Required schema key NAMES still unsatisfied locally (values-free). */
-    public readonly missingKeys: Array<string>,
-    /** The clean nonzero exit code wrangler surfaced (safe scalar). */
-    exitCode?: number,
-  ) {
+  /** Required schema key NAMES still unsatisfied locally (values-free). */
+  readonly missingKeys: Array<string>;
+  constructor(message: string, missingKeys: Array<string>, exitCode?: number) {
     // Structurally still a nonzero-exit; `message` is the values-free
     // first-deploy guidance and `missingKeys` carries the names.
     super(message, 'nonzero-exit', { exitCode });
+    this.missingKeys = missingKeys;
   }
 }
 
@@ -698,11 +753,10 @@ export class SelfHostFirstDeployError extends SelfHostSecretListError {
  */
 export class SelfHostEnvValidationError extends Error {
   override name = 'SelfHostEnvValidationError';
-  constructor(
-    message: string,
-    public readonly report: EnvValidationReport,
-  ) {
+  readonly report: EnvValidationReport;
+  constructor(message: string, report: EnvValidationReport) {
     super(message);
+    this.report = report;
   }
 }
 
@@ -733,17 +787,16 @@ export type SelfHostSchemaFailureReason = 'schema-load-failed' | 'schema-validat
  */
 export class SelfHostSchemaError extends Error {
   override name = 'SelfHostSchemaError';
-  constructor(
-    message: string,
-    /** Stable, values-free failure classification. */
-    public readonly reason: SelfHostSchemaFailureReason,
-  ) {
+  /** Stable, values-free failure classification. */
+  readonly reason: SelfHostSchemaFailureReason;
+  constructor(message: string, reason: SelfHostSchemaFailureReason) {
     super(message);
+    this.reason = reason;
   }
 }
 
 /** The fixed, values-free message for each schema-failure reason. */
-function schemaFailureMessage(reason: SelfHostSchemaFailureReason): string {
+export function selfHostSchemaFailureMessage(reason: SelfHostSchemaFailureReason): string {
   switch (reason) {
     case 'schema-load-failed':
       return (
@@ -778,7 +831,7 @@ async function withSchemaBoundary<T>(
   } catch {
     // Drop the caught error entirely (message/stack/cause) — it may carry a
     // value — and rethrow only the structural, values-free classification.
-    throw new SelfHostSchemaError(schemaFailureMessage(reason), reason);
+    throw new SelfHostSchemaError(selfHostSchemaFailureMessage(reason), reason);
   }
 }
 
@@ -819,6 +872,41 @@ export type ValidateSelfHostProdEnvOptions = {
   runWrangler?: RunSecretList;
   /** Test seam — hard timeout for the default runner (ms). */
   timeoutMs?: number;
+  /**
+   * The EXACT env the build runs under (the scrubbed `buildProjectEnv`). Threaded to
+   * the effective-build-map resolver so the empty-collision fence sees the `.env*`
+   * overlay the build actually ships — resolved under the build's env, never the
+   * credential-bearing parent's. In production the derivation runs inside the isolated
+   * build-context subprocess (where `process.env` already IS that env); a test seam
+   * supplies it in-process.
+   */
+  buildEnv?: NodeJS.ProcessEnv;
+};
+
+/**
+ * The structured, VALUES-FREE outcome of the self-host env DERIVATION — everything
+ * decidable from the effective build var map + schema WITHOUT a network round-trip,
+ * so the derivation can run in the isolated build-context subprocess (under the
+ * scrubbed build env, where the user's env.ts + `loadEnv` never see the parent's
+ * credentials) and the parent discharges it with only pure work + one `wrangler
+ * secret list`. Carries KEY NAMES + source kinds/filenames + the fixed invalid
+ * reason ONLY — never a value — so it crosses the process boundary as safe JSON.
+ */
+export type SelfHostEnvContext = {
+  /** Whether the project registered an env schema at all (no schema → nothing to gate). */
+  hasSchema: boolean;
+  /**
+   * Required keys the effective build map assigns an EMPTY string (`K=""`). The build
+   * bakes these as plaintext `vars` that win over a same-named remote secret, so they
+   * FAIL CLOSED unconditionally — the parent throws before any wrangler spawn.
+   */
+  presentEmptyRequired: Array<string>;
+  /** Per-empty-key WINNING source (kind + filename) so the parent names it — never a value. */
+  presentEmptySources: Record<string, VarSource>;
+  /** Required keys the effective build map does NOT set — the only state a remote secret discharges. */
+  absentRequired: Array<string>;
+  /** Present-non-empty keys the schema REJECTED — malformed, never dischargeable by a secret. */
+  invalidKeys: Array<string>;
 };
 
 export type SelfHostProdEnvResult = {
@@ -878,11 +966,53 @@ export async function validateSelfHostProdEnv(
   root: string,
   options: ValidateSelfHostProdEnvOptions,
 ): Promise<SelfHostProdEnvResult> {
-  // Skip the wrangler round-trip when the project has no typed env schema
-  // (mirrors assertEnvSchemaValid's findEnvFile fast path).
+  // The DERIVATION (env.ts eval + `loadEnv` + validators) runs project code and
+  // must live in the isolated build-context subprocess; the DISCHARGE (`wrangler
+  // secret list` + comparison) is pure parent work. Composed here so the existing
+  // unit tests exercise the whole gate in one call; the deploy orchestrator runs
+  // the two halves in their respective processes.
+  const context = await deriveSelfHostEnvContext(root, {
+    configPath: options.configPath,
+    envDir: options.envDir,
+    mode: options.mode,
+    buildEnv: options.buildEnv,
+  });
+  return dischargeSelfHostEnvContext(context, {
+    root,
+    configPath: options.configPath,
+    accountId: options.accountId,
+    runWrangler: options.runWrangler,
+    timeoutMs: options.timeoutMs,
+  });
+}
+
+/**
+ * DERIVE half of the self-host gate — everything decidable from the effective
+ * build var map + schema, with NO network. Runs the user's env.ts + `loadEnv` +
+ * validators, so in the deploy orchestrator it executes INSIDE the isolated
+ * build-context subprocess (under the scrubbed build env), never in the
+ * credential-bearing parent (F1: no parent env.ts import; F2: `loadEnv` never
+ * sees the parent's ambient/credentialed env). Returns a VALUES-FREE
+ * {@link SelfHostEnvContext} — key names + source kinds/filenames + the fixed
+ * invalid reason only — so it crosses the process boundary as safe JSON. Throws
+ * only a values-free {@link SelfHostSchemaError} (via {@link withSchemaBoundary})
+ * when the schema machinery itself fails; the gate OUTCOMES (empty / absent /
+ * invalid) are returned as data for the parent's {@link dischargeSelfHostEnvContext}.
+ */
+export async function deriveSelfHostEnvContext(
+  root: string,
+  options: {
+    configPath?: string;
+    envDir?: string;
+    mode?: string;
+    buildEnv?: NodeJS.ProcessEnv;
+  },
+): Promise<SelfHostEnvContext> {
+  // Skip when the project has no typed env schema (mirrors assertEnvSchemaValid's
+  // findEnvFile fast path).
   const envFile = findEnvFile(root);
   if (envFile == null) {
-    return { hasSchema: false, remoteSecretNames: null };
+    return emptyEnvContext();
   }
 
   // env.ts evaluation runs arbitrary user code that could throw an error
@@ -890,25 +1020,18 @@ export async function validateSelfHostProdEnv(
   // below (schema + validateAllEnv) without a second import.
   const mod = await withSchemaBoundary('schema-load-failed', () => loadSchema(envFile));
   if (!mod) {
-    return { hasSchema: false, remoteSecretNames: null };
+    return emptyEnvContext();
   }
   const schema = mod._getRegisteredSchema() ?? {};
 
   // The ONE effective build map — the EXACT key→value bytes the build bakes into
   // worker `vars` across ALL FOUR sources (root wrangler `vars` < schema defaults
   // < void.json `worker.vars` < the sanitized `.env*` overlay incl. `.env.local`
-  // / `.env.<mode>.local` / a custom `envDir`), via the SAME
-  // {@link resolveEffectiveWorkerVars} the WARN unit uses so the two can never
-  // diverge from each other OR the build. Every presence/emptiness decision below
-  // reads ONLY this map; no value ever leaves this function.
-  //
-  // The resolver probes schema defaults (arbitrary user code) and reads
-  // config, so it runs inside the values-free boundary: a sync throw becomes a
-  // structural error, and {@link schemaDefaultEntries} consumes any async
-  // default-probe rejection so it can never float carrying a value.
-  // `buildEnv` holds the winning VALUES (presence/emptiness only); `buildSources`
-  // carries the per-key provenance used to name the ACTUAL source of a
-  // configured-empty key — filenames + kinds, never a value.
+  // / `.env.<mode>.local`), via the SAME {@link resolveEffectiveWorkerVars} the
+  // WARN unit uses so the two can never diverge from each other OR the build. The
+  // `.env*` overlay is resolved under `buildEnv` (the build's env), so the map is
+  // exactly what the build ships. Every presence/emptiness decision below reads
+  // ONLY this map; no value ever leaves this function.
   const { values: buildEnv, sources: buildSources } = await withSchemaBoundary(
     'schema-validation-error',
     () =>
@@ -918,6 +1041,7 @@ export async function validateSelfHostProdEnv(
           envDir: options.envDir,
           mode: options.mode,
           schema,
+          buildEnv: options.buildEnv,
         }),
       ),
   );
@@ -932,95 +1056,135 @@ export async function validateSelfHostProdEnv(
 
   // Validate the effective build map to surface INVALID values (present,
   // non-empty, failed validation) — a remote secret can NEVER fix those.
-  // Wrapped so a throwing/rejecting validator cannot leak the offending
-  // value. Emptiness/absence are decided from `requiredKeys` above, NOT from
-  // this report's `missing` (which a schema accepting `""` would understate).
   const buildReport = await withSchemaBoundary('schema-validation-error', () =>
     mod.validateAllEnv(buildEnv),
   );
 
-  // A required key that is PRESENT-and-EMPTY (`K=""`) in the effective
-  // build map FAILS CLOSED ALWAYS, independent of whether K exists remotely: the
-  // build ships `K=""` as a plaintext var, which wrangler gives precedence over
-  // any same-named remote secret. Thrown BEFORE any wrangler spawn — remote
-  // membership is irrelevant to this decision. Names K only, never a value.
-  //
-  // Emptiness is the EMPTY STRING alone. A non-string JSON var (number /
-  // boolean / null / object / array) is PRESENT-and-non-empty: wrangler ships it
-  // as a `type:"json"` binding that wins over a same-named remote secret, so it
-  // is satisfied locally and must NEVER be dischargeable by that secret.
+  // A required key PRESENT-and-EMPTY (`K=""`) fails closed ALWAYS (the parent
+  // throws before any wrangler spawn). Emptiness is the EMPTY STRING alone — a
+  // non-string JSON var is present-and-non-empty and ships as a `type:"json"`
+  // binding that wins over a same-named remote secret.
   const presentEmptyRequired = [...requiredKeys].filter(
     (key) => Object.hasOwn(buildEnv, key) && buildEnv[key] === '',
   );
-  if (presentEmptyRequired.length > 0) {
-    throw emptyAssignmentError(presentEmptyRequired, buildSources);
-  }
 
   // Required keys the effective build map does NOT set at all — the ONLY state a
-  // remote secret can legitimately discharge. A key PRESENT with ANY value type
-  // is never here, so a present JSON var can never be treated as absent.
+  // remote secret can legitimately discharge.
   const absentRequired = [...requiredKeys].filter((key) => !Object.hasOwn(buildEnv, key));
 
-  // A required key PRESENT with a non-empty value that the schema still
-  // REJECTED is malformed, not absent, and must FAIL CLOSED (never fall through
-  // to remote discharge). validateAllEnv records only the keys whose value
-  // validated in `report.values`; a present-non-empty required key missing from
-  // it failed — whether validateAllEnv bucketed it as `invalid` (e.g. a JSON
-  // object under a `string()` schema) or as `missing` (a present `null`, which
-  // its `isMissing` rule folds in). `""` is excluded (already rejected above).
+  // A required key PRESENT with a non-empty value the schema still REJECTED is
+  // malformed, not absent, and must fail closed. `""` is excluded (handled above).
   const presentInvalidRequired = [...requiredKeys].filter(
     (key) => Object.hasOwn(buildEnv, key) && buildEnv[key] !== '' && !buildReport.values.has(key),
   );
-  // Union with any invalid key validateAllEnv already surfaced (incl. optional
-  // keys with an invalid present value — existing fail-closed behaviour).
   const invalidKeys = new Set<string>([
     ...buildReport.invalid.map((i) => i.key),
     ...presentInvalidRequired,
   ]);
-  const invalidReport = (missing: Array<string>): EnvValidationReport => ({
+
+  // Carry ONLY the winning source of each EMPTY key (kind + filename) so the
+  // parent's message names it — never a value, and never the full map.
+  const presentEmptySources: Record<string, VarSource> = {};
+  for (const key of presentEmptyRequired) {
+    const source = buildSources[key];
+    if (source) {
+      presentEmptySources[key] = source;
+    }
+  }
+
+  return {
+    hasSchema: true,
+    presentEmptyRequired,
+    presentEmptySources,
+    absentRequired,
+    invalidKeys: [...invalidKeys],
+  };
+}
+
+/** A no-schema {@link SelfHostEnvContext} — nothing to gate. */
+function emptyEnvContext(): SelfHostEnvContext {
+  return {
+    hasSchema: false,
+    presentEmptyRequired: [],
+    presentEmptySources: {},
+    absentRequired: [],
+    invalidKeys: [],
+  };
+}
+
+/** Build a values-free invalid {@link EnvValidationReport} from key names only. */
+function invalidEnvReport(missing: Array<string>, invalidKeys: Array<string>): EnvValidationReport {
+  return {
     valid: false,
     missing,
-    invalid: [...invalidKeys].map((key) => ({ key, messages: [SELF_HOST_INVALID_REASON] })),
+    invalid: invalidKeys.map((key) => ({ key, messages: [SELF_HOST_INVALID_REASON] })),
     values: new Map(),
-  });
+  };
+}
 
-  if (absentRequired.length === 0) {
-    // Every required key is PRESENT-and-NON-EMPTY in the effective build map, so
-    // presence is fully satisfied locally and a remote secret could not change
-    // the outcome — no wrangler call (keeps first deploys of a fully-local
-    // schema working). The only remaining gate is invalid local values (incl. a
-    // present malformed JSON var), which a remote secret can never fix.
-    if (invalidKeys.size > 0) {
-      throw selfHostEnvError(invalidReport([]));
+/**
+ * DISCHARGE half of the self-host gate — PURE parent work over the values-free
+ * {@link SelfHostEnvContext} the subprocess derived, plus at most one `wrangler
+ * secret list`. Runs NO project code, NO `loadEnv`, and imports NO env.ts, so the
+ * parent never evaluates arbitrary code with live credentials in scope. Applies
+ * the three fences unchanged:
+ *   - a PRESENT-EMPTY required key fails closed ALWAYS, before any wrangler spawn;
+ *   - the target account is reconciled against the config's `account_id` BEFORE
+ *     `secret list` is spawned;
+ *   - an ABSENT required key is discharged only by a same-named remote secret,
+ *     else fails closed ({@link SelfHostFirstDeployError} on a not-yet-deployed
+ *     worker, carrying the missing names + `wrangler secret put` guidance).
+ */
+export async function dischargeSelfHostEnvContext(
+  context: SelfHostEnvContext,
+  options: {
+    root: string;
+    configPath: string;
+    accountId?: string;
+    runWrangler?: RunSecretList;
+    timeoutMs?: number;
+  },
+): Promise<SelfHostProdEnvResult> {
+  if (!context.hasSchema) {
+    return { hasSchema: false, remoteSecretNames: null };
+  }
+
+  // PRESENT-and-EMPTY required keys fail closed ALWAYS — remote membership is
+  // irrelevant. Names the key + its actual source, never a value.
+  if (context.presentEmptyRequired.length > 0) {
+    throw emptyAssignmentError(context.presentEmptyRequired, context.presentEmptySources);
+  }
+
+  const invalidKeys = context.invalidKeys;
+  if (context.absentRequired.length === 0) {
+    // Every required key is present-and-non-empty; a remote secret could not
+    // change the outcome — no wrangler call. Invalid local values still fail closed.
+    if (invalidKeys.length > 0) {
+      throw selfHostEnvError(invalidEnvReport([], invalidKeys));
     }
     return { hasSchema: true, remoteSecretNames: null };
   }
 
-  // Reconcile the effective account BEFORE any wrangler spawn. wrangler
-  // 4.107 resolves the config's top-level `account_id` with precedence over
-  // CLOUDFLARE_ACCOUNT_ID, so a config pinning account X while options.accountId
-  // requests Y would list X's secrets; a same-named secret in X could then
-  // falsely satisfy Y's preflight. Fail closed (naming both) here, before the
-  // runner is created or invoked, and pin the ONE reconciled account.
+  // Reconcile the effective account BEFORE any wrangler spawn (config `account_id`
+  // wins over CLOUDFLARE_ACCOUNT_ID, so a mismatch could list a different account).
   const effectiveAccountId = reconcileSelfHostAccount(options.configPath, options.accountId);
 
   const run =
     options.runWrangler ??
-    createDefaultSecretListRunner(root, {
+    createDefaultSecretListRunner(options.root, {
       accountId: effectiveAccountId,
       timeoutMs: options.timeoutMs,
     });
-  // `absentRequired` seeds the first-deploy (worker-not-found) guidance with the
-  // still-unsatisfied required key NAMES (values-free).
-  const remoteSecretNames = await fetchSelfHostSecretNames(run, options.configPath, absentRequired);
+  const remoteSecretNames = await fetchSelfHostSecretNames(
+    run,
+    options.configPath,
+    context.absentRequired,
+  );
 
-  // Only ABSENT required keys may be discharged by the remote list; a
-  // present-empty key was already rejected above and can never reach here, and a
-  // present-invalid key is folded into `invalidKeys` — never discharged.
   const remoteSet = new Set(remoteSecretNames);
-  const stillMissing = absentRequired.filter((key) => !remoteSet.has(key));
-  if (stillMissing.length > 0 || invalidKeys.size > 0) {
-    throw selfHostEnvError(invalidReport(stillMissing));
+  const stillMissing = context.absentRequired.filter((key) => !remoteSet.has(key));
+  if (stillMissing.length > 0 || invalidKeys.length > 0) {
+    throw selfHostEnvError(invalidEnvReport(stillMissing, invalidKeys));
   }
   return { hasSchema: true, remoteSecretNames };
 }
