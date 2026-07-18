@@ -2,10 +2,12 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import {
+  assertMigrationsProduceAuthSchema,
   assertNoConfigOverrideInProjectDotenv,
   checkWranglerMigrationApplySet,
   computeDesiredCloudflareResources,
   runCloudflareDeploy,
+  validateAuthMigrationSchema,
   verifyGeneratedDeployConfig,
   type CloudflareDeployDeps,
   type DeployWranglerRun,
@@ -122,6 +124,9 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     // Stub the migration apply-set equality gate so orchestration tests need no on-disk
     // migration dir; a dedicated suite exercises the real `checkWranglerMigrationApplySet`.
     checkMigrationApplySet: async () => ({ ok: true }),
+    // Stub auth-schema validation so orchestration tests never load Better Auth; dedicated
+    // tests exercise the real `validateAuthMigrationSchema` + `assertMigrationsProduceAuthSchema`.
+    validateAuthMigrations: async () => {},
     // Stub the effective build-config resolver so orchestration tests never load Vite.
     resolveBuildConfig: () => ({ mode: 'production', envDir: undefined }),
     ...overrides,
@@ -1430,7 +1435,11 @@ describe('runCloudflareDeploy — migrations dir / count / auth', () => {
         2,
       ),
     });
-    const { deps, trace, exitCalls } = harness();
+    // Use the REAL schema validator (auth app with NO migrations → no tables → rejects),
+    // exercising the resolveVoidAuthMigrationSchema + in-memory-SQLite path end to end.
+    const { deps, trace, exitCalls } = harness({
+      validateAuthMigrations: validateAuthMigrationSchema,
+    });
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
@@ -1439,15 +1448,12 @@ describe('runCloudflareDeploy — migrations dir / count / auth', () => {
     expect(trace).toEqual([]);
   });
 
-  it('lets an auth app proceed when checked-in migrations create the auth tables', async () => {
-    const authSql = ['user', 'session', 'account', 'verification']
-      .map((t) => `CREATE TABLE "${t}" (id text primary key);`)
-      .join('\n');
+  it('lets an auth app proceed when its migrations produce the required auth schema', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'authapp' }),
       'void.json': JSON.stringify({ auth: {} }),
       'routes/index.ts': `export const GET = () => new Response('ok');`,
-      'db/migrations/0000_auth.sql': authSql,
+      'db/migrations/0000_auth.sql': `CREATE TABLE "user" (id text primary key);`,
       'wrangler.jsonc': JSON.stringify(
         {
           account_id: 'acc123',
@@ -1465,9 +1471,82 @@ describe('runCloudflareDeploy — migrations dir / count / auth', () => {
         2,
       ),
     });
+    // The schema validator is stubbed (harness default) — dedicated tests exercise the real
+    // schema check; here we assert the guard lets a satisfied auth app proceed to deploy.
     const { deps, trace } = harness();
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
     expect(trace).toContain('wrangler:deploy');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B5: auth schema derived from resolveVoidAuthMigrationSchema, validated by
+// applying migrations to an in-memory SQLite DB (not a CREATE TABLE token search)
+// ---------------------------------------------------------------------------
+
+describe('assertMigrationsProduceAuthSchema', () => {
+  const required = [
+    { table: 'user', columns: ['id', 'email', 'name'] },
+    { table: 'session', columns: ['id', 'userId'] },
+  ];
+
+  it('passes when every required table + column is produced by the migrations', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql: 'CREATE TABLE user (id text primary key, email text, name text);\nCREATE TABLE session (id text primary key, userId text);',
+        },
+      ],
+      required,
+    );
+    // no throw
+  });
+
+  it('rejects when a required table is missing (token search would miss a renamed/commented one)', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [{ name: '0000.sql', sql: 'CREATE TABLE user (id text, email text, name text);' }],
+        required,
+      ),
+    ).rejects.toThrow(/session/);
+  });
+
+  it('rejects when a required column is missing (only presence of the table is not enough)', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql: 'CREATE TABLE user (id text, email text, name text);\nCREATE TABLE session (id text);',
+          },
+        ],
+        required,
+      ),
+    ).rejects.toThrow(/session.*userId|userId/);
+  });
+
+  it('is not fooled by a CREATE TABLE inside a comment or string (real apply, not a regex)', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql: `CREATE TABLE user (id text, email text, name text);\n-- CREATE TABLE session (id text, userId text);`,
+          },
+        ],
+        required,
+      ),
+    ).rejects.toThrow(/session/);
+  });
+
+  it('rejects when a migration cannot be applied to a fresh SQLite database', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [{ name: '0000.sql', sql: 'THIS IS NOT VALID SQL;' }],
+        required,
+      ),
+    ).rejects.toThrow(/could not be applied/);
   });
 });
 

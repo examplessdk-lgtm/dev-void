@@ -808,6 +808,8 @@ export interface CloudflareDeployDeps {
   assertMigrationsDeployable?: typeof assertRemoteMigrationsDeployable;
   /** Migration apply-set equality gate seam (default: {@link checkWranglerMigrationApplySet}). */
   checkMigrationApplySet?: typeof checkWranglerMigrationApplySet;
+  /** Auth-schema validation seam (default: {@link validateAuthMigrationSchema}). */
+  validateAuthMigrations?: typeof validateAuthMigrationSchema;
   /**
    * Effective build `{ mode, envDir }` resolver seam (default:
    * {@link resolveDeployBuildConfig}). Receives the sanitized build env so it resolves
@@ -1153,30 +1155,106 @@ export async function computeDesiredCloudflareResources(
 }
 
 /**
- * The core Void-managed Better Auth tables (`buildCreateTableSql` in
- * `runtime/auth-migrations.ts` emits exactly these plus any plugin tables). Every
- * Better Auth config creates these four, so a checked-in migration set that creates
- * them is the v1 signal that auth is self-host-deployable on this backend.
+ * Apply the checked-in migrations to an in-memory SQLite database (`node:sqlite`, a repo
+ * dependency — the same driver `auth/node.ts` uses) and assert the effective schema contains
+ * every REQUIRED auth table and its columns. This replaces a raw `CREATE TABLE` token search
+ * (defeated by comments/strings/renames/plugin tables) with the real POST-migration schema —
+ * the identical thing wrangler will apply to remote D1 (SQLite). Throws with the exact
+ * missing table(s)/column(s), or when a migration cannot even be applied. Exported for unit
+ * testing (the `required` set is passed in, so this needs no Better Auth resolution).
  */
-const REQUIRED_AUTH_TABLES = ['user', 'session', 'account', 'verification'] as const;
+export async function assertMigrationsProduceAuthSchema(
+  migrations: Array<{ name: string; sql: string }>,
+  required: Array<{ table: string; columns: Array<string> }>,
+): Promise<void> {
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+  try {
+    for (const migration of migrations) {
+      try {
+        db.exec(migration.sql);
+      } catch (err) {
+        throw new Error(
+          `checked-in migration ${migration.name} could not be applied to a fresh SQLite database, ` +
+            `so the auth schema cannot be verified: ${getErrorMessage(err)}`,
+        );
+      }
+    }
+    const tables = new Set(
+      (
+        db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{
+          name: string;
+        }>
+      ).map((row) => row.name),
+    );
+    const problems: Array<string> = [];
+    for (const req of required) {
+      if (!tables.has(req.table)) {
+        problems.push(`table "${req.table}" is not created by any checked-in migration`);
+        continue;
+      }
+      const columns = new Set(
+        (
+          db.prepare(`PRAGMA table_info("${req.table.replace(/"/g, '""')}")`).all() as Array<{
+            name: string;
+          }>
+        ).map((row) => row.name),
+      );
+      const missing = req.columns.filter((column) => !columns.has(column));
+      if (missing.length > 0) {
+        problems.push(`table "${req.table}" is missing column(s): ${missing.join(', ')}`);
+      }
+    }
+    if (problems.length > 0) {
+      throw new Error(problems.join('; '));
+    }
+  } finally {
+    db.close();
+  }
+}
 
 /**
- * Which of the core Better Auth tables are NOT created by any checked-in migration.
- * Scans the collected migration SQL for a `CREATE TABLE [IF NOT EXISTS] <name>`
- * matching each table (bare or quoted with `"`, backtick, or `[...]`,
- * case-insensitive). Returns the uncovered table names (empty when all are covered).
+ * Resolve the REQUIRED Better Auth schema (tables + columns) from the app's real auth
+ * config via {@link resolveVoidAuthMigrationSchema} — the SAME resolver the runtime
+ * `/__void/migrate/auth` path uses — so configured table/column RENAMES and PLUGIN tables
+ * are all included, not just the hardcoded core four. The `id` column is the implicit PRIMARY
+ * KEY (`buildCreateTableSql`), not a field, so it is added to each table's required columns.
+ * Loaded lazily so a managed deploy never pulls Better Auth into this CLI file.
  */
-function uncoveredAuthTables(migrations: Array<{ name: string; sql: string }>): Array<string> {
-  const sql = migrations.map((m) => m.sql).join('\n');
-  return REQUIRED_AUTH_TABLES.filter((table) => {
-    const pattern = new RegExp(
-      String.raw`create\s+table\s+(?:if\s+not\s+exists\s+)?["\`\[]?` +
-        table +
-        String.raw`["\`\]]?(?:\s|\()`,
-      'i',
-    );
-    return !pattern.test(sql);
-  });
+async function resolveRequiredAuthSchema(
+  root: string,
+  paths: ReturnType<typeof resolveProjectPaths>,
+  voidConfig: VoidConfig,
+): Promise<Array<{ table: string; columns: Array<string> }>> {
+  const [{ loadVoidAuthConfig }, { resolveVoidAuthMigrationSchema }, { loadEnv }] =
+    await Promise.all([import('../auth/config.ts'), import('../auth/drizzle.ts'), import('vite')]);
+  const userConfig = await loadVoidAuthConfig(findVoidAuthConfig(root, paths));
+  const schema = resolveVoidAuthMigrationSchema(
+    { dialect: 'sqlite', providers: voidConfig.auth?.providers ?? null, userConfig },
+    // The env only matters when the user's auth config is a function of env; the checked-in
+    // migrations + core schema are otherwise env-independent, so a production/root read is a
+    // faithful default (this guard runs pre-account, before the build-config resolution).
+    loadEnv('production', root, '') as Record<string, unknown>,
+  );
+  return schema.tables.map((table) => ({
+    table: table.name,
+    columns: ['id', ...Object.keys(table.fields)],
+  }));
+}
+
+/**
+ * Default {@link CloudflareDeployDeps.validateAuthMigrations} seam: resolve the required
+ * Better Auth schema and assert the checked-in migrations produce it. Throws on any missing
+ * table/column (or an unapplyable migration); the caller renders `.message` + fails closed.
+ */
+export async function validateAuthMigrationSchema(
+  root: string,
+  paths: ReturnType<typeof resolveProjectPaths>,
+  voidConfig: VoidConfig,
+  migrations: Array<{ name: string; sql: string }>,
+): Promise<void> {
+  const required = await resolveRequiredAuthSchema(root, paths, voidConfig);
+  await assertMigrationsProduceAuthSchema(migrations, required);
 }
 
 /** Format the drift / CI-gate guidance naming each un-provisioned resource. */
@@ -1540,26 +1618,33 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
-  // 2c. Auth-migration guard — FAIL CLOSED before any account operation. The managed
-  // platform creates Void-managed Better Auth tables at RUNTIME via the worker's
-  // `/__void/migrate/auth` endpoint, which it invokes after dispatch. This self-host
-  // backend never calls that endpoint — it only applies checked-in `db/migrations/*.sql`
-  // — so an auth app whose core tables (user/session/account/verification) are not created
-  // by a checked-in migration would deploy auth code against a schema that lacks them.
-  // v1 supports auth only when the tables ARE covered by checked-in migrations.
+  // 2b. Auth-migration guard — FAIL CLOSED before any account operation. The managed platform
+  // creates Void-managed Better Auth tables at RUNTIME via the worker's `/__void/migrate/auth`
+  // endpoint, which it invokes after dispatch. This self-host backend never calls that
+  // endpoint — it only applies checked-in `db/migrations/*.sql`. So verify the checked-in
+  // migrations PRODUCE the required Better Auth schema (tables + columns, incl. configured
+  // renames + plugin tables), derived from the real `resolveVoidAuthMigrationSchema` and
+  // checked by applying the migrations to an in-memory SQLite DB — not a `CREATE TABLE` token
+  // search. `dialect` is guaranteed `'sqlite'` here (pg+auth was rejected at 2a).
   if (authEnabled) {
-    const missingAuthTables = uncoveredAuthTables(migrations);
-    if (missingAuthTables.length > 0) {
+    try {
+      await (deps.validateAuthMigrations ?? validateAuthMigrationSchema)(
+        root,
+        paths,
+        voidConfig,
+        migrations,
+      );
+    } catch (err) {
       log.error(
         [
-          'deploy: --backend cloudflare cannot provision Void-managed Better Auth tables.',
-          'The managed platform creates them at runtime (POST /__void/migrate/auth) after',
-          'deploy; this self-host backend only applies checked-in db/migrations/*.sql and',
-          'never calls that endpoint. These auth tables are not created by any checked-in',
-          `migration: ${missingAuthTables.join(', ')}.`,
-          'Generate a migration that creates the Better Auth tables (e.g. define them in',
-          '`db/schema.ts` and run `void db generate`), commit it, then rerun — or deploy',
-          'this app with `void deploy` (the managed platform).',
+          'deploy: --backend cloudflare cannot verify the Void-managed Better Auth schema.',
+          'The managed platform creates these tables at runtime (POST /__void/migrate/auth)',
+          'after deploy; this self-host backend only applies checked-in db/migrations/*.sql, so',
+          'they must already produce the Better Auth schema:',
+          `  ${getErrorMessage(err)}`,
+          'Generate a migration that creates the Better Auth tables (define them in',
+          '`db/schema.ts`, run `void db generate`, commit), then rerun — or deploy this app',
+          'with `void deploy` (the managed platform).',
         ].join('\n'),
       );
       return exit(1);
