@@ -130,6 +130,9 @@ export default defineConfig({
       'src/pages/serialize.ts',
       'src/pages/islands-plugin.ts',
       'src/cli/cli.ts',
+      // Standalone entry so `void deploy --backend cloudflare` can self-spawn it as an isolated
+      // child (via import.meta.url) to derive the Better Auth schema under a scrubbed env.
+      'src/cli/auth-schema-probe.ts',
     ],
     format: 'esm',
     dts: true,

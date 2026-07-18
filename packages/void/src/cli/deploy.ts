@@ -1226,46 +1226,62 @@ export async function assertMigrationsProduceAuthSchema(
 }
 
 /**
- * Resolve the REQUIRED Better Auth schema (tables + columns) from the app's real auth
- * config via {@link resolveVoidAuthMigrationSchema} — the SAME resolver the runtime
- * `/__void/migrate/auth` path uses — so configured table/column RENAMES and PLUGIN tables
- * are all included, not just the hardcoded core four. The `id` column is the implicit PRIMARY
- * KEY (`buildCreateTableSql`), not a field, so it is added to each table's required columns.
- * Loaded lazily so a managed deploy never pulls Better Auth into this CLI file.
+ * The build's EFFECTIVE `{ mode, envDir }` (from {@link resolveDeployBuildConfig}) plus the
+ * SCRUBBED build `env` the auth config must be derived under — so an env-conditioned auth config
+ * is resolved exactly as the deployed worker would see it, and the arbitrary auth-config code
+ * never runs with the parent's live credentials.
+ */
+export type AuthSchemaValidationEnv = {
+  mode: string;
+  envDir: string | undefined;
+  env: NodeJS.ProcessEnv;
+};
+
+/**
+ * Resolve the REQUIRED Better Auth schema (tables + columns) from the app's real auth config in
+ * an ISOLATED SUBPROCESS ({@link resolveRequiredAuthSchemaViaSubprocess}) — the child uses the
+ * SAME `resolveVoidAuthMigrationSchema` resolver the runtime `/__void/migrate/auth` path uses
+ * (so configured table/column RENAMES + PLUGIN tables are included, not just the core four),
+ * derives it under the build's EFFECTIVE mode (`loadEnv(mode, envDir)`), and runs under the
+ * scrubbed build env so the parent's CF Access credentials never reach the arbitrary auth code.
+ * `findVoidAuthConfig` (a plain file read) is done in the parent and its path handed to the
+ * child. The `id` column is the implicit PRIMARY KEY, so it is added to each table's columns
+ * (done in the child). Loaded lazily so a managed deploy never pulls the probe module in.
  */
 async function resolveRequiredAuthSchema(
   root: string,
   paths: ReturnType<typeof resolveProjectPaths>,
   voidConfig: VoidConfig,
+  opts: AuthSchemaValidationEnv,
 ): Promise<Array<{ table: string; columns: Array<string> }>> {
-  const [{ loadVoidAuthConfig }, { resolveVoidAuthMigrationSchema }, { loadEnv }] =
-    await Promise.all([import('../auth/config.ts'), import('../auth/drizzle.ts'), import('vite')]);
-  const userConfig = await loadVoidAuthConfig(findVoidAuthConfig(root, paths));
-  const schema = resolveVoidAuthMigrationSchema(
-    { dialect: 'sqlite', providers: voidConfig.auth?.providers ?? null, userConfig },
-    // The env only matters when the user's auth config is a function of env; the checked-in
-    // migrations + core schema are otherwise env-independent, so a production/root read is a
-    // faithful default (this guard runs pre-account, before the build-config resolution).
-    loadEnv('production', root, '') as Record<string, unknown>,
+  const { resolveRequiredAuthSchemaViaSubprocess } = await import('./auth-schema-probe.ts');
+  return resolveRequiredAuthSchemaViaSubprocess(
+    {
+      root,
+      authConfigPath: findVoidAuthConfig(root, paths),
+      dialect: 'sqlite',
+      providers: voidConfig.auth?.providers ?? null,
+      mode: opts.mode,
+      envDir: opts.envDir,
+    },
+    opts.env,
   );
-  return schema.tables.map((table) => ({
-    table: table.name,
-    columns: ['id', ...Object.keys(table.fields)],
-  }));
 }
 
 /**
- * Default {@link CloudflareDeployDeps.validateAuthMigrations} seam: resolve the required
- * Better Auth schema and assert the checked-in migrations produce it. Throws on any missing
- * table/column (or an unapplyable migration); the caller renders `.message` + fails closed.
+ * Default {@link CloudflareDeployDeps.validateAuthMigrations} seam: resolve the required Better
+ * Auth schema (in the isolated subprocess) and assert the checked-in migrations produce it.
+ * Throws on any missing table/column (or an unapplyable migration); the caller renders
+ * `.message` + fails closed.
  */
 export async function validateAuthMigrationSchema(
   root: string,
   paths: ReturnType<typeof resolveProjectPaths>,
   voidConfig: VoidConfig,
   migrations: Array<{ name: string; sql: string }>,
+  opts: AuthSchemaValidationEnv,
 ): Promise<void> {
-  const required = await resolveRequiredAuthSchema(root, paths, voidConfig);
+  const required = await resolveRequiredAuthSchema(root, paths, voidConfig, opts);
   await assertMigrationsProduceAuthSchema(migrations, required);
 }
 
@@ -1729,38 +1745,9 @@ export async function runCloudflareDeploy(
     }
   }
 
-  // 2b. Auth-migration guard — FAIL CLOSED before any account operation. The managed platform
-  // creates Void-managed Better Auth tables at RUNTIME via the worker's `/__void/migrate/auth`
-  // endpoint, which it invokes after dispatch. This self-host backend never calls that
-  // endpoint — it only applies checked-in `db/migrations/*.sql`. So verify the checked-in
-  // migrations PRODUCE the required Better Auth schema (tables + columns, incl. configured
-  // renames + plugin tables), derived from the real `resolveVoidAuthMigrationSchema` and
-  // checked by applying the migrations to an in-memory SQLite DB — not a `CREATE TABLE` token
-  // search. `dialect` is guaranteed `'sqlite'` here (pg+auth was rejected at 2a).
-  if (authEnabled) {
-    try {
-      await (deps.validateAuthMigrations ?? validateAuthMigrationSchema)(
-        root,
-        paths,
-        voidConfig,
-        migrations,
-      );
-    } catch (err) {
-      log.error(
-        [
-          'deploy: --backend cloudflare cannot verify the Void-managed Better Auth schema.',
-          'The managed platform creates these tables at runtime (POST /__void/migrate/auth)',
-          'after deploy; this self-host backend only applies checked-in db/migrations/*.sql, so',
-          'they must already produce the Better Auth schema:',
-          `  ${getErrorMessage(err)}`,
-          'Generate a migration that creates the Better Auth tables (define them in',
-          '`db/schema.ts`, run `void db generate`, commit), then rerun — or deploy this app',
-          'with `void deploy` (the managed platform).',
-        ].join('\n'),
-      );
-      return exit(1);
-    }
-  }
+  // (The auth-migration guard runs at 3d below, AFTER the transport + account pin, so it can
+  // derive the Better Auth schema in an isolated subprocess under the build's EFFECTIVE mode +
+  // the SAME scrubbed env the build uses — still BEFORE whoami / provision / build / deploy.)
 
   // 3. Preflight — pin ONE transport, pin the account, confirm wrangler auth.
   const rootConfig = parseRootWranglerConfig(configPath);
@@ -1793,7 +1780,63 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
-  // 3c. Confirm wrangler auth. `whoami` gets the SAME `-c`/`--env=`/pinned-transport
+  // 3c. Resolve the ONE shared build config `{ mode, envDir }` the whole deploy validates
+  // against, under the SAME scrubbed env (`deployChildEnv`) the build's project code runs with.
+  // Resolved ONCE here (a `vite build` config resolution — read-only, no account mutation) and
+  // fed to BOTH the auth-schema guard (3d) and the secret preflight (7), so they cannot diverge
+  // from what the build ships. `resolveConfig` failing is fatal — the build would fail too, and
+  // validating a wrong env set is exactly the leak this closes.
+  const buildProjectEnv = deployChildEnv(accountId, apiBaseUrl);
+  let buildConfig: DeployBuildConfig;
+  try {
+    buildConfig = await (deps.resolveBuildConfig ?? resolveDeployBuildConfig)(
+      root,
+      buildProjectEnv,
+    );
+  } catch (err) {
+    log.error(
+      `deploy: could not resolve the Vite build config (mode / envDir) — ${getErrorMessage(err)}`,
+    );
+    return exit(1);
+  }
+
+  // 3d. Auth-migration guard — FAIL CLOSED before whoami / provision / build. The managed
+  // platform creates Void-managed Better Auth tables at RUNTIME via the worker's
+  // `/__void/migrate/auth` endpoint after dispatch; this self-host backend never calls it — it
+  // only applies checked-in `db/migrations/*.sql`. So verify the checked-in migrations PRODUCE
+  // the required Better Auth schema (tables + columns, incl. configured renames + plugin
+  // tables). The required schema is derived in an ISOLATED SUBPROCESS (auth-schema-probe) under
+  // the build's EFFECTIVE mode + the scrubbed `buildProjectEnv` — the arbitrary auth-config code
+  // never runs in this credential-bearing parent — then the checked-in migrations are applied to
+  // an in-memory SQLite DB (safe SQL, in-parent) and compared. `dialect` is guaranteed `'sqlite'`
+  // here (pg+auth was rejected at 2a).
+  if (authEnabled) {
+    try {
+      await (deps.validateAuthMigrations ?? validateAuthMigrationSchema)(
+        root,
+        paths,
+        voidConfig,
+        migrations,
+        { mode: buildConfig.mode, envDir: buildConfig.envDir, env: buildProjectEnv },
+      );
+    } catch (err) {
+      log.error(
+        [
+          'deploy: --backend cloudflare cannot verify the Void-managed Better Auth schema.',
+          'The managed platform creates these tables at runtime (POST /__void/migrate/auth)',
+          'after deploy; this self-host backend only applies checked-in db/migrations/*.sql, so',
+          'they must already produce the Better Auth schema:',
+          `  ${getErrorMessage(err)}`,
+          'Generate a migration that creates the Better Auth tables (define them in',
+          '`db/schema.ts`, run `void db generate`, commit), then rerun — or deploy this app',
+          'with `void deploy` (the managed platform).',
+        ].join('\n'),
+      );
+      return exit(1);
+    }
+  }
+
+  // 3e. Confirm wrangler auth. `whoami` gets the SAME `-c`/`--env=`/pinned-transport
   // context as migrate/deploy, so it authenticates against the exact endpoint they use.
   const runWrangler = deps.runWrangler ?? createDeployWranglerRunner(root, accountId, apiBaseUrl);
   const whoami = await Promise.resolve(
@@ -2087,28 +2130,12 @@ export async function runCloudflareDeploy(
     }
   }
 
-  // 7. Secrets preflight — WARN (plaintext .env→vars), then GATE (required
-  // secrets). Runs AFTER provision/migrate resolve (so the config carries real ids the
-  // build will bake), BEFORE build/deploy.
-  //
-  // Resolve the EXACT `{ mode, envDir }` the build's `void:env` hook will observe, under the
-  // SAME sanitized env the build runs with, and feed BOTH secret units that pair — so they
-  // validate the identical `.env*` set the build ships. A top-level `mode: 'staging'` or a
-  // plugin-set `envDir` would otherwise diverge from the hardcoded `production`/root and
-  // leak a plaintext secret unwarned or shadow a remote secret. `resolveConfig` failing is
-  // fatal (the build would fail too — never validate a wrong env set).
-  let buildConfig: DeployBuildConfig;
-  try {
-    buildConfig = await (deps.resolveBuildConfig ?? resolveDeployBuildConfig)(
-      root,
-      deployChildEnv(accountId, apiBaseUrl),
-    );
-  } catch (err) {
-    log.error(
-      `deploy: could not resolve the Vite build config (mode / envDir) — ${getErrorMessage(err)}`,
-    );
-    return exit(1);
-  }
+  // 7. Secrets preflight — WARN (plaintext .env→vars), then GATE (required secrets). Runs BEFORE
+  // build/deploy, reusing the ONE shared `buildConfig` resolved at 3c — the EXACT `{ mode,
+  // envDir }` the build's `void:env` hook observes — so both secret units validate the identical
+  // `.env*` set the build ships. A top-level `mode: 'staging'` or a plugin-set `envDir` would
+  // otherwise diverge from a hardcoded `production`/root and leak a plaintext secret unwarned or
+  // shadow a remote secret.
   const warnings = await (deps.collectPlaintextVarWarnings ?? collectPlaintextVarWarnings)(root, {
     configPath,
     envDir: buildConfig.envDir,

@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
+import { resolveRequiredAuthSchemaViaSubprocess } from '../../src/cli/auth-schema-probe.ts';
 import {
   assertMigrationsProduceAuthSchema,
   assertNoConfigOverrideInProjectDotenv,
@@ -1500,7 +1501,7 @@ describe('runCloudflareDeploy — migrations dir / count / auth', () => {
       ),
     });
     // Use the REAL schema validator (auth app with NO migrations → no tables → rejects),
-    // exercising the resolveVoidAuthMigrationSchema + in-memory-SQLite path end to end.
+    // exercising the isolated-subprocess probe + in-memory-SQLite path end to end.
     const { deps, trace, exitCalls } = harness({
       validateAuthMigrations: validateAuthMigrationSchema,
     });
@@ -1508,7 +1509,7 @@ describe('runCloudflareDeploy — migrations dir / count / auth', () => {
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
-    // Rejected before any account operation (the auth guard runs pre-preflight).
+    // Rejected at the auth guard (3d — after the transport/account pin, before whoami/provision).
     expect(trace).toEqual([]);
   });
 
@@ -1611,6 +1612,173 @@ describe('assertMigrationsProduceAuthSchema', () => {
         required,
       ),
     ).rejects.toThrow(/could not be applied/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F5: auth schema derived in an ISOLATED SUBPROCESS under the build's EFFECTIVE mode +
+// the scrubbed build env (no arbitrary project code runs in the credential-bearing parent)
+// ---------------------------------------------------------------------------
+
+describe('F5: isolated auth-schema subprocess', () => {
+  // Fixture auth config that (a) RENAMES the user table from an env var (so the effective mode
+  // is observable in the result), and (b) reveals whether the child's process.env carries CF
+  // Access (so a scrubbed env is observable). `import type ... from "void/auth"` is stripped by
+  // node — no runtime resolution needed — while satisfying findVoidAuthConfig's detector.
+  const AUTH_CONFIG = [
+    `import type { VoidAuthConfig } from 'void/auth';`,
+    `const config: VoidAuthConfig = ({ defaults, env }) => ({`,
+    `  ...defaults,`,
+    `  user: {`,
+    `    modelName: process.env.CF_ACCESS_CLIENT_ID`,
+    `      ? 'LEAKED'`,
+    `      : ((env.AUTH_TABLE as string) ?? 'user'),`,
+    `  },`,
+    `});`,
+    `export default config;`,
+  ].join('\n');
+
+  function authRenameProject(): string {
+    return makeProject({
+      'package.json': JSON.stringify({ name: 'authapp', type: 'module' }),
+      'void.json': JSON.stringify({ auth: { providers: ['email'] } }),
+      'auth.config.ts': AUTH_CONFIG,
+      '.env.production': 'AUTH_TABLE=user\n',
+      '.env.staging': 'AUTH_TABLE=members\n',
+    });
+  }
+
+  it('derives the schema under the EFFECTIVE mode (production `user` vs staging `members`)', async () => {
+    const root = authRenameProject();
+    const env = { ...process.env };
+    delete env.CF_ACCESS_CLIENT_ID;
+    const input = {
+      root,
+      authConfigPath: join(root, 'auth.config.ts'),
+      dialect: 'sqlite' as const,
+      providers: ['email'],
+      envDir: undefined,
+    };
+    const staging = await resolveRequiredAuthSchemaViaSubprocess(
+      { ...input, mode: 'staging' },
+      env,
+    );
+    expect(staging.map((t) => t.table)).toContain('members');
+    expect(staging.map((t) => t.table)).not.toContain('user');
+
+    const production = await resolveRequiredAuthSchemaViaSubprocess(
+      { ...input, mode: 'production' },
+      env,
+    );
+    expect(production.map((t) => t.table)).toContain('user');
+    expect(production.map((t) => t.table)).not.toContain('members');
+  });
+
+  it('runs under the passed env — a scrubbed env hides CF Access from the auth code', async () => {
+    const root = authRenameProject();
+    const input = {
+      root,
+      authConfigPath: join(root, 'auth.config.ts'),
+      dialect: 'sqlite' as const,
+      providers: ['email'],
+      mode: 'production',
+      envDir: undefined,
+    };
+    // With CF Access present in the child env, the arbitrary auth code CAN read it (LEAKED).
+    const leaked = await resolveRequiredAuthSchemaViaSubprocess(input, {
+      ...process.env,
+      CF_ACCESS_CLIENT_ID: 'super-secret',
+    });
+    expect(leaked.map((t) => t.table)).toContain('LEAKED');
+    // Scrubbed (as the orchestrator passes it) → the credential is absent in the child.
+    const scrubbed = { ...process.env };
+    delete scrubbed.CF_ACCESS_CLIENT_ID;
+    const clean = await resolveRequiredAuthSchemaViaSubprocess(input, scrubbed);
+    expect(clean.map((t) => t.table)).not.toContain('LEAKED');
+    expect(clean.map((t) => t.table)).toContain('user');
+  });
+
+  it('fails closed when the child cannot resolve the schema (bad auth config)', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'authapp', type: 'module' }),
+      'void.json': JSON.stringify({ auth: {} }),
+      'auth.config.ts': `import type { X } from 'void/auth';\nthrow new Error('boom in auth config');\nexport default {};`,
+    });
+    await expect(
+      resolveRequiredAuthSchemaViaSubprocess(
+        {
+          root,
+          authConfigPath: join(root, 'auth.config.ts'),
+          dialect: 'sqlite',
+          providers: null,
+          mode: 'production',
+          envDir: undefined,
+        },
+        { ...process.env },
+      ),
+    ).rejects.toThrow(/boom in auth config|exited with code/);
+  });
+
+  it('the orchestrator derives auth under the SCRUBBED env + the EFFECTIVE mode/envDir', async () => {
+    const savedId = process.env.CF_ACCESS_CLIENT_ID;
+    const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+    process.env.CF_ACCESS_CLIENT_ID = 'leak-me';
+    process.env.CF_ACCESS_CLIENT_SECRET = 'leak-me-too';
+    try {
+      const root = makeProject({
+        'package.json': JSON.stringify({ name: 'authapp' }),
+        'void.json': JSON.stringify({ auth: { providers: ['email'] } }),
+        'routes/index.ts': `export const GET = () => new Response('ok');`,
+        'wrangler.jsonc': JSON.stringify(
+          {
+            account_id: 'acc123',
+            name: 'authapp',
+            d1_databases: [
+              {
+                binding: 'DB',
+                database_name: 'authapp-db',
+                database_id: REAL_D1_ID,
+                migrations_dir: './db/migrations',
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        ...INIT_MIGRATION,
+      });
+      let seen: { mode?: string; envDir?: string; env?: NodeJS.ProcessEnv } | undefined;
+      const { deps } = harness({
+        resolveBuildConfig: () => ({ mode: 'staging', envDir: 'config' }),
+        validateAuthMigrations: (async (
+          _root: string,
+          _paths: unknown,
+          _vc: unknown,
+          _migrations: unknown,
+          opts: { mode: string; envDir: string | undefined; env: NodeJS.ProcessEnv },
+        ) => {
+          seen = { mode: opts.mode, envDir: opts.envDir, env: opts.env };
+        }) as CloudflareDeployDeps['validateAuthMigrations'],
+      });
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+      // Effective mode + envDir from the shared build-config resolver.
+      expect(seen?.mode).toBe('staging');
+      expect(seen?.envDir).toBe('config');
+      // The child env the arbitrary auth code runs under has CF Access scrubbed.
+      expect(seen?.env?.CF_ACCESS_CLIENT_ID).toBeUndefined();
+      expect(seen?.env?.CF_ACCESS_CLIENT_SECRET).toBeUndefined();
+    } finally {
+      if (savedId === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_ID;
+      } else {
+        process.env.CF_ACCESS_CLIENT_ID = savedId;
+      }
+      if (savedSecret === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_SECRET;
+      } else {
+        process.env.CF_ACCESS_CLIENT_SECRET = savedSecret;
+      }
+    }
   });
 });
 
