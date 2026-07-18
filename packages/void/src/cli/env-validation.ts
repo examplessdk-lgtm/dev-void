@@ -11,7 +11,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
-import { join } from 'pathe';
+import { dirname, join, resolve } from 'pathe';
 import { findEnvFile } from '../codegen/env-types.ts';
 import { loadUserEnvFile } from '../host/load-user-env.ts';
 import { voidWarn } from '../log.ts';
@@ -563,13 +563,16 @@ export async function deriveSelfHostSchemaFacts(root: string): Promise<SelfHostS
  * plus the env-insensitive {@link SelfHostSchemaFacts}. PURE (no project code, no
  * I/O): the parent runs this AFTER the build with the real emitted map, so the
  * gate reads exactly what the worker ships.
- *   - a required key EMPTY in the emitted vars (`K=""`) → SHADOWS a same-named
- *     remote secret → fail closed ALWAYS (`presentEmptyRequired`).
+ *   - a required key present with an EMPTY value (`K=""` or `K=null`) → SHADOWS a
+ *     same-named remote secret with an unusable value → fail closed ALWAYS
+ *     (`presentEmptyRequired`). Both spellings are treated the same because the
+ *     schema validators classify `null` and `""` as "missing" (not "invalid"), so
+ *     they would otherwise slip past both the invalid-value probe and the absent
+ *     fence while still shadowing the remote secret.
  *   - a required key ABSENT from the emitted vars → the only state a remote secret
  *     can discharge (`absentRequired`).
- * `invalidKeys` is empty: value validity is enforced at worker boot
- * (`_validateEnvOnce`, per isolate), not re-derived here — the redesigned gate is
- * scoped to the empty-shadow + missing concerns over ground truth.
+ * `invalidKeys` is populated separately from the value-validation probe (the parent
+ * folds it in); a PRESENT, NON-EMPTY value that fails the schema validator lands there.
  */
 export function deriveSelfHostEnvContextFromVars(
   emittedVars: Record<string, unknown>,
@@ -578,8 +581,11 @@ export function deriveSelfHostEnvContextFromVars(
   if (!facts.hasSchema) {
     return emptyEnvContext();
   }
+  // `null` and `""` are the two "present but unusable" shapes a parsed wrangler.json var can
+  // take that the schema validators bucket as "missing" — treat both as an empty shadow.
+  const isEmptyShadow = (value: unknown): boolean => value === '' || value === null;
   const presentEmptyRequired = facts.requiredKeys.filter(
-    (key) => Object.hasOwn(emittedVars, key) && emittedVars[key] === '',
+    (key) => Object.hasOwn(emittedVars, key) && isEmptyShadow(emittedVars[key]),
   );
   const absentRequired = facts.requiredKeys.filter((key) => !Object.hasOwn(emittedVars, key));
   const presentEmptySources: Record<string, VarSource> = {};
@@ -593,6 +599,109 @@ export function deriveSelfHostEnvContextFromVars(
     absentRequired,
     invalidKeys: [],
   };
+}
+
+/** The REAL worker `vars` the build baked into `dist/ssr/wrangler.json`, or a fail-closed reason. */
+export type EmittedWorkerVarsResult =
+  | { ok: true; vars: Record<string, unknown> }
+  | { ok: false; reason: string };
+
+/**
+ * Follow the CF plugin's deploy pointer (`.wrangler/deploy/config.json` →
+ * `configPath`) to the generated wrangler config the build emitted, and return it
+ * parsed. Shared by the parent's ground-truth reads and the isolated
+ * `validate-emitted` probe child, so both resolve the SAME artifact. Returns a
+ * fail-closed reason (never throws) when the pointer/config is missing or malformed.
+ */
+function readGeneratedWranglerConfig(
+  root: string,
+): { ok: true; config: Record<string, unknown> } | { ok: false; reason: string } {
+  const deployConfigPath = join(root, '.wrangler', 'deploy', 'config.json');
+  if (!existsSync(deployConfigPath)) {
+    return {
+      ok: false,
+      reason: `the CF plugin's deploy pointer at ${deployConfigPath} was not written by the build.`,
+    };
+  }
+  let redirectedPath: string;
+  try {
+    const parsed = JSON.parse(readFileSync(deployConfigPath, 'utf-8')) as { configPath?: unknown };
+    if (typeof parsed.configPath !== 'string' || parsed.configPath.length === 0) {
+      return { ok: false, reason: `${deployConfigPath} has no "configPath" pointer.` };
+    }
+    redirectedPath = resolve(dirname(deployConfigPath), parsed.configPath);
+  } catch {
+    return { ok: false, reason: `${deployConfigPath} is not valid JSON.` };
+  }
+  if (!existsSync(redirectedPath)) {
+    return { ok: false, reason: `generated wrangler config ${redirectedPath} does not exist.` };
+  }
+  try {
+    const config = JSON.parse(readFileSync(redirectedPath, 'utf-8')) as Record<string, unknown>;
+    return { ok: true, config };
+  } catch {
+    return { ok: false, reason: `generated wrangler config ${redirectedPath} is not valid JSON.` };
+  }
+}
+
+/**
+ * Read the REAL `vars` map the build baked into `dist/ssr/wrangler.json` (ground
+ * truth — the exact plaintext the worker ships). A missing `vars` field is an empty
+ * map (a worker with no vars), not a failure; a missing/malformed artifact fails
+ * closed. The self-host orchestrator reads this in the parent; the `validate-emitted`
+ * probe reads it in the child to run the schema validators against those exact
+ * values in isolation.
+ */
+export function readEmittedWorkerVars(root: string): EmittedWorkerVarsResult {
+  const resolved = readGeneratedWranglerConfig(root);
+  if (!resolved.ok) {
+    return resolved;
+  }
+  const vars = resolved.config.vars;
+  // An ABSENT `vars` field is a worker with no vars → empty map (not a failure). But a
+  // PRESENT-but-malformed `vars` (a scalar, null, or array) must FAIL CLOSED rather than be
+  // silently normalized to `{}`: normalizing would make every required key read as "absent"
+  // and let a remote secret discharge it, hiding a genuinely broken build artifact.
+  if (vars === undefined) {
+    return { ok: true, vars: {} };
+  }
+  if (vars === null || typeof vars !== 'object' || Array.isArray(vars)) {
+    return {
+      ok: false,
+      reason: 'the generated wrangler config has a malformed "vars" field (expected an object).',
+    };
+  }
+  return { ok: true, vars: vars as Record<string, unknown> };
+}
+
+/**
+ * Validate the REAL emitted worker `vars` against the registered schema's
+ * validators and return the FAILING key NAMES only (values-free). A value is
+ * "invalid" iff the validator REJECTS a PRESENT, NON-EMPTY value — the exact
+ * `report.invalid` set `validateAllEnv` produces (an absent/empty value is
+ * "missing", handled by the emitted-var context's present-empty / absent fences,
+ * never counted here). Runs the user's validators (arbitrary code), so the caller
+ * MUST run this in the isolated {@link ../cli/env-schema-probe.ts} subprocess; a
+ * validator that THROWS/REJECTS surfaces as a values-free {@link SelfHostSchemaError}
+ * via {@link withSchemaBoundary}. NEVER reads `report.invalid[].messages` (which can
+ * embed the offending value) — only the key names leave here.
+ */
+export async function computeInvalidEmittedKeys(
+  root: string,
+  emittedVars: Record<string, unknown>,
+): Promise<Array<string>> {
+  const envFile = findEnvFile(root);
+  if (envFile == null) {
+    return [];
+  }
+  const mod = await withSchemaBoundary('schema-load-failed', () => loadSchema(envFile));
+  if (!mod) {
+    return [];
+  }
+  const report = await withSchemaBoundary('schema-validation-error', () =>
+    mod.validateAllEnv(emittedVars),
+  );
+  return report.invalid.map((entry) => entry.key).sort((a, b) => a.localeCompare(b));
 }
 
 /**

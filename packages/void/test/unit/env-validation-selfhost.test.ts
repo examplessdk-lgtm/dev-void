@@ -1,13 +1,15 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   collectPlaintextVarWarningsFromVars,
+  computeInvalidEmittedKeys,
   createDefaultSecretListRunner,
   deriveSelfHostEnvContextFromVars,
   deriveSelfHostSchemaFacts,
   dischargeSelfHostEnvContext,
+  readEmittedWorkerVars,
   secretListEnv,
   SelfHostEnvValidationError,
   SelfHostFirstDeployError,
@@ -16,7 +18,7 @@ import {
   type SecretListRunResult,
   type SelfHostSchemaFacts,
 } from '../../src/cli/env-validation.ts';
-import { string } from '../../src/runtime/env-helpers.ts';
+import { number, string } from '../../src/runtime/env-helpers.ts';
 import { defineEnv } from '../../src/runtime/env-public.ts';
 import { _resetUnmaskCacheForTests } from '../../src/shared/env-mask.ts';
 import type { StandardSchemaV1 } from '../../src/standard-schema.ts';
@@ -125,6 +127,16 @@ describe('deriveSelfHostEnvContextFromVars — ground-truth context from the emi
     const ctx = deriveSelfHostEnvContextFromVars({ STRIPE_KEY: 'sk_live' }, requiredStripe);
 
     expect(ctx.presentEmptyRequired).toEqual([]);
+    expect(ctx.absentRequired).toEqual([]);
+  });
+
+  it('a required key PRESENT-and-NULL is present-empty too (null shadows like an empty string)', () => {
+    // A parsed wrangler.json var can be null; the validators bucket null as "missing", so
+    // without this it would be neither invalid, empty, nor absent — yet still shadow the secret.
+    const ctx = deriveSelfHostEnvContextFromVars({ STRIPE_KEY: null }, requiredStripe);
+
+    expect(ctx.presentEmptyRequired).toEqual(['STRIPE_KEY']);
+    expect(ctx.presentEmptySources).toEqual({ STRIPE_KEY: { kind: 'emitted' } });
     expect(ctx.absentRequired).toEqual([]);
   });
 
@@ -281,6 +293,99 @@ describe('deriveSelfHostSchemaFacts — env-insensitive schema facts', () => {
       vi.unstubAllEnvs();
       _resetUnmaskCacheForTests();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeInvalidEmittedKeys — VALUE-validate the REAL emitted worker vars against
+// the schema validators, returning the FAILING key NAMES only (values-free).
+// ---------------------------------------------------------------------------
+
+describe('computeInvalidEmittedKeys — schema-invalid emitted values', () => {
+  it('flags a required var whose emitted value fails the validator (present, non-empty, malformed)', async () => {
+    const root = createTempProject();
+    defineEnv({ PORT: number(), API_URL: string() });
+    // PORT ships a non-numeric value; API_URL is fine.
+    const invalid = await computeInvalidEmittedKeys(root, {
+      PORT: 'not-a-number',
+      API_URL: 'https://example.com',
+    });
+    expect(invalid).toEqual(['PORT']);
+  });
+
+  it('returns no invalid keys when every emitted value validates', async () => {
+    const root = createTempProject();
+    defineEnv({ PORT: number() });
+    expect(await computeInvalidEmittedKeys(root, { PORT: '8080' })).toEqual([]);
+  });
+
+  it('does NOT count an ABSENT or EMPTY required value as invalid (those are the missing/empty fences)', async () => {
+    const root = createTempProject();
+    defineEnv({ PORT: number(), TOKEN: string() });
+    // PORT absent, TOKEN empty — both are "missing", handled by the emitted-var context, not here.
+    expect(await computeInvalidEmittedKeys(root, { TOKEN: '' })).toEqual([]);
+  });
+
+  it('returns [] when the project registered no schema', async () => {
+    const root = createTempProject();
+    // beforeEach reset the registry to an empty schema — nothing to validate.
+    expect(await computeInvalidEmittedKeys(root, { ANYTHING: 'x' })).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readEmittedWorkerVars — follow the CF deploy pointer to the emitted vars.
+// ---------------------------------------------------------------------------
+
+describe('readEmittedWorkerVars — ground-truth worker vars via the deploy pointer', () => {
+  it('reads the vars the build baked into the generated wrangler config', () => {
+    const root = createTempProject();
+    // The pointer lives at `.wrangler/deploy/config.json` and redirects to the generated config.
+    mkdirSync(join(root, '.wrangler', 'deploy'), { recursive: true });
+    writeFileSync(
+      join(root, '.wrangler', 'deploy', 'config.json'),
+      JSON.stringify({ configPath: '../../dist/ssr/wrangler.json' }),
+    );
+    mkdirSync(join(root, 'dist', 'ssr'), { recursive: true });
+    writeFileSync(
+      join(root, 'dist', 'ssr', 'wrangler.json'),
+      JSON.stringify({ vars: { APP_NAME: 'demo', PORT: '8080' } }),
+    );
+    const result = readEmittedWorkerVars(root);
+    expect(result).toEqual({ ok: true, vars: { APP_NAME: 'demo', PORT: '8080' } });
+  });
+
+  it('fails closed when the build wrote no deploy pointer', () => {
+    const root = createTempProject();
+    const result = readEmittedWorkerVars(root);
+    expect(result.ok).toBe(false);
+  });
+
+  it('fails closed on a present-but-malformed vars field (array/scalar), never normalizes to {}', () => {
+    for (const badVars of [[], 'nope', 42, null] as Array<unknown>) {
+      const root = createTempProject();
+      mkdirSync(join(root, '.wrangler', 'deploy'), { recursive: true });
+      writeFileSync(
+        join(root, '.wrangler', 'deploy', 'config.json'),
+        JSON.stringify({ configPath: '../../dist/ssr/wrangler.json' }),
+      );
+      mkdirSync(join(root, 'dist', 'ssr'), { recursive: true });
+      writeFileSync(join(root, 'dist', 'ssr', 'wrangler.json'), JSON.stringify({ vars: badVars }));
+      const result = readEmittedWorkerVars(root);
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it('treats an ABSENT vars field as an empty map (a worker with no vars)', () => {
+    const root = createTempProject();
+    mkdirSync(join(root, '.wrangler', 'deploy'), { recursive: true });
+    writeFileSync(
+      join(root, '.wrangler', 'deploy', 'config.json'),
+      JSON.stringify({ configPath: '../../dist/ssr/wrangler.json' }),
+    );
+    mkdirSync(join(root, 'dist', 'ssr'), { recursive: true });
+    writeFileSync(join(root, 'dist', 'ssr', 'wrangler.json'), JSON.stringify({ name: 'x' }));
+    expect(readEmittedWorkerVars(root)).toEqual({ ok: true, vars: {} });
   });
 });
 
