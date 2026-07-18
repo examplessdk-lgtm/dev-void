@@ -425,6 +425,46 @@ describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)',
     // Rejected at the pg+auth guard (after the desired set, before whoami/provision).
     expect(trace).toEqual([]);
   });
+
+  it('rejects a pages app with output:"static" (SSG) — the signal the build itself branches on', async () => {
+    // Real-shape: the static-pages playground config — `output: "static"` + a `pages/` dir.
+    // `detectPreset` returns null (no SSG dep / no root index.html) and `pages/` satisfies
+    // `hasBackendFiles`, so without the `output === 'static'` signal this reaches account/build.
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'ssgapp' }),
+      'void.json': JSON.stringify({
+        output: 'static',
+        worker: { compatibility_date: '2026-02-12' },
+      }),
+      'pages/index.vue': `<template><div>hi</div></template>`,
+      'pages/index.server.ts': `export const loader = () => ({});`,
+    });
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // NO account / build seam ran.
+    expect(trace).toEqual([]);
+  });
+
+  it('rejects a WebSocket / Durable Object app (.ws.ts route) before any account op', async () => {
+    // A `.ws.ts` route makes the build emit a `new_classes` (KV-backed) DO migration, which a
+    // fresh Cloudflare account refuses to create — reject via the SAME `scanWebSocketRoutesSync`
+    // scan the build's DO emission uses.
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'wsapp' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'routes/chat/[room].ws.ts': `import { defineRoom } from 'void/ws';\nexport default defineRoom({});`,
+    });
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toEqual([]);
+  });
 });
 
 describe('runCloudflareDeploy — preflight', () => {

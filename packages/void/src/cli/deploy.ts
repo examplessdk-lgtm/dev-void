@@ -1548,9 +1548,17 @@ export async function runCloudflareDeploy(
   // `detectPreset` structurally detects an SSG dep, a Vite-only SPA, and prebuilt html; the
   // explicit `--dir` / `--spa` intents and a configured static appType are checked alongside
   // it (a configured-but-not-yet-built static app has no structural marker for `detectPreset`).
+  // `voidConfig.output === 'static'` is the SSG signal the BUILD itself branches on
+  // (index.ts `void:env` skips worker minify + prerenders the SSR bundle for it, deploy.ts
+  // `deployConfig.output === 'static'` takes the static-asset path). A pages/ project with
+  // `output: "static"` satisfies `hasBackendFiles` and yields a `null` `detectPreset`, so
+  // without this signal it would slip past the guard and reach account/build as if it were a
+  // full worker app — include it in the reject.
   const staticPreset = detectPreset(root, { dir: options.dir, spa: options.spa });
   const configuredStatic =
-    voidConfig.inference?.appType === 'static' || voidConfig.inference?.appType === 'spa';
+    voidConfig.inference?.appType === 'static' ||
+    voidConfig.inference?.appType === 'spa' ||
+    voidConfig.output === 'static';
   if (staticPreset || configuredStatic || options.dir || options.spa) {
     const appType = staticPreset?.appType ?? (options.spa ? 'spa' : 'static');
     log.error(
@@ -1592,6 +1600,29 @@ export async function runCloudflareDeploy(
     scanJobsSync(root, paths.cronsDir);
   } catch (err) {
     log.error(`deploy: ${getErrorMessage(err)}`);
+    return exit(1);
+  }
+
+  // 1f. WebSocket / Durable Object guard — FAIL CLOSED before any account op. For a `.ws.ts`
+  // route, the self-host `vite build` emits a `durable_objects` binding plus a DO migration
+  // block keyed `new_classes` (index.ts `mergeBindings`, via the SAME `scanWebSocketRoutesSync`
+  // scan; also cli/wrangler.ts for --provision) — i.e. a KEY-VALUE-backed Durable Object
+  // namespace. As of Cloudflare's 2026-07-09 change, a fresh account (every Workers Free
+  // account, and any account with no pre-existing KV-backed namespace) REJECTS a `new_classes`
+  // migration at `wrangler deploy` ("create a namespace using a new_sqlite_classes migration
+  // instead"). So a websocket app deployed to a fresh own-account hard-fails after the build.
+  // Emitting `new_sqlite_classes` is a build-side follow-up; until then reject those apps.
+  // (sandbox / void/live DOs already emit `new_sqlite_classes` — they stay supported.)
+  if (scanWebSocketRoutesSync(root, paths).length > 0) {
+    log.error(
+      [
+        'deploy: --backend cloudflare does not yet support WebSocket / Durable Object routes.',
+        'A `.ws.ts` route makes the build emit a key-value-backed Durable Object namespace',
+        '(a `new_classes` migration), which a fresh Cloudflare account (and every Workers Free',
+        'account) refuses to create. Deploy this app with `void deploy` (the managed platform).',
+        'SQLite-backed WebSocket support for this backend is a follow-up.',
+      ].join('\n'),
+    );
     return exit(1);
   }
 
