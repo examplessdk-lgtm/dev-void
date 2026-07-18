@@ -12,16 +12,13 @@ import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
 import { join } from 'pathe';
-import { loadEnv } from 'vite';
 import { findEnvFile } from '../codegen/env-types.ts';
-import { readConfig } from '../config.ts';
 import { loadUserEnvFile } from '../host/load-user-env.ts';
 import { voidWarn } from '../log.ts';
 import { getSecretOverride } from '../runtime/env-helpers.ts';
 import type { EnvValidationReport } from '../runtime/env-public.ts';
 import { mergeAndExpand, parseDotenvFile } from '../shared/dotenv.ts';
 import { isLikelySecretKey } from '../shared/env-mask.ts';
-import { filterLoadedEnv, stripInternalEnvKeys } from '../shared/env.ts';
 import type { StandardSchemaV1 } from '../standard-schema.ts';
 import type { PlatformClient } from './client.ts';
 import { resolveWranglerArgv } from './preset.ts';
@@ -158,16 +155,15 @@ export async function fetchRemoteSecretNames(
 //
 // The managed platform path gates secrets via `assertEnvSchemaValid` (deploy.ts)
 // against the platform's secret store. The self-host path bypasses the platform
-// entirely, so it needs its own two safety units, called by the self-host deploy
-// orchestrator BEFORE build/deploy:
-//   1. `collectPlaintextVarWarnings` — WARN: the build bakes `.env*` values
-//      verbatim into worker `vars` (plaintext in the uploaded config); report
-//      which of those keys look like secrets so the caller can warn.
-//   2. `validateSelfHostProdEnv` — GATE: the platform-free analogue of
-//      `assertEnvSchemaValid`, sourcing remote secret names from
-//      `wrangler secret list` instead of the platform API.
-// Both are pure additions — every existing platform caller of
-// `validateProdEnv` is unaffected.
+// entirely, so it needs its own safety units over the REAL build artifact
+// (`dist/ssr/wrangler.json` `vars`), defined further below:
+//   1. `collectPlaintextVarWarningsFromVars` — WARN: the build bakes worker
+//      `vars` verbatim into the uploaded config (plaintext); report which of the
+//      emitted keys look like secrets so the caller can warn.
+//   2. `deriveSelfHostEnvContextFromVars` + `dischargeSelfHostEnvContext` — GATE:
+//      the platform-free analogue of `assertEnvSchemaValid`, sourcing remote
+//      secret names from `wrangler secret list` instead of the platform API.
+// Both consume ground truth (the emitted map), never a pre-build facsimile.
 // ---------------------------------------------------------------------------
 
 /** One worker-vars key that looks like a secret, with why it was flagged. */
@@ -185,7 +181,7 @@ export type PlaintextVarWarning = {
 };
 
 /**
- * Result of {@link collectPlaintextVarWarnings}. Carries KEY NAMES ONLY —
+ * Result of {@link collectPlaintextVarWarningsFromVars}. Carries KEY NAMES ONLY —
  * never values — so nothing here can leak a secret into logs, no matter how
  * the caller formats it.
  */
@@ -195,100 +191,6 @@ export type PlaintextVarWarningsResult = {
   /** Total number of keys the build will merge into worker `vars`. */
   totalVarKeys: number;
 };
-
-export type CollectPlaintextVarWarningsOptions = {
-  /**
-   * The user's Vite `envDir` config value, passed RAW (exactly as
-   * `envPlugin.config` receives `userConfig.envDir`). Resolved the same way
-   * the build does: non-empty string → `join(root, envDir)`, else `root`.
-   */
-  envDir?: string;
-  /** Vite mode the build runs under. Deploy builds use `'production'` (default). */
-  mode?: string;
-  /**
-   * Resolved root wrangler config path (the same `-c` target the GATE pins). Its
-   * top-level `vars` (the build's LOWEST-precedence plaintext layer) is folded
-   * into the effective var union so configured root-wrangler keys are warned too.
-   * When omitted, the root config is DISCOVERED from `root` the same way the
-   * build does ({@link discoverRootWranglerConfigPath}), so the DEFAULT
-   * invocation still covers the root-wrangler layer; an explicit path wins.
-   */
-  configPath?: string;
-  /**
-   * The EXACT env the build runs under (the scrubbed `buildProjectEnv`). Threaded
-   * to {@link resolveEffectiveWorkerVars} so the sanitized dotenv overlay is
-   * resolved against the build's env, never the credential-bearing parent's. In
-   * the isolated build-context subprocess `process.env` already IS that env, so it
-   * is omitted there; a test seam supplies it in-process.
-   */
-  buildEnv?: NodeJS.ProcessEnv;
-};
-
-/**
- * The EXACT sanitized worker-vars map the BUILD assembles from `.env*` files,
- * mirroring `envPlugin.config` in index.ts byte-for-byte: `loadEnv(mode, envDir,
- * '')` (all `.env*` files for the mode + process.env) → {@link filterLoadedEnv}
- * (drop shell-env pollution, keep only `.env`-file keys) → {@link
- * stripInternalEnvKeys} (drop reserved `__VOID_*` keys). Returns the surviving
- * `sanitized` map — the values baked into `wrangler.json` `vars` as PLAINTEXT.
- *
- * This is the HIGHEST-precedence (dotenv) layer of {@link
- * resolveEffectiveWorkerVars}, which overlays it over the root wrangler `vars`,
- * schema defaults, and void.json `worker.vars` to reproduce the build's FINAL
- * `vars` map — the single source of truth both self-host units consume, so they
- * can NEVER diverge on which keys/values the build actually ships. `envDir`
- * resolution matches `envPlugin.config` exactly: a non-empty string `envDir` is
- * joined to `root`, else `root`; `mode` defaults to the deploy build's
- * `'production'`. Callers that only need emptiness inspect values locally
- * and never let one escape.
- */
-function loadSanitizedBuildEnv(
-  root: string,
-  options: { envDir?: string; mode?: string },
-): Record<string, string> {
-  const mode = options.mode ?? 'production';
-  const filtered = filterLoadedEnv(loadEnv(mode, resolveBuildEnvDir(root, options.envDir), ''));
-  const { sanitized } = stripInternalEnvKeys(filtered);
-  return sanitized;
-}
-
-/**
- * Resolve the directory the build reads `.env*` files from, EXACTLY like
- * `envPlugin.config`: a non-empty string `envDir` is joined to `root`, else
- * `root`. Shared by {@link loadSanitizedBuildEnv} (the winning values) and
- * {@link dotenvKeyProvenance} (the winning file) so the two can never disagree
- * on which directory the overlay came from.
- */
-function resolveBuildEnvDir(root: string, envDir?: string): string {
-  return typeof envDir === 'string' && envDir.length > 0 ? join(root, envDir) : root;
-}
-
-/**
- * Map each `.env*` key to the SPECIFIC file whose assignment WINS in the
- * build's dotenv overlay, so a configured-empty error can name the exact source
- * (never a value). Mirrors Vite `loadEnv`'s `getEnvFilesForMode` precedence: the
- * files are read `.env` < `.env.local` < `.env.<mode>` < `.env.<mode>.local`,
- * later overriding earlier — so the LAST file to assign a key is its winning
- * source. Same `envDir`/`mode` resolution as {@link loadSanitizedBuildEnv}.
- * Presence-only (values are never returned here; the winning value comes from
- * {@link loadSanitizedBuildEnv}).
- */
-function dotenvKeyProvenance(
-  root: string,
-  options: { envDir?: string; mode?: string },
-): Record<string, string> {
-  const dir = resolveBuildEnvDir(root, options.envDir);
-  const mode = options.mode ?? 'production';
-  const provenance: Record<string, string> = {};
-  for (const file of ['.env', '.env.local', `.env.${mode}`, `.env.${mode}.local`]) {
-    const parsed = parseDotenvFile(join(dir, file), { expand: false });
-    for (const key of Object.keys(parsed)) {
-      // Later (higher-precedence) file overwrites — matching loadEnv's merge.
-      provenance[key] = file;
-    }
-  }
-  return provenance;
-}
 
 /** Minimal structural view of a Standard Schema validator's probe entrypoint. */
 type SchemaProbe = StandardSchemaV1<unknown, unknown>['~standard'];
@@ -323,303 +225,13 @@ async function requiredSchemaKeys(schema: Record<string, unknown>): Promise<Set<
 }
 
 /**
- * The `.default(value)` ENTRIES (`[key, stringified value]`) the schema
- * contributes to worker `vars`, via a values-free, boundary-safe probe. Mirrors
- * `_getSchemaDefaults` (probe `undefined`; a non-undefined, issue-free result is
- * the default value, stringified the same way — `String(value)` for non-strings)
- * BUT attaches a rejection handler to any async probe so a rejecting validator
- * can NEVER float as an unhandled rejection carrying the original value (the
- * exact leak `_getSchemaDefaults` has and that neither self-host unit may
- * reintroduce). A validator that THROWS synchronously is left to propagate to
- * the caller's {@link withSchemaBoundary}, which drops its (value-carrying)
- * message/stack/cause and rethrows a structural error.
- *
- * VALUES are read ONLY to reconstruct the effective build map inside
- * {@link resolveEffectiveWorkerVars} (a required key never has a default, so a
- * default value can never decide the GATE's per-required-key outcome; the WARN
- * unit consumes the resulting KEY NAMES alone). No default value ever leaves the
- * units.
+ * The values-free provenance of a var's WINNING value. The self-host gate reads
+ * ground truth — the REAL worker `vars` the build emitted into
+ * `dist/ssr/wrangler.json` — so every present key's source is `emitted`. Only the
+ * KIND is ever surfaced (never a value), so a configured-empty error can name the
+ * source without echoing anything sensitive.
  */
-function schemaDefaultEntries(schema: Record<string, unknown>): Array<[string, string]> {
-  const entries: Array<[string, string]> = [];
-  for (const [key, validator] of Object.entries(schema)) {
-    const probe = (validator as { '~standard': SchemaProbe })['~standard'];
-    // A sync throw propagates to the caller's withSchemaBoundary (values-free).
-    const result = probe.validate(undefined);
-    if (result instanceof Promise) {
-      // Consume the rejection so a rejecting async probe never becomes an
-      // unhandled rejection carrying the value. Async → no sync default.
-      result.catch(() => {});
-      continue;
-    }
-    const r = result as { value?: unknown; issues?: unknown };
-    if (r.issues || r.value === undefined || r.value === null) {
-      continue;
-    }
-    entries.push([key, typeof r.value === 'string' ? r.value : String(r.value)]);
-  }
-  return entries;
-}
-
-/**
- * Which of the four build layers supplied a key's WINNING value, so a
- * configured-empty error can name the ACTUAL source (never a value, just the
- * source + key). A `file` is a plain filename (`.env.production`, `wrangler.jsonc`)
- * — never a path or a value.
- */
-export type VarSource =
-  | { kind: 'dotenv'; file: string }
-  | { kind: 'void-json' }
-  | { kind: 'schema-default' }
-  | { kind: 'wrangler'; file: string }
-  /** The value ships in the REAL emitted worker config (`dist/ssr/wrangler.json` `vars`). */
-  | { kind: 'emitted' };
-
-/**
- * The FINAL effective worker-vars map plus the per-key {@link VarSource}
- * provenance. Only `values` presence/emptiness and `sources` (filenames +
- * kinds) are ever read by the units — a value never leaves.
- */
-type EffectiveWorkerVars = {
-  values: Record<string, unknown>;
-  sources: Record<string, VarSource>;
-};
-
-/**
- * Reproduce the build's FINAL resolved worker `vars` map — the EXACT key→value
- * bytes wrangler deploys — from ALL FOUR sources the build assembles it from, in
- * the build's real precedence (LOWEST → HIGHEST, later wins):
- *   1. root wrangler top-level `vars` — `resolved.vars`, filled in by the
- *      Cloudflare plugin's `config()` merge `defu(mergeBindings-result, resolved)`
- *      (the plugin's `customizeWorkerConfig` does `defu(configResult,
- *      workerConfig)`, so our result wins and the root config only fills gaps) —
- *      the LOWEST layer. index.ts wires `cloudflare({ config: mergeBindings })`.
- *   2. schema `.default(value)` keys — `applySchemaDefaultsToWorkerVars` fills a
- *      default only when the key is still unset (index.ts ~1252-1259).
- *   3. void.json `worker.vars` — `workerConfig.vars = { ...config.worker.vars }`
- *      (index.ts ~924-925).
- *   4. sanitized dotenv overlay — envPlugin.config `{ ...workerConfig.vars,
- *      ...loadEnv→filterLoadedEnv→stripInternalEnvKeys }` (index.ts ~1264-1290),
- *      the HIGHEST layer, via {@link loadSanitizedBuildEnv}.
- * Applying the layers in that order with plain overwrite yields the build's
- * per-key priority `dotenv > void.json > schema-default > root-wrangler`. Keep
- * this in lockstep with those index.ts sites — a future build-assembly change
- * must update here too, else the preflight would judge a map the build no longer
- * ships.
- *
- * The SINGLE source of truth for BOTH self-host units, so neither can drift from
- * the build. Schema-default probing runs arbitrary user code: a SYNC throw
- * propagates to the caller's {@link withSchemaBoundary} (values-free structural
- * error); an ASYNC probe rejection is consumed by {@link schemaDefaultEntries}
- * so it can never float as an unhandled rejection carrying a value. The config
- * reads (`readConfig` for void.json, {@link readConfigVars} for root wrangler)
- * can throw only fixed, values-free config errors and likewise stay inside the
- * caller's boundary. Only KEY NAMES ever leave the units — internal value
- * inspection (emptiness) is fine.
- */
-function resolveEffectiveWorkerVars(
-  root: string,
-  options: {
-    /**
-     * Resolved root wrangler config path (`-c` target); its top-level `vars` is
-     * the lowest layer. Omitted → discovered from `root`
-     * ({@link discoverRootWranglerConfigPath}) so the root layer is never skipped
-     * on a default invocation; an explicit path wins.
-     */
-    configPath?: string;
-    /** Raw Vite `envDir` — resolved exactly like the build (see {@link loadSanitizedBuildEnv}). */
-    envDir?: string;
-    /** Vite build mode — selects the `.env.<mode>` files. Defaults to `'production'`. */
-    mode?: string;
-    /** Registered env schema (if any) — source of the `.default(value)` layer. */
-    schema?: Record<string, unknown> | null;
-    /**
-     * The EXACT env the build runs `vite build` under (the scrubbed `buildProjectEnv`).
-     * Vite `loadEnv(mode, dir, '')` merges `process.env` OVER the `.env*` files and
-     * {@link filterLoadedEnv} classifies shell pollution against `process.env`, so the
-     * sanitized dotenv overlay depends on the ambient env. To reproduce the build's
-     * `vars` byte-for-byte the overlay must be resolved under the SAME env the build
-     * uses — NOT the credential-bearing parent's `process.env`, which differs from
-     * `buildProjectEnv` on exactly the scrubbed keys (CF Access / transport selectors)
-     * and would judge a map the build never ships. When provided, `process.env` is
-     * SYNCHRONOUSLY swapped to it strictly around this (fully synchronous) resolution
-     * and restored in `finally` — no `await` runs under the swap, so no deferred handler
-     * can observe it. In the isolated build-context subprocess `process.env` already IS
-     * `buildProjectEnv`, so this is omitted there (the swap would be a no-op).
-     */
-    buildEnv?: NodeJS.ProcessEnv;
-  },
-): EffectiveWorkerVars {
-  const savedProcessEnv = process.env;
-  if (options.buildEnv) {
-    process.env = options.buildEnv;
-  }
-  try {
-    return resolveEffectiveWorkerVarsUnderEnv(root, options);
-  } finally {
-    if (options.buildEnv) {
-      process.env = savedProcessEnv;
-    }
-  }
-}
-
-/**
- * The body of {@link resolveEffectiveWorkerVars}, run under whatever `process.env`
- * the caller pinned (the build env when `buildEnv` was supplied, else the ambient
- * one). Fully SYNCHRONOUS — no `await` — so the caller's `process.env` swap has no
- * deferred window.
- */
-function resolveEffectiveWorkerVarsUnderEnv(
-  root: string,
-  options: {
-    configPath?: string;
-    envDir?: string;
-    mode?: string;
-    schema?: Record<string, unknown> | null;
-  },
-): EffectiveWorkerVars {
-  // Values are `unknown`, not `string`: the root wrangler layer can carry a
-  // JSON var of any type (see {@link readConfigVars}). Higher layers (schema
-  // defaults, void.json `worker.vars`, the dotenv overlay) are always strings,
-  // but a lower-layer JSON value survives when no higher layer overrides it. The
-  // caller reads only presence/emptiness — never the value itself.
-  //
-  // Each `set` also records which layer supplied the WINNING value; a later
-  // (higher-precedence) layer overwrites both the value AND its provenance, so
-  // `sources[key]` always names the source the deploy actually ships from.
-  const values: Record<string, unknown> = {};
-  const sources: Record<string, VarSource> = {};
-  const set = (key: string, value: unknown, source: VarSource): void => {
-    values[key] = value;
-    sources[key] = source;
-  };
-  // 1. root wrangler top-level `vars` (lowest precedence). When the caller
-  // did not pin an explicit `configPath`, DISCOVER the root config the same way
-  // the build does so the default `collectPlaintextVarWarnings(root)` still folds
-  // in the root-wrangler layer. An explicit `configPath` always wins.
-  const configPath = options.configPath ?? discoverRootWranglerConfigPath(root);
-  if (configPath) {
-    const file = configFileName(configPath);
-    for (const [key, value] of Object.entries(readConfigVars(configPath))) {
-      set(key, value, { kind: 'wrangler', file });
-    }
-  }
-  // 2. schema `.default(value)` keys (overwrite root wrangler; overwritten below).
-  if (options.schema) {
-    for (const [key, value] of schemaDefaultEntries(options.schema)) {
-      set(key, value, { kind: 'schema-default' });
-    }
-  }
-  // 3. void.json `worker.vars`.
-  const voidJsonVars = readConfig(root).worker?.vars;
-  if (voidJsonVars) {
-    for (const [key, value] of Object.entries(voidJsonVars)) {
-      set(key, value, { kind: 'void-json' });
-    }
-  }
-  // 4. sanitized dotenv overlay (highest precedence). Provenance is the SPECIFIC
-  // `.env*` file whose assignment wins ({@link dotenvKeyProvenance}).
-  const dotenv = loadSanitizedBuildEnv(root, { envDir: options.envDir, mode: options.mode });
-  const dotenvFiles = dotenvKeyProvenance(root, { envDir: options.envDir, mode: options.mode });
-  const mode = options.mode ?? 'production';
-  for (const [key, value] of Object.entries(dotenv)) {
-    // Every sanitized overlay key comes from an actual `.env*` file (shell-env
-    // pollution is stripped by filterLoadedEnv), so dotenvFiles has it; the
-    // `.env.<mode>` fallback is only a defensive default.
-    set(key, value, { kind: 'dotenv', file: dotenvFiles[key] ?? `.env.${mode}` });
-  }
-  return { values, sources };
-}
-
-/**
- * Extract the plain filename from a config path (`/proj/wrangler.jsonc` →
- * `wrangler.jsonc`), handling both POSIX and Windows separators. Used only to
- * name a source in a values-free error — never the path itself.
- */
-function configFileName(configPath: string): string {
-  const parts = configPath.split(/[/\\]+/);
-  return parts[parts.length - 1] || configPath;
-}
-
-/**
- * WARN unit — determine exactly the keys the BUILD will merge into worker
- * `vars` and classify the secret-looking ones.
- *
- * Classifies over the FINAL effective var map ({@link resolveEffectiveWorkerVars})
- * — the UNION of all four plaintext sources the build bakes into `wrangler.json`
- * `vars`: root wrangler top-level `vars`, registered schema `.default(value)`
- * keys, void.json `worker.vars`, and the sanitized `.env*` overlay. Using the
- * same resolver the GATE consumes guarantees the two units can never diverge on
- * which keys the build ships, and it now covers configured plaintext keys
- * (void.json / root wrangler) the dotenv-only view used to miss. KEYS ONLY leave
- * this unit — the resolver's values are never read here.
- *
- * Classification per key: `schema-secret` when the registered env.ts schema
- * flags it `.secret()` (explicit, always wins); OTHERWISE the shared
- * {@link isLikelySecretKey} name heuristic. `.public()` does NOT suppress the
- * heuristic — it only means "not a schema secret"; the value still ships as
- * plaintext, so a secret-looking public key is still flagged.
- *
- * The caller formats/prints. The result contains key names only — values are
- * deliberately unreachable from here so they can never leak into logs.
- */
-export async function collectPlaintextVarWarnings(
-  root: string,
-  options: CollectPlaintextVarWarningsOptions = {},
-): Promise<PlaintextVarWarningsResult> {
-  // Registered schema (if the project has an env.ts) for explicit overrides
-  // AND its registered defaults — the build merges BOTH into workerConfig.vars.
-  //
-  // env.ts evaluation runs ARBITRARY user code that can throw an error
-  // embedding an env value (loadUserEnvFile rethrows with the ORIGINAL message);
-  // load inside the values-free boundary so a throwing env.ts becomes a
-  // structural error, never a leak — even under VOID_ENV_UNMASK.
-  const envFile = findEnvFile(root);
-  const mod = envFile
-    ? await withSchemaBoundary('schema-load-failed', () => loadSchema(envFile))
-    : null;
-  const schema = mod?._getRegisteredSchema() ?? null;
-
-  // The COMPLETE effective var map the build ships (all four sources), via the
-  // SAME resolver the GATE uses so the two units can never diverge. Only its
-  // KEY NAMES are read below — values stay internal.
-  //
-  // The resolver probes schema defaults (arbitrary code) and reads config,
-  // so it runs behind the values-free boundary: a sync throw becomes a
-  // structural error, and {@link schemaDefaultEntries} consumes any async
-  // default-probe rejection so it can never float carrying a value.
-  const effective = await withSchemaBoundary('schema-validation-error', () =>
-    Promise.resolve(
-      resolveEffectiveWorkerVars(root, {
-        configPath: options.configPath,
-        envDir: options.envDir,
-        mode: options.mode,
-        schema,
-        buildEnv: options.buildEnv,
-      }),
-    ),
-  );
-  // KEYS ONLY — the resolver's values (and provenance filenames) are never read
-  // here; the WARN unit classifies key names alone.
-  const varKeys = Object.keys(effective.values);
-
-  const secretKeys: Array<PlaintextVarWarning> = [];
-  for (const key of varKeys) {
-    // Explicit `.secret()` is the ONLY override that changes classification.
-    // `.public()` means "not a schema secret" — it does NOT suppress the name
-    // heuristic (the value still ships plaintext), so fall through to it.
-    const override = schema ? getSecretOverride(schema[key]) : undefined;
-    if (override === 'secret') {
-      secretKeys.push({ key, reason: 'schema-secret' });
-      continue;
-    }
-    if (isLikelySecretKey(key)) {
-      secretKeys.push({ key, reason: 'heuristic' });
-    }
-  }
-  secretKeys.sort((a, b) => a.key.localeCompare(b.key));
-  return { secretKeys, totalVarKeys: varKeys.length };
-}
+export type VarSource = { kind: 'emitted' };
 
 /**
  * Result of one `wrangler secret list` invocation. Same structured-provenance
@@ -837,54 +449,6 @@ async function withSchemaBoundary<T>(
   }
 }
 
-export type ValidateSelfHostProdEnvOptions = {
-  /**
-   * Absolute path to the resolved root wrangler config — pinned onto every
-   * wrangler argv via `-c` so discovery reads the exact config the deploy
-   * will use (worker name comes from its `name` field).
-   */
-  configPath: string;
-  /**
-   * The Cloudflare account id the deploy targets. Reconciled against the pinned
-   * config's top-level `account_id` BEFORE any wrangler spawn: wrangler
-   * resolves the config's `account_id` with PRECEDENCE over
-   * `CLOUDFLARE_ACCOUNT_ID`, so a config pinning a different account is a hard,
-   * fail-closed mismatch (naming both). The reconciled effective account is
-   * then pinned into the spawned wrangler's `CLOUDFLARE_ACCOUNT_ID` so
-   * `secret list` can never consult a different ambient account.
-   */
-  accountId?: string;
-  /**
-   * The user's Vite `envDir`, passed RAW — MUST be the same value handed to
-   * {@link collectPlaintextVarWarnings} and the build. Used only to reconstruct
-   * the EXACT sanitized build var map for the empty-collision fence (via
-   * {@link loadSanitizedBuildEnv}), so the gate sees precisely the `.env*`
-   * sources the build bakes (incl. `.env.local` / a custom envDir). Resolved
-   * the same way the build does: non-empty string → `join(root, envDir)`, else
-   * `root`.
-   */
-  envDir?: string;
-  /**
-   * The Vite mode the build runs under — MUST match the build / WARN unit.
-   * Deploy builds use `'production'` (default). Selects the `.env.<mode>` files
-   * the build-map fence reads.
-   */
-  mode?: string;
-  /** Test seam — injectable wrangler runner. Defaults to the real spawn-based runner. */
-  runWrangler?: RunSecretList;
-  /** Test seam — hard timeout for the default runner (ms). */
-  timeoutMs?: number;
-  /**
-   * The EXACT env the build runs under (the scrubbed `buildProjectEnv`). Threaded to
-   * the effective-build-map resolver so the empty-collision fence sees the `.env*`
-   * overlay the build actually ships — resolved under the build's env, never the
-   * credential-bearing parent's. In production the derivation runs inside the isolated
-   * build-context subprocess (where `process.env` already IS that env); a test seam
-   * supplies it in-process.
-   */
-  buildEnv?: NodeJS.ProcessEnv;
-};
-
 /**
  * The structured, VALUES-FREE outcome of the self-host env DERIVATION — everything
  * decidable from the effective build var map + schema WITHOUT a network round-trip,
@@ -920,188 +484,6 @@ export type SelfHostProdEnvResult = {
    */
   remoteSecretNames: Array<string> | null;
 };
-
-/**
- * GATE unit — the platform-free analogue of deploy.ts's `assertEnvSchemaValid`
- * for `void deploy --backend cloudflare`.
- *
- * The ONE effective build map ({@link resolveEffectiveWorkerVars} — the EXACT
- * bytes the build bakes into worker `vars` across ALL FOUR sources: root wrangler
- * `vars` < schema defaults < void.json `worker.vars` < the sanitized `.env*`
- * overlay, full Vite precedence incl. `.env.local` / `.env.production.local` / a
- * custom `envDir` / mode) is the SINGLE SOURCE OF TRUTH — so a configured
- * `worker.vars` / root-wrangler value counts as PRESENT and a configured EMPTY
- * one fails closed, exactly as the deployed worker would behave. Requiredness is
- * derived INDEPENDENTLY of that map
- * (probe each schema key with `undefined`; reject ⇒ required — {@link
- * requiredSchemaKeys}). For EVERY required key K, the effective value decides:
- *   - PRESENT and NON-EMPTY  → satisfied locally (presence). Not a gate failure
- *     for the shadow/absence concern; an invalid value is still caught below.
- *   - PRESENT and EMPTY (`K=`) → FAIL CLOSED ALWAYS, independent of whether K
- *     exists remotely. The build ships `K=""` as a plaintext var, which wrangler
- *     4.107 gives precedence over any same-named remote secret, so the deploy
- *     would ship empty for a required secret (overwriting a remote one if
- *     present). Thrown BEFORE any wrangler spawn — remote membership is
- *     irrelevant. Message: remove the empty assignment (names K, never a value).
- *   - ABSENT → must be discharged by `wrangler secret list` (K present remotely)
- *     else FAIL CLOSED with `wrangler secret put <NAME>` guidance.
- *
- * wrangler is only invoked when the effective map leaves a required key ABSENT
- * (the only state a remote secret can discharge). A fully-local satisfied schema
- * never requires the worker to already exist, while a genuinely absent key on a
- * fresh worker fails the wrangler call (worker not found) — a hard, fail-closed
- * {@link SelfHostFirstDeployError} carrying the missing key names + bootstrap
- * guidance, rather than a false "all secrets present".
- *
- * Three fences:
- *   - the present-empty rejection above is authoritative: it is NEVER gated
- *     on remote membership and requiredness is NEVER sourced from
- *     `validateAllEnv().missing`, so a schema that accepts `""` is still
- *     rejected when a required key is emptied.
- *   - the target account is reconciled against the config's `account_id`
- *     BEFORE spawning wrangler, so `secret list` can never consult a different
- *     account.
- *   - all schema loading + validation runs inside {@link withSchemaBoundary}
- *     so a throwing env.ts or validator becomes a values-free structural error.
- */
-export async function validateSelfHostProdEnv(
-  root: string,
-  options: ValidateSelfHostProdEnvOptions,
-): Promise<SelfHostProdEnvResult> {
-  // The DERIVATION (env.ts eval + `loadEnv` + validators) runs project code and
-  // must live in the isolated build-context subprocess; the DISCHARGE (`wrangler
-  // secret list` + comparison) is pure parent work. Composed here so the existing
-  // unit tests exercise the whole gate in one call; the deploy orchestrator runs
-  // the two halves in their respective processes.
-  const context = await deriveSelfHostEnvContext(root, {
-    configPath: options.configPath,
-    envDir: options.envDir,
-    mode: options.mode,
-    buildEnv: options.buildEnv,
-  });
-  return dischargeSelfHostEnvContext(context, {
-    root,
-    configPath: options.configPath,
-    accountId: options.accountId,
-    runWrangler: options.runWrangler,
-    timeoutMs: options.timeoutMs,
-  });
-}
-
-/**
- * DERIVE half of the self-host gate — everything decidable from the effective
- * build var map + schema, with NO network. Runs the user's env.ts + `loadEnv` +
- * validators, so in the deploy orchestrator it executes INSIDE the isolated
- * build-context subprocess (under the scrubbed build env), never in the
- * credential-bearing parent (F1: no parent env.ts import; F2: `loadEnv` never
- * sees the parent's ambient/credentialed env). Returns a VALUES-FREE
- * {@link SelfHostEnvContext} — key names + source kinds/filenames + the fixed
- * invalid reason only — so it crosses the process boundary as safe JSON. Throws
- * only a values-free {@link SelfHostSchemaError} (via {@link withSchemaBoundary})
- * when the schema machinery itself fails; the gate OUTCOMES (empty / absent /
- * invalid) are returned as data for the parent's {@link dischargeSelfHostEnvContext}.
- */
-export async function deriveSelfHostEnvContext(
-  root: string,
-  options: {
-    configPath?: string;
-    envDir?: string;
-    mode?: string;
-    buildEnv?: NodeJS.ProcessEnv;
-  },
-): Promise<SelfHostEnvContext> {
-  // Skip when the project has no typed env schema (mirrors assertEnvSchemaValid's
-  // findEnvFile fast path).
-  const envFile = findEnvFile(root);
-  if (envFile == null) {
-    return emptyEnvContext();
-  }
-
-  // env.ts evaluation runs arbitrary user code that could throw an error
-  // embedding a value; load inside the values-free boundary. `mod` is reused
-  // below (schema + validateAllEnv) without a second import.
-  const mod = await withSchemaBoundary('schema-load-failed', () => loadSchema(envFile));
-  if (!mod) {
-    return emptyEnvContext();
-  }
-  const schema = mod._getRegisteredSchema() ?? {};
-
-  // The ONE effective build map — the EXACT key→value bytes the build bakes into
-  // worker `vars` across ALL FOUR sources (root wrangler `vars` < schema defaults
-  // < void.json `worker.vars` < the sanitized `.env*` overlay incl. `.env.local`
-  // / `.env.<mode>.local`), via the SAME {@link resolveEffectiveWorkerVars} the
-  // WARN unit uses so the two can never diverge from each other OR the build. The
-  // `.env*` overlay is resolved under `buildEnv` (the build's env), so the map is
-  // exactly what the build ships. Every presence/emptiness decision below reads
-  // ONLY this map; no value ever leaves this function.
-  const { values: buildEnv, sources: buildSources } = await withSchemaBoundary(
-    'schema-validation-error',
-    () =>
-      Promise.resolve(
-        resolveEffectiveWorkerVars(root, {
-          configPath: options.configPath,
-          envDir: options.envDir,
-          mode: options.mode,
-          schema,
-          buildEnv: options.buildEnv,
-        }),
-      ),
-  );
-
-  // Requiredness is derived INDEPENDENTLY of whether a validator accepts
-  // `""` (probe each key with `undefined`; reject ⇒ required), NOT from
-  // `validateAllEnv().missing`. Wrapped so a throwing/rejecting validator
-  // becomes a values-free structural error rather than leaking the probed value.
-  const requiredKeys = await withSchemaBoundary('schema-validation-error', () =>
-    requiredSchemaKeys(schema),
-  );
-
-  // Validate the effective build map to surface INVALID values (present,
-  // non-empty, failed validation) — a remote secret can NEVER fix those.
-  const buildReport = await withSchemaBoundary('schema-validation-error', () =>
-    mod.validateAllEnv(buildEnv),
-  );
-
-  // A required key PRESENT-and-EMPTY (`K=""`) fails closed ALWAYS (the parent
-  // throws before any wrangler spawn). Emptiness is the EMPTY STRING alone — a
-  // non-string JSON var is present-and-non-empty and ships as a `type:"json"`
-  // binding that wins over a same-named remote secret.
-  const presentEmptyRequired = [...requiredKeys].filter(
-    (key) => Object.hasOwn(buildEnv, key) && buildEnv[key] === '',
-  );
-
-  // Required keys the effective build map does NOT set at all — the ONLY state a
-  // remote secret can legitimately discharge.
-  const absentRequired = [...requiredKeys].filter((key) => !Object.hasOwn(buildEnv, key));
-
-  // A required key PRESENT with a non-empty value the schema still REJECTED is
-  // malformed, not absent, and must fail closed. `""` is excluded (handled above).
-  const presentInvalidRequired = [...requiredKeys].filter(
-    (key) => Object.hasOwn(buildEnv, key) && buildEnv[key] !== '' && !buildReport.values.has(key),
-  );
-  const invalidKeys = new Set<string>([
-    ...buildReport.invalid.map((i) => i.key),
-    ...presentInvalidRequired,
-  ]);
-
-  // Carry ONLY the winning source of each EMPTY key (kind + filename) so the
-  // parent's message names it — never a value, and never the full map.
-  const presentEmptySources: Record<string, VarSource> = {};
-  for (const key of presentEmptyRequired) {
-    const source = buildSources[key];
-    if (source) {
-      presentEmptySources[key] = source;
-    }
-  }
-
-  return {
-    hasSchema: true,
-    presentEmptyRequired,
-    presentEmptySources,
-    absentRequired,
-    invalidKeys: [...invalidKeys],
-  };
-}
 
 /** A no-schema {@link SelfHostEnvContext} — nothing to gate. */
 function emptyEnvContext(): SelfHostEnvContext {
@@ -1352,34 +734,6 @@ function reconcileSelfHostAccount(
 /** UTF-8 BOM, stripped before JSONC parsing (matches provision.ts readRootConfig). */
 const UTF8_BOM = '﻿';
 
-/**
- * Root wrangler config filenames, in the SAME discovery order the build and the
- * bindings writer use (`syncWranglerBindings` / `ensureWrangler*` in cli/wrangler.ts,
- * `readWranglerDurableObjectBindings`): `wrangler.jsonc` first, then `wrangler.json`.
- */
-const ROOT_WRANGLER_CONFIG_NAMES = ['wrangler.jsonc', 'wrangler.json'] as const;
-
-/**
- * Discover the root wrangler config path the SAME way the build / bindings
- * writer do (first existing of {@link ROOT_WRANGLER_CONFIG_NAMES} under `root`),
- * used ONLY when the caller did not pin an explicit `configPath`. Without it the
- * DEFAULT `collectPlaintextVarWarnings(root)` produced a THREE-source map that
- * missed the root `wrangler.jsonc` `vars` layer (the build's lowest plaintext
- * layer), so a configured secret-looking / JSON-valued var went unwarned. An
- * explicit `configPath` (the GATE always pins one) still wins. Returns undefined
- * when no root config exists — then the root layer is simply absent, exactly as
- * the build would resolve it.
- */
-function discoverRootWranglerConfigPath(root: string): string | undefined {
-  for (const name of ROOT_WRANGLER_CONFIG_NAMES) {
-    const candidate = join(root, name);
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return undefined;
-}
-
 /** True when `value` is a non-array object (JSONC-parsed config record). */
 function isConfigRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -1427,34 +781,6 @@ function readConfigAccountId(configPath: string): string | undefined {
   }
   const accountId = parsed.account_id;
   return typeof accountId === 'string' && accountId.length > 0 ? accountId : undefined;
-}
-
-/**
- * Read the top-level `vars` map from the resolved root wrangler config (`-c`
- * target) — the LOWEST-precedence plaintext layer of the build's worker `vars`
- * (the Cloudflare plugin's `defu(mergeBindings-result, resolved)` keeps
- * `resolved.vars` keys the higher layers don't set). Same file/parse as
- * {@link parseRootConfig}, reading the SAME top-level env the deploy pins via
- * `--env=`.
- *
- * wrangler 4.107 accepts a var value of ANY JSON type (string, number,
- * boolean, null, object, array), not just strings: its `deployWorkerBindings`
- * ships a string var as `{ type: "plain_text" }` and EVERY non-string as
- * `{ type: "json" }` (wrangler-dist/cli.js `case "vars"`). Both are real var
- * bindings on the deployed worker, and `checkRemoteSecretsOverride` gives ANY
- * config var (string OR json) precedence over a same-named remote secret. So a
- * non-string member must be preserved as PRESENT here — dropping it would let a
- * same-named remote secret falsely discharge a required key while the deploy
- * ships the JSON var OVER that secret. Every declared member is kept, regardless
- * of value type; the caller inspects only presence/emptiness (never the value).
- * An unreadable/malformed config yields `{}` (no root layer).
- */
-function readConfigVars(configPath: string): Record<string, unknown> {
-  const parsed = parseRootConfig(configPath);
-  if (!parsed || !isConfigRecord(parsed.vars)) {
-    return {};
-  }
-  return { ...parsed.vars };
 }
 
 /**
@@ -1516,21 +842,11 @@ function selfHostEnvError(report: EnvValidationReport): SelfHostEnvValidationErr
 /**
  * The values-free description of a var's WINNING source, used to name the
  * ACTUAL origin of a configured-empty key in the remediation. Only the source
- * KIND and a plain filename (`.env.production`, `wrangler.jsonc`) ever appear —
- * never a value. `schema-default` is defensive only: a key with a `.default()`
- * is never REQUIRED (its `undefined` probe returns the default, not issues), so
- * it can never reach the present-empty gate.
+ * KIND is ever surfaced — never a value. The self-host gate reads ground truth
+ * (`dist/ssr/wrangler.json` `vars`), so every present key's source is `emitted`.
  */
 function describeVarSource(source: VarSource | undefined): string {
   switch (source?.kind) {
-    case 'dotenv':
-      return `the \`${source.file}\` file`;
-    case 'void-json':
-      return '`void.json` `worker.vars`';
-    case 'wrangler':
-      return `\`${source.file}\` \`vars\``;
-    case 'schema-default':
-      return 'your env schema `.default()`';
     case 'emitted':
       return 'the built worker config (`dist/ssr/wrangler.json` `vars`)';
     default:
