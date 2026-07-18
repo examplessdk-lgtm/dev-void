@@ -47,7 +47,11 @@ import {
   type DetectedFramework,
 } from '../plugin-inference.ts';
 import { collectPrerenderPaths, collectPrerenderPathsNode } from '../prerender.ts';
-import { readProjectPaths, resolveProjectPaths } from '../project-paths.ts';
+import {
+  assertNoRootSourceConventionConflicts,
+  readProjectPaths,
+  resolveProjectPaths,
+} from '../project-paths.ts';
 import { scanQueuesSync } from '../queues/scan.ts';
 import { scanRoutes } from '../router/scan.ts';
 import { scanWebSocketRoutesSync } from '../router/websocket.ts';
@@ -107,6 +111,7 @@ import {
 } from './package.ts';
 import {
   detectPreset,
+  hasBackendFiles,
   FRAMEWORK_PRESETS,
   formatProjectCommand,
   resolveProjectCommand,
@@ -1259,26 +1264,15 @@ export async function runCloudflareDeploy(
   // here BEFORE any sync helper that calls `requireProvisionModule()`.
   const provisionModule = await loadProvisionModule();
 
-  // 1. App-class guard — v1 supports WORKER-BEARING apps only (full Void app +
-  // framework SSR). `resolveStaticDeployPreset` returns non-null for static/SPA.
-  const staticPreset = resolveStaticDeployPreset(root, voidConfig, options);
-  if (staticPreset) {
-    log.error(
-      [
-        `deploy: --backend cloudflare does not yet support ${staticPreset.appType} apps.`,
-        'The Cloudflare backend currently deploys worker-bearing apps (a full Void app',
-        'or a framework SSR app). Deploy this app with `void deploy` (the managed',
-        'platform), or host the built assets on Cloudflare Pages / any static host.',
-      ].join('\n'),
-    );
-    return exit(1);
-  }
+  // 1. App-class narrowing — v1 of `--backend cloudflare` supports ONE well-understood
+  // shape: a FULL VOID APP (worker-bearing, running `routingPlugin`) on the Cloudflare
+  // Workers target, with D1/KV/R2/Queues/Hyperdrive and — on D1/SQLite — auth + ISR.
+  // Everything else FAILS CLOSED here, BEFORE any account / preflight / provision / build
+  // op, reusing the SAME classifiers the managed deploy path uses (`detectPreset` +
+  // `detectFramework`) so this fork can never disagree with the build about what the app is.
 
-  // 1b. Target guard — this backend deploys Cloudflare Workers ONLY. A node/bun/deno
-  // target builds a non-CF worker (no CF producer binding, no consumer handler), yet its
-  // queue files would still enter the desired set — so `--provision` could create orphan
-  // queues before the build reveals the mismatch. Reject BEFORE the desired set or any
-  // account operation.
+  // 1a. Target guard — this backend deploys Cloudflare Workers ONLY. A node/bun/deno target
+  // builds a non-CF worker; reject before the desired set or any account operation.
   if (isNodeTarget(voidConfig.target)) {
     log.error(
       [
@@ -1290,26 +1284,77 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
-  // 1c. Framework-class guard — v1 supports only Class-A framework SSR
-  // (tanstack-start, react-router, vinext), which composes the FULL Void plugin
-  // stack (routing + ISR + the CF Vite plugin) through the project's `vite build`.
-  // Class B/C frameworks (sveltekit, nuxt, analog, astro) get a lighter Void
-  // composition (`index.ts`): NO CF Vite plugin — so `vite build` never emits the
-  // `.wrangler/deploy/config.json` this backend deploys — and some drive their own
-  // non-Vite build CLI. Reject them BEFORE any account operation so the app class is
-  // fully settled before we ever trust a build artifact or touch Cloudflare.
+  // 1b. Framework guard — v1 defers the ENTIRE framework SSR path (every class). Class A
+  // (tanstack-start / react-router / vinext) composes the Void CF stack but the framework
+  // owns its own entry + routing; Class B/C (sveltekit / nuxt / analog / astro) build
+  // through their own adapter with NO CF Vite plugin, so `vite build` emits no worker
+  // artifact here. Rejecting all of them leaves exactly one supported class — the full Void
+  // app that runs `routingPlugin` and emits ISR coherently — so this fork never has to
+  // reason about framework wiring. Checked before the static guard so a framework app with
+  // no Void backend dirs gets the framework message, not a misleading static one.
   const framework = detectFramework(root);
-  if (framework && framework.class !== 'a') {
+  if (framework) {
     log.error(
       [
-        `deploy: --backend cloudflare does not support ${framework.name} (framework class ${framework.class.toUpperCase()}) in v1.`,
-        'This backend deploys full Void apps and Class-A framework SSR (tanstack-start,',
-        'react-router, vinext) as Cloudflare Workers. This framework builds through its own',
-        'adapter, not the Void Cloudflare plugin, so `vite build` emits no worker artifact',
-        'here. Deploy it with `void deploy` (the managed platform) or the framework’s own',
-        'Cloudflare adapter.',
+        `deploy: --backend cloudflare does not yet support framework SSR (${framework.name}).`,
+        'v1 deploys full Void apps only. Deploy this framework with `void deploy` (the managed',
+        'platform) or the framework’s own Cloudflare adapter. Framework SSR support for this',
+        'backend is a follow-up.',
       ].join('\n'),
     );
+    return exit(1);
+  }
+
+  // 1c. Static / SPA / SSG guard — reuse the MANAGED path's own classifier `detectPreset`
+  // (NOT `resolveStaticDeployPreset`, whose fallback fires only for an explicit `--dir` or a
+  // configured `inference.appType`, so an UNCONFIGURED static/SPA/SSG app slips past it).
+  // `detectPreset` structurally detects an SSG dep, a Vite-only SPA, and prebuilt html; the
+  // explicit `--dir` / `--spa` intents and a configured static appType are checked alongside
+  // it (a configured-but-not-yet-built static app has no structural marker for `detectPreset`).
+  const staticPreset = detectPreset(root, { dir: options.dir, spa: options.spa });
+  const configuredStatic =
+    voidConfig.inference?.appType === 'static' || voidConfig.inference?.appType === 'spa';
+  if (staticPreset || configuredStatic || options.dir || options.spa) {
+    const appType = staticPreset?.appType ?? (options.spa ? 'spa' : 'static');
+    log.error(
+      [
+        `deploy: --backend cloudflare does not yet support ${appType} (static-asset) apps.`,
+        'The Cloudflare backend v1 deploys full Void apps (worker-bearing) on the Cloudflare',
+        'Workers target. Deploy this app with `void deploy` (the managed platform), or host',
+        'the built assets on Cloudflare Pages / any static host.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
+  // 1d. Positive full-Void assertion — the app must actually be worker-bearing. Mirrors the
+  // managed dispatch's `runFullDeploy` branch (a `null` preset with no framework) and rejects
+  // a bare project with no backend files (no routes/pages/middleware/crons/queues/SSR entry)
+  // that `detectPreset` also returns `null` for.
+  if (!hasBackendFiles(root)) {
+    log.error(
+      [
+        'deploy: --backend cloudflare found no Void backend to deploy.',
+        'A full Void app has at least one of: routes/, pages/, middleware, crons/, queues/,',
+        'or an SSR entry. Add your server code, or use `void deploy` for a static site.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
+  // 1e. voidPlugin structural rejects — mirror the deterministic throws voidPlugin itself
+  // hits during `vite build`, reusing voidPlugin's OWN validators (no re-derivation), so an
+  // app that cannot build never reaches account mutation first: a sourceDir convention
+  // duplicated at the root (`assertNoRootSourceConventionConflicts`), a broken SSR entry
+  // (`validateSsrEntry`), and a malformed cron file (`scanJobsSync`). (sandbox / void/live /
+  // AI / remote / websocket are wired fine by the full-Void self-host build — no guard.)
+  const paths = resolveProjectPaths(root, voidConfig);
+  try {
+    assertNoRootSourceConventionConflicts(paths);
+    validateSsrEntry(root, paths);
+    scanJobsSync(root, paths.cronsDir);
+  } catch (err) {
+    log.error(`deploy: ${getErrorMessage(err)}`);
     return exit(1);
   }
 
@@ -1320,23 +1365,17 @@ export async function runCloudflareDeploy(
   const { desired, reasons, authEnabled, dialect, migrationsDir, migrations } =
     await computeDesiredCloudflareResources(root, voidConfig, configPath);
 
-  // 2b. Framework-queue guard — FAIL CLOSED before touching the account. A full
-  // Void app wires queues end-to-end through the normal `vite build`
-  // (`compileWorkerEntry` emits the native `queue()` handler and the CF plugin binds
-  // the producer/consumer), so those proceed. A detected (Class-A) framework app does
-  // NOT: `index.ts` suppresses queue bindings for a framework, and the framework's own
-  // worker entry has no queue handler. Provisioning a queue for one would create it
-  // with no producer binding and no consumer — an orphan. Full framework-queue
-  // support for `--backend cloudflare` is a follow-up.
-  if (framework != null && desired.queues.length > 0) {
+  // 2a. Postgres + auth guard — reject before any account op. This backend applies only
+  // checked-in `db/migrations/*.sql` to REMOTE D1 (SQLite); a Postgres/Hyperdrive app runs
+  // no D1 migrate step here, so it can neither create NOR verify the Better Auth tables. v1
+  // supports Void-managed auth on D1/SQLite only. (A pg app WITHOUT auth is still supported.)
+  if (authEnabled && dialect === 'postgresql') {
     log.error(
       [
-        'deploy: --backend cloudflare cannot yet wire queues for framework SSR apps.',
-        `This app defines queue(s): ${desired.queues.join(', ')}.`,
-        'A framework build binds no queue producer and no consumer handler, so',
-        'provisioning would leave an orphaned queue (nothing produces to or consumes',
-        'from it). Deploy with `void deploy` (the managed platform), or remove the',
-        'queue(s) until framework-queue support for this backend lands.',
+        'deploy: --backend cloudflare does not yet support Void-managed auth on a PostgreSQL app.',
+        'This backend verifies + applies auth tables through remote D1 (SQLite) migrations',
+        'only; it cannot provision or verify the Better Auth schema on Postgres/Hyperdrive.',
+        'Deploy this app with `void deploy` (the managed platform), or switch the app to D1.',
       ].join('\n'),
     );
     return exit(1);

@@ -325,8 +325,8 @@ describe('computeDesiredCloudflareResources — desired set from source', () => 
 // Orchestration flow
 // ---------------------------------------------------------------------------
 
-describe('runCloudflareDeploy — app-class guard', () => {
-  it('rejects a static/SPA app with exit(1) and never runs wrangler', async () => {
+describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)', () => {
+  it('rejects a configured static/SPA app with exit(1) and never runs wrangler', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'spaapp' }),
       'void.json': JSON.stringify({ inference: { appType: 'spa' } }),
@@ -336,6 +336,79 @@ describe('runCloudflareDeploy — app-class guard', () => {
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
+    expect(trace).toEqual([]);
+  });
+
+  it('rejects an UNCONFIGURED Vite SPA (no void.json appType) via the managed detectPreset classifier', async () => {
+    // resolveStaticDeployPreset returns null here (no --dir, no configured appType), so the
+    // old guard let this slip; detectPreset structurally classifies it as an SPA (vite dep,
+    // no backend files) and this fork now rejects it.
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'viteapp', dependencies: { vite: '6.0.0' } }),
+      'void.json': JSON.stringify({}),
+      'index.html': '<!doctype html><div id="app"></div>',
+    });
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toEqual([]);
+  });
+
+  it('rejects a bare --spa deploy before any account op', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'app' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+    });
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare', spa: true }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toEqual([]);
+  });
+
+  it('rejects a --dir static deploy before any account op', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'app' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+    });
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare', dir: 'dist' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toEqual([]);
+  });
+
+  it('rejects a bare project with no Void backend files (positive full-Void assertion)', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'bare' }),
+      'void.json': JSON.stringify({}),
+    });
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toEqual([]);
+  });
+
+  it('rejects a PostgreSQL app with auth enabled (pg + auth) before any account op', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'pgauth' }),
+      'void.json': JSON.stringify({ database: 'pg', auth: {} }),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+    });
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Rejected at the pg+auth guard (after the desired set, before whoami/provision).
     expect(trace).toEqual([]);
   });
 });
@@ -606,8 +679,8 @@ describe('runCloudflareDeploy — D1 migrations_dir gate', () => {
   });
 });
 
-describe('runCloudflareDeploy — framework queue guard', () => {
-  it('fails closed before touching the account for a framework app with a queue', async () => {
+describe('runCloudflareDeploy — full Void app queues', () => {
+  it('rejects a framework app (with a queue) via the framework guard before any account op', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({
         name: 'fwapp',
@@ -1167,7 +1240,7 @@ describe('runCloudflareDeploy — managed path does not import the provision mod
 // lighter Void composition that emits no worker artifact here — reject early.
 // ---------------------------------------------------------------------------
 
-describe('runCloudflareDeploy — framework-class guard', () => {
+describe('runCloudflareDeploy — framework guard (all framework SSR deferred in v1)', () => {
   it('rejects a Class B/C framework SSR app before any account operation', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({
@@ -1187,7 +1260,7 @@ describe('runCloudflareDeploy — framework-class guard', () => {
     expect(trace).toEqual([]);
   });
 
-  it('lets a Class-A framework SSR app proceed to deploy', async () => {
+  it('rejects a Class-A framework SSR app before any account operation (narrowed in v1)', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({
         name: 'tsapp',
@@ -1197,9 +1270,13 @@ describe('runCloudflareDeploy — framework-class guard', () => {
       'routes/index.ts': `export const GET = () => new Response('ok');`,
       'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'tsapp' }, null, 2),
     });
-    const { deps, trace } = harness();
-    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
-    expect(trace).toContain('wrangler:deploy');
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // The whole framework path is deferred — rejected before any account op.
+    expect(trace).toEqual([]);
   });
 });
 
