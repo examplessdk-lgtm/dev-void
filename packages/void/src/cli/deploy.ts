@@ -627,18 +627,22 @@ export type DeployBuildConfig = { mode: string; envDir: string | undefined };
  * Resolve the EXACT `{ mode, envDir }` the deploy build's `void:env` config hook observes,
  * so the secret WARN + GATE units validate the SAME `.env*` set the build ships. Runs the
  * FULL Vite config-hook pipeline via `resolveConfig(inlineConfig, 'build', 'production',
- * 'production')` — exactly what `vite build` calls internally — so, unlike
- * `loadConfigFromFile`, it captures a top-level `mode` (a config file may set
- * `mode: 'staging'`, which `void:env` then reads and the old hardcoded `'production'`
- * missed) AND an `envDir` an earlier plugin's `config` hook set. Run under the SANITIZED
- * build env (CLOUDFLARE_ENV etc. scrubbed) so it can never resolve a different env than the
- * build. `resolved.envDir` is ABSOLUTE; convert it back to the RAW, root-relative form the
- * secret units re-join (equal to root → `undefined`, matching `void:env`). Dynamic
- * `import('vite')` so this CLI file never pulls Vite into a managed deploy. On a throw the
- * caller fails closed — the real build would throw too, and validating a wrong env set is
- * exactly the leak this closes.
+ * 'production')` — exactly what `vite build` calls internally — so it captures a top-level
+ * `mode` (a config file may set `mode: 'staging'`, which `void:env` then reads and the old
+ * hardcoded `'production'` missed). Run under the SANITIZED build env (CLOUDFLARE_ENV etc.
+ * scrubbed) so it can never resolve a different env than the build.
+ *
+ * The value is read from the `void:env` plugin's `api` — the RAW `{ mode, envDir }` that hook
+ * OBSERVED at its own position — NOT from the final `resolved.envDir`. `void:env` loads its
+ * dotenv from the config visible at its hook, and Vite folds a LATER plugin's `config`-hook
+ * `envDir` into `resolved.envDir`; reading the final value would validate a `.env*` dir the
+ * build never loaded. Every self-host app runs `voidPlugin()` (this fork rejects everything
+ * else), so `void:env` is always present; if its captured value is somehow absent we fail
+ * closed. Dynamic `import('vite')` so this CLI file never pulls Vite into a managed deploy. On
+ * a throw the caller fails closed — the real build would throw too, and validating a wrong env
+ * set is exactly the leak this closes.
  */
-async function resolveDeployBuildConfig(
+export async function resolveDeployBuildConfig(
   root: string,
   env: NodeJS.ProcessEnv,
 ): Promise<DeployBuildConfig> {
@@ -647,11 +651,19 @@ async function resolveDeployBuildConfig(
   process.env = env;
   try {
     const resolved = await resolveConfig({ root }, 'build', 'production', 'production');
-    const envDir =
-      typeof resolved.envDir === 'string' && resolved.envDir !== resolved.root
-        ? relative(resolved.root, resolved.envDir)
-        : undefined;
-    return { mode: resolved.mode, envDir: envDir && envDir.length > 0 ? envDir : undefined };
+    const envPlugin = resolved.plugins.find((p) => p.name === 'void:env');
+    const captured = (
+      envPlugin?.api as
+        | { getVoidDeployBuildConfig?: () => DeployBuildConfig | undefined }
+        | undefined
+    )?.getVoidDeployBuildConfig?.();
+    if (!captured) {
+      throw new Error(
+        "the build config did not expose the void:env hook's mode/envDir — is voidPlugin() in your vite.config?",
+      );
+    }
+    const envDir = captured.envDir && captured.envDir.length > 0 ? captured.envDir : undefined;
+    return { mode: captured.mode, envDir };
   } finally {
     process.env = saved;
   }

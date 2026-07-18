@@ -7,6 +7,7 @@ import {
   checkWranglerMigrationApplySet,
   compareWranglerMigrationPaths,
   computeDesiredCloudflareResources,
+  resolveDeployBuildConfig,
   runCloudflareDeploy,
   validateAuthMigrationSchema,
   verifyGeneratedDeployConfig,
@@ -1928,9 +1929,36 @@ describe('runCloudflareDeploy — effective build mode/envDir', () => {
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
-    // Resolved after provision/migrate, before the secret gate + build.
+    // Resolved before the secret gate + build.
     expect(trace).not.toContain('gate');
     expect(trace).not.toContain('build');
+  });
+
+  // F4: the REAL resolver runs the full `resolveConfig` config-hook pipeline. A later plugin
+  // that returns a different `envDir` folds into `resolved.envDir`, but the build's `void:env`
+  // hook loaded its dotenv from the value IT observed (the root) — a seam-only test can't catch
+  // this, so exercise the real resolver end-to-end and prove preflight == build.
+  it('F4: reads the void:env HOOK-TIME envDir, not the final resolved.envDir a later plugin sets', async () => {
+    const srcIndex = join(import.meta.dirname, '..', '..', 'src', 'index.ts');
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'f4app', type: 'module' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'f4app' }, null, 2),
+      'vite.config.ts': [
+        `import { voidPlugin } from ${JSON.stringify(srcIndex)};`,
+        `export default {`,
+        `  plugins: [`,
+        `    voidPlugin(),`,
+        `    { name: 'later-envdir', config() { return { envDir: 'some/other/dir' }; } },`,
+        `  ],`,
+        `};`,
+      ].join('\n'),
+    });
+    const resolved = await resolveDeployBuildConfig(root, { ...process.env });
+    // The later plugin makes resolved.envDir = '<root>/some/other/dir', but void:env loaded
+    // from the root — the preflight must use the hook-time value (root → undefined).
+    expect(resolved).toEqual({ mode: 'production', envDir: undefined });
   });
 });
 

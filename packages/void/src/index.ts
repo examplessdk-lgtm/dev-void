@@ -1261,8 +1261,21 @@ export function voidPlugin(options?: {
 
   // Plugin that loads .env files and merges them into workerConfig.vars.
   // Runs before the Cloudflare plugin so vars are available as worker bindings.
+  //
+  // The `{ mode, envDir }` this hook OBSERVES (raw, root-relative) is exposed via `api` so the
+  // self-host `void deploy --backend cloudflare` secret preflight can validate the SAME `.env*`
+  // set the build ships. It must be captured HERE, at this hook's position, not read off the
+  // final `resolved.envDir`: config hooks run in sequence, and a LATER plugin's `config` hook
+  // that returns a different `envDir` would change `resolved.envDir` while this hook already
+  // loaded env from the value it saw — the preflight reading the final value would then diverge
+  // from what the build baked.
+  let voidDeployBuildConfig: { mode: string; envDir: string | undefined } | undefined;
   const envPlugin: Plugin = {
     name: 'void:env',
+    api: {
+      getVoidDeployBuildConfig: (): { mode: string; envDir: string | undefined } | undefined =>
+        voidDeployBuildConfig,
+    },
     config(userConfig, { mode, command }) {
       viteCommand = command;
       // Exclude the .void cache directory from the file watcher so that
@@ -1271,10 +1284,12 @@ export function voidPlugin(options?: {
       // Honour the user's `envDir` config — projects that keep .env files
       // in `config/` or similar would otherwise be silently ignored. Falls
       // back to the project root, matching Vite's own default.
-      const envDir =
+      const rawEnvDir =
         typeof userConfig.envDir === 'string' && userConfig.envDir.length > 0
-          ? join(root, userConfig.envDir)
-          : root;
+          ? userConfig.envDir
+          : undefined;
+      voidDeployBuildConfig = { mode, envDir: rawEnvDir };
+      const envDir = rawEnvDir ? join(root, rawEnvDir) : root;
       // loadEnv with prefix "" returns .env file vars AND all process.env vars.
       // filterLoadedEnv strips shell pollution (PATH, HOME, etc.) so only
       // .env-file vars reach worker bindings. stripInternalEnvKeys then
