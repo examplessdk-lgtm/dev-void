@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { writeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { join } from 'pathe';
 import type { SelfHostSchemaFacts, SelfHostSchemaFailureReason } from './env-validation.ts';
 
 /**
@@ -277,6 +278,25 @@ function emitResult(result: EnvSchemaProbeRawResult): void {
 }
 
 /**
+ * Read the RAW (root-relative, unnormalized) envDir the build's worker-vars loader
+ * actually uses, straight from the `void:env` config hook's captured value (exposed on
+ * that plugin's `api.getVoidDeployBuildConfig`). This is the only faithful input to the
+ * build's OWN `join(root, rawEnvDir)` computation: Vite's `resolved.envDir` is already
+ * normalized (`path.resolve`), which loses the distinction an absolute-root envDir needs.
+ * Returns `undefined` when the hook is absent (a non-void config), which the caller
+ * treats as "no custom raw envDir" and falls back to Vite's normalized view.
+ */
+function readBuildRawEnvDir(
+  plugins: ReadonlyArray<{ name: string; api?: unknown }>,
+): string | undefined {
+  const plugin = plugins.find((p) => p.name === 'void:env');
+  const api = plugin?.api as
+    | { getVoidDeployBuildConfig?: () => { mode: string; envDir: string | undefined } | undefined }
+    | undefined;
+  return api?.getVoidDeployBuildConfig?.()?.envDir;
+}
+
+/**
  * CHILD side (`facts`): resolve the Vite config HERE (the FULL plugin pipeline the
  * real `vite build` runs, under the scrubbed env — never in the parent) purely to
  * read the effective `{ envDir, mode }` and reject a custom envDir / non-production
@@ -292,12 +312,30 @@ async function runFactsChild(root: string): Promise<void> {
   // `false` (env loading disabled) or the absolute normalized dir; the default
   // equals `resolved.root`.
   const resolved = await resolveConfig({ root }, 'build', 'production', 'production');
-  const envDir = resolved.envDir as string | false;
-  if (envDir === false || envDir !== resolved.root) {
-    // A custom envDir makes the build read `.env*` from a non-root dir, so the
-    // worker `vars` (from the build's envDir) can diverge from the auth artifact
-    // (generated under the project root) — v1 supports only a root-relative envDir.
-    // Only the fixed reason code crosses the boundary (never the raw envDir string).
+  // Reject a custom envDir by the SAME computation the BUILD uses. Vite normalizes
+  // `resolved.envDir` via `path.resolve(root, envDir)` (absolute-safe), so an ABSOLUTE
+  // envDir equal to the project root collapses to `resolved.root` and would ACCEPT — but
+  // the build's worker-vars loader (`index.ts`) uses `join(root, rawEnvDir)`, and
+  // `join(root, <absolute root>)` DUPLICATES the path (`/proj/proj`), so the build loads
+  // `vars` from the WRONG dir while the auth artifact is generated under the root: the
+  // exact vars-vs-auth divergence this guard exists to reject. So derive the build's
+  // ACTUAL vars dir from the RAW envDir the `void:env` hook captured and reject unless it
+  // equals the root — unset / `'.'` → root → accept; a relative subdir → non-root →
+  // reject; an absolute-root → `join` duplicates → non-root → reject. Also keep rejecting
+  // Vite's own `envDir === false` (env loading disabled) and its normalized-non-root view
+  // (a robust fallback that still catches a custom subdir if the `void:env` hook is absent).
+  // NOTE: `index.ts` uses `join` (not Vite's `resolve`) for the raw envDir, so the build
+  // itself mishandles an absolute envDir; this guard fails such configs CLOSED here.
+  // Switching `index.ts` `join`→`resolve` is a separate build-side follow-up (not done here).
+  const rawEnvDir = readBuildRawEnvDir(resolved.plugins);
+  const buildVarsDir = rawEnvDir ? join(resolved.root, rawEnvDir) : resolved.root;
+  if (
+    resolved.envDir === false ||
+    resolved.envDir !== resolved.root ||
+    buildVarsDir !== resolved.root
+  ) {
+    // v1 supports only a root-relative envDir. Only the fixed reason code crosses the
+    // boundary (never the raw envDir string).
     emitResult({ kind: 'reject', reason: 'custom-envdir' });
     return;
   }

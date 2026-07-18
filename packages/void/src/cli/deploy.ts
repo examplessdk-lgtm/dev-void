@@ -642,6 +642,8 @@ function deployPointerPath(root: string): string {
  *   - global auth email:    `CLOUDFLARE_EMAIL` / `CF_EMAIL`
  *   - user service key:     `CLOUDFLARE_API_USER_SERVICE_KEY`
  *   - CF authorization tok: `WRANGLER_CF_AUTHORIZATION_TOKEN`
+ *   - R2 SQL auth token:    `WRANGLER_R2_SQL_AUTH_TOKEN` (a Bearer credential wrangler
+ *     reads via `getEnvironmentVariableFactory`, falling back to `CLOUDFLARE_API_TOKEN`)
  *   - Access service token: `CLOUDFLARE_ACCESS_CLIENT_ID` / `CLOUDFLARE_ACCESS_CLIENT_SECRET`
  * The env-schema probe needs NO credentials, so the whole set is scrubbed from its
  * child env — a leaking env.ts can never read a real credential the parent holds.
@@ -657,6 +659,7 @@ const WRANGLER_AUTH_CREDENTIAL_ENV_VARS = [
   'CF_EMAIL',
   'CLOUDFLARE_API_USER_SERVICE_KEY',
   'WRANGLER_CF_AUTHORIZATION_TOKEN',
+  'WRANGLER_R2_SQL_AUTH_TOKEN',
   'CLOUDFLARE_ACCESS_CLIENT_ID',
   'CLOUDFLARE_ACCESS_CLIENT_SECRET',
 ];

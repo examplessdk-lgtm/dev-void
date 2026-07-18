@@ -215,6 +215,35 @@ function d1Project(
   });
 }
 
+/**
+ * A minimal `vite.config.ts` carrying a `void:env` plugin STUB that mirrors how the real
+ * plugin (index.ts) captures the RAW (unnormalized) envDir and exposes it via
+ * `api.getVoidDeployBuildConfig`. `envDirExpr` is spliced verbatim as the config's `envDir`
+ * (e.g. `"'.'"`, `'import.meta.dirname'`), so the real probe exercises the build's own
+ * `join(root, rawEnvDir)` guard without pulling the full void pipeline into the child.
+ */
+function viteConfigWithVoidEnvStub(envDirExpr: string): string {
+  return [
+    `let captured;`,
+    `export default {`,
+    `  envDir: ${envDirExpr},`,
+    `  plugins: [`,
+    `    {`,
+    `      name: 'void:env',`,
+    `      api: { getVoidDeployBuildConfig: () => captured },`,
+    `      config(userConfig, { mode }) {`,
+    `        const raw =`,
+    `          typeof userConfig.envDir === 'string' && userConfig.envDir.length > 0`,
+    `            ? userConfig.envDir`,
+    `            : undefined;`,
+    `        captured = { mode, envDir: raw };`,
+    `      },`,
+    `    },`,
+    `  ],`,
+    `};`,
+  ].join('\n');
+}
+
 /** One non-destructive checked-in migration so the remote migrate path runs. */
 const INIT_MIGRATION = {
   'db/migrations/0000_init.sql': `CREATE TABLE notes (id integer primary key);`,
@@ -2262,6 +2291,39 @@ describe('runCloudflareDeploy — envDir / mode narrowing (rejected pre-account)
     }
   });
 
+  it('rejects an ABSOLUTE envDir equal to the project root pre-account — the build mis-loads it (REAL probe)', async () => {
+    const savedNodeOptions = process.env.NODE_OPTIONS;
+    process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, '--experimental-transform-types']
+      .filter(Boolean)
+      .join(' ');
+    try {
+      // Vite normalizes `envDir` via `path.resolve(root, envDir)`, so an ABSOLUTE envDir equal
+      // to the root collapses to `resolved.root` and Vite's own view would ACCEPT. But the build
+      // loads worker vars with `join(root, rawEnvDir)`, which DUPLICATES an absolute path
+      // (`/proj/proj`) → the build reads vars from the wrong dir. The probe now reads the RAW
+      // envDir the `void:env` hook captured and rejects via the build's own computation, before
+      // any account op. `import.meta.dirname` in the config === the project root (absolute).
+      const root = d1Project(PROVISIONED_D1, {
+        'package.json': JSON.stringify({ name: 'myapp', type: 'module' }),
+        'vite.config.ts': viteConfigWithVoidEnvStub('import.meta.dirname'),
+      });
+      const { deps, trace, wranglerArgs, exitCalls } = harness({ resolveSchemaFacts: undefined });
+      await expect(
+        runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+      ).rejects.toBeInstanceOf(ExitError);
+      expect(exitCalls).toEqual([1]);
+      // Pre-account: nothing ran — no whoami, no provision, no build, no deploy.
+      expect(trace).toEqual([]);
+      expect(wranglerArgs).toEqual([]);
+    } finally {
+      if (savedNodeOptions === undefined) {
+        delete process.env.NODE_OPTIONS;
+      } else {
+        process.env.NODE_OPTIONS = savedNodeOptions;
+      }
+    }
+  });
+
   it('rejects a non-production build mode pre-account — no whoami / provision / build', async () => {
     const root = d1Project(PROVISIONED_D1);
     const { deps, trace, wranglerArgs, exitCalls } = harness({
@@ -2662,6 +2724,38 @@ describe('env-schema probe (real subprocess)', () => {
     }
   });
 
+  it('rejects an ABSOLUTE envDir equal to the root (build`s join(root, rawEnvDir) duplicates it)', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'envapp', type: 'module' }),
+      // `import.meta.dirname` in the config === the project root (absolute). Vite normalizes it
+      // back to `resolved.root` (would ACCEPT), but the build's `join(root, <absolute root>)`
+      // duplicates the path — the probe reads the RAW envDir and rejects via that computation.
+      'vite.config.ts': viteConfigWithVoidEnvStub('import.meta.dirname'),
+    });
+    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, withTransform({ ...process.env }));
+    expect(r.kind).toBe('reject');
+    if (r.kind === 'reject') {
+      expect(r.reason).toBe('custom-envdir');
+      // Only the fixed reason code crosses the boundary — never the raw (absolute) envDir string.
+      expect(JSON.stringify(r)).not.toContain(root);
+    }
+  });
+
+  it('accepts envDir: "." (the root-relative dot resolves to the project root)', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'envapp', type: 'module' }),
+      'env.ts': [
+        `import { defineEnv } from ${JSON.stringify(srcEnvPublic)};`,
+        `import { string } from ${JSON.stringify(srcEnvHelpers)};`,
+        `export default defineEnv({ API_URL: string() });`,
+      ].join('\n'),
+      // `join(root, '.') === root` and `resolve(root, '.') === root` — both views accept.
+      'vite.config.ts': viteConfigWithVoidEnvStub(`'.'`),
+    });
+    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, withTransform({ ...process.env }));
+    expect(r.kind).toBe('ok');
+  });
+
   it('accepts the default (root) envDir + production mode', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'envapp', type: 'module' }),
@@ -2754,6 +2848,7 @@ describe('env-schema probe (real subprocess)', () => {
       'CF_EMAIL',
       'CLOUDFLARE_API_USER_SERVICE_KEY',
       'WRANGLER_CF_AUTHORIZATION_TOKEN',
+      'WRANGLER_R2_SQL_AUTH_TOKEN',
       'CLOUDFLARE_ACCESS_CLIENT_ID',
       'CLOUDFLARE_ACCESS_CLIENT_SECRET',
     ];
