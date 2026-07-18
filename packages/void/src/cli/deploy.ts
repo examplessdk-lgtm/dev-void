@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseJsoncConfig, type ParseError } from 'jsonc-parser';
-import { basename, dirname, join, relative, resolve } from 'pathe';
+import { basename, dirname, join, normalize, relative, resolve } from 'pathe';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
@@ -573,6 +573,14 @@ function deployChildEnv(accountId: string, apiBaseUrl: string): NodeJS.ProcessEn
   for (const name of DEPLOY_CONFIG_OVERRIDE_ENV_VARS) {
     provision.deleteEnvVarCaseAware(env, name);
   }
+  // Pin WRANGLER_LOG=log for the whole deploy so wrangler's `d1 migrations list` sentinels
+  // ('No migrations to apply!' / 'Migrations to be applied:'), emitted at logger level
+  // `log`, are NEVER suppressed by an ambient WRANGLER_LOG=none|error|warn|info — otherwise
+  // a declined/partial apply prints no marker and the pending-check would pass open. The
+  // canonical spelling is scrubbed case-aware FIRST so no mixed-case ambient value shadows
+  // the pin on win32; `log` is wrangler's own default level, so normal output is unchanged.
+  provision.deleteEnvVarCaseAware(env, 'WRANGLER_LOG');
+  env.WRANGLER_LOG = 'log';
   return env;
 }
 
@@ -782,6 +790,8 @@ export interface CloudflareDeployDeps {
   verifyDeployConfig?: typeof verifyGeneratedDeployConfig;
   /** Pre-remote-migrate gate seam (default: {@link assertRemoteMigrationsDeployable}). */
   assertMigrationsDeployable?: typeof assertRemoteMigrationsDeployable;
+  /** Migration apply-set equality gate seam (default: {@link checkWranglerMigrationApplySet}). */
+  checkMigrationApplySet?: typeof checkWranglerMigrationApplySet;
   /** Raw Vite `envDir` resolver seam (default: {@link resolveViteEnvDir}). */
   resolveEnvDir?: (root: string) => string | undefined | Promise<string | undefined>;
   /** Override CI / non-interactive detection (default: `!stdin.isTTY || getTokenSource()==='ci'`). */
@@ -1188,6 +1198,132 @@ export function assertRemoteMigrationsDeployable(
 }
 
 /**
+ * wrangler 4.107's dir-relative migration glob for a D1 entry: the default `*.sql`, or a
+ * configured `migrations_pattern` with its `<dir>/` prefix stripped (matching wrangler's
+ * `resolveMigrationsConfig` / `stripDirPrefix`). wrangler UserErrors when the pattern is not
+ * under the dir — mirror that fail-closed so this backend never diverges from what wrangler
+ * would enumerate.
+ */
+function migrationDirRelativePattern(
+  migrationsDirRaw: string,
+  migrationsPattern: string | undefined,
+): { ok: true; pattern: string } | { ok: false; reason: string } {
+  if (typeof migrationsPattern !== 'string' || migrationsPattern.length === 0) {
+    return { ok: true, pattern: '*.sql' };
+  }
+  const normalizeRel = (p: string): string => {
+    const n = normalize(p.replace(/\\/g, '/'));
+    return n.endsWith('/') ? n.slice(0, -1) : n;
+  };
+  const normDir = normalizeRel(migrationsDirRaw);
+  const normPattern = normalizeRel(migrationsPattern);
+  if (normDir === '.') {
+    return { ok: true, pattern: normPattern };
+  }
+  if (normPattern.startsWith(`${normDir}/`)) {
+    return { ok: true, pattern: normPattern.slice(normDir.length + 1) };
+  }
+  return {
+    ok: false,
+    reason:
+      `deploy: migrations_pattern ${JSON.stringify(migrationsPattern)} is not under ` +
+      `migrations_dir ${JSON.stringify(migrationsDirRaw)} — wrangler rejects this config. ` +
+      `Align them, then rerun.`,
+  };
+}
+
+/**
+ * Assert the migration files wrangler 4.107 will APPLY equal the gated source set. wrangler
+ * resolves its OWN files from the D1 entry's `migrations_dir` (default `./migrations`,
+ * relative to the config-file dir) + `migrations_pattern` (default `<dir>/*.sql`), globs them
+ * ({ dot:false }, recursive), and tracks each by its dir-relative name (`.sql` kept) — the
+ * exact set `d1 migrations apply` runs against REMOTE D1. This backend only VALIDATES the set
+ * `collectMigrations` reads from Void's on-disk migrations dir; a stale/extra file (e.g.
+ * `seed.sql`, which `collectMigrations` skips but wrangler's `*.sql` matches), a differing
+ * dir, or a divergent content would otherwise be applied to production UNVALIDATED. Require
+ * the two sets EQUAL by normalized name AND content; otherwise fail closed. Exported for unit
+ * testing; the migrations_pattern branch loads `tinyglobby` lazily so the default flat case
+ * stays dependency-free.
+ */
+export async function checkWranglerMigrationApplySet(
+  configPath: string,
+  config: Record<string, unknown>,
+  binding: string,
+  migrationsDirRaw: string,
+  gated: Array<{ name: string; sql: string }>,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const absDir = resolve(dirname(configPath), migrationsDirRaw);
+  if (!existsSync(absDir)) {
+    return {
+      ok: false,
+      reason:
+        `deploy: configured migrations_dir ${JSON.stringify(migrationsDirRaw)} resolves to ` +
+        `${absDir}, which does not exist — wrangler would have nothing to apply (or error). ` +
+        `Align "migrations_dir" with your db/migrations, then rerun.`,
+    };
+  }
+  const migrationsPattern = readStoredResourceName(
+    config,
+    'd1_databases',
+    binding,
+    'migrations_pattern',
+  );
+  const dirRel = migrationDirRelativePattern(migrationsDirRaw, migrationsPattern);
+  if (!dirRel.ok) {
+    return { ok: false, reason: dirRel.reason };
+  }
+  let names: Array<string>;
+  if (dirRel.pattern === '*.sql') {
+    // wrangler's default: top-level `.sql` files, dotfiles excluded ({ dot:false }).
+    names = readdirSync(absDir, { withFileTypes: true })
+      .filter(
+        (entry) => entry.isFile() && entry.name.endsWith('.sql') && !entry.name.startsWith('.'),
+      )
+      .map((entry) => entry.name);
+  } else {
+    const { globSync } = await import('tinyglobby');
+    names = globSync(dirRel.pattern, {
+      cwd: absDir,
+      dot: false,
+      onlyFiles: true,
+      expandDirectories: false,
+    });
+  }
+  const applied = new Map<string, string>();
+  for (const name of names) {
+    const normalized = name.replace(/\\/g, '/');
+    applied.set(normalized, readFileSync(join(absDir, name), 'utf-8'));
+  }
+  const gatedMap = new Map(gated.map((m) => [m.name.replace(/\\/g, '/'), m.sql]));
+  const extra = [...applied.keys()].filter((k) => !gatedMap.has(k)).sort();
+  const missing = [...gatedMap.keys()].filter((k) => !applied.has(k)).sort();
+  const changed = [...applied.keys()]
+    .filter((k) => gatedMap.has(k) && gatedMap.get(k) !== applied.get(k))
+    .sort();
+  if (extra.length === 0 && missing.length === 0 && changed.length === 0) {
+    return { ok: true };
+  }
+  const lines = [
+    `deploy: the migrations wrangler would apply to remote D1 do not match Void's validated set (${absDir}).`,
+  ];
+  if (extra.length > 0) {
+    lines.push(`  • wrangler would ALSO apply (not validated by Void): ${extra.join(', ')}`);
+  }
+  if (missing.length > 0) {
+    lines.push(`  • validated by Void but NOT in wrangler's set: ${missing.join(', ')}`);
+  }
+  if (changed.length > 0) {
+    lines.push(`  • content differs between Void's copy and wrangler's: ${changed.join(', ')}`);
+  }
+  lines.push(
+    'Only Void-managed db/migrations/*.sql may be applied. Remove stray .sql (e.g. seed.sql) ' +
+      'from migrations_dir, or align "migrations_dir"/"migrations_pattern" with your ' +
+      'db/migrations, then rerun.',
+  );
+  return { ok: false, reason: lines.join('\n') };
+}
+
+/**
  * Default {@link DeployWranglerRun}: spawns the project-local wrangler REAL CLI
  * (via {@link resolveWranglerArgv}, shell-free) with ONE pinned transport in the
  * child env (via {@link deployChildEnv} — reused provisioner scrub/pin: CF Access +
@@ -1581,58 +1717,15 @@ export async function runCloudflareDeploy(
   const workerName = readWranglerTopLevelString(rootConfig, 'name') ?? deriveWorkerName(root);
   writeProvisionedWranglerConfig(root, { name: workerName, accountId }, { configPath });
 
-  // 6. Remote D1 migrations (sqlite D1 apps only; pg/Hyperdrive apps skip). Run ONLY
-  // when there ARE checked-in migrations: a D1 desired purely from DB-use or auth can
-  // have no `db/migrations` at all, and wrangler 4.107 HARD-FAILS `d1 migrations apply`
-  // on a missing/empty folder (it never no-ops), so a zero-migration app must skip the
-  // command entirely rather than error. When migrations DO exist, `migrations_dir` must
-  // be present in the config: wrangler defaults a missing value to `./migrations`
-  // (relative to the config) and would apply an unrelated folder to REMOTE D1.
-  if (desired.d1 && migrations.length > 0) {
-    const migrateConfig = parseRootWranglerConfig(configPath);
-    const d1MigrationsDir = readStoredResourceName(
-      migrateConfig,
-      'd1_databases',
-      desired.d1.binding,
-      'migrations_dir',
-    );
-    if (!d1MigrationsDir) {
-      log.error(
-        [
-          `deploy: D1 binding ${desired.d1.binding} has no "migrations_dir" in ${configPath}.`,
-          'Refusing to run `wrangler d1 migrations apply` — wrangler would default to',
-          '`./migrations` (relative to the config) and apply an unrelated folder to your',
-          'remote database, or error. Run `void deploy --backend cloudflare --provision`',
-          'once to set `migrations_dir` (it writes `./db/migrations`), or add it yourself.',
-        ].join('\n'),
-      );
-      return exit(1);
-    }
-    // wrangler 4.107 resolves the migrate target by FIRST-matching the passed token
-    // against `database_name` OR `binding` (getDatabaseInfoFromConfig, src/d1/utils.ts)
-    // and reads THAT entry's `migrations_dir`. The gate validated the entry matched by
-    // BINDING, so migrate by a token that resolves to exactly that entry — fail closed
-    // when an earlier alias entry would shadow it (else wrangler could migrate the wrong
-    // DB / an unrelated folder though the gate passed).
-    const migrateTarget = resolveD1MigrateTarget(migrateConfig, desired.d1.binding);
-    if (!migrateTarget.ok) {
-      log.error(
-        [
-          `deploy: cannot safely run D1 migrations for binding ${desired.d1.binding} — ${migrateTarget.reason}`,
-          'wrangler resolves `d1 migrations apply <name>` by first-matching the name against',
-          "each entry's database_name OR binding, so an ambiguous token could migrate a",
-          'different database than the one validated. Give each D1 database a unique',
-          'database_name (and binding), then rerun.',
-        ].join('\n'),
-      );
-      return exit(1);
-    }
-
-    // 6a. Run the SAME gates the managed deploy runs BEFORE any remote apply —
-    // schema drift, journal coherence, and destructive-op-without-pragma. wrangler
-    // auto-applies destructive SQL in CI (its confirmation defaults to "yes" in
-    // non-interactive shells), so without these gates a destructive migration with no
-    // explicit `-- void:allow-destructive` pragma would run unattended against remote D1.
+  // 6. Migration gates + remote D1 apply — D1/SQLite apps only (pg/Hyperdrive skip).
+  if (desired.d1) {
+    // 6a. Run the SAME gates the managed deploy runs — schema drift, journal coherence,
+    // destructive-op-without-pragma — for EVERY D1 app REGARDLESS of migration count. The
+    // managed path runs `assertDeploySchemaDriftFree` + `assertJournalCoherence`
+    // unconditionally; a `db/schema.ts` with no generated migration is drift the old
+    // count-gated check silently skipped (shipping a schemaless remote DB). wrangler also
+    // auto-applies destructive SQL in CI (its confirmation defaults to "yes" non-
+    // interactively). `validateMigrations` self-guards on an empty set.
     try {
       (deps.assertMigrationsDeployable ?? assertRemoteMigrationsDeployable)(
         root,
@@ -1645,51 +1738,139 @@ export async function runCloudflareDeploy(
       return exit(1);
     }
 
-    // 6b. Apply pending migrations to remote D1.
-    const migrate = await Promise.resolve(
-      runWrangler(
-        ['d1', 'migrations', 'apply', migrateTarget.token, '--remote', '-c', configPath, '--env='],
-        { capture: false },
-      ),
-    );
-    if (!isCleanWranglerExit(migrate)) {
-      log.error(
-        `deploy: remote D1 migrations failed for "${migrateTarget.token}" (exit ${String(migrate.status)}). ` +
-          'Fix the migration and rerun. Note: D1 always enforces foreign_keys=ON — a Drizzle ' +
-          'table-rebuild using PRAGMA foreign_keys=OFF must use PRAGMA defer_foreign_keys instead.',
+    // Apply/list ONLY when there ARE checked-in migrations: a D1 desired purely from DB-use
+    // or auth can have no `db/migrations`, and wrangler 4.107 HARD-FAILS
+    // `d1 migrations apply` on a missing/empty folder (it never no-ops).
+    if (migrations.length > 0) {
+      // `migrations_dir` must be present in the config: wrangler defaults a missing value to
+      // `./migrations` (relative to the config) and would apply an unrelated folder.
+      const migrateConfig = parseRootWranglerConfig(configPath);
+      const d1MigrationsDir = readStoredResourceName(
+        migrateConfig,
+        'd1_databases',
+        desired.d1.binding,
+        'migrations_dir',
       );
-      return exit(1);
-    }
+      if (!d1MigrationsDir) {
+        log.error(
+          [
+            `deploy: D1 binding ${desired.d1.binding} has no "migrations_dir" in ${configPath}.`,
+            'Refusing to run `wrangler d1 migrations apply` — wrangler would default to',
+            '`./migrations` (relative to the config) and apply an unrelated folder to your',
+            'remote database, or error. Run `void deploy --backend cloudflare --provision`',
+            'once to set `migrations_dir` (it writes `./db/migrations`), or add it yourself.',
+          ].join('\n'),
+        );
+        return exit(1);
+      }
+      // wrangler 4.107 resolves the migrate target by FIRST-matching the passed token
+      // against `database_name` OR `binding` (getDatabaseInfoFromConfig, src/d1/utils.ts)
+      // and reads THAT entry's `migrations_dir`. The gate validated the entry matched by
+      // BINDING, so migrate by a token that resolves to exactly that entry — fail closed
+      // when an earlier alias entry would shadow it (else wrangler could migrate the wrong
+      // DB / an unrelated folder though the gate passed).
+      const migrateTarget = resolveD1MigrateTarget(migrateConfig, desired.d1.binding);
+      if (!migrateTarget.ok) {
+        log.error(
+          [
+            `deploy: cannot safely run D1 migrations for binding ${desired.d1.binding} — ${migrateTarget.reason}`,
+            'wrangler resolves `d1 migrations apply <name>` by first-matching the name against',
+            "each entry's database_name OR binding, so an ambiguous token could migrate a",
+            'different database than the one validated. Give each D1 database a unique',
+            'database_name (and binding), then rerun.',
+          ].join('\n'),
+        );
+        return exit(1);
+      }
 
-    // 6c. Verify NO migrations remain pending on remote. `d1 migrations apply` EXITS 0
-    // when an interactive user DECLINES its confirmation (a no-op that reads as success),
-    // and prints no machine-readable applied set. A separate `d1 migrations list --remote`
-    // queries the remote `d1_migrations` table and prints "Migrations to be applied:" when
-    // any remain — so a declined/partial apply can never pass as a clean deploy.
-    const migrateList = await Promise.resolve(
-      runWrangler(
-        ['d1', 'migrations', 'list', migrateTarget.token, '--remote', '-c', configPath, '--env='],
-        { capture: true },
-      ),
-    );
-    if (!isCleanWranglerExit(migrateList)) {
-      log.error(
-        `deploy: could not verify the remote migration state for "${migrateTarget.token}" ` +
-          `(\`d1 migrations list\` exit ${String(migrateList.status)}). Refusing to deploy against ` +
-          'an unverified schema — rerun once wrangler can reach your account.',
+      // 6b. The EXACT files wrangler will apply (its own `migrations_dir` + `migrations_pattern`
+      // resolution) must EQUAL the gated source set by normalized name AND content. Otherwise
+      // a stray/extra `.sql` (e.g. `seed.sql`, which the gate's `collectMigrations` skips but
+      // wrangler's `*.sql` glob matches), a differing dir, or a divergent file would be applied
+      // to REMOTE D1 unvalidated. The gate above only checked `migrations`; this makes the
+      // applied set == the validated set.
+      const applyCheck = await (deps.checkMigrationApplySet ?? checkWranglerMigrationApplySet)(
+        configPath,
+        migrateConfig,
+        desired.d1.binding,
+        d1MigrationsDir,
+        migrations,
       );
-      return exit(1);
-    }
-    if (migrateList.stdout.includes('Migrations to be applied:')) {
-      log.error(
-        [
-          `deploy: remote D1 still has UNAPPLIED migrations for "${migrateTarget.token}" after apply.`,
-          '`wrangler d1 migrations apply` exits 0 even when its confirmation is declined, so',
-          'the schema may be un-migrated while the code that needs it is about to deploy.',
-          'Re-run and confirm the migration (or apply it non-interactively), then rerun.',
-        ].join('\n'),
+      if (!applyCheck.ok) {
+        log.error(applyCheck.reason);
+        return exit(1);
+      }
+
+      // 6c. Apply pending migrations to remote D1.
+      const migrate = await Promise.resolve(
+        runWrangler(
+          [
+            'd1',
+            'migrations',
+            'apply',
+            migrateTarget.token,
+            '--remote',
+            '-c',
+            configPath,
+            '--env=',
+          ],
+          { capture: false },
+        ),
       );
-      return exit(1);
+      if (!isCleanWranglerExit(migrate)) {
+        log.error(
+          `deploy: remote D1 migrations failed for "${migrateTarget.token}" (exit ${String(migrate.status)}). ` +
+            'Fix the migration and rerun. Note: D1 always enforces foreign_keys=ON — a Drizzle ' +
+            'table-rebuild using PRAGMA foreign_keys=OFF must use PRAGMA defer_foreign_keys instead.',
+        );
+        return exit(1);
+      }
+
+      // 6d. Verify NO migrations remain pending on remote. `d1 migrations apply` EXITS 0 when
+      // its confirmation is DECLINED (interactive) — a no-op that reads as success — and prints
+      // no machine-readable applied set. `d1 migrations list --remote` queries the remote
+      // `d1_migrations` table and prints "Migrations to be applied:" when any remain, else the
+      // affirmative "No migrations to apply!". Both emit at wrangler's `log` level, which the
+      // child env PINS (`WRANGLER_LOG=log`), so an ambient reduced level can never suppress
+      // them. Reject on the pending marker, REQUIRE the affirmative sentinel, and reject any
+      // empty/unrecognized output rather than trust an absent marker.
+      const migrateList = await Promise.resolve(
+        runWrangler(
+          ['d1', 'migrations', 'list', migrateTarget.token, '--remote', '-c', configPath, '--env='],
+          { capture: true },
+        ),
+      );
+      if (!isCleanWranglerExit(migrateList)) {
+        log.error(
+          `deploy: could not verify the remote migration state for "${migrateTarget.token}" ` +
+            `(\`d1 migrations list\` exit ${String(migrateList.status)}). Refusing to deploy against ` +
+            'an unverified schema — rerun once wrangler can reach your account.',
+        );
+        return exit(1);
+      }
+      if (migrateList.stdout.includes('Migrations to be applied:')) {
+        log.error(
+          [
+            `deploy: remote D1 still has UNAPPLIED migrations for "${migrateTarget.token}" after apply.`,
+            '`wrangler d1 migrations apply` exits 0 even when its confirmation is declined, so',
+            'the schema may be un-migrated while the code that needs it is about to deploy.',
+            'Re-run and confirm the migration (or apply it non-interactively), then rerun.',
+          ].join('\n'),
+        );
+        return exit(1);
+      }
+      if (!migrateList.stdout.includes('No migrations to apply!')) {
+        log.error(
+          [
+            `deploy: could not confirm the remote migration state for "${migrateTarget.token}".`,
+            '`wrangler d1 migrations list` printed neither the "no migrations to apply" nor the',
+            '"migrations to be applied" marker (WRANGLER_LOG is pinned so they are never',
+            'suppressed) — refusing to deploy against an unverified schema. Rerun once wrangler',
+            'can reach your account.',
+          ].join('\n'),
+        );
+        return exit(1);
+      }
     }
   }
 

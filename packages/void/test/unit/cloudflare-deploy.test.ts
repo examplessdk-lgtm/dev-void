@@ -3,6 +3,7 @@ import { dirname, join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import {
   assertNoConfigOverrideInProjectDotenv,
+  checkWranglerMigrationApplySet,
   computeDesiredCloudflareResources,
   runCloudflareDeploy,
   verifyGeneratedDeployConfig,
@@ -79,6 +80,11 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     if (args[0] === 'whoami') {
       return { ...cleanExit, stdout: '{"loggedIn":true}' };
     }
+    // `d1 migrations list` (the post-apply pending verify) must print wrangler's affirmative
+    // "no pending" sentinel under the pinned WRANGLER_LOG=log, else the B3 check fails closed.
+    if (args[0] === 'd1' && args[1] === 'migrations' && args[2] === 'list') {
+      return { ...cleanExit, stdout: '✅ No migrations to apply!\n' };
+    }
     return cleanExit;
   };
   const deps: CloudflareDeployDeps = {
@@ -113,6 +119,9 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     assertMigrationsDeployable: () => {
       trace.push('migrate-gate');
     },
+    // Stub the migration apply-set equality gate so orchestration tests need no on-disk
+    // migration dir; a dedicated suite exercises the real `checkWranglerMigrationApplySet`.
+    checkMigrationApplySet: async () => ({ ok: true }),
     // Stub the Vite envDir resolver so orchestration tests never load a vite config.
     resolveEnvDir: () => undefined,
     ...overrides,
@@ -1387,13 +1396,15 @@ describe('runCloudflareDeploy — migrations dir / count / auth', () => {
     expect(desired.d1?.migrationsDir).toBe('./src/db/migrations');
   });
 
-  it('skips the remote migrate when a D1 app has no checked-in migrations', async () => {
+  it('runs the drift/journal gate but skips the wrangler apply when a D1 app has no migrations', async () => {
     const root = d1Project(PROVISIONED_D1); // migrations_dir set, but NO .sql files
     const { deps, wranglerArgs, trace } = harness();
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
-    // wrangler 4.107 hard-fails on an empty/absent folder — so we must not call it.
+    // B2: the managed drift/journal gate runs for EVERY D1 app (a schema.ts with no
+    // generated migration is drift), but wrangler 4.107 hard-fails on an empty/absent
+    // folder — so the apply/list is skipped.
+    expect(trace).toContain('migrate-gate');
     expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
-    expect(trace).not.toContain('migrate-gate');
     expect(trace).toContain('wrangler:deploy');
   });
 
@@ -1522,6 +1533,136 @@ describe('runCloudflareDeploy — remote migration gates', () => {
     // Reached the list-verify, then failed closed before building/deploying.
     expect(localTrace).toContain('wrangler:d1:list');
     expect(localTrace).not.toContain('build');
+  });
+
+  it('fails closed when the pending-verify prints NO recognizable marker (B3, reduced log level)', async () => {
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const localTrace: Array<string> = [];
+    const { deps, exitCalls } = harness({
+      runWrangler: (args) => {
+        localTrace.push(`wrangler:${args[0]}:${args[2] ?? ''}`);
+        if (args[0] === 'whoami') {
+          return { ...cleanExit, stdout: '{"loggedIn":true}' };
+        }
+        // Both `apply` and `list` exit 0 with EMPTY stdout — the failure mode when an
+        // ambient WRANGLER_LOG suppressed the sentinel. Require the affirmative marker.
+        return cleanExit;
+      },
+      runBuild: () => {
+        localTrace.push('build');
+      },
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Never trusts an absent marker — fails closed before build/deploy.
+    expect(localTrace).toContain('wrangler:d1:list');
+    expect(localTrace).not.toContain('build');
+  });
+
+  it('fails closed (B1) when wrangler would apply a stray seed.sql not in the validated set', async () => {
+    const root = d1Project(PROVISIONED_D1, {
+      'db/migrations/0000_init.sql': `CREATE TABLE notes (id integer primary key);`,
+      // `collectMigrations` skips seed.sql, but wrangler's `*.sql` glob would apply it.
+      'db/migrations/seed.sql': `INSERT INTO notes VALUES (1);`,
+    });
+    // Use the REAL apply-set gate (override the harness stub) so it enumerates the dir.
+    const { deps, wranglerArgs, trace, exitCalls } = harness({
+      checkMigrationApplySet: checkWranglerMigrationApplySet,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Rejected before any `d1 migrations apply` and before build/deploy.
+    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
+    expect(trace).not.toContain('build');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B1: the exact set wrangler will apply must equal the gated source set
+// ---------------------------------------------------------------------------
+
+describe('checkWranglerMigrationApplySet', () => {
+  function configFor(dir: string, pattern?: string): Record<string, unknown> {
+    const entry: Record<string, unknown> = { binding: 'DB', migrations_dir: dir };
+    if (pattern) {
+      entry.migrations_pattern = pattern;
+    }
+    return { d1_databases: [entry] };
+  }
+
+  it('passes when the configured dir + files equal the gated set', async () => {
+    const root = makeProject({
+      'wrangler.jsonc': '{}',
+      'db/migrations/0000_init.sql': 'CREATE TABLE a (id integer);',
+      'db/migrations/0001_more.sql': 'CREATE TABLE b (id integer);',
+    });
+    const result = await checkWranglerMigrationApplySet(
+      join(root, 'wrangler.jsonc'),
+      configFor('./db/migrations'),
+      'DB',
+      './db/migrations',
+      [
+        { name: '0000_init.sql', sql: 'CREATE TABLE a (id integer);' },
+        { name: '0001_more.sql', sql: 'CREATE TABLE b (id integer);' },
+      ],
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects an extra seed.sql wrangler would apply that the gated set excludes', async () => {
+    const root = makeProject({
+      'wrangler.jsonc': '{}',
+      'db/migrations/0000_init.sql': 'CREATE TABLE a (id integer);',
+      'db/migrations/seed.sql': 'INSERT INTO a VALUES (1);',
+    });
+    const result = await checkWranglerMigrationApplySet(
+      join(root, 'wrangler.jsonc'),
+      configFor('./db/migrations'),
+      'DB',
+      './db/migrations',
+      [{ name: '0000_init.sql', sql: 'CREATE TABLE a (id integer);' }],
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('seed.sql');
+    }
+  });
+
+  it('rejects when the configured migrations_dir does not exist', async () => {
+    const root = makeProject({ 'wrangler.jsonc': '{}' });
+    const result = await checkWranglerMigrationApplySet(
+      join(root, 'wrangler.jsonc'),
+      configFor('./nope'),
+      'DB',
+      './nope',
+      [{ name: '0000_init.sql', sql: 'CREATE TABLE a (id integer);' }],
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('does not exist');
+    }
+  });
+
+  it('rejects when a file content differs between the config dir and the gated copy', async () => {
+    const root = makeProject({
+      'wrangler.jsonc': '{}',
+      'db/migrations/0000_init.sql': 'CREATE TABLE a (id integer);',
+    });
+    const result = await checkWranglerMigrationApplySet(
+      join(root, 'wrangler.jsonc'),
+      configFor('./db/migrations'),
+      'DB',
+      './db/migrations',
+      [{ name: '0000_init.sql', sql: 'CREATE TABLE a (id text);' }],
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('content differs');
+    }
   });
 });
 
