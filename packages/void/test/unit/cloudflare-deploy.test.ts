@@ -499,6 +499,33 @@ describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)',
     expect(trace).toEqual([]);
   });
 
+  it('A1: rejects a PRESENT-but-EMPTY migrations_pattern ("") before any account op', async () => {
+    // `migrations_pattern: ""` is present-but-empty. readStoredResourceName collapses it to
+    // `undefined` (== absent), so a length-based guard would wave it through as "default" — but
+    // wrangler 4.107 takes its non-default branch for ANY value that is not `undefined`, so an
+    // empty pattern diverges from the flat `*.sql` set this backend validates. Reject on presence.
+    const root = d1Project({
+      ...PROVISIONED_D1,
+      d1_databases: [
+        {
+          binding: 'DB',
+          database_name: 'myapp-db',
+          database_id: REAL_D1_ID,
+          migrations_dir: './db/migrations',
+          migrations_pattern: '',
+        },
+      ],
+    });
+    const { deps, trace, wranglerArgs, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Reached NO whoami / provision / migration / build seam — rejected pre-account.
+    expect(trace).toEqual([]);
+    expect(wranglerArgs).toEqual([]);
+  });
+
   it('rejects a WebSocket / Durable Object app (.ws.ts route) before any account op', async () => {
     // A `.ws.ts` route makes the build emit a `new_classes` (KV-backed) DO migration, which a
     // fresh Cloudflare account refuses to create — reject via the SAME `scanWebSocketRoutesSync`
@@ -1958,7 +1985,9 @@ describe('runCloudflareDeploy — remote migration gates', () => {
 describe('checkWranglerMigrationApplySet', () => {
   function configFor(dir: string, pattern?: string): Record<string, unknown> {
     const entry: Record<string, unknown> = { binding: 'DB', migrations_dir: dir };
-    if (pattern) {
+    // `!== undefined` (not truthiness) so an explicit EMPTY pattern (`""`) is set —
+    // a present-but-empty pattern is still custom and must be rejected.
+    if (pattern !== undefined) {
       entry.migrations_pattern = pattern;
     }
     return { d1_databases: [entry] };
@@ -2088,6 +2117,24 @@ describe('checkWranglerMigrationApplySet', () => {
     const result = await checkWranglerMigrationApplySet(
       join(root, 'wrangler.jsonc'),
       configFor('./db/migrations', 'db/migrations/**/*.sql'),
+      'DB',
+      './db/migrations',
+      [{ name: '0000_init.sql', sql: 'CREATE TABLE a (id integer);' }],
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('custom migrations_pattern');
+    }
+  });
+
+  it('A1: fails closed (defense in depth) on a PRESENT-but-EMPTY migrations_pattern ("")', async () => {
+    const root = makeProject({
+      'wrangler.jsonc': '{}',
+      'db/migrations/0000_init.sql': 'CREATE TABLE a (id integer);',
+    });
+    const result = await checkWranglerMigrationApplySet(
+      join(root, 'wrangler.jsonc'),
+      configFor('./db/migrations', ''),
       'DB',
       './db/migrations',
       [{ name: '0000_init.sql', sql: 'CREATE TABLE a (id integer);' }],

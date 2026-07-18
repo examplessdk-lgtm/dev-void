@@ -906,6 +906,41 @@ function readStoredResourceName(
   return undefined;
 }
 
+/**
+ * Whether a resource binding DECLARES a field at all — present with ANY defined
+ * value, INCLUDING an empty string. Distinct from {@link readStoredResourceName}
+ * (which collapses both "absent" and "empty string" to `undefined`): a
+ * present-but-empty `migrations_pattern: ""` is still a CUSTOM pattern — wrangler
+ * 4.107 takes its non-default branch for any value that is not `undefined`
+ * (`rawPattern !== void 0`), so an empty pattern diverges from the default flat
+ * `*.sql` enumeration this backend validates against. v1 therefore rejects a
+ * custom pattern on PRESENCE, not on a non-empty length. Returns the raw value so
+ * the caller can name it (never a secret — a wrangler config field).
+ */
+function readBindingFieldPresence(
+  config: Record<string, unknown>,
+  field: string,
+  binding: string,
+  key: string,
+): { present: boolean; value: unknown } {
+  const list = config[field];
+  if (!Array.isArray(list)) {
+    return { present: false, value: undefined };
+  }
+  for (const entry of list) {
+    if (
+      entry &&
+      typeof entry === 'object' &&
+      (entry as { binding?: unknown }).binding === binding
+    ) {
+      return Object.hasOwn(entry as object, key)
+        ? { present: true, value: (entry as Record<string, unknown>)[key] }
+        : { present: false, value: undefined };
+    }
+  }
+  return { present: false, value: undefined };
+}
+
 /** Read a `d1_databases` entry's string field. */
 function readD1EntryString(entry: unknown, field: string): string | undefined {
   if (!entry || typeof entry !== 'object') {
@@ -1412,17 +1447,19 @@ export async function checkWranglerMigrationApplySet(
   }
   // Defense in depth: a custom migrations_pattern is rejected pre-account (v1 = default
   // convention only). If one reaches here, fail closed rather than assume the flat `*.sql`.
-  const migrationsPattern = readStoredResourceName(
+  // Reject on PRESENCE (any defined value, incl. `""`): a present-but-empty pattern is
+  // still non-default to wrangler, and it would otherwise be indistinguishable from absent.
+  const migrationsPattern = readBindingFieldPresence(
     config,
     'd1_databases',
     binding,
     'migrations_pattern',
   );
-  if (typeof migrationsPattern === 'string' && migrationsPattern.length > 0) {
+  if (migrationsPattern.present) {
     return {
       ok: false,
       reason:
-        `deploy: a custom migrations_pattern (${JSON.stringify(migrationsPattern)}) is not ` +
+        `deploy: a custom migrations_pattern (${JSON.stringify(migrationsPattern.value)}) is not ` +
         `supported — v1 deploys only the default db/migrations/*.sql convention. Remove it, then rerun.`,
     };
   }
@@ -1722,16 +1759,18 @@ export async function runCloudflareDeploy(
   // to remote D1. Rejecting a custom pattern removes that divergence entirely; the default
   // convention still gets ORDER-parity checked at 6b. (Only the DEPLOYED D1 entry matters.)
   if (desired.d1) {
-    const migrationsPattern = readStoredResourceName(
+    // Reject on PRESENCE (any defined value, incl. `""`) — a present-but-empty pattern is
+    // still non-default to wrangler, and readStoredResourceName can't tell absent from empty.
+    const migrationsPattern = readBindingFieldPresence(
       parseRootWranglerConfig(configPath),
       'd1_databases',
       desired.d1.binding,
       'migrations_pattern',
     );
-    if (typeof migrationsPattern === 'string' && migrationsPattern.length > 0) {
+    if (migrationsPattern.present) {
       log.error(
         [
-          `deploy: --backend cloudflare does not support a custom migrations_pattern (${JSON.stringify(migrationsPattern)}).`,
+          `deploy: --backend cloudflare does not support a custom migrations_pattern (${JSON.stringify(migrationsPattern.value)}).`,
           'v1 deploys only the default Void migration convention: db/migrations/*.sql with',
           "wrangler's default pattern (leave `migrations_pattern` unset). A custom glob would",
           'apply a set to remote D1 that Void cannot verify against its own db/migrations.',
