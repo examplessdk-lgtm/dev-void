@@ -5,6 +5,7 @@ import {
   assertMigrationsProduceAuthSchema,
   assertNoConfigOverrideInProjectDotenv,
   checkWranglerMigrationApplySet,
+  compareWranglerMigrationPaths,
   computeDesiredCloudflareResources,
   runCloudflareDeploy,
   validateAuthMigrationSchema,
@@ -445,6 +446,28 @@ describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)',
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
     // NO account / build seam ran.
+    expect(trace).toEqual([]);
+  });
+
+  it('A1: rejects a project whose D1 binding sets a custom migrations_pattern before any account op', async () => {
+    const root = d1Project({
+      ...PROVISIONED_D1,
+      d1_databases: [
+        {
+          binding: 'DB',
+          database_name: 'myapp-db',
+          database_id: REAL_D1_ID,
+          migrations_dir: './db/migrations',
+          migrations_pattern: 'db/migrations/**/*.sql',
+        },
+      ],
+    });
+    const { deps, trace, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Rejected at the custom-pattern guard (after the desired set, before whoami/provision).
     expect(trace).toEqual([]);
   });
 
@@ -1782,6 +1805,81 @@ describe('checkWranglerMigrationApplySet', () => {
     if (!result.ok) {
       expect(result.reason).toContain('content differs');
     }
+  });
+
+  it('A1: rejects when wrangler would apply in a DIFFERENT order (unpadded numeric prefix)', async () => {
+    // `2_*.sql` and `10_*.sql` sort DIFFERENTLY for wrangler (numeric: 2 < 10) than for Void's
+    // collectMigrations (lexicographic: "10" < "2"). The set is equal but the apply ORDER
+    // diverges, so remote D1 would receive them out of the validated order — reject.
+    const root = makeProject({
+      'wrangler.jsonc': '{}',
+      'db/migrations/2_early.sql': 'CREATE TABLE a (id integer);',
+      'db/migrations/10_late.sql': 'CREATE TABLE b (id integer);',
+    });
+    const result = await checkWranglerMigrationApplySet(
+      join(root, 'wrangler.jsonc'),
+      configFor('./db/migrations'),
+      'DB',
+      './db/migrations',
+      // collectMigrations' lexicographic order: 10_late before 2_early.
+      [
+        { name: '10_late.sql', sql: 'CREATE TABLE b (id integer);' },
+        { name: '2_early.sql', sql: 'CREATE TABLE a (id integer);' },
+      ],
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('DIFFERENT order');
+    }
+  });
+
+  it('A1: passes with zero-padded prefixes (numeric order == lexicographic order)', async () => {
+    const root = makeProject({
+      'wrangler.jsonc': '{}',
+      'db/migrations/0002_early.sql': 'CREATE TABLE a (id integer);',
+      'db/migrations/0010_late.sql': 'CREATE TABLE b (id integer);',
+    });
+    const result = await checkWranglerMigrationApplySet(
+      join(root, 'wrangler.jsonc'),
+      configFor('./db/migrations'),
+      'DB',
+      './db/migrations',
+      [
+        { name: '0002_early.sql', sql: 'CREATE TABLE a (id integer);' },
+        { name: '0010_late.sql', sql: 'CREATE TABLE b (id integer);' },
+      ],
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('A1: fails closed (defense in depth) if a custom migrations_pattern slips through', async () => {
+    const root = makeProject({
+      'wrangler.jsonc': '{}',
+      'db/migrations/0000_init.sql': 'CREATE TABLE a (id integer);',
+    });
+    const result = await checkWranglerMigrationApplySet(
+      join(root, 'wrangler.jsonc'),
+      configFor('./db/migrations', 'db/migrations/**/*.sql'),
+      'DB',
+      './db/migrations',
+      [{ name: '0000_init.sql', sql: 'CREATE TABLE a (id integer);' }],
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('custom migrations_pattern');
+    }
+  });
+});
+
+describe('compareWranglerMigrationPaths (wrangler 4.107 numeric-prefix comparator)', () => {
+  it('sorts by leading numeric prefix (2 before 10), matching wrangler', () => {
+    const sorted = ['10_b.sql', '2_a.sql', '1_z.sql'].sort(compareWranglerMigrationPaths);
+    expect(sorted).toEqual(['1_z.sql', '2_a.sql', '10_b.sql']);
+  });
+
+  it('places a non-numeric segment (seed.sql) after all numeric-prefixed ones', () => {
+    const sorted = ['seed.sql', '0001_a.sql', '0000_b.sql'].sort(compareWranglerMigrationPaths);
+    expect(sorted).toEqual(['0000_b.sql', '0001_a.sql', 'seed.sql']);
   });
 });
 

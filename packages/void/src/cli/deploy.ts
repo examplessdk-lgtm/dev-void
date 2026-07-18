@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseJsoncConfig, type ParseError } from 'jsonc-parser';
-import { basename, dirname, join, normalize, relative, resolve } from 'pathe';
+import { basename, dirname, join, relative, resolve } from 'pathe';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
@@ -1299,52 +1299,74 @@ export function assertRemoteMigrationsDeployable(
 }
 
 /**
- * wrangler 4.107's dir-relative migration glob for a D1 entry: the default `*.sql`, or a
- * configured `migrations_pattern` with its `<dir>/` prefix stripped (matching wrangler's
- * `resolveMigrationsConfig` / `stripDirPrefix`). wrangler UserErrors when the pattern is not
- * under the dir — mirror that fail-closed so this backend never diverges from what wrangler
- * would enumerate.
+ * wrangler 4.107's own migration-file order comparator, reproduced EXACTLY
+ * (`compareMigrationPaths` / `compareSegments` / `leadingMigrationNumber`,
+ * `wrangler-dist/cli.js` `src/d1/migrations/helpers.ts`): segment-by-segment, comparing each
+ * segment's LEADING NUMERIC PREFIX (`parseInt(segment.split('_')[0], 10)`) numerically first,
+ * so `2_x.sql` sorts BEFORE `10_x.sql` (lexicographic would invert them). A finite number
+ * sorts before a non-numeric segment; equal/both-NaN falls back to lexicographic. This is the
+ * exact order `d1 migrations apply` walks (`listFilesRelative(...).sort(compareMigrationPaths)`
+ * → `getMigrationNames`), so ordering the gated set the same way tells us what remote D1 will
+ * receive, in what order.
  */
-function migrationDirRelativePattern(
-  migrationsDirRaw: string,
-  migrationsPattern: string | undefined,
-): { ok: true; pattern: string } | { ok: false; reason: string } {
-  if (typeof migrationsPattern !== 'string' || migrationsPattern.length === 0) {
-    return { ok: true, pattern: '*.sql' };
+function leadingWranglerMigrationNumber(relativePath: string): number {
+  const firstSegment = relativePath.split('/')[0] ?? '';
+  return parseInt(firstSegment.split('_')[0] ?? '', 10);
+}
+
+function compareWranglerMigrationSegments(a: string, b: string): number {
+  const aNum = leadingWranglerMigrationNumber(a);
+  const bNum = leadingWranglerMigrationNumber(b);
+  if (aNum !== bNum) {
+    if (Number.isFinite(aNum) && Number.isFinite(bNum)) {
+      return aNum - bNum;
+    }
+    if (Number.isFinite(aNum)) {
+      return -1;
+    }
+    if (Number.isFinite(bNum)) {
+      return 1;
+    }
   }
-  const normalizeRel = (p: string): string => {
-    const n = normalize(p.replace(/\\/g, '/'));
-    return n.endsWith('/') ? n.slice(0, -1) : n;
-  };
-  const normDir = normalizeRel(migrationsDirRaw);
-  const normPattern = normalizeRel(migrationsPattern);
-  if (normDir === '.') {
-    return { ok: true, pattern: normPattern };
+  if (a < b) {
+    return -1;
   }
-  if (normPattern.startsWith(`${normDir}/`)) {
-    return { ok: true, pattern: normPattern.slice(normDir.length + 1) };
+  if (a > b) {
+    return 1;
   }
-  return {
-    ok: false,
-    reason:
-      `deploy: migrations_pattern ${JSON.stringify(migrationsPattern)} is not under ` +
-      `migrations_dir ${JSON.stringify(migrationsDirRaw)} — wrangler rejects this config. ` +
-      `Align them, then rerun.`,
-  };
+  return 0;
+}
+
+export function compareWranglerMigrationPaths(a: string, b: string): number {
+  const aSegments = a.split('/');
+  const bSegments = b.split('/');
+  const shared = Math.min(aSegments.length, bSegments.length);
+  for (let i = 0; i < shared; i++) {
+    const cmp = compareWranglerMigrationSegments(aSegments[i] as string, bSegments[i] as string);
+    if (cmp !== 0) {
+      return cmp;
+    }
+  }
+  return aSegments.length - bSegments.length;
 }
 
 /**
- * Assert the migration files wrangler 4.107 will APPLY equal the gated source set. wrangler
- * resolves its OWN files from the D1 entry's `migrations_dir` (default `./migrations`,
- * relative to the config-file dir) + `migrations_pattern` (default `<dir>/*.sql`), globs them
- * ({ dot:false }, recursive), and tracks each by its dir-relative name (`.sql` kept) — the
- * exact set `d1 migrations apply` runs against REMOTE D1. This backend only VALIDATES the set
- * `collectMigrations` reads from Void's on-disk migrations dir; a stale/extra file (e.g.
- * `seed.sql`, which `collectMigrations` skips but wrangler's `*.sql` matches), a differing
- * dir, or a divergent content would otherwise be applied to production UNVALIDATED. Require
- * the two sets EQUAL by normalized name AND content; otherwise fail closed. Exported for unit
- * testing; the migrations_pattern branch loads `tinyglobby` lazily so the default flat case
- * stays dependency-free.
+ * Assert the migration files wrangler 4.107 will APPLY — in the ORDER it applies them — equal
+ * the gated source set. wrangler resolves its OWN files from the D1 entry's `migrations_dir`
+ * (relative to the config-file dir) with the DEFAULT pattern `<dir>/*.sql` (a custom
+ * `migrations_pattern` is rejected pre-account, so only the default flat `*.sql` enumeration —
+ * top-level, `{ dot:false }` — reaches here), tracks each by its `.sql` name, and applies them
+ * sorted by its numeric-prefix comparator ({@link compareWranglerMigrationPaths}) — the exact
+ * sequence `d1 migrations apply` runs against REMOTE D1. This backend VALIDATES the set
+ * `collectMigrations` reads (flat dir, `seed.sql` excluded, sorted lexicographically). Two
+ * things must hold: (1) SET equality by name AND content — a stray/extra file (e.g. `seed.sql`,
+ * which `collectMigrations` skips but wrangler's `*.sql` matches), a differing dir, or a
+ * divergent content would otherwise be applied UNVALIDATED; and (2) ORDER parity — the numeric
+ * order wrangler applies must equal Void's gated order position-for-position, so the local
+ * runner + deploy gates validate the exact order remote D1 receives (an unpadded prefix like
+ * `2_` vs `10_` sorts differently lexicographically-vs-numerically and diverges — reject). A
+ * defensive custom-pattern check fails closed if one slips past the pre-account guard. Exported
+ * for unit testing.
  */
 export async function checkWranglerMigrationApplySet(
   configPath: string,
@@ -1363,65 +1385,83 @@ export async function checkWranglerMigrationApplySet(
         `Align "migrations_dir" with your db/migrations, then rerun.`,
     };
   }
+  // Defense in depth: a custom migrations_pattern is rejected pre-account (v1 = default
+  // convention only). If one reaches here, fail closed rather than assume the flat `*.sql`.
   const migrationsPattern = readStoredResourceName(
     config,
     'd1_databases',
     binding,
     'migrations_pattern',
   );
-  const dirRel = migrationDirRelativePattern(migrationsDirRaw, migrationsPattern);
-  if (!dirRel.ok) {
-    return { ok: false, reason: dirRel.reason };
+  if (typeof migrationsPattern === 'string' && migrationsPattern.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `deploy: a custom migrations_pattern (${JSON.stringify(migrationsPattern)}) is not ` +
+        `supported — v1 deploys only the default db/migrations/*.sql convention. Remove it, then rerun.`,
+    };
   }
-  let names: Array<string>;
-  if (dirRel.pattern === '*.sql') {
-    // wrangler's default: top-level `.sql` files, dotfiles excluded ({ dot:false }).
-    names = readdirSync(absDir, { withFileTypes: true })
-      .filter(
-        (entry) => entry.isFile() && entry.name.endsWith('.sql') && !entry.name.startsWith('.'),
-      )
-      .map((entry) => entry.name);
-  } else {
-    const { globSync } = await import('tinyglobby');
-    names = globSync(dirRel.pattern, {
-      cwd: absDir,
-      dot: false,
-      onlyFiles: true,
-      expandDirectories: false,
-    });
-  }
-  const applied = new Map<string, string>();
-  for (const name of names) {
-    const normalized = name.replace(/\\/g, '/');
-    applied.set(normalized, readFileSync(join(absDir, name), 'utf-8'));
-  }
-  const gatedMap = new Map(gated.map((m) => [m.name.replace(/\\/g, '/'), m.sql]));
-  const extra = [...applied.keys()].filter((k) => !gatedMap.has(k)).sort();
-  const missing = [...gatedMap.keys()].filter((k) => !applied.has(k)).sort();
-  const changed = [...applied.keys()]
-    .filter((k) => gatedMap.has(k) && gatedMap.get(k) !== applied.get(k))
-    .sort();
-  if (extra.length === 0 && missing.length === 0 && changed.length === 0) {
-    return { ok: true };
-  }
-  const lines = [
-    `deploy: the migrations wrangler would apply to remote D1 do not match Void's validated set (${absDir}).`,
-  ];
-  if (extra.length > 0) {
-    lines.push(`  • wrangler would ALSO apply (not validated by Void): ${extra.join(', ')}`);
-  }
-  if (missing.length > 0) {
-    lines.push(`  • validated by Void but NOT in wrangler's set: ${missing.join(', ')}`);
-  }
-  if (changed.length > 0) {
-    lines.push(`  • content differs between Void's copy and wrangler's: ${changed.join(', ')}`);
-  }
-  lines.push(
-    'Only Void-managed db/migrations/*.sql may be applied. Remove stray .sql (e.g. seed.sql) ' +
-      'from migrations_dir, or align "migrations_dir"/"migrations_pattern" with your ' +
-      'db/migrations, then rerun.',
+  // wrangler's DEFAULT enumeration: top-level `.sql` files, dotfiles excluded (Minimatch
+  // `*.sql` with `{ dot:false }` never crosses `/`, so `meta/` is not walked), APPLIED in
+  // wrangler's numeric-prefix order.
+  const wranglerNames = readdirSync(absDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.sql') && !entry.name.startsWith('.'))
+    .map((entry) => entry.name.replace(/\\/g, '/'))
+    .sort(compareWranglerMigrationPaths);
+  const wranglerContent = new Map(
+    wranglerNames.map((name) => [name, readFileSync(join(absDir, name), 'utf-8')]),
   );
-  return { ok: false, reason: lines.join('\n') };
+  const gatedNames = gated.map((m) => m.name.replace(/\\/g, '/'));
+  const gatedContent = new Map(gatedNames.map((name, i) => [name, gated[i]!.sql]));
+
+  // 1) SET equality by name + content.
+  const wranglerSet = new Set(wranglerNames);
+  const extra = wranglerNames.filter((k) => !gatedContent.has(k));
+  const missing = gatedNames.filter((k) => !wranglerSet.has(k)).sort();
+  const changed = wranglerNames.filter(
+    (k) => gatedContent.has(k) && gatedContent.get(k) !== wranglerContent.get(k),
+  );
+  if (extra.length > 0 || missing.length > 0 || changed.length > 0) {
+    const lines = [
+      `deploy: the migrations wrangler would apply to remote D1 do not match Void's validated set (${absDir}).`,
+    ];
+    if (extra.length > 0) {
+      lines.push(`  • wrangler would ALSO apply (not validated by Void): ${extra.join(', ')}`);
+    }
+    if (missing.length > 0) {
+      lines.push(`  • validated by Void but NOT in wrangler's set: ${missing.join(', ')}`);
+    }
+    if (changed.length > 0) {
+      lines.push(`  • content differs between Void's copy and wrangler's: ${changed.join(', ')}`);
+    }
+    lines.push(
+      'Only Void-managed db/migrations/*.sql may be applied. Remove stray .sql (e.g. seed.sql) ' +
+        'from migrations_dir, then rerun.',
+    );
+    return { ok: false, reason: lines.join('\n') };
+  }
+
+  // 2) ORDER parity — wrangler's numeric apply order must equal Void's gated (collectMigrations)
+  // order position-for-position, so the order remote D1 receives is the order Void validated.
+  const orderDiffers =
+    gatedNames.length !== wranglerNames.length ||
+    gatedNames.some((name, i) => name !== wranglerNames[i]);
+  if (orderDiffers) {
+    return {
+      ok: false,
+      reason: [
+        `deploy: wrangler would apply your migrations in a DIFFERENT order than Void validated (${absDir}).`,
+        `  • wrangler (numeric-prefix) order: ${wranglerNames.join(', ')}`,
+        `  • Void's validated order:          ${gatedNames.join(', ')}`,
+        "This happens when a migration's numeric prefix is not zero-padded (e.g. `2_` vs `10_`),",
+        'so it sorts differently for wrangler (numeric) than for Void (lexicographic) — remote D1',
+        'would receive them out of the validated order. Zero-pad the prefixes (0001_, 0002_, …),',
+        'e.g. with `void db rename-migrations`, then rerun.',
+      ].join('\n'),
+    };
+  }
+
+  return { ok: true };
 }
 
 /**
@@ -1647,6 +1687,34 @@ export async function runCloudflareDeploy(
       ].join('\n'),
     );
     return exit(1);
+  }
+
+  // 2c. Custom migrations_pattern guard — FAIL CLOSED before any account op. v1 supports ONLY
+  // Void's default migration convention: `db/migrations/*.sql` with wrangler's default
+  // `migrations_pattern` (unset). An explicit `migrations_pattern` makes wrangler enumerate its
+  // remote-apply set through Minimatch over a custom glob, which can diverge from Void's
+  // `collectMigrations` (flat dir, `seed.sql` excluded) — so it would apply an unverifiable set
+  // to remote D1. Rejecting a custom pattern removes that divergence entirely; the default
+  // convention still gets ORDER-parity checked at 6b. (Only the DEPLOYED D1 entry matters.)
+  if (desired.d1) {
+    const migrationsPattern = readStoredResourceName(
+      parseRootWranglerConfig(configPath),
+      'd1_databases',
+      desired.d1.binding,
+      'migrations_pattern',
+    );
+    if (typeof migrationsPattern === 'string' && migrationsPattern.length > 0) {
+      log.error(
+        [
+          `deploy: --backend cloudflare does not support a custom migrations_pattern (${JSON.stringify(migrationsPattern)}).`,
+          'v1 deploys only the default Void migration convention: db/migrations/*.sql with',
+          "wrangler's default pattern (leave `migrations_pattern` unset). A custom glob would",
+          'apply a set to remote D1 that Void cannot verify against its own db/migrations.',
+          `Remove "migrations_pattern" from the ${desired.d1.binding} D1 binding, then rerun.`,
+        ].join('\n'),
+      );
+      return exit(1);
+    }
   }
 
   // 2b. Auth-migration guard — FAIL CLOSED before any account operation. The managed platform
