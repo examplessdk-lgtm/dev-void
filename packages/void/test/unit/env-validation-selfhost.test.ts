@@ -319,11 +319,54 @@ describe('computeInvalidEmittedKeys — schema-invalid emitted values', () => {
     expect(await computeInvalidEmittedKeys(root, { PORT: '8080' })).toEqual([]);
   });
 
-  it('does NOT count an ABSENT or EMPTY required value as invalid (those are the missing/empty fences)', async () => {
+  it('does NOT count a genuinely-ABSENT required value as invalid (a remote secret can still discharge it)', async () => {
     const root = createTempProject();
     defineEnv({ PORT: number(), TOKEN: string() });
-    // PORT absent, TOKEN empty — both are "missing", handled by the emitted-var context, not here.
-    expect(await computeInvalidEmittedKeys(root, { TOKEN: '' })).toEqual([]);
+    // Neither key is present in the emitted map — both required keys are ABSENT, the only
+    // state a same-named remote `wrangler secret list` secret can discharge. So neither is a
+    // hard invalid here (the context's absent fence handles them), even though the runtime
+    // buckets both as "missing".
+    expect(await computeInvalidEmittedKeys(root, {})).toEqual([]);
+  });
+
+  it('counts a required value SHIPPED empty (present in the emitted map but rejected)', async () => {
+    const root = createTempProject();
+    defineEnv({ TOKEN: string() });
+    // TOKEN was baked into the worker vars as "" — shipped-but-rejected. The runtime buckets
+    // it as "missing", but because it is PRESENT in the emitted map it fails closed here too
+    // (the context's present-empty fence also covers it; the two agree, discharge fences first).
+    expect(await computeInvalidEmittedKeys(root, { TOKEN: '' })).toEqual(['TOKEN']);
+  });
+
+  it('flags an OPTIONAL validator key SHIPPED as "" or null (rejected but bucketed "missing")', async () => {
+    const root = createTempProject();
+    // A validator that rejects `""`/`null` but accepts `undefined` — exactly `z.url().optional()`.
+    // The runtime buckets a rejected empty/null as "missing" (not "invalid"), and the
+    // required-empty fence covers only `requiredKeys`, so an OPTIONAL key shipped empty would
+    // slip EVERY gate unless the present-in-emitted union catches it here.
+    const optionalRejectingEmpty: StandardSchemaV1<unknown, unknown> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate(value) {
+          if (value === undefined) {
+            return { value: undefined };
+          }
+          if (typeof value === 'string' && value.length > 0) {
+            return { value };
+          }
+          return { issues: [{ message: 'invalid' }] };
+        },
+      },
+    };
+    defineEnv({ OPT_URL: optionalRejectingEmpty });
+    // Both empty spellings ship a present-but-rejected value → flagged.
+    expect(await computeInvalidEmittedKeys(root, { OPT_URL: '' })).toEqual(['OPT_URL']);
+    expect(await computeInvalidEmittedKeys(root, { OPT_URL: null })).toEqual(['OPT_URL']);
+    // A valid optional value validates clean; an absent optional key (accepted undefined) is
+    // never flagged.
+    expect(await computeInvalidEmittedKeys(root, { OPT_URL: 'https://ok.dev' })).toEqual([]);
+    expect(await computeInvalidEmittedKeys(root, {})).toEqual([]);
   });
 
   it('returns [] when the project registered no schema', async () => {
@@ -467,6 +510,35 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
     expect(envError.message).toContain('dist/ssr/wrangler.json');
     expect(envError.message).not.toContain('wrangler secret put');
     // Rejected before any wrangler spawn — remote membership is irrelevant.
+    expect(calls).toEqual([]);
+  });
+
+  it('a folded INVALID key (an optional value the validator rejected) fails CLOSED with no wrangler spawn', async () => {
+    const root = createTempProject({ withEnvTs: false });
+    // No required key is absent, so the only failure is the invalid-value set the emitted-var
+    // probe folds in — here an optional key shipped empty that the runtime bucketed "missing"
+    // but `computeInvalidEmittedKeys` caught (present in the emitted map). It must fail closed
+    // BEFORE any remote apply: a remote secret cannot rescue an invalid SHIPPED value.
+    const ctx = deriveSelfHostEnvContextFromVars(
+      {},
+      { hasSchema: true, requiredKeys: [], secretKeys: [] },
+    );
+    ctx.invalidKeys = ['OPT_URL'];
+    const { run, calls } = stubRunner(okList(['OPT_URL']));
+
+    const error = await dischargeSelfHostEnvContext(ctx, {
+      root,
+      configPath: CONFIG_PATH,
+      runWrangler: run,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(error).toBeInstanceOf(SelfHostEnvValidationError);
+    const envError = error as SelfHostEnvValidationError;
+    expect(envError.report.invalid.map((entry) => entry.key)).toEqual(['OPT_URL']);
+    // No required key is absent → no wrangler spawn; the invalid value fails closed on its own.
     expect(calls).toEqual([]);
   });
 

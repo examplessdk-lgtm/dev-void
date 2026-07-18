@@ -676,11 +676,21 @@ export function readEmittedWorkerVars(root: string): EmittedWorkerVarsResult {
 
 /**
  * Validate the REAL emitted worker `vars` against the registered schema's
- * validators and return the FAILING key NAMES only (values-free). A value is
- * "invalid" iff the validator REJECTS a PRESENT, NON-EMPTY value — the exact
- * `report.invalid` set `validateAllEnv` produces (an absent/empty value is
- * "missing", handled by the emitted-var context's present-empty / absent fences,
- * never counted here). Runs the user's validators (arbitrary code), so the caller
+ * validators and return the FAILING key NAMES only (values-free). A key FAILS iff
+ * the validator REJECTS the value it was SHIPPED WITH — the UNION of:
+ *   - `report.invalid` (a PRESENT, NON-EMPTY value the validator rejected), plus
+ *   - the `report.missing` keys that are STILL PRESENT in `emittedVars` (the key
+ *     exists in the emitted map with value `null`/`""`). `validateAllEnv` buckets a
+ *     REJECTED `undefined`/`null`/`""` as "missing", not "invalid" (see
+ *     `runtime/env-public.ts` — `isMissing = raw === undefined || raw === null || raw
+ *     === ''`), so an OPTIONAL-with-validator key shipped as `""`/`null` (e.g.
+ *     `z.url().optional()`, which rejects those but the required-empty fence in
+ *     `deriveSelfHostEnvContextFromVars` — `requiredKeys` only — never covers) would
+ *     otherwise slip EVERY gate and boot-reject the deployed worker.
+ * A `report.missing` key ABSENT from `emittedVars` is NEVER counted: it is a
+ * genuinely-unset REQUIRED secret that a same-named remote `wrangler secret list`
+ * secret can still discharge, so it stays with the context's absent fence rather than
+ * becoming a hard invalid. Runs the user's validators (arbitrary code), so the caller
  * MUST run this in the isolated {@link ../cli/env-schema-probe.ts} subprocess; a
  * validator that THROWS/REJECTS surfaces as a values-free {@link SelfHostSchemaError}
  * via {@link withSchemaBoundary}. NEVER reads `report.invalid[].messages` (which can
@@ -701,7 +711,16 @@ export async function computeInvalidEmittedKeys(
   const report = await withSchemaBoundary('schema-validation-error', () =>
     mod.validateAllEnv(emittedVars),
   );
-  return report.invalid.map((entry) => entry.key).sort((a, b) => a.localeCompare(b));
+  const invalid = new Set<string>(report.invalid.map((entry) => entry.key));
+  // A rejected value the runtime bucketed as "missing" still fails closed WHEN THE KEY
+  // WAS SHIPPED (present in the emitted map) — otherwise it is a genuinely-absent
+  // required secret a remote secret can still discharge, so leave it to the fences.
+  for (const key of report.missing) {
+    if (Object.hasOwn(emittedVars, key)) {
+      invalid.add(key);
+    }
+  }
+  return Array.from(invalid).sort((a, b) => a.localeCompare(b));
 }
 
 /**
