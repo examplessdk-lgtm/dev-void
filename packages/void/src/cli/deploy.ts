@@ -21,6 +21,7 @@ import {
   resolveAssetConfig,
 } from '../asset-routing.ts';
 import { findVoidAuthConfig } from '../auth/config.ts';
+import type { VoidAuthMigrationSchema } from '../auth/drizzle.ts';
 import { findEnvFile } from '../codegen/env-types.ts';
 import {
   readConfig,
@@ -71,14 +72,16 @@ import {
   type ManifestOnlyDeployPayload,
 } from './client.ts';
 import { promptAndCreateProject } from './create-project.ts';
-import type { DeployBuildContextInput, DeployBuildContextResult } from './deploy-build-probe.ts';
 import {
   formatConnectionLostMessage,
   formatDeployFailureMessage,
   formatStreamDeployError,
 } from './deploy-errors.ts';
 import { uploadAssetsToR2, type DirectR2PutItem } from './direct-r2-upload.ts';
+import type { EnvSchemaProbeInput, EnvSchemaProbeResult } from './env-schema-probe.ts';
 import {
+  collectPlaintextVarWarningsFromVars,
+  deriveSelfHostEnvContextFromVars,
   dischargeSelfHostEnvContext,
   fetchRemoteSecretNames,
   formatEnvReport,
@@ -89,6 +92,7 @@ import {
   SelfHostSchemaError,
   SelfHostSecretListError,
   validateProdEnv,
+  type SelfHostSchemaFacts,
 } from './env-validation.ts';
 import { collectGitDeployMetadata, type GitDeployMetadata } from './git-metadata.ts';
 import {
@@ -621,47 +625,87 @@ function deployPointerPath(root: string): string {
   return join(root, '.wrangler', 'deploy', 'config.json');
 }
 
-/** The `{ mode, envDir }` the deploy build's `void:env` config hook observes. */
-export type DeployBuildConfig = { mode: string; envDir: string | undefined };
-
 /**
- * Default {@link CloudflareDeployDeps.resolveBuildContext} seam: derive the build
- * context in an ISOLATED SUBPROCESS ({@link resolveDeployBuildContextViaSubprocess})
- * under the scrubbed build `env`. The parent runs NO project code and NO project-env
- * `loadEnv` — resolving the Vite config (arbitrary plugin pipeline) and loading the
- * `.env*` overlay both happen in the child, so a deferred plugin handler can never
- * read the parent's CF Access token and the effective-var map is resolved under the
- * build's own env, never the parent's credentialed one. Loaded lazily so a managed
- * deploy never pulls the probe (or Vite) in.
+ * Default {@link CloudflareDeployDeps.resolveSchemaFacts} seam: derive the
+ * env-INSENSITIVE schema facts (required-secret NAMES + `.secret()` flags) in an
+ * ISOLATED SUBPROCESS ({@link resolveEnvSchemaFactsViaSubprocess}) under the scrubbed
+ * `env`. The parent runs NO project code: importing the user's env.ts happens in the
+ * child, so a deferred handler can never read the parent's credentials. Because the
+ * facts are env-insensitive (fixed by env.ts's structure, independent of any `.env`
+ * file), the subprocess needs neither the Vite config nor `loadEnv` — the whole
+ * probe-vs-build divergence class is gone. Loaded lazily so a managed deploy never
+ * pulls the probe in.
  */
-async function resolveDeployBuildContextDefault(
-  input: DeployBuildContextInput,
+async function resolveEnvSchemaFactsDefault(
+  input: EnvSchemaProbeInput,
   env: NodeJS.ProcessEnv,
-): Promise<DeployBuildContextResult> {
-  const { resolveDeployBuildContextViaSubprocess } = await import('./deploy-build-probe.ts');
-  return resolveDeployBuildContextViaSubprocess(input, env);
+): Promise<EnvSchemaProbeResult> {
+  const { resolveEnvSchemaFactsViaSubprocess } = await import('./env-schema-probe.ts');
+  return resolveEnvSchemaFactsViaSubprocess(input, env);
 }
 
-/** Fail-closed, pre-account guidance for a v1-unsupported build context (custom envDir / mode). */
-function formatBuildContextReject(
-  reject: Extract<DeployBuildContextResult, { kind: 'reject' }>,
-): string {
-  if (reject.reason === 'custom-envdir') {
-    return [
-      `deploy: --backend cloudflare does not support a custom Vite envDir (${JSON.stringify(reject.envDir)}).`,
-      'v1 reads .env* from the project root only — the same directory the build generates auth',
-      'migrations from — so a custom envDir would validate a different .env* set than the worker',
-      'ships. Move your .env* files to the project root (remove `envDir` from your Vite config),',
-      'then rerun — or deploy this app with `void deploy` (the managed platform). A custom envDir',
-      'is a follow-up.',
-    ].join('\n');
+/** The REAL worker `vars` the build baked into `dist/ssr/wrangler.json`, or a fail-closed reason. */
+export type EmittedWorkerVarsResult =
+  | { ok: true; vars: Record<string, unknown> }
+  | { ok: false; reason: string };
+
+/**
+ * Follow the CF plugin's deploy pointer (`.wrangler/deploy/config.json` →
+ * `configPath`) to the generated wrangler config the build emitted, and return it
+ * parsed. Mirrors the pointer resolution {@link verifyGeneratedDeployConfig} does, so
+ * the vars gate and the identity check read the SAME artifact. Returns a fail-closed
+ * reason (never throws) when the pointer/config is missing or malformed.
+ */
+function readGeneratedWranglerConfig(
+  root: string,
+): { ok: true; config: Record<string, unknown> } | { ok: false; reason: string } {
+  const deployConfigPath = deployPointerPath(root);
+  if (!existsSync(deployConfigPath)) {
+    return {
+      ok: false,
+      reason: `the CF plugin's deploy pointer at ${deployConfigPath} was not written by the build.`,
+    };
   }
-  return [
-    `deploy: --backend cloudflare builds in production mode, but your Vite config resolves to mode ${JSON.stringify(reject.mode)}.`,
-    'v1 validates and ships the production .env* set only. Remove the non-production build mode',
-    '(or set it to `production`), then rerun — or deploy this app with `void deploy` (the managed',
-    'platform). A custom build mode is a follow-up.',
-  ].join('\n');
+  let redirectedPath: string;
+  try {
+    const parsed = JSON.parse(readFileSync(deployConfigPath, 'utf-8')) as { configPath?: unknown };
+    if (typeof parsed.configPath !== 'string' || parsed.configPath.length === 0) {
+      return { ok: false, reason: `${deployConfigPath} has no "configPath" pointer.` };
+    }
+    redirectedPath = resolve(dirname(deployConfigPath), parsed.configPath);
+  } catch {
+    return { ok: false, reason: `${deployConfigPath} is not valid JSON.` };
+  }
+  if (!existsSync(redirectedPath)) {
+    return { ok: false, reason: `generated wrangler config ${redirectedPath} does not exist.` };
+  }
+  try {
+    const config = JSON.parse(readFileSync(redirectedPath, 'utf-8')) as Record<string, unknown>;
+    return { ok: true, config };
+  } catch {
+    return { ok: false, reason: `generated wrangler config ${redirectedPath} is not valid JSON.` };
+  }
+}
+
+/**
+ * Default {@link CloudflareDeployDeps.readEmittedWorkerVars} seam: read the REAL
+ * `vars` map the build baked into `dist/ssr/wrangler.json` (ground truth — the exact
+ * plaintext the worker ships). A missing `vars` field is an empty map (a worker with
+ * no vars), not a failure; a missing/malformed artifact fails closed.
+ */
+function readEmittedWorkerVarsDefault(root: string): EmittedWorkerVarsResult {
+  const resolved = readGeneratedWranglerConfig(root);
+  if (!resolved.ok) {
+    return resolved;
+  }
+  const vars = resolved.config.vars;
+  return {
+    ok: true,
+    vars:
+      vars && typeof vars === 'object' && !Array.isArray(vars)
+        ? (vars as Record<string, unknown>)
+        : {},
+  };
 }
 
 /**
@@ -813,20 +857,30 @@ export interface CloudflareDeployDeps {
   assertMigrationsDeployable?: typeof assertRemoteMigrationsDeployable;
   /** Migration apply-set equality gate seam (default: {@link checkWranglerMigrationApplySet}). */
   checkMigrationApplySet?: typeof checkWranglerMigrationApplySet;
-  /** Auth-schema validation seam (default: {@link validateAuthMigrationSchema}). */
+  /**
+   * Auth-schema validation seam (default: {@link validateAuthMigrationSchema}).
+   * Runs POST-build: reads the generated auth schema the build emitted
+   * (`.void/better-auth-schema.ts`) and asserts the checked-in migrations produce it.
+   */
   validateAuthMigrations?: typeof validateAuthMigrationSchema;
   /**
-   * Isolated build-context probe seam (default: the {@link DeployBuildContextInput}
-   * subprocess). Receives the scrubbed build env and returns the effective build
-   * mode, the plaintext-var warnings, and the required-secret gate inputs — all
-   * derived under that scrubbed env, so the parent runs no project code / no
-   * project-env `loadEnv`. A `reject` (custom envDir / non-production mode) fails
-   * the deploy closed pre-account.
+   * Isolated env-schema probe seam (default: the {@link EnvSchemaProbeInput}
+   * subprocess). Receives a scrubbed env and returns the env-INSENSITIVE schema facts
+   * (required-secret NAMES + `.secret()` flags), derived by importing env.ts in the
+   * child, so the parent runs no project code. A `schema-error` (env.ts failed to
+   * evaluate, or a validator threw) fails the deploy closed.
    */
-  resolveBuildContext?: (
-    input: DeployBuildContextInput,
+  resolveSchemaFacts?: (
+    input: EnvSchemaProbeInput,
     env: NodeJS.ProcessEnv,
-  ) => DeployBuildContextResult | Promise<DeployBuildContextResult>;
+  ) => EnvSchemaProbeResult | Promise<EnvSchemaProbeResult>;
+  /**
+   * Emitted-worker-vars read seam (default: {@link readEmittedWorkerVarsDefault}).
+   * Runs POST-build: reads the REAL `vars` map the build baked into
+   * `dist/ssr/wrangler.json` — the ground truth the plaintext warnings + secret gate
+   * validate.
+   */
+  readEmittedWorkerVars?: (root: string) => EmittedWorkerVarsResult;
   /** Override CI / non-interactive detection (default: `!stdin.isTTY || getTokenSource()==='ci'`). */
   isCI?: boolean;
   /** Override `process.exit` (tests assert the exit code without halting). */
@@ -1257,63 +1311,69 @@ export async function assertMigrationsProduceAuthSchema(
 }
 
 /**
- * The build's EFFECTIVE `{ mode, envDir }` (narrowed to `production` / root by the build-context
- * probe) plus the SCRUBBED build `env` the auth config must be derived under — so an
- * env-conditioned auth config
- * is resolved exactly as the deployed worker would see it, and the arbitrary auth-config code
- * never runs with the parent's live credentials.
+ * Read the REQUIRED Better Auth schema (tables + columns) from the schema the BUILD
+ * actually generated — ground truth, not a facsimile. `writeAuthDatabaseFiles`
+ * (plugin-routing.ts) emits `<root>/.void/better-auth-schema.ts` during the build,
+ * containing an `export const migrationSchema = { ... } as const;` literal —
+ * `JSON.stringify(resolveVoidAuthMigrationSchema(...), null, 2)` derived under the
+ * build's real mode, so it already reflects configured table/column RENAMES + PLUGIN
+ * tables. The literal's top-level object closes with `}` at column 0, so the
+ * `\n} as const;` terminator uniquely bounds the JSON (inner braces are indented).
+ * The `id` column is the implicit PRIMARY KEY, so it is prepended to each table's
+ * columns — matching `resolveVoidAuthMigrationSchema`'s field set exactly. Throws a
+ * fail-closed error when the artifact is missing/malformed.
  */
-export type AuthSchemaValidationEnv = {
-  mode: string;
-  envDir: string | undefined;
-  env: NodeJS.ProcessEnv;
-};
-
-/**
- * Resolve the REQUIRED Better Auth schema (tables + columns) from the app's real auth config in
- * an ISOLATED SUBPROCESS ({@link resolveRequiredAuthSchemaViaSubprocess}) — the child uses the
- * SAME `resolveVoidAuthMigrationSchema` resolver the runtime `/__void/migrate/auth` path uses
- * (so configured table/column RENAMES + PLUGIN tables are included, not just the core four),
- * derives it under the build's EFFECTIVE mode (`loadEnv(mode, envDir)`), and runs under the
- * scrubbed build env so the parent's CF Access credentials never reach the arbitrary auth code.
- * `findVoidAuthConfig` (a plain file read) is done in the parent and its path handed to the
- * child. The `id` column is the implicit PRIMARY KEY, so it is added to each table's columns
- * (done in the child). Loaded lazily so a managed deploy never pulls the probe module in.
- */
-async function resolveRequiredAuthSchema(
+function readEmittedAuthMigrationSchema(
   root: string,
-  paths: ReturnType<typeof resolveProjectPaths>,
-  voidConfig: VoidConfig,
-  opts: AuthSchemaValidationEnv,
-): Promise<Array<{ table: string; columns: Array<string> }>> {
-  const { resolveRequiredAuthSchemaViaSubprocess } = await import('./auth-schema-probe.ts');
-  return resolveRequiredAuthSchemaViaSubprocess(
-    {
-      root,
-      authConfigPath: findVoidAuthConfig(root, paths),
-      dialect: 'sqlite',
-      providers: voidConfig.auth?.providers ?? null,
-      mode: opts.mode,
-      envDir: opts.envDir,
-    },
-    opts.env,
-  );
+): Array<{ table: string; columns: Array<string> }> {
+  const schemaPath = join(root, '.void', 'better-auth-schema.ts');
+  if (!existsSync(schemaPath)) {
+    throw new Error(
+      `the build did not emit ${schemaPath}, so the generated auth schema could not be read from the build output.`,
+    );
+  }
+  const content = readFileSync(schemaPath, 'utf-8');
+  const marker = 'export const migrationSchema = ';
+  const start = content.indexOf(marker);
+  if (start === -1) {
+    throw new Error(
+      `${schemaPath} has no migrationSchema literal — cannot verify the auth schema.`,
+    );
+  }
+  const jsonStart = start + marker.length;
+  const end = content.indexOf('\n} as const;', jsonStart);
+  if (end === -1) {
+    throw new Error(
+      `${schemaPath} migrationSchema literal is malformed — cannot verify the auth schema.`,
+    );
+  }
+  let migrationSchema: VoidAuthMigrationSchema;
+  try {
+    migrationSchema = JSON.parse(content.slice(jsonStart, end + 2)) as VoidAuthMigrationSchema;
+  } catch {
+    throw new Error(
+      `${schemaPath} migrationSchema is not valid JSON — cannot verify the auth schema.`,
+    );
+  }
+  return migrationSchema.tables.map((table) => ({
+    table: table.name,
+    columns: ['id', ...Object.keys(table.fields)],
+  }));
 }
 
 /**
- * Default {@link CloudflareDeployDeps.validateAuthMigrations} seam: resolve the required Better
- * Auth schema (in the isolated subprocess) and assert the checked-in migrations produce it.
- * Throws on any missing table/column (or an unapplyable migration); the caller renders
- * `.message` + fails closed.
+ * Default {@link CloudflareDeployDeps.validateAuthMigrations} seam: read the auth
+ * schema the BUILD generated ({@link readEmittedAuthMigrationSchema}) and assert the
+ * checked-in migrations produce it (applied to in-memory SQLite). Runs POST-build,
+ * against ground truth — no auth-config subprocess, no mode/envDir divergence.
+ * Throws on any missing table/column (or an unapplyable migration); the caller
+ * renders `.message` + fails closed.
  */
 export async function validateAuthMigrationSchema(
   root: string,
-  paths: ReturnType<typeof resolveProjectPaths>,
-  voidConfig: VoidConfig,
   migrations: Array<{ name: string; sql: string }>,
-  opts: AuthSchemaValidationEnv,
 ): Promise<void> {
-  const required = await resolveRequiredAuthSchema(root, paths, voidConfig, opts);
+  const required = readEmittedAuthMigrationSchema(root);
   await assertMigrationsProduceAuthSchema(migrations, required);
 }
 
@@ -1816,76 +1876,36 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
-  // 3c. Resolve the ONE shared build CONTEXT the whole deploy validates against — the effective
-  // build mode, the plaintext-var warnings, and the required-secret gate inputs — in an ISOLATED
-  // SUBPROCESS under the SAME scrubbed env (`deployChildEnv`) the build runs with. The parent runs
-  // NO project code and NO project-env `loadEnv`: resolving the Vite config (arbitrary plugin
-  // pipeline) and loading the `.env*` overlay BOTH happen in the child, so a deferred plugin
-  // handler can never read this credential-bearing parent's CF Access token, and the effective-var
-  // map is derived under the build's own env (never the parent's ambient/credentialed one). A
-  // custom Vite envDir or a non-`production` build mode is unsupported in v1 → the child returns a
-  // REJECT the parent turns into clear pre-account guidance (so root === envDir for every supported
-  // app — the auth-schema probe and the build's auth generation can never diverge). Derived ONCE
-  // and fed to BOTH the auth-schema guard (3d) and the secret preflight (7).
-  const buildProjectEnv = deployChildEnv(accountId, apiBaseUrl);
-  let buildContext: DeployBuildContextResult;
+  // 3c. Derive the env-INSENSITIVE schema facts — the required-secret NAMES + the keys
+  // flagged `.secret()` — in an ISOLATED SUBPROCESS under a scrubbed env. Importing the
+  // user's env.ts is arbitrary project code, so it must not run in this credential-bearing
+  // parent; but the facts do NOT depend on any `.env` file (they are fixed by env.ts's
+  // structure), so the child needs neither the Vite config nor `loadEnv` — no plugin
+  // pipeline, no `beforeExit`/timer risk, and no probe-vs-build divergence over which
+  // `.env*` set was loaded. The REAL worker vars the gate validates come from the emitted
+  // `dist/ssr/wrangler.json` AFTER the build (ground truth), not from here. The child env
+  // additionally scrubs `CLOUDFLARE_API_TOKEN` (schema derivation needs no credentials) on
+  // top of `deployChildEnv`'s CF Access / transport scrub. Run pre-build so a broken env.ts
+  // fails fast, before any account op.
+  const schemaProbeEnv = deployChildEnv(accountId, apiBaseUrl);
+  requireProvisionModule().deleteEnvVarCaseAware(schemaProbeEnv, 'CLOUDFLARE_API_TOKEN');
+  let schemaResult: EnvSchemaProbeResult;
   try {
-    buildContext = await (deps.resolveBuildContext ?? resolveDeployBuildContextDefault)(
-      { root, configPath },
-      buildProjectEnv,
+    schemaResult = await (deps.resolveSchemaFacts ?? resolveEnvSchemaFactsDefault)(
+      { root },
+      schemaProbeEnv,
     );
   } catch (err) {
     log.error(
-      `deploy: could not resolve the Vite build context (mode / envDir / worker vars) — ${getErrorMessage(err)}`,
+      `deploy: could not derive the env schema (required secrets / .secret() flags) — ${getErrorMessage(err)}`,
     );
     return exit(1);
   }
-  if (buildContext.kind === 'reject') {
-    log.error(formatBuildContextReject(buildContext));
+  if (schemaResult.kind === 'schema-error') {
+    log.error(`deploy: ${selfHostSchemaFailureMessage(schemaResult.reason)}`);
     return exit(1);
   }
-  if (buildContext.kind === 'schema-error') {
-    log.error(`deploy: ${selfHostSchemaFailureMessage(buildContext.reason)}`);
-    return exit(1);
-  }
-  // Accepted: the narrowing guarantees `mode === 'production'` and `envDir === root`.
-  const buildConfig: DeployBuildConfig = { mode: buildContext.mode, envDir: undefined };
-
-  // 3d. Auth-migration guard — FAIL CLOSED before whoami / provision / build. The managed
-  // platform creates Void-managed Better Auth tables at RUNTIME via the worker's
-  // `/__void/migrate/auth` endpoint after dispatch; this self-host backend never calls it — it
-  // only applies checked-in `db/migrations/*.sql`. So verify the checked-in migrations PRODUCE
-  // the required Better Auth schema (tables + columns, incl. configured renames + plugin
-  // tables). The required schema is derived in an ISOLATED SUBPROCESS (auth-schema-probe) under
-  // the build's EFFECTIVE mode + the scrubbed `buildProjectEnv` — the arbitrary auth-config code
-  // never runs in this credential-bearing parent — then the checked-in migrations are applied to
-  // an in-memory SQLite DB (safe SQL, in-parent) and compared. `dialect` is guaranteed `'sqlite'`
-  // here (pg+auth was rejected at 2a).
-  if (authEnabled) {
-    try {
-      await (deps.validateAuthMigrations ?? validateAuthMigrationSchema)(
-        root,
-        paths,
-        voidConfig,
-        migrations,
-        { mode: buildConfig.mode, envDir: buildConfig.envDir, env: buildProjectEnv },
-      );
-    } catch (err) {
-      log.error(
-        [
-          'deploy: --backend cloudflare cannot verify the Void-managed Better Auth schema.',
-          'The managed platform creates these tables at runtime (POST /__void/migrate/auth)',
-          'after deploy; this self-host backend only applies checked-in db/migrations/*.sql, so',
-          'they must already produce the Better Auth schema:',
-          `  ${getErrorMessage(err)}`,
-          'Generate a migration that creates the Better Auth tables (define them in',
-          '`db/schema.ts`, run `void db generate`, commit), then rerun — or deploy this app',
-          'with `void deploy` (the managed platform).',
-        ].join('\n'),
-      );
-      return exit(1);
-    }
-  }
+  const schemaFacts: SelfHostSchemaFacts = schemaResult.facts;
 
   // 3e. Confirm wrangler auth. `whoami` gets the SAME `-c`/`--env=`/pinned-transport
   // context as migrate/deploy, so it authenticates against the exact endpoint they use.
@@ -2024,7 +2044,11 @@ export async function runCloudflareDeploy(
   const workerName = readWranglerTopLevelString(rootConfig, 'name') ?? deriveWorkerName(root);
   writeProvisionedWranglerConfig(root, { name: workerName, accountId }, { configPath });
 
-  // 6. Migration gates + remote D1 apply — D1/SQLite apps only (pg/Hyperdrive skip).
+  // 6. Migration gates (LOCAL, pre-build) — D1/SQLite apps only (pg/Hyperdrive skip). These
+  // read only local files; the REMOTE apply runs LATER (step 9), AFTER the build + the
+  // secret/auth gates pass, so a failed gate never mutates remote D1. The migrate token
+  // resolved + validated here is held for that later apply.
+  let d1MigrateToken: string | undefined;
   if (desired.d1) {
     // 6a. Run the SAME gates the managed deploy runs — schema drift, journal coherence,
     // destructive-op-without-pragma — for EVERY D1 app REGARDLESS of migration count. The
@@ -2045,9 +2069,9 @@ export async function runCloudflareDeploy(
       return exit(1);
     }
 
-    // Apply/list ONLY when there ARE checked-in migrations: a D1 desired purely from DB-use
-    // or auth can have no `db/migrations`, and wrangler 4.107 HARD-FAILS
-    // `d1 migrations apply` on a missing/empty folder (it never no-ops).
+    // Resolve + validate the migrate target ONLY when there ARE checked-in migrations: a D1
+    // desired purely from DB-use or auth can have no `db/migrations`, and wrangler 4.107
+    // HARD-FAILS `d1 migrations apply` on a missing/empty folder (it never no-ops).
     if (migrations.length > 0) {
       // `migrations_dir` must be present in the config: wrangler defaults a missing value to
       // `./migrations` (relative to the config) and would apply an unrelated folder.
@@ -2107,88 +2131,72 @@ export async function runCloudflareDeploy(
         log.error(applyCheck.reason);
         return exit(1);
       }
-
-      // 6c. Apply pending migrations to remote D1.
-      const migrate = await Promise.resolve(
-        runWrangler(
-          [
-            'd1',
-            'migrations',
-            'apply',
-            migrateTarget.token,
-            '--remote',
-            '-c',
-            configPath,
-            '--env=',
-          ],
-          { capture: false },
-        ),
-      );
-      if (!isCleanWranglerExit(migrate)) {
-        log.error(
-          `deploy: remote D1 migrations failed for "${migrateTarget.token}" (exit ${String(migrate.status)}). ` +
-            'Fix the migration and rerun. Note: D1 always enforces foreign_keys=ON — a Drizzle ' +
-            'table-rebuild using PRAGMA foreign_keys=OFF must use PRAGMA defer_foreign_keys instead.',
-        );
-        return exit(1);
-      }
-
-      // 6d. Verify NO migrations remain pending on remote. `d1 migrations apply` EXITS 0 when
-      // its confirmation is DECLINED (interactive) — a no-op that reads as success — and prints
-      // no machine-readable applied set. `d1 migrations list --remote` queries the remote
-      // `d1_migrations` table and prints "Migrations to be applied:" when any remain, else the
-      // affirmative "No migrations to apply!". Both emit at wrangler's `log` level, which the
-      // child env PINS (`WRANGLER_LOG=log`), so an ambient reduced level can never suppress
-      // them. Reject on the pending marker, REQUIRE the affirmative sentinel, and reject any
-      // empty/unrecognized output rather than trust an absent marker.
-      const migrateList = await Promise.resolve(
-        runWrangler(
-          ['d1', 'migrations', 'list', migrateTarget.token, '--remote', '-c', configPath, '--env='],
-          { capture: true },
-        ),
-      );
-      if (!isCleanWranglerExit(migrateList)) {
-        log.error(
-          `deploy: could not verify the remote migration state for "${migrateTarget.token}" ` +
-            `(\`d1 migrations list\` exit ${String(migrateList.status)}). Refusing to deploy against ` +
-            'an unverified schema — rerun once wrangler can reach your account.',
-        );
-        return exit(1);
-      }
-      if (migrateList.stdout.includes('Migrations to be applied:')) {
-        log.error(
-          [
-            `deploy: remote D1 still has UNAPPLIED migrations for "${migrateTarget.token}" after apply.`,
-            '`wrangler d1 migrations apply` exits 0 even when its confirmation is declined, so',
-            'the schema may be un-migrated while the code that needs it is about to deploy.',
-            'Re-run and confirm the migration (or apply it non-interactively), then rerun.',
-          ].join('\n'),
-        );
-        return exit(1);
-      }
-      if (!migrateList.stdout.includes('No migrations to apply!')) {
-        log.error(
-          [
-            `deploy: could not confirm the remote migration state for "${migrateTarget.token}".`,
-            '`wrangler d1 migrations list` printed neither the "no migrations to apply" nor the',
-            '"migrations to be applied" marker (WRANGLER_LOG is pinned so they are never',
-            'suppressed) — refusing to deploy against an unverified schema. Rerun once wrangler',
-            'can reach your account.',
-          ].join('\n'),
-        );
-        return exit(1);
-      }
+      // Hold the validated token; the REMOTE apply happens at step 9, after the build gates.
+      d1MigrateToken = migrateTarget.token;
     }
   }
 
-  // 7. Secrets preflight — WARN (plaintext .env→vars), then GATE (required secrets). Both were
-  // DERIVED at 3c inside the isolated build-context subprocess (under the scrubbed build env, so
-  // `loadEnv` saw the EXACT vars the build ships — never the parent's ambient/credentialed env),
-  // and cross to the parent as VALUES-FREE structured data. The parent does ONLY pure work here:
-  // print the warnings, then DISCHARGE the gate (compare the required-secret names to `wrangler
-  // secret list`) — no project code, no project-env `loadEnv`, no env.ts import in this
-  // credential-bearing process.
-  const { warnings, envContext } = buildContext;
+  // 7. Build with the pinned deploy transport — WITHOUT VOID_DEPLOY_PROJECT_ID — so
+  // self-host ISR emits and the CF plugin merges the wrangler.jsonc real ids into
+  // dist/ssr/wrangler.json. `deployChildEnv` scrubs CLOUDFLARE_ENV +
+  // CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH (and pins one account + API base), so the CF
+  // plugin generates the pinned TOP-LEVEL config from the CANONICAL root wrangler config,
+  // not a named-env / alternate-config one whose account/name/bindings could differ.
+  //
+  // The build runs BEFORE the secret / auth gates: the redesign validates the REAL artifact
+  // the build emits (`dist/ssr/wrangler.json` `vars` + the generated auth schema) rather than
+  // predicting it, so a missing secret / bad auth schema is caught AFTER the build — the
+  // accepted trade-off for reading ground truth. No REMOTE mutation has happened yet (provision
+  // ran earlier, but the remote D1 apply + deploy are still ahead), so a failed gate below
+  // never leaves a half-migrated / half-deployed account.
+  //
+  // DELETE the CF plugin's deploy pointer (`.wrangler/deploy/config.json`) FIRST. The
+  // plugin OVERWRITES it (never deletes) on each build, but ONLY when the CF Vite plugin
+  // participates — a build that emits no worker artifact leaves a STALE pointer from a
+  // previous run in place, and a bare `wrangler deploy` would follow it to an old
+  // `dist/ssr/wrangler.json`. Removing it now means the reads below (which require the
+  // pointer to exist) can only pass on a pointer THIS build re-created.
+  removeDeployPointer(root);
+  const buildChildEnv = deployChildEnv(accountId, apiBaseUrl);
+  delete buildChildEnv.VOID_DEPLOY_PROJECT_ID;
+  const runBuild =
+    deps.runBuild ??
+    ((env: NodeJS.ProcessEnv) => {
+      execSync(resolveProjectCommand(root, 'vite build'), { cwd: root, stdio: 'inherit', env });
+    });
+  try {
+    runBuild(buildChildEnv);
+  } catch (err) {
+    log.error(`deploy: build failed — ${getErrorMessage(err)}`);
+    return exit(getExitCode(err));
+  }
+
+  // 8. Post-build GROUND-TRUTH gates — validate the REAL artifact the build emitted, not a
+  // facsimile. Read the actual `vars` the build baked into `dist/ssr/wrangler.json`, then
+  // WARN (plaintext secret-looking vars) + GATE (required secrets) + auth-schema check, all
+  // against that ground truth. Nothing here imports project code or runs `loadEnv`: the only
+  // project-derived input is the env-INSENSITIVE schema facts from 3c.
+  const emitted = (deps.readEmittedWorkerVars ?? readEmittedWorkerVarsDefault)(root);
+  if (!emitted.ok) {
+    log.error(
+      [
+        'deploy: could not read the worker vars the build emitted — refusing to validate secrets.',
+        `  ${emitted.reason}`,
+        'The build must emit dist/ssr/wrangler.json for this backend. Rerun the build, or deploy',
+        'this app with `void deploy` (the managed platform).',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+  const emittedVars = emitted.vars;
+
+  // 8a. Plaintext-var warnings — classify the secret-looking keys among the REAL emitted vars
+  // (`.secret()`-flagged from the schema facts, OR the shared name heuristic). Ground truth —
+  // no `loadEnv`, no facsimile.
+  const warnings = collectPlaintextVarWarningsFromVars(
+    emittedVars,
+    schemaFacts.hasSchema ? schemaFacts.secretKeys : [],
+  );
   if (warnings.secretKeys.length > 0) {
     log.warn(
       [
@@ -2200,6 +2208,14 @@ export async function runCloudflareDeploy(
       ].join('\n'),
     );
   }
+
+  // 8b. Required-secret gate — build the values-free context from the REAL emitted vars + the
+  // env-insensitive required-key names (pure parent work, no project code), then DISCHARGE it:
+  // a required key shipped EMPTY (`K=""`) SHADOWS a same-named remote secret → fail closed
+  // always; a required key ABSENT from the emitted vars is discharged only by `wrangler secret
+  // list`, else fails closed. Reuses the same `dischargeSelfHostEnvContext` the unit tests
+  // exercise — now fed the ground-truth vars instead of a facsimile.
+  const envContext = deriveSelfHostEnvContextFromVars(emittedVars, schemaFacts);
   try {
     await (deps.dischargeSelfHostEnv ?? dischargeSelfHostEnvContext)(envContext, {
       root,
@@ -2219,35 +2235,101 @@ export async function runCloudflareDeploy(
     throw err;
   }
 
-  // 8. Build with the pinned deploy transport — WITHOUT VOID_DEPLOY_PROJECT_ID — so
-  // self-host ISR emits and the CF plugin merges the wrangler.jsonc real ids into
-  // dist/ssr/wrangler.json. `deployChildEnv` scrubs CLOUDFLARE_ENV +
-  // CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH (and pins one account + API base), so the CF
-  // plugin generates the pinned TOP-LEVEL config from the CANONICAL root wrangler config,
-  // not a named-env / alternate-config one whose account/name/bindings could differ.
-  //
-  // DELETE the CF plugin's deploy pointer (`.wrangler/deploy/config.json`) FIRST. The
-  // plugin OVERWRITES it (never deletes) on each build, but ONLY when the CF Vite plugin
-  // participates — a build that emits no worker artifact leaves a STALE pointer from a
-  // previous run in place, and a bare `wrangler deploy` would follow it to an old
-  // `dist/ssr/wrangler.json`. Removing it now means the verification below (which
-  // requires the pointer to exist) can only pass on a pointer THIS build re-created.
-  removeDeployPointer(root);
-  const buildChildEnv = deployChildEnv(accountId, apiBaseUrl);
-  delete buildChildEnv.VOID_DEPLOY_PROJECT_ID;
-  const runBuild =
-    deps.runBuild ??
-    ((env: NodeJS.ProcessEnv) => {
-      execSync(resolveProjectCommand(root, 'vite build'), { cwd: root, stdio: 'inherit', env });
-    });
-  try {
-    runBuild(buildChildEnv);
-  } catch (err) {
-    log.error(`deploy: build failed — ${getErrorMessage(err)}`);
-    return exit(getExitCode(err));
+  // 8c. Auth-schema check — the managed platform creates Void-managed Better Auth tables at
+  // RUNTIME (POST /__void/migrate/auth) after dispatch; this self-host backend never calls it,
+  // it only applies checked-in `db/migrations/*.sql`. So verify the checked-in migrations
+  // PRODUCE the required Better Auth schema (tables + columns, incl. configured renames + plugin
+  // tables) by reading the schema the BUILD generated (`.void/better-auth-schema.ts` — ground
+  // truth) and applying the migrations to in-memory SQLite. `dialect` is guaranteed `'sqlite'`
+  // here (pg+auth was rejected at 2a).
+  if (authEnabled) {
+    try {
+      await (deps.validateAuthMigrations ?? validateAuthMigrationSchema)(root, migrations);
+    } catch (err) {
+      log.error(
+        [
+          'deploy: --backend cloudflare cannot verify the Void-managed Better Auth schema.',
+          'The managed platform creates these tables at runtime (POST /__void/migrate/auth)',
+          'after deploy; this self-host backend only applies checked-in db/migrations/*.sql, so',
+          'they must already produce the Better Auth schema:',
+          `  ${getErrorMessage(err)}`,
+          'Generate a migration that creates the Better Auth tables (define them in',
+          '`db/schema.ts`, run `void db generate`, commit), then rerun — or deploy this app',
+          'with `void deploy` (the managed platform).',
+        ].join('\n'),
+      );
+      return exit(1);
+    }
   }
 
-  // 8b. Verify the generated deploy config targets the pinned account + expected worker
+  // 9. Apply pending migrations to remote D1 — AFTER all local + ground-truth gates pass, so a
+  // failed gate never mutates remote D1. Uses the token resolved + validated at step 6, and the
+  // pinned root config (`-c`), which targets the account already verified by provision/drift.
+  if (d1MigrateToken) {
+    // 9a. Apply.
+    const migrate = await Promise.resolve(
+      runWrangler(
+        ['d1', 'migrations', 'apply', d1MigrateToken, '--remote', '-c', configPath, '--env='],
+        { capture: false },
+      ),
+    );
+    if (!isCleanWranglerExit(migrate)) {
+      log.error(
+        `deploy: remote D1 migrations failed for "${d1MigrateToken}" (exit ${String(migrate.status)}). ` +
+          'Fix the migration and rerun. Note: D1 always enforces foreign_keys=ON — a Drizzle ' +
+          'table-rebuild using PRAGMA foreign_keys=OFF must use PRAGMA defer_foreign_keys instead.',
+      );
+      return exit(1);
+    }
+
+    // 9b. Verify NO migrations remain pending on remote. `d1 migrations apply` EXITS 0 when
+    // its confirmation is DECLINED (interactive) — a no-op that reads as success — and prints
+    // no machine-readable applied set. `d1 migrations list --remote` queries the remote
+    // `d1_migrations` table and prints "Migrations to be applied:" when any remain, else the
+    // affirmative "No migrations to apply!". Both emit at wrangler's `log` level, which the
+    // child env PINS (`WRANGLER_LOG=log`), so an ambient reduced level can never suppress
+    // them. Reject on the pending marker, REQUIRE the affirmative sentinel, and reject any
+    // empty/unrecognized output rather than trust an absent marker.
+    const migrateList = await Promise.resolve(
+      runWrangler(
+        ['d1', 'migrations', 'list', d1MigrateToken, '--remote', '-c', configPath, '--env='],
+        { capture: true },
+      ),
+    );
+    if (!isCleanWranglerExit(migrateList)) {
+      log.error(
+        `deploy: could not verify the remote migration state for "${d1MigrateToken}" ` +
+          `(\`d1 migrations list\` exit ${String(migrateList.status)}). Refusing to deploy against ` +
+          'an unverified schema — rerun once wrangler can reach your account.',
+      );
+      return exit(1);
+    }
+    if (migrateList.stdout.includes('Migrations to be applied:')) {
+      log.error(
+        [
+          `deploy: remote D1 still has UNAPPLIED migrations for "${d1MigrateToken}" after apply.`,
+          '`wrangler d1 migrations apply` exits 0 even when its confirmation is declined, so',
+          'the schema may be un-migrated while the code that needs it is about to deploy.',
+          'Re-run and confirm the migration (or apply it non-interactively), then rerun.',
+        ].join('\n'),
+      );
+      return exit(1);
+    }
+    if (!migrateList.stdout.includes('No migrations to apply!')) {
+      log.error(
+        [
+          `deploy: could not confirm the remote migration state for "${d1MigrateToken}".`,
+          '`wrangler d1 migrations list` printed neither the "no migrations to apply" nor the',
+          '"migrations to be applied" marker (WRANGLER_LOG is pinned so they are never',
+          'suppressed) — refusing to deploy against an unverified schema. Rerun once wrangler',
+          'can reach your account.',
+        ].join('\n'),
+      );
+      return exit(1);
+    }
+  }
+
+  // 10. Verify the generated deploy config targets the pinned account + expected worker
   // AND the exact provisioned binding IDENTITIES BEFORE uploading. A `CLOUDFLARE_ENV` /
   // `CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH` the CF plugin loaded could have baked a
   // different account/name — or the SAME account/name with a flattened, DIFFERENT binding
@@ -2275,7 +2357,7 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
-  // 9. Deploy — bare `wrangler deploy` follows .wrangler/deploy/config.json →
+  // 11. Deploy — bare `wrangler deploy` follows .wrangler/deploy/config.json →
   // dist/ssr/wrangler.json (which carries the real ids + pinned account). `--env=` pins
   // the top-level env so an ambient CLOUDFLARE_ENV cannot reselect a named one.
   // `--experimental-provision=false` / `--experimental-auto-create=false` disable

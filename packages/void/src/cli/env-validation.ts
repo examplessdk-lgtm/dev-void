@@ -371,7 +371,9 @@ export type VarSource =
   | { kind: 'dotenv'; file: string }
   | { kind: 'void-json' }
   | { kind: 'schema-default' }
-  | { kind: 'wrangler'; file: string };
+  | { kind: 'wrangler'; file: string }
+  /** The value ships in the REAL emitted worker config (`dist/ssr/wrangler.json` `vars`). */
+  | { kind: 'emitted' };
 
 /**
  * The FINAL effective worker-vars map plus the per-key {@link VarSource}
@@ -1112,6 +1114,134 @@ function emptyEnvContext(): SelfHostEnvContext {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Post-build ground-truth self-host units.
+//
+// The redesigned `void deploy --backend cloudflare` gate validates the REAL
+// build artifact the build emits — `dist/ssr/wrangler.json` `vars` (the plaintext
+// worker vars) — instead of a pre-build `loadEnv` facsimile. It needs only ONE
+// piece of project-derived data: the env-INSENSITIVE schema facts (required key
+// names + `.secret()` flags), which do NOT depend on which `.env` file the build
+// reads. Those are derived once in an isolated subprocess; everything else is pure
+// parent work over the emitted map.
+// ---------------------------------------------------------------------------
+
+/**
+ * The env-INSENSITIVE structural facts the self-host secret gate needs from the
+ * project's env schema: whether a schema is registered, the REQUIRED key names (a
+ * validator that rejects the ABSENT value — {@link requiredSchemaKeys}), and the
+ * keys the schema flags `.secret()` ({@link getSecretOverride} === 'secret').
+ * NONE of these depend on which `.env` file the build reads — they are fixed by
+ * env.ts's structure — so this needs no `loadEnv` and no build env, and the result
+ * is the SAME regardless of the build's mode/envDir. That is precisely why the old
+ * probe-vs-build divergence class is gone: nothing derived here can diverge from
+ * the build over which `.env*` set was loaded.
+ */
+export type SelfHostSchemaFacts = {
+  /** Whether the project registered an env schema at all (no schema → nothing to gate). */
+  hasSchema: boolean;
+  /** Required key NAMES — validator rejects `undefined`. Values-free. */
+  requiredKeys: Array<string>;
+  /** Keys the schema flags `.secret()`. Values-free. */
+  secretKeys: Array<string>;
+};
+
+/**
+ * Derive the {@link SelfHostSchemaFacts} by importing the user's env.ts. Runs
+ * ARBITRARY project code (env.ts evaluation) + the registered validators' probes,
+ * so the caller MUST run this in an ISOLATED SUBPROCESS ({@link
+ * ../cli/env-schema-probe.ts}) under a scrubbed env. Throws only a values-free
+ * {@link SelfHostSchemaError} (via {@link withSchemaBoundary}) when the schema
+ * machinery itself fails; the derived names/flags are returned as values-free data.
+ */
+export async function deriveSelfHostSchemaFacts(root: string): Promise<SelfHostSchemaFacts> {
+  const envFile = findEnvFile(root);
+  if (envFile == null) {
+    return { hasSchema: false, requiredKeys: [], secretKeys: [] };
+  }
+  const mod = await withSchemaBoundary('schema-load-failed', () => loadSchema(envFile));
+  if (!mod) {
+    return { hasSchema: false, requiredKeys: [], secretKeys: [] };
+  }
+  const schema = mod._getRegisteredSchema() ?? {};
+  const requiredKeys = await withSchemaBoundary('schema-validation-error', () =>
+    requiredSchemaKeys(schema),
+  );
+  // `.secret()` is a STATIC flag on the validator (getSecretOverride) — no value
+  // read, no env dependency.
+  const secretKeys = Object.keys(schema).filter(
+    (key) => getSecretOverride(schema[key]) === 'secret',
+  );
+  return { hasSchema: true, requiredKeys: [...requiredKeys], secretKeys };
+}
+
+/**
+ * Build the values-free {@link SelfHostEnvContext} from the REAL worker `vars` the
+ * build emitted into `dist/ssr/wrangler.json` (ground truth — never a facsimile)
+ * plus the env-insensitive {@link SelfHostSchemaFacts}. PURE (no project code, no
+ * I/O): the parent runs this AFTER the build with the real emitted map, so the
+ * gate reads exactly what the worker ships.
+ *   - a required key EMPTY in the emitted vars (`K=""`) → SHADOWS a same-named
+ *     remote secret → fail closed ALWAYS (`presentEmptyRequired`).
+ *   - a required key ABSENT from the emitted vars → the only state a remote secret
+ *     can discharge (`absentRequired`).
+ * `invalidKeys` is empty: value validity is enforced at worker boot
+ * (`_validateEnvOnce`, per isolate), not re-derived here — the redesigned gate is
+ * scoped to the empty-shadow + missing concerns over ground truth.
+ */
+export function deriveSelfHostEnvContextFromVars(
+  emittedVars: Record<string, unknown>,
+  facts: SelfHostSchemaFacts,
+): SelfHostEnvContext {
+  if (!facts.hasSchema) {
+    return emptyEnvContext();
+  }
+  const presentEmptyRequired = facts.requiredKeys.filter(
+    (key) => Object.hasOwn(emittedVars, key) && emittedVars[key] === '',
+  );
+  const absentRequired = facts.requiredKeys.filter((key) => !Object.hasOwn(emittedVars, key));
+  const presentEmptySources: Record<string, VarSource> = {};
+  for (const key of presentEmptyRequired) {
+    presentEmptySources[key] = { kind: 'emitted' };
+  }
+  return {
+    hasSchema: true,
+    presentEmptyRequired,
+    presentEmptySources,
+    absentRequired,
+    invalidKeys: [],
+  };
+}
+
+/**
+ * Classify the secret-looking keys among the REAL worker `vars` the build baked
+ * into `dist/ssr/wrangler.json` (ground truth). PURE: for each emitted var key, a
+ * `.secret()`-flagged key ({@link SelfHostSchemaFacts.secretKeys}) is
+ * `schema-secret`; otherwise the shared {@link isLikelySecretKey} name heuristic
+ * applies (so a secret-looking key ships plaintext regardless of any schema, and
+ * heuristic classification still works with no env.ts at all). KEYS ONLY leave
+ * here — the emitted values are never read.
+ */
+export function collectPlaintextVarWarningsFromVars(
+  emittedVars: Record<string, unknown>,
+  secretFlaggedKeys: Array<string>,
+): PlaintextVarWarningsResult {
+  const flagged = new Set(secretFlaggedKeys);
+  const keys = Object.keys(emittedVars);
+  const secretKeys: Array<PlaintextVarWarning> = [];
+  for (const key of keys) {
+    if (flagged.has(key)) {
+      secretKeys.push({ key, reason: 'schema-secret' });
+      continue;
+    }
+    if (isLikelySecretKey(key)) {
+      secretKeys.push({ key, reason: 'heuristic' });
+    }
+  }
+  secretKeys.sort((a, b) => a.key.localeCompare(b.key));
+  return { secretKeys, totalVarKeys: keys.length };
+}
+
 /** Build a values-free invalid {@link EnvValidationReport} from key names only. */
 function invalidEnvReport(missing: Array<string>, invalidKeys: Array<string>): EnvValidationReport {
   return {
@@ -1401,6 +1531,8 @@ function describeVarSource(source: VarSource | undefined): string {
       return `\`${source.file}\` \`vars\``;
     case 'schema-default':
       return 'your env schema `.default()`';
+    case 'emitted':
+      return 'the built worker config (`dist/ssr/wrangler.json` `vars`)';
     default:
       // Unreachable — a present key always has a recorded source. Fall back to a
       // generic, values-free phrasing rather than naming a wrong source.

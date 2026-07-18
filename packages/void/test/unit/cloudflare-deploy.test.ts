@@ -1,11 +1,6 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
-import { resolveRequiredAuthSchemaViaSubprocess } from '../../src/cli/auth-schema-probe.ts';
-import {
-  resolveDeployBuildContextViaSubprocess,
-  type DeployBuildContextResult,
-} from '../../src/cli/deploy-build-probe.ts';
 import {
   assertMigrationsProduceAuthSchema,
   assertNoConfigOverrideInProjectDotenv,
@@ -18,8 +13,14 @@ import {
   type CloudflareDeployDeps,
   type DeployWranglerRun,
   type DeployWranglerRunResult,
+  type EmittedWorkerVarsResult,
 } from '../../src/cli/deploy.ts';
-import type { SelfHostEnvContext } from '../../src/cli/env-validation.ts';
+import {
+  resolveEnvSchemaFactsViaSubprocess,
+  type EnvSchemaProbeResult,
+  type EnvSchemaProbeSpawnResult,
+} from '../../src/cli/env-schema-probe.ts';
+import type { SelfHostEnvContext, SelfHostSchemaFacts } from '../../src/cli/env-validation.ts';
 import type { CliLogger } from '../../src/cli/log-file.ts';
 import type { ProvisionResult } from '../../src/cli/provision.ts';
 import { readConfig } from '../../src/config.ts';
@@ -69,26 +70,52 @@ const cleanExit: DeployWranglerRunResult = {
   error: null,
 };
 
-/** A no-schema (nothing-to-gate) {@link SelfHostEnvContext}. */
-const EMPTY_ENV_CONTEXT: SelfHostEnvContext = {
-  hasSchema: false,
-  presentEmptyRequired: [],
-  presentEmptySources: {},
-  absentRequired: [],
-  invalidKeys: [],
-};
+/** No-schema (nothing-to-gate) env-insensitive facts. */
+const NO_SCHEMA_FACTS: SelfHostSchemaFacts = { hasSchema: false, requiredKeys: [], secretKeys: [] };
 
-/** A default-passing build-context probe result (production, no warnings, nothing to gate). */
-function okBuildContext(
-  overrides: Partial<Extract<DeployBuildContextResult, { kind: 'ok' }>> = {},
-): DeployBuildContextResult {
-  return {
-    kind: 'ok',
-    mode: 'production',
-    warnings: { secretKeys: [], totalVarKeys: 0 },
-    envContext: EMPTY_ENV_CONTEXT,
-    ...overrides,
+/** A default-passing env-schema probe result (no schema → nothing to gate). */
+function okSchemaFacts(overrides: Partial<SelfHostSchemaFacts> = {}): EnvSchemaProbeResult {
+  return { kind: 'ok', facts: { ...NO_SCHEMA_FACTS, ...overrides } };
+}
+
+/** A default emitted-vars read (empty vars — a worker that ships no plaintext vars). */
+function emittedVars(vars: Record<string, unknown> = {}): EmittedWorkerVarsResult {
+  return { ok: true, vars };
+}
+
+/** Absolute src paths for runtime imports inside spawned-child env.ts fixtures. */
+const srcEnvPublic = join(import.meta.dirname, '..', '..', 'src', 'runtime', 'env-public.ts');
+const srcEnvHelpers = join(import.meta.dirname, '..', '..', 'src', 'runtime', 'env-helpers.ts');
+
+/**
+ * Write a `.void/better-auth-schema.ts` fixture whose `migrationSchema` literal matches the
+ * shape the build emits (`JSON.stringify(resolveVoidAuthMigrationSchema(...), null, 2)`), so
+ * the post-build auth check reads ground truth exactly as it would after a real build.
+ */
+function writeAuthSchemaArtifact(
+  root: string,
+  tables: Array<{ name: string; fields: Array<string> }>,
+): void {
+  const migrationSchema = {
+    dialect: 'sqlite',
+    idStrategy: 'text',
+    tables: tables.map((t, i) => ({
+      name: t.name,
+      order: i + 1,
+      fields: Object.fromEntries(
+        t.fields.map((f) => [
+          f,
+          { type: 'string', required: true, unique: false, index: false, bigint: false },
+        ]),
+      ),
+    })),
   };
+  const dir = join(root, '.void');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'better-auth-schema.ts'),
+    `// Auto-generated fixture\nexport const migrationSchema = ${JSON.stringify(migrationSchema, null, 2)} as const;\n`,
+  );
 }
 
 /**
@@ -132,10 +159,13 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
       trace.push('provision');
       return { resources: [], configPath, accountIdWritten: false };
     }) as CloudflareDeployDeps['provision'],
-    // Stub the isolated build-context probe so orchestration tests never spawn Vite; the
-    // warnings + gate inputs it would derive are returned inline. Silent (no trace) — like
-    // the real subprocess, it runs pre-account and is not a step these tests order around.
-    resolveBuildContext: (() => okBuildContext()) as CloudflareDeployDeps['resolveBuildContext'],
+    // Stub the isolated env-schema probe so orchestration tests never spawn a child; the
+    // env-insensitive facts (required names + `.secret()` flags) are returned inline. Silent
+    // (no trace) — it runs pre-build and is not a step these tests order around.
+    resolveSchemaFacts: (() => okSchemaFacts()) as CloudflareDeployDeps['resolveSchemaFacts'],
+    // Stub the emitted-vars read so orchestration tests need no real dist/ssr/wrangler.json;
+    // dedicated tests inject the REAL vars a build would emit. Silent.
+    readEmittedWorkerVars: (() => emittedVars()) as CloudflareDeployDeps['readEmittedWorkerVars'],
     // Parent-side gate discharge (the wrangler `secret list` comparison). Dedicated tests
     // inject a throwing stub or exercise the real derive+discharge units directly.
     dischargeSelfHostEnv: (async () => {
@@ -602,7 +632,7 @@ describe('runCloudflareDeploy — drift check (no --provision)', () => {
     expect(trace).toEqual(['wrangler:whoami']);
   });
 
-  it('proceeds through whoami → migrate → verify → gate → build → deploy when fully provisioned', async () => {
+  it('proceeds through whoami → migrate-gate → build → gate → remote-migrate → deploy when fully provisioned', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'myapp' }),
       'void.json': JSON.stringify({}),
@@ -612,13 +642,15 @@ describe('runCloudflareDeploy — drift check (no --provision)', () => {
     });
     const { deps, trace, wranglerArgs } = harness();
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    // The BUILD runs BEFORE the secret gate (ground-truth validation reads the real emitted
+    // artifact), and the REMOTE D1 apply runs AFTER the gate (a failed gate never mutates D1).
     expect(trace).toEqual([
       'wrangler:whoami',
       'migrate-gate',
-      'wrangler:d1', // migrations apply
-      'wrangler:d1', // migrations list (pending verify)
-      'gate',
       'build',
+      'gate',
+      'wrangler:d1', // migrations apply (after the gate)
+      'wrangler:d1', // migrations list (pending verify)
       'wrangler:deploy',
     ]);
     // migrate targets the stored db name with --remote + pinned config
@@ -711,27 +743,25 @@ describe('runCloudflareDeploy — CI provision gate', () => {
 });
 
 describe('runCloudflareDeploy — secrets gate', () => {
-  it('warns about a plaintext secret-looking key without blocking', async () => {
+  it('warns about a plaintext secret-looking key in the REAL emitted vars without blocking', async () => {
     const root = d1Project(PROVISIONED_D1);
-    // The warning is DERIVED in the build-context probe and returned inline; the parent
-    // just prints it. A secret-looking key is non-fatal — the deploy still proceeds.
+    // The warning classifies the REAL vars the build baked into dist/ssr/wrangler.json (ground
+    // truth). A secret-looking key is non-fatal — the deploy still proceeds.
     const { deps, trace } = harness({
-      resolveBuildContext: (() =>
-        okBuildContext({
-          warnings: {
-            secretKeys: [{ key: 'API_TOKEN', reason: 'heuristic' as const }],
-            totalVarKeys: 3,
-          },
-        })) as CloudflareDeployDeps['resolveBuildContext'],
+      readEmittedWorkerVars: (() =>
+        emittedVars({
+          API_TOKEN: 'sk-live-xyz',
+          APP_NAME: 'demo',
+        })) as CloudflareDeployDeps['readEmittedWorkerVars'],
     });
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
     expect(trace).toContain('wrangler:deploy'); // warning is non-fatal
   });
 
-  it('blocks with exit(1) when the gate discharge throws (missing required secret); never deploys', async () => {
+  it('blocks with exit(1) when the gate discharge throws (missing required secret); never deploys or migrates remote', async () => {
     const { SelfHostEnvValidationError } = await import('../../src/cli/env-validation.ts');
     const root = d1Project(PROVISIONED_D1);
-    const { deps, trace, exitCalls } = harness({
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
       dischargeSelfHostEnv: (async () => {
         trace.push('gate');
         throw new SelfHostEnvValidationError('env: missing required secret STRIPE_KEY', {
@@ -746,8 +776,11 @@ describe('runCloudflareDeploy — secrets gate', () => {
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
-    expect(trace).not.toContain('build');
+    // The build ran BEFORE the gate (ground truth), but the gate failing blocks the REMOTE D1
+    // apply AND the deploy — no account mutation past the build.
+    expect(trace).toContain('build');
     expect(trace).not.toContain('wrangler:deploy');
+    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
   });
 
   it('renders the first-deploy structured error and exits', async () => {
@@ -1366,33 +1399,36 @@ describe('runCloudflareDeploy — managed path does not import the provision mod
     expect(deploySource).toMatch(/await import\('\.\/provision\.ts'\)/);
   });
 
-  it('loads the build-context probe via a dynamic import() (never a static module-scope import)', () => {
+  it('loads the env-schema probe via a dynamic import() (never a static module-scope import)', () => {
     // deploy.ts must only `import type` from the probe at module scope; the runtime helper
-    // loads via dynamic import() inside the fork, so a managed deploy never pulls Vite in.
+    // loads via dynamic import() inside the fork, so a managed deploy never pulls the probe in.
     const staticImports = [
-      ...deploySource.matchAll(/^import\s+([^']*?)\s+from\s+'\.\/deploy-build-probe\.ts';/gm),
+      ...deploySource.matchAll(/^import\s+([^']*?)\s+from\s+'\.\/env-schema-probe\.ts';/gm),
     ];
     for (const [, clause] of staticImports) {
       expect(clause.startsWith('type')).toBe(true);
     }
-    expect(deploySource).toMatch(/await import\('\.\/deploy-build-probe\.ts'\)/);
+    expect(deploySource).toMatch(/await import\('\.\/env-schema-probe\.ts'\)/);
   });
 
-  it('the build-context probe pulls Vite / env-validation only dynamically and no backend statically', () => {
+  it('the env-schema probe imports env-validation only dynamically and no backend statically', () => {
     // The probe is imported (dynamically) during a self-host deploy, but a plain LIBRARY import of
-    // it (the parent-side helper) must not eagerly evaluate Vite / the env stack, and it must never
-    // statically pull provision / Better Auth / proper-lockfile into any bundle.
+    // it (the parent-side helper) must not eagerly evaluate env-validation (which pulls Vite / the
+    // env stack), and it must never statically pull Vite / provision / Better Auth / proper-lockfile
+    // into any bundle.
     const probeSource = readFileSync(
-      join(import.meta.dirname, '../../src/cli/deploy-build-probe.ts'),
+      join(import.meta.dirname, '../../src/cli/env-schema-probe.ts'),
       'utf-8',
     );
-    // No static module-scope `... from 'vite'|'./env-validation.ts'` runtime import — dynamic only.
-    for (const spec of ["'vite'", "'./env-validation.ts'"]) {
-      const staticRe = new RegExp(`^import\\s+(?!type\\b)[^;]*?\\s+from\\s+${spec};`, 'gm');
-      expect(probeSource).not.toMatch(staticRe);
-      expect(probeSource).toContain(`await import(${spec})`);
-    }
-    // No static backend imports at all (provision / Better Auth / proper-lockfile).
+    // env-validation is loaded dynamically only — its static import is TYPE-only.
+    const staticEnvValidation = new RegExp(
+      "^import\\s+(?!type\\b)[^;]*?\\s+from\\s+'\\./env-validation\\.ts';",
+      'gm',
+    );
+    expect(probeSource).not.toMatch(staticEnvValidation);
+    expect(probeSource).toContain("await import('./env-validation.ts')");
+    // No static backend imports at all (Vite / provision / Better Auth / proper-lockfile).
+    expect(probeSource).not.toMatch(/from\s+'vite'/);
     expect(probeSource).not.toMatch(/from\s+'\.\/provision\.ts'/);
     expect(probeSource).not.toMatch(/better-auth/);
     expect(probeSource).not.toMatch(/proper-lockfile/);
@@ -1586,17 +1622,21 @@ describe('runCloudflareDeploy — migrations dir / count / auth', () => {
         2,
       ),
     });
-    // Use the REAL schema validator (auth app with NO migrations → no tables → rejects),
-    // exercising the isolated-subprocess probe + in-memory-SQLite path end to end.
-    const { deps, trace, exitCalls } = harness({
+    // Simulate the build's generated auth schema (ground truth) requiring a `user` table, with
+    // NO checked-in migration to create it → the REAL post-build auth check fails closed
+    // (applying the migrations to in-memory SQLite leaves `user` absent).
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['email'] }]);
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
       validateAuthMigrations: validateAuthMigrationSchema,
     });
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
-    // Rejected at the auth guard (3d — after the transport/account pin, before whoami/provision).
-    expect(trace).toEqual([]);
+    // The auth check runs POST-build (against ground truth); it blocks the remote migrate + deploy.
+    expect(trace).toContain('build');
+    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
+    expect(trace).not.toContain('wrangler:deploy');
   });
 
   it('lets an auth app proceed when its migrations produce the required auth schema', async () => {
@@ -1702,169 +1742,42 @@ describe('assertMigrationsProduceAuthSchema', () => {
 });
 
 // ---------------------------------------------------------------------------
-// F5: auth schema derived in an ISOLATED SUBPROCESS under the build's EFFECTIVE mode +
-// the scrubbed build env (no arbitrary project code runs in the credential-bearing parent)
+// The post-build auth-schema check reads the schema the BUILD generated
+// (`.void/better-auth-schema.ts`, ground truth) and asserts the checked-in
+// migrations produce it — applied to in-memory SQLite, not a token search.
 // ---------------------------------------------------------------------------
 
-describe('F5: isolated auth-schema subprocess', () => {
-  // Fixture auth config that (a) RENAMES the user table from an env var (so the effective mode
-  // is observable in the result), and (b) reveals whether the child's process.env carries CF
-  // Access (so a scrubbed env is observable). `import type ... from "void/auth"` is stripped by
-  // node — no runtime resolution needed — while satisfying findVoidAuthConfig's detector.
-  const AUTH_CONFIG = [
-    `import type { VoidAuthConfig } from 'void/auth';`,
-    `const config: VoidAuthConfig = ({ defaults, env }) => ({`,
-    `  ...defaults,`,
-    `  user: {`,
-    `    modelName: process.env.CF_ACCESS_CLIENT_ID`,
-    `      ? 'LEAKED'`,
-    `      : ((env.AUTH_TABLE as string) ?? 'user'),`,
-    `  },`,
-    `});`,
-    `export default config;`,
-  ].join('\n');
-
-  function authRenameProject(): string {
-    return makeProject({
-      'package.json': JSON.stringify({ name: 'authapp', type: 'module' }),
-      'void.json': JSON.stringify({ auth: { providers: ['email'] } }),
-      'auth.config.ts': AUTH_CONFIG,
-      '.env.production': 'AUTH_TABLE=user\n',
-      '.env.staging': 'AUTH_TABLE=members\n',
-    });
-  }
-
-  it('derives the schema under the EFFECTIVE mode (production `user` vs staging `members`)', async () => {
-    const root = authRenameProject();
-    const env = { ...process.env };
-    delete env.CF_ACCESS_CLIENT_ID;
-    const input = {
-      root,
-      authConfigPath: join(root, 'auth.config.ts'),
-      dialect: 'sqlite' as const,
-      providers: ['email'],
-      envDir: undefined,
-    };
-    const staging = await resolveRequiredAuthSchemaViaSubprocess(
-      { ...input, mode: 'staging' },
-      env,
-    );
-    expect(staging.map((t) => t.table)).toContain('members');
-    expect(staging.map((t) => t.table)).not.toContain('user');
-
-    const production = await resolveRequiredAuthSchemaViaSubprocess(
-      { ...input, mode: 'production' },
-      env,
-    );
-    expect(production.map((t) => t.table)).toContain('user');
-    expect(production.map((t) => t.table)).not.toContain('members');
+describe("validateAuthMigrationSchema — reads the build's generated auth schema", () => {
+  it('passes when the checked-in migrations produce the emitted schema', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['email', 'name'] }]);
+    // Applying the migration to in-memory SQLite yields `user(id, email, name)` — the exact
+    // emitted schema — so the check resolves (no throw).
+    await validateAuthMigrationSchema(root, [
+      {
+        name: '0000.sql',
+        sql: 'CREATE TABLE "user" (id text primary key, email text, name text);',
+      },
+    ]);
   });
 
-  it('runs under the passed env — a scrubbed env hides CF Access from the auth code', async () => {
-    const root = authRenameProject();
-    const input = {
-      root,
-      authConfigPath: join(root, 'auth.config.ts'),
-      dialect: 'sqlite' as const,
-      providers: ['email'],
-      mode: 'production',
-      envDir: undefined,
-    };
-    // With CF Access present in the child env, the arbitrary auth code CAN read it (LEAKED).
-    const leaked = await resolveRequiredAuthSchemaViaSubprocess(input, {
-      ...process.env,
-      CF_ACCESS_CLIENT_ID: 'super-secret',
-    });
-    expect(leaked.map((t) => t.table)).toContain('LEAKED');
-    // Scrubbed (as the orchestrator passes it) → the credential is absent in the child.
-    const scrubbed = { ...process.env };
-    delete scrubbed.CF_ACCESS_CLIENT_ID;
-    const clean = await resolveRequiredAuthSchemaViaSubprocess(input, scrubbed);
-    expect(clean.map((t) => t.table)).not.toContain('LEAKED');
-    expect(clean.map((t) => t.table)).toContain('user');
-  });
-
-  it('fails closed when the child cannot resolve the schema (bad auth config)', async () => {
-    const root = makeProject({
-      'package.json': JSON.stringify({ name: 'authapp', type: 'module' }),
-      'void.json': JSON.stringify({ auth: {} }),
-      'auth.config.ts': `import type { X } from 'void/auth';\nthrow new Error('boom in auth config');\nexport default {};`,
-    });
+  it('fails closed when a required column is missing from the checked-in migrations', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['email', 'name'] }]);
     await expect(
-      resolveRequiredAuthSchemaViaSubprocess(
-        {
-          root,
-          authConfigPath: join(root, 'auth.config.ts'),
-          dialect: 'sqlite',
-          providers: null,
-          mode: 'production',
-          envDir: undefined,
-        },
-        { ...process.env },
-      ),
-    ).rejects.toThrow(/boom in auth config|exited with code/);
+      // Creates `user` WITHOUT the required `name` column → fails closed against ground truth.
+      validateAuthMigrationSchema(root, [
+        { name: '0000.sql', sql: 'CREATE TABLE "user" (id text primary key, email text);' },
+      ]),
+    ).rejects.toThrow(/user|name/);
   });
 
-  it('the orchestrator derives auth under the SCRUBBED env + the EFFECTIVE mode/envDir', async () => {
-    const savedId = process.env.CF_ACCESS_CLIENT_ID;
-    const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-    process.env.CF_ACCESS_CLIENT_ID = 'leak-me';
-    process.env.CF_ACCESS_CLIENT_SECRET = 'leak-me-too';
-    try {
-      const root = makeProject({
-        'package.json': JSON.stringify({ name: 'authapp' }),
-        'void.json': JSON.stringify({ auth: { providers: ['email'] } }),
-        'routes/index.ts': `export const GET = () => new Response('ok');`,
-        'wrangler.jsonc': JSON.stringify(
-          {
-            account_id: 'acc123',
-            name: 'authapp',
-            d1_databases: [
-              {
-                binding: 'DB',
-                database_name: 'authapp-db',
-                database_id: REAL_D1_ID,
-                migrations_dir: './db/migrations',
-              },
-            ],
-          },
-          null,
-          2,
-        ),
-        ...INIT_MIGRATION,
-      });
-      let seen: { mode?: string; envDir?: string; env?: NodeJS.ProcessEnv } | undefined;
-      const { deps } = harness({
-        validateAuthMigrations: (async (
-          _root: string,
-          _paths: unknown,
-          _vc: unknown,
-          _migrations: unknown,
-          opts: { mode: string; envDir: string | undefined; env: NodeJS.ProcessEnv },
-        ) => {
-          seen = { mode: opts.mode, envDir: opts.envDir, env: opts.env };
-        }) as CloudflareDeployDeps['validateAuthMigrations'],
-      });
-      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
-      // The narrowing guarantees production + root, so the auth-schema probe (envDir) and the
-      // build's root-relative auth generation can never diverge.
-      expect(seen?.mode).toBe('production');
-      expect(seen?.envDir).toBeUndefined();
-      // The child env the arbitrary auth code runs under has CF Access scrubbed.
-      expect(seen?.env?.CF_ACCESS_CLIENT_ID).toBeUndefined();
-      expect(seen?.env?.CF_ACCESS_CLIENT_SECRET).toBeUndefined();
-    } finally {
-      if (savedId === undefined) {
-        delete process.env.CF_ACCESS_CLIENT_ID;
-      } else {
-        process.env.CF_ACCESS_CLIENT_ID = savedId;
-      }
-      if (savedSecret === undefined) {
-        delete process.env.CF_ACCESS_CLIENT_SECRET;
-      } else {
-        process.env.CF_ACCESS_CLIENT_SECRET = savedSecret;
-      }
-    }
+  it('fails closed when the build did not emit the auth-schema artifact', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    // No writeAuthSchemaArtifact — the build produced no schema to read as ground truth.
+    await expect(validateAuthMigrationSchema(root, [])).rejects.toThrow(
+      /did not emit|better-auth-schema/,
+    );
   });
 });
 
@@ -1927,9 +1840,11 @@ describe('runCloudflareDeploy — remote migration gates', () => {
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
-    // Reached the list-verify, then failed closed before building/deploying.
+    // The remote apply/list runs AFTER the build now; reached the list-verify, then failed
+    // closed before DEPLOYING (the build already ran, but the deploy never does).
     expect(localTrace).toContain('wrangler:d1:list');
-    expect(localTrace).not.toContain('build');
+    expect(localTrace).toContain('build');
+    expect(localTrace).not.toContain('wrangler:deploy');
   });
 
   it('fails closed when the pending-verify prints NO recognizable marker (B3, reduced log level)', async () => {
@@ -1953,9 +1868,10 @@ describe('runCloudflareDeploy — remote migration gates', () => {
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
-    // Never trusts an absent marker — fails closed before build/deploy.
+    // Never trusts an absent marker — fails closed before DEPLOY (the build already ran).
     expect(localTrace).toContain('wrangler:d1:list');
-    expect(localTrace).not.toContain('build');
+    expect(localTrace).toContain('build');
+    expect(localTrace).not.toContain('wrangler:deploy');
   });
 
   it('fails closed (B1) when wrangler would apply a stray seed.sql not in the validated set', async () => {
@@ -2159,102 +2075,91 @@ describe('compareWranglerMigrationPaths (wrangler 4.107 numeric-prefix comparato
 });
 
 // ---------------------------------------------------------------------------
-// Isolated build-context probe consumption (findings F1/F2/F3): the parent runs
-// NO project code / project-env loadEnv — it consumes the subprocess's structured
-// result and REJECTS a custom envDir / non-production mode pre-account.
+// Post-build ground-truth secret gate: the parent builds the values-free context
+// from the REAL emitted `vars` + the env-insensitive required names, then
+// discharges it. A required secret shipped EMPTY fails closed post-build; a
+// pre-build schema-probe failure fails closed before any account op.
 // ---------------------------------------------------------------------------
 
-describe('runCloudflareDeploy — build-context probe', () => {
-  it('prints the probe-derived warnings and discharges the probe-derived gate inputs', async () => {
+describe('runCloudflareDeploy — post-build ground-truth secret gate', () => {
+  it('discharges a context DERIVED from the REAL emitted vars + env-insensitive required names', async () => {
     const root = d1Project(PROVISIONED_D1);
-    let dischargedContext: SelfHostEnvContext | undefined;
-    const envContext: SelfHostEnvContext = {
+    let captured: SelfHostEnvContext | undefined;
+    const { deps, trace } = harness({
+      resolveSchemaFacts: (() =>
+        okSchemaFacts({
+          hasSchema: true,
+          requiredKeys: ['STRIPE_KEY'],
+          secretKeys: ['STRIPE_KEY'],
+        })) as CloudflareDeployDeps['resolveSchemaFacts'],
+      readEmittedWorkerVars: (() =>
+        emittedVars({ APP_NAME: 'demo' })) as CloudflareDeployDeps['readEmittedWorkerVars'],
+      dischargeSelfHostEnv: (async (ctx: SelfHostEnvContext) => {
+        trace.push('gate');
+        captured = ctx;
+        return { hasSchema: true, remoteSecretNames: ['STRIPE_KEY'] };
+      }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    // STRIPE_KEY is absent from the emitted vars → the gate sees it as absentRequired (the
+    // remote secret discharges it); nothing is present-empty/invalid.
+    expect(captured).toEqual({
       hasSchema: true,
       presentEmptyRequired: [],
       presentEmptySources: {},
       absentRequired: ['STRIPE_KEY'],
       invalidKeys: [],
-    };
-    const { deps, trace } = harness({
-      resolveBuildContext: (() =>
-        okBuildContext({
-          warnings: {
-            secretKeys: [{ key: 'API_KEY', reason: 'heuristic' as const }],
-            totalVarKeys: 4,
-          },
-          envContext,
-        })) as CloudflareDeployDeps['resolveBuildContext'],
-      dischargeSelfHostEnv: (async (context: SelfHostEnvContext) => {
-        trace.push('gate');
-        dischargedContext = context;
-        return { hasSchema: true, remoteSecretNames: ['STRIPE_KEY'] };
-      }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
     });
-    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
-    // The parent discharges EXACTLY the values-free context the subprocess derived.
-    expect(dischargedContext).toEqual(envContext);
-    expect(trace).toContain('gate');
     expect(trace).toContain('wrangler:deploy');
   });
 
-  it('fails closed when the build-context probe cannot be resolved (never validates a wrong env)', async () => {
+  it('fails closed when a required secret is shipped EMPTY in the REAL vars (shadows the remote secret)', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    // Use the REAL discharge (dischargeSelfHostEnv undefined) so the present-empty fence runs.
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      resolveSchemaFacts: (() =>
+        okSchemaFacts({
+          hasSchema: true,
+          requiredKeys: ['STRIPE_KEY'],
+          secretKeys: ['STRIPE_KEY'],
+        })) as CloudflareDeployDeps['resolveSchemaFacts'],
+      readEmittedWorkerVars: (() =>
+        emittedVars({ STRIPE_KEY: '' })) as CloudflareDeployDeps['readEmittedWorkerVars'],
+      dischargeSelfHostEnv: undefined,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // The gate runs POST-build (ground truth), so the build already ran; a shipped-empty
+    // required secret fails closed BEFORE any wrangler secret list and before deploy.
+    expect(trace).toContain('build');
+    expect(trace).not.toContain('wrangler:deploy');
+    expect(wranglerArgs.some((a) => a[0] === 'secret')).toBe(false);
+  });
+
+  it('fails closed pre-build when the env-schema probe throws (never validates a wrong schema)', async () => {
     const root = d1Project(PROVISIONED_D1);
     const { deps, trace, exitCalls } = harness({
-      resolveBuildContext: () => {
-        throw new Error('invalid vite.config.ts');
-      },
+      resolveSchemaFacts: (() => {
+        throw new Error('cannot import env.ts');
+      }) as CloudflareDeployDeps['resolveSchemaFacts'],
     });
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
-    // Resolved before ANY account op — no whoami / gate / build.
+    // Derived pre-build — before whoami / provision / build.
     expect(trace).toEqual([]);
   });
 
-  it('F3: REJECTS a custom Vite envDir pre-account (no whoami / gate / build)', async () => {
-    const root = d1Project(PROVISIONED_D1);
-    const { deps, trace, wranglerArgs, exitCalls } = harness({
-      resolveBuildContext: (() => ({
-        kind: 'reject',
-        reason: 'custom-envdir',
-        mode: 'production',
-        envDir: 'config',
-      })) as CloudflareDeployDeps['resolveBuildContext'],
-    });
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    expect(trace).toEqual([]);
-    expect(wranglerArgs).toEqual([]);
-  });
-
-  it('REJECTS a non-production build mode pre-account (no whoami / gate / build)', async () => {
-    const root = d1Project(PROVISIONED_D1);
-    const { deps, trace, wranglerArgs, exitCalls } = harness({
-      resolveBuildContext: (() => ({
-        kind: 'reject',
-        reason: 'non-production-mode',
-        mode: 'staging',
-        envDir: null,
-      })) as CloudflareDeployDeps['resolveBuildContext'],
-    });
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    expect(trace).toEqual([]);
-    expect(wranglerArgs).toEqual([]);
-  });
-
-  it('fails closed (values-free) when the probe reports a schema-load failure', async () => {
+  it('fails closed (values-free) pre-build when the probe reports a schema-load failure', async () => {
     const root = d1Project(PROVISIONED_D1);
     const { deps, trace, exitCalls } = harness({
-      resolveBuildContext: (() => ({
+      resolveSchemaFacts: (() => ({
         kind: 'schema-error',
         reason: 'schema-load-failed',
-      })) as CloudflareDeployDeps['resolveBuildContext'],
+      })) as CloudflareDeployDeps['resolveSchemaFacts'],
     });
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
@@ -2265,73 +2170,123 @@ describe('runCloudflareDeploy — build-context probe', () => {
 });
 
 // ---------------------------------------------------------------------------
-// F1/F3 end-to-end: the REAL build-context subprocess. The parent runs NO project
-// code — resolveConfig (the full plugin pipeline) executes in the child under the
-// SCRUBBED env, so no config handler (sync OR deferred) can read the parent's CF
-// Access token, and a custom envDir is rejected under real config resolution.
+// The REAL env-schema probe subprocess. The parent runs NO project code —
+// importing the user's env.ts happens in the child, whose framed result is
+// written to a DEDICATED fd (fd 3) so noisy stdout can't truncate it, and the
+// child sees ONLY the passed (scrubbed) env — never the parent's credentials.
 // ---------------------------------------------------------------------------
 
-describe('build-context probe (real subprocess)', () => {
-  const srcIndex = join(import.meta.dirname, '..', '..', 'src', 'index.ts');
+describe('env-schema probe (real subprocess)', () => {
+  // The probe spawns a plain `node` on THIS repo's SOURCE `.ts`. `env-public.ts` (imported at
+  // runtime to read the registered schema) uses a TS parameter property, which Node's default
+  // strip-only mode rejects — so enable full type transform for the child, mirroring how
+  // production runs the compiled `dist`. `provisionEnv`/`deployChildEnv` never scrub NODE_OPTIONS.
+  const withTransform = (base: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({
+    ...base,
+    NODE_OPTIONS: [base.NODE_OPTIONS, '--experimental-transform-types'].filter(Boolean).join(' '),
+  });
 
-  function scrubbedBuildEnv(): NodeJS.ProcessEnv {
-    // The env the orchestrator passes the probe: a copy of the parent env with the CF Access
-    // service token pair scrubbed (as `deployChildEnv` does). The parent's process.env KEEPS the
-    // creds — the test asserts the child (project code) never sees them.
-    const env = { ...process.env };
-    delete env.CF_ACCESS_CLIENT_ID;
-    delete env.CF_ACCESS_CLIENT_SECRET;
-    return env;
-  }
-
-  it('F1: a deferred config handler cannot read the parent CF Access token (parent runs no project code)', async () => {
-    const leakFile = join(tmpDir, 'leaked.json');
+  it('derives required + `.secret()` facts and the fd-3 result survives noisy stdout', async () => {
     const root = makeProject({
-      'package.json': JSON.stringify({ name: 'f1app', type: 'module' }),
-      'void.json': JSON.stringify({}),
-      'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
-      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'f1app' }, null, 2),
-      // A plugin that reads process.env creds SYNCHRONOUSLY during config() AND schedules a
-      // DEFERRED (timer) read — exactly the leak the old in-parent resolveConfig had. Both write
-      // the same file; whichever runs last wins, and both run in the CHILD under the scrubbed env.
-      'vite.config.ts': [
-        `import { writeFileSync } from 'node:fs';`,
-        `import { voidPlugin } from ${JSON.stringify(srcIndex)};`,
-        `function leak() {`,
-        `  writeFileSync(${JSON.stringify(leakFile)}, JSON.stringify({`,
-        `    secret: process.env.CF_ACCESS_CLIENT_SECRET ?? null,`,
-        `    id: process.env.CF_ACCESS_CLIENT_ID ?? null,`,
-        `  }));`,
-        `}`,
-        `export default {`,
-        `  plugins: [`,
-        `    voidPlugin(),`,
-        `    { name: 'app:leaker', config() { leak(); setTimeout(leak, 0); return {}; } },`,
-        `  ],`,
-        `};`,
+      'package.json': JSON.stringify({ name: 'envapp', type: 'module' }),
+      'env.ts': [
+        `import { defineEnv } from ${JSON.stringify(srcEnvPublic)};`,
+        `import { string } from ${JSON.stringify(srcEnvHelpers)};`,
+        // A huge stdout write proves the fd-3 result channel is not truncated by env.ts noise.
+        `console.log('x'.repeat(200000));`,
+        `export default defineEnv({ STRIPE_KEY: string().secret(), API_URL: string() });`,
       ].join('\n'),
     });
+    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, withTransform({ ...process.env }));
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.facts.hasSchema).toBe(true);
+      expect(r.facts.requiredKeys).toContain('STRIPE_KEY');
+      expect(r.facts.requiredKeys).toContain('API_URL');
+      expect(r.facts.secretKeys).toEqual(['STRIPE_KEY']);
+    }
+  });
 
-    // The PARENT holds the CF Access service token, as the real deploy does.
+  it('runs env.ts under the PASSED env — a scrubbed env hides CF Access from project code', async () => {
+    const leakFile = join(tmpDir, 'env-leak.json');
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'envapp', type: 'module' }),
+      'env.ts': [
+        `import { defineEnv } from ${JSON.stringify(srcEnvPublic)};`,
+        `import { string } from ${JSON.stringify(srcEnvHelpers)};`,
+        `import { writeFileSync } from 'node:fs';`,
+        `writeFileSync(${JSON.stringify(leakFile)}, JSON.stringify({`,
+        `  token: process.env.CLOUDFLARE_API_TOKEN ?? null,`,
+        `  id: process.env.CF_ACCESS_CLIENT_ID ?? null,`,
+        `}));`,
+        `export default defineEnv({ FOO: string() });`,
+      ].join('\n'),
+    });
+    const env = withTransform({ ...process.env });
+    delete env.CLOUDFLARE_API_TOKEN;
+    delete env.CF_ACCESS_CLIENT_ID;
+    await resolveEnvSchemaFactsViaSubprocess({ root }, env);
+    const leaked = JSON.parse(readFileSync(leakFile, 'utf-8')) as {
+      token: string | null;
+      id: string | null;
+    };
+    // The child only ever sees the PASSED env — the scrubbed keys read as null.
+    expect(leaked.token).toBeNull();
+    expect(leaked.id).toBeNull();
+  });
+
+  it('the orchestrator scrubs CLOUDFLARE_API_TOKEN + CF Access before spawning the probe', async () => {
+    const savedToken = process.env.CLOUDFLARE_API_TOKEN;
     const savedId = process.env.CF_ACCESS_CLIENT_ID;
     const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+    const savedNodeOptions = process.env.NODE_OPTIONS;
+    process.env.CLOUDFLARE_API_TOKEN = 'super-secret-token';
     process.env.CF_ACCESS_CLIENT_ID = 'super-secret-id';
-    process.env.CF_ACCESS_CLIENT_SECRET = 'super-secret-token';
+    process.env.CF_ACCESS_CLIENT_SECRET = 'super-secret-secret';
+    // The orchestrator copies process.env (unscrubbed NODE_OPTIONS) into the probe child env, so
+    // enable full type transform for the plain-node child running SOURCE .ts (see withTransform).
+    process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, '--experimental-transform-types']
+      .filter(Boolean)
+      .join(' ');
+    const leakFile = join(tmpDir, 'orchestrator-leak.json');
     try {
-      const result = await resolveDeployBuildContextViaSubprocess(
-        { root, configPath: join(root, 'wrangler.jsonc') },
-        scrubbedBuildEnv(),
+      // The env.ts LEAKS the three parent creds to a file; the orchestrator spawns the REAL
+      // probe (resolveSchemaFacts undefined → default subprocess seam) under a scrubbed env.
+      const root = d1Project(PROVISIONED_D1, {
+        'package.json': JSON.stringify({ name: 'myapp', type: 'module' }),
+        'env.ts': [
+          `import { defineEnv } from ${JSON.stringify(srcEnvPublic)};`,
+          `import { string } from ${JSON.stringify(srcEnvHelpers)};`,
+          `import { writeFileSync } from 'node:fs';`,
+          `writeFileSync(${JSON.stringify(leakFile)}, JSON.stringify({`,
+          `  token: process.env.CLOUDFLARE_API_TOKEN ?? null,`,
+          `  id: process.env.CF_ACCESS_CLIENT_ID ?? null,`,
+          `  secret: process.env.CF_ACCESS_CLIENT_SECRET ?? null,`,
+          `}));`,
+          `export default defineEnv({ FOO: string() });`,
+        ].join('\n'),
+      });
+      await runCloudflareDeploy(
+        root,
+        { backend: 'cloudflare' },
+        silentCliLog,
+        harness({ resolveSchemaFacts: undefined }).deps,
       );
-      expect(result.kind).toBe('ok');
-      // The config pipeline ran in the SCRUBBED child — the handler read null creds. The parent
-      // never ran the pipeline, so its live token was never in scope of any project code.
       const leaked = JSON.parse(readFileSync(leakFile, 'utf-8')) as {
-        secret: string | null;
+        token: string | null;
         id: string | null;
+        secret: string | null;
       };
-      expect(leaked.secret).toBeNull();
+      // The child (project env.ts) ran under the scrubbed env — none of the parent's creds.
+      expect(leaked.token).toBeNull();
       expect(leaked.id).toBeNull();
+      expect(leaked.secret).toBeNull();
     } finally {
+      if (savedToken === undefined) {
+        delete process.env.CLOUDFLARE_API_TOKEN;
+      } else {
+        process.env.CLOUDFLARE_API_TOKEN = savedToken;
+      }
       if (savedId === undefined) {
         delete process.env.CF_ACCESS_CLIENT_ID;
       } else {
@@ -2342,33 +2297,52 @@ describe('build-context probe (real subprocess)', () => {
       } else {
         process.env.CF_ACCESS_CLIENT_SECRET = savedSecret;
       }
+      if (savedNodeOptions === undefined) {
+        delete process.env.NODE_OPTIONS;
+      } else {
+        process.env.NODE_OPTIONS = savedNodeOptions;
+      }
     }
   });
 
-  it('F3: rejects a custom Vite envDir (custom-envdir) under real config resolution', async () => {
+  it('a broken env.ts fails closed with a VALUES-FREE classification — no raw child output echoed', async () => {
     const root = makeProject({
-      'package.json': JSON.stringify({ name: 'f3app', type: 'module' }),
-      'void.json': JSON.stringify({}),
-      'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
-      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'f3app' }, null, 2),
-      // Conflicting root vs custom-envDir env files: the root .env.production has FOO, the custom
-      // envDir has a DIFFERENT FOO. v1 rejects the custom envDir before it can matter.
-      '.env.production': 'FOO=root-value\n',
-      'config/.env.production': 'FOO=envdir-value\n',
-      'vite.config.ts': [
-        `import { voidPlugin } from ${JSON.stringify(srcIndex)};`,
-        `export default { envDir: 'config', plugins: [voidPlugin()] };`,
-      ].join('\n'),
+      'package.json': JSON.stringify({ name: 'envapp', type: 'module' }),
+      'env.ts': `throw new Error('SUPER_SECRET_LEAK_9999');\nexport default {};`,
     });
-    const result = await resolveDeployBuildContextViaSubprocess(
-      { root, configPath: join(root, 'wrangler.jsonc') },
-      scrubbedBuildEnv(),
+    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, withTransform({ ...process.env }));
+    expect(r.kind).toBe('schema-error');
+    // The values-free boundary drops the original message, so the leak never reaches the result.
+    expect(JSON.stringify(r)).not.toContain('SUPER_SECRET_LEAK_9999');
+  });
+
+  it('parses ONLY the dedicated fd-3 result channel (injected spawn)', async () => {
+    const facts = { hasSchema: true, requiredKeys: ['X'], secretKeys: [] };
+    const okSpawn = (): EnvSchemaProbeSpawnResult => ({
+      status: 0,
+      fd3: JSON.stringify({ kind: 'ok', facts }),
+      error: null,
+      signal: null,
+    });
+    const r = await resolveEnvSchemaFactsViaSubprocess(
+      { root: tmpDir },
+      { ...process.env },
+      okSpawn,
     );
-    expect(result.kind).toBe('reject');
-    if (result.kind === 'reject') {
-      expect(result.reason).toBe('custom-envdir');
-      expect(result.envDir).toBe('config');
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.facts).toEqual(facts);
     }
+    // A nonzero child exit fails closed (values-free) — the parent never trusts a partial result.
+    const failSpawn = (): EnvSchemaProbeSpawnResult => ({
+      status: 1,
+      fd3: '',
+      error: null,
+      signal: null,
+    });
+    await expect(
+      resolveEnvSchemaFactsViaSubprocess({ root: tmpDir }, { ...process.env }, failSpawn),
+    ).rejects.toThrow(/exited with code/);
   });
 });
 
