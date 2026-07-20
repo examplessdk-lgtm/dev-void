@@ -577,8 +577,13 @@ function resolveDeployTransport(root: string, rootConfig: Record<string, unknown
  * provisioner's {@link provisionEnv} (scrubs the CF Access pair + EVERY transport
  * selector incl. `CLOUDFLARE_ENV` + win32 case variants, pins ONE account + API base),
  * then scrubs the deploy-specific config-override selectors on top.
+ *
+ * This is the env {@link createDeployWranglerRunner} spawns `whoami` / `d1 migrations apply`
+ * / `deploy` with, so it deliberately KEEPS the wrangler-auth credentials — only the
+ * untrusted-code children layer {@link scrubWranglerAuthCredentials} on top. Exported so a
+ * test can assert that directly.
  */
-function deployChildEnv(accountId: string, apiBaseUrl: string): NodeJS.ProcessEnv {
+export function deployChildEnv(accountId: string, apiBaseUrl: string): NodeJS.ProcessEnv {
   const provision = requireProvisionModule();
   const env = provision.provisionEnv({ accountId, apiBaseUrl });
   for (const name of DEPLOY_CONFIG_OVERRIDE_ENV_VARS) {
@@ -645,8 +650,11 @@ function deployPointerPath(root: string): string {
  *   - R2 SQL auth token:    `WRANGLER_R2_SQL_AUTH_TOKEN` (a Bearer credential wrangler
  *     reads via `getEnvironmentVariableFactory`, falling back to `CLOUDFLARE_API_TOKEN`)
  *   - Access service token: `CLOUDFLARE_ACCESS_CLIENT_ID` / `CLOUDFLARE_ACCESS_CLIENT_SECRET`
- * The env-schema probe needs NO credentials, so the whole set is scrubbed from its
- * child env — a leaking env.ts can never read a real credential the parent holds.
+ * Scrubbed from EVERY child that runs untrusted project code — the env-schema probes, the
+ * `vite build`, and `drizzle-kit generate` (which loads the user's schema). None of them
+ * authenticates against Cloudflare, so a leaking `env.ts` / build plugin / schema module can
+ * never read a real credential the parent holds. NOT scrubbed from the wrangler runner's env
+ * (`createDeployWranglerRunner`), where `whoami` / `d1 migrations apply` / `deploy` need them.
  * (`provisionEnv` already scrubs Void's own `CF_ACCESS_CLIENT_ID/SECRET` pair + the
  * account-id selector; this adds the wrangler-account credentials it does not.)
  */
@@ -665,6 +673,32 @@ const WRANGLER_AUTH_CREDENTIAL_ENV_VARS = [
 ];
 
 /**
+ * Delete every {@link WRANGLER_AUTH_CREDENTIAL_ENV_VARS} entry from `env` IN PLACE and
+ * return it, for a child that executes UNTRUSTED project code and needs no Cloudflare
+ * credential of its own.
+ *
+ * The case-aware delete lives in the provision module, which ONLY the Cloudflare fork
+ * loads (a managed deploy must not pay `proper-lockfile`'s import-time side effects). One
+ * caller — `runDrizzleKitGenerate`, via the shared schema-drift check — also runs on the
+ * MANAGED path, where that module is legitimately absent, so read the memoized handle
+ * directly instead of {@link requireProvisionModule} (which throws when the fork never ran)
+ * and fall back to the exact-case delete. That fallback IS the whole rule off win32 (POSIX
+ * env keys are case-sensitive); the case-insensitive win32 sweep only matters for the
+ * Cloudflare fork, and by the time either call site runs there the module is always loaded.
+ */
+function scrubWranglerAuthCredentials(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const deleteVar =
+    loadedProvisionModule?.deleteEnvVarCaseAware ??
+    ((target: NodeJS.ProcessEnv, name: string): void => {
+      delete target[name];
+    });
+  for (const name of WRANGLER_AUTH_CREDENTIAL_ENV_VARS) {
+    deleteVar(env, name);
+  }
+  return env;
+}
+
+/**
  * Build the child env for the isolated env-schema probe. Starts from
  * {@link deployChildEnv} (CF Access + every transport selector scrubbed, one account +
  * API base pinned), then (1) scrubs the FULL wrangler-auth credential set case-aware —
@@ -675,13 +709,9 @@ const WRANGLER_AUTH_CREDENTIAL_ENV_VARS = [
  * `validate-emitted` probe.
  */
 function buildSchemaProbeEnv(accountId: string, apiBaseUrl: string): NodeJS.ProcessEnv {
-  const env = deployChildEnv(accountId, apiBaseUrl);
-  const provision = requireProvisionModule();
-  for (const name of WRANGLER_AUTH_CREDENTIAL_ENV_VARS) {
-    provision.deleteEnvVarCaseAware(env, name);
-  }
+  const env = scrubWranglerAuthCredentials(deployChildEnv(accountId, apiBaseUrl));
   // Scrub any ambient spelling first (case-aware on win32) so it cannot shadow the pin.
-  provision.deleteEnvVarCaseAware(env, 'NODE_ENV');
+  requireProvisionModule().deleteEnvVarCaseAware(env, 'NODE_ENV');
   env.NODE_ENV = 'production';
   return env;
 }
@@ -1421,6 +1451,15 @@ export type RequiredAuthColumn = {
   column: string;
   /** The emitted field is `unique: true` — a duplicate row here is a duplicate auth identity. */
   unique: boolean;
+  /**
+   * This is the table's implicit `id` — the row identity every auth foreign key points at.
+   * SQLite requires a PARENT KEY to be uniquely constrained (a PRIMARY KEY or a UNIQUE
+   * constraint/index); pointing a foreign key at an ordinary column is accepted by
+   * `CREATE TABLE` and even echoed back by `PRAGMA foreign_key_list` as if valid, but every
+   * statement touching the child fails at PREPARE time with `foreign key mismatch` once
+   * `foreign_keys=ON` — which D1 always enforces. So it must be asserted separately.
+   */
+  primaryKey?: boolean;
   /** The emitted field carries `references` — the parent table + column it must point at. */
   references?: { table: string; column: string };
 };
@@ -1445,7 +1484,8 @@ export type RequiredAuthTable = {
  * and no `session.userId` foreign key is a materially weaker schema than the one the managed
  * path builds (`applySqliteAuthMigrations`), and it used to sail through this gate.
  *
- * Asserted: column presence, `unique: true`, and `references` (parent table + column).
+ * Asserted: column presence, the implicit `id`'s uniqueness (`primaryKey`), `unique: true`,
+ * and `references` (parent table + column).
  * Deliberately NOT asserted — these would reject legitimate schemas:
  *   - column TYPE — SQLite is dynamically typed, and Drizzle's output varies by mode.
  *   - non-unique `index: true` — a performance property, not a correctness one.
@@ -1542,6 +1582,33 @@ export async function assertMigrationsProduceAuthSchema(
           uniqueColumns.add(foldIdentifier(only));
         }
       }
+      // The implicit `id` — the parent key every auth foreign key resolves against. SQLite
+      // only accepts a parent key that is uniquely constrained, so a migration that creates
+      // `id` as an ordinary column produces a schema whose FKs are DEAD: `CREATE TABLE`
+      // succeeds, `PRAGMA foreign_key_list` still reports the constraint, and then every
+      // statement touching the child table fails at prepare time with `foreign key mismatch`
+      // under `foreign_keys=ON` (which D1 always enforces) — i.e. auth breaks in production
+      // AFTER a green deploy. PRIMARY KEY and UNIQUE are both valid parent keys, so reuse
+      // `uniqueColumns` (it already accepts the single-column PK, the `INTEGER PRIMARY KEY`
+      // rowid alias, and any single-column non-partial unique index) rather than demanding
+      // PRIMARY KEY specifically.
+      const notIdentity = req.columns
+        .filter(
+          (required) =>
+            required.primaryKey === true &&
+            columns.has(foldIdentifier(required.column)) &&
+            !uniqueColumns.has(foldIdentifier(required.column)),
+        )
+        .map((required) => required.column);
+      for (const column of notIdentity) {
+        problems.push(
+          `table "${req.table}" column "${column}" must be the PRIMARY KEY (or otherwise ` +
+            `uniquely constrained) — it is the row identity the auth foreign keys point at, and ` +
+            `SQLite rejects a foreign key whose parent key is not unique at runtime with ` +
+            `"foreign key mismatch"`,
+        );
+      }
+
       const notUnique = req.columns
         .filter(
           (required) =>
@@ -1645,8 +1712,11 @@ function readEmittedAuthMigrationSchema(root: string): Array<RequiredAuthTable> 
   return migrationSchema.tables.map((table) => ({
     table: table.name,
     columns: [
-      // `id` is the implicit PRIMARY KEY — never carries `unique`/`references` of its own.
-      { column: 'id', unique: false },
+      // `id` is the implicit PRIMARY KEY — never carries `unique`/`references` of its own,
+      // and is absent from `fields`, so this synthesized descriptor is the ONLY thing that
+      // represents it. `primaryKey` makes the check assert it is a usable FK parent key
+      // (see {@link RequiredAuthColumn.primaryKey}).
+      { column: 'id', unique: false, primaryKey: true },
       ...Object.entries(table.fields).map(([column, field]) => ({
         column,
         unique: field.unique === true,
@@ -2461,7 +2531,17 @@ export async function runCloudflareDeploy(
   // `dist/ssr/wrangler.json`. Removing it now means the reads below (which require the
   // pointer to exist) can only pass on a pointer THIS build re-created.
   removeDeployPointer(root);
-  const buildChildEnv = deployChildEnv(accountId, apiBaseUrl);
+  // `vite build` runs arbitrary project code — the user's config, every plugin, and env.ts
+  // — and needs NO Cloudflare credential of its own (the CF plugin makes no authenticated
+  // call from a build hook; Void's `remote: true` is a serve-only proxy to Void's own
+  // platform, and build-time prerender/ISR runs on local Miniflare). So the build child gets
+  // the same credential scrub as the probes, on the same rationale.
+  //
+  // Not a leak this can close: the CF plugin's `config` hook `loadEnv`s the project's own
+  // `CLOUDFLARE_*` dotenv keys back into the child's `process.env`. Those values are already
+  // on disk and readable by the build code either way — the scrub is about the credentials
+  // the PARENT holds, which the project never had.
+  const buildChildEnv = scrubWranglerAuthCredentials(deployChildEnv(accountId, apiBaseUrl));
   delete buildChildEnv.VOID_DEPLOY_PROJECT_ID;
   // Pin NODE_ENV=production for the build too, so the build and the env-schema probes evaluate
   // env.ts under the SAME environment. `vite build` only DEFAULTS NODE_ENV to production when it
@@ -2595,13 +2675,14 @@ export async function runCloudflareDeploy(
           'deploy: --backend cloudflare cannot verify the Void-managed Better Auth schema.',
           'The managed platform creates these tables at runtime (POST /__void/migrate/auth)',
           'after deploy; this self-host backend only applies checked-in db/migrations/*.sql, so',
-          'they must already produce the Better Auth schema — tables, columns, and the unique',
-          'constraints and foreign keys it declares:',
+          'they must already produce the Better Auth schema — tables, columns, and the primary',
+          'keys, unique constraints and foreign keys it declares:',
           `  ${getErrorMessage(err)}`,
           'Define the Better Auth tables in `db/schema.ts`, run `void db generate`, commit the',
           'migration, then rerun — or deploy this app with `void deploy` (the managed platform).',
-          'Note that Drizzle opts out of constraints by default: a field the schema marks unique',
-          'needs `.unique()`, and one that references another table needs `.references()`.',
+          "Note that Drizzle opts out of constraints by default: every auth table's `id` needs",
+          '`.primaryKey()`, a field the schema marks unique needs `.unique()`, and one that',
+          'references another table needs `.references()`.',
         ].join('\n'),
       );
       return exit(1);
@@ -4576,8 +4657,9 @@ function runDrizzleKitGenerate(root: string, configPath: string): string {
     cwd: root,
     encoding: 'utf-8',
     // drizzle-kit loads the user's drizzle config + schema (user code); keep the
-    // CF Access service token out of it, matching the build spawns.
-    env: buildEnv(),
+    // CF Access service token AND every wrangler-auth credential out of it, matching the
+    // build spawns. Generating migrations needs no Cloudflare credential.
+    env: scrubWranglerAuthCredentials(buildEnv()),
   });
   const stderr = bufferToString(result.stderr);
   const stdout = bufferToString(result.stdout);

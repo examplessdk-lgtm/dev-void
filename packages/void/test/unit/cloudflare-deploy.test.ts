@@ -8,6 +8,7 @@ import {
   checkWranglerMigrationApplySet,
   compareWranglerMigrationPaths,
   computeDesiredCloudflareResources,
+  deployChildEnv,
   runCloudflareDeploy,
   validateAuthMigrationSchema,
   verifyGeneratedDeployConfig,
@@ -90,6 +91,46 @@ function emittedVars(vars: Record<string, unknown> = {}): EmittedWorkerVarsResul
 /** Absolute src paths for runtime imports inside spawned-child env.ts fixtures. */
 const srcEnvPublic = join(import.meta.dirname, '..', '..', 'src', 'runtime', 'env-public.ts');
 const srcEnvHelpers = join(import.meta.dirname, '..', '..', 'src', 'runtime', 'env-helpers.ts');
+
+/**
+ * Wrangler's FULL credential env-var set, canonical names + deprecated `CF_*` aliases.
+ * Mirrors `WRANGLER_AUTH_CREDENTIAL_ENV_VARS` in deploy.ts. Every child that runs untrusted
+ * project code (env-schema probes, `vite build`, `drizzle-kit generate`) must see NONE of
+ * these; the wrangler runner must still see ALL of them.
+ */
+const WRANGLER_AUTH_VARS = [
+  'CLOUDFLARE_API_TOKEN',
+  'CF_API_TOKEN',
+  'CLOUDFLARE_API_KEY',
+  'CF_API_KEY',
+  'CLOUDFLARE_EMAIL',
+  'CF_EMAIL',
+  'CLOUDFLARE_API_USER_SERVICE_KEY',
+  'WRANGLER_CF_AUTHORIZATION_TOKEN',
+  'WRANGLER_R2_SQL_AUTH_TOKEN',
+  'CLOUDFLARE_ACCESS_CLIENT_ID',
+  'CLOUDFLARE_ACCESS_CLIENT_SECRET',
+];
+
+/** Set every wrangler credential on the parent for the duration of `run`, then restore. */
+async function withWranglerCredentials(run: () => Promise<void>): Promise<void> {
+  const saved: Record<string, string | undefined> = {};
+  for (const name of WRANGLER_AUTH_VARS) {
+    saved[name] = process.env[name];
+    process.env[name] = `secret-${name}`;
+  }
+  try {
+    await run();
+  } finally {
+    for (const name of WRANGLER_AUTH_VARS) {
+      if (saved[name] === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = saved[name];
+      }
+    }
+  }
+}
 
 /**
  * Write a `.void/better-auth-schema.ts` fixture whose `migrationSchema` literal matches the
@@ -2701,6 +2742,110 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
     ).rejects.toThrow(/table "user" is missing a UNIQUE constraint on column\(s\): email/);
   });
 
+  // -------------------------------------------------------------------------
+  // The implicit `id`. It is absent from the emitted artifact's `fields` (see
+  // `playground/kitchen-sink/.void/better-auth-schema.ts` — `user` starts at `name`),
+  // so the synthesized descriptor is the only thing representing it. SQLite only
+  // accepts a UNIQUELY CONSTRAINED parent key: point a foreign key at an ordinary
+  // column and `CREATE TABLE` succeeds, `PRAGMA foreign_key_list` still reports the
+  // constraint, and then every statement touching the child fails at prepare time
+  // with `foreign key mismatch` under `foreign_keys=ON` — which D1 always enforces.
+  // -------------------------------------------------------------------------
+
+  const ID_MUST_BE_UNIQUE = /table "user" column "id" must be the PRIMARY KEY/;
+
+  it('fails closed when an auth table id is an ordinary column (its foreign keys would be dead)', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeConstrainedAuthArtifact(root);
+    await expect(
+      validateAuthMigrationSchema(root, [
+        {
+          name: '0000.sql',
+          // Every name, the unique email and the session FK are all present — only `user.id`
+          // was never marked `.primaryKey()`, which SQLite accepts at DDL time and rejects
+          // at runtime.
+          sql:
+            'CREATE TABLE "user" (id text, email text UNIQUE, name text);\n' +
+            'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id));',
+        },
+      ]),
+    ).rejects.toThrow(ID_MUST_BE_UNIQUE);
+  });
+
+  it("names SQLite's runtime failure mode so the message is actionable", async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
+    await expect(
+      validateAuthMigrationSchema(root, [
+        { name: '0000.sql', sql: 'CREATE TABLE "user" (id text, name text);' },
+      ]),
+    ).rejects.toThrow(/foreign key mismatch/);
+  });
+
+  it('accepts `id text primary key` (the spelling the real build emits)', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeConstrainedAuthArtifact(root);
+    await validateAuthMigrationSchema(root, [
+      {
+        name: '0000.sql',
+        sql:
+          'CREATE TABLE "user" (id text primary key, email text UNIQUE, name text);\n' +
+          'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id));',
+      },
+    ]);
+  });
+
+  it('accepts a UNIQUE id — SQLite takes any unique parent key, not only a PRIMARY KEY', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeConstrainedAuthArtifact(root);
+    await validateAuthMigrationSchema(root, [
+      {
+        name: '0000.sql',
+        sql:
+          'CREATE TABLE "user" (id text not null unique, email text UNIQUE, name text);\n' +
+          'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id));',
+      },
+    ]);
+  });
+
+  it('accepts the `integer primary key` rowid alias (which materializes no index_list row)', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
+    await validateAuthMigrationSchema(root, [
+      { name: '0000.sql', sql: 'CREATE TABLE "user" (id integer primary key, name text);' },
+    ]);
+  });
+
+  it('does not accept a COMPOSITE unique index as making id a usable parent key', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
+    await expect(
+      validateAuthMigrationSchema(root, [
+        {
+          name: '0000.sql',
+          sql:
+            'CREATE TABLE "user" (id text, name text);\n' +
+            'CREATE UNIQUE INDEX "user_id_name_idx" ON "user" (id, name);',
+        },
+      ]),
+    ).rejects.toThrow(ID_MUST_BE_UNIQUE);
+  });
+
+  it('does not accept a PARTIAL unique index as making id a usable parent key', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
+    await expect(
+      validateAuthMigrationSchema(root, [
+        {
+          name: '0000.sql',
+          sql:
+            'CREATE TABLE "user" (id text, name text);\n' +
+            'CREATE UNIQUE INDEX "user_id_idx" ON "user" (id) WHERE name IS NOT NULL;',
+        },
+      ]),
+    ).rejects.toThrow(ID_MUST_BE_UNIQUE);
+  });
+
   it('fails closed when the migrations create every name but drop the session foreign key', async () => {
     const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
     writeConstrainedAuthArtifact(root);
@@ -3301,6 +3446,46 @@ describe('runCloudflareDeploy — schema probe runs under the build NODE_ENV', (
 });
 
 // ---------------------------------------------------------------------------
+// `vite build` runs UNTRUSTED project code (the user's config, every plugin, env.ts)
+// and authenticates against nothing, so it gets the same credential scrub as the
+// isolated probes. The wrangler runner must keep them — whoami / d1 migrations apply
+// / deploy are the calls that actually need an account credential.
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — wrangler credentials reach only the wrangler runner', () => {
+  it('the BUILD child env carries none of the wrangler auth credentials', async () => {
+    let buildEnvSeen: NodeJS.ProcessEnv = {};
+    await withWranglerCredentials(async () => {
+      const root = d1Project(PROVISIONED_D1);
+      const { deps } = harness({
+        runBuild: (env) => {
+          buildEnvSeen = { ...env };
+        },
+      });
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    });
+    for (const name of WRANGLER_AUTH_VARS) {
+      expect(buildEnvSeen[name]).toBeUndefined();
+    }
+  });
+
+  it('the wrangler runner env DOES still carry them (whoami / migrate / deploy need them)', async () => {
+    await withWranglerCredentials(async () => {
+      // Run a deploy first so the fork's memoized provision module is loaded — the sync
+      // `deployChildEnv` reads it, exactly as `createDeployWranglerRunner` does.
+      const root = d1Project(PROVISIONED_D1);
+      const { deps } = harness();
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+      const runnerEnv = deployChildEnv('acc123', 'https://api.cloudflare.com/client/v4');
+      for (const name of WRANGLER_AUTH_VARS) {
+        expect(runnerEnv[name]).toBe(`secret-${name}`);
+      }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Emitted-value validation (invalid required value) — a required var shipped with
 // a MALFORMED value fails the deploy closed BEFORE any remote mutation, not only at
 // worker boot.
@@ -3747,20 +3932,8 @@ describe('env-schema probe (real subprocess)', () => {
   it('the child env carries NONE of the full wrangler-auth credential set (all aliases scrubbed)', async () => {
     const savedNodeOptions = process.env.NODE_OPTIONS;
     // The FULL wrangler-auth credential set + aliases set on the parent; a d1 app whose
-    // env.ts leaks them. Mirrors WRANGLER_AUTH_CREDENTIAL_ENV_VARS in deploy.ts.
-    const authVars = [
-      'CLOUDFLARE_API_TOKEN',
-      'CF_API_TOKEN',
-      'CLOUDFLARE_API_KEY',
-      'CF_API_KEY',
-      'CLOUDFLARE_EMAIL',
-      'CF_EMAIL',
-      'CLOUDFLARE_API_USER_SERVICE_KEY',
-      'WRANGLER_CF_AUTHORIZATION_TOKEN',
-      'WRANGLER_R2_SQL_AUTH_TOKEN',
-      'CLOUDFLARE_ACCESS_CLIENT_ID',
-      'CLOUDFLARE_ACCESS_CLIENT_SECRET',
-    ];
+    // env.ts leaks them.
+    const authVars = WRANGLER_AUTH_VARS;
     const saved: Record<string, string | undefined> = {};
     for (const name of authVars) {
       saved[name] = process.env[name];
