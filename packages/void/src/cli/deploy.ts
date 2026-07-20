@@ -2121,6 +2121,41 @@ export async function runCloudflareDeploy(
       );
       return exit(1);
     }
+    // The drift check above is config-only, and queues carry NO id in the config — so a
+    // desired queue that was never created is invisible to it. `wrangler deploy` (step 11)
+    // does reject a missing queue before uploading, but only AFTER the build (step 7) and
+    // the remote D1 apply (step 9) have run. Probe each desired queue by name HERE so that
+    // failure lands before either. `--provision` needs no probe: it creates the queues.
+    //
+    // `queues list` is unusable (a human table with no `--json`, whose single un-looped
+    // page-1 request silently truncates on large accounts), so this is N `queues info`
+    // calls — one clean binary probe per desired queue. Only the provisioner's exact,
+    // name-aware not-found signal counts as absence: an inconclusive probe (auth or
+    // network error, signal-killed child, unexpected output) must NOT block, since
+    // `wrangler deploy`'s own pre-upload check still backstops it.
+    const absentQueues: Array<string> = [];
+    for (const name of desired.queues) {
+      const info = await Promise.resolve(
+        runWrangler(['queues', 'info', name, '-c', configPath, '--env='], { capture: true }),
+      );
+      if (provisionModule.isQueueConfirmedAbsent(info, name)) {
+        absentQueues.push(name);
+      }
+    }
+    if (absentQueues.length > 0) {
+      log.error(
+        [
+          'Deploy blocked — these queues do not exist in your Cloudflare account:',
+          ...absentQueues.map((name) => `  • ${name} (queue)`),
+          '',
+          'Create them by rerunning with --provision:',
+          '  void deploy --backend cloudflare --provision',
+          'Or create each one yourself:',
+          ...absentQueues.map((name) => `  wrangler queues create ${name}`),
+        ].join('\n'),
+      );
+      return exit(1);
+    }
   }
 
   // 5. Reconcile the worker `name` AND the pinned `account_id` into the root config

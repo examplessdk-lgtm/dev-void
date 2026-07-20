@@ -921,6 +921,134 @@ describe('runCloudflareDeploy — full Void app queues', () => {
   });
 });
 
+describe('runCloudflareDeploy — pre-build queue existence probe', () => {
+  /** A worker-bearing app desiring exactly one queue (`jobs`), fully config-provisioned. */
+  function queueProject(): string {
+    return makeProject({
+      'package.json': JSON.stringify({ name: 'qapp' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'queues/jobs.ts': `export default {};`,
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'qapp' }, null, 2),
+    });
+  }
+
+  /**
+   * The default harness plus a scripted `queues info` reply, so a test drives the
+   * REAL classifier with the exact output wrangler would print. Every other wrangler
+   * call keeps the harness behaviour (and its arg/trace recording).
+   */
+  function queueHarness(
+    probe: (name: string) => DeployWranglerRunResult,
+    overrides: Partial<CloudflareDeployDeps> = {},
+  ): ReturnType<typeof harness> {
+    const h = harness(overrides);
+    const base = h.deps.runWrangler as DeployWranglerRun;
+    h.deps.runWrangler = (args, opts) => {
+      const passthrough = base(args, opts);
+      return args[0] === 'queues' && args[1] === 'info' ? probe(args[2] as string) : passthrough;
+    };
+    return h;
+  }
+
+  it('probes each desired queue by name before the build', async () => {
+    const root = queueProject();
+    const { deps, wranglerArgs, trace } = queueHarness((name) => ({
+      ...cleanExit,
+      stdout: `Queue Name: ${name}\n`,
+    }));
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    const probeArgs = wranglerArgs.find((a) => a[0] === 'queues');
+    expect(probeArgs).toEqual([
+      'queues',
+      'info',
+      'jobs',
+      '-c',
+      join(root, 'wrangler.jsonc'),
+      '--env=',
+    ]);
+    // The probe runs at step 4 — ahead of the build and everything downstream of it.
+    expect(trace.indexOf('wrangler:queues')).toBeLessThan(trace.indexOf('build'));
+    expect(trace).toContain('wrangler:deploy');
+  });
+
+  it('fails closed naming the queue when the probe confirms it does not exist', async () => {
+    const root = queueProject();
+    const { deps, trace, exitCalls } = queueHarness((name) => ({
+      ...cleanExit,
+      status: 1,
+      stderr: `✘ [ERROR] Queue "${name}" does not exist.\n`,
+    }));
+    const messages: Array<string> = [];
+    const restore = log.error;
+    log.error = (msg: string) => {
+      messages.push(msg);
+    };
+    try {
+      await expect(
+        runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+      ).rejects.toBeInstanceOf(ExitError);
+    } finally {
+      log.error = restore;
+    }
+    expect(exitCalls).toEqual([1]);
+    // Nothing past step 4 ran: no build, no remote D1 apply, no upload.
+    expect(trace).toEqual(['wrangler:whoami', 'wrangler:queues']);
+    const joined = messages.join('\n');
+    expect(joined).toContain('jobs');
+    expect(joined).toContain('--provision');
+    expect(joined).toContain('wrangler queues create jobs');
+  });
+
+  it('proceeds when the probe fails for a reason other than the queue being absent', async () => {
+    const root = queueProject();
+    // An auth failure is NOT absence — blocking here would be a false positive, and
+    // `wrangler deploy` still rejects a genuinely missing queue before uploading.
+    const { deps, trace } = queueHarness(() => ({
+      ...cleanExit,
+      status: 1,
+      stderr: '✘ [ERROR] A request to the Cloudflare API failed [code: 10000]\n',
+    }));
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(trace).toContain('build');
+    expect(trace).toContain('wrangler:deploy');
+  });
+
+  it('proceeds when a killed probe merely buffered a not-found line', async () => {
+    const root = queueProject();
+    // A signal-killed child never ran to completion, so its buffered text is not proof.
+    const { deps, trace } = queueHarness((name) => ({
+      ...cleanExit,
+      status: 1,
+      signal: 'SIGKILL',
+      stderr: `✘ [ERROR] Queue "${name}" does not exist.\n`,
+    }));
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(trace).toContain('build');
+    expect(trace).toContain('wrangler:deploy');
+  });
+
+  it('never probes when the app desires no queues', async () => {
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, wranglerArgs } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(wranglerArgs.some((a) => a[0] === 'queues')).toBe(false);
+  });
+
+  it('never probes under --provision (the provisioner creates the queue itself)', async () => {
+    const root = queueProject();
+    const { deps, wranglerArgs, trace } = queueHarness(() => ({
+      ...cleanExit,
+      status: 1,
+      stderr: '✘ [ERROR] Queue "jobs" does not exist.\n',
+    }));
+    await runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps);
+    expect(trace).toContain('provision');
+    expect(wranglerArgs.some((a) => a[0] === 'queues')).toBe(false);
+    expect(trace).toContain('wrangler:deploy');
+  });
+});
+
 describe('runCloudflareDeploy — CI queue provision gate', () => {
   it('fails closed on a queue under CI --provision (queues cannot be proven created)', async () => {
     const root = makeProject({

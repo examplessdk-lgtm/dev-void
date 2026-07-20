@@ -242,7 +242,7 @@ void deploy --backend cloudflare --provision
 
 **What it does** (in order): settles the app class (a full Void app on the Cloudflare Workers target -- see [scope](#scope-and-limitations)) before any account operation; pins the account and confirms wrangler auth; provisions or drift-checks resources; validates then applies remote D1 migrations for SQLite apps (and verifies none remain pending); warns on plaintext vars and gates on missing required secrets; then builds and runs `wrangler deploy` on exactly the artifact it verified.
 
-Without `--provision`, deploy is a **drift check**: if a binding your source needs is not yet in `wrangler.jsonc` with a real id, deploy stops and names each missing resource, telling you to run `--provision` once.
+Without `--provision`, deploy is a **drift check**: if a binding your source needs is not yet in `wrangler.jsonc` with a real id, deploy stops and names each missing resource, telling you to run `--provision` once. Queues carry no id in the config, so deploy instead checks each one against your account (`wrangler queues info`) at the same point -- a queue that does not exist stops the deploy before anything is built or migrated.
 
 **`--provision`** creates any D1 database, KV namespace, R2 bucket, Queues, Hyperdrive config, and the ISR cache namespace your source needs, then lets wrangler write the real ids into your root `wrangler.jsonc`. It is **idempotent** -- it reads existing ids first, so re-running creates nothing that already exists.
 

@@ -3118,6 +3118,19 @@ function isConfirmedAbsent(result: RunWranglerResult, kind: 'r2' | 'queue', name
 }
 
 /**
+ * A `wrangler queues info <name>` result POSITIVELY confirms THIS queue does NOT
+ * exist in the account. Narrow, queue-only view of {@link isConfirmedAbsent}, shared
+ * with the deploy orchestrator's pre-build queue probe (`cli/deploy.ts`) so both call
+ * sites classify the SAME wrangler output the SAME way. Only the exact, name-aware
+ * `Queue "<name>" does not exist` on a clean non-zero exit returns `true`; every other
+ * outcome (success, signal/spawn failure, auth or network error, generic "not found")
+ * returns `false` and is left for the caller to treat as inconclusive.
+ */
+export function isQueueConfirmedAbsent(result: RunWranglerResult, name: string): boolean {
+  return isConfirmedAbsent(result, 'queue', name);
+}
+
+/**
  * A `wrangler queues info <name>` result POSITIVELY confirms THIS queue
  * exists. Queues write NO config, so a create cannot be verified by re-reading the
  * config (the D1/KV/R2/Hyperdrive backstop). And wrangler's `bin.wrangler` wrapper
