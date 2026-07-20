@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { log } from '@clack/prompts';
 import { dirname, join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
@@ -1045,6 +1045,113 @@ describe('runCloudflareDeploy — pre-build queue existence probe', () => {
     await runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps);
     expect(trace).toContain('provision');
     expect(wranglerArgs.some((a) => a[0] === 'queues')).toBe(false);
+    expect(trace).toContain('wrangler:deploy');
+  });
+});
+
+describe('runCloudflareDeploy — pre-build queue name validation', () => {
+  /**
+   * A worker-bearing app whose desired queues come from the given `queues/` filenames.
+   * Queue names are the filenames verbatim (`queues/scan.ts` strips only the extension),
+   * so this fixture is how an adversarial name actually reaches the deploy.
+   */
+  function queueNameProject(...fileNames: Array<string>): string {
+    return makeProject({
+      'package.json': JSON.stringify({ name: 'qapp' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'qapp' }, null, 2),
+      ...Object.fromEntries(fileNames.map((f) => [`queues/${f}`, `export default {};`])),
+    });
+  }
+
+  /** Run the deploy capturing `log.error` output, restoring the real logger after. */
+  async function runCapturingErrors(
+    root: string,
+    deps: CloudflareDeployDeps,
+  ): Promise<Array<string>> {
+    const messages: Array<string> = [];
+    const restore = log.error;
+    log.error = (msg: string) => {
+      messages.push(msg);
+    };
+    try {
+      await expect(
+        runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+      ).rejects.toBeInstanceOf(ExitError);
+    } finally {
+      log.error = restore;
+    }
+    return messages;
+  }
+
+  it('fails closed on a leading-dash name before the build, the D1 apply, or the probe', async () => {
+    // `queues/--help.ts` yields the literal name `--help`, which wrangler would parse as a
+    // FLAG: `queues info --help` exits 0 printing usage, which the probe reads as
+    // inconclusive and waves through. The name gate must stop it before that.
+    const root = queueNameProject('--help.ts');
+    const { deps, trace, wranglerArgs, exitCalls } = harness();
+    const messages = await runCapturingErrors(root, deps);
+
+    expect(exitCalls).toEqual([1]);
+    const joined = messages.join('\n');
+    expect(joined).toContain('--help');
+    expect(joined).toContain('queues/');
+    expect(joined).toContain('begin and end with a letter or digit');
+    // Nothing past the gate ran: no probe, no build, no remote D1 apply, no upload.
+    expect(wranglerArgs.some((a) => a[0] === 'queues')).toBe(false);
+    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
+    expect(trace).toEqual(['wrangler:whoami']);
+  });
+
+  it('rejects a shell-significant name by the grammar', async () => {
+    // The runner uses `spawnSync` with `shell: false`, so `$(touch marker)` was never
+    // executable — the point is that an invalid name can no longer reach wrangler's argv
+    // or the printed `wrangler queues create <name>` guidance at all.
+    const root = queueNameProject('$(touch marker).ts');
+    const { deps, trace, wranglerArgs, exitCalls } = harness();
+    const messages = await runCapturingErrors(root, deps);
+
+    expect(exitCalls).toEqual([1]);
+    const joined = messages.join('\n');
+    expect(joined).toContain('$(touch marker)');
+    // The absent-queue branch's `wrangler queues create <name>` guidance is never reached.
+    expect(joined).not.toContain('wrangler queues create');
+    expect(wranglerArgs.some((a) => a[0] === 'queues')).toBe(false);
+    expect(trace).toEqual(['wrangler:whoami']);
+    // Belt and braces: no subshell ever ran.
+    expect(existsSync(join(root, 'marker'))).toBe(false);
+  });
+
+  it('reports every invalid queue name together rather than dying on the first', async () => {
+    const root = queueNameProject('--help.ts', '$(touch marker).ts', 'jobs.ts');
+    const { deps, wranglerArgs, exitCalls } = harness();
+    const messages = await runCapturingErrors(root, deps);
+
+    expect(exitCalls).toEqual([1]);
+    // ONE batched message naming BOTH offenders — and not the valid sibling.
+    expect(messages).toHaveLength(1);
+    const [message] = messages;
+    expect(message).toContain('  • --help (queue)');
+    expect(message).toContain('  • $(touch marker) (queue)');
+    expect(message).not.toContain('• jobs');
+    expect(wranglerArgs.some((a) => a[0] === 'queues')).toBe(false);
+  });
+
+  it('lets a valid queue name through to the probe unchanged', async () => {
+    const root = queueNameProject('jobs.ts');
+    const { deps, wranglerArgs, trace } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    // The gate is transparent to a legal name: the probe still runs, pre-build, for `jobs`.
+    expect(wranglerArgs.find((a) => a[0] === 'queues')).toEqual([
+      'queues',
+      'info',
+      'jobs',
+      '-c',
+      join(root, 'wrangler.jsonc'),
+      '--env=',
+    ]);
+    expect(trace.indexOf('wrangler:queues')).toBeLessThan(trace.indexOf('build'));
     expect(trace).toContain('wrangler:deploy');
   });
 });

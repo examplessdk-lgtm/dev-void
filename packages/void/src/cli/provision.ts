@@ -3335,8 +3335,14 @@ const RESOURCE_NAME_GRAMMARS: Record<
  * Validate a name destined for a wrangler ARGV positional: FIRST the universal
  * option-injection guard, THEN the resource's own Cloudflare grammar. Fail closed on any
  * violation, before the account gate or any wrangler/REST call.
+ *
+ * Exported — like {@link isQueueConfirmedAbsent} — so the deploy orchestrator's
+ * no-`--provision` queue probe (`cli/deploy.ts`) gates names on the SAME rules this
+ * provisioner enforces, instead of only the `--provision` path being protected. Queue names
+ * are taken verbatim from filenames with no sanitization, so without this gate a name
+ * beginning with `-` reaches wrangler as a FLAG rather than a positional.
  */
-function assertValidResourceName(kind: ResourceNameKind, name: string): void {
+export function assertValidResourceName(kind: ResourceNameKind, name: string): void {
   assertNoOptionInjection(RESOURCE_NAME_GRAMMARS[kind].label, name);
   const grammar = RESOURCE_NAME_GRAMMARS[kind];
   if (!grammar.re.test(name)) {

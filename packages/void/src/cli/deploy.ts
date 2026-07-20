@@ -2121,6 +2121,37 @@ export async function runCloudflareDeploy(
       );
       return exit(1);
     }
+    // Queue names are taken VERBATIM from filenames (`queues/<name>.ts` → `<name>`, see
+    // `queues/scan.ts`) with no sanitization, and the probe below passes each one to wrangler
+    // as an ARGV positional. Gate them on the SAME `assertValidResourceName('queue', …)` the
+    // `--provision` path already applies, BEFORE the probe runs: a name beginning with `-` is
+    // parsed by wrangler as a FLAG (`queues info --help` exits 0 printing usage), which the
+    // probe would classify as inconclusive and wave through — silently forfeiting the
+    // early-ordering guarantee this whole step exists to provide. Collect EVERY offending name
+    // (as the drift/absent-queue errors do) so one rename pass clears them all.
+    const invalidQueues = desired.queues.filter((name) => {
+      try {
+        provisionModule.assertValidResourceName('queue', name);
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    if (invalidQueues.length > 0) {
+      log.error(
+        [
+          'Deploy blocked — these queue names are not valid Cloudflare queue names:',
+          ...invalidQueues.map((name) => `  • ${name} (queue)`),
+          '',
+          'A queue takes its name from its filename in queues/ (queues/<name>.ts → "<name>").',
+          'A queue name must be 1–63 characters, contain only letters, digits and "-", and',
+          'begin and end with a letter or digit.',
+          '',
+          'Rename the offending file(s) in queues/ and retry.',
+        ].join('\n'),
+      );
+      return exit(1);
+    }
     // The drift check above is config-only, and queues carry NO id in the config — so a
     // desired queue that was never created is invisible to it. `wrangler deploy` (step 11)
     // does reject a missing queue before uploading, but only AFTER the build (step 7) and
