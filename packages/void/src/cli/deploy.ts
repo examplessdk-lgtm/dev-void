@@ -1462,9 +1462,15 @@ export async function assertMigrationsProduceAuthSchema(
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(':memory:');
   const quote = (identifier: string): string => `"${identifier.replace(/"/g, '""')}"`;
-  // SQLite identifier comparison is case-insensitive, so neither the FK's parent table nor
-  // its column has to match the emitted schema byte-for-byte to be the same constraint.
-  const sameIdentifier = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+  // SQLite resolves identifiers case-insensitively, but `sqlite_master.name` and every PRAGMA
+  // echo back the casing the migration DECLARED. So `CREATE TABLE "User" ("Email" TEXT UNIQUE)`
+  // is the same schema as the emitted `user.email` — lowercase SELECTs resolve against it and
+  // the UNIQUE constraint enforces — and must not read as missing here. Every identifier this
+  // function compares (table, column, unique index member, FK parent) is folded through this
+  // one notion of equality; only the PRAGMA arguments keep the caller's original spelling,
+  // since SQLite resolves those case-insensitively anyway.
+  const foldIdentifier = (identifier: string): string => identifier.toLowerCase();
+  const sameIdentifier = (a: string, b: string): boolean => foldIdentifier(a) === foldIdentifier(b);
   try {
     for (const migration of migrations) {
       try {
@@ -1481,11 +1487,11 @@ export async function assertMigrationsProduceAuthSchema(
         db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{
           name: string;
         }>
-      ).map((row) => row.name),
+      ).map((row) => foldIdentifier(row.name)),
     );
     const problems: Array<string> = [];
     for (const req of required) {
-      if (!tables.has(req.table)) {
+      if (!tables.has(foldIdentifier(req.table))) {
         problems.push(`table "${req.table}" is not created by any checked-in migration`);
         continue;
       }
@@ -1493,9 +1499,9 @@ export async function assertMigrationsProduceAuthSchema(
         name: string;
         pk: number;
       }>;
-      const columns = new Set(tableInfo.map((row) => row.name));
+      const columns = new Set(tableInfo.map((row) => foldIdentifier(row.name)));
       const missing = req.columns
-        .filter((required) => !columns.has(required.column))
+        .filter((required) => !columns.has(foldIdentifier(required.column)))
         .map((required) => required.column);
       if (missing.length > 0) {
         problems.push(`table "${req.table}" is missing column(s): ${missing.join(', ')}`);
@@ -1511,7 +1517,7 @@ export async function assertMigrationsProduceAuthSchema(
       const uniqueColumns = new Set<string>();
       const primaryKey = tableInfo.filter((row) => Number(row.pk) > 0);
       if (primaryKey.length === 1 && primaryKey[0]) {
-        uniqueColumns.add(primaryKey[0].name);
+        uniqueColumns.add(foldIdentifier(primaryKey[0].name));
       }
       const indexes = db.prepare(`PRAGMA index_list(${quote(req.table)})`).all() as Array<{
         name: string;
@@ -1533,13 +1539,15 @@ export async function assertMigrationsProduceAuthSchema(
         }
         const only = indexColumns[0]?.name;
         if (typeof only === 'string') {
-          uniqueColumns.add(only);
+          uniqueColumns.add(foldIdentifier(only));
         }
       }
       const notUnique = req.columns
         .filter(
           (required) =>
-            required.unique && columns.has(required.column) && !uniqueColumns.has(required.column),
+            required.unique &&
+            columns.has(foldIdentifier(required.column)) &&
+            !uniqueColumns.has(foldIdentifier(required.column)),
         )
         .map((required) => required.column);
       if (notUnique.length > 0) {
@@ -1560,7 +1568,7 @@ export async function assertMigrationsProduceAuthSchema(
       }>;
       for (const required of req.columns) {
         const reference = required.references;
-        if (!reference || !columns.has(required.column)) {
+        if (!reference || !columns.has(foldIdentifier(required.column))) {
           continue;
         }
         const satisfied = foreignKeys.some(

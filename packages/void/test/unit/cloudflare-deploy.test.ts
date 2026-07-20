@@ -2522,6 +2522,115 @@ describe('assertMigrationsProduceAuthSchema', () => {
       ),
     ).rejects.toThrow(/user.*email[\s\S]*session.*userId|session.*userId[\s\S]*user.*email/);
   });
+
+  // -------------------------------------------------------------------------
+  // Identifier CASING. SQLite resolves identifiers case-insensitively, but
+  // `sqlite_master.name` and every PRAGMA echo back the casing the migration
+  // DECLARED. A migration written as `CREATE TABLE "User" ("Email" TEXT UNIQUE)`
+  // is fully functional — lowercase SELECTs resolve, the UNIQUE constraint
+  // enforces — so the gate must not reject it as missing.
+  // -------------------------------------------------------------------------
+
+  const CASED_USER = 'CREATE TABLE "User" ("Id" text primary key, "Email" text, "Name" text);';
+  const CASED_USER_UNIQUE_EMAIL =
+    'CREATE TABLE "User" ("Id" text primary key, "Email" text UNIQUE, "Name" text);';
+  const CASED_SESSION_WITH_FK =
+    'CREATE TABLE "Session" ("Id" text primary key, "UserId" text REFERENCES "User"("Id"));';
+
+  it('accepts tables and columns declared in a different case than the emitted schema', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql: `${CASED_USER}\nCREATE TABLE "Session" ("Id" text primary key, "UserId" text);`,
+        },
+      ],
+      required,
+    );
+  });
+
+  it('accepts a column-level UNIQUE declared on a differently-cased column', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [{ name: '0000.sql', sql: `${CASED_USER_UNIQUE_EMAIL}\n${CASED_SESSION_WITH_FK}` }],
+      constrained,
+    );
+  });
+
+  it('accepts a separate CREATE UNIQUE INDEX over a differently-cased column', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql:
+            `${CASED_USER}\n` +
+            'CREATE UNIQUE INDEX "User_Email_Unique" ON "User" ("Email");\n' +
+            `${CASED_SESSION_WITH_FK}`,
+        },
+      ],
+      constrained,
+    );
+  });
+
+  it('accepts a differently-cased single-column PRIMARY KEY as satisfying UNIQUE', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql:
+            'CREATE TABLE "User" ("Id" text, "Email" text primary key, "Name" text);\n' +
+            `${CASED_SESSION_WITH_FK}`,
+        },
+      ],
+      constrained,
+    );
+  });
+
+  it('still fails closed on a genuinely missing table, naming it as the schema declares it', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema([{ name: '0000.sql', sql: CASED_USER }], required),
+    ).rejects.toThrow(/table "session" is not created by any checked-in migration/);
+  });
+
+  it('still fails closed on a genuinely missing column, naming it as the schema declares it', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql: `${CASED_USER}\nCREATE TABLE "Session" ("Id" text primary key);`,
+          },
+        ],
+        required,
+      ),
+    ).rejects.toThrow(/table "session" is missing column\(s\): userId/);
+  });
+
+  it('still fails closed on a missing UNIQUE constraint when only the casing differs', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [{ name: '0000.sql', sql: `${CASED_USER}\n${CASED_SESSION_WITH_FK}` }],
+        constrained,
+      ),
+    ).rejects.toThrow(/table "user" is missing a UNIQUE constraint on column\(s\): email/);
+  });
+
+  it('still fails closed on a missing foreign key when only the casing differs', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              `${CASED_USER_UNIQUE_EMAIL}\n` +
+              'CREATE TABLE "Session" ("Id" text primary key, "UserId" text);',
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(
+      /table "session" column "userId" is missing a foreign key referencing "user"\."id"/,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
