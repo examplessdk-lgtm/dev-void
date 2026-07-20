@@ -1832,13 +1832,25 @@ function withListerDeadline<T>(start: (signal: AbortSignal) => Promise<T>, ms: n
 }
 
 /**
+ * The Cloudflare API token the default Hyperdrive existence check authenticates with:
+ * the caller-supplied one, else the ambient `CLOUDFLARE_API_TOKEN`. An empty value is
+ * treated as absent. This is the ONE resolver — the up-front Hyperdrive fence and the
+ * default lister below both use it, so the fence can never promise a check the lister
+ * then declines to make.
+ */
+function resolveHyperdriveApiToken(apiToken?: string): string | undefined {
+  const token = apiToken ?? process.env.CLOUDFLARE_API_TOKEN;
+  return typeof token === 'string' && token.length > 0 ? token : undefined;
+}
+
+/**
  * Default Hyperdrive existence check: `GET /accounts/{id}/hyperdrive/configs`
  * with the CF API token, matched by name in the caller. Returns `undefined` when
  * it cannot be built (no account id / no token) — the caller then fails closed
  * before any blind create. Never called in unit tests — those inject a stub.
  */
 function createDefaultListHyperdriveConfigs(apiToken?: string): ListHyperdriveConfigs | undefined {
-  const token = apiToken ?? process.env.CLOUDFLARE_API_TOKEN;
+  const token = resolveHyperdriveApiToken(apiToken);
   if (!token) {
     return undefined;
   }
@@ -4105,6 +4117,45 @@ async function provisionCloudflareResourcesLocked(
   // cannot reason about a redirected transport vs. the pinned Hyperdrive REST base.
   if (hasRemoteWork) {
     assertNoTransportRedirectInProjectDotenv(root);
+  }
+
+  // --- Hyperdrive existence check needs a Cloudflare API token -------------
+  // Unlike D1/KV/R2/queues — each of which has a machine-readable wrangler probe that
+  // works under ANY wrangler credential, including a `wrangler login` OAuth session —
+  // Hyperdrive has none (wrangler 4.107 prints a human table and offers no get-by-name;
+  // see the Hyperdrive block below). Its existence check is therefore a direct Cloudflare
+  // REST call, which needs an API token of its own. Without one there is no way to tell
+  // "config absent" from "cannot look", and `hyperdrive create` silently mints a DUPLICATE
+  // on a name collision — so the run has to stop.
+  //
+  // It stops HERE, before the account pin is written and before the first create, rather
+  // than at the Hyperdrive block far below: by that point D1/KV/R2 have already been
+  // created, so the user pays for a half-provisioned account to learn about a missing
+  // token. The message names both ways out, because `wrangler login` is the documented
+  // setup and this is the one resource it does not cover.
+  //
+  // Scoped to the case that would actually CREATE (a connection string is present). With
+  // no connection string nothing can be minted whatever the answer, so that path keeps its
+  // structured skip — the missing connection source is the real blocker to report there.
+  if (desired.hyperdrive?.connectionString && !opts?.listHyperdriveConfigs) {
+    const { binding, name } = desired.hyperdrive;
+    const entry = readBindingEntry(configPath, 'hyperdrive', binding);
+    const alreadyProvisioned = entry !== undefined && isRealHyperdriveId(entry.id);
+    // The read-first path is pure config I/O and needs NO token: an already-provisioned
+    // Postgres app deploys fine under `wrangler login` alone.
+    if (!alreadyProvisioned && !resolveHyperdriveApiToken(opts?.apiToken)) {
+      throw new Error(
+        `provision: Hyperdrive config ${JSON.stringify(name)} is not in "${configPath}" yet, and ` +
+          `creating it needs a Cloudflare API token. wrangler exposes no machine-readable ` +
+          `Hyperdrive list, so Void checks the account over the Cloudflare REST API, which a ` +
+          `"wrangler login" (OAuth) session cannot authenticate. Without that check a create ` +
+          `would silently duplicate an existing same-named config, so nothing was provisioned. ` +
+          `Either (a) export CLOUDFLARE_API_TOKEN with Hyperdrive edit permission and rerun, or ` +
+          `(b) create the Hyperdrive config yourself (dashboard / "wrangler hyperdrive create") ` +
+          `and add its id to the ${JSON.stringify(binding)} hyperdrive binding in ` +
+          `"${configPath}" — deploying an already-provisioned Hyperdrive needs no token.`,
+      );
+    }
   }
 
   // --- account_id (PERSIST FIRST, before selecting/calling any seam) --------

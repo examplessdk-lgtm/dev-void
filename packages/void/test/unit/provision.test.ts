@@ -1182,6 +1182,229 @@ describe('provisionCloudflareResources — Hyperdrive', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Hyperdrive needs a Cloudflare API token for its existence check, because
+// wrangler exposes no machine-readable Hyperdrive list. `wrangler login` (OAuth)
+// covers every OTHER resource, so the missing token has to be reported UP FRONT
+// with the exact remedy — not discovered after D1/KV/R2 were already created.
+// ---------------------------------------------------------------------------
+
+describe('provisionCloudflareResources — Hyperdrive API token requirement', () => {
+  let savedToken: string | undefined;
+  beforeEach(() => {
+    savedToken = process.env.CLOUDFLARE_API_TOKEN;
+    delete process.env.CLOUDFLARE_API_TOKEN;
+  });
+  afterEach(() => {
+    if (savedToken === undefined) {
+      delete process.env.CLOUDFLARE_API_TOKEN;
+    } else {
+      process.env.CLOUDFLARE_API_TOKEN = savedToken;
+    }
+  });
+
+  it('fails with an actionable token error BEFORE any account mutation when the config has no id', async () => {
+    // A first-time Postgres provision under `wrangler login` (OAuth, no token): the
+    // Hyperdrive id is not in the config yet and there is no way to check the account,
+    // so the run must stop before the D1 database beside it is created.
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          d1: { binding: 'DB', name: 'myapp-db' },
+          hyperdrive: {
+            binding: 'HYPERDRIVE',
+            name: 'myapp-hd',
+            connectionString: 'postgres://u:p@h/db',
+          },
+        },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/CLOUDFLARE_API_TOKEN/);
+    // Nothing ran: no `d1 create`, no Hyperdrive call — the account is untouched.
+    expect(calls).toEqual([]);
+    // The config was not touched either (no account_id pin, no new entries).
+    expect(readConfig()).toEqual({ name: 'app' });
+  });
+
+  it('names the two remedies: export a token, or put an existing Hyperdrive id in the config', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run } = makeRunner([]);
+    const error = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        hyperdrive: {
+          binding: 'HYPERDRIVE',
+          name: 'myapp-hd',
+          connectionString: 'postgres://u:p@h/db',
+        },
+      },
+      { runWrangler: run, log: silentLog },
+    ).catch((e: unknown) => e as Error);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain('CLOUDFLARE_API_TOKEN');
+    expect(message).toContain('Hyperdrive');
+    // Explains WHY a token is needed where `wrangler login` suffices elsewhere.
+    expect(message).toMatch(/no machine-readable/i);
+    // Remedy 2: create the config yourself and paste its id into wrangler.jsonc.
+    expect(message).toContain(wranglerPath);
+    expect(message).toMatch(/wrangler login|OAuth/i);
+    // The connection string is never echoed into the error.
+    expect(message).not.toContain('postgres://');
+  });
+
+  it('proceeds with NO token when the Hyperdrive id is already in the config (no REST call)', async () => {
+    // The read-first path is pure config I/O: an already-provisioned Postgres app
+    // deploys fine under `wrangler login` alone.
+    setup(JSON.stringify({ hyperdrive: [{ binding: 'HYPERDRIVE', id: hex32('hd') }] }));
+    const { run, calls } = makeRunner([]);
+    const fetchUrls: Array<string> = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      fetchUrls.push(String(url));
+      throw new Error('the read-first path must not reach the network');
+    }) as typeof fetch;
+    let result;
+    try {
+      result = await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: {
+            binding: 'HYPERDRIVE',
+            name: 'myapp-hd',
+            connectionString: 'postgres://u:p@h/db',
+          },
+        },
+        { runWrangler: run, log: silentLog },
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    expect(fetchUrls).toEqual([]);
+    expect(calls).toEqual([]);
+    expect(result.resources).toEqual([
+      {
+        kind: 'hyperdrive',
+        binding: 'HYPERDRIVE',
+        name: 'myapp-hd',
+        action: 'reused',
+        id: hex32('hd'),
+      },
+    ]);
+  });
+
+  it('runs the existence check unchanged when a token IS resolvable', async () => {
+    process.env.CLOUDFLARE_API_TOKEN = 'ambient-tok';
+    setup(JSON.stringify({ account_id: 'config-acct', name: 'app' }));
+    const urls: Array<string> = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      urls.push(String(url));
+      return new Response(
+        JSON.stringify({ success: true, result: [], result_info: { total_count: 0 } }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    const { run, calls } = makeRunner([
+      {
+        match: /^hyperdrive create /,
+        reply: () => {
+          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: hex32('newhd') });
+          return ok();
+        },
+      },
+    ]);
+    let result;
+    try {
+      result = await provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: {
+            binding: 'HYPERDRIVE',
+            name: 'myapp-hd',
+            connectionString: 'postgres://u:p@h/db',
+          },
+        },
+        { runWrangler: run, log: silentLog },
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    expect(urls[0]).toContain('/accounts/config-acct/hyperdrive/configs');
+    expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(true);
+    expect(result.resources).toEqual([
+      { kind: 'hyperdrive', binding: 'HYPERDRIVE', name: 'myapp-hd', action: 'created' },
+    ]);
+  });
+
+  it('needs no token when a listHyperdriveConfigs seam is injected', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([
+      {
+        match: /^hyperdrive create /,
+        reply: () => {
+          simulateUpdateConfig('hyperdrive', { binding: 'HYPERDRIVE', id: hex32('newhd') });
+          return ok();
+        },
+      },
+    ]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        hyperdrive: {
+          binding: 'HYPERDRIVE',
+          name: 'myapp-hd',
+          connectionString: 'postgres://u:p@h/db',
+        },
+      },
+      { runWrangler: run, log: silentLog, listHyperdriveConfigs: async () => [] },
+    );
+    expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(true);
+    expect(result.resources).toEqual([
+      { kind: 'hyperdrive', binding: 'HYPERDRIVE', name: 'myapp-hd', action: 'created' },
+    ]);
+  });
+
+  it('still skips (never throws the token error) when there is no connection string', async () => {
+    // Nothing can be created without a connection source, so there is no duplicate
+    // risk and no token is needed to report the real blocker.
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+      },
+      { runWrangler: run, log: silentLog },
+    );
+    expect(calls).toEqual([]);
+    expect(result.resources).toEqual([
+      {
+        kind: 'hyperdrive',
+        binding: 'HYPERDRIVE',
+        name: 'myapp-hd',
+        action: 'skipped',
+        reason: 'no connection string provided',
+      },
+    ]);
+  });
+});
+
 describe('provisionCloudflareResources — Queues (resource only)', () => {
   it('reuses a queue that `queues info` finds (no create, never writes queue config)', async () => {
     setup(JSON.stringify({ name: 'app' }));
