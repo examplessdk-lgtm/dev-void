@@ -1467,7 +1467,9 @@ export type RequiredAuthColumn = {
    * The emitted field is `required: true` — the column must be NOT NULL. `PRAGMA
    * table_info.notnull` answers this directly, with one exception: the `INTEGER PRIMARY KEY`
    * rowid alias reports `notnull = 0` yet SQLite assigns a rowid on a NULL insert, so it can
-   * never hold NULL and must not be rejected.
+   * never hold NULL and must not be rejected. A true alias is identified by the ABSENCE of an
+   * `origin = 'pk'` row in `PRAGMA index_list`, not by its declared type — `INTEGER PRIMARY
+   * KEY DESC` declares the same type but is no alias and really does store NULL.
    */
   required?: boolean;
   /**
@@ -1486,9 +1488,10 @@ export type RequiredAuthColumn = {
 };
 
 /**
- * One row of `PRAGMA table_info`. `type` is the type the migration DECLARED, echoed back —
- * needed to recognize the `INTEGER PRIMARY KEY` rowid alias, which no other column of this
- * PRAGMA distinguishes from an ordinary nullable primary key.
+ * One row of `PRAGMA table_info`. `type` is the type the migration DECLARED, echoed back — one
+ * of the conditions for recognizing the `INTEGER PRIMARY KEY` rowid alias, which no column of
+ * this PRAGMA distinguishes from an ordinary nullable primary key on its own (`PRAGMA
+ * index_list` supplies the discriminator).
  */
 type TableInfoRow = { name: string; type: string | null; notnull: number; pk: number };
 
@@ -1604,7 +1607,7 @@ export async function assertMigrationsProduceAuthSchema(
       // `CREATE UNIQUE INDEX ... ON user (email)` (what `applySqliteAuthMigrations` emits).
       // Any single-column, non-partial unique index over the column counts — the index NAME
       // is never required. A single-column PRIMARY KEY counts too, including the
-      // `INTEGER PRIMARY KEY` rowid alias, which materializes no `index_list` row at all.
+      // `INTEGER PRIMARY KEY` rowid alias, which materializes no `origin = 'pk'` index row.
       const uniqueColumns = new Set<string>();
       const primaryKey = tableInfo.filter((row) => Number(row.pk) > 0);
       if (primaryKey.length === 1 && primaryKey[0]) {
@@ -1613,6 +1616,7 @@ export async function assertMigrationsProduceAuthSchema(
       const indexes = db.prepare(`PRAGMA index_list(${quote(req.table)})`).all() as Array<{
         name: string;
         unique: number;
+        origin?: string | null;
         partial?: number;
       }>;
       for (const index of indexes) {
@@ -1663,12 +1667,28 @@ export async function assertMigrationsProduceAuthSchema(
       // NOT NULL — `PRAGMA table_info.notnull` answers it directly, with ONE exception. The
       // `INTEGER PRIMARY KEY` rowid alias reports `notnull = 0`, but SQLite assigns a rowid on
       // a NULL insert, so the column can never actually hold NULL; rejecting it would false-
-      // reject a common, legitimate schema. Only an exact `INTEGER` declared type makes a
-      // single-column primary key the rowid alias — `INT PRIMARY KEY` and `BIGINT PRIMARY KEY`
-      // really do store NULL.
+      // reject a common, legitimate schema.
+      //
+      // The declared type CANNOT decide this on its own. `INTEGER PRIMARY KEY DESC` is not a
+      // rowid alias — a historical SQLite quirk — yet `PRAGMA table_info` reports it
+      // identically to the real alias (`type = INTEGER`, `pk = 1`, `notnull = 0`) while a NULL
+      // insert genuinely stores NULL. What separates them is that a true alias IS the rowid,
+      // so SQLite materializes no primary-key index for it: `PRAGMA index_list` carries an
+      // `origin = 'pk'` row for `DESC`, for `TEXT PRIMARY KEY`, for `INT`/`BIGINT PRIMARY KEY`
+      // and for a composite PK, but none for `INTEGER PRIMARY KEY` / `INTEGER PRIMARY KEY ASC`.
+      // That is the discriminator used here — the absence of the `origin = 'pk'` row, read off
+      // the `index_list` the uniqueness check above already fetched, with no SQL text parsing.
+      // Note the test is the ORIGIN, not the row count: a rowid-alias table may still carry
+      // unrelated `origin = 'u'` / `origin = 'c'` index rows from a column-level UNIQUE or a
+      // `CREATE INDEX`. The single-column-PK and exact-`INTEGER` conditions are kept alongside
+      // it, so nothing widens beyond the one shape SQLite actually aliases to the rowid.
+      const hasPrimaryKeyIndex = indexes.some(
+        (index) => String(index.origin ?? '').toLowerCase() === 'pk',
+      );
       const isRowidAlias = (row: TableInfoRow): boolean =>
         primaryKey.length === 1 &&
         Number(row.pk) > 0 &&
+        !hasPrimaryKeyIndex &&
         String(row.type ?? '')
           .trim()
           .toUpperCase() === 'INTEGER';
@@ -1736,24 +1756,50 @@ export async function assertMigrationsProduceAuthSchema(
 
       // References — the emitted schema points these columns at a parent row, and without the
       // foreign key the migrations permit orphaned auth rows (e.g. a session with no user).
+      // `PRAGMA foreign_key_list` returns ONE ROW PER COLUMN, not one per constraint: the rows
+      // of a single constraint share an `id` and are ordered by `seq`. Grouping by `id` is what
+      // makes the width of each constraint visible, and the width is load-bearing — see below.
       const foreignKeys = db
         .prepare(`PRAGMA foreign_key_list(${quote(req.table)})`)
         .all() as Array<{
+        id: number;
         table: string;
         from: string;
         to: string | null;
       }>;
+      const foreignKeyConstraints = new Map<number, Array<(typeof foreignKeys)[number]>>();
+      for (const fk of foreignKeys) {
+        const group = foreignKeyConstraints.get(Number(fk.id));
+        if (group) {
+          group.push(fk);
+        } else {
+          foreignKeyConstraints.set(Number(fk.id), [fk]);
+        }
+      }
+      const constraints = Array.from(foreignKeyConstraints.values());
       for (const required of req.columns) {
         const reference = required.references;
         if (!reference || !columns.has(foldIdentifier(required.column))) {
           continue;
         }
-        const matching = foreignKeys.filter(
-          (fk) =>
-            typeof fk.from === 'string' &&
-            sameIdentifier(fk.from, required.column) &&
-            typeof fk.table === 'string' &&
-            sameIdentifier(fk.table, reference.table),
+        const namesReference = (fk: (typeof foreignKeys)[number]): boolean =>
+          typeof fk.from === 'string' &&
+          sameIdentifier(fk.from, required.column) &&
+          typeof fk.table === 'string' &&
+          sameIdentifier(fk.table, reference.table);
+        // ONLY a SINGLE-COLUMN foreign key satisfies an auth reference. SQLite applies
+        // MATCH SIMPLE, under which a COMPOSITE foreign key is skipped ENTIRELY whenever ANY
+        // of its child columns is NULL — so `FOREIGN KEY (userId, tenant) REFERENCES
+        // user(id, tenant)` with a nullable `tenant` lets a session naming a nonexistent user
+        // be inserted, exactly the orphan the `references` requirement exists to prevent.
+        // Matching per ROW would accept that constraint through its `userId` member alone.
+        // `PRAGMA foreign_key_check` cannot cover for this either: it reports orphaned DATA,
+        // and the freshly-migrated database it runs against holds no rows.
+        const matching = constraints.flatMap((group) =>
+          group.length === 1 && group[0] && namesReference(group[0]) ? [group[0]] : [],
+        );
+        const composite = constraints.some(
+          (group) => group.length > 1 && group.some(namesReference),
         );
         // WHICH COLUMN the foreign key points at — a question of NAMES, and the only
         // question this block answers. Whether SQLite will ACCEPT that parent key at all is
@@ -1778,14 +1824,21 @@ export async function assertMigrationsProduceAuthSchema(
         });
         if (!satisfied) {
           problems.push(
-            matching.some((fk) => fk.to == null)
-              ? `table "${req.table}" column "${required.column}" references "${reference.table}" ` +
+            matching.length === 0 && composite
+              ? `table "${req.table}" column "${required.column}" references ` +
+                  `"${reference.table}"."${reference.column}" only as part of a MULTI-COLUMN ` +
+                  `foreign key — SQLite skips a composite foreign key entirely when any of its ` +
+                  `child columns is NULL, so a row naming a "${reference.table}" that does not ` +
+                  `exist is still accepted. This reference needs its own single-column foreign ` +
+                  `key on "${required.column}"`
+              : matching.some((fk) => fk.to == null)
+                ? `table "${req.table}" column "${required.column}" references "${reference.table}" ` +
                   `without naming a target column, but "${reference.table}"."${reference.column}" ` +
                   `is not that table's single-column PRIMARY KEY — SQLite resolves an omitted ` +
                   `target only to the parent's PRIMARY KEY (a UNIQUE constraint does not qualify, ` +
                   `nor does a composite PRIMARY KEY) and rejects this at runtime with ` +
                   `"foreign key mismatch"`
-              : `table "${req.table}" column "${required.column}" is missing a foreign key ` +
+                : `table "${req.table}" column "${required.column}" is missing a foreign key ` +
                   `referencing "${reference.table}"."${reference.column}"`,
           );
         }

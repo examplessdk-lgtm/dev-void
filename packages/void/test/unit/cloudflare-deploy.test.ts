@@ -2796,6 +2796,77 @@ describe('assertMigrationsProduceAuthSchema', () => {
     );
   });
 
+  // -------------------------------------------------------------------------
+  // An auth reference must be its OWN single-column foreign key. SQLite applies
+  // MATCH SIMPLE: a COMPOSITE foreign key is skipped ENTIRELY whenever any of
+  // its child columns is NULL, so a composite constraint that merely happens to
+  // include the required column still lets an orphaned auth row in. `PRAGMA
+  // foreign_key_list` returns one row per COLUMN (rows of one constraint share
+  // an `id`), so a per-row match would accept it through a single member, and
+  // `PRAGMA foreign_key_check` cannot catch it either — it reports orphaned
+  // DATA, and the freshly-migrated database holds no rows.
+  // -------------------------------------------------------------------------
+
+  const COMPOSITE_PARENT =
+    'CREATE TABLE "user" (id text NOT NULL, tenant text, email text UNIQUE, name text, ' +
+    'PRIMARY KEY (id, tenant));';
+
+  it('fails closed when the reference is only covered by a multi-column foreign key', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              `${COMPOSITE_PARENT}\n` +
+              'CREATE TABLE "session" (id text primary key, userId text NOT NULL, tenant text, ' +
+              'FOREIGN KEY (userId, tenant) REFERENCES "user"(id, tenant));',
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(
+      /table "session" column "userId" references "user"\."id" only as part of a MULTI-COLUMN foreign key/,
+    );
+  });
+
+  it('explains that a composite foreign key is skipped when a child column is NULL', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              `${COMPOSITE_PARENT}\n` +
+              'CREATE TABLE "session" (id text primary key, userId text NOT NULL, tenant text, ' +
+              'FOREIGN KEY (userId, tenant) REFERENCES "user"(id, tenant));',
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(
+      /skips a composite foreign key entirely when any of its child columns is NULL[\s\S]*needs its own single-column foreign key on "userId"/,
+    );
+  });
+
+  it('accepts a single-column foreign key on a table that also declares a composite one', async () => {
+    // The composite constraint is unrelated to the auth reference; the single-column foreign
+    // key on `userId` is what satisfies it, and grouping by constraint id must not lose it.
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql:
+            `${USER_WITH_UNIQUE_EMAIL}\n` +
+            'CREATE TABLE "tenant" (org text NOT NULL, region text NOT NULL, PRIMARY KEY (org, region));\n' +
+            'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id), ' +
+            'org text, region text, FOREIGN KEY (org, region) REFERENCES "tenant"(org, region));',
+        },
+      ],
+      constrained,
+    );
+  });
+
   it('does not fail on an unrelated application table with its own broken foreign key', async () => {
     // The gate is scoped to the auth tables; a user's own schema problem elsewhere is not
     // this check's business and must not block a deploy on the auth path.
@@ -3139,6 +3210,36 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
     ]);
   });
 
+  it('accepts `id integer primary key asc` — also a true rowid alias', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
+    // `ASC` on an INTEGER PRIMARY KEY is the plain alias spelled out; SQLite materializes no
+    // primary-key index for it and assigns a rowid on a NULL insert.
+    await validateAuthMigrationSchema(root, [
+      {
+        name: '0000.sql',
+        sql: 'CREATE TABLE "user" (id integer primary key asc, name text not null);',
+      },
+    ]);
+  });
+
+  it('fails closed on `id integer primary key desc` — declared INTEGER, but not the rowid alias', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
+    // A SQLite quirk: `DESC` makes this an ORDINARY primary key, so a NULL insert stores NULL
+    // and the table accepts rows with no identity. `PRAGMA table_info` reports it exactly like
+    // the real alias (`type = INTEGER`, `pk = 1`, `notnull = 0`) — only the `origin = 'pk'`
+    // row SQLite materializes in `PRAGMA index_list` tells them apart.
+    await expect(
+      validateAuthMigrationSchema(root, [
+        {
+          name: '0000.sql',
+          sql: 'CREATE TABLE "user" (id integer primary key desc, name text not null);',
+        },
+      ]),
+    ).rejects.toThrow(ID_MUST_BE_NOT_NULL);
+  });
+
   it('does not extend the rowid-alias exception to `int primary key` (which really does store NULL)', async () => {
     const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
     writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
@@ -3148,6 +3249,37 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
         { name: '0000.sql', sql: 'CREATE TABLE "user" (id int primary key, name text not null);' },
       ]),
     ).rejects.toThrow(ID_MUST_BE_NOT_NULL);
+  });
+
+  it('does not extend the rowid-alias exception to `bigint primary key`', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
+    await expect(
+      validateAuthMigrationSchema(root, [
+        {
+          name: '0000.sql',
+          sql: 'CREATE TABLE "user" (id bigint primary key, name text not null);',
+        },
+      ]),
+    ).rejects.toThrow(ID_MUST_BE_NOT_NULL);
+  });
+
+  it('still treats `id integer primary key` as the alias when the table carries other unique indexes', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [
+      { name: 'user', fields: [{ name: 'email', unique: true }, 'name'] },
+    ]);
+    // The discriminator is the index ORIGIN, not the index COUNT: a column-level UNIQUE adds an
+    // `origin = 'u'` row and a `CREATE UNIQUE INDEX` an `origin = 'c'` row, neither of which
+    // stops the primary key from being the rowid alias.
+    await validateAuthMigrationSchema(root, [
+      {
+        name: '0000.sql',
+        sql:
+          'CREATE TABLE "user" (id integer primary key, email text not null UNIQUE, name text not null);\n' +
+          'CREATE UNIQUE INDEX "user_name_idx" ON "user" (name);',
+      },
+    ]);
   });
 
   it('fails closed when a required emitted field is declared nullable', async () => {
