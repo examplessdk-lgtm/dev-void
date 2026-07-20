@@ -346,6 +346,16 @@ async function runFactsChild(root: string): Promise<void> {
     return;
   }
 
+  // `resolveConfig` above already ran `void:env-schema`'s config hook, which imports the
+  // user's `env.ts` — so deriving the facts imports it a SECOND time, through the
+  // cache-busting loader. That is deliberate, and reusing the registration from config
+  // resolution instead would be unsafe: `importUserEnv` SWALLOWS a load error (it warns
+  // and returns), so a throwing `env.ts` would leave nothing registered, report
+  // `hasSchema: false`, and the required-secret gate would then validate ZERO keys and let
+  // the deploy through. Re-importing surfaces that failure as `schema-error`, which the
+  // orchestrator treats as fatal. Re-evaluation is a supported path — `defineEnv` is
+  // last-write-wins and resets its caches for exactly this (HMR re-imports do the same),
+  // and the build itself evaluates `env.ts` several times per process.
   const { deriveSelfHostSchemaFacts, SelfHostSchemaError } = await import('./env-validation.ts');
   try {
     const facts = await deriveSelfHostSchemaFacts(root);
