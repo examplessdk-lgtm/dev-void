@@ -1313,21 +1313,55 @@ export async function computeDesiredCloudflareResources(
   };
 }
 
+/** A column the emitted auth schema requires, with the constraints that carry correctness. */
+export type RequiredAuthColumn = {
+  column: string;
+  /** The emitted field is `unique: true` — a duplicate row here is a duplicate auth identity. */
+  unique: boolean;
+  /** The emitted field carries `references` — the parent table + column it must point at. */
+  references?: { table: string; column: string };
+};
+
+/** One table of the emitted auth schema, reduced to what the migrations must reproduce. */
+export type RequiredAuthTable = {
+  table: string;
+  columns: Array<RequiredAuthColumn>;
+};
+
 /**
  * Apply the checked-in migrations to an in-memory SQLite database (`node:sqlite`, a repo
  * dependency — the same driver `auth/node.ts` uses) and assert the effective schema contains
- * every REQUIRED auth table and its columns. This replaces a raw `CREATE TABLE` token search
- * (defeated by comments/strings/renames/plugin tables) with the real POST-migration schema —
- * the identical thing wrangler will apply to remote D1 (SQLite). Throws with the exact
- * missing table(s)/column(s), or when a migration cannot even be applied. Exported for unit
- * testing (the `required` set is passed in, so this needs no Better Auth resolution).
+ * every REQUIRED auth table, its columns, AND the constraints that carry correctness. This
+ * replaces a raw `CREATE TABLE` token search (defeated by comments/strings/renames/plugin
+ * tables) with the real POST-migration schema — the identical thing wrangler will apply to
+ * remote D1 (SQLite).
+ *
+ * Names alone are not enough: Void ships no auth migration scaffolder, so users hand-write
+ * `db/schema.ts` and run `void db generate`, where Drizzle's `.unique()` and `.references()`
+ * are both opt-in. A migration set with every right NAME but no unique index on `user.email`
+ * and no `session.userId` foreign key is a materially weaker schema than the one the managed
+ * path builds (`applySqliteAuthMigrations`), and it used to sail through this gate.
+ *
+ * Asserted: column presence, `unique: true`, and `references` (parent table + column).
+ * Deliberately NOT asserted — these would reject legitimate schemas:
+ *   - column TYPE — SQLite is dynamically typed, and Drizzle's output varies by mode.
+ *   - non-unique `index: true` — a performance property, not a correctness one.
+ *   - the exact `onDelete` action — over-tight; the reference itself is the invariant.
+ *
+ * Throws naming the exact offending `table.column` and what is missing (identifiers only,
+ * never values), or when a migration cannot even be applied. Exported for unit testing (the
+ * `required` set is passed in, so this needs no Better Auth resolution).
  */
 export async function assertMigrationsProduceAuthSchema(
   migrations: Array<{ name: string; sql: string }>,
-  required: Array<{ table: string; columns: Array<string> }>,
+  required: Array<RequiredAuthTable>,
 ): Promise<void> {
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(':memory:');
+  const quote = (identifier: string): string => `"${identifier.replace(/"/g, '""')}"`;
+  // SQLite identifier comparison is case-insensitive, so neither the FK's parent table nor
+  // its column has to match the emitted schema byte-for-byte to be the same constraint.
+  const sameIdentifier = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
   try {
     for (const migration of migrations) {
       try {
@@ -1352,16 +1386,96 @@ export async function assertMigrationsProduceAuthSchema(
         problems.push(`table "${req.table}" is not created by any checked-in migration`);
         continue;
       }
-      const columns = new Set(
-        (
-          db.prepare(`PRAGMA table_info("${req.table.replace(/"/g, '""')}")`).all() as Array<{
-            name: string;
-          }>
-        ).map((row) => row.name),
-      );
-      const missing = req.columns.filter((column) => !columns.has(column));
+      const tableInfo = db.prepare(`PRAGMA table_info(${quote(req.table)})`).all() as Array<{
+        name: string;
+        pk: number;
+      }>;
+      const columns = new Set(tableInfo.map((row) => row.name));
+      const missing = req.columns
+        .filter((required) => !columns.has(required.column))
+        .map((required) => required.column);
       if (missing.length > 0) {
         problems.push(`table "${req.table}" is missing column(s): ${missing.join(', ')}`);
+      }
+
+      // Uniqueness — collect every column SQLite actually enforces as unique, so BOTH
+      // spellings a real project produces are honored: a column-level `email TEXT UNIQUE`
+      // (SQLite materializes an implicit `sqlite_autoindex_*`) and a separate
+      // `CREATE UNIQUE INDEX ... ON user (email)` (what `applySqliteAuthMigrations` emits).
+      // Any single-column, non-partial unique index over the column counts — the index NAME
+      // is never required. A single-column PRIMARY KEY counts too, including the
+      // `INTEGER PRIMARY KEY` rowid alias, which materializes no `index_list` row at all.
+      const uniqueColumns = new Set<string>();
+      const primaryKey = tableInfo.filter((row) => Number(row.pk) > 0);
+      if (primaryKey.length === 1 && primaryKey[0]) {
+        uniqueColumns.add(primaryKey[0].name);
+      }
+      const indexes = db.prepare(`PRAGMA index_list(${quote(req.table)})`).all() as Array<{
+        name: string;
+        unique: number;
+        partial?: number;
+      }>;
+      for (const index of indexes) {
+        // A PARTIAL unique index only constrains the rows matching its WHERE clause, so it
+        // does not make the column globally unique.
+        if (Number(index.unique) !== 1 || Number(index.partial ?? 0) !== 0) {
+          continue;
+        }
+        const indexColumns = db.prepare(`PRAGMA index_info(${quote(index.name)})`).all() as Array<{
+          name: string | null;
+        }>;
+        // A composite unique index constrains the TUPLE, not this column on its own.
+        if (indexColumns.length !== 1) {
+          continue;
+        }
+        const only = indexColumns[0]?.name;
+        if (typeof only === 'string') {
+          uniqueColumns.add(only);
+        }
+      }
+      const notUnique = req.columns
+        .filter(
+          (required) =>
+            required.unique && columns.has(required.column) && !uniqueColumns.has(required.column),
+        )
+        .map((required) => required.column);
+      if (notUnique.length > 0) {
+        problems.push(
+          `table "${req.table}" is missing a UNIQUE constraint on column(s): ${notUnique.join(', ')} ` +
+            `(no column-level UNIQUE and no single-column unique index covers them)`,
+        );
+      }
+
+      // References — the emitted schema points these columns at a parent row, and without the
+      // foreign key the migrations permit orphaned auth rows (e.g. a session with no user).
+      const foreignKeys = db
+        .prepare(`PRAGMA foreign_key_list(${quote(req.table)})`)
+        .all() as Array<{
+        table: string;
+        from: string;
+        to: string | null;
+      }>;
+      for (const required of req.columns) {
+        const reference = required.references;
+        if (!reference || !columns.has(required.column)) {
+          continue;
+        }
+        const satisfied = foreignKeys.some(
+          (fk) =>
+            typeof fk.from === 'string' &&
+            sameIdentifier(fk.from, required.column) &&
+            typeof fk.table === 'string' &&
+            sameIdentifier(fk.table, reference.table) &&
+            // `to` is NULL when the FK targets the parent's PRIMARY KEY implicitly
+            // (`REFERENCES "user"`) — a valid spelling of the very same constraint.
+            (fk.to == null || sameIdentifier(String(fk.to), reference.column)),
+        );
+        if (!satisfied) {
+          problems.push(
+            `table "${req.table}" column "${required.column}" is missing a foreign key ` +
+              `referencing "${reference.table}"."${reference.column}"`,
+          );
+        }
       }
     }
     if (problems.length > 0) {
@@ -1382,12 +1496,12 @@ export async function assertMigrationsProduceAuthSchema(
  * tables. The literal's top-level object closes with `}` at column 0, so the
  * `\n} as const;` terminator uniquely bounds the JSON (inner braces are indented).
  * The `id` column is the implicit PRIMARY KEY, so it is prepended to each table's
- * columns — matching `resolveVoidAuthMigrationSchema`'s field set exactly. Throws a
+ * columns — matching `resolveVoidAuthMigrationSchema`'s field set exactly. Each field
+ * also carries its `unique` flag and its `references` target, so the check below can
+ * assert the CONSTRAINTS the schema requires and not merely the names. Throws a
  * fail-closed error when the artifact is missing/malformed.
  */
-function readEmittedAuthMigrationSchema(
-  root: string,
-): Array<{ table: string; columns: Array<string> }> {
+function readEmittedAuthMigrationSchema(root: string): Array<RequiredAuthTable> {
   const schemaPath = join(root, '.void', 'better-auth-schema.ts');
   if (!existsSync(schemaPath)) {
     throw new Error(
@@ -1419,7 +1533,17 @@ function readEmittedAuthMigrationSchema(
   }
   return migrationSchema.tables.map((table) => ({
     table: table.name,
-    columns: ['id', ...Object.keys(table.fields)],
+    columns: [
+      // `id` is the implicit PRIMARY KEY — never carries `unique`/`references` of its own.
+      { column: 'id', unique: false },
+      ...Object.entries(table.fields).map(([column, field]) => ({
+        column,
+        unique: field.unique === true,
+        references: field.references
+          ? { table: field.references.table, column: field.references.field }
+          : undefined,
+      })),
+    ],
   }));
 }
 
@@ -2360,11 +2484,13 @@ export async function runCloudflareDeploy(
           'deploy: --backend cloudflare cannot verify the Void-managed Better Auth schema.',
           'The managed platform creates these tables at runtime (POST /__void/migrate/auth)',
           'after deploy; this self-host backend only applies checked-in db/migrations/*.sql, so',
-          'they must already produce the Better Auth schema:',
+          'they must already produce the Better Auth schema — tables, columns, and the unique',
+          'constraints and foreign keys it declares:',
           `  ${getErrorMessage(err)}`,
-          'Generate a migration that creates the Better Auth tables (define them in',
-          '`db/schema.ts`, run `void db generate`, commit), then rerun — or deploy this app',
-          'with `void deploy` (the managed platform).',
+          'Define the Better Auth tables in `db/schema.ts`, run `void db generate`, commit the',
+          'migration, then rerun — or deploy this app with `void deploy` (the managed platform).',
+          'Note that Drizzle opts out of constraints by default: a field the schema marks unique',
+          'needs `.unique()`, and one that references another table needs `.references()`.',
         ].join('\n'),
       );
       return exit(1);

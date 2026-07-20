@@ -94,9 +94,23 @@ const srcEnvHelpers = join(import.meta.dirname, '..', '..', 'src', 'runtime', 'e
  * shape the build emits (`JSON.stringify(resolveVoidAuthMigrationSchema(...), null, 2)`), so
  * the post-build auth check reads ground truth exactly as it would after a real build.
  */
+/**
+ * A field of the emitted artifact. A bare string is the plain, unconstrained case; the object
+ * form carries the `unique` / `references` metadata the real build emits (see
+ * `playground/kitchen-sink/.void/better-auth-schema.ts`, e.g. `user.email` is `unique: true`
+ * and `session.userId` references `user.id`).
+ */
+type AuthSchemaField =
+  | string
+  | {
+      name: string;
+      unique?: boolean;
+      references?: { table: string; field: string; onDelete?: string };
+    };
+
 function writeAuthSchemaArtifact(
   root: string,
-  tables: Array<{ name: string; fields: Array<string> }>,
+  tables: Array<{ name: string; fields: Array<AuthSchemaField> }>,
 ): void {
   const migrationSchema = {
     dialect: 'sqlite',
@@ -105,10 +119,20 @@ function writeAuthSchemaArtifact(
       name: t.name,
       order: i + 1,
       fields: Object.fromEntries(
-        t.fields.map((f) => [
-          f,
-          { type: 'string', required: true, unique: false, index: false, bigint: false },
-        ]),
+        t.fields.map((f) => {
+          const field = typeof f === 'string' ? { name: f } : f;
+          return [
+            field.name,
+            {
+              type: 'string',
+              required: true,
+              unique: field.unique === true,
+              index: false,
+              bigint: false,
+              ...(field.references ? { references: field.references } : {}),
+            },
+          ];
+        }),
       ),
     })),
   };
@@ -1954,9 +1978,12 @@ describe('runCloudflareDeploy — migrations dir / count / auth', () => {
 // ---------------------------------------------------------------------------
 
 describe('assertMigrationsProduceAuthSchema', () => {
+  /** A required column with no constraint attached — presence is all that is asserted. */
+  const col = (column: string): { column: string; unique: boolean } => ({ column, unique: false });
+
   const required = [
-    { table: 'user', columns: ['id', 'email', 'name'] },
-    { table: 'session', columns: ['id', 'userId'] },
+    { table: 'user', columns: [col('id'), col('email'), col('name')] },
+    { table: 'session', columns: [col('id'), col('userId')] },
   ];
 
   it('passes when every required table + column is produced by the migrations', async () => {
@@ -2017,6 +2044,237 @@ describe('assertMigrationsProduceAuthSchema', () => {
       ),
     ).rejects.toThrow(/could not be applied/);
   });
+
+  // -------------------------------------------------------------------------
+  // Constraints, not just names. Void ships no auth migration scaffolder, so a
+  // hand-written `db/schema.ts` + `void db generate` can produce every correct
+  // NAME while omitting Drizzle's opt-in `.unique()` / `.references()`.
+  // -------------------------------------------------------------------------
+
+  /** `user.email` unique + `session.userId` → `user.id`, as the real build emits them. */
+  const constrained = [
+    {
+      table: 'user',
+      columns: [col('id'), { column: 'email', unique: true }, col('name')],
+    },
+    {
+      table: 'session',
+      columns: [
+        col('id'),
+        { column: 'userId', unique: false, references: { table: 'user', column: 'id' } },
+      ],
+    },
+  ];
+
+  const USER_WITH_UNIQUE_EMAIL =
+    'CREATE TABLE "user" (id text primary key, email text UNIQUE, name text);';
+  const SESSION_WITH_FK =
+    'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id) ON DELETE CASCADE);';
+
+  it('rejects when the migrations create the right names but no UNIQUE constraint on user.email', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              'CREATE TABLE "user" (id text primary key, email text, name text);\n' +
+              SESSION_WITH_FK,
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(/UNIQUE.*email|email/);
+  });
+
+  it('names the offending table and column when the UNIQUE constraint is missing', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              'CREATE TABLE "user" (id text primary key, email text, name text);\n' +
+              SESSION_WITH_FK,
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(/table "user" is missing a UNIQUE constraint on column\(s\): email/);
+  });
+
+  it('accepts a column-level UNIQUE (the spelling Drizzle emits inline)', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [{ name: '0000.sql', sql: `${USER_WITH_UNIQUE_EMAIL}\n${SESSION_WITH_FK}` }],
+      constrained,
+    );
+  });
+
+  it('accepts a separate CREATE UNIQUE INDEX (the spelling the managed path emits)', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql:
+            'CREATE TABLE "user" (id text primary key, email text, name text);\n' +
+            'CREATE UNIQUE INDEX "user_email_unique_idx" ON "user" (email);\n' +
+            SESSION_WITH_FK,
+        },
+      ],
+      constrained,
+    );
+  });
+
+  it('does not require a particular unique index name', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql:
+            'CREATE TABLE "user" (id text primary key, email text, name text);\n' +
+            'CREATE UNIQUE INDEX "totally_unrelated_name" ON "user" (email);\n' +
+            SESSION_WITH_FK,
+        },
+      ],
+      constrained,
+    );
+  });
+
+  it('does not accept a NON-unique index as satisfying a UNIQUE requirement', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              'CREATE TABLE "user" (id text primary key, email text, name text);\n' +
+              'CREATE INDEX "user_email_idx" ON "user" (email);\n' +
+              SESSION_WITH_FK,
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(/UNIQUE constraint on column\(s\): email/);
+  });
+
+  it('does not accept a COMPOSITE unique index as making the column unique on its own', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              'CREATE TABLE "user" (id text primary key, email text, name text);\n' +
+              'CREATE UNIQUE INDEX "user_email_name_idx" ON "user" (email, name);\n' +
+              SESSION_WITH_FK,
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(/UNIQUE constraint on column\(s\): email/);
+  });
+
+  it('rejects when the session foreign key to user is missing', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              `${USER_WITH_UNIQUE_EMAIL}\n` +
+              'CREATE TABLE "session" (id text primary key, userId text);',
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(
+      /table "session" column "userId" is missing a foreign key referencing "user"\."id"/,
+    );
+  });
+
+  it('rejects a foreign key that points at the wrong parent table', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              `${USER_WITH_UNIQUE_EMAIL}\n` +
+              'CREATE TABLE "account" (id text primary key);\n' +
+              'CREATE TABLE "session" (id text primary key, userId text REFERENCES "account"(id));',
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(/table "session" column "userId" is missing a foreign key/);
+  });
+
+  it('accepts an implicit REFERENCES to the parent primary key (no column named)', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql:
+            `${USER_WITH_UNIQUE_EMAIL}\n` +
+            'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user");',
+        },
+      ],
+      constrained,
+    );
+  });
+
+  it('does not assert the onDelete action (ON DELETE SET NULL still satisfies the reference)', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql:
+            `${USER_WITH_UNIQUE_EMAIL}\n` +
+            'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id) ON DELETE SET NULL);',
+        },
+      ],
+      constrained,
+    );
+  });
+
+  it('does not assert column TYPE (SQLite is dynamically typed — a valid schema must not be rejected)', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql:
+            'CREATE TABLE "user" (id text primary key, email blob UNIQUE, name numeric);\n' +
+            SESSION_WITH_FK,
+        },
+      ],
+      constrained,
+    );
+  });
+
+  it('does not require a non-unique index the emitted schema marks as index: true', async () => {
+    // `session.userId` is `index: true` in the real artifact, but that is a performance
+    // property — migrations without the index are still correct.
+    await assertMigrationsProduceAuthSchema(
+      [{ name: '0000.sql', sql: `${USER_WITH_UNIQUE_EMAIL}\n${SESSION_WITH_FK}` }],
+      constrained,
+    );
+  });
+
+  it('reports every constraint problem at once, naming each table.column', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              'CREATE TABLE "user" (id text primary key, email text, name text);\n' +
+              'CREATE TABLE "session" (id text primary key, userId text);',
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(/user.*email[\s\S]*session.*userId|session.*userId[\s\S]*user.*email/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2056,6 +2314,65 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
     await expect(validateAuthMigrationSchema(root, [])).rejects.toThrow(
       /did not emit|better-auth-schema/,
     );
+  });
+
+  /** The emitted artifact as the real build writes it: unique email + session → user FK. */
+  function writeConstrainedAuthArtifact(root: string): void {
+    writeAuthSchemaArtifact(root, [
+      { name: 'user', fields: [{ name: 'email', unique: true }, 'name'] },
+      {
+        name: 'session',
+        fields: [
+          { name: 'userId', references: { table: 'user', field: 'id', onDelete: 'cascade' } },
+        ],
+      },
+    ]);
+  }
+
+  it('fails closed when the migrations create every name but drop the unique email constraint', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeConstrainedAuthArtifact(root);
+    await expect(
+      validateAuthMigrationSchema(root, [
+        {
+          name: '0000.sql',
+          // Every table and column name is correct — only `.unique()` was never applied.
+          sql:
+            'CREATE TABLE "user" (id text primary key, email text, name text);\n' +
+            'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id));',
+        },
+      ]),
+    ).rejects.toThrow(/table "user" is missing a UNIQUE constraint on column\(s\): email/);
+  });
+
+  it('fails closed when the migrations create every name but drop the session foreign key', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeConstrainedAuthArtifact(root);
+    await expect(
+      validateAuthMigrationSchema(root, [
+        {
+          name: '0000.sql',
+          sql:
+            'CREATE TABLE "user" (id text primary key, email text UNIQUE, name text);\n' +
+            'CREATE TABLE "session" (id text primary key, userId text);',
+        },
+      ]),
+    ).rejects.toThrow(
+      /table "session" column "userId" is missing a foreign key referencing "user"\."id"/,
+    );
+  });
+
+  it('passes when the migrations reproduce the emitted constraints', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeConstrainedAuthArtifact(root);
+    await validateAuthMigrationSchema(root, [
+      {
+        name: '0000.sql',
+        sql:
+          'CREATE TABLE "user" (id text primary key, email text UNIQUE, name text);\n' +
+          'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id) ON DELETE CASCADE);',
+      },
+    ]);
   });
 });
 
