@@ -233,15 +233,15 @@ Auto-detects your project type and chooses the right pipeline. See [Supported Ap
 
 For Drizzle projects, deploy performs a read-only schema drift check. If a new migration would be generated, deploy stops and tells you to run `void db generate`, review the migration, commit it yourself, and rerun `void deploy`.
 
-| Flag                   | Purpose                                                                               |
-| ---------------------- | ------------------------------------------------------------------------------------- |
-| `--project <name>`     | Target a specific project by slug                                                     |
-| `--dir <path>`         | Deploy a pre-built static directory (skips build)                                     |
-| `--spa`                | Use SPA mode instead of SSG for static deploys                                        |
-| `--skip-build`         | Skip the build step (use existing build output)                                       |
-| `--backend cloudflare` | Deploy to your own Cloudflare account instead of the Void platform                    |
-| `--provision`          | Create missing bindings (D1/KV/R2/Queues/Hyperdrive); requires `--backend cloudflare` |
-| `--debug`              | Mirror the structured deploy log to stderr (also written to `~/.void/logs/`)          |
+| Flag                   | Purpose                                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------------------ |
+| `--project <name>`     | Target a specific project by slug                                                          |
+| `--dir <path>`         | Deploy a pre-built static directory (skips build)                                          |
+| `--spa`                | Use SPA mode instead of SSG for static deploys                                             |
+| `--skip-build`         | Skip the build step (use existing build output); not supported with `--backend cloudflare` |
+| `--backend cloudflare` | Deploy to your own Cloudflare account instead of the Void platform                         |
+| `--provision`          | Create missing bindings (D1/KV/R2/Queues/Hyperdrive); requires `--backend cloudflare`      |
+| `--debug`              | Mirror the structured deploy log to stderr (also written to `~/.void/logs/`)               |
 
 Every deploy writes a structured JSONL trace to `~/.void/logs/deploy-<timestamp>.jsonl` regardless of `--debug`. On failure the path is printed at the end of the error message so you can attach it when reporting platform issues. `VOID_DEPLOY_DEBUG=1` is accepted as an alternate trigger for stderr mirroring.
 
@@ -269,6 +269,7 @@ Prerequisites:
 - A Cloudflare account must be **pinned**: set `account_id` in your root `wrangler.jsonc`, or export `CLOUDFLARE_ACCOUNT_ID`. A multi-account token otherwise makes wrangler prompt (or error in CI), which Void cannot intercept.
 - Authenticate wrangler (`wrangler login`, or set `CLOUDFLARE_API_TOKEN`). Deploy needs a token with `Workers Scripts:Edit` plus read on the resources you bind; `--provision` additionally needs per-product `*:Edit` (D1, KV, R2, Queues, Hyperdrive).
 - `CLOUDFLARE_API_TOKEN` is **required** to provision a Hyperdrive config for the first time — `wrangler login` covers every other resource, but wrangler exposes no machine-readable Hyperdrive list, so Void checks for an existing config over the Cloudflare REST API, which OAuth cannot authenticate. Without a token, `--provision` stops before touching your account. Alternatively create the Hyperdrive config yourself and put its id in `wrangler.jsonc` — deploying an already-provisioned Hyperdrive app needs no token.
+- `--skip-build` is **not supported** with `--backend cloudflare`: this backend validates the artifact the build emits (worker `vars` in `dist/ssr/wrangler.json`, the generated auth schema), so there is nothing to check without a fresh build.
 - Local Docker is required to build apps that use the sandbox.
 
 What it does, in order: settles the app class before any account op (v1 supports **full Void apps on the Cloudflare Workers target** -- worker-bearing apps running Void's routing, with D1/KV/R2/Queues/Hyperdrive and, on D1/SQLite, auth + ISR; framework SSR of every kind, static/SPA/SSG apps, node/bun/deno targets, and PostgreSQL apps with auth all fail closed with guidance), pins the account and checks auth, provisions or drift-checks resources, validates then applies remote D1 migrations for SQLite apps (verifying the applied set equals the validated set and none remain pending), checks production secrets against the build's effective mode/envDir, then builds and runs `wrangler deploy` on exactly the verified artifact. Auth apps must ship checked-in migrations that produce the Better Auth schema — the managed platform's runtime auth-migration step does not run on this backend.

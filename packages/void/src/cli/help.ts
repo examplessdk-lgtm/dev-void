@@ -46,7 +46,10 @@ const HELP_TREE: HelpTree = {
       { command: '--project <name>', description: 'Deploy target project name' },
       { command: '--dir <path>', description: 'Deploy a static directory and skip build' },
       { command: '--spa', description: 'Use SPA mode for static deploys' },
-      { command: '--skip-build', description: 'Skip the build step and use existing output' },
+      {
+        command: '--skip-build',
+        description: 'Skip the build step and use existing output (not with --backend cloudflare)',
+      },
       {
         command: '--backend cloudflare',
         description: 'Deploy to your own Cloudflare account instead of the Void platform',

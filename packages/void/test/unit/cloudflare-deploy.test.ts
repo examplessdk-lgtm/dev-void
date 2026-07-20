@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { log } from '@clack/prompts';
 import { dirname, join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import {
@@ -2928,6 +2929,70 @@ describe('env-schema probe (real subprocess)', () => {
 // ---------------------------------------------------------------------------
 // wrangler framework autoconfig / OpenNext delegation disabled (finding 1)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// `--skip-build` — every gate on this path reads the artifact `vite build`
+// emits, so there is nothing to validate without a build. Reject the combination
+// instead of silently ignoring the flag.
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — --skip-build is rejected', () => {
+  it('rejects --skip-build pre-account — no whoami / provision / build / migrate / deploy', async () => {
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, trace, wranglerArgs, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare', skipBuild: true }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Pre-account: no seam ran at all.
+    expect(trace).toEqual([]);
+    expect(wranglerArgs).toEqual([]);
+  });
+
+  it('rejects --skip-build even with --provision (nothing is provisioned)', async () => {
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, trace, wranglerArgs, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(
+        root,
+        { backend: 'cloudflare', skipBuild: true, provision: true },
+        silentCliLog,
+        deps,
+      ),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toEqual([]);
+    expect(wranglerArgs).toEqual([]);
+  });
+
+  it('explains that this backend validates the build artifact', async () => {
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const messages: Array<string> = [];
+    const restore = log.error;
+    log.error = (msg: string) => {
+      messages.push(msg);
+    };
+    try {
+      const { deps } = harness();
+      await expect(
+        runCloudflareDeploy(root, { backend: 'cloudflare', skipBuild: true }, silentCliLog, deps),
+      ).rejects.toBeInstanceOf(ExitError);
+    } finally {
+      log.error = restore;
+    }
+    const joined = messages.join('\n');
+    expect(joined).toContain('--skip-build');
+    expect(joined).toContain('--backend cloudflare');
+    expect(joined).toMatch(/validat/i);
+  });
+
+  it('leaves the build running when --skip-build is absent', async () => {
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, trace } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(trace).toContain('build');
+  });
+});
 
 describe('runCloudflareDeploy — wrangler autoconfig disabled', () => {
   it('always passes --autoconfig=false so a framework marker cannot delegate the deploy', async () => {

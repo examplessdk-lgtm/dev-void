@@ -1719,6 +1719,27 @@ export async function runCloudflareDeploy(
     provision: options.provision === true ? true : undefined,
   });
 
+  // 0. Flag guard — `--skip-build` cannot be honored by this backend, so REJECT the
+  // combination rather than silently ignore it. Every gate on this path reads the artifact
+  // `vite build` emits as ground truth: the plaintext-var warnings, the required-secret gate
+  // and the invalid-value gate all read the REAL `dist/ssr/wrangler.json`, and the auth check
+  // reads the generated `.void/better-auth-schema.ts`. Skipping the build would leave them
+  // validating a stale or absent artifact — i.e. reporting a worker that is not the one being
+  // uploaded. Rejected here, before any account op, so the flag can never cost a build hook.
+  if (options.skipBuild) {
+    log.error(
+      [
+        'deploy: --skip-build is not supported with --backend cloudflare.',
+        'This backend validates the artifact the build emits — the worker vars in',
+        'dist/ssr/wrangler.json and the generated auth schema — so a skipped build would',
+        'leave every check reading a stale or missing artifact instead of the worker you',
+        'are about to upload. Drop --skip-build, or deploy with `void deploy` (the managed',
+        'platform), which supports it.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
   // Load the provision module ONCE, dynamically, so the sync deploy helpers can
   // reach its transport/drift/scrub primitives without a static import that would
   // make every managed `void deploy` eagerly load the provision lifecycle. Awaited
