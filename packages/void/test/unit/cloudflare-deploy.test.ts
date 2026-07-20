@@ -10,6 +10,7 @@ import {
   computeDesiredCloudflareResources,
   deployChildEnv,
   runCloudflareDeploy,
+  snapshotBindingIdentities,
   validateAuthMigrationSchema,
   verifyGeneratedDeployConfig,
   type CloudflareDeployDeps,
@@ -57,6 +58,8 @@ const silentCliLog: CliLogger = {
 
 /** Synthetic real ids (shape-valid) for drift/provision fixtures. */
 const REAL_D1_ID = '52b3bbc7-c473-4b26-9486-1345f5de61c4';
+/** A second shape-valid D1 id, so a tampered config can point at a DIFFERENT database. */
+const OTHER_D1_ID = '11111111-2222-3333-4444-555555555555';
 const REAL_KV_ID = '7c07b54c9f2a4d1e8b3f6a0c153aa11a';
 /** A second shape-valid KV id, so a two-namespace config can be distinct. */
 const OTHER_KV_ID = '3f9a1c2d4e5b6a7c8d9e0f1a2b3c4d5e';
@@ -1847,19 +1850,6 @@ describe('verifyGeneratedDeployConfig', () => {
     });
   }
 
-  function deployConfigProjectWithRoot(
-    generated: Record<string, unknown>,
-    root: Record<string, unknown>,
-  ): string {
-    return makeProject({
-      'wrangler.jsonc': JSON.stringify(root),
-      '.wrangler/deploy/config.json': JSON.stringify({
-        configPath: '../../dist/ssr/wrangler.json',
-      }),
-      'dist/ssr/wrangler.json': JSON.stringify(generated),
-    });
-  }
-
   it('passes when account_id and name match the pinned target', () => {
     const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
     expect(verifyGeneratedDeployConfig(root, { accountId: 'acc123', workerName: 'myapp' })).toEqual(
@@ -1889,77 +1879,291 @@ describe('verifyGeneratedDeployConfig', () => {
     expect(result.ok).toBe(false);
   });
 
-  it('fails when a flattened config swaps a binding identity (same account/name)', () => {
-    // Same account_id + name, but the generated D1 database_id differs from the root
-    // config's provisioned id — a flattened named-env / alternate-config binding set.
-    const OTHER_D1_ID = '11111111-2222-3333-4444-555555555555';
-    const root = deployConfigProjectWithRoot(
-      {
-        account_id: 'acc123',
-        name: 'myapp',
-        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: OTHER_D1_ID }],
-      },
-      {
-        account_id: 'acc123',
-        name: 'myapp',
-        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
-      },
+  it('fails when the generated binding identity differs from the pinned snapshot', () => {
+    // Same account_id + name, but the generated D1 database_id differs from the identity
+    // pinned before the build — a flattened named-env / alternate-config binding set, OR a
+    // build that rewrote the id. The snapshot (not a root re-read) is the ground truth.
+    const desired = { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] };
+    const snapshot = snapshotBindingIdentities(
+      { d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }] },
+      desired,
     );
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: OTHER_D1_ID }],
+    });
     const result = verifyGeneratedDeployConfig(root, {
       accountId: 'acc123',
       workerName: 'myapp',
-      rootConfigPath: join(root, 'wrangler.jsonc'),
-      desired: { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] },
+      desired,
+      bindingIdentitySnapshot: snapshot,
     });
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/identity|flattened/);
+    expect(result.reason).toMatch(/identity|flattened|tampered/);
   });
 
-  it('fails when the generated config drops a provisioned binding entirely', () => {
-    const root = deployConfigProjectWithRoot(
-      { account_id: 'acc123', name: 'myapp', d1_databases: [] },
-      {
-        account_id: 'acc123',
-        name: 'myapp',
-        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
-      },
+  it('fails when the generated config drops a pinned binding entirely', () => {
+    const desired = { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] };
+    const snapshot = snapshotBindingIdentities(
+      { d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }] },
+      desired,
     );
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp', d1_databases: [] });
     const result = verifyGeneratedDeployConfig(root, {
       accountId: 'acc123',
       workerName: 'myapp',
-      rootConfigPath: join(root, 'wrangler.jsonc'),
-      desired: { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] },
+      desired,
+      bindingIdentitySnapshot: snapshot,
     });
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/missing/);
   });
 
-  it('passes when the generated binding identities match the root config', () => {
-    const root = deployConfigProjectWithRoot(
+  it('passes when the generated binding identities match the pinned snapshot', () => {
+    const desired = {
+      d1: { binding: 'DB', name: 'myapp-db' },
+      kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }],
+      queues: [],
+    };
+    const snapshot = snapshotBindingIdentities(
       {
-        account_id: 'acc123',
-        name: 'myapp',
         d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
         kv_namespaces: [{ binding: 'KV', id: REAL_KV_ID }],
       },
-      {
-        account_id: 'acc123',
-        name: 'myapp',
-        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
-        kv_namespaces: [{ binding: 'KV', id: REAL_KV_ID }],
-      },
+      desired,
     );
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+      kv_namespaces: [{ binding: 'KV', id: REAL_KV_ID }],
+    });
     const result = verifyGeneratedDeployConfig(root, {
       accountId: 'acc123',
       workerName: 'myapp',
-      rootConfigPath: join(root, 'wrangler.jsonc'),
-      desired: {
-        d1: { binding: 'DB', name: 'myapp-db' },
-        kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }],
-        queues: [],
-      },
+      desired,
+      bindingIdentitySnapshot: snapshot,
     });
     expect(result).toEqual({ ok: true });
+  });
+
+  it('fails when a non-D1 binding identity (R2 / Hyperdrive) differs from the snapshot', () => {
+    // R2 (bucket_name) and Hyperdrive (id) are pinned the same way D1 is — the snapshot +
+    // verify logic is uniform across kinds, so both must be caught.
+    const r2Desired = {
+      r2: { binding: 'STORAGE', bucketName: 'myapp-storage' },
+      kvNamespaces: [],
+      queues: [],
+    };
+    const r2Snapshot = snapshotBindingIdentities(
+      { r2_buckets: [{ binding: 'STORAGE', bucket_name: 'myapp-storage' }] },
+      r2Desired,
+    );
+    const r2Root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      r2_buckets: [{ binding: 'STORAGE', bucket_name: 'someone-elses-bucket' }],
+    });
+    expect(
+      verifyGeneratedDeployConfig(r2Root, {
+        accountId: 'acc123',
+        workerName: 'myapp',
+        desired: r2Desired,
+        bindingIdentitySnapshot: r2Snapshot,
+      }).ok,
+    ).toBe(false);
+
+    const hyperDesired = {
+      hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hyperdrive', connectionString: '' },
+      kvNamespaces: [],
+      queues: [],
+    };
+    const hyperSnapshot = snapshotBindingIdentities(
+      { hyperdrive: [{ binding: 'HYPERDRIVE', id: REAL_KV_ID }] },
+      hyperDesired,
+    );
+    const hyperRoot = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      hyperdrive: [{ binding: 'HYPERDRIVE', id: OTHER_KV_ID }],
+    });
+    expect(
+      verifyGeneratedDeployConfig(hyperRoot, {
+        accountId: 'acc123',
+        workerName: 'myapp',
+        desired: hyperDesired,
+        bindingIdentitySnapshot: hyperSnapshot,
+      }).ok,
+    ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Binding-identity pin: the id-bearing binding identities are snapshotted from the
+// root config AFTER provision/drift resolves them and BEFORE the (untrusted) build.
+// A compromised build dependency can only edit FILES (its credentials are scrubbed),
+// so it could rewrite `wrangler.jsonc`'s `d1_databases[DB].database_id` — keeping the
+// binding + database_name — to redirect the privileged remote migrate / deploy to a
+// DIFFERENT same-account resource. The migrate assert (step 9) and the emitted-config
+// check (step 10) both compare against the pre-build snapshot, mirroring the account_id pin.
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
+  /** The deploy pointer + emitted top-level config the CF plugin leaves behind after a build. */
+  function writeEmittedDeployArtifact(root: string, generated: Record<string, unknown>): void {
+    mkdirSync(join(root, '.wrangler', 'deploy'), { recursive: true });
+    mkdirSync(join(root, 'dist', 'ssr'), { recursive: true });
+    writeFileSync(
+      join(root, '.wrangler', 'deploy', 'config.json'),
+      JSON.stringify({ configPath: '../../dist/ssr/wrangler.json' }),
+    );
+    writeFileSync(join(root, 'dist', 'ssr', 'wrangler.json'), JSON.stringify(generated));
+  }
+
+  /** Read → mutate → rewrite the root wrangler.jsonc, standing in for a tampering build plugin. */
+  function rewriteRootConfig(
+    root: string,
+    mutate: (config: Record<string, unknown>) => void,
+  ): void {
+    const configPath = join(root, 'wrangler.jsonc');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    mutate(config);
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+  }
+
+  /** The emitted top-level config a non-tampered build of PROVISIONED_D1 would leave. */
+  const EMITTED_D1 = {
+    account_id: 'acc123',
+    name: 'myapp',
+    d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+  };
+
+  it('passes a normal deploy where the build leaves the pinned binding ids unchanged', async () => {
+    // The critical no-regression case: provision-written id present pre-build, unchanged by the
+    // build → the migrate assert AND the emitted-config check both match the snapshot.
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () => writeEmittedDeployArtifact(root, EMITTED_D1),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    // The remote migrate ran (identity pin matched) and the deploy proceeded.
+    expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'apply')).toBe(true);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
+  });
+
+  it('fails closed BEFORE the remote migrate when the build rewrites the D1 database_id', async () => {
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () => {
+        // Keep binding + database_name + migrations_dir; swap ONLY the id — the token still
+        // resolves, so wrangler would migrate a DIFFERENT same-account database.
+        rewriteRootConfig(root, (c) => {
+          (c.d1_databases as Array<Record<string, unknown>>)[0].database_id = OTHER_D1_ID;
+        });
+        writeEmittedDeployArtifact(root, {
+          ...EMITTED_D1,
+          d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: OTHER_D1_ID }],
+        });
+      },
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // The migrate seam was NOT invoked — no `d1 migrations apply`, no `d1 migrations list` — and
+    // nothing deployed. (Reverting the pin lets `d1 migrations apply` run against the wrong DB.)
+    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('fails closed at the emitted-config check when the build rewrites the D1 id in BOTH the root config and the artifact', async () => {
+    // No checked-in migrations → the remote-migrate assert is skipped, so the tamper must be
+    // caught at step 10. A CONSISTENT rewrite (root + emitted both carry the new id) would defeat
+    // a post-build root re-read; the pre-build snapshot still catches it. (Reverting the pin —
+    // which compared the artifact against a post-build root re-read — lets this deploy.)
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () => {
+        rewriteRootConfig(root, (c) => {
+          (c.d1_databases as Array<Record<string, unknown>>)[0].database_id = OTHER_D1_ID;
+        });
+        writeEmittedDeployArtifact(root, {
+          ...EMITTED_D1,
+          d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: OTHER_D1_ID }],
+        });
+      },
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('fails closed at the emitted-config check when the build consistently rewrites a KV namespace id', async () => {
+    // A non-D1 id-bearing binding (KV) rewritten in BOTH root + artifact — caught at step 10
+    // against the snapshot, exactly as D1 is. No migrations → the D1 migrate seam is skipped.
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'myapp' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = (c) => c.env.KV.get('k') ?? c.env.DB.prepare('SELECT 1').first();`,
+      'wrangler.jsonc': JSON.stringify(
+        {
+          account_id: 'acc123',
+          name: 'myapp',
+          d1_databases: [
+            {
+              binding: 'DB',
+              database_name: 'myapp-db',
+              database_id: REAL_D1_ID,
+              migrations_dir: './db/migrations',
+            },
+          ],
+          kv_namespaces: [{ binding: 'KV', id: REAL_KV_ID }],
+        },
+        null,
+        2,
+      ),
+    });
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () => {
+        rewriteRootConfig(root, (c) => {
+          (c.kv_namespaces as Array<Record<string, unknown>>)[0].id = OTHER_KV_ID;
+        });
+        writeEmittedDeployArtifact(root, {
+          account_id: 'acc123',
+          name: 'myapp',
+          d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+          kv_namespaces: [{ binding: 'KV', id: OTHER_KV_ID }],
+        });
+      },
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('still rejects a build that swaps the account_id in the emitted config (account pin intact)', async () => {
+    // The account_id defense must survive the refactor: the real verifier still fails closed on a
+    // mismatched emitted account_id, before the binding-identity block runs.
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () => writeEmittedDeployArtifact(root, { ...EMITTED_D1, account_id: 'other-acc' }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
   });
 });
 
