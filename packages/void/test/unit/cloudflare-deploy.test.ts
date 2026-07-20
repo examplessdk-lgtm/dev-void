@@ -2617,12 +2617,17 @@ describe('assertMigrationsProduceAuthSchema', () => {
   });
 
   it('accepts a differently-cased single-column PRIMARY KEY as satisfying UNIQUE', async () => {
+    // `Email` carries the PRIMARY KEY here — that is what makes it satisfy the `unique`
+    // requirement, and it is the point of this test. `Id` is then declared UNIQUE so the
+    // session foreign key still has a valid parent key to point at; without that the
+    // migration would produce a schema SQLite rejects at runtime, which is a different
+    // failure and is covered by its own tests below.
     await assertMigrationsProduceAuthSchema(
       [
         {
           name: '0000.sql',
           sql:
-            'CREATE TABLE "User" ("Id" text, "Email" text primary key, "Name" text);\n' +
+            'CREATE TABLE "User" ("Id" text UNIQUE, "Email" text primary key, "Name" text);\n' +
             `${CASED_SESSION_WITH_FK}`,
         },
       ],
@@ -2674,6 +2679,137 @@ describe('assertMigrationsProduceAuthSchema', () => {
       ),
     ).rejects.toThrow(
       /table "session" column "userId" is missing a foreign key referencing "user"\."id"/,
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // PARENT KEY VALIDITY, decided by SQLite itself (`PRAGMA foreign_key_check`)
+  // rather than by re-deriving its rules here. A parent key must be a PRIMARY
+  // KEY, or a UNIQUE index that MATCHES the reference (collation included); an
+  // omitted target column resolves only to the parent's PRIMARY KEY. Anything
+  // else yields a foreign key that `CREATE TABLE` accepts, that
+  // `PRAGMA foreign_key_list` echoes back as valid, and that fails at PREPARE
+  // time under `foreign_keys=ON` — i.e. auth broken in production after a
+  // green deploy.
+  // -------------------------------------------------------------------------
+
+  /** The parent key is a UNIQUE index, but declared under a DIFFERENT collation. */
+  it('fails closed when the parent id is only unique under a differing COLLATE', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              'CREATE TABLE "user" (id text NOT NULL, email text UNIQUE, name text);\n' +
+              'CREATE UNIQUE INDEX "user_id_nocase" ON "user" (id COLLATE NOCASE);\n' +
+              SESSION_WITH_FK,
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(/foreign key mismatch/);
+  });
+
+  it('fails closed when the parent id is an ordinary, non-unique column', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql: 'CREATE TABLE "user" (id text, email text UNIQUE, name text);\n' + SESSION_WITH_FK,
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(/foreign key mismatch/);
+  });
+
+  it('fails closed on an implicit REFERENCES to a parent that is UNIQUE but not the PRIMARY KEY', async () => {
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              'CREATE TABLE "user" (id text NOT NULL UNIQUE, email text UNIQUE, name text);\n' +
+              'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user");',
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(/foreign key mismatch/);
+  });
+
+  it('still fails closed when the child declares no foreign key at all (the pragma alone would pass it)', async () => {
+    // `PRAGMA foreign_key_check` validates only foreign keys that EXIST, so a child with
+    // none comes back clean. The presence check has to stand on its own.
+    await expect(
+      assertMigrationsProduceAuthSchema(
+        [
+          {
+            name: '0000.sql',
+            sql:
+              `${USER_WITH_UNIQUE_EMAIL}\n` +
+              'CREATE TABLE "session" (id text primary key, userId text);',
+          },
+        ],
+        constrained,
+      ),
+    ).rejects.toThrow(
+      /table "session" column "userId" is missing a foreign key referencing "user"\."id"/,
+    );
+  });
+
+  it('accepts a parent PRIMARY KEY with an explicit reference', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [{ name: '0000.sql', sql: `${USER_WITH_UNIQUE_EMAIL}\n${SESSION_WITH_FK}` }],
+      constrained,
+    );
+  });
+
+  it('accepts a parent that is UNIQUE (not PRIMARY KEY) with an explicit reference', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql:
+            'CREATE TABLE "user" (id text NOT NULL UNIQUE, email text UNIQUE, name text);\n' +
+            SESSION_WITH_FK,
+        },
+      ],
+      constrained,
+    );
+  });
+
+  it('accepts an INTEGER PRIMARY KEY rowid alias as the parent key', async () => {
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql:
+            'CREATE TABLE "user" (id integer primary key, email text UNIQUE, name text);\n' +
+            'CREATE TABLE "session" (id text primary key, userId integer REFERENCES "user"(id));',
+        },
+      ],
+      constrained,
+    );
+  });
+
+  it('does not fail on an unrelated application table with its own broken foreign key', async () => {
+    // The gate is scoped to the auth tables; a user's own schema problem elsewhere is not
+    // this check's business and must not block a deploy on the auth path.
+    await assertMigrationsProduceAuthSchema(
+      [
+        {
+          name: '0000.sql',
+          sql:
+            `${USER_WITH_UNIQUE_EMAIL}\n${SESSION_WITH_FK}\n` +
+            'CREATE TABLE "widget" (id text primary key, tag text);\n' +
+            'CREATE TABLE "widget_tag" (id text primary key, tag text REFERENCES "widget"(tag));',
+        },
+      ],
+      constrained,
     );
   });
 });

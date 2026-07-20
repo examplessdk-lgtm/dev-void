@@ -1461,12 +1461,12 @@ export type RequiredAuthColumn = {
   /**
    * This is the table's implicit `id` — the row identity every auth foreign key points at.
    * SQLite requires a PARENT KEY to be uniquely constrained (a PRIMARY KEY or a UNIQUE
-   * constraint/index); pointing a foreign key at an ordinary column is accepted by
-   * `CREATE TABLE` and even echoed back by `PRAGMA foreign_key_list` as if valid, but every
-   * statement touching the child fails at PREPARE time with `foreign key mismatch` once
-   * `foreign_keys=ON` — which D1 always enforces. So it must be asserted separately. A merely
-   * UNIQUE identity is a valid target for an EXPLICIT `REFERENCES "user"(id)` but not for the
-   * implicit `REFERENCES "user"` shorthand, which SQLite resolves only to a PRIMARY KEY.
+   * constraint/index), so an `id` that is an ordinary column cannot carry the auth schema's
+   * foreign keys. `PRAGMA foreign_key_check` is the authority on whether an EXISTING foreign
+   * key's parent key is usable, but it only validates foreign keys that were actually
+   * declared — a child table that declares none at all comes back clean. This flag is
+   * therefore asserted on its own, so a non-unique `id` is caught even before any child
+   * references it.
    */
   primaryKey?: boolean;
   /** The emitted field carries `references` — the parent table + column it must point at. */
@@ -1502,7 +1502,10 @@ export type RequiredAuthTable = {
  *
  * Asserted: column presence, the implicit `id`'s uniqueness (`primaryKey`), `required`
  * (NOT NULL), `unique: true`, and `references` (parent table + column — including that an
- * implicit `REFERENCES "parent"` resolves to the parent's actual PRIMARY KEY).
+ * implicit `REFERENCES "parent"` resolves to the parent's actual PRIMARY KEY). Those
+ * reference checks answer only WHICH column a foreign key names; whether SQLite will ACCEPT
+ * that parent key is settled by `PRAGMA foreign_key_check` on the migrated (still empty)
+ * database, which applies SQLite's own rule rather than a local re-derivation of it.
  * Deliberately NOT asserted — these would reject legitimate schemas:
  *   - column TYPE — SQLite is dynamically typed, and Drizzle's output varies by mode.
  *   - non-unique `index: true` — a performance property, not a correctness one.
@@ -1740,16 +1743,20 @@ export async function assertMigrationsProduceAuthSchema(
             typeof fk.table === 'string' &&
             sameIdentifier(fk.table, reference.table),
         );
+        // WHICH COLUMN the foreign key points at — a question of NAMES, and the only
+        // question this block answers. Whether SQLite will ACCEPT that parent key at all is
+        // orthogonal and is settled below by `PRAGMA foreign_key_check`, so nothing here
+        // needs to model SQLite's parent-key rules.
+        //
         // `to` is NULL when the migration omitted the target column (`REFERENCES "user"`).
-        // SQLite resolves an omitted target ONLY to the parent's single-column PRIMARY KEY —
-        // never to a merely UNIQUE column, and never to a composite PK. So the shorthand is a
-        // valid spelling of the same constraint only when the expected target IS that PRIMARY
-        // KEY; otherwise `CREATE TABLE` succeeds, `PRAGMA foreign_key_list` reports the same
-        // `to: null` with no hint of trouble, and every statement touching the child fails at
-        // prepare time with `foreign key mismatch`. The answer lives only in the PARENT's own
-        // `table_info`, which is why this reaches outside the table being validated. An
-        // EXPLICIT `to` keeps matching by name: `REFERENCES "user"(id)` against a UNIQUE-only
-        // `user.id` is genuinely valid.
+        // SQLite resolves an omitted target ONLY to the parent's single-column PRIMARY KEY,
+        // so the shorthand names the required column only when that column IS the parent's
+        // PRIMARY KEY. The answer lives only in the PARENT's own `table_info`, which is why
+        // this reaches outside the table being validated. This check is load-bearing beyond
+        // the pragma: a foreign key aimed at a perfectly valid parent key that is the WRONG
+        // column (`REFERENCES "user"` where the parent's PRIMARY KEY is `email`, not `id`)
+        // is structurally sound, so `foreign_key_check` passes it — only this comparison
+        // catches it. An EXPLICIT `to` matches by name directly.
         const satisfied = matching.some((fk) => {
           if (fk.to != null) {
             return sameIdentifier(String(fk.to), reference.column);
@@ -1770,6 +1777,57 @@ export async function assertMigrationsProduceAuthSchema(
                   `referencing "${reference.table}"."${reference.column}"`,
           );
         }
+      }
+
+      // AUTHORITATIVE structural gate for this table's foreign keys — ask SQLite instead of
+      // re-deriving its parent-key rules here. Those rules are subtler than they look: a
+      // parent key must be a PRIMARY KEY, or a UNIQUE index whose columns AND COLLATING
+      // SEQUENCES match the reference, and an omitted target column resolves only to the
+      // parent's PRIMARY KEY. Hand-modelling them has produced a green deploy on a schema
+      // SQLite rejects more than once (an ordinary parent column; a UNIQUE-only parent under
+      // the implicit shorthand; a unique index declared `COLLATE NOCASE` over a plainly
+      // declared column). `PRAGMA foreign_key_check` applies SQLite's own rule, so a case
+      // this file has not anticipated can no longer pass.
+      //
+      // It reports a STRUCTURAL mismatch by THROWING (`foreign key mismatch - "child"
+      // referencing "parent"`), not by returning rows; returned rows mean orphaned DATA,
+      // which a freshly-migrated database holding no rows cannot have, but are surfaced too
+      // so neither outcome is silently dropped. Scoped to this table (the CHILD side) so an
+      // unrelated application table with its own broken foreign key is not this gate's
+      // business. Any other error is a real fault and propagates untouched.
+      //
+      // Why this matters: `CREATE TABLE` accepts a dead foreign key, and `PRAGMA
+      // foreign_key_list` echoes it back as if valid. Only when a statement touches the
+      // child does SQLite fail at PREPARE time with `foreign key mismatch` — under
+      // `foreign_keys=ON`, which D1 always enforces. Without this gate that surfaces as auth
+      // breaking in production AFTER a green deploy.
+      try {
+        const violations = db
+          .prepare(`PRAGMA foreign_key_check(${quote(req.table)})`)
+          .all() as Array<{ parent?: string | null }>;
+        for (const violation of violations) {
+          const parent = typeof violation.parent === 'string' ? violation.parent : 'its parent';
+          problems.push(
+            `table "${req.table}" has rows violating its foreign key to "${parent}" ` +
+              `(PRAGMA foreign_key_check)`,
+          );
+        }
+      } catch (err) {
+        const message = getErrorMessage(err);
+        const mismatch = /foreign key mismatch\s*-\s*"(.+?)"\s+referencing\s+"(.+?)"/i.exec(
+          message,
+        );
+        if (!mismatch) {
+          throw err;
+        }
+        problems.push(
+          `table "${mismatch[1]}" has a foreign key referencing "${mismatch[2]}" whose parent ` +
+            `key is not a valid foreign-key target — SQLite requires the referenced column(s) ` +
+            `to be a PRIMARY KEY, or a UNIQUE index that MATCHES the reference (an index ` +
+            `declared with a different COLLATE does not match), and an omitted target column ` +
+            `resolves only to the parent's PRIMARY KEY. The table is created, but SQLite ` +
+            `rejects every statement touching it at runtime with "foreign key mismatch"`,
+        );
       }
     }
     if (problems.length > 0) {
