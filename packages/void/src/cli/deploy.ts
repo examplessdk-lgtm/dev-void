@@ -1452,17 +1452,33 @@ export type RequiredAuthColumn = {
   /** The emitted field is `unique: true` — a duplicate row here is a duplicate auth identity. */
   unique: boolean;
   /**
+   * The emitted field is `required: true` — the column must be NOT NULL. `PRAGMA
+   * table_info.notnull` answers this directly, with one exception: the `INTEGER PRIMARY KEY`
+   * rowid alias reports `notnull = 0` yet SQLite assigns a rowid on a NULL insert, so it can
+   * never hold NULL and must not be rejected.
+   */
+  required?: boolean;
+  /**
    * This is the table's implicit `id` — the row identity every auth foreign key points at.
    * SQLite requires a PARENT KEY to be uniquely constrained (a PRIMARY KEY or a UNIQUE
    * constraint/index); pointing a foreign key at an ordinary column is accepted by
    * `CREATE TABLE` and even echoed back by `PRAGMA foreign_key_list` as if valid, but every
    * statement touching the child fails at PREPARE time with `foreign key mismatch` once
-   * `foreign_keys=ON` — which D1 always enforces. So it must be asserted separately.
+   * `foreign_keys=ON` — which D1 always enforces. So it must be asserted separately. A merely
+   * UNIQUE identity is a valid target for an EXPLICIT `REFERENCES "user"(id)` but not for the
+   * implicit `REFERENCES "user"` shorthand, which SQLite resolves only to a PRIMARY KEY.
    */
   primaryKey?: boolean;
   /** The emitted field carries `references` — the parent table + column it must point at. */
   references?: { table: string; column: string };
 };
+
+/**
+ * One row of `PRAGMA table_info`. `type` is the type the migration DECLARED, echoed back —
+ * needed to recognize the `INTEGER PRIMARY KEY` rowid alias, which no other column of this
+ * PRAGMA distinguishes from an ordinary nullable primary key.
+ */
+type TableInfoRow = { name: string; type: string | null; notnull: number; pk: number };
 
 /** One table of the emitted auth schema, reduced to what the migrations must reproduce. */
 export type RequiredAuthTable = {
@@ -1484,8 +1500,9 @@ export type RequiredAuthTable = {
  * and no `session.userId` foreign key is a materially weaker schema than the one the managed
  * path builds (`applySqliteAuthMigrations`), and it used to sail through this gate.
  *
- * Asserted: column presence, the implicit `id`'s uniqueness (`primaryKey`), `unique: true`,
- * and `references` (parent table + column).
+ * Asserted: column presence, the implicit `id`'s uniqueness (`primaryKey`), `required`
+ * (NOT NULL), `unique: true`, and `references` (parent table + column — including that an
+ * implicit `REFERENCES "parent"` resolves to the parent's actual PRIMARY KEY).
  * Deliberately NOT asserted — these would reject legitimate schemas:
  *   - column TYPE — SQLite is dynamically typed, and Drizzle's output varies by mode.
  *   - non-unique `index: true` — a performance property, not a correctness one.
@@ -1511,6 +1528,28 @@ export async function assertMigrationsProduceAuthSchema(
   // since SQLite resolves those case-insensitively anyway.
   const foldIdentifier = (identifier: string): string => identifier.toLowerCase();
   const sameIdentifier = (a: string, b: string): boolean => foldIdentifier(a) === foldIdentifier(b);
+  // `PRAGMA table_info`, memoized. A foreign key is validated against the PARENT table's info,
+  // and the parent is not necessarily a table this loop has reached (or will ever reach), so
+  // this must be able to answer for an arbitrary table at any point. SQLite resolves the PRAGMA
+  // argument case-insensitively, so the cache is keyed on the FOLDED name while the query keeps
+  // the caller's spelling. A table no migration created yields `[]`, not an error.
+  const tableInfoCache = new Map<string, Array<TableInfoRow>>();
+  const tableInfoFor = (table: string): Array<TableInfoRow> => {
+    const key = foldIdentifier(table);
+    const cached = tableInfoCache.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const rows = db.prepare(`PRAGMA table_info(${quote(table)})`).all() as Array<TableInfoRow>;
+    tableInfoCache.set(key, rows);
+    return rows;
+  };
+  // The table's single-column PRIMARY KEY, or null when it has none or a COMPOSITE one. This is
+  // the ONLY thing SQLite resolves an omitted foreign-key target column to.
+  const singleColumnPrimaryKey = (table: string): string | null => {
+    const primaryKey = tableInfoFor(table).filter((row) => Number(row.pk) > 0);
+    return primaryKey.length === 1 && primaryKey[0] ? primaryKey[0].name : null;
+  };
   try {
     for (const migration of migrations) {
       try {
@@ -1535,10 +1574,7 @@ export async function assertMigrationsProduceAuthSchema(
         problems.push(`table "${req.table}" is not created by any checked-in migration`);
         continue;
       }
-      const tableInfo = db.prepare(`PRAGMA table_info(${quote(req.table)})`).all() as Array<{
-        name: string;
-        pk: number;
-      }>;
+      const tableInfo = tableInfoFor(req.table);
       const columns = new Set(tableInfo.map((row) => foldIdentifier(row.name)));
       const missing = req.columns
         .filter((required) => !columns.has(foldIdentifier(required.column)))
@@ -1609,6 +1645,65 @@ export async function assertMigrationsProduceAuthSchema(
         );
       }
 
+      // NOT NULL — `PRAGMA table_info.notnull` answers it directly, with ONE exception. The
+      // `INTEGER PRIMARY KEY` rowid alias reports `notnull = 0`, but SQLite assigns a rowid on
+      // a NULL insert, so the column can never actually hold NULL; rejecting it would false-
+      // reject a common, legitimate schema. Only an exact `INTEGER` declared type makes a
+      // single-column primary key the rowid alias — `INT PRIMARY KEY` and `BIGINT PRIMARY KEY`
+      // really do store NULL.
+      const isRowidAlias = (row: TableInfoRow): boolean =>
+        primaryKey.length === 1 &&
+        Number(row.pk) > 0 &&
+        String(row.type ?? '')
+          .trim()
+          .toUpperCase() === 'INTEGER';
+      const notNullColumns = new Set(
+        tableInfo
+          .filter((row) => Number(row.notnull) === 1 || isRowidAlias(row))
+          .map((row) => foldIdentifier(row.name)),
+      );
+
+      // The identity's own NOT NULL. SQLite permits NULL in any PRIMARY KEY column that is not
+      // the rowid alias — a longstanding file-format compatibility quirk — so `id text primary
+      // key` accepts rows carrying NO identity, and more than one of them, because NULLs never
+      // collide under a unique constraint. Reported apart from the ordinary required columns
+      // below: the constraint reads as already satisfied in the migration, so the message has
+      // to name the quirk to be actionable.
+      const nullableIdentity = req.columns
+        .filter(
+          (required) =>
+            required.primaryKey === true &&
+            required.required === true &&
+            columns.has(foldIdentifier(required.column)) &&
+            !notNullColumns.has(foldIdentifier(required.column)),
+        )
+        .map((required) => required.column);
+      for (const column of nullableIdentity) {
+        problems.push(
+          `table "${req.table}" column "${column}" must be declared NOT NULL — SQLite permits ` +
+            `NULL in a PRIMARY KEY column unless it is the INTEGER rowid alias, so rows could ` +
+            `be inserted with no identity at all, and more than one of them (NULLs do not ` +
+            `collide under a unique constraint)`,
+        );
+      }
+
+      // Every other column the emitted schema marks `required`.
+      const nullableRequired = req.columns
+        .filter(
+          (required) =>
+            required.required === true &&
+            required.primaryKey !== true &&
+            columns.has(foldIdentifier(required.column)) &&
+            !notNullColumns.has(foldIdentifier(required.column)),
+        )
+        .map((required) => required.column);
+      if (nullableRequired.length > 0) {
+        problems.push(
+          `table "${req.table}" is missing a NOT NULL constraint on column(s): ` +
+            `${nullableRequired.join(', ')} (the emitted auth schema marks them required)`,
+        );
+      }
+
       const notUnique = req.columns
         .filter(
           (required) =>
@@ -1638,20 +1733,41 @@ export async function assertMigrationsProduceAuthSchema(
         if (!reference || !columns.has(foldIdentifier(required.column))) {
           continue;
         }
-        const satisfied = foreignKeys.some(
+        const matching = foreignKeys.filter(
           (fk) =>
             typeof fk.from === 'string' &&
             sameIdentifier(fk.from, required.column) &&
             typeof fk.table === 'string' &&
-            sameIdentifier(fk.table, reference.table) &&
-            // `to` is NULL when the FK targets the parent's PRIMARY KEY implicitly
-            // (`REFERENCES "user"`) — a valid spelling of the very same constraint.
-            (fk.to == null || sameIdentifier(String(fk.to), reference.column)),
+            sameIdentifier(fk.table, reference.table),
         );
+        // `to` is NULL when the migration omitted the target column (`REFERENCES "user"`).
+        // SQLite resolves an omitted target ONLY to the parent's single-column PRIMARY KEY —
+        // never to a merely UNIQUE column, and never to a composite PK. So the shorthand is a
+        // valid spelling of the same constraint only when the expected target IS that PRIMARY
+        // KEY; otherwise `CREATE TABLE` succeeds, `PRAGMA foreign_key_list` reports the same
+        // `to: null` with no hint of trouble, and every statement touching the child fails at
+        // prepare time with `foreign key mismatch`. The answer lives only in the PARENT's own
+        // `table_info`, which is why this reaches outside the table being validated. An
+        // EXPLICIT `to` keeps matching by name: `REFERENCES "user"(id)` against a UNIQUE-only
+        // `user.id` is genuinely valid.
+        const satisfied = matching.some((fk) => {
+          if (fk.to != null) {
+            return sameIdentifier(String(fk.to), reference.column);
+          }
+          const parentPrimaryKey = singleColumnPrimaryKey(fk.table);
+          return parentPrimaryKey !== null && sameIdentifier(parentPrimaryKey, reference.column);
+        });
         if (!satisfied) {
           problems.push(
-            `table "${req.table}" column "${required.column}" is missing a foreign key ` +
-              `referencing "${reference.table}"."${reference.column}"`,
+            matching.some((fk) => fk.to == null)
+              ? `table "${req.table}" column "${required.column}" references "${reference.table}" ` +
+                  `without naming a target column, but "${reference.table}"."${reference.column}" ` +
+                  `is not that table's single-column PRIMARY KEY — SQLite resolves an omitted ` +
+                  `target only to the parent's PRIMARY KEY (a UNIQUE constraint does not qualify, ` +
+                  `nor does a composite PRIMARY KEY) and rejects this at runtime with ` +
+                  `"foreign key mismatch"`
+              : `table "${req.table}" column "${required.column}" is missing a foreign key ` +
+                  `referencing "${reference.table}"."${reference.column}"`,
           );
         }
       }
@@ -1675,9 +1791,9 @@ export async function assertMigrationsProduceAuthSchema(
  * `\n} as const;` terminator uniquely bounds the JSON (inner braces are indented).
  * The `id` column is the implicit PRIMARY KEY, so it is prepended to each table's
  * columns — matching `resolveVoidAuthMigrationSchema`'s field set exactly. Each field
- * also carries its `unique` flag and its `references` target, so the check below can
- * assert the CONSTRAINTS the schema requires and not merely the names. Throws a
- * fail-closed error when the artifact is missing/malformed.
+ * also carries its `required` (NOT NULL) and `unique` flags and its `references` target,
+ * so the check below can assert the CONSTRAINTS the schema requires and not merely the
+ * names. Throws a fail-closed error when the artifact is missing/malformed.
  */
 function readEmittedAuthMigrationSchema(root: string): Array<RequiredAuthTable> {
   const schemaPath = join(root, '.void', 'better-auth-schema.ts');
@@ -1715,11 +1831,13 @@ function readEmittedAuthMigrationSchema(root: string): Array<RequiredAuthTable> 
       // `id` is the implicit PRIMARY KEY — never carries `unique`/`references` of its own,
       // and is absent from `fields`, so this synthesized descriptor is the ONLY thing that
       // represents it. `primaryKey` makes the check assert it is a usable FK parent key
-      // (see {@link RequiredAuthColumn.primaryKey}).
-      { column: 'id', unique: false, primaryKey: true },
+      // (see {@link RequiredAuthColumn.primaryKey}); `required` makes it assert the column
+      // cannot be NULL, which PRIMARY KEY alone does not guarantee in SQLite.
+      { column: 'id', unique: false, required: true, primaryKey: true },
       ...Object.entries(table.fields).map(([column, field]) => ({
         column,
         unique: field.unique === true,
+        required: field.required === true,
         references: field.references
           ? { table: field.references.table, column: field.references.field }
           : undefined,

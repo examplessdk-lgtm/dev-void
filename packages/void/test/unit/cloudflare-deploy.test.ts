@@ -138,15 +138,19 @@ async function withWranglerCredentials(run: () => Promise<void>): Promise<void> 
  * the post-build auth check reads ground truth exactly as it would after a real build.
  */
 /**
- * A field of the emitted artifact. A bare string is the plain, unconstrained case; the object
- * form carries the `unique` / `references` metadata the real build emits (see
- * `playground/kitchen-sink/.void/better-auth-schema.ts`, e.g. `user.email` is `unique: true`
- * and `session.userId` references `user.id`).
+ * A field of the emitted artifact. A bare string is the plain case; the object form carries the
+ * `required` / `unique` / `references` metadata the real build emits (see
+ * `playground/kitchen-sink/.void/better-auth-schema.ts`, e.g. `user.email` is
+ * `{ required: true, unique: true }` and `session.userId` references `user.id`).
+ *
+ * `required` defaults to true because that is what the real build emits for all but a handful
+ * of optional fields (`user.image`, `session.ipAddress`, …).
  */
 type AuthSchemaField =
   | string
   | {
       name: string;
+      required?: boolean;
       unique?: boolean;
       references?: { table: string; field: string; onDelete?: string };
     };
@@ -168,7 +172,7 @@ function writeAuthSchemaArtifact(
             field.name,
             {
               type: 'string',
-              required: true,
+              required: field.required !== false,
               unique: field.unique === true,
               index: false,
               bigint: false,
@@ -2681,6 +2685,16 @@ describe('assertMigrationsProduceAuthSchema', () => {
 // ---------------------------------------------------------------------------
 
 describe("validateAuthMigrationSchema — reads the build's generated auth schema", () => {
+  // The real build emits every auth column NOT NULL except a handful of optional ones (see
+  // `playground/kitchen-sink/.void/better-auth-schema.ts`), and always
+  // `.primaryKey().notNull()` for `id` — so these fixtures spell that out.
+  const USER =
+    'CREATE TABLE "user" (id text primary key not null, email text not null UNIQUE, name text not null);';
+  const SESSION_EXPLICIT_FK =
+    'CREATE TABLE "session" (id text primary key not null, userId text not null REFERENCES "user"(id));';
+  const SESSION_IMPLICIT_FK =
+    'CREATE TABLE "session" (id text primary key not null, userId text not null REFERENCES "user");';
+
   it('passes when the checked-in migrations produce the emitted schema', async () => {
     const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
     writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['email', 'name'] }]);
@@ -2689,7 +2703,7 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
     await validateAuthMigrationSchema(root, [
       {
         name: '0000.sql',
-        sql: 'CREATE TABLE "user" (id text primary key, email text, name text);',
+        sql: 'CREATE TABLE "user" (id text primary key not null, email text not null, name text not null);',
       },
     ]);
   });
@@ -2700,9 +2714,12 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
     await expect(
       // Creates `user` WITHOUT the required `name` column → fails closed against ground truth.
       validateAuthMigrationSchema(root, [
-        { name: '0000.sql', sql: 'CREATE TABLE "user" (id text primary key, email text);' },
+        {
+          name: '0000.sql',
+          sql: 'CREATE TABLE "user" (id text primary key not null, email text not null);',
+        },
       ]),
-    ).rejects.toThrow(/user|name/);
+    ).rejects.toThrow(/table "user" is missing column\(s\): name/);
   });
 
   it('fails closed when the build did not emit the auth-schema artifact', async () => {
@@ -2735,8 +2752,8 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
           name: '0000.sql',
           // Every table and column name is correct — only `.unique()` was never applied.
           sql:
-            'CREATE TABLE "user" (id text primary key, email text, name text);\n' +
-            'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id));',
+            'CREATE TABLE "user" (id text primary key not null, email text not null, name text not null);\n' +
+            SESSION_EXPLICIT_FK,
         },
       ]),
     ).rejects.toThrow(/table "user" is missing a UNIQUE constraint on column\(s\): email/);
@@ -2765,8 +2782,8 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
           // was never marked `.primaryKey()`, which SQLite accepts at DDL time and rejects
           // at runtime.
           sql:
-            'CREATE TABLE "user" (id text, email text UNIQUE, name text);\n' +
-            'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id));',
+            'CREATE TABLE "user" (id text not null, email text not null UNIQUE, name text not null);\n' +
+            SESSION_EXPLICIT_FK,
         },
       ]),
     ).rejects.toThrow(ID_MUST_BE_UNIQUE);
@@ -2777,21 +2794,16 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
     writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
     await expect(
       validateAuthMigrationSchema(root, [
-        { name: '0000.sql', sql: 'CREATE TABLE "user" (id text, name text);' },
+        { name: '0000.sql', sql: 'CREATE TABLE "user" (id text not null, name text not null);' },
       ]),
     ).rejects.toThrow(/foreign key mismatch/);
   });
 
-  it('accepts `id text primary key` (the spelling the real build emits)', async () => {
+  it('accepts `id text primary key not null` (the spelling the real build emits)', async () => {
     const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
     writeConstrainedAuthArtifact(root);
     await validateAuthMigrationSchema(root, [
-      {
-        name: '0000.sql',
-        sql:
-          'CREATE TABLE "user" (id text primary key, email text UNIQUE, name text);\n' +
-          'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id));',
-      },
+      { name: '0000.sql', sql: `${USER}\n${SESSION_EXPLICIT_FK}` },
     ]);
   });
 
@@ -2802,8 +2814,8 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
       {
         name: '0000.sql',
         sql:
-          'CREATE TABLE "user" (id text not null unique, email text UNIQUE, name text);\n' +
-          'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id));',
+          'CREATE TABLE "user" (id text not null unique, email text not null UNIQUE, name text not null);\n' +
+          SESSION_EXPLICIT_FK,
       },
     ]);
   });
@@ -2812,7 +2824,10 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
     const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
     writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
     await validateAuthMigrationSchema(root, [
-      { name: '0000.sql', sql: 'CREATE TABLE "user" (id integer primary key, name text);' },
+      {
+        name: '0000.sql',
+        sql: 'CREATE TABLE "user" (id integer primary key, name text not null);',
+      },
     ]);
   });
 
@@ -2824,7 +2839,7 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
         {
           name: '0000.sql',
           sql:
-            'CREATE TABLE "user" (id text, name text);\n' +
+            'CREATE TABLE "user" (id text not null, name text not null);\n' +
             'CREATE UNIQUE INDEX "user_id_name_idx" ON "user" (id, name);',
         },
       ]),
@@ -2839,7 +2854,7 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
         {
           name: '0000.sql',
           sql:
-            'CREATE TABLE "user" (id text, name text);\n' +
+            'CREATE TABLE "user" (id text not null, name text not null);\n' +
             'CREATE UNIQUE INDEX "user_id_idx" ON "user" (id) WHERE name IS NOT NULL;',
         },
       ]),
@@ -2853,9 +2868,7 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
       validateAuthMigrationSchema(root, [
         {
           name: '0000.sql',
-          sql:
-            'CREATE TABLE "user" (id text primary key, email text UNIQUE, name text);\n' +
-            'CREATE TABLE "session" (id text primary key, userId text);',
+          sql: `${USER}\nCREATE TABLE "session" (id text primary key not null, userId text not null);`,
         },
       ]),
     ).rejects.toThrow(
@@ -2870,8 +2883,165 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
       {
         name: '0000.sql',
         sql:
-          'CREATE TABLE "user" (id text primary key, email text UNIQUE, name text);\n' +
-          'CREATE TABLE "session" (id text primary key, userId text REFERENCES "user"(id) ON DELETE CASCADE);',
+          `${USER}\n` +
+          'CREATE TABLE "session" (id text primary key not null, userId text not null REFERENCES "user"(id) ON DELETE CASCADE);',
+      },
+    ]);
+  });
+
+  // -------------------------------------------------------------------------
+  // An omitted foreign-key target column (`REFERENCES "user"`). SQLite resolves it
+  // ONLY to the parent's single-column PRIMARY KEY — a merely UNIQUE parent key works
+  // for an EXPLICIT `REFERENCES "user"(id)` but not for the shorthand, and a composite
+  // PRIMARY KEY cannot serve as the target either. `PRAGMA foreign_key_list` reports
+  // `to: null` in every one of those cases with no indication that anything is wrong,
+  // so the parent's own `table_info` is the only place the answer lives.
+  // -------------------------------------------------------------------------
+
+  const IMPLICIT_FK_NOT_PK = /references "user" without naming a target column/;
+
+  it('fails closed on an implicit REFERENCES when the parent id is UNIQUE but not the PRIMARY KEY', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeConstrainedAuthArtifact(root);
+    await expect(
+      validateAuthMigrationSchema(root, [
+        {
+          name: '0000.sql',
+          // `user.id` is a perfectly good parent key for an explicit reference, but the
+          // shorthand below resolves to a PRIMARY KEY that does not exist.
+          sql:
+            'CREATE TABLE "user" (id text not null unique, email text not null UNIQUE, name text not null);\n' +
+            SESSION_IMPLICIT_FK,
+        },
+      ]),
+    ).rejects.toThrow(IMPLICIT_FK_NOT_PK);
+  });
+
+  it('accepts an implicit REFERENCES when the parent id IS the primary key', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeConstrainedAuthArtifact(root);
+    await validateAuthMigrationSchema(root, [
+      { name: '0000.sql', sql: `${USER}\n${SESSION_IMPLICIT_FK}` },
+    ]);
+  });
+
+  it('still accepts an EXPLICIT REFERENCES to a UNIQUE-only parent id', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeConstrainedAuthArtifact(root);
+    await validateAuthMigrationSchema(root, [
+      {
+        name: '0000.sql',
+        sql:
+          'CREATE TABLE "user" (id text not null unique, email text not null UNIQUE, name text not null);\n' +
+          SESSION_EXPLICIT_FK,
+      },
+    ]);
+  });
+
+  it('fails closed on an implicit REFERENCES to a parent with a COMPOSITE primary key', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeConstrainedAuthArtifact(root);
+    await expect(
+      validateAuthMigrationSchema(root, [
+        {
+          name: '0000.sql',
+          // `id` carries its own UNIQUE constraint, so it passes the identity check — the
+          // only problem left is that the shorthand cannot resolve to `PRIMARY KEY (id, name)`.
+          sql:
+            'CREATE TABLE "user" (id text not null unique, email text not null UNIQUE, ' +
+            'name text not null, PRIMARY KEY (id, name));\n' +
+            SESSION_IMPLICIT_FK,
+        },
+      ]),
+    ).rejects.toThrow(IMPLICIT_FK_NOT_PK);
+  });
+
+  // -------------------------------------------------------------------------
+  // NOT NULL. SQLite permits NULL in any PRIMARY KEY column that is not the INTEGER
+  // rowid alias — a file-format compatibility quirk — so `id text primary key` alone
+  // accepts rows with no identity, and more than one of them, because NULLs never
+  // collide under a unique constraint.
+  // -------------------------------------------------------------------------
+
+  const ID_MUST_BE_NOT_NULL = /table "user" column "id" must be declared NOT NULL/;
+
+  it('fails closed when the id is a nullable PRIMARY KEY (SQLite accepts NULL identities)', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
+    await expect(
+      validateAuthMigrationSchema(root, [
+        {
+          name: '0000.sql',
+          sql: 'CREATE TABLE "user" (id text primary key, name text not null);',
+        },
+      ]),
+    ).rejects.toThrow(ID_MUST_BE_NOT_NULL);
+  });
+
+  it('accepts `id text primary key not null`', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
+    await validateAuthMigrationSchema(root, [
+      {
+        name: '0000.sql',
+        sql: 'CREATE TABLE "user" (id text primary key not null, name text not null);',
+      },
+    ]);
+  });
+
+  it('accepts `id integer primary key` — the rowid alias can never hold NULL', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
+    // `PRAGMA table_info` reports `notnull = 0` here, but SQLite assigns a rowid on a NULL
+    // insert, so the column is effectively NOT NULL — rejecting it would break a common,
+    // legitimate schema.
+    await validateAuthMigrationSchema(root, [
+      {
+        name: '0000.sql',
+        sql: 'CREATE TABLE "user" (id integer primary key, name text not null);',
+      },
+    ]);
+  });
+
+  it('does not extend the rowid-alias exception to `int primary key` (which really does store NULL)', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [{ name: 'user', fields: ['name'] }]);
+    // Only an exact `INTEGER` declared type makes a primary key the rowid alias.
+    await expect(
+      validateAuthMigrationSchema(root, [
+        { name: '0000.sql', sql: 'CREATE TABLE "user" (id int primary key, name text not null);' },
+      ]),
+    ).rejects.toThrow(ID_MUST_BE_NOT_NULL);
+  });
+
+  it('fails closed when a required emitted field is declared nullable', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    writeAuthSchemaArtifact(root, [
+      { name: 'user', fields: [{ name: 'email', unique: true }, 'name'] },
+    ]);
+    await expect(
+      validateAuthMigrationSchema(root, [
+        {
+          name: '0000.sql',
+          // `email` keeps its UNIQUE constraint and its name — only NOT NULL was dropped.
+          sql: 'CREATE TABLE "user" (id text primary key not null, email text UNIQUE, name text not null);',
+        },
+      ]),
+    ).rejects.toThrow(
+      /table "user" is missing a NOT NULL constraint on column\(s\): email \(the emitted auth schema marks them required\)/,
+    );
+  });
+
+  it('does not require NOT NULL for a field the emitted schema marks optional', async () => {
+    const root = makeProject({ 'package.json': JSON.stringify({ name: 'authapp' }) });
+    // `user.image` is `required: false` in the real artifact.
+    writeAuthSchemaArtifact(root, [
+      { name: 'user', fields: ['name', { name: 'image', required: false }] },
+    ]);
+    await validateAuthMigrationSchema(root, [
+      {
+        name: '0000.sql',
+        sql: 'CREATE TABLE "user" (id text primary key not null, name text not null, image text);',
       },
     ]);
   });
