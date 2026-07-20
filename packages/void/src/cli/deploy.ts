@@ -1111,6 +1111,9 @@ function resolveD1MigrateTarget(
   return { ok: true, token };
 }
 
+/** The length cap {@link toValidWorkerName} applies (the CF plugin's own rule). */
+const MAX_WORKER_NAME_LENGTH = 63;
+
 /**
  * Sanitize a raw name into a valid Cloudflare Worker name — the SAME rule
  * `@cloudflare/vite-plugin`'s `toValidWorkerName` applies (lowercase, `_`→`-`,
@@ -1125,9 +1128,38 @@ function toValidWorkerName(raw: string): string {
     .replace(/_/g, '-')
     .replace(/[^a-z0-9-]/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 63)
+    .slice(0, MAX_WORKER_NAME_LENGTH)
     .replace(/-+$/g, '');
   return name.length > 0 ? name : 'my-worker';
+}
+
+/**
+ * Derive a `<worker>-<suffix>` resource name, RESERVING the suffix's budget before
+ * the length cap applies.
+ *
+ * `toValidWorkerName` truncates whatever string it is handed, so
+ * `toValidWorkerName(`${workerName}-kv`)` cuts from the RIGHT — the end that carries
+ * the suffix. A worker name at or above the cap therefore loses the suffix entirely
+ * and every derivation collapses to the bare (truncated) worker name, so `KV` and
+ * `ISR_CACHE` would ask for ONE namespace title. Since KV titles are not
+ * account-unique and the provisioner matches remote namespaces BY TITLE (re-listing
+ * per binding), the second binding would adopt the namespace the first just created:
+ * two bindings sharing one namespace and one quota slot.
+ *
+ * The suffix is kept intact by trimming the BASE to `63 - suffix.length - 1` first.
+ * When the suffix survives the plain derivation (every worker name short enough to
+ * leave room — the normal case), the result is byte-identical to what it has always
+ * been, so no existing app's resource name churns.
+ */
+function suffixedResourceName(workerName: string, suffix: string): string {
+  const full = toValidWorkerName(`${workerName}-${suffix}`);
+  if (full.endsWith(`-${suffix}`)) {
+    return full;
+  }
+  const base = toValidWorkerName(workerName)
+    .slice(0, MAX_WORKER_NAME_LENGTH - suffix.length - 1)
+    .replace(/-+$/g, '');
+  return toValidWorkerName(`${base}-${suffix}`);
 }
 
 /**
@@ -1150,6 +1182,73 @@ function deriveWorkerName(root: string): string {
     // no package.json / unreadable — fall through to the directory basename.
   }
   return toValidWorkerName(pkgName ?? basename(root) ?? '');
+}
+
+/**
+ * Fail closed when two KV bindings of this deploy would end up on ONE namespace.
+ *
+ * KV is the only resource kind where a name collision silently WORKS: titles are not
+ * account-unique, the provisioner matches remote namespaces BY TITLE, and it re-lists
+ * per binding — so a second binding desiring an already-created title adopts that
+ * namespace and reports success. Both checks below are cheap and purely local:
+ *
+ *  1. DESIRED titles must be distinct — catches any future suffix collision at the
+ *     source, before a single namespace is created.
+ *  2. Already-RECORDED ids must be distinct — an app provisioned before the suffix
+ *     budget was reserved can carry two bindings pointing at the same namespace id.
+ *     Read-first is keyed by binding and both entries hold a real id, so the
+ *     provisioner would skip both forever and never surface it.
+ *
+ * Scoped to KV (and to the bindings THIS deploy manages): D1/R2/Hyperdrive names live
+ * in separate Cloudflare namespaces and are identity-checked against their stored
+ * values elsewhere.
+ */
+function assertDistinctKvNamespaces(
+  kvNamespaces: Array<{ binding: string; title: string }>,
+  config: Record<string, unknown>,
+  configPath: string,
+  isRealKvId: (value: unknown) => value is string,
+): void {
+  const bindingByTitle = new Map<string, string>();
+  for (const { binding, title } of kvNamespaces) {
+    const owner = bindingByTitle.get(title);
+    if (owner !== undefined) {
+      throw new Error(
+        `deploy: KV bindings ${JSON.stringify(owner)} and ${JSON.stringify(binding)} both resolve ` +
+          `to the namespace title ${JSON.stringify(title)}. KV titles are not account-unique, so ` +
+          `provisioning would put both bindings on ONE namespace. Give the worker a shorter ` +
+          `"name" in "${configPath}" so each binding derives its own title, then retry.`,
+      );
+    }
+    bindingByTitle.set(title, binding);
+  }
+
+  const managed = new Set(kvNamespaces.map((kv) => kv.binding));
+  const entries = config.kv_namespaces;
+  if (!Array.isArray(entries)) {
+    return;
+  }
+  const bindingById = new Map<string, string>();
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+    const { binding, id } = entry as { binding?: unknown; id?: unknown };
+    if (typeof binding !== 'string' || !managed.has(binding) || !isRealKvId(id)) {
+      continue;
+    }
+    const owner = bindingById.get(id);
+    if (owner !== undefined && owner !== binding) {
+      throw new Error(
+        `deploy: KV bindings ${JSON.stringify(owner)} and ${JSON.stringify(binding)} in ` +
+          `"${configPath}" both point at KV namespace id ${JSON.stringify(id)}. They resolved to a ` +
+          `single namespace when they were provisioned, so the two bindings share one namespace ` +
+          `and one quota slot. Give one of them a fresh namespace (create it, or drop its entry ` +
+          `from "${configPath}" and re-run with --provision), then retry.`,
+      );
+    }
+    bindingById.set(id, binding);
+  }
 }
 
 /**
@@ -1181,10 +1280,10 @@ export async function computeDesiredCloudflareResources(
   /** Checked-in migrations (`db/migrations/*.sql`) collected pre-build. */
   migrations: Array<{ name: string; sql: string }>;
 }> {
-  // `isRealD1Id` is resolved via the memoized dynamic import so this exported
+  // The id predicates are resolved via the memoized dynamic import so this exported
   // helper works when called directly in unit tests (outside the fork) without a
   // static provision edge that would eagerly load the provision lifecycle.
-  const { isRealD1Id } = await loadProvisionModule();
+  const { isRealD1Id, isRealKvId } = await loadProvisionModule();
   const paths = resolveProjectPaths(root, voidConfig);
   const config = parseRootWranglerConfig(configPath);
   const workerName = readWranglerTopLevelString(config, 'name') ?? deriveWorkerName(root);
@@ -1248,7 +1347,7 @@ export async function computeDesiredCloudflareResources(
     const name =
       storedName != null && isRealD1Id(storedId)
         ? storedName
-        : toValidWorkerName(`${workerName}-db`);
+        : suffixedResourceName(workerName, 'db');
     // Carry the sourceDir-aware config-relative migrations dir so the provisioner
     // writes the correct `migrations_dir` (it otherwise hardcodes `./db/migrations`).
     desired.d1 = { binding, name, migrationsDir: migrationsDirRelative };
@@ -1258,7 +1357,7 @@ export async function computeDesiredCloudflareResources(
   // KV
   if (bindings.needsKV) {
     const binding = bindingNames?.kv ?? 'KV';
-    desired.kvNamespaces.push({ binding, title: toValidWorkerName(`${workerName}-kv`) });
+    desired.kvNamespaces.push({ binding, title: suffixedResourceName(workerName, 'kv') });
     reasons.set(binding, 'app uses env.KV');
   }
 
@@ -1269,7 +1368,7 @@ export async function computeDesiredCloudflareResources(
     const bucketName =
       storedName && storedName !== 'default'
         ? storedName
-        : toValidWorkerName(`${workerName}-storage`);
+        : suffixedResourceName(workerName, 'storage');
     desired.r2 = { binding, bucketName };
     reasons.set(binding, 'app uses env.STORAGE (R2)');
   }
@@ -1284,7 +1383,7 @@ export async function computeDesiredCloudflareResources(
     const binding = 'HYPERDRIVE';
     desired.hyperdrive = {
       binding,
-      name: toValidWorkerName(`${workerName}-hyperdrive`),
+      name: suffixedResourceName(workerName, 'hyperdrive'),
       connectionString: process.env.DATABASE_URL ?? '',
     };
     reasons.set(binding, 'app uses PostgreSQL (needs a Hyperdrive config)');
@@ -1299,9 +1398,13 @@ export async function computeDesiredCloudflareResources(
     : null;
   if (hasRevalidate(collectRevalidate(voidConfig, pageScan))) {
     const binding = 'ISR_CACHE';
-    desired.kvNamespaces.push({ binding, title: toValidWorkerName(`${workerName}-isr-cache`) });
+    desired.kvNamespaces.push({ binding, title: suffixedResourceName(workerName, 'isr-cache') });
     reasons.set(binding, 'routes use `revalidate` (ISR) — needs an ISR_CACHE KV namespace');
   }
+
+  // Every KV binding must own its namespace — both the titles this deploy would
+  // provision and the ids an earlier provision already recorded.
+  assertDistinctKvNamespaces(desired.kvNamespaces, config, configPath, isRealKvId);
 
   return {
     desired,

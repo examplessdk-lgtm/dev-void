@@ -24,7 +24,7 @@ import {
 } from '../../src/cli/env-schema-probe.ts';
 import type { SelfHostEnvContext, SelfHostSchemaFacts } from '../../src/cli/env-validation.ts';
 import type { CliLogger } from '../../src/cli/log-file.ts';
-import type { ProvisionResult } from '../../src/cli/provision.ts';
+import { provisionCloudflareResources, type ProvisionResult } from '../../src/cli/provision.ts';
 import { readConfig } from '../../src/config.ts';
 
 const tmpDir = join(import.meta.dirname, '.tmp-cf-deploy-test');
@@ -57,6 +57,8 @@ const silentCliLog: CliLogger = {
 /** Synthetic real ids (shape-valid) for drift/provision fixtures. */
 const REAL_D1_ID = '52b3bbc7-c473-4b26-9486-1345f5de61c4';
 const REAL_KV_ID = '7c07b54c9f2a4d1e8b3f6a0c153aa11a';
+/** A second shape-valid KV id, so a two-namespace config can be distinct. */
+const OTHER_KV_ID = '3f9a1c2d4e5b6a7c8d9e0f1a2b3c4d5e';
 
 class ExitError extends Error {
   constructor(public code: number) {
@@ -453,6 +455,251 @@ describe('computeDesiredCloudflareResources — desired set from source', () => 
     );
     expect(desired.hyperdrive).toBeUndefined();
     expect(desired.d1).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suffixed resource names: the `-kv` / `-isr-cache` suffix carries the whole
+// distinction between the two KV namespaces, so the 63-char cap must eat the
+// worker name, never the suffix.
+// ---------------------------------------------------------------------------
+
+/** A deterministic worker name of `length` chars from the repeating [a-z0-9] alphabet. */
+function workerNameOfLength(length: number): string {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  return Array.from({ length }, (_, i) => alphabet[i % alphabet.length]).join('');
+}
+
+/** Cloudflare's rule for these names: lowercase [a-z0-9-], no leading/trailing dash, ≤63. */
+const CF_NAME_RULE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+
+/** A KV + ISR app (both namespaces desired) whose root config pins `workerName`. */
+function kvAndIsrProject(workerName: string, wrangler: Record<string, unknown> = {}): string {
+  return makeProject({
+    'package.json': JSON.stringify({ name: 'longapp' }),
+    'void.json': JSON.stringify({}),
+    'wrangler.jsonc': JSON.stringify(
+      { account_id: 'acc123', name: workerName, ...wrangler },
+      null,
+      2,
+    ),
+    'routes/index.ts': `export const GET = (c) => c.env.KV.get('k');`,
+    'pages/index.tsx': `export default () => null;`,
+    'pages/index.server.ts': `export const revalidate = 60;\nexport const loader = () => ({});`,
+  });
+}
+
+describe('computeDesiredCloudflareResources — suffixed names survive the 63-char cap', () => {
+  // 61 is already over budget for `-isr-cache`; 62+ used to lose BOTH suffixes, so
+  // `KV` and `ISR_CACHE` asked for one title and landed on one namespace.
+  for (const length of [61, 62, 63, 70, 100]) {
+    it(`keeps KV and ISR_CACHE on distinct titles for a ${length}-char worker name`, async () => {
+      const workerName = workerNameOfLength(length);
+      const root = kvAndIsrProject(workerName);
+      const { desired } = await computeDesiredCloudflareResources(
+        root,
+        readConfig(root),
+        join(root, 'wrangler.jsonc'),
+      );
+      const titles = new Map(desired.kvNamespaces.map((kv) => [kv.binding, kv.title]));
+      // The base is trimmed to whatever the suffix (plus its dash) leaves of the 63.
+      expect(titles.get('KV')).toBe(`${workerName.slice(0, 63 - 'kv'.length - 1)}-kv`);
+      expect(titles.get('ISR_CACHE')).toBe(
+        `${workerName.slice(0, 63 - 'isr-cache'.length - 1)}-isr-cache`,
+      );
+      expect(titles.get('KV')).not.toBe(titles.get('ISR_CACHE'));
+      for (const title of titles.values()) {
+        expect(title).toMatch(CF_NAME_RULE);
+        expect(title.length).toBe(63);
+      }
+    });
+  }
+
+  it('caps the D1 / R2 / Hyperdrive names too, keeping each suffix intact', async () => {
+    const workerName = workerNameOfLength(80);
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'longapp' }),
+      'void.json': JSON.stringify({}),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: workerName }, null, 2),
+      'routes/index.ts': `export const GET = async (c) => {
+        await c.env.STORAGE.put('a', 'b');
+        return c.env.DB.prepare('SELECT 1').first();
+      };`,
+    });
+    const { desired } = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    );
+    expect(desired.d1?.name).toBe(`${workerName.slice(0, 63 - 'db'.length - 1)}-db`);
+    expect(desired.r2?.bucketName).toBe(
+      `${workerName.slice(0, 63 - 'storage'.length - 1)}-storage`,
+    );
+    for (const name of [desired.d1?.name, desired.r2?.bucketName]) {
+      expect(name).toMatch(CF_NAME_RULE);
+      expect(name?.length).toBe(63);
+    }
+
+    const pgRoot = makeProject({
+      'package.json': JSON.stringify({ name: 'longpg' }),
+      'void.json': JSON.stringify({ database: 'pg' }),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: workerName }, null, 2),
+      'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
+    });
+    const pg = await computeDesiredCloudflareResources(
+      pgRoot,
+      readConfig(pgRoot),
+      join(pgRoot, 'wrangler.jsonc'),
+    );
+    expect(pg.desired.hyperdrive?.name).toBe(
+      `${workerName.slice(0, 63 - 'hyperdrive'.length - 1)}-hyperdrive`,
+    );
+    expect(pg.desired.hyperdrive?.name).toMatch(CF_NAME_RULE);
+  });
+
+  it('leaves a normal (short) worker name byte-for-byte as it was', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'myapp' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = async (c) => {
+        await c.env.KV.get('k');
+        await c.env.STORAGE.put('a', 'b');
+        return c.env.DB.prepare('SELECT 1').first();
+      };`,
+      'pages/index.tsx': `export default () => null;`,
+      'pages/index.server.ts': `export const revalidate = 60;\nexport const loader = () => ({});`,
+    });
+    const { desired } = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    );
+    expect(desired.kvNamespaces).toEqual([
+      { binding: 'KV', title: 'myapp-kv' },
+      { binding: 'ISR_CACHE', title: 'myapp-isr-cache' },
+    ]);
+    expect(desired.d1?.name).toBe('myapp-db');
+    expect(desired.r2?.bucketName).toBe('myapp-storage');
+  });
+});
+
+describe('computeDesiredCloudflareResources — KV bindings may not share a namespace', () => {
+  it('fails closed when two KV bindings already point at one namespace id', async () => {
+    const root = kvAndIsrProject(workerNameOfLength(70), {
+      kv_namespaces: [
+        { binding: 'KV', id: REAL_KV_ID },
+        { binding: 'ISR_CACHE', id: REAL_KV_ID },
+      ],
+    });
+    const error = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    ).then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toContain('"KV"');
+    expect(error?.message).toContain('"ISR_CACHE"');
+    expect(error?.message).toContain(REAL_KV_ID);
+    expect(error?.message).toMatch(/share one namespace/);
+    expect(error?.message).toMatch(/fresh namespace/);
+  });
+
+  it('accepts two KV bindings on distinct namespace ids', async () => {
+    const root = kvAndIsrProject(workerNameOfLength(70), {
+      kv_namespaces: [
+        { binding: 'KV', id: REAL_KV_ID },
+        { binding: 'ISR_CACHE', id: OTHER_KV_ID },
+      ],
+    });
+    const { desired } = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    );
+    expect(desired.kvNamespaces.map((kv) => kv.binding)).toEqual(['KV', 'ISR_CACHE']);
+  });
+
+  it('ignores unprovisioned placeholder ids (a synced local-dev config is not a collision)', async () => {
+    const root = kvAndIsrProject(workerNameOfLength(70), {
+      kv_namespaces: [
+        { binding: 'KV', id: 'local' },
+        { binding: 'ISR_CACHE', id: 'local' },
+      ],
+    });
+    const { desired } = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    );
+    expect(desired.kvNamespaces).toHaveLength(2);
+  });
+});
+
+describe('computeDesiredCloudflareResources — provisioned resources are never re-created', () => {
+  it('reuses the ids/names already in the config for a long-named app (no wrangler call)', async () => {
+    // The derivation changed for long worker names, so prove the renamed desired set
+    // still resolves to the SAME resources through the provisioner's read-first.
+    const workerName = workerNameOfLength(70);
+    const root = kvAndIsrProject(workerName, {
+      d1_databases: [
+        {
+          binding: 'DB',
+          database_name: 'legacy-db',
+          database_id: REAL_D1_ID,
+          migrations_dir: './db/migrations',
+        },
+      ],
+      kv_namespaces: [
+        { binding: 'KV', id: REAL_KV_ID },
+        { binding: 'ISR_CACHE', id: OTHER_KV_ID },
+      ],
+      r2_buckets: [{ binding: 'STORAGE', bucket_name: 'legacy-bucket' }],
+    });
+    writeFileSync(
+      join(root, 'routes/index.ts'),
+      `export const GET = async (c) => {
+        await c.env.KV.get('k');
+        await c.env.STORAGE.put('a', 'b');
+        return c.env.DB.prepare('SELECT 1').first();
+      };`,
+    );
+    const configPath = join(root, 'wrangler.jsonc');
+    const { desired } = await computeDesiredCloudflareResources(root, readConfig(root), configPath);
+    // Stored names win over the derivation, so nothing points at a new resource.
+    expect(desired.d1?.name).toBe('legacy-db');
+    expect(desired.r2?.bucketName).toBe('legacy-bucket');
+
+    const calls: Array<Array<string>> = [];
+    const result = await provisionCloudflareResources(root, configPath, desired, {
+      runWrangler: (args) => {
+        calls.push(args);
+        return { stdout: '', stderr: '', status: 0 };
+      },
+      log: { info: () => {}, warn: () => {} },
+    });
+    // Read-first everywhere: no list, no create — the recorded resources are kept.
+    expect(calls).toEqual([]);
+    expect(result.resources).toEqual([
+      { kind: 'd1', binding: 'DB', name: 'legacy-db', action: 'reused', id: REAL_D1_ID },
+      {
+        kind: 'kv',
+        binding: 'KV',
+        name: `${workerName.slice(0, 60)}-kv`,
+        action: 'reused',
+        id: REAL_KV_ID,
+      },
+      {
+        kind: 'kv',
+        binding: 'ISR_CACHE',
+        name: `${workerName.slice(0, 53)}-isr-cache`,
+        action: 'reused',
+        id: OTHER_KV_ID,
+      },
+      { kind: 'r2', binding: 'STORAGE', name: 'legacy-bucket', action: 'reused' },
+    ]);
   });
 });
 

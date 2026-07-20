@@ -308,8 +308,12 @@ const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
 export function isRealD1Id(value: unknown): value is string {
   return typeof value === 'string' && value !== D1_ID_PLACEHOLDER && D1_ID_RE.test(value);
 }
-/** A KV namespace `id` that is a real (non-placeholder) 32-hex string. */
-function isRealKvId(value: unknown): value is string {
+/**
+ * A KV namespace `id` that is a real (non-placeholder) 32-hex string. Exported so the
+ * deploy orchestrator applies the SAME placeholder rule when checking whether two KV
+ * bindings already share one provisioned namespace.
+ */
+export function isRealKvId(value: unknown): value is string {
   return typeof value === 'string' && value !== KV_ID_PLACEHOLDER && HEX32_ID_RE.test(value);
 }
 /** A Hyperdrive config `id` that is a real 32-hex string (no placeholder exists). */
