@@ -1635,7 +1635,7 @@ describe('runCloudflareDeploy — worker-name override (WRANGLER_CI_OVERRIDE_NAM
   });
 });
 
-describe('runCloudflareDeploy — build-config override (finding 2 / 4 fences)', () => {
+describe('runCloudflareDeploy — build-config override fences', () => {
   it('fails closed when .env.production declares CLOUDFLARE_ENV', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'myapp' }),
@@ -2030,7 +2030,7 @@ describe('runCloudflareDeploy — managed path does not import the provision mod
 });
 
 // ---------------------------------------------------------------------------
-// Framework-class guard (finding 6): only Class-A framework SSR coheres with
+// Framework-class guard: only Class-A framework SSR coheres with
 // this backend (full Void plugin stack + CF Vite plugin). Class B/C get a
 // lighter Void composition that emits no worker artifact here — reject early.
 // ---------------------------------------------------------------------------
@@ -2076,7 +2076,7 @@ describe('runCloudflareDeploy — framework guard (all framework SSR deferred in
 });
 
 // ---------------------------------------------------------------------------
-// Stale deploy pointer (finding 4): the pointer is deleted before building, so a
+// Stale deploy pointer: the pointer is deleted before building, so a
 // build that emits no fresh one (auto-static / Class B/C) can never upload old
 // code — the verification fails closed on the missing pointer.
 // ---------------------------------------------------------------------------
@@ -2112,7 +2112,7 @@ describe('runCloudflareDeploy — stale deploy pointer', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Env-only account pin (finding 7): the CF plugin copies account_id only from the
+// Env-only account pin: the CF plugin copies account_id only from the
 // root config, so the reconciled account is persisted there before the build —
 // making the documented CLOUDFLARE_ACCOUNT_ID pin actually reach deploy.
 // ---------------------------------------------------------------------------
@@ -2163,7 +2163,7 @@ describe('runCloudflareDeploy — env-only account pin', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Migrations dir/intent + auth tables (finding 5)
+// Migrations dir/intent + auth tables
 // ---------------------------------------------------------------------------
 
 describe('runCloudflareDeploy — migrations dir / count / auth', () => {
@@ -3316,7 +3316,7 @@ describe("validateAuthMigrationSchema — reads the build's generated auth schem
 });
 
 // ---------------------------------------------------------------------------
-// Remote D1 migration safety gates (finding 2)
+// Remote D1 migration safety gates
 // ---------------------------------------------------------------------------
 
 describe('runCloudflareDeploy — remote migration gates', () => {
@@ -4446,7 +4446,7 @@ describe('env-schema probe (real subprocess)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// wrangler framework autoconfig / OpenNext delegation disabled (finding 1)
+// wrangler framework autoconfig / OpenNext delegation disabled
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
