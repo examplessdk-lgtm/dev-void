@@ -172,13 +172,40 @@ export type PlaintextVarWarning = {
   /**
    * `schema-secret` — the user's env.ts flags this key `.secret()` (explicit,
    * always wins). `heuristic` — the key NAME matches the shared
-   * `isLikelySecretKey` credential heuristic (`KEY|TOKEN|SECRET|…`). An explicit
-   * `.public()` does NOT suppress the heuristic here (it only means "not a
-   * schema secret"): the value still ships as PLAINTEXT in the worker config,
-   * so a secret-looking public key is still worth flagging.
+   * `isLikelySecretKey` credential heuristic (`KEY|TOKEN|SECRET|…`).
+   * `value-shape` — the key name looks benign but the VALUE is a
+   * credential-bearing connection URL ({@link isCredentialBearingUrlValue}).
+   * An explicit `.public()` does NOT suppress the heuristics here (it only means
+   * "not a schema secret"): the value still ships as PLAINTEXT in the worker
+   * config, so a secret-looking public key is still worth flagging.
    */
-  reason: 'schema-secret' | 'heuristic';
+  reason: 'schema-secret' | 'heuristic' | 'value-shape';
 };
+
+/**
+ * A `scheme://user:password@host…` connection URL — the shape that carries a
+ * live credential in a key nothing in the NAME heuristic would catch. The
+ * motivating case is `DATABASE_URL`: `SECRET_KEY_RE` has no `URL`/`DATABASE`
+ * branch, and the shared `isLikelySecretValue` cannot help either — its
+ * `HIGH_ENTROPY_RE` character class excludes `@`, so a connection URL never
+ * matches it. Both halves of the userinfo must be non-empty, so a bare
+ * `postgres://host/db` or a password-less `https://user@host` is NOT flagged.
+ *
+ * Deliberately local to the DEPLOY-side warning rather than added to
+ * `shared/env-mask.ts`: that module is also the runtime/managed redaction
+ * heuristic, and widening it would change masking behaviour well outside this
+ * warning.
+ */
+const CREDENTIAL_URL_VALUE_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/;
+
+/**
+ * `true` when a var's VALUE is a connection URL carrying inline credentials.
+ * Inspecting the value is safe here: only the KEY name ever leaves
+ * {@link collectPlaintextVarWarningsFromVars}.
+ */
+function isCredentialBearingUrlValue(value: unknown): boolean {
+  return typeof value === 'string' && CREDENTIAL_URL_VALUE_RE.test(value);
+}
 
 /**
  * Result of {@link collectPlaintextVarWarningsFromVars}. Carries KEY NAMES ONLY —
@@ -729,8 +756,13 @@ export async function computeInvalidEmittedKeys(
  * `.secret()`-flagged key ({@link SelfHostSchemaFacts.secretKeys}) is
  * `schema-secret`; otherwise the shared {@link isLikelySecretKey} name heuristic
  * applies (so a secret-looking key ships plaintext regardless of any schema, and
- * heuristic classification still works with no env.ts at all). KEYS ONLY leave
- * here — the emitted values are never read.
+ * heuristic classification still works with no env.ts at all); failing both, a
+ * VALUE shaped like a credential-bearing connection URL
+ * ({@link isCredentialBearingUrlValue}) flags the key as `value-shape`, catching
+ * the `DATABASE_URL`-class leak no name heuristic sees.
+ *
+ * KEYS ONLY leave here — a value may be INSPECTED to classify it, but is never
+ * copied into the result, so no caller can format a value into a log.
  */
 export function collectPlaintextVarWarningsFromVars(
   emittedVars: Record<string, unknown>,
@@ -746,6 +778,10 @@ export function collectPlaintextVarWarningsFromVars(
     }
     if (isLikelySecretKey(key)) {
       secretKeys.push({ key, reason: 'heuristic' });
+      continue;
+    }
+    if (isCredentialBearingUrlValue(emittedVars[key])) {
+      secretKeys.push({ key, reason: 'value-shape' });
     }
   }
   secretKeys.sort((a, b) => a.key.localeCompare(b.key));

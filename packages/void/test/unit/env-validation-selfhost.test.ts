@@ -189,6 +189,78 @@ describe('collectPlaintextVarWarningsFromVars — plaintext worker-vars classifi
     expect(result.secretKeys).toEqual([]);
     expect(result.totalVarKeys).toBe(2);
   });
+
+  it('warns on a credential-bearing connection URL whose KEY name looks benign', () => {
+    // DATABASE_URL trips NO name heuristic (SECRET_KEY_RE has no URL/DATABASE branch)
+    // and no shared value heuristic either (HIGH_ENTROPY_RE excludes `@`), so before
+    // the value-shape check this shipped as plaintext with no warning at all.
+    const result = collectPlaintextVarWarningsFromVars(
+      { DATABASE_URL: 'postgres://admin:hunter2@db.example.com:5432/app' },
+      [],
+    );
+
+    expect(result.secretKeys).toEqual([{ key: 'DATABASE_URL', reason: 'value-shape' }]);
+    // The value decided the classification but must never ride along on the result.
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('hunter2');
+    expect(serialized).not.toContain('db.example.com');
+    expect(serialized).not.toContain('admin');
+  });
+
+  it('flags the credential URL shape across schemes, but not a benign URL value', () => {
+    const result = collectPlaintextVarWarningsFromVars(
+      {
+        // Credential-bearing → flagged regardless of scheme. Every key name here is
+        // deliberately one the NAME heuristic does NOT match, so only the value can
+        // have caused the warning.
+        MYSQL_ENDPOINT: 'mysql://root:s3cr3t@10.0.0.4/prod',
+        REDIS_ENDPOINT: 'rediss://default:abc123@cache.internal:6379',
+        // Benign URLs → NOT flagged: no userinfo, or userinfo with no password.
+        PUBLIC_SITE: 'https://example.com/a/b?c=d',
+        USERINFO_ONLY: 'https://someuser@example.com/path',
+        NO_USERINFO: 'postgres://db.example.com:5432/app',
+        // A bare value containing an @ is not a URL at all.
+        CONTACT: 'ops@example.com',
+      },
+      [],
+    );
+
+    expect(result.secretKeys).toEqual([
+      { key: 'MYSQL_ENDPOINT', reason: 'value-shape' },
+      { key: 'REDIS_ENDPOINT', reason: 'value-shape' },
+    ]);
+    expect(result.totalVarKeys).toBe(6);
+  });
+
+  it('keeps the KEY-name heuristic and .secret() flags winning over the value shape', () => {
+    // Regression guard: the value-shape check is additive — an existing secret-looking
+    // KEY is still reported as `heuristic`, and a flagged key still as `schema-secret`,
+    // even when its value ALSO happens to be a credential URL.
+    const result = collectPlaintextVarWarningsFromVars(
+      {
+        API_TOKEN: 'plain-token-value',
+        APP_PEPPER: 'postgres://u:p@h/db',
+        DB_URI: 'postgres://u:p@h/db',
+      },
+      ['APP_PEPPER'],
+    );
+
+    expect(result.secretKeys).toEqual([
+      { key: 'API_TOKEN', reason: 'heuristic' },
+      { key: 'APP_PEPPER', reason: 'schema-secret' },
+      { key: 'DB_URI', reason: 'value-shape' },
+    ]);
+  });
+
+  it('ignores non-string emitted values without throwing', () => {
+    const result = collectPlaintextVarWarningsFromVars(
+      { PORT: 8080, FLAG: true, NOTHING: null, NESTED: { url: 'postgres://u:p@h/db' } },
+      [],
+    );
+
+    expect(result.secretKeys).toEqual([]);
+    expect(result.totalVarKeys).toBe(4);
+  });
 });
 
 // ---------------------------------------------------------------------------

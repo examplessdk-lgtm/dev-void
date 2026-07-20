@@ -83,6 +83,7 @@ import type {
   EnvSchemaProbeResult,
   EnvSchemaValidateResult,
 } from './env-schema-probe.ts';
+import type { PlaintextVarWarning } from './env-validation.ts';
 import {
   collectPlaintextVarWarningsFromVars,
   deriveSelfHostEnvContextFromVars,
@@ -985,6 +986,17 @@ const CLOUDFLARE_RESOURCE_LABELS: Record<ProvisionDriftEntry['kind'], string> = 
   kv: 'KV namespace',
   r2: 'R2 bucket',
   hyperdrive: 'Hyperdrive config',
+};
+
+/**
+ * Why a plaintext worker var was flagged, rendered next to its key name. These
+ * are VALUES-FREE by construction — the classifier inspects a value to pick the
+ * reason, but only ever returns the key, so nothing here can echo a secret.
+ */
+const PLAINTEXT_WARNING_REASONS: Record<PlaintextVarWarning['reason'], string> = {
+  'schema-secret': ' (env.ts .secret())',
+  heuristic: '',
+  'value-shape': ' (value looks like a connection URL with embedded credentials)',
 };
 
 /** True only for a wrangler child that ran to completion with a clean exit 0. */
@@ -2569,7 +2581,9 @@ export async function runCloudflareDeploy(
             return `  • ${r.binding ?? r.name} (${label})${r.reason ? ` — ${r.reason}` : ''}`;
           }),
           'Resolve the connection source (e.g. set DATABASE_URL for Hyperdrive, or adopt an',
-          'existing config), then rerun. Nothing was built or deployed.',
+          'existing config), then rerun. Nothing was built or deployed — but provisioning runs',
+          'before this check, so any resource listed as created above already exists in your',
+          'account (rerunning adopts it rather than duplicating it).',
         ].join('\n'),
       );
       return exit(1);
@@ -2777,9 +2791,8 @@ export async function runCloudflareDeploy(
     log.warn(
       [
         'deploy: these worker vars ship as PLAINTEXT in the deployed config:',
-        ...warnings.secretKeys.map(
-          (k) => `  • ${k.key}${k.reason === 'schema-secret' ? ' (env.ts .secret())' : ''}`,
-        ),
+        // Key names + why they were flagged only — never a value.
+        ...warnings.secretKeys.map((k) => `  • ${k.key}${PLAINTEXT_WARNING_REASONS[k.reason]}`),
         'Move real secrets to `wrangler secret put <NAME>` so they are not baked into wrangler.json.',
       ].join('\n'),
     );

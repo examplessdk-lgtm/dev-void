@@ -1155,7 +1155,10 @@ describe('provisionCloudflareResources — Hyperdrive', () => {
     expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
   });
 
-  it('skips with a structured reason when no connection string is provided (never prompts, never creates)', async () => {
+  it('still skips (structured, never creates) when a lister can look but finds nothing', async () => {
+    // A lister IS available, so this run COULD have adopted a same-named config; it
+    // just did not find one. Nothing can be minted without a connection string, so the
+    // structured skip — not a throw — remains the right report for that outcome.
     setup(JSON.stringify({ name: 'app' }));
     const warnings: Array<string> = [];
     const { run, calls } = makeRunner([]);
@@ -1166,7 +1169,12 @@ describe('provisionCloudflareResources — Hyperdrive', () => {
         ...emptyDesired,
         hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
       },
-      { runWrangler: run, log: { info: () => {}, warn: (m) => warnings.push(m) } },
+      {
+        accountId: 'acct',
+        runWrangler: run,
+        listHyperdriveConfigs: async () => [],
+        log: { info: () => {}, warn: (m) => warnings.push(m) },
+      },
     );
     expect(calls).toEqual([]);
     expect(result.resources).toEqual([
@@ -1179,6 +1187,37 @@ describe('provisionCloudflareResources — Hyperdrive', () => {
       },
     ]);
     expect(warnings.some((w) => w.includes('skipping Hyperdrive'))).toBe(true);
+  });
+
+  it('adopts a same-named config with NO connection string (adoption never needs one)', async () => {
+    // Guards the stringless fail-closed fence from over-reaching: a run with no
+    // connection string whose lister DOES find a match must still adopt, not throw.
+    setup(JSON.stringify({ hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }));
+    const { run, calls } = makeRunner([]);
+    const result = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+      },
+      {
+        accountId: 'acct',
+        runWrangler: run,
+        listHyperdriveConfigs: async () => [{ id: hex32('adopted'), name: 'myapp-hd' }],
+        log: silentLog,
+      },
+    );
+    expect(calls).toEqual([]);
+    expect(result.resources).toEqual([
+      {
+        kind: 'hyperdrive',
+        binding: 'HYPERDRIVE',
+        name: 'myapp-hd',
+        action: 'adopted',
+        id: hex32('adopted'),
+      },
+    ]);
   });
 });
 
@@ -1378,10 +1417,77 @@ describe('provisionCloudflareResources — Hyperdrive API token requirement', ()
     ]);
   });
 
-  it('still skips (never throws the token error) when there is no connection string', async () => {
-    // Nothing can be created without a connection source, so there is no duplicate
-    // risk and no token is needed to report the real blocker.
+  it('fails closed on a MISSING connection string when nothing can look the account up', async () => {
+    // No connection string AND no token/lister → this run can neither create nor adopt,
+    // so its only reachable outcome is the structured `skipped`, which deploy treats as
+    // FATAL. Reaching that costs the user a half-provisioned account, so it stops here.
     setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+        },
+        { runWrangler: run, log: silentLog },
+      ),
+    ).rejects.toThrow(/no DATABASE_URL to create it from/);
+    // Nothing ran: no wrangler call, so no resource was created before the rejection.
+    expect(calls).toEqual([]);
+  });
+
+  it('names DATABASE_URL and the manual adopt route, and does not suggest a dotenv file', async () => {
+    setup(JSON.stringify({ name: 'app' }));
+    const { run } = makeRunner([]);
+    const err = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+      },
+      { runWrangler: run, log: silentLog },
+    ).catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    const message = (err as Error).message;
+    expect(message).toContain('DATABASE_URL');
+    expect(message).toContain('wrangler hyperdrive create');
+    expect(message).toContain('HYPERDRIVE');
+    // The remedy must point at the shell, never at a dotenv file — project-derived env
+    // is read only inside the build subprocess, and a shipped .env value would leak.
+    expect(message).toMatch(/shell/);
+    expect(message).toMatch(/NOT used here/);
+  });
+
+  it('fails closed BEFORE the account pin and before any other resource is created', async () => {
+    // The whole point of fencing early: a run that also wants KV/R2 must not create
+    // them (and must not stamp account_id) only to abort at the Hyperdrive block.
+    setup(JSON.stringify({ name: 'app' }));
+    const { run, calls } = makeRunner([{ match: /.*/, reply: () => ok() }]);
+    await expect(
+      provisionCloudflareResources(
+        tmpDir,
+        wranglerPath,
+        {
+          ...emptyDesired,
+          kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }],
+          r2: { binding: 'STORAGE', bucketName: 'myapp-uploads' },
+          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: '' },
+        },
+        { runWrangler: run, accountId: 'acct-A', log: silentLog },
+      ),
+    ).rejects.toThrow(/no DATABASE_URL to create it from/);
+    // No create seam was invoked at all — KV and R2 were never touched.
+    expect(calls).toEqual([]);
+    // …and the account was never pinned, so a retry under a different account is still free.
+    expect(readConfig().account_id).toBeUndefined();
+  });
+
+  it('a hyperdrive already provisioned with a real id needs neither a string nor a token', async () => {
+    // The read-first path is pure config I/O — the stringless fence must not touch it.
+    setup(JSON.stringify({ hyperdrive: [{ binding: 'HYPERDRIVE', id: hex32('hd') }] }));
     const { run, calls } = makeRunner([]);
     const result = await provisionCloudflareResources(
       tmpDir,
@@ -1398,8 +1504,8 @@ describe('provisionCloudflareResources — Hyperdrive API token requirement', ()
         kind: 'hyperdrive',
         binding: 'HYPERDRIVE',
         name: 'myapp-hd',
-        action: 'skipped',
-        reason: 'no connection string provided',
+        action: 'reused',
+        id: hex32('hd'),
       },
     ]);
   });

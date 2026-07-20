@@ -4142,7 +4142,7 @@ async function provisionCloudflareResourcesLocked(
     assertNoTransportRedirectInProjectDotenv(root);
   }
 
-  // --- Hyperdrive existence check needs a Cloudflare API token -------------
+  // --- Hyperdrive blockers that are knowable BEFORE any account mutation ---
   // Unlike D1/KV/R2/queues — each of which has a machine-readable wrangler probe that
   // works under ANY wrangler credential, including a `wrangler login` OAuth session —
   // Hyperdrive has none (wrangler 4.107 prints a human table and offers no get-by-name;
@@ -4157,26 +4157,53 @@ async function provisionCloudflareResourcesLocked(
   // token. The message names both ways out, because `wrangler login` is the documented
   // setup and this is the one resource it does not cover.
   //
-  // Scoped to the case that would actually CREATE (a connection string is present). With
-  // no connection string nothing can be minted whatever the answer, so that path keeps its
-  // structured skip — the missing connection source is the real blocker to report there.
-  if (desired.hyperdrive?.connectionString && !opts?.listHyperdriveConfigs) {
-    const { binding, name } = desired.hyperdrive;
+  // Two DIFFERENT blockers land here, and both are decided WITHOUT a network call — the
+  // gate is only ever "could this run reach a real Hyperdrive id by ANY route?":
+  //   - a connection string but no token → could create, cannot check first → stop;
+  //   - no connection string AND no token/lister → can neither create NOR adopt, so the
+  //     only reachable outcome is the fatal `skipped` below → stop.
+  // A stringless run that CAN look (token or injected lister) is deliberately let through:
+  // adoption needs no connection string, so it may still legitimately succeed.
+  if (desired.hyperdrive && !opts?.listHyperdriveConfigs) {
+    const { binding, name, connectionString } = desired.hyperdrive;
     const entry = readBindingEntry(configPath, 'hyperdrive', binding);
     const alreadyProvisioned = entry !== undefined && isRealHyperdriveId(entry.id);
     // The read-first path is pure config I/O and needs NO token: an already-provisioned
     // Postgres app deploys fine under `wrangler login` alone.
     if (!alreadyProvisioned && !resolveHyperdriveApiToken(opts?.apiToken)) {
+      if (connectionString) {
+        throw new Error(
+          `provision: Hyperdrive config ${JSON.stringify(name)} is not in "${configPath}" yet, and ` +
+            `creating it needs a Cloudflare API token. wrangler exposes no machine-readable ` +
+            `Hyperdrive list, so Void checks the account over the Cloudflare REST API, which a ` +
+            `"wrangler login" (OAuth) session cannot authenticate. Without that check a create ` +
+            `would silently duplicate an existing same-named config, so nothing was provisioned. ` +
+            `Either (a) export CLOUDFLARE_API_TOKEN with Hyperdrive edit permission and rerun, or ` +
+            `(b) create the Hyperdrive config yourself (dashboard / "wrangler hyperdrive create") ` +
+            `and add its id to the ${JSON.stringify(binding)} hyperdrive binding in ` +
+            `"${configPath}" — deploying an already-provisioned Hyperdrive needs no token.`,
+        );
+      }
+      // NO connection string AND no way to look the account up (no token, no injected
+      // lister) — so this run can neither CREATE nor ADOPT. Its only possible outcome is
+      // the structured `skipped` far below, which the deploy orchestrator treats as FATAL.
+      // Reaching that point would first create D1/KV/R2 and pin `account_id`, billing the
+      // user for a half-provisioned account to learn about an unset variable. Stop HERE,
+      // before the pin and before the first create, for the SAME reason as the token fence.
+      //
+      // Deliberately NOT loaded from the project's dotenv files: project-derived env is
+      // read only inside the credential-scrubbed build subprocess, so making `.env.local` a
+      // deploy input here would re-introduce exactly the plaintext leak deploy warns about.
+      // The variable has to come from the shell.
       throw new Error(
         `provision: Hyperdrive config ${JSON.stringify(name)} is not in "${configPath}" yet, and ` +
-          `creating it needs a Cloudflare API token. wrangler exposes no machine-readable ` +
-          `Hyperdrive list, so Void checks the account over the Cloudflare REST API, which a ` +
-          `"wrangler login" (OAuth) session cannot authenticate. Without that check a create ` +
-          `would silently duplicate an existing same-named config, so nothing was provisioned. ` +
-          `Either (a) export CLOUDFLARE_API_TOKEN with Hyperdrive edit permission and rerun, or ` +
-          `(b) create the Hyperdrive config yourself (dashboard / "wrangler hyperdrive create") ` +
-          `and add its id to the ${JSON.stringify(binding)} hyperdrive binding in ` +
-          `"${configPath}" — deploying an already-provisioned Hyperdrive needs no token.`,
+          `there is no DATABASE_URL to create it from. Nothing was provisioned. ` +
+          `Either (a) export DATABASE_URL with your PostgreSQL connection string and rerun ` +
+          `(Void reads it from the shell — a value in .env/.env.local is NOT used here, so it ` +
+          `never ships as a plaintext worker var), or (b) create the Hyperdrive config yourself ` +
+          `(dashboard / "wrangler hyperdrive create") and add its id to the ` +
+          `${JSON.stringify(binding)} hyperdrive binding in "${configPath}" — deploying an ` +
+          `already-provisioned Hyperdrive needs neither DATABASE_URL nor an API token.`,
       );
     }
   }
