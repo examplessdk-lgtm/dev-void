@@ -1626,7 +1626,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * under the label "Secret", not via this map — is handled in
  * `collectWorkerBindingNames`.
  */
-const FRIENDLY_BINDING_NAMES: Record<string, string> = {
+export const FRIENDLY_BINDING_NAMES: Record<string, string> = {
   data_blobs: 'Data Blob',
   durable_objects: 'Durable Object',
   kv_namespaces: 'KV Namespace',
@@ -1944,7 +1944,7 @@ const BINDING_FIELD_SHAPES: Record<string, BindingFieldShape> = {
  * wrangler is lenient and would silently drop such a member, letting the worker-wide
  * uniqueness guard miss (or invent) a collision.
  *
- * Exported so the deploy orchestrator's passthrough-denylist check reads a resource field's
+ * Exported so the deploy orchestrator's pass-through assert-set check reads a resource field's
  * per-entry identity keys through the SAME wrangler-schema shapes (handling `send_email` /
  * `ratelimits` name-keying and `logfwdr`'s nested `.bindings`, among others).
  */
@@ -1962,6 +1962,179 @@ export function bindingNamesForField(field: string, value: unknown): Array<strin
     case 'binding-list':
       return bindingListNames(field, value, shape.bindingsRequired);
   }
+}
+
+/**
+ * The entry-shaped sibling of {@link bindingNamesForField}: routes each field to its KNOWN
+ * shape and returns every binding's NAME **paired with its full config ENTRY object**, so a
+ * caller can compare not just WHICH bindings a field declares but the TARGET each one points
+ * at (a `services` binding's `service`, an `unsafe` binding's `type`, …). Same fail-closed
+ * philosophy as {@link bindingNamesForField} — a malformed/missing REQUIRED identity or wrong
+ * outer shape THROWS. By construction `bindingEntriesForField(f, v).map((e) => e.name)` equals
+ * `bindingNamesForField(f, v)` for every field (both read identity through the same shapes).
+ *
+ * Exported so the deploy orchestrator's pass-through assert-set check can pin a legitimately
+ * hand-declared binding's ENTRY pre-build and reject a build that KEEPS the name but REWRITES
+ * the target.
+ */
+export function bindingEntriesForField(
+  field: string,
+  value: unknown,
+): Array<{ name: string; entry: Record<string, unknown> }> {
+  const shape: BindingFieldShape = BINDING_FIELD_SHAPES[field] ?? { kind: 'namespace-array' };
+  switch (shape.kind) {
+    case 'key-map':
+      return keyMapBindingEntries(field);
+    case 'name-keyed-array':
+      return nameKeyedBindingEntries(field, value);
+    case 'namespace-array':
+      return namespaceArrayBindingEntries(field, value);
+    case 'singleton':
+      return singletonBindingEntry(field, value, shape.bindingRequired);
+    case 'binding-list':
+      return bindingListEntries(field, value, shape.bindingsRequired);
+  }
+}
+
+/**
+ * Entry-shaped reader for a KEY-MAP field. Key-map fields (vars/wasm_modules/text_blobs/
+ * data_blobs) carry no per-binding config ENTRY object — the binding name is the KEY and the
+ * VALUE is arbitrary content — and all four are excluded from the pass-through assert-set, so
+ * this branch is never reached in the normal flow. It THROWS the same wrong-shape message the
+ * name reader raises, so a FUTURE misclassification that routed a key-map field here fails
+ * CLOSED rather than silently reading no entries.
+ */
+function keyMapBindingEntries(field: string): never {
+  throw new Error(
+    `deploy: cannot verify binding-name uniqueness — "${field}" must be an object mapping names ` +
+      `to values. Refusing to proceed on a partially-readable binding set (a wrong-shaped field ` +
+      `could hide a real collision). Fix the wrangler config and retry.`,
+  );
+}
+
+/**
+ * Entry-shaped reader for a NAMESPACE-array field (mirror of {@link namespaceArrayBindingNames}):
+ * a PRESENT non-array THROWS; every member is strictly validated for a non-empty string
+ * `.binding` and returned with its full entry object.
+ */
+function namespaceArrayBindingEntries(
+  field: string,
+  value: unknown,
+): Array<{ name: string; entry: Record<string, unknown> }> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" must be an array of binding ` +
+        `entries. Refusing to proceed on a partially-readable binding set (a wrong-shaped field ` +
+        `could hide a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  return strictBindingEntries(value, 'binding', field);
+}
+
+/**
+ * Entry-shaped reader for a NAME-keyed array field (mirror of {@link nameKeyedBindingNames}):
+ * identity is `.name` only; a PRESENT non-array THROWS; every member is strictly validated.
+ */
+function nameKeyedBindingEntries(
+  field: string,
+  value: unknown,
+): Array<{ name: string; entry: Record<string, unknown> }> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" must be an array of binding ` +
+        `entries. Refusing to proceed on a partially-readable binding set (a wrong-shaped field ` +
+        `could hide a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  return strictBindingEntries(value, 'name', field);
+}
+
+/**
+ * Entry-shaped reader for a binding-LIST field (mirror of {@link bindingListNames}): the entry
+ * of each member is the member itself (`{ name, ... }`), keyed on `.name`. Same throw semantics
+ * as the name reader — a wrong outer shape, or a required-but-missing `bindings`, THROWS; a
+ * `bindings`-less `unsafe` (optional) contributes nothing.
+ */
+function bindingListEntries(
+  field: string,
+  value: unknown,
+  bindingsRequired: boolean,
+): Array<{ name: string; entry: Record<string, unknown> }> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!isRecord(value)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" must be an object with a ` +
+        `"bindings" array. Refusing to proceed on a partially-readable binding set (a wrong-shaped ` +
+        `field could hide a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  if (value.bindings === undefined) {
+    if (bindingsRequired) {
+      throw new Error(
+        `deploy: cannot verify binding-name uniqueness — "${field}" requires a "bindings" array. ` +
+          `Refusing to proceed on a partially-readable binding set (a wrong-shaped field could hide ` +
+          `a real collision). Fix the wrangler config and retry.`,
+      );
+    }
+    return [];
+  }
+  if (!Array.isArray(value.bindings)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}.bindings" must be an array. ` +
+        `Refusing to proceed on a partially-readable binding set (a wrong-shaped field could hide ` +
+        `a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  return strictBindingEntries(value.bindings, 'name', `${field}.bindings`);
+}
+
+/**
+ * Entry-shaped reader for a SINGLETON field (mirror of {@link singletonBindingName}): the entry
+ * is the singleton value itself. A PRESENT non-object THROWS; a present-but-malformed `binding`
+ * THROWS; a required-but-absent `binding` THROWS; a binding-optional `assets` with no binding
+ * contributes nothing.
+ */
+function singletonBindingEntry(
+  field: string,
+  value: unknown,
+  bindingRequired: boolean,
+): Array<{ name: string; entry: Record<string, unknown> }> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!isRecord(value)) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" must be an object with a ` +
+        `"binding". Refusing to proceed on a partially-readable binding set (a wrong-shaped field ` +
+        `could hide a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  if (typeof value.binding === 'string' && value.binding.length > 0) {
+    return [{ name: value.binding, entry: value }];
+  }
+  if (value.binding !== undefined) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" has a malformed "binding" ` +
+        `(expected a non-empty string). Refusing to proceed on a partially-readable binding set (a ` +
+        `dropped binding could hide a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  if (bindingRequired) {
+    throw new Error(
+      `deploy: cannot verify binding-name uniqueness — "${field}" requires a "binding" (a ` +
+        `non-empty string). Refusing to proceed on a partially-readable binding set (a dropped ` +
+        `binding could hide a real collision). Fix the wrangler config and retry.`,
+    );
+  }
+  return [];
 }
 
 /**
@@ -2142,6 +2315,21 @@ function strictBindingArray(
   keyField: 'binding' | 'name',
   field: string,
 ): Array<string> {
+  return strictBindingEntries(members, keyField, field).map((e) => e.name);
+}
+
+/**
+ * The entry-shaped sibling of {@link strictBindingArray}: reads `keyField` (a non-empty string)
+ * from EVERY member and returns it PAIRED with the member's full entry object. Same fail-closed
+ * validation — a non-record member, or one missing a non-empty string `keyField`, THROWS (never
+ * silently dropped). {@link strictBindingArray} is defined in terms of this, so the two agree on
+ * names and error messages for every field.
+ */
+function strictBindingEntries(
+  members: Array<unknown>,
+  keyField: 'binding' | 'name',
+  field: string,
+): Array<{ name: string; entry: Record<string, unknown> }> {
   return members.map((member, index) => {
     if (
       !isRecord(member) ||
@@ -2155,7 +2343,7 @@ function strictBindingArray(
           `wrangler config and retry.`,
       );
     }
-    return member[keyField] as string;
+    return { name: member[keyField] as string, entry: member };
   });
 }
 

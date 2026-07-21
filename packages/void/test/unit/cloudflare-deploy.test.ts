@@ -9,6 +9,8 @@ import {
   compareWranglerMigrationPaths,
   computeDesiredCloudflareResources,
   deployChildEnv,
+  DEPLOY_PASSTHROUGH_ASSERT_FIELDS,
+  DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS,
   runCloudflareDeploy,
   snapshotBindingIdentities,
   snapshotPassthroughIdentities,
@@ -28,6 +30,7 @@ import {
 import type { SelfHostEnvContext, SelfHostSchemaFacts } from '../../src/cli/env-validation.ts';
 import type { CliLogger } from '../../src/cli/log-file.ts';
 import { provisionCloudflareResources, type ProvisionResult } from '../../src/cli/provision.ts';
+import { FRIENDLY_BINDING_NAMES } from '../../src/cli/wrangler.ts';
 import { readConfig } from '../../src/config.ts';
 
 const tmpDir = join(import.meta.dirname, '.tmp-cf-deploy-test');
@@ -598,6 +601,29 @@ describe('runCloudflareDeploy — PostgreSQL checked-in migration guard', () => 
     expect(exitCalls).toEqual([]);
     // Reached the upload, and no D1 migrate ran (a pg app has no desired.d1).
     expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
+    expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'apply')).toBe(false);
+  });
+
+  it('rejects a pg app whose BUILD writes checked-in migrations (post-build re-check)', async () => {
+    // Empty pre-build (the fail-fast guard passes), but the build plugin writes db/migrations/*.sql
+    // during `vite build`. The remote-migrate/apply gates are `desired.d1`-only, so without the
+    // post-build re-check these files would ship UNRUN and the worker would hit an unmigrated DB.
+    const root = pgProject();
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () => {
+        mkdirSync(join(root, 'db', 'migrations'), { recursive: true });
+        writeFileSync(
+          join(root, 'db', 'migrations', '0000_injected.sql'),
+          'CREATE TABLE notes (id integer primary key);',
+        );
+      },
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Rejected AFTER the build but BEFORE any remote mutation — nothing deployed, no D1 migrate.
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
     expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'apply')).toBe(false);
   });
 
@@ -1946,6 +1972,48 @@ describe('runCloudflareDeploy — wrangler implicit provisioning disabled on dep
   });
 });
 
+// ---------------------------------------------------------------------------
+// The pass-through assert-set is DERIVED from the wrangler binding registry
+// (FRIENDLY_BINDING_NAMES) minus the fields Void's own build emits — so it is
+// complete-by-construction (every capability field is covered) and a new registry
+// field fails CLOSED (asserted until explicitly excluded).
+// ---------------------------------------------------------------------------
+
+describe('DEPLOY_PASSTHROUGH_ASSERT_FIELDS — registry-derived composition', () => {
+  it('covers the capability singletons + the `unsafe` escape hatch (previously unguarded)', () => {
+    for (const field of ['browser', 'images', 'stream', 'media', 'websearch', 'unsafe']) {
+      expect(DEPLOY_PASSTHROUGH_ASSERT_FIELDS).toContain(field);
+    }
+  });
+
+  it('excludes every id-pinned + Void-emitted + bundled-content field (no double-assert)', () => {
+    for (const field of ['d1_databases', 'kv_namespaces', 'r2_buckets', 'hyperdrive']) {
+      expect(DEPLOY_PASSTHROUGH_ASSERT_FIELDS).not.toContain(field);
+    }
+    for (const field of ['ai', 'durable_objects', 'assets', 'vars']) {
+      expect(DEPLOY_PASSTHROUGH_ASSERT_FIELDS).not.toContain(field);
+    }
+  });
+
+  it('every excluded field is a REAL registry key (no typos)', () => {
+    for (const field of DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS) {
+      expect(FRIENDLY_BINDING_NAMES).toHaveProperty(field);
+    }
+  });
+
+  it('EXCLUDE ∪ ASSERT === keys(FRIENDLY_BINDING_NAMES) — a new registry field forces a choice', () => {
+    const union = new Set<string>([
+      ...DEPLOY_PASSTHROUGH_ASSERT_FIELDS,
+      ...DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS,
+    ]);
+    expect([...union].sort()).toEqual(Object.keys(FRIENDLY_BINDING_NAMES).sort());
+    // Partition (no field is both asserted and excluded).
+    for (const field of DEPLOY_PASSTHROUGH_ASSERT_FIELDS) {
+      expect(DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS.has(field)).toBe(false);
+    }
+  });
+});
+
 describe('verifyGeneratedDeployConfig', () => {
   function deployConfigProject(generated: Record<string, unknown>): string {
     return makeProject({
@@ -2203,10 +2271,10 @@ describe('verifyGeneratedDeployConfig', () => {
     expect(result).toEqual({ ok: true });
   });
 
-  // --- Passthrough-denylist completeness (fields Void never emits) + queue ⊆ desired ---
+  // --- Pass-through assert-set completeness (fields Void never emits) + queue ⊆ desired ---
 
   it('passes the full kitchen-sink shape (empty resource arrays, DO/containers, desired queues)', () => {
-    // The critical no-regression: a real Class-A artifact carries empty denylist arrays
+    // The critical no-regression: a real Class-A artifact carries empty assert-set arrays
     // (services/vectorize/…), durable_objects/containers/migrations, and a queues block whose
     // names Void derived from source. NONE may be rejected by the new assertions.
     const root = deployConfigProject({
@@ -2314,7 +2382,7 @@ describe('verifyGeneratedDeployConfig', () => {
   });
 
   it('does NOT reject an unknown/future resource field the emitted artifact declares (fail-open)', () => {
-    // A field not on the denylist must never false-positive — a future wrangler resource field
+    // A field not in the assert-set must never false-positive — a future wrangler resource field
     // Void does not know about is simply not asserted.
     const root = deployConfigProject({
       account_id: 'acc123',
@@ -2337,6 +2405,140 @@ describe('verifyGeneratedDeployConfig', () => {
       durable_objects: { bindings: [{ name: 'WS', class_name: 'ChatRoom' }] },
       containers: [{ class_name: 'Sandbox', image: './Dockerfile' }],
       migrations: [{ tag: 'v1', new_sqlite_classes: ['Sandbox'] }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  // --- Pass-through TARGET pin: same binding name, rewritten target/config ---
+
+  it('fails closed when the build keeps a services binding NAME but rewrites its target service', () => {
+    // Root pinned MY_SVC → my-worker; the build kept the name but retargeted it to evil-worker.
+    // Name-only pinning would pass this; the entry (target) pin catches the rewrite.
+    const rootConfig = { services: [{ binding: 'MY_SVC', service: 'my-worker' }] };
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      services: [{ binding: 'MY_SVC', service: 'evil-worker' }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/services/);
+    expect(result.reason).toMatch(/MY_SVC/);
+    expect(result.reason).toMatch(/rewritten|retargeted/);
+  });
+
+  it('passes a legit passthrough whose target is unchanged, ignoring a normalizer-added key', () => {
+    // The build left MY_SVC → my-worker intact; the wrangler normalizer added `remote: false`.
+    // Only the ROOT keys are pinned, so the added key is ignored and the deploy passes.
+    const rootConfig = { services: [{ binding: 'MY_SVC', service: 'my-worker' }] };
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      services: [{ binding: 'MY_SVC', service: 'my-worker', remote: false }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  // --- Capability singletons + the `unsafe` escape hatch (previously unguarded fields) ---
+
+  it('fails closed when the build injects a capability singleton absent from the root', () => {
+    for (const field of ['browser', 'images', 'stream', 'media', 'websearch'] as const) {
+      const root = deployConfigProject({
+        account_id: 'acc123',
+        name: 'myapp',
+        [field]: { binding: 'INJECTED' },
+      });
+      const result = verifyGeneratedDeployConfig(root, {
+        accountId: 'acc123',
+        workerName: 'myapp',
+        desired: { kvNamespaces: [], queues: [] },
+        passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(new RegExp(field));
+      expect(result.reason).toMatch(/injected/);
+    }
+  });
+
+  it('fails closed when the build injects an `unsafe` binding of an arbitrary type', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      unsafe: { bindings: [{ name: 'X', type: 'secret_text' }] },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/unsafe/);
+    expect(result.reason).toMatch(/injected/);
+  });
+
+  it('fails closed when the build rewrites a root-declared `unsafe` binding’s type', () => {
+    // The nested `.type` is a ROOT key of the unsafe binding entry, so a rewrite is caught.
+    const rootConfig = { unsafe: { bindings: [{ name: 'X', type: 'secret_text' }] } };
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      unsafe: { bindings: [{ name: 'X', type: 'plain_text' }] },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/unsafe/);
+    expect(result.reason).toMatch(/rewritten|retargeted/);
+  });
+
+  // --- FALSE-POSITIVE LOCKS: the normalizer defaults that MUST keep passing ---
+
+  it('passes empty-array assert fields the normalizer default-fills (services:[] / vectorize:[] / …)', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      services: [],
+      vectorize: [],
+      dispatch_namespaces: [],
+      analytics_engine_datasets: [],
+      send_email: [],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('passes logfwdr:{bindings:[]} (always emitted, empty bindings) with none in root', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      logfwdr: { bindings: [] },
     });
     const result = verifyGeneratedDeployConfig(root, {
       accountId: 'acc123',

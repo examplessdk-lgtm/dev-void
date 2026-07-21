@@ -3,6 +3,8 @@ import { parse as parseJsoncRaw, type ParseError } from 'jsonc-parser';
 import { join } from 'pathe';
 import { describe, it, expect, afterEach } from 'vite-plus/test';
 import {
+  bindingEntriesForField,
+  bindingNamesForField,
   ensureWranglerCompat,
   ensureWranglerCompatibilityDate,
   ensureWranglerNodejsAlsFlag,
@@ -3120,5 +3122,89 @@ describe('readProvisionedBindingEntry (strict canonical binding reader)', () => 
     expect(() =>
       readProvisionedBindingEntry({ d1_databases: { binding: 'DB' } }, 'd1_databases', 'DB', P),
     ).toThrow(/must be an array of binding entries/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// bindingEntriesForField mirrors bindingNamesForField's shape switch but returns
+// each binding's NAME + its full config ENTRY object, so the deploy pass-through
+// check can pin a binding's TARGET (service/namespace/type), not just its name.
+// The two readers MUST agree on names for every shape, and both fail closed on a
+// malformed member.
+// ---------------------------------------------------------------------------
+
+describe('bindingEntriesForField — entry reader parity with bindingNamesForField', () => {
+  // One representative value per REACHABLE shape (key-map is excluded from the assert-set and
+  // its entry reader throws by design — see the dedicated case below).
+  const REPRESENTATIVE: Array<{ field: string; value: unknown }> = [
+    // namespace-array
+    {
+      field: 'services',
+      value: [
+        { binding: 'MY_SVC', service: 'my-other-worker' },
+        { binding: 'OTHER', service: 'w2', entrypoint: 'Fetcher' },
+      ],
+    },
+    // name-keyed-array
+    { field: 'send_email', value: [{ name: 'EMAIL', destination_address: 'to@example.com' }] },
+    // singleton
+    { field: 'browser', value: { binding: 'BROWSER', remote: true } },
+    // binding-list
+    { field: 'unsafe', value: { bindings: [{ name: 'X', type: 'secret_text' }] } },
+  ];
+
+  it('yields the SAME names as bindingNamesForField for a representative value of each shape', () => {
+    for (const { field, value } of REPRESENTATIVE) {
+      expect(bindingEntriesForField(field, value).map((e) => e.name)).toEqual(
+        bindingNamesForField(field, value),
+      );
+    }
+  });
+
+  it('carries each binding’s full config entry object (so a retargeted binding is visible)', () => {
+    const entries = bindingEntriesForField('services', [
+      { binding: 'MY_SVC', service: 'my-other-worker' },
+    ]);
+    expect(entries).toEqual([
+      { name: 'MY_SVC', entry: { binding: 'MY_SVC', service: 'my-other-worker' } },
+    ]);
+  });
+
+  it('reads the singleton value itself as the entry, and an empty array as no entries', () => {
+    expect(bindingEntriesForField('browser', { binding: 'BROWSER' })).toEqual([
+      { name: 'BROWSER', entry: { binding: 'BROWSER' } },
+    ]);
+    // Empty-array assert fields (the normalizer default) → no entries → the deploy loop never runs.
+    expect(bindingEntriesForField('services', [])).toEqual([]);
+    // logfwdr is always emitted as { bindings: [] } → no entries.
+    expect(bindingEntriesForField('logfwdr', { bindings: [] })).toEqual([]);
+  });
+
+  it('fails closed on a malformed member for each shape (mirrors the name reader)', () => {
+    // namespace-array member missing `.binding`
+    expect(() => bindingEntriesForField('services', [{ service: 'w' }])).toThrow(
+      /malformed entry at index 0 \(missing a non-empty string "binding"\)/,
+    );
+    // name-keyed-array member missing `.name`
+    expect(() => bindingEntriesForField('send_email', [{ destination_address: 'x' }])).toThrow(
+      /malformed entry at index 0 \(missing a non-empty string "name"\)/,
+    );
+    // singleton (required) with no `.binding`
+    expect(() => bindingEntriesForField('browser', { remote: true })).toThrow(
+      /"browser" requires a "binding"/,
+    );
+    // binding-list member missing `.name`
+    expect(() => bindingEntriesForField('unsafe', { bindings: [{ type: 'secret_text' }] })).toThrow(
+      /malformed entry at index 0 \(missing a non-empty string "name"\)/,
+    );
+  });
+
+  it('fails closed when a key-map field is routed here (unreachable — asserts fail-closed)', () => {
+    // All key-map fields (vars/wasm_modules/…) are EXCLUDED from the assert-set, so this reader is
+    // never called with one. If a future misclassification did, it must throw rather than silently
+    // return no entries.
+    expect(() => bindingEntriesForField('vars', { A: '1' })).toThrow(
+      /"vars" must be an object mapping names to values/,
+    );
   });
 });
