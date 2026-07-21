@@ -3478,6 +3478,102 @@ describe('verifyGeneratedDeployConfig', () => {
     });
     expect(result).toEqual({ ok: true });
   });
+
+  // --- Cron Triggers: a bare `wrangler deploy` reading `dist/ssr/wrangler.json` INSTALLS the
+  // worker's Cron Triggers from the emitted `triggers.crons` array, so an injected / dropped /
+  // retargeted schedule must fail closed. The expected schedules are reconstructed pre-build from
+  // the SAME `scanJobsSync` scan and compared as an order-independent, count-aware multiset. ---
+
+  it('fails closed when the build INJECTS a cron trigger schedule the source never declared', () => {
+    // A no-cron app (expected empty) whose emitted config carries a schedule — attacker code would
+    // run on a billable schedule the credentialed `wrangler deploy` installs.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      triggers: { crons: ['* * * * *'] },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedCrons: [],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/\* \* \* \* \*/);
+    expect(result.reason).toMatch(/injected/);
+  });
+
+  it('fails closed when the build DROPS a cron trigger schedule the source declared', () => {
+    // The source declares a schedule (expected has one), but the emitted `triggers` is absent — the
+    // worker would silently lose the scheduled behavior the source asked for.
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedCrons: ['0 0 * * *'],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/0 0 \* \* \*/);
+    expect(result.reason).toMatch(/dropped/);
+  });
+
+  it('fails closed when the build RETARGETS a cron trigger schedule', () => {
+    // The source declares `0 0 * * *` (daily), but the emitted schedule is `* * * * *` (every
+    // minute) — caught as a drop of the old string plus an injection of the new one.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      triggers: { crons: ['* * * * *'] },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedCrons: ['0 0 * * *'],
+    });
+    expect(result.ok).toBe(false);
+    // The unexpected new schedule is reported first (the injection check runs before the drop check).
+    expect(result.reason).toMatch(/injected/);
+  });
+
+  it('passes when the emitted schedules multiset-equal the expected set in a different order', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      triggers: { crons: ['0 12 * * *', '0 0 * * *', '*/5 * * * *'] },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedCrons: ['*/5 * * * *', '0 0 * * *', '0 12 * * *'],
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('passes a no-cron app whose emitted triggers field is absent (both-empty)', () => {
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedCrons: [],
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('passes a no-cron app whose emitted triggers is the empty object the CF plugin materializes', () => {
+    // A real no-cron build emits `triggers: {}` (the CF plugin materializes the empty object) rather
+    // than omitting the field — the defensive read treats a `crons`-less object as no schedules, so
+    // it stays symmetric-empty instead of false-positiving.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      triggers: {},
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedCrons: [],
+    });
+    expect(result).toEqual({ ok: true });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3664,10 +3760,13 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
       runBuild: () =>
         // This project imports no `void/sandbox`, so a real build emits no container application;
         // drop the kitchen-sink fixture's sandbox container (JSON.stringify omits `undefined`) so
-        // the reconstructed (empty) container set matches the emitted (absent) one.
+        // the reconstructed (empty) container set matches the emitted (absent) one. It also has no
+        // `crons/` dir, so a real build emits no `triggers.crons`; drop the fixture's schedule so the
+        // reconstructed (empty) cron set matches the emitted (absent) one.
         writeEmittedDeployArtifact(root, {
           ...KITCHEN_SINK_NON_ID_BINDINGS,
           containers: undefined,
+          triggers: undefined,
           ...EMITTED_D1,
         }),
       verifyDeployConfig: verifyGeneratedDeployConfig,
@@ -3887,10 +3986,13 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
       runBuild: () =>
         // This project imports no `void/sandbox`, so a real build emits no container application;
         // drop the kitchen-sink fixture's sandbox container (JSON.stringify omits `undefined`) so
-        // the reconstructed (empty) container set matches the emitted (absent) one.
+        // the reconstructed (empty) container set matches the emitted (absent) one. It also has no
+        // `crons/` dir, so a real build emits no `triggers.crons`; drop the fixture's schedule so the
+        // reconstructed (empty) cron set matches the emitted (absent) one.
         writeEmittedDeployArtifact(root, {
           ...KITCHEN_SINK_NON_ID_BINDINGS,
           containers: undefined,
+          triggers: undefined,
           ...EMITTED_D1,
         }),
       verifyDeployConfig: verifyGeneratedDeployConfig,

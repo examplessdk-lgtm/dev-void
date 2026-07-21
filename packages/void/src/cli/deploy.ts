@@ -1467,6 +1467,16 @@ export function verifyGeneratedDeployConfig(
      * RETARGETED (e.g. a rewritten `image` pointing at an attacker's).
      */
     expectedContainers?: Array<Record<string, unknown>>;
+    /**
+     * The exact cron trigger schedules Void's build emits into `triggers.crons`, reconstructed
+     * PRE-BUILD from the SAME `scanJobsSync` scan index.ts derives them from
+     * ({@link computeDesiredCloudflareResources}). A bare `wrangler deploy` reading
+     * `dist/ssr/wrangler.json` INSTALLS the worker's Cron Triggers from `triggers.crons`, so an
+     * emitted schedule absent from this multiset is one the build INJECTED (attacker code runs on a
+     * billable schedule) and an expected schedule missing from the emitted array is one it DROPPED
+     * (or, paired with an injected replacement, RETARGETED).
+     */
+    expectedCrons?: Array<string>;
   },
 ): { ok: boolean; reason?: string } {
   const deployConfigPath = deployPointerPath(root);
@@ -1868,6 +1878,53 @@ export function verifyGeneratedDeployConfig(
         return {
           ok: false,
           reason: `generated config no longer binds the queue ${JSON.stringify(name)} as both a producer and a consumer that Void derived from source — refusing to deploy a build that dropped a queue binding the source declared.`,
+        };
+      }
+    }
+  }
+  // (D) Cron Triggers — pin the emitted `triggers.crons` schedules against the set Void's build
+  // emits, reconstructed PRE-BUILD from the SAME `scanJobsSync` scan index.ts derives them from
+  // (`scanJobsSync(root, paths.cronsDir).flatMap((job) => job.crons)`). A bare `wrangler deploy`
+  // reading `dist/ssr/wrangler.json` INSTALLS the worker's Cron Triggers from this array — a
+  // schedule the build INJECTED runs attacker code on a billable schedule, and one it DROPPED (or
+  // RETARGETED, caught as a drop of the old string plus an injection of the new one) silently
+  // changes the worker's scheduled behavior. Compared as an order-independent, count-aware multiset
+  // of schedule strings. `generated.triggers` is read DEFENSIVELY: only an object with an array
+  // `crons` yields emitted schedules — anything else (absent, a bare `{}` the CF plugin
+  // materializes for a no-cron app, a non-array `crons`) yields none, so a no-cron app (expected
+  // empty, emitted none) passes symmetric-empty. A non-string emitted element is never a shape Void
+  // derives, so it fails the expected lookup and is rejected as injected.
+  if (expected.expectedCrons) {
+    const triggers = generated.triggers;
+    const emittedCrons: Array<unknown> =
+      typeof triggers === 'object' &&
+      triggers !== null &&
+      Array.isArray((triggers as Record<string, unknown>).crons)
+        ? ((triggers as Record<string, unknown>).crons as Array<unknown>)
+        : [];
+    const expectedCronCounts = new Map<string, number>();
+    for (const schedule of expected.expectedCrons) {
+      expectedCronCounts.set(schedule, (expectedCronCounts.get(schedule) ?? 0) + 1);
+    }
+    // Injected / retargeted — every emitted schedule must be one the source derived, with a
+    // remaining count; anything else is a schedule the build injected.
+    for (const schedule of emittedCrons) {
+      const remaining = typeof schedule === 'string' ? (expectedCronCounts.get(schedule) ?? 0) : 0;
+      if (typeof schedule !== 'string' || remaining <= 0) {
+        return {
+          ok: false,
+          reason: `generated config declares a cron trigger schedule ${JSON.stringify(schedule)} that Void did not derive from source — refusing to deploy a schedule the build injected.`,
+        };
+      }
+      expectedCronCounts.set(schedule, remaining - 1);
+    }
+    // Dropped — every expected schedule must still be emitted; any leftover count is a schedule the
+    // build dropped (e.g. the old side of a retarget).
+    for (const [schedule, remaining] of expectedCronCounts) {
+      if (remaining > 0) {
+        return {
+          ok: false,
+          reason: `generated config no longer installs the cron trigger schedule ${JSON.stringify(schedule)} that Void derived from source — refusing to deploy a build that dropped a cron trigger.`,
         };
       }
     }
@@ -2322,6 +2379,14 @@ export async function computeDesiredCloudflareResources(
    * to pin the emitted `containers` array.
    */
   needsSandbox: boolean;
+  /**
+   * The exact cron trigger schedules Void's build emits into `dist/ssr/wrangler.json`
+   * `triggers.crons`, reconstructed PRE-BUILD from the SAME `scanJobsSync(root, paths.cronsDir)`
+   * scan index.ts derives them from (`scanJobsSync(...).flatMap((job) => job.crons)`). Threaded
+   * into {@link verifyGeneratedDeployConfig} to pin the emitted schedules against a build that
+   * injected, dropped, or retargeted a Cron Trigger.
+   */
+  expectedCrons: Array<string>;
 }> {
   // The id predicates are resolved via the memoized dynamic import so this exported
   // helper works when called directly in unit tests (outside the fork) without a
@@ -2449,6 +2514,12 @@ export async function computeDesiredCloudflareResources(
   // provision and the ids an earlier provision already recorded.
   assertDistinctKvNamespaces(desired.kvNamespaces, config, configPath, isRealKvId);
 
+  // Cron trigger schedules — the EXACT expression index.ts emits into `triggers.crons`
+  // (`scanJobsSync(root, paths.cronsDir).flatMap((job) => job.crons)`), from the SAME scan and the
+  // SAME `paths` the build's emission sees, so a legitimate build's emitted schedules multiset-equal
+  // this reconstruction.
+  const expectedCrons = scanJobsSync(root, paths.cronsDir).flatMap((job) => job.crons);
+
   return {
     desired,
     reasons,
@@ -2457,6 +2528,7 @@ export async function computeDesiredCloudflareResources(
     migrationsDir: paths.migrationsDir,
     migrations,
     needsAI: bindings.needsAI,
+    expectedCrons,
     // Mirror index.ts's emission signal EXACTLY (line 658): the sandbox container is emitted when
     // `void.json` enables it OR the source imports `void/sandbox` (the import-walk signal). Using
     // `isSandboxEnabled` alone would miss an import-only sandbox app (e.g. kitchen-sink) and the
@@ -3440,6 +3512,7 @@ export async function runCloudflareDeploy(
     migrations: preBuildMigrations,
     needsAI,
     needsSandbox,
+    expectedCrons,
   } = await computeDesiredCloudflareResources(root, voidConfig, configPath);
 
   // 2a. Postgres + auth guard — reject before any account op. This backend applies only
@@ -4312,6 +4385,7 @@ export async function runCloudflareDeploy(
     passthroughRawFields,
     needsAI,
     expectedContainers,
+    expectedCrons,
   });
   if (!verification.ok) {
     log.error(
