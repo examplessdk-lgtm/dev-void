@@ -2305,6 +2305,83 @@ describe('verifyGeneratedDeployConfig', () => {
     expect(result).toEqual({ ok: true });
   });
 
+  it('fails closed when the build DROPS a non-desired root id-bearing binding (EXTRA_DB)', () => {
+    // A hand-declared, NON-desired EXTRA_DB is pinned pre-build; the emitted artifact keeps the
+    // desired DB but no longer declares EXTRA_DB. The desired loop only inspects DB, and the
+    // completeness loop only walks what the artifact declares — neither sees the omission. The
+    // reverse-presence loop must reject it (a dropped id-binding silently strips a capability).
+    const snapshot = snapshotBindingIdentities({
+      d1_databases: [
+        { binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID },
+        { binding: 'EXTRA_DB', database_name: 'extra', database_id: OTHER_D1_ID },
+      ],
+    });
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] },
+      bindingIdentitySnapshot: snapshot,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/EXTRA_DB/);
+    expect(result.reason).toMatch(/dropped/);
+  });
+
+  it('fails closed when the build drops a pinned id-bearing binding by removing the whole field', () => {
+    // The KV field is present pre-build (one pinned namespace) but the emitted artifact omits the
+    // `kv_namespaces` field entirely. A removed field means every pinned binding in it is missing —
+    // the reverse-presence loop rejects it while the D1 binding still passes.
+    const snapshot = snapshotBindingIdentities({
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+      kv_namespaces: [{ binding: 'EXTRA_KV', id: REAL_KV_ID }],
+    });
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] },
+      bindingIdentitySnapshot: snapshot,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/EXTRA_KV/);
+  });
+
+  it('passes when every pinned id-bearing binding (incl. a non-desired one) survives the build', () => {
+    // No-regression for the reverse loop: the desired DB and a non-desired EXTRA_DB are both pinned
+    // pre-build and both present unchanged in the artifact, so neither the completeness nor the
+    // reverse-presence loop objects.
+    const snapshot = snapshotBindingIdentities({
+      d1_databases: [
+        { binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID },
+        { binding: 'EXTRA_DB', database_name: 'extra', database_id: OTHER_D1_ID },
+      ],
+    });
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      d1_databases: [
+        { binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID },
+        { binding: 'EXTRA_DB', database_name: 'extra', database_id: OTHER_D1_ID },
+      ],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] },
+      bindingIdentitySnapshot: snapshot,
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
   // --- Pass-through assert-set completeness (fields Void never emits) + queue ⊆ desired ---
 
   it('passes the full kitchen-sink shape (empty resource arrays, DO/containers, desired queues)', () => {
@@ -2471,6 +2548,53 @@ describe('verifyGeneratedDeployConfig', () => {
       workerName: 'myapp',
       desired: { kvNamespaces: [], queues: ['jobs'] },
       passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('fails closed when a desired queue is DROPPED (the emitted queues field is absent)', () => {
+    // `mergeBindings` emits every desired queue as both a producer AND a consumer, so a desired
+    // queue with NO emitted `queues` field at all is a queue binding the build dropped — the worker
+    // would lose message processing and leave `QUEUE_jobs` undefined. The emitted ⊆ desired check
+    // waves this through (nothing emitted); the per-group presence check must reject it.
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: ['jobs'] },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/jobs/);
+    expect(result.reason).toMatch(/producer and a consumer/);
+  });
+
+  it('fails closed when a desired queue keeps only the producer (consumer dropped)', () => {
+    // The artifact retains the producer but drops the consumer — the worker can still enqueue but
+    // never processes. Per-group presence is why the merged reader cannot catch this: `jobs` is
+    // still in the merged name set, so only checking each group separately rejects it.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      queues: { producers: [{ binding: 'JOBS', queue: 'jobs' }], consumers: [] },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: ['jobs'] },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/jobs/);
+    expect(result.reason).toMatch(/producer and a consumer/);
+  });
+
+  it('passes when there are no desired queues and none are emitted', () => {
+    // No-regression: an app with no queues emits no `queues` field, and the per-group check has
+    // nothing to require — the empty desired set passes.
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
     });
     expect(result).toEqual({ ok: true });
   });
@@ -3751,6 +3875,60 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
     expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'apply')).toBe(true);
     expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'list')).toBe(true);
     expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
+  });
+
+  it('fails closed BEFORE whoami when the pre-build env-schema probe mutates the uploader', async () => {
+    // The uploader baseline is captured at the START of the deploy — before the env-schema probe,
+    // which runs project code (the user's Vite config + env.ts). A probe that overwrites the hashed
+    // wrangler bundle is caught by the re-check immediately before `whoami`, the FIRST credentialed
+    // run — so no credentialed wrangler call ever executes the tampered bundle. Proves the baseline
+    // is snapshotted before the first project-code execution.
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    let probed = false;
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      // The env-schema probe stands in for pre-build project code overwriting the bundle.
+      resolveSchemaFacts: (() => {
+        probed = true;
+        return okSchemaFacts();
+      }) as CloudflareDeployDeps['resolveSchemaFacts'],
+      hashWranglerUploader: () => (probed ? 'tampered-by-probe' : 'clean-at-start'),
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // whoami never ran — the deploy refused before the first credentialed call.
+    expect(trace).not.toContain('wrangler:whoami');
+    expect(wranglerArgs.some((a) => a[0] === 'whoami')).toBe(false);
+  });
+
+  it('fails closed BEFORE the provisioner when the uploader changes after whoami (--provision)', async () => {
+    // Defense-in-depth for the pre-build sequence: the baseline holds through `whoami`, then the
+    // uploader changes before the credentialed provisioner runs. The re-check immediately before the
+    // provision call fails closed against the same baseline, so `wrangler <res> create` never
+    // executes the tampered bundle.
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    let tampered = false;
+    const { deps, trace, exitCalls } = harness({
+      hashWranglerUploader: () => (tampered ? 'tampered' : 'clean'),
+      // whoami is the last step before provision; flip the bundle as it returns so the assert
+      // immediately before the provision call catches it.
+      runWrangler: (args) => {
+        trace.push(`wrangler:${args[0]}`);
+        if (args[0] === 'whoami') {
+          tampered = true;
+          return { ...cleanExit, stdout: '{"loggedIn":true}' };
+        }
+        return cleanExit;
+      },
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Reached whoami, but refused before provisioning ran.
+    expect(trace).toContain('wrangler:whoami');
+    expect(trace).not.toContain('provision');
   });
 });
 

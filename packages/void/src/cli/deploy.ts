@@ -1157,6 +1157,35 @@ function collectEmittedQueueNames(value: unknown): Array<string> {
   return names;
 }
 
+/**
+ * The queue NAMES the emitted artifact binds in ONE group (`producers` or `consumers`), as a Set.
+ * Read defensively — a wrong-shaped `queues` field, a missing group, or an entry with no readable
+ * `queue` string contributes no name — so a missing/empty group yields an EMPTY set. Used to assert
+ * every DESIRED queue survives in BOTH groups: `mergeBindings` (index.ts) emits each desired queue as
+ * both a producer AND a consumer, so per-group presence is required — {@link collectEmittedQueueNames}
+ * merges the two groups and cannot tell that a queue lost one of its two sides.
+ */
+function collectEmittedQueueGroupNames(
+  value: unknown,
+  group: 'producers' | 'consumers',
+): Set<string> {
+  const names = new Set<string>();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return names;
+  }
+  const list = (value as Record<string, unknown>)[group];
+  if (!Array.isArray(list)) {
+    return names;
+  }
+  for (const entry of list) {
+    const name = readD1EntryString(entry, 'queue');
+    if (name !== undefined) {
+      names.add(name);
+    }
+  }
+  return names;
+}
+
 /** The CF Vite plugin's deploy-config redirect that a bare `wrangler deploy` follows. */
 function deployPointerPath(root: string): string {
   return join(root, '.wrangler', 'deploy', 'config.json');
@@ -1480,6 +1509,31 @@ export function verifyGeneratedDeployConfig(
         };
       }
     }
+    // (c) Reverse-presence — the desired loop (a) inspects only the DESIRED bindings and the
+    // completeness loop (b) walks only what the artifact DECLARES, so neither sees a NON-desired,
+    // manually-declared root id-bearing binding (e.g. a hand-added `EXTRA_DB`) the build DROPPED: it
+    // is absent from `desired`, and (b) cannot iterate an omission. Walk the PINNED snapshot instead —
+    // every pinned `<field>:<binding>` must still appear among the emitted id-bearing bindings (read
+    // the SAME way (b) reads them). A field the build removed entirely leaves every pinned binding in
+    // it missing. This is the exact mirror of the pass-through reverse-presence loop (A1) below and is
+    // FP-safe on the same reasoning: a legitimate CF-plugin build spreads the root config, so no
+    // pinned id-binding is ever dropped; `bindingIdentitySnapshot` holds only bindings that had a real
+    // id pre-build, so a placeholder/absent id is never asserted here.
+    const emittedIdentityKeys = new Set<string>();
+    for (const { field, binding } of collectConfigBindingIdentities(generated)) {
+      emittedIdentityKeys.add(bindingIdentityKey(field, binding));
+    }
+    for (const key of snapshot.keys()) {
+      if (!emittedIdentityKeys.has(key)) {
+        const separator = key.indexOf(':');
+        const field = key.slice(0, separator);
+        const binding = key.slice(separator + 1);
+        return {
+          ok: false,
+          reason: `generated config no longer declares the ${field} binding ${JSON.stringify(binding)} that was present before the build — refusing to deploy a build that dropped an id-bearing binding the root config declared.`,
+        };
+      }
+    }
   }
   // (A) Pass-through assert-set — every entry the artifact declares in a resource field Void's own
   // build never emits ({@link DEPLOY_PASSTHROUGH_ASSERT_FIELDS}, derived from the wrangler binding
@@ -1657,6 +1711,24 @@ export function verifyGeneratedDeployConfig(
         return {
           ok: false,
           reason: `generated config declares a queue binding ${JSON.stringify(name)} that Void did not derive from source — refusing to deploy a queue binding the build injected.`,
+        };
+      }
+    }
+    // (B1) desired ⊆ emitted, PER GROUP — the emitted ⊆ desired check above rejects an INJECTED
+    // queue but waves through a DROPPED one: an absent/empty `queues` field, or one retaining only
+    // the producer OR only the consumer, would deploy a worker that loses message processing or
+    // leaves a `QUEUE_*` binding undefined. `mergeBindings` (index.ts) emits EVERY desired queue as
+    // BOTH a producer and a consumer (both groups mapped from the SAME scanned array), so requiring
+    // each desired queue name in both emitted groups is FP-safe. Read each group defensively (a
+    // missing/empty/wrong-shaped `queues` field yields empty sets → any desired queue is reported
+    // missing → reject); per-group presence is why this cannot reuse the merged reader above.
+    const emittedProducers = collectEmittedQueueGroupNames(generated.queues, 'producers');
+    const emittedConsumers = collectEmittedQueueGroupNames(generated.queues, 'consumers');
+    for (const name of expected.desired.queues) {
+      if (!emittedProducers.has(name) || !emittedConsumers.has(name)) {
+        return {
+          ok: false,
+          reason: `generated config no longer binds the queue ${JSON.stringify(name)} as both a producer and a consumer that Void derived from source — refusing to deploy a build that dropped a queue binding the source declared.`,
         };
       }
     }
@@ -3313,6 +3385,44 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
+  // 3b-i. Pin the wrangler UPLOADER bundle NOW — at the START of the credentialed sequence, BEFORE
+  // any project code runs and BEFORE any credentialed wrangler call. The env-schema probe (3c), the
+  // `whoami` auth check (3e), and — under `--provision` — the provisioner all run before the build,
+  // and the probe executes ARBITRARY project code (the user's Vite config + env.ts). That code runs
+  // with the parent's Cloudflare creds scrubbed so it can only edit FILES — but that INCLUDES the
+  // `wrangler-dist` bundle every credentialed wrangler run executes (whoami, the provisioner's own
+  // `wrangler <res> create`, and the post-build secret list / remote D1 migrate / deploy), so a
+  // probe/build that overwrites it would run attacker code WITH the CF token. Snapshot the bundle's
+  // content hash HERE; this pre-probe snapshot is the SINGLE baseline every later check compares
+  // against — it is never re-baselined (that would bless a mutation). Everything above only
+  // AST-parses source (`computeDesiredCloudflareResources`) or reads config files — no project code
+  // runs — so this is genuinely captured before the FIRST project-code execution. A legitimate
+  // probe/build never touches `node_modules/wrangler`, so the hash is stable from here through every
+  // credentialed run. (This closes the uploader-swap-before-a-credentialed-run vector only; a
+  // fully-compromised build dependency remains a trust boundary.)
+  const hashUploader = deps.hashWranglerUploader ?? hashWranglerUploader;
+  const wranglerUploaderHashBefore = hashUploader(root);
+  // Re-hash the wrangler uploader and assert it still matches the one baseline above. Invoked
+  // IMMEDIATELY BEFORE EACH credentialed run — the pre-build `whoami` and provision, and the
+  // post-build secret list, D1 migrate/list, and deploy — always against this same pre-probe
+  // baseline. Fails closed on any change or an unresolvable/unreadable binary (either hash
+  // `undefined`).
+  const assertUploaderStillPinned = (): boolean => {
+    const check = assertWranglerUploaderUnchanged(wranglerUploaderHashBefore, hashUploader(root));
+    if (check.ok) {
+      return true;
+    }
+    log.error(
+      [
+        'deploy: refusing to run the wrangler uploader with your Cloudflare credentials.',
+        check.reason,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    );
+    return false;
+  };
+
   // 3c. Derive the env-INSENSITIVE schema facts — the required-secret NAMES + the keys
   // flagged `.secret()` — AND enforce the v1 envDir/mode narrowing, in an ISOLATED
   // SUBPROCESS under a scrubbed env. Importing the user's env.ts + resolving the Vite
@@ -3353,6 +3463,11 @@ export async function runCloudflareDeploy(
   // 3e. Confirm wrangler auth. `whoami` gets the SAME `-c`/`--env=`/pinned-transport
   // context as migrate/deploy, so it authenticates against the exact endpoint they use.
   const runWrangler = deps.runWrangler ?? createDeployWranglerRunner(root, accountId, apiBaseUrl);
+  // Re-verify the uploader immediately before this FIRST credentialed run — the env-schema probe
+  // above ran project code (env.ts) that could have overwritten the hashed bundle `whoami` executes.
+  if (!assertUploaderStillPinned()) {
+    return exit(1);
+  }
   const whoami = await Promise.resolve(
     runWrangler(['whoami', '--json', '-c', configPath, '--env='], { capture: true }),
   );
@@ -3410,6 +3525,13 @@ export async function runCloudflareDeploy(
 
   // 4. Provision (--provision) OR drift-check (no --provision).
   if (options.provision) {
+    // Re-verify the uploader immediately before the credentialed provisioner, which runs
+    // `wrangler <res> create` with the CF token. Nothing between `whoami` and here runs project
+    // code, so this is defense-in-depth against the same probe-swap vector — against the one
+    // pre-probe baseline, never re-baselined.
+    if (!assertUploaderStillPinned()) {
+      return exit(1);
+    }
     const provision = deps.provision ?? provisionModule.provisionCloudflareResources;
     let result;
     try {
@@ -3639,38 +3761,13 @@ export async function runCloudflareDeploy(
     ((env: NodeJS.ProcessEnv) => {
       execSync(resolveProjectCommand(root, 'vite build'), { cwd: root, stdio: 'inherit', env });
     });
-  // Pin the wrangler UPLOADER across the build, mirroring the config/account/binding-id pins. The
-  // build runs untrusted project code with the parent's Cloudflare creds scrubbed, so it can only
-  // edit FILES — but that INCLUDES the `wrangler-dist` bundle every post-build credentialed wrangler
-  // run (the secret list, the remote D1 migrate, and the deploy) executes. A build that overwrites
-  // it runs attacker code WITH the CF token. Snapshot the bundle's content hash IMMEDIATELY BEFORE
-  // the build; the pre-build snapshot is the SINGLE baseline every later check compares against —
-  // it is never re-baselined post-build (that would bless a mutation). A legitimate `vite build`
-  // never touches `node_modules/wrangler`, so the hash is stable. (This closes the "build swapped
-  // the uploader" vector only; a fully-compromised build dependency remains a trust boundary.)
-  const hashUploader = deps.hashWranglerUploader ?? hashWranglerUploader;
-  const wranglerUploaderHashBefore = hashUploader(root);
-  // Re-hash the wrangler uploader NOW and assert it still matches the pre-build baseline. Post-build
-  // project code (importing env.ts, running drizzle-kit) runs BETWEEN this build and the
-  // credentialed wrangler spawns AND interleaves with them, so a single early check is not enough —
-  // this helper is invoked IMMEDIATELY BEFORE EACH credentialed spawn (the secret list, the D1
-  // migrate/list, and the deploy), always against the same pre-build baseline. Fails closed on any
-  // change or an unresolvable/unreadable binary (either hash `undefined`).
-  const assertUploaderStillPinned = (): boolean => {
-    const check = assertWranglerUploaderUnchanged(wranglerUploaderHashBefore, hashUploader(root));
-    if (check.ok) {
-      return true;
-    }
-    log.error(
-      [
-        'deploy: refusing to run the wrangler uploader with your Cloudflare credentials.',
-        check.reason,
-      ]
-        .filter(Boolean)
-        .join('\n'),
-    );
-    return false;
-  };
+  // The wrangler UPLOADER was pinned into `wranglerUploaderHashBefore` at the START of the deploy
+  // (before the env-schema probe and the pre-build credentialed runs), and `assertUploaderStillPinned`
+  // re-checks it against that ONE baseline before every credentialed spawn — never re-baselined. The
+  // build below runs untrusted project code with the parent's Cloudflare creds scrubbed, so it can
+  // only edit FILES — but that INCLUDES the `wrangler-dist` bundle every post-build credentialed
+  // wrangler run (the secret list, the remote D1 migrate, and the deploy) executes — so re-verify
+  // against the same baseline right after it, and again immediately before each spawn.
   try {
     runBuild(buildChildEnv);
   } catch (err) {
@@ -3678,7 +3775,7 @@ export async function runCloudflareDeploy(
     return exit(getExitCode(err));
   }
   // Early fail — re-check right after the build, before the ground-truth gates do any work. No
-  // remote mutation has happened since the pre-build snapshot, so a changed/unverifiable uploader
+  // remote mutation has happened since the baseline was pinned, so a changed/unverifiable uploader
   // here leaves nothing half-done. Each credentialed spawn below re-checks again immediately.
   if (!assertUploaderStillPinned()) {
     return exit(1);
