@@ -1,12 +1,15 @@
 import type { SubcommandDef } from './subcommand-prompt.ts';
 
 const LOG_LEVELS = new Set(['error', 'warn', 'info', 'log', 'debug', 'all']);
+// A status class (`5xx`), an exact 3-digit code (`500`), or `all`.
+const STATUS_FILTER = /^([1-5]xx|\d{3}|all)$/;
 
 export const projectSubcommands: Array<SubcommandDef> = [
   { name: 'status', arg: '[name]', description: 'Show deployments (omit name for linked project)' },
   { name: 'link', arg: '[name]', description: 'Link directory to a project' },
   { name: 'list', description: 'List your projects' },
   { name: 'logs', description: 'Show runtime logs from the deployed project' },
+  { name: 'requests', description: 'Show request-level traffic (status, method, timing)' },
   { name: 'rollback', arg: '[deployId]', description: 'Roll back to a previous deployment' },
   { name: 'cancel', arg: '[deployId]', description: 'Cancel an active deployment' },
   {
@@ -28,6 +31,7 @@ export type ProjectArgs =
       deployment: string;
       level: string;
     }
+  | { subcommand: 'requests'; status: string; range: string }
   | { subcommand: 'rollback'; deployId: string }
   | { subcommand: 'cancel'; deployId: string }
   | { subcommand: 'delete'; name: string; force: boolean }
@@ -92,6 +96,27 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
     return { subcommand, filter, range, deployment, level };
   }
 
+  if (subcommand === 'requests') {
+    let status = '';
+    let range = '1h';
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--status' && rest[i + 1]) {
+        const value = rest[++i];
+        if (!STATUS_FILTER.test(value)) {
+          throw new Error(
+            `project: Invalid --status '${value}'. Use a class like 5xx or an exact code like 500.`,
+          );
+        }
+        status = value;
+      } else if (rest[i] === '--range' && rest[i + 1]) {
+        range = rest[++i];
+      } else {
+        throw new Error(`project: Unexpected argument '${rest[i]}'.`);
+      }
+    }
+    return { subcommand, status, range };
+  }
+
   if (subcommand === 'rollback') {
     const [deployId, extra] = rest;
     if (deployId?.startsWith('-')) {
@@ -144,6 +169,6 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
   }
 
   throw new Error(
-    'project: Usage: void project <status|link|list|logs|rollback|cancel|delete|purge-cache>.',
+    'project: Usage: void project <status|link|list|logs|requests|rollback|cancel|delete|purge-cache>.',
   );
 }

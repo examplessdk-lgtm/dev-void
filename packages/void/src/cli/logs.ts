@@ -128,6 +128,11 @@ export function filterLogEntries(
         if (entry.exceptions.length > 0) {
           return true;
         }
+        // A 5xx response is an error even when the worker neither threw nor
+        // logged (mirrors the server-side `blob6 LIKE '5%'` predicate).
+        if (parseInt(entry.status, 10) >= 500) {
+          return true;
+        }
         for (const l of entry.logs) {
           if (l.level === 'error') {
             return true;

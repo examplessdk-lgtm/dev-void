@@ -32,6 +32,7 @@ Use this page as a command reference. If you are setting up a project for the fi
 | `void auth login`                 | Authenticate with Void                                              |
 | `void project link`               | Link directory to a project                                         |
 | `void project logs`               | Show runtime logs from deployed project                             |
+| `void project requests`           | Show request-level traffic (status, method, timing)                 |
 | `void project rollback`           | Roll back to a previous deployment                                  |
 | `void project cancel`             | Cancel an active deployment                                         |
 | `void project purge-cache`        | Purge all cached pages                                              |
@@ -162,12 +163,12 @@ void project logs [--level <level>] [--filter <text>] [--range <duration>] [--de
 
 Show runtime logs from the deployed project. Uses the linked project from `.void/project.json`.
 
-| Flag                 | Purpose                                                                                                                                                 | Default |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `--range <duration>` | How far back to look. Format: `<number><unit>` (m/h/d). Max 7d.                                                                                         | `1h`    |
-| `--level <level>`    | Filter by log level. One of `error`, `warn`, `info`, `log`, `debug`, `all`. `error` also includes uncaught exceptions and non-`ok` requests.            | `all`   |
-| `--filter <text>`    | Case-insensitive **substring** match against log message text and exception name/message — not a level filter. Shows the full request entry on any hit. | none    |
-| `--deployment <id>`  | Filter logs to a specific deployment ID.                                                                                                                | none    |
+| Flag                 | Purpose                                                                                                                                                                                                         | Default |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `--range <duration>` | How far back to look. Format: `<number><unit>` (m/h/d). Max 7d.                                                                                                                                                 | `1h`    |
+| `--level <level>`    | Filter by log level. One of `error`, `warn`, `info`, `log`, `debug`, `all`. `error` also includes uncaught exceptions, non-`ok` outcomes, and any 5xx response — even when the worker neither threw nor logged. | `all`   |
+| `--filter <text>`    | Case-insensitive **substring** match against log message text and exception name/message — not a level filter. Shows the full request entry on any hit.                                                         | none    |
+| `--deployment <id>`  | Filter logs to a specific deployment ID.                                                                                                                                                                        | none    |
 
 Output shows one line per request (`HH:MM:SS METHOD URL STATUS`) with indented console log and exception lines beneath. Errors and exceptions are colored red, warnings yellow.
 
@@ -178,7 +179,32 @@ void project logs --level error --range 12h
 void project logs --level error --filter websocket
 ```
 
-Tip: `void project logs` only sees what Cloudflare Tail captures — top-level `console.*` calls and uncaught throws. Application errors caught and persisted to your own DB are invisible to tail. Surface them via `console.error(...)` or `void/log`'s `logger.error(...)` so they show up under `--level error`.
+Tip: `void project logs` only sees what Cloudflare Tail captures — top-level `console.*` calls and uncaught throws. Application errors caught and persisted to your own DB are invisible to tail. Surface them via `console.error(...)` or `void/log`'s `logger.error(...)` so they show up under `--level error`. For 5xx that never reach your worker at all (edge-router errors, static/SPA projects), use `void project requests --status 5xx`.
+
+### `void project requests`
+
+```
+void project requests [--status <filter>] [--range <duration>]
+```
+
+Show request-level traffic recorded at the edge for the linked project: one line per request with time, method, HTTP status, request type, and server timing. Unlike `void project logs` (which only has rows for invoked user workers), this reads the edge request-metering data, so it also surfaces:
+
+- **5xx the edge router generated itself** — missing deployment manifest, static-asset read timeouts, SSR dispatch timeouts — which never invoke your worker and so never appear in logs.
+- **Requests to static/SPA projects**, which are served directly from storage and never run a worker.
+
+| Flag                 | Purpose                                                                                       | Default |
+| -------------------- | --------------------------------------------------------------------------------------------- | ------- |
+| `--status <filter>`  | Filter by status: a class (`2xx`, `3xx`, `4xx`, `5xx`) or an exact 3-digit code (e.g. `500`). | none    |
+| `--range <duration>` | How far back to look. Format: `<number><unit>` (m/h/d). Max 7d.                               | `1h`    |
+
+Output shows one line per request (`HH:MM:SS METHOD STATUS TYPE DURATION`). 5xx are colored red, 4xx yellow. Note: request paths are not recorded, so this view shows status and type rather than URLs — use `void project logs` for per-URL, per-log detail on requests that do reach your worker.
+
+Examples:
+
+```
+void project requests --status 5xx
+void project requests --range 24h
+```
 
 ### `void project rollback [deployId]`
 

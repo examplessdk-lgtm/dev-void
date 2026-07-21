@@ -23,6 +23,10 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
       args.level || undefined,
     );
   }
+  if (args.subcommand === 'requests') {
+    const { runRequestsCommand } = await import('./requests.ts');
+    return runRequestsCommand(root, args.range, args.status || undefined);
+  }
   if (args.subcommand === 'rollback') {
     const { runRollbackCommand } = await import('./rollback.ts');
     return runRollbackCommand(root, args.deployId || undefined);

@@ -197,7 +197,7 @@ if (helpPath) {
     },
     {
       name: 'project',
-      hint: 'status | link | list | logs | rollback | cancel | delete | purge-cache',
+      hint: 'status | link | list | logs | requests | rollback | cancel | delete | purge-cache',
       description: 'Manage projects and deployments',
     },
     { name: 'secret', hint: 'list | put | delete | sync', description: 'Manage project secrets' },

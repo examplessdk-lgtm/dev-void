@@ -263,6 +263,11 @@ Available methods on the "void_" object:
     void_.getLogs(projectId, since, limit?, deploymentId?) → { timestamp, outcome, logs, exceptions, url, method, status }[]
       since: duration string (e.g. "1h"), limit: number (default 200)
 
+  Requests:
+    void_.getRequests(projectId, since, limit?, status?) → { timestamp, type, method, status, bytes, durationMs }[]
+      since: duration string (e.g. "1h"), limit: number (default 200), status: class like "5xx" or exact code like "500"
+      Edge request metering — includes edge-generated 5xx and static/SPA requests that never invoke a worker.
+
   Secrets:
     void_.listSecrets(projectId) → { name }[]
     void_.setSecret(projectId, name, value) → { ok, name }

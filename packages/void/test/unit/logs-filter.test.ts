@@ -70,6 +70,17 @@ describe('filterLogEntries', () => {
     );
   });
 
+  it('--level error matches a 5xx status even when the worker did not throw or log', () => {
+    // A returned Response(status:500): outcome ok, no logs, no exceptions.
+    const silent500 = entry({ outcome: 'ok', logs: [], exceptions: [], status: '500' });
+    expect(filterLogEntries([E_OK, silent500], 'error', '')).toEqual([silent500]);
+  });
+
+  it('--level error ignores a non-5xx status with no error signal', () => {
+    const ok404 = entry({ outcome: 'ok', logs: [], exceptions: [], status: '404' });
+    expect(filterLogEntries([ok404], 'error', '')).toEqual([]);
+  });
+
   it('--level warn matches only warn entries (does not include error)', () => {
     expect(
       filterLogEntries([E_OK, E_ERROR_LOG, E_WARN_LOG, E_INFO_LOG, E_EXCEPTION], 'warn', ''),
@@ -198,5 +209,56 @@ describe('PlatformClient.getLogs URL', () => {
     const url = lastUrl(fetchMock);
     expect(url).toContain('deploymentId=dpl_abc');
     expect(url).toContain('level=warn');
+  });
+});
+
+describe('PlatformClient.getRequests URL', () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function setFetchMock() {
+    const fetchMock: ReturnType<typeof vi.fn> = vi.fn(async () => Response.json({ data: [] }));
+    globalThis.fetch = fetchMock as typeof fetch;
+    return fetchMock;
+  }
+
+  function lastUrl(fetchMock: ReturnType<typeof vi.fn>): string {
+    const calls = fetchMock.mock.calls as Array<Array<unknown>>;
+    if (calls.length === 0) {
+      throw new Error('fetch was not called');
+    }
+    return String(calls[0]?.[0]);
+  }
+
+  it('hits the /requests endpoint with since and limit, omitting status by default', async () => {
+    const fetchMock = setFetchMock();
+    const client = new PlatformClient('tok', { apiUrl: 'http://localhost:1234' });
+    await client.getRequests('proj_1', '12h');
+
+    const url = lastUrl(fetchMock);
+    expect(url).toContain('/projects/proj_1/requests?');
+    expect(url).toContain('since=12h');
+    expect(url).toContain('limit=200');
+    expect(url).not.toContain('status=');
+  });
+
+  it("omits status when status === 'all'", async () => {
+    const fetchMock = setFetchMock();
+    const client = new PlatformClient('tok', { apiUrl: 'http://localhost:1234' });
+    await client.getRequests('proj_1', '1h', 200, 'all');
+
+    expect(lastUrl(fetchMock)).not.toContain('status=');
+  });
+
+  it('appends a status class filter', async () => {
+    const fetchMock = setFetchMock();
+    const client = new PlatformClient('tok', { apiUrl: 'http://localhost:1234' });
+    await client.getRequests('proj_1', '1h', 200, '5xx');
+
+    expect(lastUrl(fetchMock)).toContain('status=5xx');
   });
 });

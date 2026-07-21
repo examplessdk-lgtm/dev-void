@@ -102,6 +102,7 @@ const HELP_TREE: HelpTree = {
       { command: 'link [name]', description: 'Link this directory to a project' },
       { command: 'list', description: 'List your projects' },
       { command: 'logs', description: 'Show runtime logs from the deployed project' },
+      { command: 'requests', description: 'Show request-level traffic (status, method, timing)' },
       { command: 'rollback [deployId]', description: 'Roll back to a previous deployment' },
       { command: 'cancel [deployId]', description: 'Cancel an active deployment' },
       { command: 'delete [name]', description: 'Delete a project and all its resources' },
@@ -140,6 +141,28 @@ const HELP_TREE: HelpTree = {
           {
             command: 'void project logs --filter websocket',
             description: 'Substring search over log messages',
+          },
+        ],
+      },
+      requests: {
+        summary:
+          'Show request-level traffic (status, method, type, timing). Surfaces 5xx that the edge router generated itself and requests to static/SPA projects that never invoke a worker — neither of which appears in `project logs`.',
+        usage: ['void project requests [options]'],
+        options: [
+          {
+            command: '--status <filter>',
+            description: 'Filter by status: a class like 5xx or an exact code like 500',
+          },
+          { command: '--range <range>', description: 'Time range to query (default: 1h)' },
+        ],
+        examples: [
+          {
+            command: 'void project requests --status 5xx',
+            description: 'Show recent server-error responses, including edge-generated ones',
+          },
+          {
+            command: 'void project requests --range 24h',
+            description: 'Show all request traffic in the last day',
           },
         ],
       },

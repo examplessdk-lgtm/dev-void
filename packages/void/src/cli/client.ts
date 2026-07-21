@@ -157,6 +157,15 @@ export type LogEntry = {
   status: string;
 };
 
+export type RequestEntry = {
+  timestamp: string;
+  type: string;
+  method: string;
+  status: string;
+  bytes: number;
+  durationMs: number;
+};
+
 export type BuildSummary = {
   id: string;
   status: string;
@@ -904,6 +913,34 @@ export class PlatformClient {
     }
 
     const json = (await res.json()) as { data: Array<LogEntry> };
+    return json.data;
+  }
+
+  async getRequests(
+    projectId: string,
+    since: string,
+    limit = 200,
+    status?: string,
+  ): Promise<Array<RequestEntry>> {
+    const params = new URLSearchParams({
+      since,
+      limit: String(limit),
+    });
+    if (status && status !== 'all') {
+      params.set('status', status);
+    }
+
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/requests?${params}`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to fetch requests', res);
+    }
+
+    const json = (await res.json()) as { data: Array<RequestEntry> };
     return json.data;
   }
 

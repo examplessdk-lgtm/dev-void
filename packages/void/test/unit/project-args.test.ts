@@ -80,6 +80,46 @@ describe('parseProjectArgs', () => {
     });
   });
 
+  describe('requests', () => {
+    it('parses requests with no flags', () => {
+      expect(parseProjectArgs(['requests'])).toEqual({
+        subcommand: 'requests',
+        status: '',
+        range: '1h',
+      });
+    });
+
+    it('parses --status and --range together', () => {
+      expect(parseProjectArgs(['requests', '--status', '5xx', '--range', '30m'])).toEqual({
+        subcommand: 'requests',
+        status: '5xx',
+        range: '30m',
+      });
+    });
+
+    it('accepts status classes, exact codes, and all', () => {
+      for (const v of ['2xx', '4xx', '5xx', '500', '404', 'all']) {
+        const parsed = parseProjectArgs(['requests', '--status', v]);
+        if (parsed.subcommand !== 'requests') {
+          throw new Error('expected requests subcommand');
+        }
+        expect(parsed.status).toBe(v);
+      }
+    });
+
+    it('rejects an invalid --status value', () => {
+      expect(() => parseProjectArgs(['requests', '--status', 'oops'])).toThrow(
+        "project: Invalid --status 'oops'. Use a class like 5xx or an exact code like 500.",
+      );
+    });
+
+    it('rejects unknown flags', () => {
+      expect(() => parseProjectArgs(['requests', '--bogus'])).toThrow(
+        "project: Unexpected argument '--bogus'.",
+      );
+    });
+  });
+
   describe('purge-cache', () => {
     it('parses purge-cache', () => {
       expect(parseProjectArgs(['purge-cache'])).toEqual({
