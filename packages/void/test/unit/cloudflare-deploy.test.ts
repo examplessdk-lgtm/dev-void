@@ -31,7 +31,11 @@ import {
   type EnvSchemaProbeResult,
   type EnvSchemaProbeSpawnResult,
 } from '../../src/cli/env-schema-probe.ts';
-import type { SelfHostEnvContext, SelfHostSchemaFacts } from '../../src/cli/env-validation.ts';
+import {
+  dischargeSelfHostEnvContext,
+  type SelfHostEnvContext,
+  type SelfHostSchemaFacts,
+} from '../../src/cli/env-validation.ts';
 import type { CliLogger } from '../../src/cli/log-file.ts';
 import { provisionCloudflareResources, type ProvisionResult } from '../../src/cli/provision.ts';
 import { FRIENDLY_BINDING_NAMES } from '../../src/cli/wrangler.ts';
@@ -4151,6 +4155,184 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
     // Reached whoami, but refused before provisioning ran.
     expect(trace).toContain('wrangler:whoami');
     expect(trace).not.toContain('provision');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Config laundering by a probe that runs project code around the build:
+//   • the PRE-BUILD env-schema probe (step 3c) rewriting the root bindings, which
+//     would otherwise be captured as the step-6 "trusted" baseline (no-provision only);
+//   • the POST-build validate-emitted probe (step 8b) rewriting the root worker `name`,
+//     which the secrets gate resolves the worker from.
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — config laundering by a build-adjacent probe', () => {
+  /** Read → mutate → rewrite the root wrangler.jsonc, standing in for a tampering probe. */
+  function rewriteRootConfig(
+    root: string,
+    mutate: (config: Record<string, unknown>) => void,
+  ): void {
+    const configPath = join(root, 'wrangler.jsonc');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    mutate(config);
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+  }
+
+  // --- FIX 2: a PRE-BUILD probe that laundered the root bindings (no-provision only) ---
+
+  it('no-provision: fails closed at step 6 when the pre-build probe SWAPS a binding id', async () => {
+    // The env-schema probe (step 3c) runs BEFORE the step-6 binding snapshot. It rewrites the
+    // provisioned DB id in the root config; without the pre-probe comparison the laundered id would
+    // be captured as the trusted baseline. Fails closed BEFORE the build (step 7) even runs.
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      resolveSchemaFacts: (() => {
+        rewriteRootConfig(root, (c) => {
+          (c.d1_databases as Array<Record<string, unknown>>)[0].database_id = OTHER_D1_ID;
+        });
+        return okSchemaFacts();
+      }) as CloudflareDeployDeps['resolveSchemaFacts'],
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Caught at step 6 — before the build ran and before anything deployed.
+    expect(trace).not.toContain('build');
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('no-provision: fails closed at step 6 when the pre-build probe ADDS an id-bearing binding', async () => {
+    // The probe injects an EXTRA_KV the source never declared — a same-account data store the
+    // deployed worker would gain. The desired loop only walks {DB}; the pre-probe snapshot is what
+    // rejects the injected binding.
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      resolveSchemaFacts: (() => {
+        rewriteRootConfig(root, (c) => {
+          c.kv_namespaces = [{ binding: 'EXTRA_KV', id: OTHER_KV_ID }];
+        });
+        return okSchemaFacts();
+      }) as CloudflareDeployDeps['resolveSchemaFacts'],
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).not.toContain('build');
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('no-provision: fails closed at step 6 when the pre-build probe INJECTS a services binding', async () => {
+    // A pass-through binding Void never emits — the probe grants the deployed worker a service
+    // binding to another same-account worker. Caught by the pass-through snapshot comparison.
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      resolveSchemaFacts: (() => {
+        rewriteRootConfig(root, (c) => {
+          c.services = [{ binding: 'EVIL', service: 'someone-elses-worker' }];
+        });
+        return okSchemaFacts();
+      }) as CloudflareDeployDeps['resolveSchemaFacts'],
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).not.toContain('build');
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('no-provision: passes when the pre-build probe leaves the root config untouched', async () => {
+    // The critical no-regression case: an inert probe means the pre-probe and step-6 snapshots are
+    // identical, so the new assertion never fires and the deploy proceeds normally.
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, wranglerArgs, exitCalls } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
+  });
+
+  it('--provision: the pre-build snapshot assertion is SKIPPED (guard scoped to no-provision)', async () => {
+    // Under --provision the provisioner legitimately writes real ids into the config AFTER the
+    // probe, so pre-probe ≠ step-6 by design and the new assertion must NOT run (that path is the
+    // residual tracked in #283). Prove it by making the probe swap the DB id — the SAME mutation
+    // the no-provision case rejects — and confirming a --provision run proceeds to deploy instead.
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      resolveSchemaFacts: (() => {
+        rewriteRootConfig(root, (c) => {
+          (c.d1_databases as Array<Record<string, unknown>>)[0].database_id = OTHER_D1_ID;
+        });
+        return okSchemaFacts();
+      }) as CloudflareDeployDeps['resolveSchemaFacts'],
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
+  });
+
+  // --- FIX 1: a POST-build probe that rewrote the pinned worker NAME ---
+
+  // Schema facts declaring one required secret that is ABSENT from the (empty) emitted vars, so the
+  // real gate reaches the worker-name reconcile + the (stubbed) remote secret list.
+  function requiredSecretFacts(): EnvSchemaProbeResult {
+    return okSchemaFacts({ hasSchema: true, requiredKeys: ['STRIPE_KEY'], secretKeys: [] });
+  }
+
+  // The real gate, but with the remote `wrangler secret list` stubbed to report the secret EXISTS.
+  // If the name reconcile is ever removed, this stub would discharge the missing secret against the
+  // WRONG worker and the deploy would proceed — so these tests fail loudly on a regression.
+  const dischargeWithSecretPresent = ((
+    ctx: SelfHostEnvContext,
+    opts: Parameters<typeof dischargeSelfHostEnvContext>[1],
+  ) =>
+    dischargeSelfHostEnvContext(ctx, {
+      ...opts,
+      runWrangler: () => ({
+        stdout: JSON.stringify([{ name: 'STRIPE_KEY', type: 'secret_text' }]),
+        stderr: '',
+        status: 0,
+      }),
+    })) as CloudflareDeployDeps['dischargeSelfHostEnv'];
+
+  it('fails closed BEFORE deploy when the post-build probe rewrites the pinned worker name', async () => {
+    // The deploy pins name "myapp" at step 5. The emitted-var probe (step 8b, project code) rewrites
+    // the root config `name` to "evil-worker". The secrets gate resolves the worker from that name,
+    // so it would list secrets for the WRONG worker; the reconcile fails it closed before any deploy.
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      resolveSchemaFacts: (() =>
+        requiredSecretFacts()) as CloudflareDeployDeps['resolveSchemaFacts'],
+      validateEmittedVars: (async () => {
+        rewriteRootConfig(root, (c) => {
+          c.name = 'evil-worker';
+        });
+        return { kind: 'invalid-keys', invalidKeys: [] };
+      }) as CloudflareDeployDeps['validateEmittedVars'],
+      dischargeSelfHostEnv: dischargeWithSecretPresent,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // The build ran (the rewrite is post-build) but nothing deployed.
+    expect(trace).toContain('build');
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('passes when the post-build probe leaves the pinned worker name intact', async () => {
+    // No-regression: the emitted-var probe does not touch the name, so the config name still equals
+    // the pinned "myapp"; the gate discharges the (stubbed-present) remote secret and the deploy runs.
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      resolveSchemaFacts: (() =>
+        requiredSecretFacts()) as CloudflareDeployDeps['resolveSchemaFacts'],
+      dischargeSelfHostEnv: dischargeWithSecretPresent,
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
   });
 });
 

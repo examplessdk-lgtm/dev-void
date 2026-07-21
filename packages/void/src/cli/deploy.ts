@@ -1161,6 +1161,44 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 /**
+ * Recursively normalize every `Map` (at any depth) to a plain object keyed by its entries, so a
+ * Map-shaped value can be compared with {@link deepEqual} — which is JSON-shaped and does NOT
+ * handle `Map`. Handles the nested `Map<string, Map<…>>` {@link snapshotPassthroughIdentities}
+ * returns, as well as the flat `Map<string, string>` / `Map<string, unknown>` the other snapshots
+ * return. Arrays and plain objects pass through with their elements normalized.
+ */
+function normalizeMapsForCompare(value: unknown): unknown {
+  if (value instanceof Map) {
+    const obj: Record<string, unknown> = {};
+    for (const [key, val] of value) {
+      obj[String(key)] = normalizeMapsForCompare(val);
+    }
+    return obj;
+  }
+  if (Array.isArray(value)) {
+    return value.map(normalizeMapsForCompare);
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = normalizeMapsForCompare(val);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Structural equality for the possibly-`Map`-shaped pre-build snapshots — normalizes every Map to
+ * a plain object first (see {@link normalizeMapsForCompare}), then compares with the key-order-
+ * independent {@link deepEqual}. Used to assert the step-6 binding/pass-through snapshots match the
+ * pre-probe ones captured before any project code ran.
+ */
+function snapshotsDeepEqual(a: unknown, b: unknown): boolean {
+  return deepEqual(normalizeMapsForCompare(a), normalizeMapsForCompare(b));
+}
+
+/**
  * The reject shown when a PostgreSQL app ships checked-in `db/migrations/*.sql` through the
  * self-host Cloudflare backend. This backend applies ONLY remote D1 (SQLite) migrations; a pg
  * app desires Hyperdrive (never `desired.d1`), so its migrations would never run here and the
@@ -3951,6 +3989,53 @@ export async function runCloudflareDeploy(
     needsSandbox,
   );
 
+  // 6a. Reject a PRE-BUILD PROBE that laundered the root bindings (NO-PROVISION path only). The
+  // step-3c env-schema probe runs project code BEFORE the step-6 snapshots above, so a probe that
+  // rewrote wrangler.jsonc — swapping a binding id, ADDING an id-bearing / pass-through binding, or
+  // changing unsafe / tail_consumers / routes / containers — would be captured HERE as the trusted
+  // baseline, emitted by the build, and waved through the step-10 verifier that pins against it.
+  // `rootConfig` was parsed at step 3, BEFORE any project code ran, so it is the pre-probe ground
+  // truth. Rebuild the same four snapshots from it and assert they deep-equal the step-6 ones.
+  //
+  // Only in the no-provision path: the ONLY config write between the pre-probe parse and step 6 is
+  // step 5's reconcile, which touches only top-level `name`/`account_id` — none of which any of
+  // these snapshots read (they cover d1/kv/r2/hyperdrive ids, pass-through binding entries,
+  // unsafe/tail/routes raw fields, and containers) — so absent laundering the two are identical and
+  // a clean deploy always passes. Under `--provision` the provisioner legitimately writes real ids
+  // into the config after the probe, so pre-probe ≠ step-6 by design; closing that path needs
+  // delta-authorization against a live-provision model and is a known residual tracked in #283.
+  if (!options.provision) {
+    const preProbeBindingIdentities = snapshotBindingIdentities(rootConfig);
+    const preProbePassthroughIdentities = snapshotPassthroughIdentities(rootConfig);
+    const preProbePassthroughRawFields = snapshotPassthroughRawFields(rootConfig);
+    const preProbeExpectedContainers = reconstructExpectedContainers(
+      voidConfig,
+      root,
+      rootConfig,
+      needsSandbox,
+    );
+    // `snapshotBindingIdentities` / `…PassthroughIdentities` / `…PassthroughRawFields` return Maps,
+    // which the JSON-shaped `deepEqual` cannot compare — use `snapshotsDeepEqual` (Map-aware).
+    // `expectedContainers` is a plain array, so `deepEqual` handles it directly.
+    const rootBindingsLaundered =
+      !snapshotsDeepEqual(preProbeBindingIdentities, bindingIdentitySnapshot) ||
+      !snapshotsDeepEqual(preProbePassthroughIdentities, passthroughIdentitySnapshot) ||
+      !snapshotsDeepEqual(preProbePassthroughRawFields, passthroughRawFields) ||
+      !deepEqual(preProbeExpectedContainers, expectedContainers);
+    if (rootBindingsLaundered) {
+      log.error(
+        [
+          'deploy: the root wrangler config’s bindings, pass-through entries, or containers changed',
+          'during the pre-build env-schema probe (the config differs from its state before any',
+          'project code ran). Refusing to deploy a config a pre-build step rewrote — the binding set',
+          'the deploy would ship no longer matches the one present before the probe. Rebuild from a',
+          'clean checkout, then rerun.',
+        ].join('\n'),
+      );
+      return exit(1);
+    }
+  }
+
   // (The LOCAL migration gates run POST-build at step 8d, immediately before the remote
   // apply — not here — so they validate the exact files on disk AFTER the build. See step 8d.)
 
@@ -4121,6 +4206,11 @@ export async function runCloudflareDeploy(
       root,
       configPath,
       accountId,
+      // Pin the worker NAME too: the secret list resolves the worker from the config's
+      // `name`, which the emitted-var probe above (project code) could have rewritten
+      // since step 5 pinned it. The gate reconciles the config against this and fails
+      // closed on a mismatch, mirroring the account pin.
+      workerName,
     });
   } catch (err) {
     if (

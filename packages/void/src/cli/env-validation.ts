@@ -304,16 +304,23 @@ export type RunSecretList = (
  *   - `account-mismatch` — config-vs-requested account gate (thrown before any
  *                          spawn; its message names the account IDs, which are
  *                          caller/config identifiers, not wrangler output).
+ *   - `name-mismatch`    — config-vs-pinned worker-name gate (thrown before any
+ *                          spawn; its message names the worker names, which are
+ *                          caller/config identifiers, not wrangler output).
  */
 export type SecretListFailureReason =
   | 'spawn-error'
   | 'nonzero-exit'
   | 'signal'
   | 'malformed-output'
-  | 'account-mismatch';
+  | 'account-mismatch'
+  | 'name-mismatch';
 
-/** Wrangler-run failure reasons (excludes the pre-spawn `account-mismatch`). */
-type SecretListRunFailureReason = Exclude<SecretListFailureReason, 'account-mismatch'>;
+/** Wrangler-run failure reasons (excludes the pre-spawn account/name gates). */
+type SecretListRunFailureReason = Exclude<
+  SecretListFailureReason,
+  'account-mismatch' | 'name-mismatch'
+>;
 
 /** Safe scalars attached to a {@link SelfHostSecretListError} — never wrangler output. */
 export type SecretListFailureDetail = {
@@ -805,8 +812,9 @@ function invalidEnvReport(missing: Array<string>, invalidKeys: Array<string>): E
  * parent never evaluates arbitrary code with live credentials in scope. Applies
  * the three fences unchanged:
  *   - a PRESENT-EMPTY required key fails closed ALWAYS, before any wrangler spawn;
- *   - the target account is reconciled against the config's `account_id` BEFORE
- *     `secret list` is spawned;
+ *   - the pinned worker `name` is reconciled against the config's `name`, and the
+ *     target account against the config's `account_id`, BOTH BEFORE `secret list`
+ *     is spawned;
  *   - an ABSENT required key is discharged only by a same-named remote secret,
  *     else fails closed ({@link SelfHostFirstDeployError} on a not-yet-deployed
  *     worker, carrying the missing names + `wrangler secret put` guidance).
@@ -817,6 +825,13 @@ export async function dischargeSelfHostEnvContext(
     root: string;
     configPath: string;
     accountId?: string;
+    /**
+     * The worker name the deploy pinned (deploy.ts step 5). `wrangler secret list`
+     * resolves the worker from the config's top-level `name`, which a post-build
+     * probe can rewrite — so the config's `name` is reconciled against this before
+     * any spawn, mirroring the `account_id` reconcile.
+     */
+    workerName?: string;
     runWrangler?: RunSecretList;
     timeoutMs?: number;
   },
@@ -840,6 +855,12 @@ export async function dischargeSelfHostEnvContext(
     }
     return { hasSchema: true, remoteSecretNames: null };
   }
+
+  // Reconcile the pinned worker NAME against the config BEFORE any wrangler spawn:
+  // `wrangler secret list` resolves the worker from the config's `name`, which a
+  // post-build probe can rewrite, so a config `name` that no longer matches the
+  // pinned one fails closed here (mirrors the account reconcile below).
+  reconcileSelfHostWorkerName(options.configPath, options.workerName);
 
   // Reconcile the effective account BEFORE any wrangler spawn (config `account_id`
   // wins over CLOUDFLARE_ACCOUNT_ID, so a mismatch could list a different account).
@@ -895,6 +916,41 @@ function reconcileSelfHostAccount(
   return configAccountId ?? requestedAccountId;
 }
 
+/**
+ * Reconcile the config's top-level worker `name` against the name the deploy PINNED
+ * (deploy.ts step 5 writes `name: workerName` into the root config before the build).
+ * `wrangler secret list` resolves the worker from the config's `name`
+ * (`getLegacyScriptName`: `args.name ?? config.name` — we pass no `--name`), so a
+ * config whose `name` was CHANGED after it was pinned would make the gate list secrets
+ * for a DIFFERENT worker than the deploy ships — and a same-named secret there could
+ * falsely pass this preflight while the pinned worker deploys WITHOUT it.
+ *
+ * Fires ONLY when the config actually declares a `name` that DIFFERS from a passed
+ * pinned name (the same "both set and differ" guard as {@link reconcileSelfHostAccount})
+ * — post-pin the config's `name` IS `workerName`, so a later divergence is exactly the
+ * laundering signal, while an undefined pinned name or an undeclared config `name` never
+ * trips a legitimate deploy. Thrown BEFORE any spawn (its message names worker names,
+ * which are caller/config identifiers, never wrangler output).
+ */
+function reconcileSelfHostWorkerName(
+  configPath: string,
+  pinnedWorkerName: string | undefined,
+): void {
+  const configName = readConfigName(configPath);
+  if (configName && pinnedWorkerName && configName !== pinnedWorkerName) {
+    throw new SelfHostSecretListError(
+      `env: Cloudflare worker name mismatch — "${configPath}" declares name ` +
+        `${JSON.stringify(configName)} but the deploy pinned ${JSON.stringify(pinnedWorkerName)}. ` +
+        `wrangler resolves the worker name from the config's \`name\`, so \`wrangler secret list\` ` +
+        `would consult ${JSON.stringify(configName)} while the deploy ships ` +
+        `${JSON.stringify(pinnedWorkerName)} — a same-named secret there could falsely pass this ` +
+        `preflight. The config's name was changed after it was pinned; rebuild from a clean ` +
+        `checkout, then rerun.`,
+      'name-mismatch',
+    );
+  }
+}
+
 /** UTF-8 BOM, stripped before JSONC parsing (matches provision.ts readRootConfig). */
 const UTF8_BOM = '﻿';
 
@@ -945,6 +1001,21 @@ function readConfigAccountId(configPath: string): string | undefined {
   }
   const accountId = parsed.account_id;
   return typeof accountId === 'string' && accountId.length > 0 ? accountId : undefined;
+}
+
+/**
+ * Read the top-level `name` string from the resolved wrangler config (`-c` target).
+ * Same file/parse as {@link parseRootConfig}; this is exactly the worker name
+ * wrangler's `secret list` will resolve. An unreadable/malformed config or an
+ * absent/empty `name` yields undefined (no reconciliation gate).
+ */
+function readConfigName(configPath: string): string | undefined {
+  const parsed = parseRootConfig(configPath);
+  if (!parsed) {
+    return undefined;
+  }
+  const name = parsed.name;
+  return typeof name === 'string' && name.length > 0 ? name : undefined;
 }
 
 /**

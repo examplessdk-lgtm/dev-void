@@ -679,6 +679,77 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
     });
   });
 
+  // --- worker NAME reconciled against the config BEFORE any spawn ---
+
+  describe('worker-name reconciliation before spawn', () => {
+    it('hard-errors (naming both worker names) and NEVER spawns wrangler on a config-vs-pinned name mismatch', async () => {
+      const root = createTempProject({ withEnvTs: false });
+      // The config's name was rewritten to "evil-worker" after the deploy pinned "app" — the gate
+      // would list secrets for the WRONG worker, so it fails closed before any spawn.
+      const configPath = writeConfig(root, { name: 'evil-worker', account_id: 'acct-1' });
+      // Absent required key → the gate would spawn wrangler, but name reconciliation fails first.
+      const ctx = deriveSelfHostEnvContextFromVars({}, requiredStripe);
+      const { run, calls } = stubRunner(okList(['STRIPE_KEY']));
+
+      const error = await dischargeSelfHostEnvContext(ctx, {
+        root,
+        configPath,
+        accountId: 'acct-1',
+        workerName: 'app',
+        runWrangler: run,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(SelfHostSecretListError);
+      expect(error).not.toBeInstanceOf(SelfHostEnvValidationError);
+      const msg = (error as Error).message;
+      expect(msg).toContain('evil-worker');
+      expect(msg).toContain('app');
+      expect((error as SelfHostSecretListError).reason).toBe('name-mismatch');
+      // The seam was never consulted — reconciliation failed before any spawn.
+      expect(calls).toEqual([]);
+    });
+
+    it('proceeds when the config name matches the pinned worker name', async () => {
+      const root = createTempProject({ withEnvTs: false });
+      const configPath = writeConfig(root, { name: 'app', account_id: 'acct-1' });
+      const ctx = deriveSelfHostEnvContextFromVars({}, requiredStripe);
+      const { run, calls } = stubRunner(okList(['STRIPE_KEY']));
+
+      const result = await dischargeSelfHostEnvContext(ctx, {
+        root,
+        configPath,
+        accountId: 'acct-1',
+        workerName: 'app',
+        runWrangler: run,
+      });
+
+      expect(result).toEqual({ hasSchema: true, remoteSecretNames: ['STRIPE_KEY'] });
+      expect(calls.length).toBe(1);
+    });
+
+    it('does not gate when no pinned worker name is passed (undefined never trips)', async () => {
+      const root = createTempProject({ withEnvTs: false });
+      // Config declares a name, but no pinned name is supplied — mirrors the account guard's
+      // "both set" rule, so a legitimate caller that omits the pin is never false-positived.
+      const configPath = writeConfig(root, { name: 'whatever', account_id: 'acct-1' });
+      const ctx = deriveSelfHostEnvContextFromVars({}, requiredStripe);
+      const { run, calls } = stubRunner(okList(['STRIPE_KEY']));
+
+      const result = await dischargeSelfHostEnvContext(ctx, {
+        root,
+        configPath,
+        accountId: 'acct-1',
+        runWrangler: run,
+      });
+
+      expect(result).toEqual({ hasSchema: true, remoteSecretNames: ['STRIPE_KEY'] });
+      expect(calls.length).toBe(1);
+    });
+  });
+
   // --- first-deploy (worker-not-found) surfaces a structured, actionable error ---
 
   describe('first-deploy worker-not-found', () => {
