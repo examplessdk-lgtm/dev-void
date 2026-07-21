@@ -3372,6 +3372,112 @@ describe('verifyGeneratedDeployConfig', () => {
     });
     expect(result).toEqual({ ok: true });
   });
+
+  // --- Container applications: a bare `wrangler deploy` PROVISIONS a container application from the
+  // emitted `containers` array (billable, runs the image), so an injected / dropped / retargeted
+  // container must fail closed. The expected set is reconstructed pre-build and passed in. ---
+
+  const SANDBOX_CONTAINER = {
+    name: 'void-sandbox',
+    class_name: 'Sandbox',
+    image: '/abs/node_modules/@cloudflare/sandbox/Dockerfile',
+  };
+
+  it('fails closed when the build RETARGETS the sandbox container image', () => {
+    // The Void `Sandbox` DO + migration are legit, but the emitted container's `image` was rewritten
+    // to an attacker image — `wrangler deploy` would roll out the attacker image.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      containers: [{ ...SANDBOX_CONTAINER, image: '/attacker/Dockerfile' }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedContainers: [SANDBOX_CONTAINER],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/Sandbox/);
+    expect(result.reason).toMatch(/retargeted/);
+  });
+
+  it('fails closed when the build INJECTS a container into a no-sandbox app', () => {
+    // The source needs no sandbox (expected set empty), yet the artifact injects a container
+    // application alongside an otherwise-accepted local DO + creation-only migration.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      containers: [{ name: 'evil', class_name: 'Evil', image: '/attacker/Dockerfile' }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedContainers: [],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/Evil/);
+    expect(result.reason).toMatch(/injected/);
+  });
+
+  it('fails closed when the build DROPS the expected sandbox container', () => {
+    // The source needs the sandbox (expected set has one container), but the emitted `containers`
+    // field is absent — read defensively as empty, so the drop is caught.
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedContainers: [SANDBOX_CONTAINER],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/Sandbox/);
+    expect(result.reason).toMatch(/dropped/);
+  });
+
+  it('passes when the emitted sandbox container matches the reconstruction exactly', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      containers: [SANDBOX_CONTAINER],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedContainers: [SANDBOX_CONTAINER],
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('passes a no-sandbox app whose emitted containers field is absent (both-empty)', () => {
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedContainers: [],
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('passes a root-declared container preserved verbatim in the emitted config', () => {
+    // A user's own container (present in the root wrangler config, spread verbatim by the build)
+    // survives — including an optional field — while the drift checks stay quiet.
+    const rootContainer = {
+      name: 'my-app',
+      class_name: 'MyApp',
+      image: './Dockerfile',
+      instance_type: 'standard',
+    };
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      containers: [rootContainer],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      expectedContainers: [rootContainer],
+    });
+    expect(result).toEqual({ ok: true });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3556,7 +3662,14 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
     });
     const { deps, wranglerArgs, exitCalls } = harness({
       runBuild: () =>
-        writeEmittedDeployArtifact(root, { ...KITCHEN_SINK_NON_ID_BINDINGS, ...EMITTED_D1 }),
+        // This project imports no `void/sandbox`, so a real build emits no container application;
+        // drop the kitchen-sink fixture's sandbox container (JSON.stringify omits `undefined`) so
+        // the reconstructed (empty) container set matches the emitted (absent) one.
+        writeEmittedDeployArtifact(root, {
+          ...KITCHEN_SINK_NON_ID_BINDINGS,
+          containers: undefined,
+          ...EMITTED_D1,
+        }),
       verifyDeployConfig: verifyGeneratedDeployConfig,
     });
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
@@ -3772,7 +3885,14 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
     });
     const { deps, wranglerArgs, exitCalls } = harness({
       runBuild: () =>
-        writeEmittedDeployArtifact(root, { ...KITCHEN_SINK_NON_ID_BINDINGS, ...EMITTED_D1 }),
+        // This project imports no `void/sandbox`, so a real build emits no container application;
+        // drop the kitchen-sink fixture's sandbox container (JSON.stringify omits `undefined`) so
+        // the reconstructed (empty) container set matches the emitted (absent) one.
+        writeEmittedDeployArtifact(root, {
+          ...KITCHEN_SINK_NON_ID_BINDINGS,
+          containers: undefined,
+          ...EMITTED_D1,
+        }),
       verifyDeployConfig: verifyGeneratedDeployConfig,
     });
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);

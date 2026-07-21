@@ -888,6 +888,51 @@ export function snapshotPassthroughRawFields(
 }
 
 /**
+ * Reconstruct the exact `containers` set Void's build emits into `dist/ssr/wrangler.json`, computed
+ * PRE-BUILD from the SAME inputs `mergeBindings` (index.ts) uses so a legitimate build's emitted
+ * entry deepEquals one reconstructed here:
+ *   1. every root-declared container passes through VERBATIM (mergeBindings spreads
+ *      `resolved.containers` unchanged), and
+ *   2. PLUS — only when the source needs the sandbox (`needsSandbox`, the SAME
+ *      `isSandboxEnabled(config) || inferProjectBindings(...).needsSandbox` signal index.ts gates
+ *      emission on) AND no root-declared container already declares the sandbox class — the single
+ *      Void sandbox container, built field-for-field from {@link resolveSandboxConfig} (the SAME
+ *      pure function the build calls, so the reconstructed entry is byte-identical to the emitted
+ *      one, absent optionals omitted).
+ * A bare `wrangler deploy` PROVISIONS a container application from this array (billable, and it runs
+ * the image's code), so pinning it lets {@link verifyGeneratedDeployConfig} reject a container the
+ * build injected, dropped, or retargeted.
+ */
+export function reconstructExpectedContainers(
+  config: VoidConfig,
+  root: string,
+  rootConfig: Record<string, unknown>,
+  needsSandbox: boolean,
+): Array<Record<string, unknown>> {
+  const rootContainers: Array<Record<string, unknown>> = Array.isArray(rootConfig.containers)
+    ? (rootConfig.containers as Array<Record<string, unknown>>)
+    : [];
+  const expected: Array<Record<string, unknown>> = [...rootContainers];
+  if (needsSandbox) {
+    const sandbox = resolveSandboxConfig(config, root);
+    const alreadyDeclared = rootContainers.some(
+      (container) => readD1EntryString(container, 'class_name') === sandbox.className,
+    );
+    if (!alreadyDeclared) {
+      expected.push({
+        name: sandbox.containerName,
+        class_name: sandbox.className,
+        image: sandbox.image,
+        ...(sandbox.imageBuildContext && { image_build_context: sandbox.imageBuildContext }),
+        ...(sandbox.instanceType && { instance_type: sandbox.instanceType }),
+        ...(sandbox.maxInstances != null && { max_instances: sandbox.maxInstances }),
+      });
+    }
+  }
+  return expected;
+}
+
+/**
  * Deterministic sha256 over the wrangler uploader BUNDLE the credentialed deploy executes — the
  * resolved `wrangler-dist/cli.js` PLUS every sibling file in its directory. `cli.js` loads sibling
  * chunks from its own `__dirname` (the proxy workers, the experimental-config module), so the
@@ -1412,6 +1457,16 @@ export function verifyGeneratedDeployConfig(
      * (billable inference the source never asked for) fails closed.
      */
     needsAI?: boolean;
+    /**
+     * The exact `containers` set Void's build emits, reconstructed PRE-BUILD
+     * ({@link reconstructExpectedContainers}) from the root-declared containers plus — when the
+     * source needs the sandbox — Void's own sandbox container. A bare `wrangler deploy` PROVISIONS a
+     * container application from the emitted array (billable, runs the image), so an emitted
+     * container absent from this set is one the build INJECTED, an expected container missing from
+     * the emitted array is one it DROPPED, and one present but not byte-identical is one it
+     * RETARGETED (e.g. a rewritten `image` pointing at an attacker's).
+     */
+    expectedContainers?: Array<Record<string, unknown>>;
   },
 ): { ok: boolean; reason?: string } {
   const deployConfigPath = deployPointerPath(root);
@@ -1698,6 +1753,90 @@ export function verifyGeneratedDeployConfig(
     );
     if (!destructiveMigration.ok) {
       return destructiveMigration;
+    }
+  }
+  // (C) Containers — pin the emitted `containers` array against the set Void's build emits,
+  // reconstructed PRE-BUILD ({@link reconstructExpectedContainers}): root-declared containers pass
+  // through verbatim, plus Void's own sandbox container when the source needs it. A bare `wrangler
+  // deploy` PROVISIONS a container application from this array — billable, and it runs the image's
+  // code — so a build that INJECTS a container (an attacker image on an app that declared none),
+  // DROPS the sandbox container, or RETARGETS one (rewrites its `image`/`instance_type`/… to an
+  // attacker's) must fail closed. Compared as a set keyed by `class_name` — the identity
+  // `mergeBindings` itself dedups on: every emitted container's class must be expected AND
+  // byte-identical, and every expected class must still be emitted. `generated.containers` is read
+  // defensively (absent/non-array → none), and absent-vs-`[]` is treated as both-empty so a clean
+  // no-sandbox build (no root containers, Void adds none, emitted none) passes. Containers with no
+  // `class_name` are not a shape Void or a buildable root config produce; they are compared as a
+  // deepEqual multiset so a verbatim root passthrough still passes while an injected/dropped one
+  // fails closed.
+  if (expected.expectedContainers) {
+    const emittedContainers: Array<unknown> = Array.isArray(generated.containers)
+      ? generated.containers
+      : [];
+    const expectedContainers = expected.expectedContainers;
+    if (emittedContainers.length !== 0 || expectedContainers.length !== 0) {
+      const expectedByClass = new Map<string, Record<string, unknown>>();
+      const expectedNoClass: Array<unknown> = [];
+      for (const container of expectedContainers) {
+        const className = readD1EntryString(container, 'class_name');
+        if (className === undefined) {
+          expectedNoClass.push(container);
+        } else {
+          expectedByClass.set(className, container);
+        }
+      }
+      const emittedByClass = new Map<string, unknown>();
+      const emittedNoClass: Array<unknown> = [];
+      for (const container of emittedContainers) {
+        const className = readD1EntryString(container, 'class_name');
+        if (className === undefined) {
+          emittedNoClass.push(container);
+        } else {
+          emittedByClass.set(className, container);
+        }
+      }
+      // Injected / retargeted — every emitted container must be expected AND byte-identical.
+      for (const [className, container] of emittedByClass) {
+        const expectedContainer = expectedByClass.get(className);
+        if (expectedContainer === undefined) {
+          return {
+            ok: false,
+            reason: `generated config declares a container application ${JSON.stringify(className)} that Void did not derive from source — refusing to deploy a container application the build injected.`,
+          };
+        }
+        if (!deepEqual(container, expectedContainer)) {
+          return {
+            ok: false,
+            reason: `generated config container application ${JSON.stringify(className)} does not match the pre-build config — refusing to deploy a container application the build retargeted.`,
+          };
+        }
+      }
+      // Dropped — every expected container must still be emitted.
+      for (const className of expectedByClass.keys()) {
+        if (!emittedByClass.has(className)) {
+          return {
+            ok: false,
+            reason: `generated config no longer declares the container application ${JSON.stringify(className)} that Void derived from source — refusing to deploy a build that dropped a container application.`,
+          };
+        }
+      }
+      // Class-less containers — deepEqual multiset (never a Void-emitted shape).
+      for (const emitted of emittedNoClass) {
+        const matchIndex = expectedNoClass.findIndex((candidate) => deepEqual(emitted, candidate));
+        if (matchIndex === -1) {
+          return {
+            ok: false,
+            reason: `generated config declares a container application that Void did not derive from source — refusing to deploy a container application the build injected.`,
+          };
+        }
+        expectedNoClass.splice(matchIndex, 1);
+      }
+      if (expectedNoClass.length > 0) {
+        return {
+          ok: false,
+          reason: `generated config no longer declares a container application that was present before the build — refusing to deploy a build that dropped a container application.`,
+        };
+      }
     }
   }
   // (B) Queues ⊆ desired — every queue the artifact binds (producers/consumers) must be one Void
@@ -2175,6 +2314,14 @@ export async function computeDesiredCloudflareResources(
    * into {@link verifyGeneratedDeployConfig} to authorize that emitted ai binding.
    */
   needsAI: boolean;
+  /**
+   * Whether Void's build emits the sandbox container application — the SAME signal `mergeBindings`
+   * (index.ts) gates emission on: `isSandboxEnabled(config)` (a `sandbox` field in `void.json`) OR
+   * the import walk detecting a `void/sandbox` import (`inferProjectBindings(...).needsSandbox`).
+   * Threaded into {@link verifyGeneratedDeployConfig} (via {@link reconstructExpectedContainers})
+   * to pin the emitted `containers` array.
+   */
+  needsSandbox: boolean;
 }> {
   // The id predicates are resolved via the memoized dynamic import so this exported
   // helper works when called directly in unit tests (outside the fork) without a
@@ -2310,6 +2457,11 @@ export async function computeDesiredCloudflareResources(
     migrationsDir: paths.migrationsDir,
     migrations,
     needsAI: bindings.needsAI,
+    // Mirror index.ts's emission signal EXACTLY (line 658): the sandbox container is emitted when
+    // `void.json` enables it OR the source imports `void/sandbox` (the import-walk signal). Using
+    // `isSandboxEnabled` alone would miss an import-only sandbox app (e.g. kitchen-sink) and the
+    // container pin would then FALSE-POSITIVE a legitimate build.
+    needsSandbox: isSandboxEnabled(voidConfig) || bindings.needsSandbox,
   };
 }
 
@@ -3287,6 +3439,7 @@ export async function runCloudflareDeploy(
     migrationsDir,
     migrations: preBuildMigrations,
     needsAI,
+    needsSandbox,
   } = await computeDesiredCloudflareResources(root, voidConfig, configPath);
 
   // 2a. Postgres + auth guard — reject before any account op. This backend applies only
@@ -3711,6 +3864,19 @@ export async function runCloudflareDeploy(
   // build-injected EXTERNAL DO `script_name`) and `ai` (pin the binding to the root's, or to Void's
   // own `{binding:'AI'}` only when `needsAI`). Void's build emits none of the first three.
   const passthroughRawFields = snapshotPassthroughRawFields(preBuildRootConfig);
+  // Companion pin: the exact `containers` set Void's build emits — the root-declared containers
+  // (spread verbatim) plus Void's own sandbox container when the source needs it (`needsSandbox`,
+  // the SAME `isSandboxEnabled(config) || import-walk` signal index.ts gates emission on). A bare
+  // `wrangler deploy` provisions a container application from this array, so the emitted-config
+  // check (step 10) rejects a container the build injected, dropped, or retargeted.
+  // `resolveSandboxConfig` is the SAME pure function the build uses, so the reconstructed sandbox
+  // container is byte-identical to the emitted one.
+  const expectedContainers = reconstructExpectedContainers(
+    voidConfig,
+    root,
+    preBuildRootConfig,
+    needsSandbox,
+  );
 
   // (The LOCAL migration gates run POST-build at step 8d, immediately before the remote
   // apply — not here — so they validate the exact files on disk AFTER the build. See step 8d.)
@@ -4145,6 +4311,7 @@ export async function runCloudflareDeploy(
     passthroughIdentitySnapshot,
     passthroughRawFields,
     needsAI,
+    expectedContainers,
   });
   if (!verification.ok) {
     log.error(
