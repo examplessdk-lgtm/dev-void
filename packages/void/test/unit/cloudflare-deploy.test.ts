@@ -11,9 +11,11 @@ import {
   deployChildEnv,
   DEPLOY_PASSTHROUGH_ASSERT_FIELDS,
   DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS,
+  DEPLOY_WHOLE_OBJECT_PINNED_FIELDS,
   runCloudflareDeploy,
   snapshotBindingIdentities,
   snapshotPassthroughIdentities,
+  snapshotPassthroughRawFields,
   validateAuthMigrationSchema,
   verifyGeneratedDeployConfig,
   type CloudflareDeployDeps,
@@ -2012,6 +2014,20 @@ describe('DEPLOY_PASSTHROUGH_ASSERT_FIELDS — registry-derived composition', ()
       expect(DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS.has(field)).toBe(false);
     }
   });
+
+  it('whole-object-pins unsafe and the tail-consumer fields (the entry pin cannot see them)', () => {
+    expect([...DEPLOY_WHOLE_OBJECT_PINNED_FIELDS].sort()).toEqual([
+      'streaming_tail_consumers',
+      'tail_consumers',
+      'unsafe',
+    ]);
+    // `unsafe` stays in the assert-set (drift invariant) but is routed to the whole-object pin.
+    expect(DEPLOY_PASSTHROUGH_ASSERT_FIELDS).toContain('unsafe');
+    // The tail-consumer fields are NOT bindings, so the assert-set structurally cannot see them —
+    // only the whole-object pin covers them.
+    expect(FRIENDLY_BINDING_NAMES).not.toHaveProperty('tail_consumers');
+    expect(FRIENDLY_BINDING_NAMES).not.toHaveProperty('streaming_tail_consumers');
+  });
 });
 
 describe('verifyGeneratedDeployConfig', () => {
@@ -2419,7 +2435,7 @@ describe('verifyGeneratedDeployConfig', () => {
 
   it('fails closed when the build keeps a services binding NAME but rewrites its target service', () => {
     // Root pinned MY_SVC → my-worker; the build kept the name but retargeted it to evil-worker.
-    // Name-only pinning would pass this; the entry (target) pin catches the rewrite.
+    // Name-only pinning would pass this; the exact entry pin catches the rewrite.
     const rootConfig = { services: [{ binding: 'MY_SVC', service: 'my-worker' }] };
     const root = deployConfigProject({
       account_id: 'acc123',
@@ -2435,17 +2451,41 @@ describe('verifyGeneratedDeployConfig', () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/services/);
     expect(result.reason).toMatch(/MY_SVC/);
-    expect(result.reason).toMatch(/rewritten|retargeted/);
+    expect(result.reason).toMatch(/rewrote|differs/);
   });
 
-  it('passes a legit passthrough whose target is unchanged, ignoring a normalizer-added key', () => {
-    // The build left MY_SVC → my-worker intact; the wrangler normalizer added `remote: false`.
-    // Only the ROOT keys are pinned, so the added key is ignored and the deploy passes.
+  it('fails closed when the build ADDS an entrypoint/environment to a pinned services entry', () => {
+    // A real `vite build` adds NOTHING to a present pass-through entry (verified against the real
+    // toolchain), so an added `entrypoint`/`environment` — which wrangler uploads, retargeting the
+    // service to a named entrypoint/environment — is a build rewrite the exact entry pin catches.
+    const rootConfig = { services: [{ binding: 'MY_SVC', service: 'my-worker' }] };
+    for (const added of [{ entrypoint: 'EvilEntry' }, { environment: 'staging' }]) {
+      const root = deployConfigProject({
+        account_id: 'acc123',
+        name: 'myapp',
+        services: [{ binding: 'MY_SVC', service: 'my-worker', ...added }],
+      });
+      const result = verifyGeneratedDeployConfig(root, {
+        accountId: 'acc123',
+        workerName: 'myapp',
+        desired: { kvNamespaces: [], queues: [] },
+        passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/services/);
+      expect(result.reason).toMatch(/MY_SVC/);
+      expect(result.reason).toMatch(/rewrote|differs/);
+    }
+  });
+
+  it('passes a byte-identical pass-through entry (no normalizer key is added to a present entry)', () => {
+    // The real toolchain leaves a present pass-through entry byte-identical, so exact equality holds
+    // for a legitimate build — no regression from the exact-compare tightening.
     const rootConfig = { services: [{ binding: 'MY_SVC', service: 'my-worker' }] };
     const root = deployConfigProject({
       account_id: 'acc123',
       name: 'myapp',
-      services: [{ binding: 'MY_SVC', service: 'my-worker', remote: false }],
+      services: [{ binding: 'MY_SVC', service: 'my-worker' }],
     });
     const result = verifyGeneratedDeployConfig(root, {
       accountId: 'acc123',
@@ -2477,25 +2517,28 @@ describe('verifyGeneratedDeployConfig', () => {
     }
   });
 
-  it('fails closed when the build injects an `unsafe` binding of an arbitrary type', () => {
+  it('fails closed when the build injects an `unsafe` object absent from the root (metadata bindings)', () => {
+    // `unsafe.metadata.bindings` is never entry-iterated, yet wrangler applies it LAST at upload,
+    // OVERWRITING the whole uploaded bindings array. The whole-object pin catches an injected
+    // `unsafe` even when its capability lives under `.metadata`, not `.bindings`.
     const root = deployConfigProject({
       account_id: 'acc123',
       name: 'myapp',
-      unsafe: { bindings: [{ name: 'X', type: 'secret_text' }] },
+      unsafe: { metadata: { bindings: [{ name: 'X', type: 'service', service: 'evil' }] } },
     });
     const result = verifyGeneratedDeployConfig(root, {
       accountId: 'acc123',
       workerName: 'myapp',
       desired: { kvNamespaces: [], queues: [] },
       passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
     });
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/unsafe/);
-    expect(result.reason).toMatch(/injected/);
   });
 
-  it('fails closed when the build rewrites a root-declared `unsafe` binding’s type', () => {
-    // The nested `.type` is a ROOT key of the unsafe binding entry, so a rewrite is caught.
+  it('fails closed when the build rewrites a root-declared `unsafe` object', () => {
+    // The whole `unsafe` object is pinned, so any rewrite (here the nested binding `.type`) fails.
     const rootConfig = { unsafe: { bindings: [{ name: 'X', type: 'secret_text' }] } };
     const root = deployConfigProject({
       account_id: 'acc123',
@@ -2507,10 +2550,37 @@ describe('verifyGeneratedDeployConfig', () => {
       workerName: 'myapp',
       desired: { kvNamespaces: [], queues: [] },
       passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
     });
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/unsafe/);
-    expect(result.reason).toMatch(/rewritten|retargeted/);
+  });
+
+  it('passes a root-declared `unsafe` object emitted byte-identical', () => {
+    const rootConfig = {
+      unsafe: { metadata: { bindings: [{ name: 'X', type: 'service', service: 'my-worker' }] } },
+    };
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp', ...rootConfig });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('passes when no `unsafe` is in the root or the emitted artifact', () => {
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result).toEqual({ ok: true });
   });
 
   // --- FALSE-POSITIVE LOCKS: the normalizer defaults that MUST keep passing ---
@@ -2545,6 +2615,232 @@ describe('verifyGeneratedDeployConfig', () => {
       workerName: 'myapp',
       desired: { kvNamespaces: [], queues: [] },
       passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('passes when unsafe / tail_consumers / streaming_tail_consumers are absent (the clean-build shape)', () => {
+    // A real `vite build` (root declaring none) leaves all three ABSENT from the emitted artifact,
+    // so the whole-object pin must wave the absent shape through.
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  // --- Tail consumers (log/request forwarding — not "bindings", so the assert-set can't see them) ---
+
+  for (const field of ['tail_consumers', 'streaming_tail_consumers'] as const) {
+    it(`fails closed when the build injects a ${field} entry absent from the root`, () => {
+      const root = deployConfigProject({
+        account_id: 'acc123',
+        name: 'myapp',
+        [field]: [{ service: 'evil-log-collector' }],
+      });
+      const result = verifyGeneratedDeployConfig(root, {
+        accountId: 'acc123',
+        workerName: 'myapp',
+        desired: { kvNamespaces: [], queues: [] },
+        passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+        passthroughRawFields: snapshotPassthroughRawFields({}),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(new RegExp(field));
+    });
+
+    it(`passes a root-declared ${field} emitted byte-identical`, () => {
+      const rootConfig = { [field]: [{ service: 'my-log-collector' }] };
+      const root = deployConfigProject({ account_id: 'acc123', name: 'myapp', ...rootConfig });
+      const result = verifyGeneratedDeployConfig(root, {
+        accountId: 'acc123',
+        workerName: 'myapp',
+        desired: { kvNamespaces: [], queues: [] },
+        passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+        passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+      });
+      expect(result).toEqual({ ok: true });
+    });
+
+    it(`passes an emitted ${field} default-filled to an empty array`, () => {
+      const root = deployConfigProject({
+        account_id: 'acc123',
+        name: 'myapp',
+        [field]: [],
+      });
+      const result = verifyGeneratedDeployConfig(root, {
+        accountId: 'acc123',
+        workerName: 'myapp',
+        desired: { kvNamespaces: [], queues: [] },
+        passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+        passthroughRawFields: snapshotPassthroughRawFields({}),
+      });
+      expect(result).toEqual({ ok: true });
+    });
+  }
+
+  // --- External Durable Object (`script_name` targets another worker's DOs) ---
+
+  it('fails closed when the build injects an external durable_object (script_name) absent from root', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      durable_objects: {
+        bindings: [{ name: 'EXT', class_name: 'Other', script_name: 'someone-elses-worker' }],
+      },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/durable_objects/);
+    expect(result.reason).toMatch(/EXT/);
+  });
+
+  it('fails closed when the build adds an `environment` to a durable_object binding', () => {
+    // `environment` narrows a cross-script DO to a named environment — external-targeting.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      durable_objects: {
+        bindings: [{ name: 'EXT', class_name: 'Other', environment: 'staging' }],
+      },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/durable_objects/);
+  });
+
+  it('passes Void-style LOCAL durable_objects (`{name, class_name}`, no script_name)', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      durable_objects: {
+        bindings: [
+          { name: 'SANDBOX', class_name: 'Sandbox' },
+          { name: 'WS', class_name: 'ChatRoom' },
+        ],
+      },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('passes a root-declared external durable_object emitted byte-identical', () => {
+    const rootConfig = {
+      durable_objects: {
+        bindings: [{ name: 'EXT', class_name: 'Other', script_name: 'my-other-worker' }],
+      },
+    };
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp', ...rootConfig });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  // --- AI binding (must be Void's own {binding:'AI'}, the root's, or absent) ---
+
+  it("passes Void's own emitted ai binding {binding:'AI'} with none in root", () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      ai: { binding: 'AI' },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('passes an emitted ai binding byte-identical to the root ai binding', () => {
+    const rootConfig = { ai: { binding: 'AI_EXTRA' } };
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp', ...rootConfig });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('fails closed when the build injects an ai binding that is neither Void’s own nor the root’s', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      ai: { binding: 'AI', gateway: { id: 'exfil-gateway' } },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/ai binding/);
+  });
+
+  it('passes an absent ai binding', () => {
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  // --- FALSE-POSITIVE LOCK: the full kitchen-sink shape passes WITH the raw-field pin active ---
+
+  it('passes the full kitchen-sink shape with the whole-object + DO + ai pins active', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      ...KITCHEN_SINK_NON_ID_BINDINGS,
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: ['jobs'] },
+      bindingIdentitySnapshot: snapshotBindingIdentities({
+        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+      }),
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(KITCHEN_SINK_NON_ID_BINDINGS),
+      passthroughRawFields: snapshotPassthroughRawFields(KITCHEN_SINK_NON_ID_BINDINGS),
     });
     expect(result).toEqual({ ok: true });
   });
@@ -2868,6 +3164,80 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
           ...EMITTED_D1,
           services: [{ binding: 'MY_SVC', service: 'my-other-worker' }],
         }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
+  });
+
+  it('fails closed at the emitted-config check when the build injects an unsafe object', async () => {
+    // The root has no `unsafe`, so the whole-object pin (populated end-to-end from the pre-build
+    // root config) rejects an injected `unsafe.metadata` before the credentialed deploy binds it.
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () =>
+        writeEmittedDeployArtifact(root, {
+          ...EMITTED_D1,
+          unsafe: { metadata: { bindings: [{ name: 'X', type: 'service', service: 'evil' }] } },
+        }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('fails closed at the emitted-config check when the build injects a tail_consumers entry', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () =>
+        writeEmittedDeployArtifact(root, {
+          ...EMITTED_D1,
+          tail_consumers: [{ service: 'evil-log-collector' }],
+        }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('fails closed at the emitted-config check when the build injects an external durable_object', async () => {
+    // Void's own DOs are always LOCAL; an emitted DO carrying `script_name` binds another worker's
+    // Durable Objects. The end-to-end raw-field pin rejects it before the deploy.
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () =>
+        writeEmittedDeployArtifact(root, {
+          ...EMITTED_D1,
+          durable_objects: {
+            bindings: [{ name: 'EXT', class_name: 'Other', script_name: 'someone-elses-worker' }],
+          },
+        }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('passes a normal deploy whose artifact carries Void’s own ai + local DO bindings', async () => {
+    // No-regression: the emitted `ai:{binding:'AI'}` and LOCAL DOs a real build emits must pass the
+    // raw-field pins end-to-end. The `queues/jobs.ts` source makes `jobs` a Void-derived queue.
+    const root = d1Project(PROVISIONED_D1, {
+      ...INIT_MIGRATION,
+      'queues/jobs.ts': 'export default {};',
+    });
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () =>
+        writeEmittedDeployArtifact(root, { ...KITCHEN_SINK_NON_ID_BINDINGS, ...EMITTED_D1 }),
       verifyDeployConfig: verifyGeneratedDeployConfig,
     });
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);

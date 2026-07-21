@@ -763,6 +763,50 @@ export const DEPLOY_PASSTHROUGH_ASSERT_FIELDS: ReadonlyArray<string> = Object.ke
 ).filter((field) => !DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS.has(field));
 
 /**
+ * Fields the CF plugin passes through VERBATIM that the per-binding ENTRY pin cannot cover, so
+ * each is compared WHOLE against the raw pre-build root value instead:
+ *   - `unsafe` — is in {@link DEPLOY_PASSTHROUGH_ASSERT_FIELDS} (so it stays in the drift
+ *     invariant) but its `.metadata`/`.capnp` are never entry-iterated, and wrangler applies
+ *     `unsafe.metadata` LAST at upload, OVERWRITING the whole uploaded bindings array — so an
+ *     entry-level pin is blind to it. Routed OUT of the entry loop into the whole-object pin.
+ *   - `tail_consumers` / `streaming_tail_consumers` — are NOT "bindings" (absent from
+ *     {@link FRIENDLY_BINDING_NAMES}), so the assert-set structurally can't see them, yet wrangler
+ *     uploads them and they forward every log/request to the named worker (exfil).
+ * Void's own build emits NONE of them: a clean `vite build` (root declaring none) leaves all three
+ * ABSENT from the emitted artifact (verified against a real build), so an emptiness check
+ * ({@link isEmptyPassthroughValue}) keeps the normalizer's default-fill from false-positiving.
+ */
+export const DEPLOY_WHOLE_OBJECT_PINNED_FIELDS: ReadonlyArray<string> = [
+  'unsafe',
+  'tail_consumers',
+  'streaming_tail_consumers',
+];
+
+/**
+ * Fields whose RAW pre-build root value {@link snapshotPassthroughRawFields} captures for
+ * {@link verifyGeneratedDeployConfig}'s whole-object + targeted checks: the three
+ * {@link DEPLOY_WHOLE_OBJECT_PINNED_FIELDS} plus `durable_objects` (external-DO check) and `ai`
+ * (binding pin) — the last two are Void-emitted (excluded from the assert-set) yet still need a
+ * pin because a build can add an EXTERNAL DO handle (`script_name`) or a rewritten `ai` binding.
+ */
+const DEPLOY_RAW_SNAPSHOT_FIELDS: ReadonlyArray<string> = [
+  ...DEPLOY_WHOLE_OBJECT_PINNED_FIELDS,
+  'durable_objects',
+  'ai',
+];
+
+/** Void's own injected Workers AI binding shape (`mergeBindings` in index.ts). */
+const VOID_EMITTED_AI_BINDING = { binding: 'AI' };
+
+/**
+ * Sub-fields on a `durable_objects` binding that make it target ANOTHER worker's Durable Objects.
+ * `script_name` is the one wrangler binds a cross-script DO through; `environment` narrows a
+ * cross-script binding to a named environment — either marks a binding Void's own build never
+ * emits (its DOs are always LOCAL `{name, class_name}`).
+ */
+const DURABLE_OBJECT_EXTERNAL_FIELDS = ['script_name', 'environment'];
+
+/**
  * A pin of every pass-through binding's ENTRY per {@link DEPLOY_PASSTHROUGH_ASSERT_FIELDS} field —
  * field → (bindingName → the root entry object) — captured from the root config at the SAME
  * pre-build point as {@link snapshotBindingIdentities} (after provision/drift resolves ids, before
@@ -795,6 +839,98 @@ export function snapshotPassthroughIdentities(
     snapshot.set(field, entries);
   }
   return snapshot;
+}
+
+/**
+ * Companion of {@link snapshotPassthroughIdentities} for the fields the per-binding ENTRY pin
+ * cannot cover ({@link DEPLOY_RAW_SNAPSHOT_FIELDS}): capture the RAW pre-build root value for each
+ * of `unsafe` / `tail_consumers` / `streaming_tail_consumers` (whole-object-pinned),
+ * `durable_objects` (external-DO check), and `ai` (binding pin). Taken at the SAME pre-build point
+ * as the other snapshots, so a build that INJECTS or REWRITES one of these into the emitted
+ * artifact is caught at {@link verifyGeneratedDeployConfig}, while a user's own hand-declared value
+ * (present here, unchanged) passes.
+ */
+export function snapshotPassthroughRawFields(
+  config: Record<string, unknown>,
+): Map<string, unknown> {
+  const snapshot = new Map<string, unknown>();
+  for (const field of DEPLOY_RAW_SNAPSHOT_FIELDS) {
+    snapshot.set(field, config[field]);
+  }
+  return snapshot;
+}
+
+/**
+ * True when a resource field's emitted value carries NO capability: `undefined`/`null`, an empty
+ * array, an empty object, or a `{ bindings: [] }`. A clean `vite build` (root declaring none of
+ * the whole-object-pinned fields) emits `unsafe` / `tail_consumers` / `streaming_tail_consumers`
+ * ABSENT (verified against a real build); this also absorbs any normalizer default-fill
+ * (`[]` / `{}` / `{ bindings: [] }`) so the whole-object pin never false-positives on an empty
+ * shape while still catching a value that actually grants a capability.
+ */
+function isEmptyPassthroughValue(value: unknown): boolean {
+  if (value === undefined || value === null) {
+    return true;
+  }
+  if (Array.isArray(value)) {
+    return value.length === 0;
+  }
+  if (typeof value === 'object') {
+    const keys = Object.keys(value as Record<string, unknown>);
+    if (keys.length === 0) {
+      return true;
+    }
+    if (keys.length === 1 && keys[0] === 'bindings') {
+      const bindings = (value as Record<string, unknown>).bindings;
+      return Array.isArray(bindings) && bindings.length === 0;
+    }
+  }
+  return false;
+}
+
+/**
+ * Reject an emitted `durable_objects` binding that targets ANOTHER worker (carrying a
+ * {@link DURABLE_OBJECT_EXTERNAL_FIELDS} sub-field) unless the pre-build root declared the SAME
+ * binding byte-for-byte. Void's own build only ever emits LOCAL DO bindings (`{name, class_name}`;
+ * index.ts), so an external DO in the artifact is a build injection — a handle to a same-account
+ * worker's Durable Objects the source never asked for. Emitted LOCAL DOs (no cross-script field)
+ * always pass. A malformed emitted `durable_objects` fails closed (Void never emits one).
+ */
+function verifyNoInjectedExternalDurableObject(
+  emitted: unknown,
+  root: unknown,
+): { ok: boolean; reason?: string } {
+  let emittedEntries: Array<{ name: string; entry: Record<string, unknown> }>;
+  try {
+    emittedEntries = bindingEntriesForField('durable_objects', emitted);
+  } catch {
+    return {
+      ok: false,
+      reason: `generated config declares a malformed durable_objects binding — refusing to deploy a binding set that cannot be verified.`,
+    };
+  }
+  const rootByName = new Map<string, Record<string, unknown>>();
+  try {
+    for (const { name, entry } of bindingEntriesForField('durable_objects', root)) {
+      rootByName.set(name, entry);
+    }
+  } catch {
+    // A malformed root records no pins, so any emitted EXTERNAL DO fails closed below.
+    rootByName.clear();
+  }
+  for (const { name, entry } of emittedEntries) {
+    if (!DURABLE_OBJECT_EXTERNAL_FIELDS.some((key) => entry[key] !== undefined)) {
+      continue;
+    }
+    const rootEntry = rootByName.get(name);
+    if (rootEntry === undefined || !deepEqual(entry, rootEntry)) {
+      return {
+        ok: false,
+        reason: `generated config declares a durable_objects binding ${JSON.stringify(name)} bound to another worker's script that was not present before the build — refusing to deploy an external Durable Object the build injected.`,
+      };
+    }
+  }
+  return { ok: true };
 }
 
 /**
@@ -1080,6 +1216,14 @@ export function verifyGeneratedDeployConfig(
      * and one whose pinned target keys were rewritten is a build-retargeted binding.
      */
     passthroughIdentitySnapshot?: Map<string, Map<string, Record<string, unknown>>>;
+    /**
+     * Raw pre-build root values ({@link snapshotPassthroughRawFields}) for the fields the ENTRY
+     * pin cannot cover: `unsafe` / `tail_consumers` / `streaming_tail_consumers`
+     * (whole-object-pinned), `durable_objects` (external-DO check), and `ai` (binding pin). An
+     * emitted value that is non-empty and not byte-identical to its root pin — an external DO
+     * absent from root, or an `ai` binding that is neither Void's own nor the root's — fails closed.
+     */
+    passthroughRawFields?: Map<string, unknown>;
   },
 ): { ok: boolean; reason?: string } {
   const deployConfigPath = deployPointerPath(root);
@@ -1181,19 +1325,21 @@ export function verifyGeneratedDeployConfig(
   // (A) Pass-through assert-set — every entry the artifact declares in a resource field Void's own
   // build never emits ({@link DEPLOY_PASSTHROUGH_ASSERT_FIELDS}, derived from the wrangler binding
   // registry) must have been present in the pre-build root snapshot, matched by its wrangler-shape
-  // identity key, AND carry every root key byte-identical. Two failures fail closed:
+  // identity key, AND be byte-identical to the pinned root entry. Two failures fail closed:
   //   • the binding name was NOT pinned pre-build → a binding the build INJECTED; and
-  //   • a pinned root key's value differs in the emitted entry → a binding the build RETARGETED
-  //     (kept the name but rewrote the service/namespace/type it points at).
-  // Compare ROOT-key ⊆ emitted (not full deep-equal): the wrangler normalizer only ADDS default
-  // sub-fields (`remote`, `entrypoint`, …) to the emitted entry — it never removes or rewrites a
-  // value the user wrote in root — so a normalizer-added key is ignored while a dropped/rewritten
-  // target is caught. Fields NOT in the assert-set are deliberately NOT asserted (fail OPEN): a
-  // resource field wrangler does not yet know about must never false-positive a legitimate build.
+  //   • the emitted entry differs from the pinned root entry → a binding the build REWROTE
+  //     (kept the name but changed the service/namespace/type it points at, or added a sub-field).
+  // Compare the WHOLE entry (exact equality): a real `vite build` adds NOTHING to a PRESENT
+  // pass-through entry — services/vectorize/workflows/mtls_certificates/send_email/ratelimits/
+  // dispatch_namespaces all emit byte-identical to root — so any added/removed/rewritten sub-field
+  // is the build tampering with the binding's target. Fields NOT in the assert-set are deliberately
+  // NOT asserted here (fail OPEN): a resource field wrangler does not yet know about must never
+  // false-positive a legitimate build. `unsafe` stays in the assert-set (for the drift invariant)
+  // but is routed to the whole-object pin below — its `.metadata`/`.capnp` are never entry-iterated.
   if (expected.passthroughIdentitySnapshot) {
     const passthrough = expected.passthroughIdentitySnapshot;
     for (const field of DEPLOY_PASSTHROUGH_ASSERT_FIELDS) {
-      if (generated[field] === undefined) {
+      if (DEPLOY_WHOLE_OBJECT_PINNED_FIELDS.includes(field) || generated[field] === undefined) {
         continue;
       }
       let emittedEntries: Array<{ name: string; entry: Record<string, unknown> }>;
@@ -1214,15 +1360,56 @@ export function verifyGeneratedDeployConfig(
             reason: `generated config declares a ${field} binding ${JSON.stringify(name)} that was not present before the build — refusing to deploy a ${field} binding the build injected.`,
           };
         }
-        for (const key of Object.keys(pinnedEntry)) {
-          if (!deepEqual(entry[key], pinnedEntry[key])) {
-            return {
-              ok: false,
-              reason: `generated config ${field} binding ${JSON.stringify(name)} had its ${JSON.stringify(key)} rewritten after the build — refusing to deploy a ${field} binding the build retargeted.`,
-            };
-          }
+        if (!deepEqual(entry, pinnedEntry)) {
+          return {
+            ok: false,
+            reason: `generated config ${field} binding ${JSON.stringify(name)} differs from the pre-build config — refusing to deploy a ${field} binding the build rewrote.`,
+          };
         }
       }
+    }
+  }
+  // (A2) Whole-object + targeted pins for the fields the per-binding ENTRY pin cannot cover, each
+  // compared against the raw pre-build root value ({@link snapshotPassthroughRawFields}):
+  //   • `unsafe` / `tail_consumers` / `streaming_tail_consumers` — an emitted value that grants a
+  //     capability (non-empty) must be byte-identical to the root's; empty/absent (the clean-build
+  //     shape) always passes. `unsafe.metadata` overwrites the WHOLE uploaded bindings array at
+  //     upload, and `tail_consumers`/`streaming_tail_consumers` forward every log/request — so a
+  //     build injecting one grants exfil the source never declared.
+  //   • `durable_objects` — an emitted binding carrying a cross-script field targets ANOTHER
+  //     worker's DOs; Void's own DOs are always LOCAL, so it must match a root binding.
+  //   • `ai` — the emitted binding must be ABSENT, Void's own `{binding:'AI'}`, or the root's.
+  if (expected.passthroughRawFields) {
+    const raw = expected.passthroughRawFields;
+    for (const field of DEPLOY_WHOLE_OBJECT_PINNED_FIELDS) {
+      const emitted = generated[field];
+      if (isEmptyPassthroughValue(emitted)) {
+        continue;
+      }
+      if (!deepEqual(emitted, raw.get(field))) {
+        return {
+          ok: false,
+          reason: `generated config declares a ${field} value that was not present before the build — refusing to deploy a ${field} value the build added or rewrote.`,
+        };
+      }
+    }
+    const externalDo = verifyNoInjectedExternalDurableObject(
+      generated.durable_objects,
+      raw.get('durable_objects'),
+    );
+    if (!externalDo.ok) {
+      return externalDo;
+    }
+    const emittedAi = generated.ai;
+    if (
+      emittedAi !== undefined &&
+      !deepEqual(emittedAi, VOID_EMITTED_AI_BINDING) &&
+      !deepEqual(emittedAi, raw.get('ai'))
+    ) {
+      return {
+        ok: false,
+        reason: `generated config declares an ai binding that is neither Void's own {binding:"AI"} nor the pre-build root ai binding — refusing to deploy an ai binding the build added or rewrote.`,
+      };
     }
   }
   // (B) Queues ⊆ desired — every queue the artifact binds (producers/consumers) must be one Void
@@ -3147,6 +3334,12 @@ export async function runCloudflareDeploy(
   // user's own hand-declared pass-through binding (present here, unchanged) passes. Void never
   // writes these fields, so no legitimate build adds one that was not already in the root.
   const passthroughIdentitySnapshot = snapshotPassthroughIdentities(preBuildRootConfig);
+  // Companion RAW-value pin from the SAME pre-build root config for the fields the ENTRY pin cannot
+  // cover: `unsafe` / `tail_consumers` / `streaming_tail_consumers` (whole-object-pinned — wrangler
+  // applies `unsafe.metadata` LAST at upload and the tail consumers forward logs/requests), plus
+  // `durable_objects` (reject a build-injected EXTERNAL DO `script_name`) and `ai` (pin the binding
+  // to Void's own `{binding:'AI'}` or the root's). Void's build emits none of the first three.
+  const passthroughRawFields = snapshotPassthroughRawFields(preBuildRootConfig);
 
   // (The LOCAL migration gates run POST-build at step 8d, immediately before the remote
   // apply — not here — so they validate the exact files on disk AFTER the build. See step 8d.)
@@ -3548,6 +3741,7 @@ export async function runCloudflareDeploy(
     desired,
     bindingIdentitySnapshot,
     passthroughIdentitySnapshot,
+    passthroughRawFields,
   });
   if (!verification.ok) {
     log.error(
