@@ -1943,8 +1943,12 @@ const BINDING_FIELD_SHAPES: Record<string, BindingFieldShape> = {
  * any malformed/missing REQUIRED identity or wrong outer shape — never content-guessing.
  * wrangler is lenient and would silently drop such a member, letting the worker-wide
  * uniqueness guard miss (or invent) a collision.
+ *
+ * Exported so the deploy orchestrator's passthrough-denylist check reads a resource field's
+ * per-entry identity keys through the SAME wrangler-schema shapes (handling `send_email` /
+ * `ratelimits` name-keying and `logfwdr`'s nested `.bindings`, among others).
  */
-function bindingNamesForField(field: string, value: unknown): Array<string> {
+export function bindingNamesForField(field: string, value: unknown): Array<string> {
   const shape: BindingFieldShape = BINDING_FIELD_SHAPES[field] ?? { kind: 'namespace-array' };
   switch (shape.kind) {
     case 'key-map':

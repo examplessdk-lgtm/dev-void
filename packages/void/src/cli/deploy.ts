@@ -188,6 +188,7 @@ import {
   resolveLiveBindingConfig,
   syncWranglerBindings,
   writeProvisionedWranglerConfig,
+  bindingNamesForField,
   type LiveBindingConfig,
   type WranglerCompat,
 } from './wrangler.ts';
@@ -711,6 +712,103 @@ export function snapshotBindingIdentities(
   return snapshot;
 }
 
+/**
+ * Resource fields Void's OWN inference NEVER emits into the worker config. Audited against
+ * `mergeBindings` (index.ts) + a real Class-A build's `dist/ssr/wrangler.json`, which together
+ * emit ONLY `assets` / `d1_databases` / `kv_namespaces` / `r2_buckets` / `ai` / `vars` / `queues`
+ * / `durable_objects` / `migrations` / `containers`. Any entry the EMITTED artifact declares in
+ * one of THESE fields is therefore either a verbatim pass-through of the user's OWN root config
+ * (captured in the pre-build snapshot) or a build-time INJECTION — the latter would grant the
+ * deployed worker a same-account capability the source never asked for (a `services` binding to
+ * another worker, a `secrets_store_secrets` handle, a `dispatch_namespaces` entry, …), which the
+ * CF plugin passes through into the emitted config and the credentialed `wrangler deploy` then
+ * binds. So the emitted set is asserted ⊆ the pre-build snapshot per field (see
+ * {@link verifyGeneratedDeployConfig}).
+ *
+ * INTENTIONALLY an explicit enumeration — a field NOT on this list is NOT asserted (fail OPEN), so
+ * a future wrangler that adds a new resource field can never false-positive a legitimate build.
+ * New dangerous fields get ADDED here over time. Every field here is verified ABSENT from
+ * `mergeBindings`; `logfwdr` nests its bindings under `.bindings`, handled by the shared
+ * shape-aware {@link bindingNamesForField} reader.
+ */
+const DEPLOY_PASSTHROUGH_DENYLIST_FIELDS = [
+  'services',
+  'secrets_store_secrets',
+  'dispatch_namespaces',
+  'vpc_services',
+  'vpc_networks',
+  'send_email',
+  'mtls_certificates',
+  'vectorize',
+  'workflows',
+  'pipelines',
+  'ai_search',
+  'ai_search_namespaces',
+  'agent_memory',
+  'analytics_engine_datasets',
+  'ratelimits',
+  'worker_loaders',
+  'unsafe_hello_world',
+  'flagship',
+  'artifacts',
+  'logfwdr',
+] as const;
+
+/**
+ * A pin of the identity-key SET per {@link DEPLOY_PASSTHROUGH_DENYLIST_FIELDS} field, captured
+ * from the root config at the SAME pre-build point as {@link snapshotBindingIdentities} (after
+ * provision/drift resolves ids, before the untrusted build). Lets a user's LEGITIMATELY
+ * hand-declared pass-through binding (e.g. a `services` entry present before the build) survive,
+ * while an entry the build ADDED — absent from this pin — fails closed at
+ * {@link verifyGeneratedDeployConfig}. Identity keys come from each field's wrangler shape via
+ * {@link bindingNamesForField} (the SAME reader the build's uniqueness check uses), so `send_email`
+ * / `ratelimits` key on `.name` and `logfwdr` on its nested `.bindings[].name`. A present field
+ * whose shape the strict reader cannot parse is recorded as an EMPTY set, so any emitted entry in
+ * it fails closed on the symmetric read.
+ */
+export function snapshotPassthroughIdentities(
+  config: Record<string, unknown>,
+): Map<string, Set<string>> {
+  const snapshot = new Map<string, Set<string>>();
+  for (const field of DEPLOY_PASSTHROUGH_DENYLIST_FIELDS) {
+    if (config[field] === undefined) {
+      continue;
+    }
+    try {
+      snapshot.set(field, new Set(bindingNamesForField(field, config[field])));
+    } catch {
+      snapshot.set(field, new Set());
+    }
+  }
+  return snapshot;
+}
+
+/**
+ * Every queue NAME the emitted artifact binds — `queues.producers[].queue` +
+ * `queues.consumers[].queue`. Non-throwing: a wrong-shaped `queues` field or an entry with no
+ * readable `queue` string contributes no name (an unnamed queue binds nothing), so only real,
+ * NAMED queue bindings are asserted against the desired set.
+ */
+function collectEmittedQueueNames(value: unknown): Array<string> {
+  const names: Array<string> = [];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return names;
+  }
+  for (const group of ['producers', 'consumers'] as const) {
+    const list = (value as Record<string, unknown>)[group];
+    if (!Array.isArray(list)) {
+      continue;
+    }
+    for (const entry of list) {
+      const name = readD1EntryString(entry, 'queue');
+      if (name !== undefined) {
+        names.push(name);
+      }
+    }
+  }
+  return names;
+}
+
 /** The CF Vite plugin's deploy-config redirect that a bare `wrangler deploy` follows. */
 function deployPointerPath(root: string): string {
   return join(root, '.wrangler', 'deploy', 'config.json');
@@ -913,6 +1011,12 @@ export function verifyGeneratedDeployConfig(
     workerName: string;
     desired?: DesiredResourceSet;
     bindingIdentitySnapshot?: BindingIdentitySnapshot;
+    /**
+     * Per-denylist-field identity-key SET pinned pre-build ({@link snapshotPassthroughIdentities}).
+     * Drives the passthrough-denylist assertion: an emitted entry in a field Void never emits
+     * whose identity was not pinned pre-build is a build-injected binding.
+     */
+    passthroughIdentitySnapshot?: Map<string, Set<string>>;
   },
 ): { ok: boolean; reason?: string } {
   const deployConfigPath = deployPointerPath(root);
@@ -1007,6 +1111,56 @@ export function verifyGeneratedDeployConfig(
         return {
           ok: false,
           reason: `generated config ${field} binding ${JSON.stringify(binding)} has identity ${JSON.stringify(id)} but the pinned pre-build identity is ${JSON.stringify(pinnedId)} — refusing to deploy a rewritten binding set.`,
+        };
+      }
+    }
+  }
+  // (A) Passthrough-denylist COMPLETENESS — every entry the artifact declares in a resource field
+  // Void's inference NEVER emits ({@link DEPLOY_PASSTHROUGH_DENYLIST_FIELDS}) must have been present
+  // in the pre-build root snapshot, matched by its wrangler-shape identity key. Compare identity-key
+  // SETS (⊆), NOT deep-equal: the wrangler normalizer default-fills sub-fields, so only the stable
+  // per-entry identifier is reliable (the same reason the id-pin compares only ids). An emitted
+  // entry whose identity was NOT pinned pre-build is a binding the build injected — one the CF
+  // plugin passes through and the credentialed `wrangler deploy` would grant the worker — so fail
+  // closed. Fields NOT on the denylist are deliberately NOT asserted (fail OPEN): a future wrangler
+  // resource field must never false-positive; new dangerous fields are added to the denylist.
+  if (expected.passthroughIdentitySnapshot) {
+    const passthrough = expected.passthroughIdentitySnapshot;
+    for (const field of DEPLOY_PASSTHROUGH_DENYLIST_FIELDS) {
+      if (generated[field] === undefined) {
+        continue;
+      }
+      let emittedNames: Array<string>;
+      try {
+        emittedNames = bindingNamesForField(field, generated[field]);
+      } catch {
+        return {
+          ok: false,
+          reason: `generated config declares a malformed ${field} binding — refusing to deploy a binding set that cannot be verified.`,
+        };
+      }
+      const pinned = passthrough.get(field) ?? new Set<string>();
+      for (const name of emittedNames) {
+        if (!pinned.has(name)) {
+          return {
+            ok: false,
+            reason: `generated config declares a ${field} binding ${JSON.stringify(name)} that was not present before the build — refusing to deploy a ${field} binding the build injected.`,
+          };
+        }
+      }
+    }
+  }
+  // (B) Queues ⊆ desired — every queue the artifact binds (producers/consumers) must be one Void
+  // desired from source (`scanQueuesSync`, the SAME scan the build binds from), so a legitimate
+  // build always satisfies emitted ⊆ desired. A queue NAME the artifact binds that is not in the
+  // desired set is a queue binding the build injected — fail closed.
+  if (expected.desired) {
+    const desiredQueues = new Set(expected.desired.queues);
+    for (const name of collectEmittedQueueNames(generated.queues)) {
+      if (!desiredQueues.has(name)) {
+        return {
+          ok: false,
+          reason: `generated config declares a queue binding ${JSON.stringify(name)} that Void did not derive from source — refusing to deploy a queue binding the build injected.`,
         };
       }
     }
@@ -2544,8 +2698,14 @@ export async function runCloudflareDeploy(
   // build (see step 8), because `vite build` runs arbitrary project plugins that could
   // add/rewrite migration SQL, and the remote apply reads the live post-build files.
   const configPath = discoverRootWranglerConfig(root);
-  const { desired, reasons, authEnabled, dialect, migrationsDir } =
-    await computeDesiredCloudflareResources(root, voidConfig, configPath);
+  const {
+    desired,
+    reasons,
+    authEnabled,
+    dialect,
+    migrationsDir,
+    migrations: preBuildMigrations,
+  } = await computeDesiredCloudflareResources(root, voidConfig, configPath);
 
   // 2a. Postgres + auth guard — reject before any account op. This backend applies only
   // checked-in `db/migrations/*.sql` to REMOTE D1 (SQLite); a Postgres/Hyperdrive app runs
@@ -2558,6 +2718,30 @@ export async function runCloudflareDeploy(
         'This backend verifies + applies auth tables through remote D1 (SQLite) migrations',
         'only; it cannot provision or verify the Better Auth schema on Postgres/Hyperdrive.',
         'Deploy this app with `void deploy` (the managed platform), or switch the app to D1.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
+  // 2b. Postgres + checked-in migrations guard — reject before any account op. This backend
+  // applies ONLY remote D1 (SQLite) migrations; the remote-migrate step (8d/9) is gated on
+  // `desired.d1`, which a PostgreSQL app never has (it desires `hyperdrive` instead). The managed
+  // platform DOES apply a pg app's `db/migrations/*.sql` over Hyperdrive at deploy (its runtime
+  // migration handler), so shipping them through this self-host backend would silently deploy
+  // against an UNMIGRATED database → a 500 on the first query. Keyed on migration PRESENCE, not
+  // dialect alone: a pg app with an externally-managed schema and ZERO checked-in migrations is
+  // legitimately deployable and MUST still pass. `preBuildMigrations` is the SAME pre-build
+  // `collectMigrations` set the desired-database gate counts, so this guard and `desired.hyperdrive`
+  // agree. (A pg app WITH auth is already rejected at 2a.)
+  if (dialect === 'postgresql' && preBuildMigrations.length > 0) {
+    log.error(
+      [
+        'deploy: --backend cloudflare will not run a PostgreSQL app’s checked-in migrations.',
+        'This backend applies only remote D1 (SQLite) migrations. A PostgreSQL app’s',
+        'db/migrations/*.sql are applied over Hyperdrive by the managed platform (`void deploy`);',
+        'this self-host backend does not run them, so your database would be left unmigrated.',
+        'Deploy this app with `void deploy`, or apply the migrations yourself against your',
+        'Postgres and remove them from db/migrations/, then rerun.',
       ].join('\n'),
     );
     return exit(1);
@@ -2887,7 +3071,15 @@ export async function runCloudflareDeploy(
   // against. No legitimate path rewrites a binding id in the ROOT config after this point — the
   // CF plugin's only post-build id writes go to the emitted dist/ssr/wrangler.json, never back to
   // the root — so equality here is safe to assert.
-  const bindingIdentitySnapshot = snapshotBindingIdentities(parseRootWranglerConfig(configPath));
+  const preBuildRootConfig = parseRootWranglerConfig(configPath);
+  const bindingIdentitySnapshot = snapshotBindingIdentities(preBuildRootConfig);
+  // Companion pin taken from the SAME pre-build root config: the identity-key SET per resource
+  // field Void's inference never emits (`DEPLOY_PASSTHROUGH_DENYLIST_FIELDS`). The emitted-config
+  // check (step 10) rejects any such binding in `dist/ssr/wrangler.json` absent from this pin — so
+  // a build that INJECTS a `services` / `secrets_store_secrets` / `dispatch_namespaces` / … binding
+  // is caught, while a user's own hand-declared pass-through binding (present here) passes. Void
+  // never writes these fields, so no legitimate build adds one that was not already in the root.
+  const passthroughIdentitySnapshot = snapshotPassthroughIdentities(preBuildRootConfig);
 
   // (The LOCAL migration gates run POST-build at step 8d, immediately before the remote
   // apply — not here — so they validate the exact files on disk AFTER the build. See step 8d.)
@@ -3263,15 +3455,19 @@ export async function runCloudflareDeploy(
   // AND the exact provisioned binding IDENTITIES BEFORE uploading. A `CLOUDFLARE_ENV` /
   // `CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH` the CF plugin loaded could have baked a
   // different account/name — or the SAME account/name with a flattened, DIFFERENT binding
-  // set — into dist/ssr/wrangler.json; passing `desired` + the step-6 snapshot lets the check
+  // set — into dist/ssr/wrangler.json; passing `desired` + the step-6 snapshots lets the check
   // reject a divergent binding set, not only an account/name mismatch. The comparison is against
   // the in-memory `bindingIdentitySnapshot` (NOT a post-build root re-read), so a build that
-  // consistently rewrote both the root config and this artifact is still caught.
+  // consistently rewrote both the root config and this artifact is still caught. The
+  // `passthroughIdentitySnapshot` extends the same defense to the resource fields Void never emits
+  // (`services` / `secrets_store_secrets` / …): an entry the build injected into one of them — or a
+  // queue not in `desired.queues` — fails closed here too, before the credentialed upload binds it.
   const verification = (deps.verifyDeployConfig ?? verifyGeneratedDeployConfig)(root, {
     accountId,
     workerName,
     desired,
     bindingIdentitySnapshot,
+    passthroughIdentitySnapshot,
   });
   if (!verification.ok) {
     log.error(

@@ -11,6 +11,7 @@ import {
   deployChildEnv,
   runCloudflareDeploy,
   snapshotBindingIdentities,
+  snapshotPassthroughIdentities,
   validateAuthMigrationSchema,
   verifyGeneratedDeployConfig,
   type CloudflareDeployDeps,
@@ -541,6 +542,73 @@ describe('computeDesiredCloudflareResources — desired set from source', () => 
     );
     expect(desired.hyperdrive).toBeUndefined();
     expect(desired.d1).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PostgreSQL checked-in migration guard: this backend applies only remote D1
+// (SQLite) migrations — the remote-migrate step is gated on `desired.d1`, which
+// a pg app never has. The managed platform DOES apply a pg app's migrations over
+// Hyperdrive at deploy, so a pg app WITH checked-in migrations must be rejected
+// (else it would ship against an unmigrated database), while a pg app WITHOUT
+// migrations (externally-managed schema) is still deployable.
+// ---------------------------------------------------------------------------
+
+describe('runCloudflareDeploy — PostgreSQL checked-in migration guard', () => {
+  /** A worker-bearing pg app with a provisioned Hyperdrive config (drift-clean). */
+  function pgProject(extraFiles: Record<string, string> = {}): string {
+    return makeProject({
+      'package.json': JSON.stringify({ name: 'pgapp' }),
+      'void.json': JSON.stringify({ database: 'pg' }),
+      'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
+      'wrangler.jsonc': JSON.stringify(
+        {
+          account_id: 'acc123',
+          name: 'pgapp',
+          hyperdrive: [{ binding: 'HYPERDRIVE', id: REAL_KV_ID }],
+        },
+        null,
+        2,
+      ),
+      ...extraFiles,
+    });
+  }
+
+  it('rejects a pg app that has checked-in migrations BEFORE any account operation', async () => {
+    // The remote-migrate path is gated on `desired.d1`; a pg app desires `hyperdrive` instead, so
+    // its db/migrations/*.sql would never run here and the worker would hit an unmigrated database.
+    // (Reverting the guard lets this app build + deploy against an unmigrated DB.)
+    const root = pgProject({
+      'db/migrations/0000_init.sql': 'CREATE TABLE notes (id integer primary key);',
+    });
+    const { deps, trace, wranglerArgs, exitCalls } = harness();
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Rejected pre-account-op: no whoami/provision/build/deploy seam ran.
+    expect(wranglerArgs).toEqual([]);
+    expect(trace).toEqual([]);
+  });
+
+  it('still deploys a pg app WITHOUT checked-in migrations (external schema — no false-reject)', async () => {
+    const root = pgProject();
+    const { deps, wranglerArgs, exitCalls } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    // Reached the upload, and no D1 migrate ran (a pg app has no desired.d1).
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
+    expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'apply')).toBe(false);
+  });
+
+  it('leaves a D1/SQLite app with checked-in migrations on the remote-D1 migrate path', async () => {
+    // The guard keys on the postgresql dialect, so a SQLite app with migrations is untouched.
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, wranglerArgs, exitCalls } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'apply')).toBe(true);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
   });
 });
 
@@ -2134,6 +2202,150 @@ describe('verifyGeneratedDeployConfig', () => {
     });
     expect(result).toEqual({ ok: true });
   });
+
+  // --- Passthrough-denylist completeness (fields Void never emits) + queue ⊆ desired ---
+
+  it('passes the full kitchen-sink shape (empty resource arrays, DO/containers, desired queues)', () => {
+    // The critical no-regression: a real Class-A artifact carries empty denylist arrays
+    // (services/vectorize/…), durable_objects/containers/migrations, and a queues block whose
+    // names Void derived from source. NONE may be rejected by the new assertions.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      ...KITCHEN_SINK_NON_ID_BINDINGS,
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: ['jobs'] },
+      bindingIdentitySnapshot: snapshotBindingIdentities({
+        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+      }),
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(KITCHEN_SINK_NON_ID_BINDINGS),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('fails closed when the build injects a services binding absent from the root snapshot', () => {
+    // Root had no `services` pre-build; the artifact adds one binding to another same-account
+    // worker — a capability the source never asked for. (Reverting assertion A lets it through.)
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      services: [{ binding: 'EVIL', service: 'someone-elses-worker' }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/services/);
+    expect(result.reason).toMatch(/injected/);
+  });
+
+  it('fails closed when the build injects a secrets_store_secrets or dispatch_namespaces entry', () => {
+    for (const field of ['secrets_store_secrets', 'dispatch_namespaces'] as const) {
+      const root = deployConfigProject({
+        account_id: 'acc123',
+        name: 'myapp',
+        [field]: [{ binding: 'INJECTED' }],
+      });
+      const result = verifyGeneratedDeployConfig(root, {
+        accountId: 'acc123',
+        workerName: 'myapp',
+        desired: { kvNamespaces: [], queues: [] },
+        passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(new RegExp(field));
+    }
+  });
+
+  it('passes a user hand-declared services binding present in the root snapshot, unchanged', () => {
+    // The legitimate-extra case: a user's own `services` binding was present before the build and
+    // the build left it untouched — completeness must NOT false-positive on a legit pass-through.
+    const rootConfig = { services: [{ binding: 'MY_SVC', service: 'my-other-worker' }] };
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp', ...rootConfig });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('fails closed when the build injects a queue producer not in desired.queues', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      queues: { producers: [{ binding: 'Q', queue: 'exfil' }], consumers: [] },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/queue/);
+    expect(result.reason).toMatch(/exfil/);
+  });
+
+  it('passes emitted queues whose producer AND consumer names are all in desired.queues', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      queues: {
+        producers: [{ binding: 'JOBS', queue: 'jobs' }],
+        consumers: [{ queue: 'jobs', max_batch_size: 10 }],
+      },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: ['jobs'] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('does NOT reject an unknown/future resource field the emitted artifact declares (fail-open)', () => {
+    // A field not on the denylist must never false-positive — a future wrangler resource field
+    // Void does not know about is simply not asserted.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      some_future_resource: [{ binding: 'NEW_THING' }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('does NOT reject durable_objects / containers in the emitted artifact (DO/sandbox out of scope)', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      durable_objects: { bindings: [{ name: 'WS', class_name: 'ChatRoom' }] },
+      containers: [{ class_name: 'Sandbox', image: './Dockerfile' }],
+      migrations: [{ tag: 'v1', new_sqlite_classes: ['Sandbox'] }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2306,8 +2518,13 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
   it('passes a normal deploy whose artifact carries the full non-id binding set (ai/queues/DO/…)', async () => {
     // No-regression at the full-flow level: the pinned DB id is unchanged AND the emitted artifact
     // carries every non-id binding a real Class-A build emits. The completeness check must wave the
-    // ai/queues/DO/vars/empty-array bindings through and let the deploy proceed.
-    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    // ai/queues/DO/vars/empty-array bindings through and let the deploy proceed. The `queues/jobs.ts`
+    // source makes the emitted `jobs` queue a Void-derived binding (desired ⊇ emitted), as a real
+    // build's queues always are.
+    const root = d1Project(PROVISIONED_D1, {
+      ...INIT_MIGRATION,
+      'queues/jobs.ts': 'export default {};',
+    });
     const { deps, wranglerArgs, exitCalls } = harness({
       runBuild: () =>
         writeEmittedDeployArtifact(root, { ...KITCHEN_SINK_NON_ID_BINDINGS, ...EMITTED_D1 }),
@@ -2393,6 +2610,67 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
     expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('fails closed at the emitted-config check when the build injects a services binding', async () => {
+    // The root config (and pre-build passthrough snapshot) has NO services. The build injects a
+    // services binding to another same-account worker into the emitted artifact — a capability the
+    // deployed worker would gain that the source never asked for. No checked-in migrations, so the
+    // catch happens at step 10. (Reverting assertion A lets EVIL through and the deploy runs.)
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () =>
+        writeEmittedDeployArtifact(root, {
+          ...EMITTED_D1,
+          services: [{ binding: 'EVIL', service: 'someone-elses-worker' }],
+        }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // The deploy seam was NOT invoked — the injected binding never reached `wrangler deploy`.
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('fails closed at the emitted-config check when the build injects a queue not in the desired set', async () => {
+    // No queues/ source → desired.queues is empty. The build injects a queue producer into the
+    // emitted artifact. (Reverting assertion B lets the injected queue deploy.)
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () =>
+        writeEmittedDeployArtifact(root, {
+          ...EMITTED_D1,
+          queues: { producers: [{ binding: 'Q', queue: 'exfil' }], consumers: [] },
+        }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('passes when a user hand-declared passthrough binding (services) is present pre-build and unchanged', async () => {
+    // A hand-declared services binding is in the root config BEFORE the build (so the passthrough
+    // snapshot pins it) and the build leaves it untouched — the deploy must NOT be blocked.
+    const root = d1Project({
+      ...PROVISIONED_D1,
+      services: [{ binding: 'MY_SVC', service: 'my-other-worker' }],
+    });
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () =>
+        writeEmittedDeployArtifact(root, {
+          ...EMITTED_D1,
+          services: [{ binding: 'MY_SVC', service: 'my-other-worker' }],
+        }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
   });
 });
 
