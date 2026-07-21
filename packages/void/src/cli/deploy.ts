@@ -1,4 +1,5 @@
 import { execSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   cpSync,
   existsSync,
@@ -861,6 +862,90 @@ export function snapshotPassthroughRawFields(
 }
 
 /**
+ * Deterministic sha256 over the wrangler uploader BUNDLE the credentialed deploy executes — the
+ * resolved `wrangler-dist/cli.js` PLUS every sibling file in its directory. `cli.js` loads sibling
+ * chunks from its own `__dirname` (the proxy workers, the experimental-config module), so the
+ * whole directory is the trust surface, not just the entry file. Content hash of the bytes, NOT
+ * mtime. Resolves the SAME entry {@link createDeployWranglerRunner} spawns (via
+ * {@link resolveWranglerArgv}, whose launcher's LAST argv element is the JS entry). Returns
+ * `undefined` when the entry cannot be resolved or a file cannot be read, so the caller FAILS
+ * CLOSED — it never deploys a binary it could not verify. The resolver is injectable for tests.
+ */
+export function hashWranglerUploader(
+  root: string,
+  resolveArgv: (root: string) => Array<string> = resolveWranglerArgv,
+): string | undefined {
+  let entry: string | undefined;
+  try {
+    const argv = resolveArgv(root);
+    entry = argv[argv.length - 1];
+  } catch {
+    return undefined;
+  }
+  if (typeof entry !== 'string' || entry.length === 0 || !existsSync(entry)) {
+    return undefined;
+  }
+  return hashDirectoryContents(dirname(entry));
+}
+
+/**
+ * sha256 over every file under `dir`, walked in a STABLE (name-sorted, depth-first) order with
+ * each file's relative path folded into the digest, so the hash depends only on the directory's
+ * contents — never on filesystem enumeration order. Returns `undefined` on any read error.
+ */
+function hashDirectoryContents(dir: string): string | undefined {
+  try {
+    const hash = createHash('sha256');
+    const walk = (rel: string): void => {
+      const entries = readdirSync(join(dir, rel), { withFileTypes: true }).sort((a, b) =>
+        a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+      );
+      for (const entry of entries) {
+        const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          walk(childRel);
+        } else {
+          hash.update(childRel);
+          hash.update('\0');
+          hash.update(readFileSync(join(dir, childRel)));
+          hash.update('\0');
+        }
+      }
+    };
+    walk('');
+    return hash.digest('hex');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Assert the wrangler uploader bundle was NOT modified between the pre-build snapshot and now.
+ * A legitimate `vite build` never touches `node_modules/wrangler`, so the hash is stable across
+ * the build. A build that overwrote the uploader — to run attacker code WITH the Cloudflare token
+ * at the post-build remote migrate / deploy — changes it, and an unresolvable/unreadable binary
+ * (either snapshot `undefined`) is a binary that cannot be verified: both FAIL CLOSED.
+ */
+export function assertWranglerUploaderUnchanged(
+  before: string | undefined,
+  after: string | undefined,
+): { ok: boolean; reason?: string } {
+  if (before === undefined || after === undefined) {
+    return {
+      ok: false,
+      reason: `could not resolve or hash the wrangler uploader to verify it across the build — refusing to run a deploy binary that cannot be verified.`,
+    };
+  }
+  if (before !== after) {
+    return {
+      ok: false,
+      reason: `the build modified the wrangler uploader (its bundle hash changed across the build) — refusing to run it with your Cloudflare credentials.`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * True when a resource field's emitted value carries NO capability: `undefined`/`null`, an empty
  * array, an empty object, or a `{ bindings: [] }`. A clean `vite build` (root declaring none of
  * the whole-object-pinned fields) emits `unsafe` / `tail_consumers` / `streaming_tail_consumers`
@@ -1220,10 +1305,19 @@ export function verifyGeneratedDeployConfig(
      * Raw pre-build root values ({@link snapshotPassthroughRawFields}) for the fields the ENTRY
      * pin cannot cover: `unsafe` / `tail_consumers` / `streaming_tail_consumers`
      * (whole-object-pinned), `durable_objects` (external-DO check), and `ai` (binding pin). An
-     * emitted value that is non-empty and not byte-identical to its root pin — an external DO
-     * absent from root, or an `ai` binding that is neither Void's own nor the root's — fails closed.
+     * emitted value that diverges from its root pin — a whole-object field added/removed/rewritten,
+     * an external DO absent from root, or an `ai` binding that is neither the root's nor Void's own
+     * (and only when the source uses AI) — fails closed.
      */
     passthroughRawFields?: Map<string, unknown>;
+    /**
+     * Whether the pre-build inference found Workers AI use in the source (the SAME `needsAI`
+     * signal `shouldBindWorkersAi` gates on in index.ts). Authorizes an emitted `{binding:'AI'}`
+     * ai binding when the root config declares no ai binding: only an AI-using app legitimately
+     * receives Void's injected Workers AI binding, so a build that injects one into a non-AI app
+     * (billable inference the source never asked for) fails closed.
+     */
+    needsAI?: boolean;
   },
 ): { ok: boolean; reason?: string } {
   const deployConfigPath = deployPointerPath(root);
@@ -1371,25 +1465,34 @@ export function verifyGeneratedDeployConfig(
   }
   // (A2) Whole-object + targeted pins for the fields the per-binding ENTRY pin cannot cover, each
   // compared against the raw pre-build root value ({@link snapshotPassthroughRawFields}):
-  //   • `unsafe` / `tail_consumers` / `streaming_tail_consumers` — an emitted value that grants a
-  //     capability (non-empty) must be byte-identical to the root's; empty/absent (the clean-build
-  //     shape) always passes. `unsafe.metadata` overwrites the WHOLE uploaded bindings array at
+  //   • `unsafe` / `tail_consumers` / `streaming_tail_consumers` — the emitted value must be
+  //     byte-identical to the root's. The empty check is SYMMETRIC: an emitted empty value passes
+  //     ONLY when the root value is ALSO empty (the clean-build shape / a normalizer default-fill).
+  //     A root that DECLARED a non-empty value emitted back EMPTY is a REMOVAL — clearing
+  //     `tail_consumers` silently disables the source's audit/log forwarding — so it is rejected
+  //     like any other rewrite. `unsafe.metadata` overwrites the WHOLE uploaded bindings array at
   //     upload, and `tail_consumers`/`streaming_tail_consumers` forward every log/request — so a
-  //     build injecting one grants exfil the source never declared.
+  //     build injecting, rewriting, OR removing one changes exfil/audit the source declared.
   //   • `durable_objects` — an emitted binding carrying a cross-script field targets ANOTHER
   //     worker's DOs; Void's own DOs are always LOCAL, so it must match a root binding.
-  //   • `ai` — the emitted binding must be ABSENT, Void's own `{binding:'AI'}`, or the root's.
+  //   • `ai` — the emitted binding must be ABSENT, the root's (when the root declared one), or —
+  //     ONLY when the source's pre-build inference says the app uses Workers AI — Void's own
+  //     `{binding:'AI'}`. An injected `{binding:'AI'}` on an app that does not use AI would incur
+  //     account-billed inference from build-injected worker code.
   if (expected.passthroughRawFields) {
     const raw = expected.passthroughRawFields;
     for (const field of DEPLOY_WHOLE_OBJECT_PINNED_FIELDS) {
       const emitted = generated[field];
-      if (isEmptyPassthroughValue(emitted)) {
+      const rootValue = raw.get(field);
+      // Both-empty is the only case an empty emitted value passes: a root that declared a
+      // non-empty value emitted back empty REMOVES a control the source configured.
+      if (isEmptyPassthroughValue(emitted) && isEmptyPassthroughValue(rootValue)) {
         continue;
       }
-      if (!deepEqual(emitted, raw.get(field))) {
+      if (!deepEqual(emitted, rootValue)) {
         return {
           ok: false,
-          reason: `generated config declares a ${field} value that was not present before the build — refusing to deploy a ${field} value the build added or rewrote.`,
+          reason: `generated config ${field} value does not match the pre-build config — refusing to deploy a ${field} value the build added, removed, or rewrote.`,
         };
       }
     }
@@ -1401,15 +1504,26 @@ export function verifyGeneratedDeployConfig(
       return externalDo;
     }
     const emittedAi = generated.ai;
-    if (
-      emittedAi !== undefined &&
-      !deepEqual(emittedAi, VOID_EMITTED_AI_BINDING) &&
-      !deepEqual(emittedAi, raw.get('ai'))
-    ) {
-      return {
-        ok: false,
-        reason: `generated config declares an ai binding that is neither Void's own {binding:"AI"} nor the pre-build root ai binding — refusing to deploy an ai binding the build added or rewrote.`,
-      };
+    if (emittedAi !== undefined) {
+      const rootAi = raw.get('ai');
+      if (rootAi !== undefined) {
+        // The root declared its own `ai` binding — the emitted one must equal it EXACTLY, so a
+        // build cannot rewrite a custom root ai binding down to the default `{binding:'AI'}`.
+        if (!deepEqual(emittedAi, rootAi)) {
+          return {
+            ok: false,
+            reason: `generated config ai binding does not match the pre-build root ai binding — refusing to deploy an ai binding the build rewrote.`,
+          };
+        }
+      } else if (!(expected.needsAI === true && deepEqual(emittedAi, VOID_EMITTED_AI_BINDING))) {
+        // No root ai binding: the only ai binding Void's own build emits is `{binding:'AI'}`, and
+        // ONLY when the pre-build inference says the source uses Workers AI (the SAME signal
+        // `shouldBindWorkersAi` gates on). Anything else here is a build-injected billable binding.
+        return {
+          ok: false,
+          reason: `generated config declares an ai binding the build injected — the pre-build inference found no Workers AI use in the source and the root config declares no ai binding.`,
+        };
+      }
     }
   }
   // (B) Queues ⊆ desired — every queue the artifact binds (producers/consumers) must be one Void
@@ -1465,6 +1579,12 @@ export interface CloudflareDeployDeps {
   runWrangler?: DeployWranglerRun;
   /** Run the project's `vite build` (inherited stdio). Throws on a nonzero build. */
   runBuild?: (env: NodeJS.ProcessEnv) => void;
+  /**
+   * Wrangler-uploader content-hash seam (default: {@link hashWranglerUploader}). Snapshotted
+   * BEFORE the build and re-checked AFTER, so a build that overwrote the wrangler bundle the
+   * credentialed remote migrate / deploy execute fails closed before either runs.
+   */
+  hashWranglerUploader?: (root: string) => string | undefined;
   /** Provisioner seam (default: `provisionCloudflareResources`, loaded dynamically). */
   provision?: typeof provisionCloudflareResources;
   /** Parent-side secret-gate discharge seam (default: {@link dischargeSelfHostEnvContext}). */
@@ -1857,6 +1977,12 @@ export async function computeDesiredCloudflareResources(
   migrationsDir: string;
   /** Checked-in migrations (`db/migrations/*.sql`) collected pre-build. */
   migrations: Array<{ name: string; sql: string }>;
+  /**
+   * Whether the pre-build inference found Workers AI use in the source — the SAME `needsAI`
+   * signal `shouldBindWorkersAi` (index.ts) gates the emitted `{binding:'AI'}` on. Threaded
+   * into {@link verifyGeneratedDeployConfig} to authorize that emitted ai binding.
+   */
+  needsAI: boolean;
 }> {
   // The id predicates are resolved via the memoized dynamic import so this exported
   // helper works when called directly in unit tests (outside the fork) without a
@@ -1991,6 +2117,7 @@ export async function computeDesiredCloudflareResources(
     dialect,
     migrationsDir: paths.migrationsDir,
     migrations,
+    needsAI: bindings.needsAI,
   };
 }
 
@@ -2967,6 +3094,7 @@ export async function runCloudflareDeploy(
     dialect,
     migrationsDir,
     migrations: preBuildMigrations,
+    needsAI,
   } = await computeDesiredCloudflareResources(root, voidConfig, configPath);
 
   // 2a. Postgres + auth guard — reject before any account op. This backend applies only
@@ -3336,9 +3464,10 @@ export async function runCloudflareDeploy(
   const passthroughIdentitySnapshot = snapshotPassthroughIdentities(preBuildRootConfig);
   // Companion RAW-value pin from the SAME pre-build root config for the fields the ENTRY pin cannot
   // cover: `unsafe` / `tail_consumers` / `streaming_tail_consumers` (whole-object-pinned — wrangler
-  // applies `unsafe.metadata` LAST at upload and the tail consumers forward logs/requests), plus
-  // `durable_objects` (reject a build-injected EXTERNAL DO `script_name`) and `ai` (pin the binding
-  // to Void's own `{binding:'AI'}` or the root's). Void's build emits none of the first three.
+  // applies `unsafe.metadata` LAST at upload and the tail consumers forward logs/requests; the pin
+  // is symmetric, so removing a root-declared value is caught too), plus `durable_objects` (reject a
+  // build-injected EXTERNAL DO `script_name`) and `ai` (pin the binding to the root's, or to Void's
+  // own `{binding:'AI'}` only when `needsAI`). Void's build emits none of the first three.
   const passthroughRawFields = snapshotPassthroughRawFields(preBuildRootConfig);
 
   // (The LOCAL migration gates run POST-build at step 8d, immediately before the remote
@@ -3390,11 +3519,41 @@ export async function runCloudflareDeploy(
     ((env: NodeJS.ProcessEnv) => {
       execSync(resolveProjectCommand(root, 'vite build'), { cwd: root, stdio: 'inherit', env });
     });
+  // Pin the wrangler UPLOADER across the build, mirroring the config/account/binding-id pins. The
+  // build runs untrusted project code with the parent's Cloudflare creds scrubbed, so it can only
+  // edit FILES — but that INCLUDES the `wrangler-dist` bundle the post-build credentialed remote
+  // migrate (step 9) and deploy (step 11) execute. A build that overwrites it runs attacker code
+  // WITH the CF token. Snapshot the bundle's content hash IMMEDIATELY BEFORE the build; re-check it
+  // IMMEDIATELY AFTER (below), BEFORE any credentialed wrangler run. A legitimate `vite build`
+  // never touches `node_modules/wrangler`, so the hash is stable. (This closes the "build swapped
+  // the uploader" vector only; a fully-compromised build dependency remains a trust boundary.)
+  const hashUploader = deps.hashWranglerUploader ?? hashWranglerUploader;
+  const wranglerUploaderHashBefore = hashUploader(root);
   try {
     runBuild(buildChildEnv);
   } catch (err) {
     log.error(`deploy: build failed — ${getErrorMessage(err)}`);
     return exit(getExitCode(err));
+  }
+  // Re-hash the wrangler uploader now the build has run, BEFORE the remote migrate / deploy. A
+  // changed hash means the build modified the bundle those credentialed runs execute; an
+  // unresolvable/unreadable binary (either snapshot `undefined`) cannot be verified. Both fail
+  // closed here — no remote mutation has happened since the pre-build snapshot, so nothing is
+  // left half-done.
+  const uploaderCheck = assertWranglerUploaderUnchanged(
+    wranglerUploaderHashBefore,
+    hashUploader(root),
+  );
+  if (!uploaderCheck.ok) {
+    log.error(
+      [
+        'deploy: refusing to run the wrangler uploader with your Cloudflare credentials.',
+        uploaderCheck.reason,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    );
+    return exit(1);
   }
 
   // Re-collect the checked-in migrations from disk AFTER the build. `vite build` runs
@@ -3742,6 +3901,7 @@ export async function runCloudflareDeploy(
     bindingIdentitySnapshot,
     passthroughIdentitySnapshot,
     passthroughRawFields,
+    needsAI,
   });
   if (!verification.ok) {
     log.error(

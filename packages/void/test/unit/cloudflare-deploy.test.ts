@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vite-plus/test';
 import {
   assertMigrationsProduceAuthSchema,
   assertNoConfigOverrideInProjectDotenv,
+  assertWranglerUploaderUnchanged,
   checkWranglerMigrationApplySet,
   compareWranglerMigrationPaths,
   computeDesiredCloudflareResources,
@@ -12,6 +13,7 @@ import {
   DEPLOY_PASSTHROUGH_ASSERT_FIELDS,
   DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS,
   DEPLOY_WHOLE_OBJECT_PINNED_FIELDS,
+  hashWranglerUploader,
   runCloudflareDeploy,
   snapshotBindingIdentities,
   snapshotPassthroughIdentities,
@@ -237,6 +239,10 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     runBuild: () => {
       trace.push('build');
     },
+    // Stub the wrangler-uploader hash so orchestration tests never hash the real ~18MB bundle
+    // twice; a constant means the pre-build and post-build snapshots match (an unchanged uploader).
+    // Dedicated tests inject a stateful stub that changes across the build to drive the fail path.
+    hashWranglerUploader: () => 'uploader-hash-unchanged',
     provision: (async (_root, configPath): Promise<ProvisionResult> => {
       trace.push('provision');
       return { resources: [], configPath, accountIdWritten: false };
@@ -2683,6 +2689,65 @@ describe('verifyGeneratedDeployConfig', () => {
     });
   }
 
+  // --- Symmetric empty check: a non-empty root emitted back EMPTY is a REMOVAL (rejected) ---
+
+  it('fails closed when the build empties a root-declared tail_consumers (disabling audit forwarding)', () => {
+    // The source forwarded logs to an audit collector; the build rewrote it to `[]`, which wrangler
+    // uploads as an explicit empty array — silently disabling the forwarding. The symmetric check
+    // rejects an emptied emitted value whenever the root declared a non-empty one.
+    const rootConfig = { tail_consumers: [{ service: 'audit-collector' }] };
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      tail_consumers: [],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/tail_consumers/);
+  });
+
+  it('fails closed when the build empties a root-declared streaming_tail_consumers', () => {
+    const rootConfig = { streaming_tail_consumers: [{ service: 'audit-collector' }] };
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      streaming_tail_consumers: [],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/streaming_tail_consumers/);
+  });
+
+  it('fails closed when the build empties a root-declared unsafe object', () => {
+    const rootConfig = { unsafe: { bindings: [{ name: 'X', type: 'plain_text' }] } };
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      unsafe: { bindings: [] },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/unsafe/);
+  });
+
   // --- External Durable Object (`script_name` targets another worker's DOs) ---
 
   it('fails closed when the build injects an external durable_object (script_name) absent from root', () => {
@@ -2765,7 +2830,7 @@ describe('verifyGeneratedDeployConfig', () => {
 
   // --- AI binding (must be Void's own {binding:'AI'}, the root's, or absent) ---
 
-  it("passes Void's own emitted ai binding {binding:'AI'} with none in root", () => {
+  it("passes Void's own emitted ai binding {binding:'AI'} with none in root when the source uses AI", () => {
     const root = deployConfigProject({
       account_id: 'acc123',
       name: 'myapp',
@@ -2777,8 +2842,29 @@ describe('verifyGeneratedDeployConfig', () => {
       desired: { kvNamespaces: [], queues: [] },
       passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
       passthroughRawFields: snapshotPassthroughRawFields({}),
+      needsAI: true,
     });
     expect(result).toEqual({ ok: true });
+  });
+
+  it("fails closed when the build injects Void's own {binding:'AI'} but the source does not use AI", () => {
+    // No root ai + needsAI false: a real build never emits `{binding:'AI'}` here, so an emitted one
+    // is a build-injected billable Workers AI binding.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      ai: { binding: 'AI' },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+      needsAI: false,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/ai binding/);
   });
 
   it('passes an emitted ai binding byte-identical to the root ai binding', () => {
@@ -2792,6 +2878,28 @@ describe('verifyGeneratedDeployConfig', () => {
       passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
     });
     expect(result).toEqual({ ok: true });
+  });
+
+  it('fails closed when the build rewrites a custom root ai binding down to the default', () => {
+    // The root declared a custom ai binding; the emitted one must equal it EXACTLY. Rewriting it
+    // to `{binding:'AI'}` (or any other shape) is a build tampering with the ai target — reject
+    // even when needsAI is true, since the root's own binding is the ground truth.
+    const rootConfig = { ai: { binding: 'AI', gateway: { id: 'my-own-gateway' } } };
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      ai: { binding: 'AI' },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+      needsAI: true,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/ai binding/);
   });
 
   it('fails closed when the build injects an ai binding that is neither Void’s own nor the root’s', () => {
@@ -3017,11 +3125,14 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
     // No-regression at the full-flow level: the pinned DB id is unchanged AND the emitted artifact
     // carries every non-id binding a real Class-A build emits. The completeness check must wave the
     // ai/queues/DO/vars/empty-array bindings through and let the deploy proceed. The `queues/jobs.ts`
-    // source makes the emitted `jobs` queue a Void-derived binding (desired ⊇ emitted), as a real
-    // build's queues always are.
+    // source makes the emitted `jobs` queue a Void-derived binding (desired ⊇ emitted), and the
+    // `routes/ai.ts` source makes the pre-build inference report needsAI=true — the SAME signal that
+    // authorizes the emitted `{binding:'AI'}` ai binding, exactly as a real AI-using build's does.
     const root = d1Project(PROVISIONED_D1, {
       ...INIT_MIGRATION,
       'queues/jobs.ts': 'export default {};',
+      'routes/ai.ts':
+        "import { ai } from 'void/ai';\nexport const GET = () => ai.run('@cf/x', {});",
     });
     const { deps, wranglerArgs, exitCalls } = harness({
       runBuild: () =>
@@ -3230,10 +3341,14 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
 
   it('passes a normal deploy whose artifact carries Void’s own ai + local DO bindings', async () => {
     // No-regression: the emitted `ai:{binding:'AI'}` and LOCAL DOs a real build emits must pass the
-    // raw-field pins end-to-end. The `queues/jobs.ts` source makes `jobs` a Void-derived queue.
+    // raw-field pins end-to-end. The `queues/jobs.ts` source makes `jobs` a Void-derived queue, and
+    // the `routes/ai.ts` source makes the pre-build inference report needsAI=true — the SAME signal
+    // that authorizes the emitted `{binding:'AI'}` ai binding.
     const root = d1Project(PROVISIONED_D1, {
       ...INIT_MIGRATION,
       'queues/jobs.ts': 'export default {};',
+      'routes/ai.ts':
+        "import { ai } from 'void/ai';\nexport const GET = () => ai.run('@cf/x', {});",
     });
     const { deps, wranglerArgs, exitCalls } = harness({
       runBuild: () =>
@@ -3243,6 +3358,43 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
     expect(exitCalls).toEqual([]);
     expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
+  });
+
+  it('fails closed when the build modifies the wrangler uploader (before any credentialed run)', async () => {
+    // The build overwrote the wrangler bundle the post-build remote migrate / deploy execute, so
+    // the post-build hash differs from the pre-build snapshot. The deploy refuses before running
+    // the uploader with the Cloudflare token — no `wrangler deploy` is reached.
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    let built = false;
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () => {
+        built = true;
+        writeEmittedDeployArtifact(root, EMITTED_D1);
+      },
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+      hashWranglerUploader: () => (built ? 'after-build-tampered' : 'before-build-clean'),
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('fails closed when the wrangler uploader cannot be hashed (unverifiable binary)', async () => {
+    // The uploader could not be resolved/read (the hash seam returns undefined) — refuse to deploy
+    // a binary that cannot be verified rather than skipping the check.
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () => writeEmittedDeployArtifact(root, EMITTED_D1),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+      hashWranglerUploader: () => undefined,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
   });
 });
 
@@ -5811,5 +5963,90 @@ describe('runCloudflareDeploy — wrangler autoconfig disabled', () => {
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
     const deployArgs = wranglerArgs.find((a) => a[0] === 'deploy');
     expect(deployArgs).toContain('--autoconfig=false');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wrangler-uploader hash pin: the credentialed remote migrate / deploy execute the
+// resolved `wrangler-dist/cli.js` bundle (plus the sibling chunks it loads). The build
+// runs untrusted project code that can only edit FILES — including that bundle — so the
+// deploy snapshots its content hash before the build and re-checks it after, failing
+// closed if it changed or cannot be verified.
+// ---------------------------------------------------------------------------
+
+describe('hashWranglerUploader — content hash of the wrangler uploader bundle dir', () => {
+  const distDir = join(tmpDir, 'fake-wrangler-dist');
+
+  /** Build a fake `wrangler-dist` dir and a resolver whose LAST argv element is its cli.js. */
+  function makeFakeUploader(files: Record<string, string>): (root: string) => Array<string> {
+    rmSync(distDir, { recursive: true, force: true });
+    mkdirSync(distDir, { recursive: true });
+    for (const [name, content] of Object.entries(files)) {
+      const abs = join(distDir, name);
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, content);
+    }
+    return () => [process.execPath, join(distDir, 'cli.js')];
+  }
+
+  it('is stable when nothing changes', () => {
+    const resolveArgv = makeFakeUploader({ 'cli.js': 'entry', 'ProxyWorker.js': 'sibling' });
+    const first = hashWranglerUploader(tmpDir, resolveArgv);
+    expect(typeof first).toBe('string');
+    expect(hashWranglerUploader(tmpDir, resolveArgv)).toBe(first);
+  });
+
+  it('changes when cli.js itself is overwritten', () => {
+    const resolveArgv = makeFakeUploader({ 'cli.js': 'original' });
+    const before = hashWranglerUploader(tmpDir, resolveArgv);
+    writeFileSync(join(distDir, 'cli.js'), 'overwritten-by-build');
+    expect(hashWranglerUploader(tmpDir, resolveArgv)).not.toBe(before);
+  });
+
+  it('changes when a SIBLING chunk cli.js loads is overwritten (whole-dir surface)', () => {
+    const resolveArgv = makeFakeUploader({ 'cli.js': 'entry', 'ProxyWorker.js': 'sibling' });
+    const before = hashWranglerUploader(tmpDir, resolveArgv);
+    // cli.js is untouched; only the sibling changes — still caught.
+    writeFileSync(join(distDir, 'ProxyWorker.js'), 'tampered-sibling');
+    expect(hashWranglerUploader(tmpDir, resolveArgv)).not.toBe(before);
+  });
+
+  it('returns undefined when the resolver throws (wrangler unresolvable → fail closed)', () => {
+    const result = hashWranglerUploader(tmpDir, () => {
+      throw new Error('cannot resolve wrangler');
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when the resolved entry does not exist', () => {
+    const result = hashWranglerUploader(tmpDir, () => [
+      process.execPath,
+      join(tmpDir, 'nonexistent', 'cli.js'),
+    ]);
+    expect(result).toBeUndefined();
+  });
+});
+
+describe('assertWranglerUploaderUnchanged', () => {
+  it('passes when the before/after hashes match', () => {
+    expect(assertWranglerUploaderUnchanged('abc123', 'abc123')).toEqual({ ok: true });
+  });
+
+  it('fails closed when the hash changed across the build', () => {
+    const result = assertWranglerUploaderUnchanged('abc123', 'xyz789');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/modified the wrangler uploader/);
+  });
+
+  it('fails closed when the pre-build hash is undefined (unverifiable binary)', () => {
+    const result = assertWranglerUploaderUnchanged(undefined, 'abc123');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/cannot be verified/);
+  });
+
+  it('fails closed when the post-build hash is undefined', () => {
+    const result = assertWranglerUploaderUnchanged('abc123', undefined);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/cannot be verified/);
   });
 });
