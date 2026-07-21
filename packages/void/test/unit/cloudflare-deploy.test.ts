@@ -2021,18 +2021,30 @@ describe('DEPLOY_PASSTHROUGH_ASSERT_FIELDS — registry-derived composition', ()
     }
   });
 
-  it('whole-object-pins unsafe and the tail-consumer fields (the entry pin cannot see them)', () => {
+  it('whole-object-pins unsafe, the tail-consumer fields, and the traffic-attachment fields (the entry pin cannot see them)', () => {
     expect([...DEPLOY_WHOLE_OBJECT_PINNED_FIELDS].sort()).toEqual([
+      'preview_urls',
+      'route',
+      'routes',
       'streaming_tail_consumers',
       'tail_consumers',
       'unsafe',
+      'workers_dev',
     ]);
     // `unsafe` stays in the assert-set (drift invariant) but is routed to the whole-object pin.
     expect(DEPLOY_PASSTHROUGH_ASSERT_FIELDS).toContain('unsafe');
-    // The tail-consumer fields are NOT bindings, so the assert-set structurally cannot see them —
-    // only the whole-object pin covers them.
-    expect(FRIENDLY_BINDING_NAMES).not.toHaveProperty('tail_consumers');
-    expect(FRIENDLY_BINDING_NAMES).not.toHaveProperty('streaming_tail_consumers');
+    // The tail-consumer + traffic-attachment fields are NOT bindings, so the assert-set structurally
+    // cannot see them — only the whole-object pin covers them.
+    for (const field of [
+      'tail_consumers',
+      'streaming_tail_consumers',
+      'routes',
+      'route',
+      'workers_dev',
+      'preview_urls',
+    ]) {
+      expect(FRIENDLY_BINDING_NAMES).not.toHaveProperty(field);
+    }
   });
 });
 
@@ -2368,6 +2380,66 @@ describe('verifyGeneratedDeployConfig', () => {
     expect(result).toEqual({ ok: true });
   });
 
+  // --- Reverse-presence: a root-declared pass-through binding the build DROPPED is rejected ---
+
+  it('fails closed when the build DROPS a root-declared services binding from the emitted config', () => {
+    // The source declared a `services` binding pre-build; the emitted artifact no longer carries it
+    // (the build removed it). The forward loop only walks emitted entries, so it cannot see the
+    // omission — the reverse-presence loop must reject it.
+    const rootConfig = { services: [{ binding: 'MY_SVC', service: 'my-other-worker' }] };
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/services/);
+    expect(result.reason).toMatch(/MY_SVC/);
+  });
+
+  it('fails closed when the build drops one of several pinned passthrough bindings', () => {
+    // Two root-declared bindings across two fields; the emitted config keeps `mtls_certificates` but
+    // drops the `services` one. The surviving binding passes the forward loop, but the reverse loop
+    // catches the dropped one.
+    const rootConfig = {
+      services: [{ binding: 'SVC', service: 'worker-a' }],
+      mtls_certificates: [{ binding: 'CERT', certificate_id: 'cert-1' }],
+    };
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      mtls_certificates: [{ binding: 'CERT', certificate_id: 'cert-1' }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/services/);
+    expect(result.reason).toMatch(/SVC/);
+  });
+
+  it('passes when every pinned passthrough binding is still present in the emitted config', () => {
+    // No-regression for the reverse loop: all root-declared pass-through bindings survive the build
+    // byte-identical, so neither the forward nor the reverse loop objects.
+    const rootConfig = {
+      services: [{ binding: 'SVC', service: 'worker-a' }],
+      mtls_certificates: [{ binding: 'CERT', certificate_id: 'cert-1' }],
+    };
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp', ...rootConfig });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
   it('fails closed when the build injects a queue producer not in desired.queues', () => {
     const root = deployConfigProject({
       account_id: 'acc123',
@@ -2635,6 +2707,126 @@ describe('verifyGeneratedDeployConfig', () => {
       desired: { kvNamespaces: [], queues: [] },
       passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
       passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  // --- Traffic attachment (routes / route / workers_dev / preview_urls — Void emits none) ---
+
+  it('passes when routes / route / workers_dev / preview_urls are all absent (the clean-build shape)', () => {
+    // A real `vite build` (root declaring none) leaves all four ABSENT from the emitted artifact
+    // (verified against a real build), so the whole-object pin must wave the absent shape through.
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('fails closed when the build injects a routes entry absent from the root (traffic hijack)', () => {
+    // The build attaches the worker to a production hostname/path the account controls by injecting
+    // `routes`. The root declared none, so the whole-object pin rejects it.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      routes: [{ pattern: 'victim.example.com/*', zone_name: 'victim.example.com' }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/routes/);
+  });
+
+  it('fails closed when the build injects a single `route` string absent from the root', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      route: 'victim.example.com/*',
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/route/);
+  });
+
+  it('passes a root-declared routes emitted byte-identical', () => {
+    // A user who legitimately declared `routes` in wrangler.jsonc: the build spreads it verbatim, so
+    // the emitted value is byte-identical and passes. (Verified against a real build.)
+    const rootConfig = {
+      routes: [{ pattern: 'app.example.com/*', zone_name: 'app.example.com' }],
+    };
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp', ...rootConfig });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('fails closed when the build flips a root-declared workers_dev from false to true', () => {
+    // `workers_dev:false` is non-empty (isEmptyPassthroughValue(false) is false), so a root that
+    // declared it false and an emitted `true` are deepEqual-compared — flipping the public exposure
+    // is rejected. (A real build emits a declared `workers_dev:false` byte-identical.)
+    const rootConfig = { workers_dev: false };
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      workers_dev: true,
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/workers_dev/);
+  });
+
+  it('fails closed when the build injects workers_dev:true on a root that declared none', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      workers_dev: true,
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/workers_dev/);
+  });
+
+  it('passes a root-declared workers_dev:false emitted byte-identical', () => {
+    const rootConfig = { workers_dev: false, preview_urls: false };
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp', ...rootConfig });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
     });
     expect(result).toEqual({ ok: true });
   });
@@ -2927,6 +3119,110 @@ describe('verifyGeneratedDeployConfig', () => {
       desired: { kvNamespaces: [], queues: [] },
       passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
       passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('fails closed when the build REMOVES a root-declared ai binding (emitted ai absent)', () => {
+    // The source declared its own `ai` binding pre-build; the emitted config drops it entirely. The
+    // check reads the root ai FIRST, so a removed root ai — not just a rewrite — is rejected. Without
+    // this, the deploy would ship a worker missing the configured AI binding.
+    const rootConfig = { ai: { binding: 'CUSTOM_AI' } };
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/ai binding/);
+  });
+
+  // --- Destructive Durable Object migrations (a build-injected delete/rename/transfer) ---
+
+  it('fails closed when the build injects a migration with deleted_classes absent from root', () => {
+    // A build appends a `{tag, deleted_classes:["ProdDO"]}` migration; `wrangler deploy` would run it
+    // and DELETE the production Durable Object's data. The root declared no such migration.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      migrations: [
+        { tag: 'v1', new_sqlite_classes: ['Sandbox'] },
+        { tag: 'evil', deleted_classes: ['ProdDO'] },
+      ],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/destructive/);
+    expect(result.reason).toMatch(/evil/);
+  });
+
+  it('fails closed for each destructive migration key the build could inject', () => {
+    for (const key of [
+      'deleted_classes',
+      'renamed_classes',
+      'transferred_classes',
+      'transferred_classes_from_script',
+    ] as const) {
+      const root = deployConfigProject({
+        account_id: 'acc123',
+        name: 'myapp',
+        migrations: [{ tag: 'x', [key]: ['ProdDO'] }],
+      });
+      const result = verifyGeneratedDeployConfig(root, {
+        accountId: 'acc123',
+        workerName: 'myapp',
+        desired: { kvNamespaces: [], queues: [] },
+        passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+        passthroughRawFields: snapshotPassthroughRawFields({}),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/destructive/);
+    }
+  });
+
+  it("passes Void's own creation-only migrations (new_sqlite_classes) — never inspected", () => {
+    // Void emits migrations carrying only creation keys; those are never checked against root, so an
+    // app whose root declared no `migrations` still deploys cleanly.
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      migrations: [{ tag: 'void-sandbox-v1', new_sqlite_classes: ['Sandbox'] }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('passes a root-declared destructive migration emitted byte-identical (a legit rename)', () => {
+    // A user's own checked-in destructive migration is pinned from the pre-build root and survives
+    // the build byte-for-byte, so it passes — only an entry ABSENT from root is rejected.
+    const rootConfig = {
+      migrations: [
+        { tag: 'v1', new_sqlite_classes: ['Room'] },
+        { tag: 'v2', renamed_classes: [{ from: 'Room', to: 'ChatRoom' }] },
+      ],
+    };
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp', ...rootConfig });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
     });
     expect(result).toEqual({ ok: true });
   });
@@ -3395,6 +3691,66 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
     expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('fails closed BEFORE the remote D1 migrate when a post-build step mutates the uploader', async () => {
+    // The early post-build check passes (the build left the uploader clean), then a POST-build
+    // project step — modelled by the migration gate, which runs after the secret gate and before the
+    // remote migrate — overwrites the bundle. The re-check immediately before `d1 migrations apply`
+    // catches it, so no credentialed D1 run and no deploy happen. (A single early check would miss
+    // this interleaving.)
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    let uploaderTampered = false;
+    const { deps, wranglerArgs, exitCalls } = harness({
+      hashWranglerUploader: () => (uploaderTampered ? 'tampered' : 'clean'),
+      assertMigrationsDeployable: () => {
+        // Stands in for post-build project code (drizzle-kit loading db/schema.ts) overwriting the
+        // hashed wrangler bundle after the build and after the secret-list check.
+        uploaderTampered = true;
+      },
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Neither the credentialed remote migrate nor the deploy ran.
+    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('fails closed BEFORE the deploy when a post-build step mutates the uploader (no-migration app)', async () => {
+    // No checked-in migrations → the remote-migrate path is skipped, so the deploy is the first
+    // credentialed run after the build. A post-build project step mutates the uploader; the re-check
+    // immediately before `wrangler deploy` fails closed.
+    const root = d1Project(PROVISIONED_D1);
+    let uploaderTampered = false;
+    const { deps, wranglerArgs, exitCalls } = harness({
+      hashWranglerUploader: () => (uploaderTampered ? 'tampered' : 'clean'),
+      assertMigrationsDeployable: () => {
+        uploaderTampered = true;
+      },
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('proceeds through every credentialed spawn when the uploader stays unchanged (no regression)', async () => {
+    // The uploader hash is stable across the build and every post-build step, so all four per-spawn
+    // re-checks (secret list, D1 apply, D1 list, deploy) pass and the deploy runs to completion.
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      // Default constant-hash stub keeps the uploader unchanged across all spawns.
+      runBuild: () => writeEmittedDeployArtifact(root, EMITTED_D1),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'apply')).toBe(true);
+    expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'list')).toBe(true);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
   });
 });
 
