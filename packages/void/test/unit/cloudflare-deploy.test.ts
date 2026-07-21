@@ -337,6 +337,44 @@ const PROVISIONED_D1 = {
   ],
 };
 
+/**
+ * The non-id bindings a real Class-A build emits into `dist/ssr/wrangler.json` (see
+ * `playground/kitchen-sink/dist/ssr/wrangler.json`): `ai`, `queues`, `durable_objects`,
+ * `migrations`, `new_sqlite_classes`, `containers`, `vars`, `assets`, `triggers`, `rules`,
+ * `observability`, `main`, `compatibility_date/flags`, plus the ~20 empty arrays wrangler
+ * always materializes. The binding-identity check MUST ignore every one of these and inspect
+ * ONLY the four id-bearing arrays (`d1_databases`/`kv_namespaces`/`r2_buckets`/`hyperdrive`).
+ */
+const KITCHEN_SINK_NON_ID_BINDINGS = {
+  ai: { binding: 'AI' },
+  queues: {
+    producers: [{ binding: 'JOBS', queue: 'jobs' }],
+    consumers: [{ queue: 'jobs', max_batch_size: 10 }],
+  },
+  durable_objects: {
+    bindings: [
+      { name: 'SANDBOX', class_name: 'Sandbox' },
+      { name: 'WS', class_name: 'ChatRoom' },
+    ],
+  },
+  migrations: [{ tag: 'v1', new_sqlite_classes: ['Sandbox'] }],
+  containers: [{ class_name: 'Sandbox', image: './Dockerfile' }],
+  vars: { __VOID_AI_GATEWAY: 'my-gateway', PUBLIC_FLAG: 'on' },
+  assets: { directory: './dist/client', binding: 'ASSETS' },
+  triggers: { crons: ['0 0 * * *'] },
+  rules: [{ type: 'ESModule', globs: ['**/*.js'] }],
+  observability: { enabled: true },
+  main: './dist/ssr/index.js',
+  compatibility_date: '2025-01-01',
+  compatibility_flags: ['nodejs_compat'],
+  services: [],
+  vectorize: [],
+  workflows: [],
+  dispatch_namespaces: [],
+  analytics_engine_datasets: [],
+  hyperdrive: [],
+};
+
 // ---------------------------------------------------------------------------
 // Desired set (from source, pre-build)
 // ---------------------------------------------------------------------------
@@ -1884,10 +1922,9 @@ describe('verifyGeneratedDeployConfig', () => {
     // pinned before the build — a flattened named-env / alternate-config binding set, OR a
     // build that rewrote the id. The snapshot (not a root re-read) is the ground truth.
     const desired = { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] };
-    const snapshot = snapshotBindingIdentities(
-      { d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }] },
-      desired,
-    );
+    const snapshot = snapshotBindingIdentities({
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+    });
     const root = deployConfigProject({
       account_id: 'acc123',
       name: 'myapp',
@@ -1905,10 +1942,9 @@ describe('verifyGeneratedDeployConfig', () => {
 
   it('fails when the generated config drops a pinned binding entirely', () => {
     const desired = { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] };
-    const snapshot = snapshotBindingIdentities(
-      { d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }] },
-      desired,
-    );
+    const snapshot = snapshotBindingIdentities({
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+    });
     const root = deployConfigProject({ account_id: 'acc123', name: 'myapp', d1_databases: [] });
     const result = verifyGeneratedDeployConfig(root, {
       accountId: 'acc123',
@@ -1926,13 +1962,10 @@ describe('verifyGeneratedDeployConfig', () => {
       kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }],
       queues: [],
     };
-    const snapshot = snapshotBindingIdentities(
-      {
-        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
-        kv_namespaces: [{ binding: 'KV', id: REAL_KV_ID }],
-      },
-      desired,
-    );
+    const snapshot = snapshotBindingIdentities({
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+      kv_namespaces: [{ binding: 'KV', id: REAL_KV_ID }],
+    });
     const root = deployConfigProject({
       account_id: 'acc123',
       name: 'myapp',
@@ -1956,10 +1989,9 @@ describe('verifyGeneratedDeployConfig', () => {
       kvNamespaces: [],
       queues: [],
     };
-    const r2Snapshot = snapshotBindingIdentities(
-      { r2_buckets: [{ binding: 'STORAGE', bucket_name: 'myapp-storage' }] },
-      r2Desired,
-    );
+    const r2Snapshot = snapshotBindingIdentities({
+      r2_buckets: [{ binding: 'STORAGE', bucket_name: 'myapp-storage' }],
+    });
     const r2Root = deployConfigProject({
       account_id: 'acc123',
       name: 'myapp',
@@ -1979,10 +2011,9 @@ describe('verifyGeneratedDeployConfig', () => {
       kvNamespaces: [],
       queues: [],
     };
-    const hyperSnapshot = snapshotBindingIdentities(
-      { hyperdrive: [{ binding: 'HYPERDRIVE', id: REAL_KV_ID }] },
-      hyperDesired,
-    );
+    const hyperSnapshot = snapshotBindingIdentities({
+      hyperdrive: [{ binding: 'HYPERDRIVE', id: REAL_KV_ID }],
+    });
     const hyperRoot = deployConfigProject({
       account_id: 'acc123',
       name: 'myapp',
@@ -1996,6 +2027,112 @@ describe('verifyGeneratedDeployConfig', () => {
         bindingIdentitySnapshot: hyperSnapshot,
       }).ok,
     ).toBe(false);
+  });
+
+  it('passes with the full non-id binding set a real build emits (allow-list is exercised)', () => {
+    // The critical no-regression shape: every id-bearing binding matches the snapshot, and the
+    // artifact ALSO carries the ai/queues/DO/vars/empty-array bindings a real Class-A build emits.
+    // None of those non-id bindings is in the snapshot, yet the check must not reject them.
+    const snapshot = snapshotBindingIdentities({
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+      kv_namespaces: [{ binding: 'KV', id: REAL_KV_ID }],
+      r2_buckets: [{ binding: 'STORAGE', bucket_name: 'myapp-storage' }],
+    });
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      ...KITCHEN_SINK_NON_ID_BINDINGS,
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+      kv_namespaces: [{ binding: 'KV', id: REAL_KV_ID }],
+      r2_buckets: [{ binding: 'STORAGE', bucket_name: 'myapp-storage' }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: {
+        d1: { binding: 'DB', name: 'myapp-db' },
+        kvNamespaces: [{ binding: 'KV', title: 'myapp-kv' }],
+        r2: { binding: 'STORAGE', bucketName: 'myapp-storage' },
+        queues: ['jobs'],
+      },
+      bindingIdentitySnapshot: snapshot,
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('fails when the artifact declares an id-bearing binding absent from the snapshot (build ADD)', () => {
+    // Only DB was pinned pre-build; the artifact ADDS an EXTRA_KV the snapshot never saw. The
+    // per-desired loop only walks {DB}, so completeness is what rejects this.
+    const snapshot = snapshotBindingIdentities({
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+    });
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID }],
+      kv_namespaces: [{ binding: 'EXTRA_KV', id: OTHER_KV_ID }],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] },
+      bindingIdentitySnapshot: snapshot,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/EXTRA_KV/);
+  });
+
+  it('fails when a NON-desired binding id in the artifact diverges from the snapshot', () => {
+    // A hand-declared, non-desired EXTRA_DB is pinned pre-build; the artifact rewrites its id.
+    // The desired loop never inspects EXTRA_DB — completeness catches the divergence.
+    const snapshot = snapshotBindingIdentities({
+      d1_databases: [
+        { binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID },
+        { binding: 'EXTRA_DB', database_name: 'extra', database_id: REAL_D1_ID },
+      ],
+    });
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      d1_databases: [
+        { binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID },
+        { binding: 'EXTRA_DB', database_name: 'extra', database_id: OTHER_D1_ID },
+      ],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] },
+      bindingIdentitySnapshot: snapshot,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/EXTRA_DB/);
+  });
+
+  it('passes when a NON-desired binding present in the snapshot is unchanged in the artifact', () => {
+    // The legitimate-extra case: a user hand-declared EXTRA_DB, it was pinned pre-build, and the
+    // build left it untouched — completeness must NOT false-positive on a legitimate extra.
+    const snapshot = snapshotBindingIdentities({
+      d1_databases: [
+        { binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID },
+        { binding: 'EXTRA_DB', database_name: 'extra', database_id: OTHER_D1_ID },
+      ],
+    });
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      d1_databases: [
+        { binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID },
+        { binding: 'EXTRA_DB', database_name: 'extra', database_id: OTHER_D1_ID },
+      ],
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { d1: { binding: 'DB', name: 'myapp-db' }, kvNamespaces: [], queues: [] },
+      bindingIdentitySnapshot: snapshot,
+    });
+    expect(result).toEqual({ ok: true });
   });
 });
 
@@ -2157,6 +2294,98 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
     const root = d1Project(PROVISIONED_D1);
     const { deps, wranglerArgs, exitCalls } = harness({
       runBuild: () => writeEmittedDeployArtifact(root, { ...EMITTED_D1, account_id: 'other-acc' }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('passes a normal deploy whose artifact carries the full non-id binding set (ai/queues/DO/…)', async () => {
+    // No-regression at the full-flow level: the pinned DB id is unchanged AND the emitted artifact
+    // carries every non-id binding a real Class-A build emits. The completeness check must wave the
+    // ai/queues/DO/vars/empty-array bindings through and let the deploy proceed.
+    const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () =>
+        writeEmittedDeployArtifact(root, { ...KITCHEN_SINK_NON_ID_BINDINGS, ...EMITTED_D1 }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'apply')).toBe(true);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
+  });
+
+  it('passes when a user-declared EXTRA id-bearing binding is present pre-build and unchanged', async () => {
+    // A hand-declared, non-desired EXTRA_KV is in the root config BEFORE the build (so the widened
+    // snapshot pins it) and the build leaves it untouched — the deploy must NOT be blocked.
+    const root = d1Project({
+      ...PROVISIONED_D1,
+      kv_namespaces: [{ binding: 'EXTRA_KV', id: REAL_KV_ID }],
+    });
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () =>
+        writeEmittedDeployArtifact(root, {
+          ...EMITTED_D1,
+          kv_namespaces: [{ binding: 'EXTRA_KV', id: REAL_KV_ID }],
+        }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
+  });
+
+  it('fails closed at the emitted-config check when the build ADDS an id-bearing binding absent from the snapshot', async () => {
+    // The root config (and thus the pre-build snapshot) has ONLY DB. The build injects an EXTRA_KV
+    // into the emitted artifact — a same-account data store the deployed worker would gain access
+    // to. The per-desired loop only walks {DB}; completeness is what rejects the injected binding.
+    // (Reverting the completeness check lets EXTRA_KV through and the deploy runs.)
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () =>
+        writeEmittedDeployArtifact(root, {
+          ...EMITTED_D1,
+          kv_namespaces: [{ binding: 'EXTRA_KV', id: OTHER_KV_ID }],
+        }),
+      verifyDeployConfig: verifyGeneratedDeployConfig,
+    });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // The deploy seam was NOT invoked — the injected binding never reached `wrangler deploy`.
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+  });
+
+  it('fails closed at the emitted-config check when the build rewrites a NON-desired binding id', async () => {
+    // A hand-declared, non-desired EXTRA_DB is pinned pre-build (widened snapshot). The build
+    // rewrites its id in BOTH the root config and the emitted artifact — a consistent rewrite a
+    // post-build root re-read could not catch, and one the per-desired {DB} loop never inspects.
+    // Only the pre-build snapshot + completeness catch it. (Reverting the check lets the deploy run.)
+    const root = d1Project({
+      ...PROVISIONED_D1,
+      d1_databases: [
+        ...PROVISIONED_D1.d1_databases,
+        { binding: 'EXTRA_DB', database_name: 'extra', database_id: REAL_KV_ID },
+      ],
+    });
+    const { deps, wranglerArgs, exitCalls } = harness({
+      runBuild: () => {
+        rewriteRootConfig(root, (c) => {
+          (c.d1_databases as Array<Record<string, unknown>>)[1].database_id = OTHER_D1_ID;
+        });
+        writeEmittedDeployArtifact(root, {
+          ...EMITTED_D1,
+          d1_databases: [
+            { binding: 'DB', database_name: 'myapp-db', database_id: REAL_D1_ID },
+            { binding: 'EXTRA_DB', database_name: 'extra', database_id: OTHER_D1_ID },
+          ],
+        });
+      },
       verifyDeployConfig: verifyGeneratedDeployConfig,
     });
     await expect(

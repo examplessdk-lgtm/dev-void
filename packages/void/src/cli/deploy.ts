@@ -652,7 +652,38 @@ function bindingIdentityKey(field: string, binding: string): string {
 }
 
 /**
- * Snapshot the real, id-bearing identity of every desired binding from `config` into an
+ * Enumerate EVERY id-bearing binding DECLARED in `config` across the four id-bearing sections
+ * (`d1_databases` / `kv_namespaces` / `r2_buckets` / `hyperdrive`), as `{ field, binding, id }`.
+ * `id` is `undefined` when the entry omits it or leaves it empty (never pinned, never asserted —
+ * the same "absent or empty → undefined" collapse as {@link readStoredResourceName}). Reads each
+ * entry on its OWN terms (never a first-match re-scan) so a duplicated / appended entry is seen as
+ * itself. Section + id-field names come from {@link DEPLOY_BINDING_IDENTITY_FIELDS} — no per-kind
+ * branching. Unlike {@link desiredIdentityBindings} this is NOT restricted to the desired set: it
+ * captures a user's hand-declared extra binding too, which is exactly what lets the completeness
+ * check tell a pre-existing binding apart from one the build injected.
+ */
+function collectConfigBindingIdentities(
+  config: Record<string, unknown>,
+): Array<{ field: string; binding: string; id: string | undefined }> {
+  const out: Array<{ field: string; binding: string; id: string | undefined }> = [];
+  for (const { field, idField } of Object.values(DEPLOY_BINDING_IDENTITY_FIELDS)) {
+    const list = config[field];
+    if (!Array.isArray(list)) {
+      continue;
+    }
+    for (const entry of list) {
+      const binding = readD1EntryString(entry, 'binding');
+      if (binding === undefined) {
+        continue;
+      }
+      out.push({ field, binding, id: readD1EntryString(entry, idField) });
+    }
+  }
+  return out;
+}
+
+/**
+ * Snapshot the real, id-bearing identity of EVERY binding declared in the root `config` into an
  * in-memory map — the id defense's ground truth, mirroring the pinned in-memory `accountId`.
  *
  * Taken AFTER provision (which writes each real id into the root config via
@@ -661,18 +692,18 @@ function bindingIdentityKey(field: string, binding: string): string {
  * so a compromised build dependency can only edit FILES — it could rewrite
  * `wrangler.jsonc`'s `d1_databases[<binding>].database_id` (keeping the binding + database_name)
  * to redirect the privileged remote D1 migrate or the deploy to a DIFFERENT same-account
- * resource. Pinning the ids here and asserting the post-build config + emitted artifact still
- * carry them closes that gap for D1/KV/R2/Hyperdrive alike. A binding whose id is absent
- * post-drift (which the drift check already rejects) is simply not pinned — never asserted.
+ * resource, OR ADD a wholly new id-bearing binding (`EXTRA_DB`/`EXTRA_KV`/…) that the CF plugin
+ * would then merge verbatim into `dist/ssr/wrangler.json`. Snapshotting EVERY declared id here —
+ * not only the desired ones — and asserting the post-build config + emitted artifact carry
+ * exactly this set closes both gaps for D1/KV/R2/Hyperdrive alike. A binding whose id is absent
+ * post-drift (which the drift check already rejects for desired bindings) is simply not pinned —
+ * never asserted.
  */
 export function snapshotBindingIdentities(
   config: Record<string, unknown>,
-  desired: DesiredResourceSet,
 ): BindingIdentitySnapshot {
   const snapshot: BindingIdentitySnapshot = new Map();
-  for (const { kind, binding } of desiredIdentityBindings(desired)) {
-    const { field, idField } = DEPLOY_BINDING_IDENTITY_FIELDS[kind];
-    const id = readStoredResourceName(config, field, binding, idField);
+  for (const { field, binding, id } of collectConfigBindingIdentities(config)) {
     if (id !== undefined) {
       snapshot.set(bindingIdentityKey(field, binding), id);
     }
@@ -858,14 +889,22 @@ function removeDeployPointer(root: string): void {
  * in the ambient env or a production `.env` can make the build FLATTEN a named env or an
  * alternate config into that artifact — keeping the same `account_id`/`name` while
  * swapping the binding set, so `wrangler deploy --env=` ships it as top-level with no
- * mismatch. When `desired` + a `bindingIdentitySnapshot` are given we therefore also assert
- * every desired id-bearing binding's IDENTITY (D1 database_id / KV id / R2 bucket_name /
- * Hyperdrive id) in the generated artifact equals the identity PINNED before the build (the
- * in-memory snapshot the drift-check / provision resolved) — NOT a post-build re-read of the
- * root config, so a build that consistently rewrote BOTH the root config and this artifact is
- * still caught. This makes the id defense symmetric with the `account_id` check above, which
- * already compares against the in-memory pinned account. Returns `{ ok:false, reason }` on any
- * mismatch — or when the config is missing/unreadable — so the caller fails closed.
+ * mismatch. When a `bindingIdentitySnapshot` is given we therefore assert, in TWO directions,
+ * that the generated artifact's id-bearing bindings (D1 database_id / KV id / R2 bucket_name /
+ * Hyperdrive id) equal the identities PINNED before the build (the in-memory snapshot the
+ * drift-check / provision resolved) — NOT a post-build re-read of the root config, so a build
+ * that consistently rewrote BOTH the root config and this artifact is still caught:
+ *   (a) with `desired`, every DESIRED binding must still be present with its pinned id — catches a
+ *       binding the build DROPPED or whose id it rewrote; and
+ *   (b) COMPLETENESS — every id-bearing binding the artifact declares must be one the snapshot
+ *       pinned, with the pinned id — catches a binding the build ADDED (absent from the snapshot)
+ *       or a pre-existing NON-desired binding whose id it rewrote, either of which the CF plugin
+ *       would otherwise merge verbatim into the artifact and `wrangler deploy` would bind.
+ * Only these four id-bearing kinds are inspected; every other binding the build legitimately
+ * emits (ai / queues / durable_objects / vars / …) passes through untouched. This makes the id
+ * defense symmetric with the `account_id` check above, which already compares against the
+ * in-memory pinned account. Returns `{ ok:false, reason }` on any mismatch — or when the config
+ * is missing/unreadable — so the caller fails closed.
  */
 export function verifyGeneratedDeployConfig(
   root: string,
@@ -914,30 +953,60 @@ export function verifyGeneratedDeployConfig(
       reason: `generated config worker name ${JSON.stringify(generated.name)} does not match the expected worker ${JSON.stringify(expected.workerName)}.`,
     };
   }
-  // Binding-identity check: the generated artifact's provisioned resources must be the
-  // SAME ones (by id) as were PINNED before the build (the in-memory snapshot). A flattened
-  // named-env / alternate config — or a build that rewrote the id in BOTH the root config and
-  // this artifact — keeps account+name but swaps identities, caught here against the snapshot.
-  if (expected.desired && expected.bindingIdentitySnapshot) {
-    for (const { kind, binding } of desiredIdentityBindings(expected.desired)) {
-      const { field, idField } = DEPLOY_BINDING_IDENTITY_FIELDS[kind];
-      const pinnedId = expected.bindingIdentitySnapshot.get(bindingIdentityKey(field, binding));
-      // A binding with no pinned id was never provisioned with a real one (the drift check's
-      // job); here we only assert the generated artifact did not DIVERGE from the pre-build pin.
-      if (pinnedId === undefined) {
-        continue;
+  // Binding-identity check: the generated artifact's id-bearing bindings must be the SAME ones
+  // (by id) as were PINNED before the build (the in-memory snapshot). A flattened named-env /
+  // alternate config — or a build that rewrote/added an id in BOTH the root config and this
+  // artifact — keeps account+name but swaps the binding set, caught here against the snapshot.
+  if (expected.bindingIdentitySnapshot) {
+    const snapshot = expected.bindingIdentitySnapshot;
+    // (a) Every DESIRED binding must still be present with its pinned id — catches a binding the
+    // build DROPPED (the completeness loop below, which only walks what the artifact DECLARES,
+    // cannot see an omission) or whose id it rewrote.
+    if (expected.desired) {
+      for (const { kind, binding } of desiredIdentityBindings(expected.desired)) {
+        const { field, idField } = DEPLOY_BINDING_IDENTITY_FIELDS[kind];
+        const pinnedId = snapshot.get(bindingIdentityKey(field, binding));
+        // A binding with no pinned id was never provisioned with a real one (the drift check's
+        // job); here we only assert the generated artifact did not DIVERGE from the pre-build pin.
+        if (pinnedId === undefined) {
+          continue;
+        }
+        const generatedId = readStoredResourceName(generated, field, binding, idField);
+        if (generatedId === undefined) {
+          return {
+            ok: false,
+            reason: `generated config is missing the ${field} binding ${JSON.stringify(binding)} (pinned identity ${JSON.stringify(pinnedId)}) — a named environment or alternate config flattened a different binding set.`,
+          };
+        }
+        if (generatedId !== pinnedId) {
+          return {
+            ok: false,
+            reason: `generated config ${field} binding ${JSON.stringify(binding)} has identity ${JSON.stringify(generatedId)} but the pinned pre-build identity is ${JSON.stringify(pinnedId)} — refusing to deploy a flattened/alternate or tampered binding set.`,
+          };
+        }
       }
-      const generatedId = readStoredResourceName(generated, field, binding, idField);
-      if (generatedId === undefined) {
+    }
+    // (b) COMPLETENESS — every id-bearing binding the artifact DECLARES must be one the snapshot
+    // pinned (by binding name) AND carry the pinned id. The desired loop above only inspects the
+    // desired set, so a binding the build ADDED to the root config (absent from the snapshot) or a
+    // pre-existing NON-desired binding whose id it rewrote would otherwise flow into the artifact
+    // and get bound by `wrangler deploy`. Scoped to the four id-bearing kinds only — every other
+    // binding the build emits (ai / queues / durable_objects / vars / …) is neither inspected nor
+    // rejected. The pin is the pre-build snapshot of the SAME root config the CF plugin merges, so
+    // a legitimately emitted binding's id equals what was captured; only an added / rewritten one
+    // diverges.
+    for (const { field, binding, id } of collectConfigBindingIdentities(generated)) {
+      const pinnedId = snapshot.get(bindingIdentityKey(field, binding));
+      if (pinnedId === undefined) {
         return {
           ok: false,
-          reason: `generated config is missing the ${field} binding ${JSON.stringify(binding)} (pinned identity ${JSON.stringify(pinnedId)}) — a named environment or alternate config flattened a different binding set.`,
+          reason: `generated config declares a ${field} binding ${JSON.stringify(binding)} that was not present before the build — refusing to deploy an id-bearing binding the build injected.`,
         };
       }
-      if (generatedId !== pinnedId) {
+      if (id !== pinnedId) {
         return {
           ok: false,
-          reason: `generated config ${field} binding ${JSON.stringify(binding)} has identity ${JSON.stringify(generatedId)} but the pinned pre-build identity is ${JSON.stringify(pinnedId)} — refusing to deploy a flattened/alternate or tampered binding set.`,
+          reason: `generated config ${field} binding ${JSON.stringify(binding)} has identity ${JSON.stringify(id)} but the pinned pre-build identity is ${JSON.stringify(pinnedId)} — refusing to deploy a rewritten binding set.`,
         };
       }
     }
@@ -2809,14 +2878,16 @@ export async function runCloudflareDeploy(
   // compromised build dependency can only edit FILES: it could rewrite `wrangler.jsonc`'s
   // `d1_databases[<binding>].database_id` (keeping the binding + database_name) to redirect the
   // privileged remote D1 migrate (step 9) or the deploy (step 11) to a DIFFERENT same-account
-  // resource. This snapshot is the ground truth the migrate assert (step 9) and the emitted-config
-  // check (step 10) compare against. No legitimate path rewrites a binding id in the ROOT config
-  // after this point — the CF plugin's only post-build id writes go to the emitted
-  // dist/ssr/wrangler.json, never back to the root — so equality here is safe to assert.
-  const bindingIdentitySnapshot = snapshotBindingIdentities(
-    parseRootWranglerConfig(configPath),
-    desired,
-  );
+  // resource — OR ADD a brand-new id-bearing binding (`EXTRA_DB`/`EXTRA_KV`/…) the CF plugin then
+  // merges verbatim into the emitted artifact. So the snapshot captures EVERY id-bearing binding
+  // declared here, not only the desired ones: the emitted-config check (step 10) rejects any
+  // id-bearing binding in `dist/ssr/wrangler.json` absent from this pin, so a binding the build
+  // added is caught while a user's own extra binding (present here) passes. This snapshot is the
+  // ground truth the migrate assert (step 9) and the emitted-config check (step 10) compare
+  // against. No legitimate path rewrites a binding id in the ROOT config after this point — the
+  // CF plugin's only post-build id writes go to the emitted dist/ssr/wrangler.json, never back to
+  // the root — so equality here is safe to assert.
+  const bindingIdentitySnapshot = snapshotBindingIdentities(parseRootWranglerConfig(configPath));
 
   // (The LOCAL migration gates run POST-build at step 8d, immediately before the remote
   // apply — not here — so they validate the exact files on disk AFTER the build. See step 8d.)
