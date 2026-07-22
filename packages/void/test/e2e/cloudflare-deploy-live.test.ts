@@ -1,5 +1,5 @@
-import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import spawn from 'cross-spawn';
 import { join } from 'pathe';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 
@@ -91,7 +91,7 @@ function cloudEnv(): NodeJS.ProcessEnv {
 
 /** Best-effort `wrangler` invocation for teardown — never throws, so afterAll always continues. */
 function wrangler(args: Array<string>): { status: number; output: string } {
-  const res = spawnSync(WRANGLER_BIN, args, {
+  const res = spawn.sync(WRANGLER_BIN, args, {
     cwd: APP,
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024,
@@ -330,7 +330,7 @@ describe.skipIf(!E2E_ENABLED)('void deploy --backend cloudflare (live account)',
     // The CI-safe path: no `--provision`. The root config now covers every desired id-bearing
     // resource, so the drift-check passes; this exercises build → tamper-guard → remote migrations →
     // `wrangler deploy` against the live account.
-    const res = spawnSync('node', [CLI_ENTRY, 'deploy', '--backend', 'cloudflare'], {
+    const res = spawn.sync('node', [CLI_ENTRY, 'deploy', '--backend', 'cloudflare'], {
       cwd: APP,
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
