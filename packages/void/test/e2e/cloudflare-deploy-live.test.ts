@@ -72,8 +72,14 @@ const APP_WRANGLER = join(APP, 'wrangler.jsonc');
 // hard-killed run. Derived names mirror the provisioner (`suffixedResourceName`): `<name>-db` (D1),
 // `<name>-kv` (KV).
 function uniqueRunSuffix(): string {
+  // `||`, not `??`: `VOID_E2E_RUN_ID` arrives as an EMPTY STRING (not undefined) when unset, because
+  // `vite.config.ts` forwards `VOID_E2E_RUN_ID: process.env.VOID_E2E_RUN_ID ?? ''` into the worker
+  // via `test.env`. `??` would treat that `''` as present and collapse every local run onto the
+  // `-local` suffix (below), so overlapping local runs would clobber one shared worker/D1/KV. `||`
+  // lets the empty value fall through to a unique timestamp + random. CI sets a non-empty run id, so
+  // its value is unaffected.
   const raw =
-    process.env.VOID_E2E_RUN_ID ??
+    process.env.VOID_E2E_RUN_ID ||
     `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   // Cloudflare worker/D1/KV names are lowercase `[a-z0-9-]` and must not start/end with `-`.
   // Sanitize, then cap the suffix so the worker name — and its `-db`/`-kv` tails — stay well under
@@ -138,14 +144,20 @@ function cloudEnv(): NodeJS.ProcessEnv {
 }
 
 /** Best-effort `wrangler` invocation for teardown — never throws, so afterAll always continues. */
-function wrangler(args: Array<string>): { status: number; output: string } {
+function wrangler(args: Array<string>): { status: number; stdout: string; output: string } {
   const res = spawn.sync(WRANGLER_BIN, args, {
     cwd: APP,
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024,
     env: cloudEnv(),
   });
-  return { status: res.status ?? 1, output: `${res.stdout ?? ''}${res.stderr ?? ''}` };
+  const stdout = res.stdout ?? '';
+  const stderr = res.stderr ?? '';
+  // `output` (stdout+stderr) is for human-facing error text only. JSON parsing must read `stdout`
+  // ALONE: wrangler can print notices/warnings to stderr on a status-0 list (update notices, a
+  // "Delegating to locally-installed wrangler" line, a Node deprecation warning), and any non-JSON
+  // trailing the payload would make JSON.parse throw — breaking the ownership gate / teardown.
+  return { status: res.status ?? 1, stdout, output: `${stdout}${stderr}` };
 }
 
 /**
@@ -200,7 +212,7 @@ function createD1Database(): string {
   }
   let databases: Array<{ uuid: string; name: string }>;
   try {
-    databases = JSON.parse(list.output) as Array<{ uuid: string; name: string }>;
+    databases = JSON.parse(list.stdout) as Array<{ uuid: string; name: string }>;
   } catch {
     throw new Error(`live e2e setup: "wrangler d1 list" returned non-JSON:\n${list.output.trim()}`);
   }
@@ -229,7 +241,7 @@ function createKvNamespace(): string {
   }
   let namespaces: Array<{ id: string; title: string }>;
   try {
-    namespaces = JSON.parse(list.output) as Array<{ id: string; title: string }>;
+    namespaces = JSON.parse(list.stdout) as Array<{ id: string; title: string }>;
   } catch {
     throw new Error(
       `live e2e setup: "wrangler kv namespace list" returned non-JSON:\n${list.output.trim()}`,
@@ -244,7 +256,11 @@ function createKvNamespace(): string {
 
 /** Extract the deployed workers.dev URL the CLI prints on a successful deploy. */
 function extractWorkerUrl(output: string): string | undefined {
-  return output.match(/https:\/\/[^\s]*\.workers\.dev[^\s]*/)?.[0];
+  // `[a-z0-9.-]+` spans the MULTI-label host (`<worker>.<account-subdomain>.workers.dev`); the
+  // optional `(?:\/[^\s]*)?` consumes only a real URL path, so a trailing sentence period (were the
+  // URL ever printed in prose) is not captured. A bare `[a-z0-9-]+` before `.workers.dev` would NOT
+  // match the two-label host and would return undefined — do not "simplify" it to that.
+  return output.match(/https:\/\/[a-z0-9.-]+\.workers\.dev(?:\/[^\s]*)?/)?.[0];
 }
 
 /**
@@ -338,7 +354,7 @@ describe('void deploy --backend cloudflare (live account)', () => {
       collisions.push(`d1 database ${D1_NAME} (could not list databases to rule out a collision)`);
     } else {
       try {
-        const databases = JSON.parse(d1List.output) as Array<{ name: string }>;
+        const databases = JSON.parse(d1List.stdout) as Array<{ name: string }>;
         if (databases.some((d) => d.name === D1_NAME)) {
           collisions.push(`d1 database ${D1_NAME}`);
         }
@@ -356,7 +372,7 @@ describe('void deploy --backend cloudflare (live account)', () => {
       );
     } else {
       try {
-        const namespaces = JSON.parse(kvList.output) as Array<{ title: string }>;
+        const namespaces = JSON.parse(kvList.stdout) as Array<{ title: string }>;
         if (namespaces.some((n) => n.title === KV_TITLE)) {
           collisions.push(`kv namespace ${KV_TITLE}`);
         }
@@ -449,7 +465,7 @@ describe('void deploy --backend cloudflare (live account)', () => {
         failures.push(`d1 list (exit ${d1List.status})\n${d1List.output.trim()}`);
       } else {
         try {
-          const databases = JSON.parse(d1List.output) as Array<{ name: string }>;
+          const databases = JSON.parse(d1List.stdout) as Array<{ name: string }>;
           if (databases.some((d) => d.name === D1_NAME)) {
             attemptDelete(`d1 ${D1_NAME}`, ['d1', 'delete', D1_NAME, '--skip-confirmation']);
           }
@@ -467,7 +483,7 @@ describe('void deploy --backend cloudflare (live account)', () => {
         failures.push(`kv namespace list (exit ${list.status})\n${list.output.trim()}`);
       } else {
         try {
-          const namespaces = JSON.parse(list.output) as Array<{ id: string; title: string }>;
+          const namespaces = JSON.parse(list.stdout) as Array<{ id: string; title: string }>;
           const ns = namespaces.find((n) => n.title === KV_TITLE);
           if (ns) {
             attemptDelete(`kv ${KV_TITLE}`, ['kv', 'namespace', 'delete', '--namespace-id', ns.id]);
@@ -497,7 +513,13 @@ describe('void deploy --backend cloudflare (live account)', () => {
     ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
     expect(deployStatus, deployOutput).toBe(0);
     // A successful `wrangler deploy` prints the worker's workers.dev URL.
-    expect(deployOutput).toMatch(/https:\/\/[^\s]*\.workers\.dev/);
+    const url = extractWorkerUrl(deployOutput);
+    expect(url, deployOutput).toBeDefined();
+    // The host's FIRST label must be THIS run's worker name. If a concurrent local run had clobbered
+    // the shared `wrangler.jsonc` overlay, the deploy would have targeted a different worker — this
+    // catches that cross-run contamination rather than silently validating someone else's worker.
+    const workerLabel = new URL(url!).hostname.split('.')[0];
+    expect(workerLabel, `deployed host for ${url}`).toBe(WORKER_NAME);
   });
 
   it('serves a live 200 from the deployed worker', async (ctx) => {

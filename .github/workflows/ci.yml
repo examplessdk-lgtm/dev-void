@@ -20,19 +20,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
-    env:
-      # The gated live Cloudflare deploy e2e (packages/void/test/e2e/cloudflare-deploy-live.test.ts)
-      # activates only when BOTH vars are non-empty. Same-repo pushes/PRs receive the secrets; fork
-      # PRs receive empty strings, so the suite SKIPS there. Each run deploys a UNIQUELY-named worker
-      # (VOID_E2E_RUN_ID) and tears it down, so overlapping runs never collide on the same worker/D1/KV.
-      # NOTE: only `github.*` (and `secrets.*`) are valid in a job-level `env` map. `strategy.job-index`
-      # is NOT — referencing it silently voids the ENTIRE map (every var becomes empty, no error), which
-      # is why an earlier `run-id + attempt + strategy.job-index` value made the token empty and the e2e
-      # skip. run-id + attempt is already unique per deploying run: windows skips the live path, so only
-      # the single ubuntu leg ever deploys.
-      VOID_E2E_CF_TOKEN: ${{ secrets.VOID_E2E_CF_TOKEN }}
-      VOID_E2E_CF_ACCOUNT_ID: ${{ secrets.VOID_E2E_CF_ACCOUNT_ID }}
-      VOID_E2E_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+    # No Cloudflare creds in this job. The credentialed live deploy e2e runs in the separate
+    # `live-e2e` job (below), whose secrets are bound to the `cloudflare-e2e` environment. Here the
+    # live suite (part of `vp run test:all`) sees empty creds and self-skips on every event.
     strategy:
       fail-fast: false
       matrix:
@@ -56,11 +46,42 @@ jobs:
 
       - run: vp run test:all
 
+  # Credentialed live Cloudflare deploy e2e, ISOLATED from `test` so the account token exists ONLY in
+  # a job bound to the `cloudflare-e2e` GitHub Environment. That environment's deployment branch policy
+  # allows `main` ONLY and the ref is enforced server-side, so a `pull_request` run (ref
+  # refs/pull/<n>/merge) can never reach the secret — even a PR that edits this file — and a modified
+  # workflow cannot exfiltrate it. The `if` also keeps the job off everything except a direct push to
+  # the `main` branch: tag pushes and `workflow_call` (release) carry a non-main ref, so they are
+  # skipped — which both avoids a branch-policy failure and matches where the secret is allowed. It
+  # deploys a UNIQUELY-named worker (VOID_E2E_RUN_ID) to a throwaway account and tears it down.
+  live-e2e:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+    environment: cloudflare-e2e
+    env:
+      VOID_E2E_CF_TOKEN: ${{ secrets.VOID_E2E_CF_TOKEN }}
+      VOID_E2E_CF_ACCOUNT_ID: ${{ secrets.VOID_E2E_CF_ACCOUNT_ID }}
+      VOID_E2E_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@2dec1e33f4ab2c6d5bce1b0c4607961bb1a3f7a1 # v1.12.0
+        with:
+          node-version-file: .node-version
+          cache: true
+      # build:core produces dist/cli/cli.mjs + the built `void` plugin the deploy uses to build the app.
+      - run: vp run build:core
+      - run: vp test run packages/void/test/e2e/cloudflare-deploy-live.test.ts
+
   done:
     runs-on: ubuntu-latest
     if: always()
     needs:
       - test
+      - live-e2e
     steps:
       - run: exit 1
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
