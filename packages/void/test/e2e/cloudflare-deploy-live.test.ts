@@ -114,30 +114,52 @@ describe.skipIf(!E2E_ENABLED)('void deploy --backend cloudflare --provision (liv
 
   afterAll(() => {
     // Tear DOWN every provisioned resource + the worker, even if the deploy or an assertion failed.
-    // Each call is best-effort and independent so one failure never blocks the others.
+    // Each delete is best-effort and independent so one failure never blocks the others — but a
+    // nonzero exit (transient API error / missing delete permission) is COLLECTED and re-thrown
+    // after cleanup + config restore, so a run that leaves a worker or database behind fails LOUD
+    // instead of reporting green with leaked resources.
+    const failures: Array<string> = [];
+    const attemptDelete = (label: string, args: Array<string>): void => {
+      const res = wrangler(args);
+      if (res.status !== 0) {
+        failures.push(`${label} (exit ${res.status})\n${res.output.trim()}`);
+      }
+    };
     if (E2E_ENABLED) {
-      wrangler(['delete', '--name', WORKER_NAME, '--force']);
-      wrangler(['d1', 'delete', D1_NAME, '--skip-confirmation']);
-      // KV delete needs the namespace id — resolve it from the account's namespace list by title.
+      attemptDelete(`worker ${WORKER_NAME}`, ['delete', '--name', WORKER_NAME, '--force']);
+      attemptDelete(`d1 ${D1_NAME}`, ['d1', 'delete', D1_NAME, '--skip-confirmation']);
+      // KV delete needs the namespace id — resolve it from the account's namespace list by EXACT
+      // title. The provisioner creates AND matches the namespace by this exact title (the
+      // provision-time existence check rejects any non-exact title), so an `endsWith` here could
+      // select and delete an unrelated namespace that merely shares the suffix.
       const list = wrangler(['kv', 'namespace', 'list']);
-      try {
-        const namespaces = JSON.parse(list.output) as Array<{ id: string; title: string }>;
-        // wrangler titles a namespace `<worker>-<binding>` — match the derived KV title as a suffix.
-        const ns = namespaces.find((n) => n.title === KV_TITLE || n.title.endsWith(KV_TITLE));
-        if (ns) {
-          wrangler(['kv', 'namespace', 'delete', '--namespace-id', ns.id]);
+      if (list.status !== 0) {
+        failures.push(`kv namespace list (exit ${list.status})\n${list.output.trim()}`);
+      } else {
+        try {
+          const namespaces = JSON.parse(list.output) as Array<{ id: string; title: string }>;
+          const ns = namespaces.find((n) => n.title === KV_TITLE);
+          if (ns) {
+            attemptDelete(`kv ${KV_TITLE}`, ['kv', 'namespace', 'delete', '--namespace-id', ns.id]);
+          }
+        } catch {
+          failures.push(
+            `kv namespace list returned non-JSON output — delete the ${KV_TITLE} namespace manually`,
+          );
         }
-      } catch {
-        // A non-JSON list (auth failure / API change) leaves the namespace for manual cleanup.
       }
     }
-    // Restore the app's original root config (or remove the overlay if it had none).
+    // Restore the app's original root config (or remove the overlay if it had none) BEFORE surfacing
+    // any teardown failure, so the working tree is always left clean.
     if (wranglerSnapshotTaken) {
       if (wranglerOriginal === undefined) {
         rmSync(APP_WRANGLER, { force: true });
       } else {
         writeFileSync(APP_WRANGLER, wranglerOriginal);
       }
+    }
+    if (failures.length > 0) {
+      throw new Error(`live e2e teardown failed — manual cleanup needed:\n${failures.join('\n')}`);
     }
   }, 300_000);
 
