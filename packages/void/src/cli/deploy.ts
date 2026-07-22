@@ -2094,7 +2094,7 @@ function isCleanWranglerExit(result: DeployWranglerRunResult): boolean {
  * unreadable — callers then treat every field as unset (safe: a genuinely broken
  * config fails later in wrangler with a clear error).
  */
-function parseRootWranglerConfig(configPath: string): Record<string, unknown> {
+export function parseRootWranglerConfig(configPath: string): Record<string, unknown> {
   if (!existsSync(configPath)) {
     return {};
   }

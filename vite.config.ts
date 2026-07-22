@@ -327,6 +327,9 @@ export default defineConfig({
           hookTimeout,
           include: [
             'packages/void/test/integration/**/*.test.ts',
+            // Gated live-account e2e (test/e2e/**). Collected here so it is skipped cleanly in CI
+            // (no token) rather than silently undiscovered; runs only when its env vars are set.
+            'packages/void/test/e2e/**/*.test.ts',
             'packages/md/test/integration/**/*.test.ts',
           ],
           exclude: metaframeworks,

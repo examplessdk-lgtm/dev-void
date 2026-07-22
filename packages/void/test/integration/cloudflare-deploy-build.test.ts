@@ -1,0 +1,255 @@
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import spawn from 'cross-spawn';
+import { join } from 'pathe';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
+import {
+  computeDesiredCloudflareResources,
+  parseRootWranglerConfig,
+  reconstructExpectedContainers,
+  snapshotBindingIdentities,
+  snapshotPassthroughIdentities,
+  snapshotPassthroughRawFields,
+  verifyGeneratedDeployConfig,
+} from '../../src/cli/deploy.ts';
+import { readConfig } from '../../src/config.ts';
+
+// Real-build FP-safety lock for `void deploy --backend cloudflare`. The 600+ unit tests drive
+// `runCloudflareDeploy` with a STUBBED `vite build` and HAND-WRITTEN emitted configs, so nothing
+// there proves the guard's core premise: that a REAL `@cloudflare/vite-plugin` + wrangler build
+// emits exactly the shape `verifyGeneratedDeployConfig` reconstructs, adding nothing that would
+// false-positive a legitimate deploy. This test runs a real `vite build` of the richest playground
+// (kitchen-sink: D1 + KV + R2 + AI + sandbox/containers + cron + queue), reconstructs `expected`
+// with the SAME exported builders `runCloudflareDeploy` uses (steps 1 + 5/6), and asserts the real
+// emission PASSES the real guard unmodified. A future plugin/wrangler upgrade that adds a field
+// would break this lock instead of surfacing as a production deploy-blocking false positive.
+//
+// Negative cases start from the SAME real emitted artifact, apply one minimal tamper in memory,
+// write it back to the path the guard reads, and assert it is REJECTED — real-shape teeth.
+
+const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
+const PLAYGROUND = 'playground/kitchen-sink';
+const PG = join(ROOT, PLAYGROUND);
+const CONFIG_PATH = join(PG, 'wrangler.jsonc');
+const EMITTED_PATH = join(PG, 'dist', 'ssr', 'wrangler.json');
+
+// Real-SHAPED ids the guard treats as genuine (`isRealD1Id` UUID / `isRealKvId` 32-hex). Because
+// `void deploy --provision` writes real ids into the root config before the build, and the build
+// merges the root config into the emitted artifact, an overlaid root `wrangler.jsonc` carrying
+// these ids yields an emitted artifact whose id-bearing bindings match the pinned snapshot — the
+// exact clean-deploy condition the guard authorizes.
+const ACCOUNT_ID = '0123456789abcdef0123456789abcdef';
+const WORKER_NAME = 'void-kitchen-sink';
+const REAL_D1_ID = '52b3bbc7-c473-4b26-9486-1345f5de61c4';
+const REAL_KV_ID = '7c07b54c9f2a4d1e8b3f6a0c153aa11a';
+const OTHER_D1_ID = '11111111-2222-3333-4444-555555555555';
+const R2_BUCKET_NAME = 'void-kitchen-sink-storage';
+
+// The overlaid root config. kitchen-sink ships NO root wrangler config (it relies on void.json +
+// inference), so the test writes one declaring `account_id`, `name`, and real-shaped ids for every
+// id-bearing binding the source uses, then removes it on teardown.
+const OVERLAY_WRANGLER = {
+  name: WORKER_NAME,
+  account_id: ACCOUNT_ID,
+  compatibility_date: '2026-02-24',
+  d1_databases: [{ binding: 'DB', database_name: 'void-kitchen-sink-db', database_id: REAL_D1_ID }],
+  kv_namespaces: [{ binding: 'KV', id: REAL_KV_ID }],
+  r2_buckets: [{ binding: 'STORAGE', bucket_name: R2_BUCKET_NAME }],
+};
+
+// The `expected` payload `runCloudflareDeploy` (steps 5/6) threads into the guard, rebuilt here from
+// the same exported builders.
+type ExpectedPayload = Parameters<typeof verifyGeneratedDeployConfig>[1];
+
+let buildStatus: number | null = null;
+let buildOutput = '';
+// The pristine real emission, parsed once and reused (deep-cloned) across every tamper case.
+let pristineEmitted: Record<string, unknown> = {};
+let expectedPayload: ExpectedPayload;
+
+// Snapshot guard: only touch/restore `wrangler.jsonc` if we actually reached the snapshot step, so
+// an early beforeAll failure never deletes a developer-local file the hook never saw.
+let wranglerSnapshotTaken = false;
+let wranglerOriginal: string | undefined;
+
+/** A fresh deep clone of the pristine emitted config, so a tamper never mutates the shared copy. */
+function cloneEmitted(): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(pristineEmitted)) as Record<string, unknown>;
+}
+
+/**
+ * Write a tampered emitted config to the exact path the guard reads (via the CF plugin's
+ * `.wrangler/deploy/config.json` redirect), run the REAL guard, then restore the pristine emission —
+ * even if the assertion throws. No rebuild: the tamper models a compromised build editing the one
+ * artifact `wrangler deploy` uploads.
+ */
+function guardOnTamper(mutate: (config: Record<string, unknown>) => void): {
+  ok: boolean;
+  reason?: string;
+} {
+  const tampered = cloneEmitted();
+  mutate(tampered);
+  writeFileSync(EMITTED_PATH, JSON.stringify(tampered));
+  try {
+    return verifyGeneratedDeployConfig(PG, expectedPayload);
+  } finally {
+    writeFileSync(EMITTED_PATH, JSON.stringify(pristineEmitted));
+  }
+}
+
+describe('playground/kitchen-sink --backend cloudflare real-build deploy guard', () => {
+  beforeAll(async () => {
+    // Snapshot BEFORE any other filesystem work.
+    wranglerOriginal = existsSync(CONFIG_PATH) ? readFileSync(CONFIG_PATH, 'utf-8') : undefined;
+    wranglerSnapshotTaken = true;
+
+    writeFileSync(CONFIG_PATH, `${JSON.stringify(OVERLAY_WRANGLER, null, 2)}\n`);
+    // Fresh build inputs: drop the previous dist + the stale CF-plugin deploy pointer so the guard
+    // trusts only a pointer this build wrote.
+    rmSync(join(PG, 'dist'), { recursive: true, force: true });
+    rmSync(join(PG, '.wrangler', 'deploy', 'config.json'), { force: true });
+
+    const result = spawn.sync('vp', ['run', '--filter', `./${PLAYGROUND}`, 'build'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    buildStatus = result.status;
+    buildOutput = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    expect(buildStatus, buildOutput).toBe(0);
+
+    pristineEmitted = JSON.parse(readFileSync(EMITTED_PATH, 'utf-8')) as Record<string, unknown>;
+
+    // Reconstruct `expected` EXACTLY as runCloudflareDeploy does (steps 1 + 5/6): the desired set +
+    // signals from `computeDesiredCloudflareResources`, and the four snapshots + container set from
+    // the pre-build root config.
+    const voidConfig = readConfig(PG);
+    const { desired, needsAI, needsSandbox, expectedCrons } =
+      await computeDesiredCloudflareResources(PG, voidConfig, CONFIG_PATH);
+    const rootConfig = parseRootWranglerConfig(CONFIG_PATH);
+    expectedPayload = {
+      accountId: ACCOUNT_ID,
+      workerName: WORKER_NAME,
+      desired,
+      bindingIdentitySnapshot: snapshotBindingIdentities(rootConfig),
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
+      passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
+      needsAI,
+      expectedContainers: reconstructExpectedContainers(voidConfig, PG, rootConfig, needsSandbox),
+      expectedCrons,
+    };
+  });
+
+  afterAll(() => {
+    if (!wranglerSnapshotTaken) {
+      return;
+    }
+    if (wranglerOriginal === undefined) {
+      rmSync(CONFIG_PATH, { force: true });
+    } else {
+      writeFileSync(CONFIG_PATH, wranglerOriginal);
+    }
+  });
+
+  // --- Proof this is a REAL build (not a hand-written facsimile) ---------------------------------
+
+  it('emits the CF-plugin deploy pointer the guard follows', () => {
+    const pointer = JSON.parse(
+      readFileSync(join(PG, '.wrangler', 'deploy', 'config.json'), 'utf-8'),
+    ) as { configPath?: string };
+    expect(pointer.configPath).toBe('../../dist/ssr/wrangler.json');
+  });
+
+  it('merges the pinned account, worker name, and real binding ids into the emitted artifact', () => {
+    expect(pristineEmitted.account_id).toBe(ACCOUNT_ID);
+    expect(pristineEmitted.name).toBe(WORKER_NAME);
+    expect(pristineEmitted.d1_databases).toContainEqual(
+      expect.objectContaining({ binding: 'DB', database_id: REAL_D1_ID }),
+    );
+    expect(pristineEmitted.kv_namespaces).toContainEqual(
+      expect.objectContaining({ binding: 'KV', id: REAL_KV_ID }),
+    );
+    expect(pristineEmitted.r2_buckets).toContainEqual(
+      expect.objectContaining({ binding: 'STORAGE', bucket_name: R2_BUCKET_NAME }),
+    );
+  });
+
+  it('emits the sandbox container, injected AI binding, cron trigger, and queue bindings', () => {
+    expect(pristineEmitted.containers).toContainEqual(
+      expect.objectContaining({ name: 'void-sandbox', class_name: 'Sandbox' }),
+    );
+    expect(pristineEmitted.ai).toEqual({ binding: 'AI' });
+    expect(pristineEmitted.triggers).toEqual({ crons: ['* * * * *'] });
+    const queues = pristineEmitted.queues as {
+      producers: Array<{ queue: string }>;
+      consumers: Array<{ queue: string }>;
+    };
+    expect(queues.producers).toContainEqual(expect.objectContaining({ queue: 'demo-queue' }));
+    expect(queues.consumers).toContainEqual(expect.objectContaining({ queue: 'demo-queue' }));
+  });
+
+  it('reconstructs a container set byte-identical to the emitted sandbox container', () => {
+    // The highest-value FP-safety lock: `reconstructExpectedContainers` (a pure pre-build function)
+    // must produce EXACTLY what the CF plugin emitted, or every sandbox deploy would false-positive.
+    expect(expectedPayload.expectedContainers).toEqual(pristineEmitted.containers);
+  });
+
+  // --- Positive: the real emission passes the real guard unmodified (FP-lock) -------------------
+
+  it('the real emitted config passes verifyGeneratedDeployConfig unmodified', () => {
+    expect(verifyGeneratedDeployConfig(PG, expectedPayload)).toEqual({ ok: true });
+  });
+
+  // --- Negative: the SAME real emission, minimally tampered, is rejected (teeth) -----------------
+
+  it('rejects an injected container application', () => {
+    const result = guardOnTamper((config) => {
+      (config.containers as Array<unknown>).push({ class_name: 'Evil', image: '/attacker' });
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/container application .*injected/i);
+  });
+
+  it('rejects a swapped D1 database_id', () => {
+    const result = guardOnTamper((config) => {
+      (config.d1_databases as Array<{ database_id: string }>)[0].database_id = OTHER_D1_ID;
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/identity|tampered|flattened/i);
+  });
+
+  it('rejects an injected id-bearing binding (EXTRA_DB)', () => {
+    const result = guardOnTamper((config) => {
+      (config.d1_databases as Array<unknown>).push({
+        binding: 'EXTRA_DB',
+        database_name: 'attacker-db',
+        database_id: OTHER_D1_ID,
+      });
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/not present before the build|injected/i);
+  });
+
+  it('rejects an injected cron schedule', () => {
+    const result = guardOnTamper((config) => {
+      (config.triggers as { crons: Array<string> }).crons.push('0 0 * * *');
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/cron trigger schedule .*injected/i);
+  });
+
+  it('rejects an injected services binding', () => {
+    const result = guardOnTamper((config) => {
+      config.services = [{ binding: 'EVIL_SVC', service: 'attacker-worker' }];
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/services binding .*injected/i);
+  });
+
+  it('rejects an injected routes entry', () => {
+    const result = guardOnTamper((config) => {
+      config.routes = [{ pattern: 'evil.example.com/*', zone_name: 'example.com' }];
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/routes value does not match/i);
+  });
+});
