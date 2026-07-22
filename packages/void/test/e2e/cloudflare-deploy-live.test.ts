@@ -6,14 +6,16 @@ import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 // ---------------------------------------------------------------------------------------------
 // Gated live-account e2e for the self-host `void deploy --backend cloudflare` path.
 //
-// INERT in normal CI. The whole suite is skipped unless BOTH env vars are present:
+// Runs whenever BOTH env vars are present, and cleanly SKIPS (per test, at runtime) otherwise:
 //   - VOID_E2E_CF_TOKEN       a Cloudflare API token with permissions to create + delete Workers
 //                             Scripts, D1, and KV in the target account.
 //   - VOID_E2E_CF_ACCOUNT_ID  the Cloudflare account id to deploy into.
 //
 // When they are set, this deploys the `playground/spa` app (D1 + KV + cron) to the target account
-// under a FIXED, throwaway worker name — so reruns are idempotent and every resource is cleanable
-// by a stable name — then asserts the live worker answers HTTP 200 and tears everything down.
+// under a UNIQUE per-run worker name (derived from `VOID_E2E_RUN_ID` in CI, a timestamp locally) so
+// that overlapping runs — two pushes in flight, a rerun of the same commit — never collide on the
+// same worker or D1/KV. Each run owns a fresh, exclusively-named set that teardown deletes, then
+// asserts the live worker answers HTTP 200.
 //
 // Why it does NOT drive `--provision`: `void deploy --provision` fails closed in non-interactive
 // shells by design (a spawned CLI has no TTY, and CI cannot commit back the ids a create would
@@ -23,14 +25,33 @@ import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 // `void deploy --backend cloudflare` (no `--provision`) — exercising the real build → tamper-guard
 // → remote-migrations → `wrangler deploy` pipeline end to end against a live account.
 //
-// The live path is a MANUAL operator step: this repo's CI has no token, so the suite only ever
-// SKIPS here. Do not commit a token; export the two vars locally to exercise the real path:
+// In CI the two vars come from repo secrets (same-repo pushes/PRs); fork PRs get no secrets and skip.
+// Do not commit a token; to exercise the real path locally, export the two vars:
 //   VOID_E2E_CF_TOKEN=... VOID_E2E_CF_ACCOUNT_ID=... vp test run packages/void/test/e2e
 // ---------------------------------------------------------------------------------------------
 
-const CF_TOKEN = process.env.VOID_E2E_CF_TOKEN ?? '';
-const CF_ACCOUNT_ID = process.env.VOID_E2E_CF_ACCOUNT_ID ?? '';
-const E2E_ENABLED = CF_TOKEN.length > 0 && CF_ACCOUNT_ID.length > 0;
+// Read the credentials + the enable gate at EXECUTION time, never at module top-level. Vitest imports
+// (collects) this file BEFORE the CI runner injects the job's step env into the worker's process.env,
+// so a top-level `process.env.VOID_E2E_CF_TOKEN` read sees an empty string and `describe.skipIf` would
+// skip the suite even when the credentials are present — while an identical read inside a hook/test
+// (which run AFTER injection) sees the real value. So these are functions, called from the hooks/tests.
+function cfToken(): string {
+  return process.env.VOID_E2E_CF_TOKEN ?? '';
+}
+function cfAccountId(): string {
+  return process.env.VOID_E2E_CF_ACCOUNT_ID ?? '';
+}
+// Windows is intentionally excluded from the LIVE deploy: invoking the wrangler bin against a real
+// account on win32 is unverified, and this gate runs on EVERY CI — a first-time, unproven windows
+// live deploy must not be what turns `main` red. The real-build integration test
+// (test/integration/cloudflare-deploy-build.test.ts) already exercises the build path on windows;
+// enabling the live path there is a follow-up gated on a verified windows run. Fork PRs also skip
+// cleanly: they receive no secrets, so the token is empty.
+function e2eEnabled(): boolean {
+  return cfToken().length > 0 && cfAccountId().length > 0 && process.platform !== 'win32';
+}
+const NO_CREDS_NOTE =
+  'VOID_E2E_CF_TOKEN + VOID_E2E_CF_ACCOUNT_ID not set (or win32) — live deploy skipped';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PACKAGE_ROOT = join(ROOT, 'packages', 'void');
@@ -42,12 +63,39 @@ const WRANGLER_BIN = join(PACKAGE_ROOT, 'node_modules', '.bin', 'wrangler');
 const APP = join(ROOT, 'playground', 'spa');
 const APP_WRANGLER = join(APP, 'wrangler.jsonc');
 
-// A FIXED throwaway worker name (no Date.now()/random, so a crashed run leaves a deterministically
-// named worker + resources the next run — or an operator — can delete). The resource names mirror
-// what the provisioner derives (`suffixedResourceName`): `<name>-db` (D1) and `<name>-kv` (KV).
-const WORKER_NAME = 'void-e2e-cf-deploy';
-const D1_NAME = `${WORKER_NAME}-db`;
-const KV_TITLE = `${WORKER_NAME}-kv`;
+// A UNIQUE per-run worker name so running this on EVERY CI is safe: two runs that overlap (two pushes
+// in flight, a rerun of the same commit) must never deploy the same-named worker or create the same
+// D1/KV, or they would clobber each other and teardown would race one against the other. The suffix is
+// `VOID_E2E_RUN_ID` (CI sets it to run-id + attempt — unique per deploying run; windows skips the live
+// path so only the ubuntu leg deploys) or, locally, a timestamp + random. The shared
+// `void-e2e-cf-deploy-` prefix keeps every resource greppable for manual cleanup of an orphan from a
+// hard-killed run. Derived names mirror the provisioner (`suffixedResourceName`): `<name>-db` (D1),
+// `<name>-kv` (KV).
+function uniqueRunSuffix(): string {
+  const raw =
+    process.env.VOID_E2E_RUN_ID ??
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  // Cloudflare worker/D1/KV names are lowercase `[a-z0-9-]` and must not start/end with `-`.
+  // Sanitize, then cap the suffix so the worker name — and its `-db`/`-kv` tails — stay well under
+  // the 63-char limit.
+  const cleaned = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .slice(0, 28)
+    .replace(/^-+|-+$/g, '');
+  return cleaned || 'local';
+}
+// Computed in `beforeAll` (execution time), not here, so `VOID_E2E_RUN_ID` is read after the runner
+// injects it — the same collection-vs-execution timing as the credentials above. A module-load read
+// would always miss the CI run id and fall back to the timestamp.
+let WORKER_NAME = '';
+let D1_NAME = '';
+let KV_TITLE = '';
+function computeResourceNames(): void {
+  WORKER_NAME = `void-e2e-cf-deploy-${uniqueRunSuffix()}`;
+  D1_NAME = `${WORKER_NAME}-db`;
+  KV_TITLE = `${WORKER_NAME}-kv`;
+}
 
 // Binding names the SPA app resolves for its D1 + KV (Void's defaults: `void/db` → DB, `env.KV` →
 // KV). The pre-created resources must be written into the root config under THESE bindings so the
@@ -73,8 +121,8 @@ let ownershipVerified = false;
 function cloudEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    CLOUDFLARE_API_TOKEN: CF_TOKEN,
-    CLOUDFLARE_ACCOUNT_ID: CF_ACCOUNT_ID,
+    CLOUDFLARE_API_TOKEN: cfToken(),
+    CLOUDFLARE_ACCOUNT_ID: cfAccountId(),
   };
   // This suite only supports the PUBLIC Cloudflare API + a `*.workers.dev` URL: `workerExistence()`
   // fetches `api.cloudflare.com` directly and the 200 assertion hits `*.workers.dev`. Scrub every
@@ -114,8 +162,8 @@ async function workerExistence(): Promise<'exists' | 'absent' | 'unknown'> {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}`,
-        { headers: { Authorization: `Bearer ${CF_TOKEN}` } },
+        `https://api.cloudflare.com/client/v4/accounts/${cfAccountId()}/workers/scripts/${WORKER_NAME}`,
+        { headers: { Authorization: `Bearer ${cfToken()}` } },
       );
       if (res.status === 200) {
         return 'exists';
@@ -200,13 +248,15 @@ function extractWorkerUrl(output: string): string | undefined {
 }
 
 /**
- * Poll the live worker until it serves a 200 (edge propagation can lag the deploy by a few seconds,
- * and a freshly-deployed route can transiently 404 or 5xx before it is live). Retries on ANY
+ * Poll the live worker until it serves a 200. A BRAND-NEW `*.workers.dev` hostname (every run uses a
+ * unique worker name) needs the route to propagate globally before the first request succeeds, and
+ * that window is materially longer from a CI runner's network path than from a dev machine — a run
+ * observed a solid 30s of 404s before the route went live. So poll generously (~2 min). Retries on ANY
  * non-200 — not just 5xx — so a propagation-window 404 is not mistaken for the final answer. On
- * exhaustion returns the LAST response so the caller's status assertion reports the real final
- * status; throws only when every attempt was a network error (no response at all).
+ * exhaustion returns the LAST response so the caller's status assertion reports the real final status;
+ * throws only when every attempt was a network error (no response at all).
  */
-async function fetchWithRetry(url: string, attempts = 10): Promise<Response> {
+async function fetchWithRetry(url: string, attempts = 40, delayMs = 3000): Promise<Response> {
   let lastResponse: Response | undefined;
   let lastError: unknown;
   for (let i = 0; i < attempts; i++) {
@@ -221,7 +271,9 @@ async function fetchWithRetry(url: string, attempts = 10): Promise<Response> {
       lastError = error;
       lastResponse = undefined;
     }
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    if (i < attempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
   }
   if (lastResponse) {
     return lastResponse;
@@ -229,9 +281,34 @@ async function fetchWithRetry(url: string, attempts = 10): Promise<Response> {
   throw lastError ?? new Error(`worker at ${url} never answered`);
 }
 
-describe.skipIf(!E2E_ENABLED)('void deploy --backend cloudflare (live account)', () => {
+/**
+ * Whether the deployed worker has its `*.workers.dev` route enabled, for diagnosing a persistent 404.
+ * A propagation-window 404 has the route enabled (just not live yet); a route that is DISABLED 404s
+ * forever. Best-effort — returns a short human string, never throws.
+ */
+async function workersDevEnabled(): Promise<string> {
+  try {
+    const res = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${cfAccountId()}/workers/scripts/${WORKER_NAME}/subdomain`,
+      { headers: { Authorization: `Bearer ${cfToken()}` } },
+    );
+    const body = (await res.json().catch(() => ({}))) as { result?: unknown };
+    return `workers.dev subdomain endpoint ${res.status}: ${JSON.stringify(body.result ?? body)}`;
+  } catch (error) {
+    return `workers.dev subdomain check errored: ${String(error)}`;
+  }
+}
+
+describe('void deploy --backend cloudflare (live account)', () => {
   beforeAll(async () => {
-    // Ownership gate — refuse to run if any fixed-name resource ALREADY exists in the target account.
+    // Gate at execution time (see the credential note): when the token/account are absent the suite is
+    // a no-op — the tests below skip too. Compute the unique resource names now, from the injected env.
+    if (!e2eEnabled()) {
+      return;
+    }
+    computeResourceNames();
+
+    // Ownership gate — refuse to run if any of this run's resources ALREADY exist in the target account.
     // `--provision` ADOPTS an exact-name D1/KV (it would migrate pre-existing data), and teardown
     // deletes by these exact names, so a collision with a real resource risks destroying data this
     // test does not own. Only after proving the names are exclusively ours do we set
@@ -314,7 +391,7 @@ describe.skipIf(!E2E_ENABLED)('void deploy --backend cloudflare (live account)',
     const overlay = {
       name: WORKER_NAME,
       compatibility_date: COMPAT_DATE,
-      account_id: CF_ACCOUNT_ID,
+      account_id: cfAccountId(),
       d1_databases: [
         {
           binding: D1_BINDING,
@@ -357,7 +434,7 @@ describe.skipIf(!E2E_ENABLED)('void deploy --backend cloudflare (live account)',
     };
     // Delete ONLY when the ownership gate proved these names were free before the deploy, so a
     // collision that aborted beforeAll never deletes a pre-existing resource the test does not own.
-    if (E2E_ENABLED && ownershipVerified) {
+    if (e2eEnabled() && ownershipVerified) {
       // Worker — exists only if the deploy succeeded. Skip when the CF API confirms it is ABSENT
       // (avoids a spurious "does not exist" failure on a deploy that never got that far); fail closed
       // when existence cannot be confirmed ('unknown') by attempting the delete anyway.
@@ -416,16 +493,23 @@ describe.skipIf(!E2E_ENABLED)('void deploy --backend cloudflare (live account)',
     }
   }, 300_000);
 
-  it('deploys the worker to the live account', () => {
+  it('deploys the worker to the live account', (ctx) => {
+    ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
     expect(deployStatus, deployOutput).toBe(0);
     // A successful `wrangler deploy` prints the worker's workers.dev URL.
     expect(deployOutput).toMatch(/https:\/\/[^\s]*\.workers\.dev/);
   });
 
-  it('serves a live 200 from the deployed worker', async () => {
+  it('serves a live 200 from the deployed worker', async (ctx) => {
+    ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
     const base = extractWorkerUrl(deployOutput);
     expect(base, deployOutput).toBeDefined();
-    const res = await fetchWithRetry(`${base!.replace(/\/$/, '')}/api/hello`);
-    expect(res.status).toBe(200);
-  });
+    const url = `${base!.replace(/\/$/, '')}/api/hello`;
+    const res = await fetchWithRetry(url);
+    // On a persistent non-200, report the URL + whether the workers.dev route is even enabled, to
+    // tell a slow-propagation 404 (route enabled) from a route that never went live (disabled).
+    const diagnostic =
+      res.status === 200 ? '' : ` — GET ${url} → ${res.status}; ${await workersDevEnabled()}`;
+    expect(res.status, `worker ${WORKER_NAME}${diagnostic}`).toBe(200);
+  }, 200_000);
 });

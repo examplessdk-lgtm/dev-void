@@ -3,6 +3,17 @@ import { defineConfig } from 'vite-plus';
 
 const maxWorkers = process.env.CI ? 2 : Math.max(2, Math.floor(availableParallelism() * 0.75));
 
+// Vitest forwards a FILTERED env to test workers — in CI only VOID_E2E_CF_TOKEN survives, while
+// VOID_E2E_CF_ACCOUNT_ID and VOID_E2E_RUN_ID are dropped. The gated live Cloudflare deploy e2e
+// (packages/void/test/e2e/cloudflare-deploy-live.test.ts) needs all three, so forward them into the
+// core-markdown workers explicitly from this main config process (which has the runner's step env).
+// Absent/unset → empty strings → the suite skips itself as designed.
+const e2eWorkerEnv = {
+  VOID_E2E_CF_TOKEN: process.env.VOID_E2E_CF_TOKEN ?? '',
+  VOID_E2E_CF_ACCOUNT_ID: process.env.VOID_E2E_CF_ACCOUNT_ID ?? '',
+  VOID_E2E_RUN_ID: process.env.VOID_E2E_RUN_ID ?? '',
+};
+
 // Windows CI runners are 2-3x slower for builds and server startup.
 const ciTimeoutScale = process.platform === 'win32' ? 3 : 1;
 const testTimeout = 120_000 * ciTimeoutScale;
@@ -27,6 +38,11 @@ export default defineConfig({
       },
       'test:all': {
         command: 'vp check && vp run build:all && vp run check && vp test run',
+        // `vp run` passes ONLY the env vars a task declares to that task — not the full environment.
+        // Without this, the gated live Cloudflare e2e's credentials never reach `vp test run`, so it
+        // skips even when the CI job injects them. `untrackedEnv` forwards them without folding them
+        // into the task's cache fingerprint (credentials must not bust the cache).
+        untrackedEnv: ['VOID_E2E_CF_TOKEN', 'VOID_E2E_CF_ACCOUNT_ID', 'VOID_E2E_RUN_ID'],
       },
     },
   },
@@ -325,6 +341,8 @@ export default defineConfig({
           sequence: { groupOrder: 3 },
           testTimeout,
           hookTimeout,
+          // Forward the live-e2e credentials past vitest's worker env filter (see e2eWorkerEnv).
+          env: e2eWorkerEnv,
           include: [
             'packages/void/test/integration/**/*.test.ts',
             // Gated live-account e2e (test/e2e/**). Collected here so it is skipped cleanly in CI

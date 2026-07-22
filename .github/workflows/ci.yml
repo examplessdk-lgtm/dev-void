@@ -20,6 +20,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    env:
+      # The gated live Cloudflare deploy e2e (packages/void/test/e2e/cloudflare-deploy-live.test.ts)
+      # activates only when BOTH vars are non-empty. Same-repo pushes/PRs receive the secrets; fork
+      # PRs receive empty strings, so the suite SKIPS there. Each run deploys a UNIQUELY-named worker
+      # (VOID_E2E_RUN_ID) and tears it down, so overlapping runs never collide on the same worker/D1/KV.
+      # NOTE: only `github.*` (and `secrets.*`) are valid in a job-level `env` map. `strategy.job-index`
+      # is NOT — referencing it silently voids the ENTIRE map (every var becomes empty, no error), which
+      # is why an earlier `run-id + attempt + strategy.job-index` value made the token empty and the e2e
+      # skip. run-id + attempt is already unique per deploying run: windows skips the live path, so only
+      # the single ubuntu leg ever deploys.
+      VOID_E2E_CF_TOKEN: ${{ secrets.VOID_E2E_CF_TOKEN }}
+      VOID_E2E_CF_ACCOUNT_ID: ${{ secrets.VOID_E2E_CF_ACCOUNT_ID }}
+      VOID_E2E_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
     strategy:
       fail-fast: false
       matrix:
