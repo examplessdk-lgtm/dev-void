@@ -116,20 +116,12 @@ describe('playground/kitchen-sink --backend cloudflare real-build deploy guard',
     rmSync(join(PG, 'dist'), { recursive: true, force: true });
     rmSync(join(PG, '.wrangler', 'deploy', 'config.json'), { force: true });
 
-    const result = spawn.sync('vp', ['run', '--filter', `./${PLAYGROUND}`, 'build'], {
-      cwd: ROOT,
-      encoding: 'utf8',
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    buildStatus = result.status;
-    buildOutput = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-    expect(buildStatus, buildOutput).toBe(0);
-
-    pristineEmitted = JSON.parse(readFileSync(EMITTED_PATH, 'utf-8')) as Record<string, unknown>;
-
     // Reconstruct `expected` EXACTLY as runCloudflareDeploy does (steps 1 + 5/6): the desired set +
     // signals from `computeDesiredCloudflareResources`, and the four snapshots + container set from
-    // the pre-build root config.
+    // the root config — captured BEFORE the build, matching the orchestrator's pre-build snapshot.
+    // Doing this AFTER the build would let build-time code that rewrote the root config launder a
+    // tampered binding set into `expected`, so the FP-safety lock could pass an artifact that
+    // production (which snapshots pre-build) would reject.
     const voidConfig = readConfig(PG);
     const { desired, needsAI, needsSandbox, expectedCrons } =
       await computeDesiredCloudflareResources(PG, voidConfig, CONFIG_PATH);
@@ -145,6 +137,17 @@ describe('playground/kitchen-sink --backend cloudflare real-build deploy guard',
       expectedContainers: reconstructExpectedContainers(voidConfig, PG, rootConfig, needsSandbox),
       expectedCrons,
     };
+
+    const result = spawn.sync('vp', ['run', '--filter', `./${PLAYGROUND}`, 'build'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    buildStatus = result.status;
+    buildOutput = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    expect(buildStatus, buildOutput).toBe(0);
+
+    pristineEmitted = JSON.parse(readFileSync(EMITTED_PATH, 'utf-8')) as Record<string, unknown>;
   });
 
   afterAll(() => {
