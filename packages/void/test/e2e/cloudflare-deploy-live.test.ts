@@ -77,20 +77,32 @@ function extractWorkerUrl(output: string): string | undefined {
   return output.match(/https:\/\/[^\s]*\.workers\.dev[^\s]*/)?.[0];
 }
 
-/** Poll the live worker until it answers (edge propagation can lag the deploy by a few seconds). */
+/**
+ * Poll the live worker until it serves a 200 (edge propagation can lag the deploy by a few seconds,
+ * and a freshly-deployed route can transiently 404 or 5xx before it is live). Retries on ANY
+ * non-200 — not just 5xx — so a propagation-window 404 is not mistaken for the final answer. On
+ * exhaustion returns the LAST response so the caller's status assertion reports the real final
+ * status; throws only when every attempt was a network error (no response at all).
+ */
 async function fetchWithRetry(url: string, attempts = 10): Promise<Response> {
+  let lastResponse: Response | undefined;
   let lastError: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
       const res = await fetch(url);
-      if (res.status < 500) {
+      if (res.status === 200) {
         return res;
       }
-      lastError = new Error(`status ${res.status}`);
+      lastResponse = res;
+      lastError = undefined;
     } catch (error) {
       lastError = error;
+      lastResponse = undefined;
     }
     await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  if (lastResponse) {
+    return lastResponse;
   }
   throw lastError ?? new Error(`worker at ${url} never answered`);
 }
