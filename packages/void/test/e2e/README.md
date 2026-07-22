@@ -61,8 +61,11 @@ untrusted code:
   be bypassable that way; the environment ref-check is the real boundary.
 
 So the credentialed live deploy runs on every merge to `main`; everywhere else the creds are empty and
-the suite SKIPS (the `test` job still imports the file and skips it). Each `live-e2e` run also gets
-`VOID_E2E_RUN_ID = <run-id>-<attempt>` for the unique per-run resource names below.
+the suite SKIPS (the `test` job still imports the file and skips it). The `live-e2e` job itself is
+fail-closed — a preflight step errors if either credential is empty (a missing, deleted, or
+not-yet-rotated secret), so a misconfigured gate is loud instead of a silent green skip. Each
+`live-e2e` run also gets `VOID_E2E_RUN_ID = <run-id>-<attempt>` for the unique per-run resource names
+below.
 
 ### Resource naming & cleanup
 
