@@ -29,7 +29,7 @@ const E2E_ENABLED = CF_TOKEN.length > 0 && CF_ACCOUNT_ID.length > 0;
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PACKAGE_ROOT = join(ROOT, 'packages', 'void');
 const CLI_ENTRY = join(PACKAGE_ROOT, 'dist', 'cli', 'cli.mjs');
-const WRANGLER_BIN = join(ROOT, 'node_modules', '.bin', 'wrangler');
+const WRANGLER_BIN = join(PACKAGE_ROOT, 'node_modules', '.bin', 'wrangler');
 
 // Deploy target: the SPA playground (real, buildable Void app exercising D1 + KV + a cron). The
 // deploy CLI runs its own build → provision → migrate → deploy pipeline against this dir.
@@ -51,6 +51,10 @@ let wranglerSnapshotTaken = false;
 let wranglerOriginal: string | undefined;
 let deployOutput = '';
 let deployStatus: number | null = null;
+// Set true ONLY once the pre-deploy ownership gate proves none of the fixed-name resources already
+// existed in the account. Teardown deletes ONLY when this is true, so a collision (gate throws) can
+// never delete a pre-existing resource the test does not own.
+let ownershipVerified = false;
 
 /** The credentialed env every real Cloudflare call (deploy + teardown) shares. */
 function cloudEnv(): NodeJS.ProcessEnv {
@@ -109,6 +113,48 @@ async function fetchWithRetry(url: string, attempts = 10): Promise<Response> {
 
 describe.skipIf(!E2E_ENABLED)('void deploy --backend cloudflare --provision (live account)', () => {
   beforeAll(() => {
+    // Ownership gate — refuse to run if any fixed-name resource ALREADY exists in the target account.
+    // `--provision` ADOPTS an exact-name D1/KV (it would migrate pre-existing data), and teardown
+    // deletes by these exact names, so a collision with a real resource risks destroying data this
+    // test does not own. Only after proving the names are exclusively ours do we set
+    // `ownershipVerified` — the sole condition under which teardown deletes anything. If we cannot
+    // confirm a name is free (a list call fails), fail CLOSED rather than risk it.
+    const collisions: Array<string> = [];
+    if (wrangler(['deployments', 'list', '--name', WORKER_NAME]).status === 0) {
+      collisions.push(`worker ${WORKER_NAME}`);
+    }
+    if (wrangler(['d1', 'info', D1_NAME]).status === 0) {
+      collisions.push(`d1 database ${D1_NAME}`);
+    }
+    const kvList = wrangler(['kv', 'namespace', 'list']);
+    if (kvList.status !== 0) {
+      collisions.push(
+        `kv namespace ${KV_TITLE} (could not list namespaces to rule out a collision)`,
+      );
+    } else {
+      try {
+        const namespaces = JSON.parse(kvList.output) as Array<{ title: string }>;
+        if (namespaces.some((n) => n.title === KV_TITLE)) {
+          collisions.push(`kv namespace ${KV_TITLE}`);
+        }
+      } catch {
+        collisions.push(
+          `kv namespace ${KV_TITLE} (non-JSON namespace list — cannot rule out a collision)`,
+        );
+      }
+    }
+    if (collisions.length > 0) {
+      throw new Error(
+        'live e2e refuses to run — these throwaway-named resources already exist in the target ' +
+          'account, so provisioning would adopt/migrate them and teardown would delete them ' +
+          `(risking data this test does not own):\n  ${collisions.join('\n  ')}\n` +
+          'Remove them (or change WORKER_NAME) and rerun.',
+      );
+    }
+    // Exclusive ownership proven: any resource with these names after this point was created by THIS
+    // run, so teardown may safely delete them.
+    ownershipVerified = true;
+
     // Snapshot BEFORE any filesystem work so an early failure never deletes a developer-local file.
     wranglerOriginal = existsSync(APP_WRANGLER) ? readFileSync(APP_WRANGLER, 'utf-8') : undefined;
     wranglerSnapshotTaken = true;
@@ -137,7 +183,9 @@ describe.skipIf(!E2E_ENABLED)('void deploy --backend cloudflare --provision (liv
         failures.push(`${label} (exit ${res.status})\n${res.output.trim()}`);
       }
     };
-    if (E2E_ENABLED) {
+    // Delete ONLY when the ownership gate proved these names were free before the deploy, so a
+    // collision that aborted beforeAll never deletes a pre-existing resource the test does not own.
+    if (E2E_ENABLED && ownershipVerified) {
       attemptDelete(`worker ${WORKER_NAME}`, ['delete', '--name', WORKER_NAME, '--force']);
       attemptDelete(`d1 ${D1_NAME}`, ['d1', 'delete', D1_NAME, '--skip-confirmation']);
       // KV delete needs the namespace id — resolve it from the account's namespace list by EXACT
