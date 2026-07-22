@@ -76,6 +76,31 @@ function wrangler(args: Array<string>): { status: number; output: string } {
   return { status: res.status ?? 1, output: `${res.stdout ?? ''}${res.stderr ?? ''}` };
 }
 
+/**
+ * Definitively resolve whether the fixed-name worker already exists, for the ownership gate. The CF
+ * API returns an unambiguous 200 (exists) / 404 (absent) for a script, unlike a wrangler exit code
+ * (a genuinely-absent worker ALSO exits nonzero). Any other outcome — a non-200/404 status or a
+ * network error — is `'unknown'`, which the gate treats as a collision and fails closed on, so an
+ * ownership lookup that merely errored can never be mistaken for "the name is free".
+ */
+async function workerExistence(): Promise<'exists' | 'absent' | 'unknown'> {
+  try {
+    const res = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}`,
+      { headers: { Authorization: `Bearer ${CF_TOKEN}` } },
+    );
+    if (res.status === 200) {
+      return 'exists';
+    }
+    if (res.status === 404) {
+      return 'absent';
+    }
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 /** Extract the deployed workers.dev URL the CLI prints on a successful deploy. */
 function extractWorkerUrl(output: string): string | undefined {
   return output.match(/https:\/\/[^\s]*\.workers\.dev[^\s]*/)?.[0];
@@ -112,20 +137,48 @@ async function fetchWithRetry(url: string, attempts = 10): Promise<Response> {
 }
 
 describe.skipIf(!E2E_ENABLED)('void deploy --backend cloudflare --provision (live account)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     // Ownership gate — refuse to run if any fixed-name resource ALREADY exists in the target account.
     // `--provision` ADOPTS an exact-name D1/KV (it would migrate pre-existing data), and teardown
     // deletes by these exact names, so a collision with a real resource risks destroying data this
     // test does not own. Only after proving the names are exclusively ours do we set
-    // `ownershipVerified` — the sole condition under which teardown deletes anything. If we cannot
-    // confirm a name is free (a list call fails), fail CLOSED rather than risk it.
+    // `ownershipVerified` — the sole condition under which teardown deletes anything.
+    //
+    // Every check fails CLOSED: a lookup that neither confirms "free" nor confirms "taken" (a
+    // transient API error, a missing read scope, a non-JSON body) is recorded as a collision, so an
+    // ambiguous result can never be mistaken for a free name and let teardown delete a resource this
+    // test did not create.
     const collisions: Array<string> = [];
-    if (wrangler(['deployments', 'list', '--name', WORKER_NAME]).status === 0) {
+
+    // Worker — a genuinely-absent worker ALSO makes `wrangler` exit nonzero, so an exit code cannot
+    // tell "free" from "errored". Resolve it against the CF API instead, which returns an unambiguous
+    // 200/404; anything else is `'unknown'` → treated as a collision (fail closed).
+    const worker = await workerExistence();
+    if (worker === 'exists') {
       collisions.push(`worker ${WORKER_NAME}`);
+    } else if (worker === 'unknown') {
+      collisions.push(`worker ${WORKER_NAME} (could not confirm it is free — lookup errored)`);
     }
-    if (wrangler(['d1', 'info', D1_NAME]).status === 0) {
-      collisions.push(`d1 database ${D1_NAME}`);
+
+    // D1 — `d1 info <name>` exits nonzero BOTH when the database is absent and when the call errors,
+    // so it cannot fail closed. List every database instead: a successful JSON list that omits the
+    // name proves it is free; a list failure or non-JSON body is ambiguous → collision.
+    const d1List = wrangler(['d1', 'list', '--json']);
+    if (d1List.status !== 0) {
+      collisions.push(`d1 database ${D1_NAME} (could not list databases to rule out a collision)`);
+    } else {
+      try {
+        const databases = JSON.parse(d1List.output) as Array<{ name: string }>;
+        if (databases.some((d) => d.name === D1_NAME)) {
+          collisions.push(`d1 database ${D1_NAME}`);
+        }
+      } catch {
+        collisions.push(
+          `d1 database ${D1_NAME} (non-JSON database list — cannot rule out a collision)`,
+        );
+      }
     }
+
     const kvList = wrangler(['kv', 'namespace', 'list']);
     if (kvList.status !== 0) {
       collisions.push(
