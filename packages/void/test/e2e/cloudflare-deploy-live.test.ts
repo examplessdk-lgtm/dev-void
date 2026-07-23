@@ -57,6 +57,14 @@ const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PACKAGE_ROOT = join(ROOT, 'packages', 'void');
 const CLI_ENTRY = join(PACKAGE_ROOT, 'dist', 'cli', 'cli.mjs');
 const WRANGLER_BIN = join(PACKAGE_ROOT, 'node_modules', '.bin', 'wrangler');
+// Bound each deploy subprocess BELOW the enclosing vitest timeout. `spawn.sync` blocks the test
+// worker's event loop, so a hung CLI/wrangler would keep vitest's own timer from firing AND keep
+// `afterAll` from running — leaking the worker/D1/KV. On timeout, spawnSync returns a null status,
+// which fails the status assertion loudly and lets teardown reclaim the resources.
+const DEPLOY_TIMEOUT_MS = 480_000;
+// Per-request abort deadline for the polling fetches, so a single stalled request aborts and the
+// retry loop moves on instead of consuming the whole per-test budget on one hung socket.
+const REQUEST_TIMEOUT_MS = 20_000;
 
 // Deploy target: the SPA playground (real, buildable Void app exercising D1 + KV + a cron). The
 // deploy CLI runs its own build → provision → migrate → deploy pipeline against this dir.
@@ -283,7 +291,11 @@ async function fetchWithRetry(
   let lastError: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await fetch(url, init);
+      const res = await fetch(url, {
+        ...init,
+        // Per-request deadline so a hung socket aborts and we retry, rather than blocking the poll.
+        signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
       if (res.status === 200) {
         return res;
       }
@@ -325,7 +337,11 @@ async function workersDevEnabled(): Promise<string> {
 async function cfWorkerApi(path: string): Promise<Response> {
   return fetch(
     `https://api.cloudflare.com/client/v4/accounts/${cfAccountId()}/workers/scripts/${WORKER_NAME}${path}`,
-    { headers: { Authorization: `Bearer ${cfToken()}` } },
+    {
+      headers: { Authorization: `Bearer ${cfToken()}` },
+      // Bound the request so one stalled schedules read aborts and the caller's retry loop continues.
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    },
   );
 }
 
@@ -442,9 +458,10 @@ describe('void deploy --backend cloudflare (live account)', () => {
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
       env: cloudEnv(),
+      timeout: DEPLOY_TIMEOUT_MS,
     });
     deployStatus = res.status;
-    deployOutput = `${res.stdout ?? ''}${res.stderr ?? ''}`;
+    deployOutput = `${res.stdout ?? ''}${res.stderr ?? ''}${res.error ? `\n${res.error}` : ''}`;
   }, 600_000);
 
   afterAll(async () => {
@@ -600,11 +617,14 @@ describe('void deploy --backend cloudflare (live account)', () => {
       2000,
     );
     expect(put.status, `PUT /api/kv/${key}`).toBe(200);
-    const got = await fetchWithRetry(`${root}/api/kv/${key}`, {}, 15, 2000);
+    // KV is eventually consistent and a first-read MISS can be negatively cached at the edge for up to
+    // ~60s, so poll past that window (40 × 2s = 80s). A healthy binding whose first GET raced the
+    // write's central visibility then converges rather than false-failing CI.
+    const got = await fetchWithRetry(`${root}/api/kv/${key}`, {}, 40, 2000);
     const gotBody = await got.text();
     expect(got.status, gotBody).toBe(200);
     expect(gotBody).toBe(value);
-  }, 120_000);
+  }, 150_000);
 
   it('registers the cron trigger on the deployed worker', async (ctx) => {
     ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
@@ -649,13 +669,22 @@ describe('void deploy --backend cloudflare (live account)', () => {
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
       env: cloudEnv(),
+      timeout: DEPLOY_TIMEOUT_MS,
     });
-    const output = `${res.stdout ?? ''}${res.stderr ?? ''}`;
+    const output = `${res.stdout ?? ''}${res.stderr ?? ''}${res.error ? `\n${res.error}` : ''}`;
     expect(res.status, output).toBe(0);
-    // Same worker name → same host; it still serves after the in-place update.
-    const base = extractWorkerUrl(output) ?? extractWorkerUrl(deployOutput);
+    // Prove THIS deploy re-targeted the same worker: read the URL from ITS OWN output (no fallback to
+    // the first deploy, which would mask a second deploy that uploaded nothing) and require the host's
+    // worker label to equal WORKER_NAME.
+    const base = extractWorkerUrl(output);
     expect(base, output).toBeDefined();
-    const served = await fetchWithRetry(`${base!.replace(/\/$/, '')}/api/hello`, {}, 15, 2000);
+    expect(new URL(base!).hostname.split('.')[0], output).toBe(WORKER_NAME);
+    const root = base!.replace(/\/$/, '');
+    // The re-deployed worker still serves AND its bindings survived the update: /api/hello (static) is
+    // 200, and /api/users (a D1-backed route) is 200 — a dropped or broken DB binding would 500.
+    const served = await fetchWithRetry(`${root}/api/hello`, {}, 15, 2000);
     expect(served.status).toBe(200);
+    const dbRoute = await fetchWithRetry(`${root}/api/users`, {}, 15, 2000);
+    expect(dbRoute.status, await dbRoute.text()).toBe(200);
   }, 600_000);
 });
