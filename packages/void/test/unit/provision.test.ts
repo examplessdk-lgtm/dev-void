@@ -7173,12 +7173,24 @@ describe('provisionCloudflareResources — Hyperdrive lister deadline', () => {
 
 describe('createDefaultRunWrangler — confirmed child termination + kill classification', () => {
   const KILL_CLASSIFY_TMP = join(import.meta.dirname, '.tmp-kill-classify');
+  /**
+   * These cases deliberately keep a REAL child alive (that is the scenario under test) and kill
+   * it at the end, and the child's CWD is this temp dir. Windows releases a terminated process's
+   * handles — including the directory handle for its CWD — ASYNCHRONOUSLY, so a recursive remove
+   * issued right after the pid is confirmed gone can still fail with EPERM. `maxRetries` is
+   * Node's documented remedy: it retries EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM on a linear
+   * backoff, and is honored only when `recursive` is set. Inert on POSIX, which unlinks a
+   * directory regardless of any open handle.
+   */
+  const rmTmp = (): void => {
+    rmSync(KILL_CLASSIFY_TMP, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  };
   beforeEach(() => {
-    rmSync(KILL_CLASSIFY_TMP, { recursive: true, force: true });
+    rmTmp();
     mkdirSync(KILL_CLASSIFY_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(KILL_CLASSIFY_TMP, { recursive: true, force: true });
+    rmTmp();
   });
 
   async function waitForDead(pid: number, timeoutMs: number): Promise<boolean> {
