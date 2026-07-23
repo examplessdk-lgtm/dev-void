@@ -42,7 +42,7 @@ export default defineConfig({
 - `void auth login` — platform auth
 - `void deploy` — build and deploy
 - `void db *` — local DB and migration commands
-- `void project *` — link, status, logs, rollback, delete
+- `void project *` — link, status, logs, requests, rollback, delete
 
 Runtime helpers include:
 
