@@ -19,6 +19,21 @@ const ciTimeoutScale = process.platform === 'win32' ? 3 : 1;
 const testTimeout = 120_000 * ciTimeoutScale;
 const hookTimeout = 120_000 * ciTimeoutScale;
 
+// Integration files that share a playground directory with another file in the same project. A
+// parallel run lets one file's build wipe state (.void/, dist/) that another is actively using —
+// e.g. kitchen-sink-build.test.ts deletes .void/, destroying the miniflare persistence that
+// kitchen-sink.test.ts's dev server depends on. These run serially in their own project so the
+// rest of the integration suite does not have to.
+const sharedPlayground = [
+  // playground/kitchen-sink
+  'packages/void/test/integration/kitchen-sink.test.ts',
+  'packages/void/test/integration/kitchen-sink-build.test.ts',
+  'packages/void/test/integration/cloudflare-deploy-build.test.ts',
+  // playground/named-layouts
+  'packages/void/test/integration/named-layouts.test.ts',
+  'packages/void/test/integration/full-deploy-manifest.test.ts',
+];
+
 const metaframeworks = [
   'packages/void/test/integration/analog.test.ts',
   'packages/void/test/integration/astro.test.ts',
@@ -350,12 +365,21 @@ export default defineConfig({
             'packages/void/test/e2e/**/*.test.ts',
             'packages/md/test/integration/**/*.test.ts',
           ],
-          exclude: metaframeworks,
+          exclude: [...metaframeworks, ...sharedPlayground],
           maxWorkers,
-          // kitchen-sink.test.ts (dev server) and kitchen-sink-build.test.ts
-          // (build) both use playground/kitchen-sink/. The build test deletes
-          // .void/ before running, which destroys miniflare persistence that
-          // the dev server depends on. Serialize to prevent the conflict.
+        },
+      },
+      {
+        test: {
+          // The only integration files that share a playground directory. Serialized among
+          // themselves so one file's build cannot delete state another is mid-way through using.
+          // This needs its own group order: `fileParallelism: false` resolves to `maxWorkers: 1`,
+          // and vitest rejects projects that share a group order but disagree on `maxWorkers`.
+          name: 'shared-playground',
+          sequence: { groupOrder: 4 },
+          include: sharedPlayground,
+          testTimeout,
+          hookTimeout,
           fileParallelism: false,
         },
       },
