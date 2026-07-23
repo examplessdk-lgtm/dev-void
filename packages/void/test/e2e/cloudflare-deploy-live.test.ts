@@ -69,6 +69,17 @@ const WRANGLER_TIMEOUT_MS = 120_000;
 // Per-request abort deadline for the polling fetches, so a single stalled request aborts and the
 // retry loop moves on instead of consuming the whole per-test budget on one hung socket.
 const REQUEST_TIMEOUT_MS = 20_000;
+// `WRANGLER_TIMEOUT_MS` bounds ONE stalled call, but each hook fires SEVERAL wrangler calls back to
+// back with no `await` between them (setup: 6 create/list; teardown: up to 5 list/delete), so
+// `spawn.sync` blocks the event loop across the whole run and vitest's hook timer can never fire to
+// interrupt it — the per-call bound alone lets the AGGREGATE (5–6 × 120s) blow past the hook budget,
+// and an external cancel mid-teardown strands D1/KV. These budgets cap the SUM of wrangler wall-clock
+// per hook: each hook stamps `wranglerDeadline` at its start and `wrangler()` shrinks each call's
+// timeout to the time left, skipping (as a failed call) once spent. Sized under the hook timeouts —
+// setup: 90s + DEPLOY_TIMEOUT_MS (a separate spawn) = 570s < 600s beforeAll; teardown: 200s + the
+// ~64s async worker probe = 264s < 300s afterAll.
+const SETUP_WRANGLER_BUDGET_MS = 90_000;
+const TEARDOWN_WRANGLER_BUDGET_MS = 200_000;
 
 // Deploy target: the SPA playground (real, buildable Void app exercising D1 + KV + a cron). The
 // deploy CLI runs its own build → provision → migrate → deploy pipeline against this dir.
@@ -155,8 +166,25 @@ function cloudEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+// Absolute wall-clock deadline (epoch ms) for the CURRENT hook's aggregate wrangler work; each hook
+// stamps it at its start (see SETUP_/TEARDOWN_WRANGLER_BUDGET_MS). Infinity outside a hook so a stray
+// call is still bounded by WRANGLER_TIMEOUT_MS alone.
+let wranglerDeadline = Number.POSITIVE_INFINITY;
+
 /** Best-effort `wrangler` invocation for teardown — never throws, so afterAll always continues. */
 function wrangler(args: Array<string>): { status: number; stdout: string; output: string } {
+  // Shrink this call's timeout to the time left in the hook's aggregate budget, so a run of stalled
+  // calls can't collectively overrun the hook (spawn.sync blocks the loop, so vitest can't interrupt).
+  // Once the budget is spent, skip the call as a failed one rather than launching a doomed spawn — the
+  // ownership gate fails closed and teardown records the leak loudly instead of silently hanging.
+  const remaining = wranglerDeadline - Date.now();
+  if (remaining <= 0) {
+    return {
+      status: 1,
+      stdout: '',
+      output: `wrangler ${args.join(' ')} skipped — hook wrangler-time budget exhausted`,
+    };
+  }
   const res = spawn.sync(WRANGLER_BIN, args, {
     cwd: APP,
     encoding: 'utf8',
@@ -165,7 +193,7 @@ function wrangler(args: Array<string>): { status: number; stdout: string; output
     // Bound each call so a stalled wrangler/CF request can't block the event loop and freeze teardown
     // (see WRANGLER_TIMEOUT_MS). On timeout, status is null → `?? 1` makes it a non-zero (failed) call,
     // which every caller already handles: the ownership gate fails closed, teardown records a failure.
-    timeout: WRANGLER_TIMEOUT_MS,
+    timeout: Math.min(WRANGLER_TIMEOUT_MS, remaining),
   });
   const stdout = res.stdout ?? '';
   const stderr = res.stderr ?? '';
@@ -387,13 +415,16 @@ async function workersDevEnabled(): Promise<string> {
 }
 
 /** Authenticated GET against the Cloudflare API for THIS deployed worker (Bearer `cfToken()`). */
-async function cfWorkerApi(path: string): Promise<Response> {
+async function cfWorkerApi(path: string, signal?: AbortSignal): Promise<Response> {
   return fetch(
     `https://api.cloudflare.com/client/v4/accounts/${cfAccountId()}/workers/scripts/${WORKER_NAME}${path}`,
     {
       headers: { Authorization: `Bearer ${cfToken()}` },
-      // Bound the request so one stalled schedules read aborts and the caller's retry loop continues.
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      // Bound the request so one stalled schedules read aborts and the caller's retry loop continues;
+      // when the caller passes the test signal, also abort the moment Vitest times the test out.
+      signal: signal
+        ? AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), signal])
+        : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     },
   );
 }
@@ -405,6 +436,10 @@ describe('void deploy --backend cloudflare (live account)', () => {
     if (!e2eEnabled()) {
       return;
     }
+    // Cap the SUM of this hook's wrangler wall-clock (the ownership-gate lists + the create/list pairs)
+    // so it plus the separate deploy spawn stays under the 600s beforeAll budget. The deploy is NOT a
+    // wrangler() call, so it keeps its own DEPLOY_TIMEOUT_MS.
+    wranglerDeadline = Date.now() + SETUP_WRANGLER_BUDGET_MS;
     computeResourceNames();
 
     // Ownership gate — refuse to run if any of this run's resources ALREADY exist in the target account.
@@ -535,6 +570,9 @@ describe('void deploy --backend cloudflare (live account)', () => {
     // Delete ONLY when the ownership gate proved these names were free before the deploy, so a
     // collision that aborted beforeAll never deletes a pre-existing resource the test does not own.
     if (e2eEnabled() && ownershipVerified) {
+      // Cap the SUM of teardown's wrangler wall-clock (the worker probe is async + separately bounded)
+      // so the whole cleanup stays under the 300s afterAll budget even if every list/delete stalls.
+      wranglerDeadline = Date.now() + TEARDOWN_WRANGLER_BUDGET_MS;
       // Worker — exists only if the deploy succeeded. Skip when the CF API confirms it is ABSENT
       // (avoids a spurious "does not exist" failure on a deploy that never got that far); fail closed
       // when existence cannot be confirmed ('unknown') by attempting the delete anyway.
@@ -691,8 +729,13 @@ describe('void deploy --backend cloudflare (live account)', () => {
     let crons: Array<string | undefined> = [];
     let diag = 'no response';
     for (let attempt = 0; attempt < 8; attempt++) {
+      // Stop as soon as Vitest times the test out: like `fetchWithRetry`, thread `ctx.signal` into the
+      // request AND the inter-attempt delay so 8 × 20s of polling can't outlive the 60s test budget.
+      if (ctx.signal.aborted) {
+        break;
+      }
       try {
-        const res = await cfWorkerApi('/schedules');
+        const res = await cfWorkerApi('/schedules', ctx.signal);
         const body = (await res.json().catch(() => ({}))) as {
           result?: { schedules?: Array<{ cron?: string }> };
         };
@@ -707,7 +750,7 @@ describe('void deploy --backend cloudflare (live account)', () => {
         diag = `fetch threw: ${String(error)}`;
       }
       if (attempt < 7) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await abortableDelay(2000, ctx.signal);
       }
     }
     expect(crons, `registered schedules — ${diag}`).toContain('0 * * * *');
