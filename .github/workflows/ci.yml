@@ -35,11 +35,21 @@ jobs:
           persist-credentials: false
       # Defender's real-time scan is synchronous on every file write, and this suite writes a lot of
       # them (dependency install, ~26 playground builds, per-worker temp dirs). Excluding the paths
-      # we generate is safe — their contents come from the checkout and the lockfile-pinned install,
-      # both already trusted by every other step. Only a speed measure: it never changes what runs.
-      # Warn instead of fail, so a runner image that refuses the call still runs the suite.
+      # we generate is purely a speed measure: it never changes what runs.
+      #
+      # Skipped for fork pull requests, the only case where the checkout is code no maintainer has
+      # pushed. Not because scanning is a boundary for this job — it has no secrets, a read-only
+      # token, an ephemeral runner, and already executes the PR's own build and test code by design
+      # — but because leaving the scan on for untrusted checkouts costs us nothing: Windows runs on
+      # a PR only when a maintainer applies the `test: windows` label, so this is rare, while main
+      # pushes and maintainer branches (the everyday path) keep the speedup.
+      #
+      # Warns instead of failing, so a runner image that refuses the call still runs the suite.
       - name: Exclude build paths from Windows Defender
-        if: ${{ contains(matrix.os, 'windows') }}
+        if: >-
+          ${{ contains(matrix.os, 'windows')
+          && (github.event_name == 'push'
+          || github.event.pull_request.head.repo.full_name == github.repository) }}
         shell: pwsh
         run: |
           foreach ($path in @('${{ github.workspace }}', '${{ runner.temp }}')) {
