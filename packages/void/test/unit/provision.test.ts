@@ -7190,8 +7190,13 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
    *
    * This deliberately KILLS NOTHING. A pid read from a file is not proof that the process now
    * holding that pid is the one that wrote it, so signalling it could terminate an unrelated
-   * process. If removal still fails, report which recorded pids currently resolve to a live
-   * process and what entries remain — a bare errno is undebuggable without a Windows machine.
+   * process.
+   *
+   * A removal that still fails is then classified, not blanket-tolerated: a recorded pid that is
+   * STILL LIVE means a child was genuinely stranded — a real leak, failed loud. Otherwise the
+   * only things left are the dead child's own script and pid file, which Windows keeps mapped
+   * until process rundown completes; that can outlast any practical retry budget and is an OS
+   * artifact rather than a defect in the code under test, whose assertions have already passed.
    */
   const rmTmp = (): void => {
     if (killClassifyTmp === '') {
@@ -7199,26 +7204,31 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
     }
     try {
       rmSync(killClassifyTmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+      return;
     } catch (error) {
       const left = existsSync(killClassifyTmp) ? readdirSync(killClassifyTmp) : [];
-      const recorded = left
+      const live = left
         .filter((entry) => entry.endsWith('.pid'))
-        .map((entry) => {
-          const pid = Number(readFileSync(join(killClassifyTmp, entry), 'utf-8').trim());
-          let live = false;
+        .map((entry) => Number(readFileSync(join(killClassifyTmp, entry), 'utf-8').trim()))
+        .filter((pid) => {
           try {
             process.kill(pid, 0);
-            live = true;
+            return true;
           } catch {
-            live = false;
+            return false;
           }
-          return `${entry}=${pid}${live ? ' (some process holds that pid)' : ' (gone)'}`;
         });
-      throw new Error(
-        `could not remove ${killClassifyTmp}: ${(error as Error).message}\n` +
-          `  recorded pids: ${recorded.length > 0 ? recorded.join(', ') : 'none'}\n` +
-          `  entries remaining: ${left.length > 0 ? left.join(', ') : '(none)'}`,
-      );
+      const detail =
+        `${(error as Error).message}\n` +
+        `  entries remaining: ${left.length > 0 ? left.join(', ') : '(none)'}\n` +
+        `  recorded pids still resolving to a live process: ${live.length > 0 ? live.join(', ') : 'none'}`;
+      if (live.length > 0) {
+        throw new Error(`could not remove ${killClassifyTmp}: ${detail}`);
+      }
+      // Nothing of ours is running. Warn so it stays visible, rather than reddening a green
+      // behavioural test over temp-file hygiene; the directory is unique per test and ignored by
+      // git, so a leftover cannot affect any other case.
+      console.warn(`warn: leaving ${killClassifyTmp} behind — ${detail}`);
     }
   };
   beforeEach(() => {
