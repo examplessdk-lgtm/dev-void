@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { extname, isAbsolute, join, relative, resolve } from 'pathe';
+import { extname, isAbsolute, join, relative, resolve } from 'pathslash';
 import { chromium } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { collectPrerenderPathsNode } from '../../src/prerender.ts';

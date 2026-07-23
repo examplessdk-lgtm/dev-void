@@ -12,7 +12,7 @@ import {
   type Node,
   type ParseError,
 } from 'jsonc-parser';
-import { join, normalize } from 'pathe';
+import { join, normalize } from 'pathslash';
 import type { VoidConfig } from '../config.ts';
 import type { InferredBindings } from '../inference/walk.ts';
 import type { WebSocketRouteDefinition } from '../router/websocket.ts';

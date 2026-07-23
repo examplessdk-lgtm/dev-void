@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { normalizePath, type Plugin } from 'vite';
 import { DRIZZLE_OPERATORS, generateDbDts } from './codegen/db-types.ts';
 import { ensureProjectTsconfig } from './codegen/project-tsconfig.ts';

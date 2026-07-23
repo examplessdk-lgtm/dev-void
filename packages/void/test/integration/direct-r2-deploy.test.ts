@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 // Capture how many times each asset path is read via `readFileSync`. Mocked

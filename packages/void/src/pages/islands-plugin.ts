@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, resolve } from 'pathe';
+import { dirname, resolve } from 'pathslash';
 import { normalizePath, type ResolvedConfig, type ViteDevServer } from 'vite';
 import { resolveEffectiveLayoutChain, scanPages } from './scan.ts';
 import type { PageScanResult } from './types.ts';

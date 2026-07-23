@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import type { Plugin } from 'vite';
 import type { DatabaseDialect } from './config.ts';
 import { voidLog, voidWarn, voidError } from './log.ts';

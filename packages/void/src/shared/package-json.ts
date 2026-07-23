@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'pathe';
+import { dirname, join } from 'pathslash';
 
 export type PackageJson = Record<string, unknown>;
 

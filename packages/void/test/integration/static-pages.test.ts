@@ -1,6 +1,6 @@
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { beforeAll, describe, expect, it } from 'vite-plus/test';
 import { collectPrerenderPaths } from '../../src/prerender.ts';
 

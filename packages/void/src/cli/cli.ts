@@ -2,7 +2,7 @@
 
 import { readFileSync } from 'node:fs';
 import { log } from '@clack/prompts';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { getPackageDir } from './agents.ts';
 import { parseDeployArgs } from './args.ts';
 import { authSubcommands, parseAuthArgs } from './auth-args.ts';

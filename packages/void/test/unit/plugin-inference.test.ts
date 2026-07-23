@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { LATEST_KNOWN_COMPAT_DATE } from '../../src/cli/wrangler.ts';
 import { voidPlugin } from '../../src/index.ts';

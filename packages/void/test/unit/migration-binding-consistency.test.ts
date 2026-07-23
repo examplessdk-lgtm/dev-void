@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { describe, it, expect, beforeEach, afterEach } from 'vite-plus/test';
 import { buildVoidManifest, buildFrameworkManifest } from '../../src/cli/package.ts';
 import { inferBindingsFromSource, mergeBindings } from '../../src/inference/walk.ts';

@@ -1,5 +1,5 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { pagesPlugin } from '../../src/plugin-pages.ts';
 

@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import type { ProjectResponse } from './client.ts';
 import type { ProjectConfig } from './project.ts';
 

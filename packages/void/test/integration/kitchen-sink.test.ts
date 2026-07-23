@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { chromium, type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';

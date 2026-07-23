@@ -26,7 +26,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { log, outro } from '@clack/prompts';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { findEnvFile } from '../codegen/env-types.ts';
 import { loadUserEnvFile } from '../host/load-user-env.ts';
 import type { StandardSchemaV1 } from '../standard-schema.ts';

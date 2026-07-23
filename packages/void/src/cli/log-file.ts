@@ -1,6 +1,6 @@
 import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
 

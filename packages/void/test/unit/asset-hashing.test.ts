@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { hash as blake3hash } from 'blake3-jit';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 // `vi.mock` is hoisted above all imports — declare the mock before importing

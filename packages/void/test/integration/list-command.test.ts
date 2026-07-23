@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
 const tempHomes: Array<string> = [];

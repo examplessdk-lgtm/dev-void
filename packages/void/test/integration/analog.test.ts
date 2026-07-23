@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
@@ -13,7 +13,7 @@ const CLEAN_ENV_KEYS = [
   'ComSpec',
   'HOME',
   'LOCALAPPDATA',
-  'PATHEXT',
+  'pathslashXT',
   'PNPM_HOME',
   'SystemDrive',
   'SystemRoot',

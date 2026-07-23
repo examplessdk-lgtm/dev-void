@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'pathe';
+import { dirname } from 'pathslash';
 
 export function writeFileIfChanged(path: string, content: string): boolean {
   let existing: string | null = null;

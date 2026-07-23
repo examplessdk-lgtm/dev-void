@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, it, expect } from 'vite-plus/test';
 import { classifyMigration } from '../../src/migrations/plan.ts';
 import {

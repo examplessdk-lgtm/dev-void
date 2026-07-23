@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { describe, it, expect } from 'vite-plus/test';
 import { generateEnvTypes, findEnvFile } from '../../src/codegen/env-types.ts';
 

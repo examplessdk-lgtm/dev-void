@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { type Plugin, type ResolvedConfig } from 'vite';
 import { findEnvFile, generateEnvTypes } from './codegen/env-types.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';

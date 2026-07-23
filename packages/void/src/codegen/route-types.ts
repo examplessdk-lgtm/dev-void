@@ -1,4 +1,4 @@
-import { relative } from 'pathe';
+import { relative } from 'pathslash';
 import type { ScanResult } from '../router/scan.ts';
 
 export type RouteTypesResult = {

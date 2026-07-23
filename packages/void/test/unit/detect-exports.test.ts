@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
 import { detectHttpExports } from '../../src/router/detect-exports.ts';
 

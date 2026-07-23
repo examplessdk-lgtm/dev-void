@@ -24,7 +24,7 @@
     "@angular/build": "^22.0.5",
     "@angular/compiler-cli": "^22.0.5",
     "nitro-cloudflare-dev": "^0.2.2",
-    "pathe": "catalog:",
+    "pathslash": "catalog:",
     "typescript": "~6.0.3",
     "vite": "catalog:",
     "vite-plus": "catalog:",

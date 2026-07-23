@@ -1,6 +1,6 @@
 import { execSync } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join, resolve } from 'pathe';
+import { join, resolve } from 'pathslash';
 import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
 import {
   detectPreset,

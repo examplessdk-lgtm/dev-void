@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseJsoncConfig, type ParseError } from 'jsonc-parser';
-import { basename, dirname, join, relative, resolve } from 'pathe';
+import { basename, dirname, join, relative, resolve } from 'pathslash';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');

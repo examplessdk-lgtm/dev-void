@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import type MarkdownExit from 'markdown-exit';
 import type { RuleBlock, Token } from 'markdown-exit';
-import { resolve, dirname } from 'pathe';
+import { resolve, dirname } from 'pathslash';
 
 const rawPathRegexp =
   /^(.+?(?:(?:\.([a-z0-9]+))?))(?:(#[\w-]+))?(?: ?(?:\{(\d+(?:[,-]\d+)*)? ?(\S+)? ?(\S+)?}))? ?(?:\[(.+)\])?$/;

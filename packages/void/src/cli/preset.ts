@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'pathe';
+import { dirname, join, resolve } from 'pathslash';
 import { readProjectPaths } from '../project-paths.ts';
 import {
   getPackageDependencies,

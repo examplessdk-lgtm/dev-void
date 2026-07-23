@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { dirname, relative } from 'pathe';
+import { dirname, relative } from 'pathslash';
 import { normalizePath, type Plugin, type ResolvedConfig, type ViteDevServer } from 'vite';
 import { resolveStaticPageDataBuildOptions, scanPages } from 'void/pages';
 import type { PageScanResult, StaticPageDataBuildOptions } from 'void/pages';

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'pathe';
+import { isAbsolute, join, relative, resolve } from 'pathslash';
 
 type Tsconfig = Record<string, unknown>;
 type TsconfigHook = (config: Tsconfig) => Tsconfig | void;

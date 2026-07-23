@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join, dirname, basename, extname } from 'pathe';
+import { join, dirname, basename, extname } from 'pathslash';
 import { glob } from 'tinyglobby';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import { parseRouteFilename } from '../router/parse-filename.ts';

@@ -1,6 +1,6 @@
 import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'pathe';
+import { dirname, resolve } from 'pathslash';
 import { globSync } from 'tinyglobby';
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));

@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { hash as blake3hash } from 'blake3-jit';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
   buildVoidManifest,

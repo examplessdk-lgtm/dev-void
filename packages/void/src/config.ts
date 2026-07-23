@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import type { RewriteDestination } from 'void/routes';
 import type { DevRedirectRule, HeaderRule, RedirectRule } from './cli/types.ts';
 export type { RedirectRule };

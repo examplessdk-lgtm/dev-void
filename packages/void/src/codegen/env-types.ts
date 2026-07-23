@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { relative } from 'pathe';
+import { relative } from 'pathslash';
 import { voidWarn } from '../log.ts';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 

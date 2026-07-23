@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { hash as blake3hash } from 'blake3-jit';
 import ignore from 'ignore';
-import { extname, join, relative } from 'pathe';
+import { extname, join, relative } from 'pathslash';
 import type { InferredBindings } from '../inference/walk.ts';
 import { buildMigrationPlanBundle } from '../migrations/plan.ts';
 import type { MigrationFile } from '../migrations/validate.ts';

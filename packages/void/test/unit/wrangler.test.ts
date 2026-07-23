@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { parse as parseJsoncRaw, type ParseError } from 'jsonc-parser';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { describe, it, expect, afterEach } from 'vite-plus/test';
 import {
   bindingEntriesForField,

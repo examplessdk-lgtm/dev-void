@@ -1,4 +1,4 @@
-import { resolve } from 'pathe';
+import { resolve } from 'pathslash';
 import { normalizePath } from 'vite';
 import { describe, it, expect } from 'vite-plus/test';
 import { rewriteCssImportForVirtualModule } from '../../src/pages/islands-plugin.ts';

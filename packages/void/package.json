@@ -347,7 +347,7 @@
     "estree-walker": "^3.0.3",
     "magic-string": "^0.30.21",
     "ofetch": "2.0.0-alpha.3",
-    "pathe": "catalog:",
+    "pathslash": "catalog:",
     "pglite-server": "0.1.5",
     "picocolors": "^1.1.1",
     "tinyglobby": "^0.2.17",

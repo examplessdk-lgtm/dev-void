@@ -17,7 +17,7 @@ import {
 } from 'node:fs';
 import { types as nodeUtilTypes } from 'node:util';
 import { parse as parseJsoncRaw } from 'jsonc-parser';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
   acquireProvisionLock,

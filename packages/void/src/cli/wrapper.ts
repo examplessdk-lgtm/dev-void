@@ -9,7 +9,7 @@ import {
   readdirSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, extname } from 'pathe';
+import { dirname, join, extname } from 'pathslash';
 import { build } from 'vite';
 import type { MigrationPlanBundle } from '../migrations/plan.ts';
 import { readProjectPaths } from '../project-paths.ts';

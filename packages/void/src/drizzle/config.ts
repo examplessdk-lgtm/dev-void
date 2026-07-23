@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join, relative } from 'pathe';
+import { join, relative } from 'pathslash';
 import { readProjectPaths } from '../project-paths.ts';
 import { discoverSchema, schemaSpecifier } from './discover.ts';
 

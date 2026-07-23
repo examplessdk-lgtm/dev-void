@@ -51,7 +51,7 @@
     "@types/node": "catalog:",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "pathe": "catalog:",
+    "pathslash": "catalog:",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "vite": "catalog:",

@@ -10,7 +10,7 @@
  * wrong guess only costs the user a single-line edit.
  */
 import { existsSync, writeFileSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { expandDotenv, parseDotenvFile as sharedParseDotenvFile } from '../shared/dotenv.ts';
 
 /** Dotenv files we harvest keys from, in trust order (first wins per key). */

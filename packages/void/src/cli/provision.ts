@@ -17,7 +17,7 @@ import {
 import { createRequire } from 'node:module';
 import { types as utilTypes } from 'node:util';
 import { parse, type ParseError } from 'jsonc-parser';
-import { basename, dirname, join, resolve } from 'pathe';
+import { basename, dirname, join, resolve } from 'pathslash';
 import lockfile from 'proper-lockfile';
 import { voidLog, voidWarn } from '../log.ts';
 import { scanWranglerDotenvKeys } from '../shared/dotenv.ts';

@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { stripVTControlCharacters } from 'node:util';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 const mockCancel = vi.fn();

@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
 import { scanQueuesSync } from '../../src/queues/scan.ts';
 

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, relative } from 'pathe';
+import { dirname, join, relative } from 'pathslash';
 import { loadEnv, normalizePath, type Plugin } from 'vite';
 import {
   hasApiRoutes,

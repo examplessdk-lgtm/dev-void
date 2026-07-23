@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import type { Plugin } from 'vite';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { voidMarkdown } from '../../src/plugin.ts';

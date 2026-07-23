@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vite-plus/test';
 import { islandsPlugin } from '../../src/plugin-islands.ts';
 

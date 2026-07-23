@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'pathe';
+import { dirname, join } from 'pathslash';
 import { getToken } from './auth.ts';
 import { PlatformClient } from './client.ts';
 import { writeProjectConfig } from './project.ts';

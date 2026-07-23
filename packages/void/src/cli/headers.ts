@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import {
   convertFallbacksConfig,
   convertHeadersConfig,

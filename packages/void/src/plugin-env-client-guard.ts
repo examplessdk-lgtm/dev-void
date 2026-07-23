@@ -1,5 +1,5 @@
 import { walk } from 'estree-walker';
-import { relative } from 'pathe';
+import { relative } from 'pathslash';
 import { parseSync, type Plugin } from 'vite';
 import {
   isIdentifier,

@@ -1,4 +1,4 @@
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { loadEnv } from 'vite';
 import { readConfig } from '../config.ts';
 import { getMiniflareDatabasePath } from '../migrations/runner.ts';

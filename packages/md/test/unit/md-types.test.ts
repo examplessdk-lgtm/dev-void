@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import { generateMdTypes } from '../../src/codegen/md-types.ts';
 

@@ -1,7 +1,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vite-plugin';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import pc from 'picocolors';
 import { loadEnv, type Plugin } from 'vite';
 import {

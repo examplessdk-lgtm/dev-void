@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { Entry } from '@napi-rs/keyring';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
 import { ensureCloudflaredToken } from './cf-access.ts';
 import { pc } from './output.ts';

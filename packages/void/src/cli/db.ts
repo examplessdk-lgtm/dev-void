@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { confirm, intro, isCancel, outro, log } from '@clack/prompts';
-import { extname, join, relative, resolve } from 'pathe';
+import { extname, join, relative, resolve } from 'pathslash';
 import {
   readConfig,
   getDatabaseDialect,

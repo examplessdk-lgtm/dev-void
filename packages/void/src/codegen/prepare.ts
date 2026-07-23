@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { loadEnv } from 'vite';
 import { findVoidAuthConfig, loadVoidAuthConfig } from '../auth/config.ts';
 import { generateVoidAuthDatabaseModule, generateVoidAuthDrizzleSchema } from '../auth/drizzle.ts';

@@ -1,4 +1,4 @@
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { glob, globSync } from 'tinyglobby';
 import { scanJobs, type JobDefinition } from '../crons/scan.ts';
 import { scanPages } from '../pages/scan.ts';

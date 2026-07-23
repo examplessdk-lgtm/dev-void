@@ -1,4 +1,4 @@
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { parseRedirectsFile } from '../cli/headers.ts';
 import { readConfig } from '../config.ts';
 

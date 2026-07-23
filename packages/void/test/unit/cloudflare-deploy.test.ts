@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { log } from '@clack/prompts';
-import { dirname, join } from 'pathe';
+import { dirname, join } from 'pathslash';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import {
   assertMigrationsProduceAuthSchema,

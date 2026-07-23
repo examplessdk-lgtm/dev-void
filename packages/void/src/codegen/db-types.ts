@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import type { SchemaLocation } from '../drizzle/discover.ts';
 import { writeFileIfChanged } from './write-if-changed.ts';
 

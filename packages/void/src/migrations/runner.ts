@@ -1,6 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'pathe';
+import { dirname, join } from 'pathslash';
 import { hasPackageDependency, readNearestPackageJson } from '../shared/package-json.ts';
 import { collectMigrations } from './collect.ts';
 import { classifyMigration } from './plan.ts';

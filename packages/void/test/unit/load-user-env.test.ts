@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { loadUserEnvFile } from '../../src/host/load-user-env.ts';
 

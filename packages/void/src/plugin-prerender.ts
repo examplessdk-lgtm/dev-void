@@ -1,4 +1,4 @@
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import type { Plugin } from 'vite';
 import { resolveDistDir, resolveWorkerDirName } from './cli/deploy.ts';
 import { isNodeTarget, type VoidConfig } from './config.ts';

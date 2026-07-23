@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync } from 'node:fs';
-import { join, relative } from 'pathe';
+import { join, relative } from 'pathslash';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import { writeFileIfChanged } from './write-if-changed.ts';
 

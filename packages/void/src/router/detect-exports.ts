@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { basename } from 'pathe';
+import { basename } from 'pathslash';
 import { parseSync } from 'vite';
 import {
   isIdentifier,

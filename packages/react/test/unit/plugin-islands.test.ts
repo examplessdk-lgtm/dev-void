@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
 import { islandsPlugin } from '../../src/plugin-islands.ts';
 

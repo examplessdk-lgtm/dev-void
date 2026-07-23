@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { describe, expect, it, afterEach } from 'vite-plus/test';
 import { getSsrServerEntryPath, hasSsrEntry, validateSsrEntry } from '../../src/ssr/entry.ts';
 

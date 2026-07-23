@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { intro, outro, log, select, isCancel, cancel } from '@clack/prompts';
-import { join, dirname, relative } from 'pathe';
+import { join, dirname, relative } from 'pathslash';
 import { ensureProjectTsconfig } from '../codegen/project-tsconfig.ts';
 import { readConfig, getDatabaseDialect } from '../config.ts';
 import { writeDrizzleConfig } from '../drizzle/config.ts';

@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { getPort, killChild, waitForServer } from '../../../../test/integration-helpers.ts';
 

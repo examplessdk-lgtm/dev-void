@@ -1,4 +1,4 @@
-import { relative } from 'pathe';
+import { relative } from 'pathslash';
 import type { QueueDefinition } from '../queues/scan.ts';
 
 /**

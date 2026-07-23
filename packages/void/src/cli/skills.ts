@@ -7,7 +7,7 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { log } from '@clack/prompts';
-import { join, relative } from 'pathe';
+import { join, relative } from 'pathslash';
 import { getPackageDir, type AgentConfig } from './agents.ts';
 
 type SkillInfo = {

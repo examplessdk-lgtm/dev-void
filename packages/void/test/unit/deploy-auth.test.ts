@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { buildEnv, runDeploy } from '../../src/cli/deploy.ts';
 

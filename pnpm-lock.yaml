@@ -18,9 +18,9 @@ catalogs:
     '@typescript/native-preview':
       specifier: 7.0.0-dev.20260507.1
       version: 7.0.0-dev.20260507.1
-    pathe:
-      specifier: ^2.0.3
-      version: 2.0.3
+    pathslash:
+      specifier: ^0.1.0
+      version: 0.1.0
     vite-plus:
       specifier: ^0.2.2
       version: 0.2.2
@@ -94,9 +94,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 26.1.0
-      pathe:
+      pathslash:
         specifier: 'catalog:'
-        version: 2.0.3
+        version: 0.1.0
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -133,9 +133,9 @@ importers:
       markdown-it-footnote:
         specifier: ^4.0.0
         version: 4.0.0
-      pathe:
+      pathslash:
         specifier: 'catalog:'
-        version: 2.0.3
+        version: 0.1.0
       shiki:
         specifier: ^4.3.1
         version: 4.3.1
@@ -177,9 +177,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.17)
-      pathe:
+      pathslash:
         specifier: 'catalog:'
-        version: 2.0.3
+        version: 0.1.0
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -205,9 +205,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 26.1.0
-      pathe:
+      pathslash:
         specifier: 'catalog:'
-        version: 2.0.3
+        version: 0.1.0
       solid-js:
         specifier: ^1.9.14
         version: 1.9.14
@@ -230,9 +230,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 26.1.0
-      pathe:
+      pathslash:
         specifier: 'catalog:'
-        version: 2.0.3
+        version: 0.1.0
       svelte:
         specifier: ^5.56.4
         version: 5.56.4
@@ -345,9 +345,9 @@ importers:
       ofetch:
         specifier: 2.0.0-alpha.3
         version: 2.0.0-alpha.3
-      pathe:
+      pathslash:
         specifier: 'catalog:'
-        version: 2.0.3
+        version: 0.1.0
       pglite-server:
         specifier: 0.1.5
         version: 0.1.5(@electric-sql/pglite@0.5.4)
@@ -379,9 +379,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 26.1.0
-      pathe:
+      pathslash:
         specifier: 'catalog:'
-        version: 2.0.3
+        version: 0.1.0
       vite-plus:
         specifier: 'catalog:'
         version: 0.2.2(@types/node@26.1.0)(@voidzero-dev/vite-plus-core@0.2.2(@types/node@26.1.0)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.99.0)(terser@5.48.0)(tsx@4.23.0)(typescript@6.0.3)(yaml@2.9.0))(esbuild@0.27.7)(jiti@2.7.0)(sass@1.99.0)(svelte@5.56.4)(terser@5.48.0)(tsx@4.23.0)(typescript@6.0.3)(yaml@2.9.0)
@@ -440,9 +440,9 @@ importers:
       nitro-cloudflare-dev:
         specifier: ^0.2.2
         version: 0.2.2
-      pathe:
+      pathslash:
         specifier: 'catalog:'
-        version: 2.0.3
+        version: 0.1.0
       typescript:
         specifier: ~6.0.3
         version: 6.0.3
@@ -635,9 +635,9 @@ importers:
       '@void/react':
         specifier: workspace:*
         version: link:../../packages/react
-      pathe:
+      pathslash:
         specifier: 'catalog:'
-        version: 2.0.3
+        version: 0.1.0
       vite:
         specifier: npm:@voidzero-dev/vite-plus-core@0.2.2
         version: '@voidzero-dev/vite-plus-core@0.2.2(@types/node@26.1.0)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.99.0)(terser@5.48.0)(tsx@4.23.0)(typescript@6.0.3)(yaml@2.9.0)'
@@ -657,9 +657,9 @@ importers:
       '@typescript/native-preview':
         specifier: 'catalog:'
         version: 7.0.0-dev.20260507.1
-      pathe:
+      pathslash:
         specifier: 'catalog:'
-        version: 2.0.3
+        version: 0.1.0
       vite:
         specifier: npm:@voidzero-dev/vite-plus-core@0.2.2
         version: '@voidzero-dev/vite-plus-core@0.2.2(@types/node@26.1.0)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.99.0)(terser@5.48.0)(tsx@4.23.0)(typescript@6.0.3)(yaml@2.9.0)'
@@ -1928,11 +1928,11 @@ packages:
 
   '@esbuild-kit/core-utils@3.3.2':
     resolution: {integrity: sha512-sPRAnw9CdSsRmEtnsl2WXWdyquogVpB3yZ3dgwJfe8zrOzTsV7cJvmwrKVa+0ma5BoiGJ+BoqkMvawbayKUsqQ==}
-    deprecated: 'Merged into tsx: https://tsx.hirok.io'
+    deprecated: 'Merged into tsx: https://tsx.is'
 
   '@esbuild-kit/esm-loader@2.6.5':
     resolution: {integrity: sha512-FxEMIkJKnodyA1OaCUoEvbYRkoZlLZ4d/eXFu9Fh8CbBBgP5EmZxrfTRyN0qpXZ4vOvqnE5YdRdcrmUUXuU+dA==}
-    deprecated: 'Merged into tsx: https://tsx.hirok.io'
+    deprecated: 'Merged into tsx: https://tsx.is'
 
   '@esbuild/aix-ppc64@0.27.7':
     resolution: {integrity: sha512-EKX3Qwmhz1eMdEJokhALr0YiD0lhQNwDqkPYyPhiSwKrh7/4KRjQc04sZ8db+5DVVnZ1LmbNDI1uAMPEUBnQPg==}
@@ -7958,6 +7958,10 @@ packages:
 
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
+
+  pathslash@0.1.0:
+    resolution: {integrity: sha512-mJSfhMv8Ra0gN4xGqzRQ7IpUSc4v6rV+r3X5FY9HrxC9Te2ZvtZe6RPS6UDmgOVUI5DKGDHuPXRuNzhffawG2Q==}
+    engines: {node: '>=22'}
 
   perfect-debounce@2.1.0:
     resolution: {integrity: sha512-LjgdTytVFXeUgtHZr9WYViYSM/g8MkcTPYDlPa3cDqMirHjKiSZPYd6DoL7pK8AJQr+uWkQvCjHNdiMqsrJs+g==}
@@ -16322,6 +16326,8 @@ snapshots:
   pathe@1.1.2: {}
 
   pathe@2.0.3: {}
+
+  pathslash@0.1.0: {}
 
   perfect-debounce@2.1.0: {}
 

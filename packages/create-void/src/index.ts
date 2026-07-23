@@ -2,7 +2,7 @@
 
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
-import { resolve } from 'pathe';
+import { resolve } from 'pathslash';
 import pc from 'picocolors';
 import { detectPM, pmExec, pmInstall, run } from './pm.ts';
 

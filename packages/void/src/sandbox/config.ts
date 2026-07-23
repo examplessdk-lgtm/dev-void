@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, isAbsolute, join } from 'pathe';
+import { dirname, isAbsolute, join } from 'pathslash';
 import type { VoidConfig } from '../config.ts';
 
 export const DEFAULT_SANDBOX_BINDING = 'SANDBOX';

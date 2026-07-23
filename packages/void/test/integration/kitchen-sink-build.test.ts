@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { assembleVoidManifest } from '../../src/cli/deploy.ts';
 import { readConfig } from '../../src/config.ts';

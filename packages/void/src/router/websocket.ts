@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { glob, globSync } from 'tinyglobby';
 import { parseSync } from 'vite';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute, join, normalize, relative } from 'pathe';
+import { isAbsolute, join, normalize, relative } from 'pathslash';
 import type { VoidConfig } from './config.ts';
 
 const SOURCE_CONVENTION_DIRECTORIES = [

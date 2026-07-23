@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { resolveConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { voidPlugin } from '../../src/index.ts';

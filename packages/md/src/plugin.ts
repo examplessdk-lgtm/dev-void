@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'pathe';
+import { dirname, join, relative, resolve } from 'pathslash';
 import { glob } from 'tinyglobby';
 import { normalizePath, type Plugin, type ResolvedConfig, type ViteDevServer } from 'vite';
 import { resolvePagesDir } from 'void/pages';

@@ -252,12 +252,12 @@ export default defineConfig({
             {
               name: 'node:path',
               message:
-                "Use `pathe` instead. It re-exports the same API but always emits forward slashes, which avoids cross-platform breakage when paths are embedded in module specifiers, generated source, or compared against Vite's normalized watcher events. If you genuinely need format-specific behavior, import `node:path/win32` or `node:path/posix` explicitly.",
+                "Use `pathslash` instead. It re-exports the same API but always emits forward slashes, which avoids cross-platform breakage when paths are embedded in module specifiers, generated source, or compared against Vite's normalized watcher events. If you genuinely need format-specific behavior, import `node:path/win32` or `node:path/posix` explicitly.",
             },
             {
               name: 'path',
               message:
-                'Use `pathe` instead of the unprefixed `path` import (and prefer `node:path/win32` / `node:path/posix` for explicit format-specific behavior).',
+                'Use `pathslash` instead of the unprefixed `path` import (and prefer `node:path/win32` / `node:path/posix` for explicit format-specific behavior).',
             },
           ],
         },

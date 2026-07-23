@@ -44,7 +44,7 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "pathe": "catalog:",
+    "pathslash": "catalog:",
     "solid-js": "^1.9.14",
     "vite": "catalog:",
     "vite-plus": "catalog:",

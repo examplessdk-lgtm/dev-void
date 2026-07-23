@@ -1,5 +1,5 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import { mergeVoidSvelteKitTsconfig, withVoidTSConfig } from '../../src/sveltekit.ts';
 

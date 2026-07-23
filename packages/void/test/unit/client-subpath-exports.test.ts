@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { describe, expect, it } from 'vite-plus/test';
 
 describe('client package exports', () => {

@@ -14,7 +14,7 @@ import { parseArgs } from 'node:util';
 import { intro, outro, log, confirm, isCancel, cancel, note, select, text } from '@clack/prompts';
 import { parse, type ParseError } from 'jsonc-parser';
 import MagicString from 'magic-string';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'pathe';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'pathslash';
 import { createProjectTsconfig, ensureProjectTsconfig } from '../codegen/project-tsconfig.ts';
 import { getDatabaseDialect, readConfig, type DatabaseDialect } from '../config.ts';
 import { writeDrizzleConfig } from '../drizzle/config.ts';

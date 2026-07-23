@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { describe, it, expect, beforeEach, afterEach } from 'vite-plus/test';
 import { discoverSchema, schemaSpecifier } from '../../src/drizzle/discover.ts';
 

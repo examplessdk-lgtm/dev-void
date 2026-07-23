@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
 import { getPackageDir } from './agents.ts';
 import { getApiUrl } from './auth.ts';

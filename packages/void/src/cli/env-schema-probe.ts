@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { writeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import type { SelfHostSchemaFacts, SelfHostSchemaFailureReason } from './env-validation.ts';
 
 /**

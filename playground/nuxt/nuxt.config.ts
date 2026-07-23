@@ -1,4 +1,4 @@
-import { resolve } from 'pathe';
+import { resolve } from 'pathslash';
 import type { PluginOption } from 'vite-plus';
 import { voidPlugin } from 'void';
 

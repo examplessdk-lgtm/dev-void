@@ -1,6 +1,6 @@
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { describe, expect, it } from 'vite-plus/test';
 import {
   collectInferredEntries,

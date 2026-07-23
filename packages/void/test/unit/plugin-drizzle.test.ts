@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'pathe';
+import { dirname, join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 vi.mock('../../src/log', () => ({

@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join, relative } from 'pathe';
+import { join, relative } from 'pathslash';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { hasDeploySchemaDrift } from '../../src/cli/deploy.ts';
 import { writeDrizzleConfig } from '../../src/drizzle/config.ts';

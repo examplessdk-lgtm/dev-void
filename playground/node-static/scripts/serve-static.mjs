@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { extname, isAbsolute, relative, resolve } from 'pathe';
+import { extname, isAbsolute, relative, resolve } from 'pathslash';
 
 const root = resolve(import.meta.dirname, '../dist/client');
 const port = Number(process.env.PORT || 4179);

@@ -1,4 +1,4 @@
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import type { Plugin } from 'vite';
 import { scanJobsSync } from './crons/scan.ts';
 import { voidLog } from './log.ts';

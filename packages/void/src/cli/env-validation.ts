@@ -11,7 +11,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
-import { dirname, join, resolve } from 'pathe';
+import { dirname, join, resolve } from 'pathslash';
 import { findEnvFile } from '../codegen/env-types.ts';
 import { loadUserEnvFile } from '../host/load-user-env.ts';
 import { voidWarn } from '../log.ts';

@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import type { Plugin } from 'vite';
 import { readProjectPaths } from './project-paths.ts';
 

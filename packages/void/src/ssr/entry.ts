@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join, relative } from 'pathe';
+import { join, relative } from 'pathslash';
 import { parseSync } from 'vite';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import {

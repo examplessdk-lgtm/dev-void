@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
-import { dirname, join } from 'pathe';
+import { dirname, join } from 'pathslash';
 
 /**
  * Collect all .sql migration files from the migrations directory,

@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { isAbsolute, join } from 'pathe';
+import { isAbsolute, join } from 'pathslash';
 import { glob, globSync } from 'tinyglobby';
 
 const JOB_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];

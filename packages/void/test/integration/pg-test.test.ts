@@ -2,7 +2,7 @@ import { once } from 'node:events';
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import spawn from 'cross-spawn';
-import { join } from 'pathe';
+import { join } from 'pathslash';
 import { createServer } from 'pglite-server';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
