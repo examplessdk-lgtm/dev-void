@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdir,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   realpath,
@@ -7172,56 +7173,56 @@ describe('provisionCloudflareResources — Hyperdrive lister deadline', () => {
 });
 
 describe('createDefaultRunWrangler — confirmed child termination + kill classification', () => {
-  const KILL_CLASSIFY_TMP = join(import.meta.dirname, '.tmp-kill-classify');
   /**
-   * Every child spawned here runs with `cwd` = KILL_CLASSIFY_TMP, and Windows refuses to remove
-   * a directory that is a live process's CWD — so teardown must not assume each case reached its
-   * own cleanup. Reap anything still recorded in a `*.pid` file first, then remove with
-   * `maxRetries`, which is Node's documented remedy for EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM and
-   * covers the window where a terminated process's handles (its CWD among them) are still being
-   * released. `waitForDead` only proves the exit CODE is set; rundown finishes slightly later.
-   * If removal still fails, report what was alive and what remains rather than a bare EPERM —
-   * a bare errno here is undebuggable without a Windows machine. Inert on POSIX, which unlinks
-   * a directory regardless of any open handle.
+   * A UNIQUE directory per test. Every child spawned in this block runs with its `cwd` set to
+   * this directory, and a fixed shared path lets a crashed or concurrent run leave a stale
+   * `*.pid` file behind whose pid the OS may since have reassigned — so nothing may be inferred
+   * from, and certainly nothing killed by, a pid found on disk. Per-test isolation also stops
+   * one case's stranded child from blocking every later case's cleanup.
+   */
+  let killClassifyTmp = '';
+  /**
+   * Windows refuses to remove a directory that is a live process's CWD, and `waitForDead` only
+   * proves the exit CODE is set — the rundown that releases the CWD handle finishes slightly
+   * later. `maxRetries` is Node's documented remedy for exactly that: it retries
+   * EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM on a linear backoff, and is honored only when
+   * `recursive` is set. Inert on POSIX, which unlinks a directory regardless of open handles.
+   *
+   * This deliberately KILLS NOTHING. A pid read from a file is not proof that the process now
+   * holding that pid is the one that wrote it, so signalling it could terminate an unrelated
+   * process. If removal still fails, report which recorded pids currently resolve to a live
+   * process and what entries remain — a bare errno is undebuggable without a Windows machine.
    */
   const rmTmp = (): void => {
-    const reaped: Array<string> = [];
-    if (existsSync(KILL_CLASSIFY_TMP)) {
-      for (const entry of readdirSync(KILL_CLASSIFY_TMP)) {
-        if (!entry.endsWith('.pid')) {
-          continue;
-        }
-        const pid = Number(readFileSync(join(KILL_CLASSIFY_TMP, entry), 'utf-8').trim());
-        if (!Number.isInteger(pid) || pid <= 0) {
-          continue;
-        }
-        try {
-          process.kill(pid, 0);
-        } catch {
-          continue; // already gone
-        }
-        reaped.push(`${entry}=${pid}`);
-        try {
-          process.kill(pid, 'SIGKILL');
-        } catch {
-          // raced with its own exit
-        }
-      }
+    if (killClassifyTmp === '') {
+      return;
     }
     try {
-      rmSync(KILL_CLASSIFY_TMP, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+      rmSync(killClassifyTmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
     } catch (error) {
-      const left = existsSync(KILL_CLASSIFY_TMP) ? readdirSync(KILL_CLASSIFY_TMP) : [];
+      const left = existsSync(killClassifyTmp) ? readdirSync(killClassifyTmp) : [];
+      const recorded = left
+        .filter((entry) => entry.endsWith('.pid'))
+        .map((entry) => {
+          const pid = Number(readFileSync(join(killClassifyTmp, entry), 'utf-8').trim());
+          let live = false;
+          try {
+            process.kill(pid, 0);
+            live = true;
+          } catch {
+            live = false;
+          }
+          return `${entry}=${pid}${live ? ' (some process holds that pid)' : ' (gone)'}`;
+        });
       throw new Error(
-        `could not remove ${KILL_CLASSIFY_TMP}: ${(error as Error).message}\n` +
-          `  still-live children reaped at teardown: ${reaped.length > 0 ? reaped.join(', ') : 'none'}\n` +
+        `could not remove ${killClassifyTmp}: ${(error as Error).message}\n` +
+          `  recorded pids: ${recorded.length > 0 ? recorded.join(', ') : 'none'}\n` +
           `  entries remaining: ${left.length > 0 ? left.join(', ') : '(none)'}`,
       );
     }
   };
   beforeEach(() => {
-    rmTmp();
-    mkdirSync(KILL_CLASSIFY_TMP, { recursive: true });
+    killClassifyTmp = mkdtempSync(join(import.meta.dirname, '.tmp-kill-classify-'));
   });
   afterEach(() => {
     rmTmp();
@@ -7248,14 +7249,14 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
   });
 
   it('a REAL kill failure (EPERM) on timeout QUARANTINES: the runner REJECTS, never settle-and-release', async () => {
-    const pidFile = join(KILL_CLASSIFY_TMP, 'cli.pid');
-    const hungCli = join(KILL_CLASSIFY_TMP, 'hung.cjs');
+    const pidFile = join(killClassifyTmp, 'cli.pid');
+    const hungCli = join(killClassifyTmp, 'hung.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const run = createDefaultRunWrangler(KILL_CLASSIFY_TMP, {
+    const run = createDefaultRunWrangler(killClassifyTmp, {
       launcher: [process.execPath, hungCli],
       timeoutMs: 300,
       // Simulate a kill that FAILS for a non-ESRCH reason (the child is still alive).
@@ -7290,14 +7291,14 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
   }, 15_000);
 
   it('an unconfirmable termination (grace expiry, child still alive) QUARANTINES too', async () => {
-    const pidFile = join(KILL_CLASSIFY_TMP, 'cli3.pid');
-    const hungCli = join(KILL_CLASSIFY_TMP, 'hung3.cjs');
+    const pidFile = join(killClassifyTmp, 'cli3.pid');
+    const hungCli = join(killClassifyTmp, 'hung3.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const run = createDefaultRunWrangler(KILL_CLASSIFY_TMP, {
+    const run = createDefaultRunWrangler(killClassifyTmp, {
       launcher: [process.execPath, hungCli],
       timeoutMs: 250,
       confirmKillGraceMs: 500,
@@ -7325,14 +7326,14 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
   }, 15_000);
 
   it('an ESRCH kill (already gone) is treated as SUCCESS — settles as the timeout hard-failure, no kill-error text', async () => {
-    const pidFile = join(KILL_CLASSIFY_TMP, 'cli2.pid');
-    const hungCli = join(KILL_CLASSIFY_TMP, 'hung2.cjs');
+    const pidFile = join(killClassifyTmp, 'cli2.pid');
+    const hungCli = join(killClassifyTmp, 'hung2.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const run = createDefaultRunWrangler(KILL_CLASSIFY_TMP, {
+    const run = createDefaultRunWrangler(killClassifyTmp, {
       launcher: [process.execPath, hungCli],
       timeoutMs: 300,
       // Kill FOR REAL, then report ESRCH (the child exited in the race window) → treated as gone.
@@ -7355,12 +7356,12 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
     // Drive a FULL provision whose wrangler runner is the REAL default runner spawning a hung
     // CLI. The `d1 list` times out → confirmed-termination hard failure → provision rejects →
     // the whole-provision lock is released. The child must be dead and the mutex gone.
-    const cfgDir = join(KILL_CLASSIFY_TMP, 'app');
+    const cfgDir = join(killClassifyTmp, 'app');
     mkdirSync(cfgDir, { recursive: true });
     const cfgPath = join(cfgDir, 'wrangler.jsonc');
     writeFileSync(cfgPath, JSON.stringify({ name: 'app', account_id: 'acct' }));
-    const pidFile = join(KILL_CLASSIFY_TMP, 'prov-cli.pid');
-    const hungCli = join(KILL_CLASSIFY_TMP, 'prov-hung.cjs');
+    const pidFile = join(killClassifyTmp, 'prov-cli.pid');
+    const hungCli = join(killClassifyTmp, 'prov-hung.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
