@@ -32,6 +32,11 @@ const sharedPlayground = [
   // playground/named-layouts
   'packages/void/test/integration/named-layouts.test.ts',
   'packages/void/test/integration/full-deploy-manifest.test.ts',
+  // playground/spa — both rewrite its wrangler.jsonc. The live suite only runs when its
+  // credentials are set, which is never the case in the `test` job, but is the case for a local
+  // `test:all` run — the scenario the credential forwarding below exists to support.
+  'packages/void/test/integration/spa-middleware-auth.test.ts',
+  'packages/void/test/e2e/cloudflare-deploy-live.test.ts',
 ];
 
 const metaframeworks = [
@@ -356,7 +361,9 @@ export default defineConfig({
           sequence: { groupOrder: 3 },
           testTimeout,
           hookTimeout,
-          // Forward the live-e2e credentials past vitest's worker env filter (see e2eWorkerEnv).
+          // Kept alongside the e2e glob below so a newly added e2e file gets its credentials
+          // forwarded past vitest's worker env filter here too (see e2eWorkerEnv). The one
+          // existing e2e file drives playground/spa, so it is in `shared-playground` instead.
           env: e2eWorkerEnv,
           include: [
             'packages/void/test/integration/**/*.test.ts',
@@ -378,6 +385,11 @@ export default defineConfig({
           name: 'shared-playground',
           sequence: { groupOrder: 4 },
           include: sharedPlayground,
+          // The live-e2e suite lives here, so this project — not core-markdown — is the one that
+          // has to forward its credentials past vitest's worker env filter (see e2eWorkerEnv).
+          // Without this the suite reads empty credentials and self-skips, quietly turning the
+          // live deployment gate into a green no-op.
+          env: e2eWorkerEnv,
           testTimeout,
           hookTimeout,
           fileParallelism: false,
