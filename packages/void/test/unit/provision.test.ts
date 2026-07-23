@@ -5705,7 +5705,9 @@ describe('acquireProvisionLock — quarantine sidecar gate', () => {
       const recorded = JSON.parse(readFileSync(sidecar, 'utf-8')) as Record<string, unknown>;
       expect(recorded).toMatchObject({
         pid: child.pid,
-        pgid: child.pid,
+        // Windows has no process groups, so `writeQuarantineSidecar` records `null` there by
+        // design and the gate falls back to probing the plain pid.
+        pgid: process.platform === 'win32' ? null : child.pid,
         reason: 'test quarantine (child unconfirmed)',
       });
       expect(typeof recorded.quarantinedAt).toBe('string');
@@ -6442,6 +6444,16 @@ describe('acquireProvisionLock — recovery decisions are serialized + generatio
   });
 });
 
+/**
+ * Windows cannot DELIVER a signal to another process. libuv maps SIGTERM/SIGINT/SIGKILL to
+ * `TerminateProcess`, which destroys the target immediately WITHOUT running any handler in it,
+ * and a synthetic Ctrl-C would need `GenerateConsoleCtrlEvent` (unreachable from Node). The
+ * cases carrying this note drive a real child `node` parent with `kill('SIGTERM')` and then
+ * assert on that parent's signal-teardown handler — work that only happens under POSIX signal
+ * semantics.
+ */
+const WINDOWS_NO_SIGNALS = 'signal delivery to another process is POSIX-only (see note above)';
+
 describe('createDefaultRunWrangler — signal-path kill failure quarantines the lock (child-process)', () => {
   const SIGNAL_KILL_TMP = join(import.meta.dirname, '.tmp-signal-kill');
   beforeEach(() => {
@@ -6465,7 +6477,8 @@ describe('createDefaultRunWrangler — signal-path kill failure quarantines the 
     return false;
   }
 
-  it('SIGTERM + an injected kill FAILURE: the parent dies with mutex + sidecar RETAINED; the gate blocks until the child dies', async () => {
+  it('SIGTERM + an injected kill FAILURE: the parent dies with mutex + sidecar RETAINED; the gate blocks until the child dies', async (ctx) => {
+    ctx.skip(process.platform === 'win32', WINDOWS_NO_SIGNALS);
     // Pre-fix, the signal-forwarding path re-raised IMMEDIATELY on a non-ESRCH kill
     // failure — the parent died, proper-lockfile's exit hook removed the still-tracked
     // mutex, and the live wrangler child kept creating resources with NO lock on disk.
@@ -6626,7 +6639,8 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     expect(result.signal).toBeNull();
   }, 15_000);
 
-  it('one SIGTERM (+ a repeat mid-teardown) is coalesced: the parent re-raises only after the group is dead', async () => {
+  it('one SIGTERM (+ a repeat mid-teardown) is coalesced: the parent re-raises only after the group is dead', async (ctx) => {
+    ctx.skip(process.platform === 'win32', WINDOWS_NO_SIGNALS);
     // Previously, runners installed per-runner listeners that detached themselves at
     // signal entry — a REPEATED signal during the bounded teardown took Node's default
     // action, killing the parent with the child alive, every tracked mutex swept, and
@@ -6703,7 +6717,8 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     }
   }, 20_000);
 
-  it('a spawn attempted AFTER teardown began is rejected fast (no child spawned, teardown unaffected)', async () => {
+  it('a spawn attempted AFTER teardown began is rejected fast (no child spawned, teardown unaffected)', async (ctx) => {
+    ctx.skip(process.platform === 'win32', WINDOWS_NO_SIGNALS);
     const pidFile = join(COORDINATOR_TMP, 'c.pid');
     const childScript = join(COORDINATOR_TMP, 'slow-exit-child2.cjs');
     writeFileSync(
@@ -6771,7 +6786,8 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     }
   }, 20_000);
 
-  it('the coordinator-WIDE deadline bounds an unconfirmable teardown (quarantine + re-raise, never a wedge)', async () => {
+  it('the coordinator-WIDE deadline bounds an unconfirmable teardown (quarantine + re-raise, never a wedge)', async (ctx) => {
+    ctx.skip(process.platform === 'win32', WINDOWS_NO_SIGNALS);
     // The runner's own confirmation window is 60s here and the child never dies (the
     // injected group-killer claims success but kills nothing) — pre-fix `pending`
     // stayed nonzero for the full 60s and the fatal signal was not re-raised. The

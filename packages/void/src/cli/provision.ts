@@ -17,7 +17,7 @@ import {
 import { createRequire } from 'node:module';
 import { types as utilTypes } from 'node:util';
 import { parse, type ParseError } from 'jsonc-parser';
-import { basename, dirname, join, resolve } from 'pathe';
+import { basename, dirname, join, normalize, resolve } from 'pathe';
 import lockfile from 'proper-lockfile';
 import { voidLog, voidWarn } from '../log.ts';
 import { scanWranglerDotenvKeys } from '../shared/dotenv.ts';
@@ -1424,6 +1424,23 @@ export function createDefaultRunWrangler(
             killProcessGroup(-child.pid, signal); // negative pid → the whole group
             return 'signaled';
           }
+          if (isWindows && typeof child.pid === 'number') {
+            // Windows has NO process groups, so the signal target is the child ITSELF.
+            // Consult Node's own bookkeeping FIRST: once the exit has been observed the OS
+            // may already have recycled the pid, and signaling it could hit an unrelated
+            // process.
+            if (child.exitCode !== null || child.signalCode !== null) {
+              return 'gone';
+            }
+            // Routed through the SAME seam POSIX uses, because `process.kill` THROWS ESRCH
+            // (classified "already gone" below), whereas `child.kill()` collapses ESRCH and
+            // EPERM into one silent `false`. Node sets `exitCode`/`signalCode` asynchronously
+            // in its `exit` handler, so a child that died a moment ago still reads as
+            // "running" here — and the ambiguous `false` would then be reported as a FAILED
+            // delivery, quarantining the lock over a child that had simply already exited.
+            killProcessGroup(child.pid, signal);
+            return 'signaled';
+          }
           if (child.kill(signal)) {
             return 'signaled';
           }
@@ -1447,10 +1464,30 @@ export function createDefaultRunWrangler(
         if (groupGone) {
           return true;
         }
-        if (isWindows || typeof child.pid !== 'number') {
-          // No process-group concept — `close` is the only (and sufficient) confirmation.
+        if (typeof child.pid !== 'number') {
           groupGone = true;
           return true;
+        }
+        if (isWindows) {
+          // No process GROUP to probe, but the child ITSELF is still confirmable: libuv
+          // implements `kill(pid, 0)` on Windows as a real liveness check
+          // (GetExitCodeProcess + WaitForSingleObject). Descendants are covered separately —
+          // libuv assigns every non-`detached` child to a global Job Object with
+          // KILL_ON_JOB_CLOSE, so they die with this process. Prefer Node's own bookkeeping
+          // (immune to pid reuse) and fall back to the signal-0 probe while the exit has not
+          // been observed yet — so confirmation stays EARNED rather than assumed.
+          if (child.exitCode !== null || child.signalCode !== null) {
+            groupGone = true;
+            return true;
+          }
+          try {
+            process.kill(child.pid, 0);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+              groupGone = true;
+            }
+          }
+          return groupGone;
         }
         try {
           process.kill(-child.pid, 0);
@@ -2259,7 +2296,11 @@ function assertQuarantineClearedOrClear(lockTarget: string, onBeforeClear?: () =
     typeof recorded?.quarantinedAt === 'string' ? recorded.quarantinedAt : undefined;
   // Prefer the recorded GROUP (negative-pid probe); fall back to the plain pid where no
   // group was recorded (Windows). No probe target at all → cannot verify → fail closed.
-  const probeTarget = pgid !== undefined ? -pgid : pid;
+  // A NEGATIVE target is POSIX-ONLY: on win32 `process.kill(-n, 0)` resolves to
+  // OpenProcess((DWORD)-n), which fails with ERROR_INVALID_PARAMETER and surfaces as ESRCH —
+  // i.e. it would report ANY recorded owner "confirmed dead" and clear a LIVE quarantine,
+  // inverting this gate from fail-closed to fail-open. Mirrors the watchdog's guard above.
+  const probeTarget = pgid !== undefined && process.platform !== 'win32' ? -pgid : (pid ?? pgid);
   let confirmedDead = false;
   if (probeTarget !== undefined) {
     try {
@@ -2355,6 +2396,20 @@ function loadProperLockfileInternals(): ProperLockfileInternals | undefined {
 }
 
 /**
+ * `realpathSync` is `node:fs`, so it returns a NATIVE path — backslashes on Windows —
+ * while every other path in this module comes from `pathe` and is POSIX-normalized,
+ * including the not-yet-created branch below (whose `join()` already normalizes). Without
+ * this, `canonicalizeConfigPath` hands back TWO different spellings of the same file
+ * depending only on whether it happens to exist yet, defeating the "ONE identity" contract
+ * the function exists to provide — and splitting the lock identity, the wrangler `-c` argv,
+ * and the paths printed in error messages. No-op off Windows, where `\` is a legal filename
+ * character that must survive byte-for-byte.
+ */
+function toPosixConfigPath(nativePath: string): string {
+  return process.platform === 'win32' ? normalize(nativePath) : nativePath;
+}
+
+/**
  * Canonicalize an already-absolute config path via `realpath` so the lock identity
  * and every read/write/`-c` key on the REAL file, not a lexical symlink alias. When the
  * config file EXISTS, its own realpath is returned (a symlink resolves to its target).
@@ -2366,7 +2421,7 @@ function loadProperLockfileInternals(): ProperLockfileInternals | undefined {
  */
 function canonicalizeConfigPath(absoluteConfigPath: string, depth = 0): string {
   try {
-    return realpathSync(absoluteConfigPath);
+    return toPosixConfigPath(realpathSync(absoluteConfigPath));
   } catch (error) {
     // ONLY ENOENT (a path component does not exist yet) is the benign "not created yet" case
     // we handle below. Any OTHER realpath error (EACCES, ELOOP for a real symlink cycle,
