@@ -62,6 +62,10 @@ const WRANGLER_BIN = join(PACKAGE_ROOT, 'node_modules', '.bin', 'wrangler');
 // `afterAll` from running — leaking the worker/D1/KV. On timeout, spawnSync returns a null status,
 // which fails the status assertion loudly and lets teardown reclaim the resources.
 const DEPLOY_TIMEOUT_MS = 480_000;
+// The same event-loop-block reasoning applies to every `wrangler` call (setup create/list, the
+// ownership gate, teardown list/delete): an unbounded `spawn.sync` on a stalled wrangler/CF call would
+// freeze vitest's hook timer and strand already-created resources. Quick ops, so a much shorter bound.
+const WRANGLER_TIMEOUT_MS = 120_000;
 // Per-request abort deadline for the polling fetches, so a single stalled request aborts and the
 // retry loop moves on instead of consuming the whole per-test budget on one hung socket.
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -158,6 +162,10 @@ function wrangler(args: Array<string>): { status: number; stdout: string; output
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024,
     env: cloudEnv(),
+    // Bound each call so a stalled wrangler/CF request can't block the event loop and freeze teardown
+    // (see WRANGLER_TIMEOUT_MS). On timeout, status is null → `?? 1` makes it a non-zero (failed) call,
+    // which every caller already handles: the ownership gate fails closed, teardown records a failure.
+    timeout: WRANGLER_TIMEOUT_MS,
   });
   const stdout = res.stdout ?? '';
   const stderr = res.stderr ?? '';
@@ -165,7 +173,11 @@ function wrangler(args: Array<string>): { status: number; stdout: string; output
   // ALONE: wrangler can print notices/warnings to stderr on a status-0 list (update notices, a
   // "Delegating to locally-installed wrangler" line, a Node deprecation warning), and any non-JSON
   // trailing the payload would make JSON.parse throw — breaking the ownership gate / teardown.
-  return { status: res.status ?? 1, stdout, output: `${stdout}${stderr}` };
+  return {
+    status: res.status ?? 1,
+    stdout,
+    output: `${stdout}${stderr}${res.error ? `\n${res.error}` : ''}`,
+  };
 }
 
 /**
@@ -183,7 +195,12 @@ async function workerExistence(): Promise<'exists' | 'absent' | 'unknown'> {
     try {
       const res = await fetch(
         `https://api.cloudflare.com/client/v4/accounts/${cfAccountId()}/workers/scripts/${WORKER_NAME}`,
-        { headers: { Authorization: `Bearer ${cfToken()}` } },
+        {
+          headers: { Authorization: `Bearer ${cfToken()}` },
+          // Abort a stalled connection so the retry loop (and teardown that depends on it) stays
+          // bounded — an accepted-but-never-answered request would otherwise hang the whole check.
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        },
       );
       if (res.status === 200) {
         return 'exists';
@@ -324,7 +341,10 @@ async function workersDevEnabled(): Promise<string> {
   try {
     const res = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${cfAccountId()}/workers/scripts/${WORKER_NAME}/subdomain`,
-      { headers: { Authorization: `Bearer ${cfToken()}` } },
+      {
+        headers: { Authorization: `Bearer ${cfToken()}` },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      },
     );
     const body = (await res.json().catch(() => ({}))) as { result?: unknown };
     return `workers.dev subdomain endpoint ${res.status}: ${JSON.stringify(body.result ?? body)}`;
