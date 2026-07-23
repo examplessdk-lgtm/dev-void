@@ -13,6 +13,8 @@ routes/api/
   users/
     index.ts           # GET list + POST create (valibot validation)
     [id].ts            # GET single user by param
+  kv/
+    [key].ts           # PUT store + GET read a value in KV (:key param)
 middleware/
   01.logger.ts         # Logs method + path for every request
 migrations/
@@ -28,6 +30,7 @@ crons/
 - **Input validation** — `defineHandler.withValidator()` with valibot schemas for body and params
 - **Typed fetch client** — `fetch` from `void/client` with full type inference from route definitions
 - **Typed DB queries** — Drizzle ORM via `db` from `void/db` with schema defined in `db/schema.ts`
+- **KV storage** — `c.env.KV` read/write in a route, plus the cron writing a heartbeat key
 - **Middleware** — `defineMiddleware` for cross-cutting concerns (request logging)
 - **Cron jobs** — `defineScheduled` with cron expression syntax (`"0 * * * *"`)
 - **SQL migrations** — auto-applied on dev server start

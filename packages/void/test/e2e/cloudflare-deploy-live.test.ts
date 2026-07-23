@@ -270,14 +270,20 @@ function extractWorkerUrl(output: string): string | undefined {
  * observed a solid 30s of 404s before the route went live. So poll generously (~2 min). Retries on ANY
  * non-200 — not just 5xx — so a propagation-window 404 is not mistaken for the final answer. On
  * exhaustion returns the LAST response so the caller's status assertion reports the real final status;
- * throws only when every attempt was a network error (no response at all).
+ * throws only when every attempt was a network error (no response at all). `init` is forwarded to
+ * `fetch` for non-GET requests (e.g. a KV `PUT`) and defaults to a GET.
  */
-async function fetchWithRetry(url: string, attempts = 40, delayMs = 3000): Promise<Response> {
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit = {},
+  attempts = 40,
+  delayMs = 3000,
+): Promise<Response> {
   let lastResponse: Response | undefined;
   let lastError: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, init);
       if (res.status === 200) {
         return res;
       }
@@ -313,6 +319,14 @@ async function workersDevEnabled(): Promise<string> {
   } catch (error) {
     return `workers.dev subdomain check errored: ${String(error)}`;
   }
+}
+
+/** Authenticated GET against the Cloudflare API for THIS deployed worker (Bearer `cfToken()`). */
+async function cfWorkerApi(path: string): Promise<Response> {
+  return fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${cfAccountId()}/workers/scripts/${WORKER_NAME}${path}`,
+    { headers: { Authorization: `Bearer ${cfToken()}` } },
+  );
 }
 
 describe('void deploy --backend cloudflare (live account)', () => {
@@ -534,4 +548,114 @@ describe('void deploy --backend cloudflare (live account)', () => {
       res.status === 200 ? '' : ` — GET ${url} → ${res.status}; ${await workersDevEnabled()}`;
     expect(res.status, `worker ${WORKER_NAME}${diagnostic}`).toBe(200);
   }, 200_000);
+
+  it('persists data through the live D1 binding', async (ctx) => {
+    ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
+    const base = extractWorkerUrl(deployOutput);
+    expect(base, deployOutput).toBeDefined();
+    const root = base!.replace(/\/$/, '');
+    // A 500 here means the remote D1 migration never applied (no `users` table) or the DB binding did
+    // not resolve — the exact deploy failure the static /api/hello check cannot catch. A unique email
+    // keeps the read-back assertion precise regardless of any pre-existing rows. This (and the KV/
+    // idempotency cases) run AFTER `serves a live 200` has already blocked until the hostname routes
+    // globally, so their shorter retry budgets only need to cover worker cold-start, not propagation.
+    const email = `e2e-${uniqueRunSuffix()}@example.com`;
+    const created = await fetchWithRetry(
+      `${root}/api/users`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'E2E User', email }),
+      },
+      15,
+      2000,
+    );
+    const createdBody = await created.text();
+    expect(created.status, createdBody).toBe(200);
+    expect(JSON.parse(createdBody)).toEqual({ created: true });
+
+    const list = await fetchWithRetry(`${root}/api/users`, {}, 15, 2000);
+    const listBody = await list.text();
+    expect(list.status, listBody).toBe(200);
+    const rows = JSON.parse(listBody) as Array<{ email: string }>;
+    expect(
+      rows.some((u) => u.email === email),
+      `posted user ${email} not found in ${listBody}`,
+    ).toBe(true);
+  }, 120_000);
+
+  it('round-trips a value through the live KV binding', async (ctx) => {
+    ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
+    const base = extractWorkerUrl(deployOutput);
+    expect(base, deployOutput).toBeDefined();
+    const root = base!.replace(/\/$/, '');
+    // Proves the `KV` binding resolves to the real namespace end to end: write via the deployed worker,
+    // then read it back. (The namespace id was pinned into wrangler.jsonc by beforeAll.)
+    const key = `probe-${uniqueRunSuffix()}`;
+    const value = `kv-${Date.now().toString(36)}`;
+    const put = await fetchWithRetry(
+      `${root}/api/kv/${key}`,
+      { method: 'PUT', body: value },
+      15,
+      2000,
+    );
+    expect(put.status, `PUT /api/kv/${key}`).toBe(200);
+    const got = await fetchWithRetry(`${root}/api/kv/${key}`, {}, 15, 2000);
+    const gotBody = await got.text();
+    expect(got.status, gotBody).toBe(200);
+    expect(gotBody).toBe(value);
+  }, 120_000);
+
+  it('registers the cron trigger on the deployed worker', async (ctx) => {
+    ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
+    // The deploy emits `triggers.crons` and `wrangler deploy` PUTs them to the worker's schedules. We
+    // assert the schedule is REGISTERED via the CF API — fast + deterministic — instead of waiting for
+    // the hourly job to actually fire. Retry so a single transient CF-API blip (a 429/5xx or a network
+    // throw) or a brief registration-visibility lag on the shared CI runner does not red an
+    // otherwise-healthy deploy; a genuinely-unregistered cron still fails loud after the retries.
+    let crons: Array<string | undefined> = [];
+    let diag = 'no response';
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        const res = await cfWorkerApi('/schedules');
+        const body = (await res.json().catch(() => ({}))) as {
+          result?: { schedules?: Array<{ cron?: string }> };
+        };
+        diag = `status ${res.status}: ${JSON.stringify(body)}`;
+        if (res.status === 200) {
+          crons = (body.result?.schedules ?? []).map((s) => s.cron);
+          if (crons.includes('0 * * * *')) {
+            break;
+          }
+        }
+      } catch (error) {
+        diag = `fetch threw: ${String(error)}`;
+      }
+      if (attempt < 7) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    }
+    expect(crons, `registered schedules — ${diag}`).toContain('0 * * * *');
+  }, 60_000);
+
+  it('re-deploys idempotently to the same worker', async (ctx) => {
+    ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
+    // A SECOND `void deploy` against the already-created worker/D1/KV must succeed cleanly: the
+    // drift-check still passes (the overlay covers every id), the remote migration is already applied
+    // (a no-op), and the worker is updated in place. The overlay wrangler.jsonc is still on disk
+    // (afterAll restores it only after every test), so this reuses it. Runs LAST for that reason.
+    const res = spawn.sync('node', [CLI_ENTRY, 'deploy', '--backend', 'cloudflare'], {
+      cwd: APP,
+      encoding: 'utf8',
+      maxBuffer: 20 * 1024 * 1024,
+      env: cloudEnv(),
+    });
+    const output = `${res.stdout ?? ''}${res.stderr ?? ''}`;
+    expect(res.status, output).toBe(0);
+    // Same worker name → same host; it still serves after the in-place update.
+    const base = extractWorkerUrl(output) ?? extractWorkerUrl(deployOutput);
+    expect(base, output).toBeDefined();
+    const served = await fetchWithRetry(`${base!.replace(/\/$/, '')}/api/hello`, {}, 15, 2000);
+    expect(served.status).toBe(200);
+  }, 600_000);
 });
