@@ -1426,9 +1426,18 @@ export function createDefaultRunWrangler(
           }
           if (isWindows && typeof child.pid === 'number') {
             // Windows has NO process groups, so the signal target is the child ITSELF.
-            // Consult Node's own bookkeeping FIRST: once the exit has been observed the OS
-            // may already have recycled the pid, and signaling it could hit an unrelated
-            // process.
+            // Consult Node's own bookkeeping FIRST: once the exit has been observed there is
+            // nothing left to signal. This ORDERING is also what makes the pid-based call below
+            // free of any pid-reuse hazard. Windows destroys a pid only when the process OBJECT
+            // is destroyed, which requires the process to have exited AND every handle to it to
+            // be closed; libuv closes its handle (`CloseHandle(handle->process_handle)` in
+            // `uv__process_proc_exit`, win/process.c) in the SAME straight-line frame that then
+            // invokes `exit_cb` — Node's `onexit`, whose first statements set
+            // `exitCode`/`signalCode`. No JavaScript runs in between, so a pid observed here
+            // with a null exit code is still pinned by libuv's open handle and cannot have been
+            // reassigned. (`child.kill()` is no safer in that instant: libuv sets
+            // UV_HANDLE_ESRCH on the very next line and `uv_process_kill` then short-circuits to
+            // ESRCH, which `ChildProcess.kill` reports as the same ambiguous `false`.)
             if (child.exitCode !== null || child.signalCode !== null) {
               return 'gone';
             }

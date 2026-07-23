@@ -7174,16 +7174,50 @@ describe('provisionCloudflareResources — Hyperdrive lister deadline', () => {
 describe('createDefaultRunWrangler — confirmed child termination + kill classification', () => {
   const KILL_CLASSIFY_TMP = join(import.meta.dirname, '.tmp-kill-classify');
   /**
-   * These cases deliberately keep a REAL child alive (that is the scenario under test) and kill
-   * it at the end, and the child's CWD is this temp dir. Windows releases a terminated process's
-   * handles — including the directory handle for its CWD — ASYNCHRONOUSLY, so a recursive remove
-   * issued right after the pid is confirmed gone can still fail with EPERM. `maxRetries` is
-   * Node's documented remedy: it retries EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM on a linear
-   * backoff, and is honored only when `recursive` is set. Inert on POSIX, which unlinks a
-   * directory regardless of any open handle.
+   * Every child spawned here runs with `cwd` = KILL_CLASSIFY_TMP, and Windows refuses to remove
+   * a directory that is a live process's CWD — so teardown must not assume each case reached its
+   * own cleanup. Reap anything still recorded in a `*.pid` file first, then remove with
+   * `maxRetries`, which is Node's documented remedy for EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM and
+   * covers the window where a terminated process's handles (its CWD among them) are still being
+   * released. `waitForDead` only proves the exit CODE is set; rundown finishes slightly later.
+   * If removal still fails, report what was alive and what remains rather than a bare EPERM —
+   * a bare errno here is undebuggable without a Windows machine. Inert on POSIX, which unlinks
+   * a directory regardless of any open handle.
    */
   const rmTmp = (): void => {
-    rmSync(KILL_CLASSIFY_TMP, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    const reaped: Array<string> = [];
+    if (existsSync(KILL_CLASSIFY_TMP)) {
+      for (const entry of readdirSync(KILL_CLASSIFY_TMP)) {
+        if (!entry.endsWith('.pid')) {
+          continue;
+        }
+        const pid = Number(readFileSync(join(KILL_CLASSIFY_TMP, entry), 'utf-8').trim());
+        if (!Number.isInteger(pid) || pid <= 0) {
+          continue;
+        }
+        try {
+          process.kill(pid, 0);
+        } catch {
+          continue; // already gone
+        }
+        reaped.push(`${entry}=${pid}`);
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // raced with its own exit
+        }
+      }
+    }
+    try {
+      rmSync(KILL_CLASSIFY_TMP, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+    } catch (error) {
+      const left = existsSync(KILL_CLASSIFY_TMP) ? readdirSync(KILL_CLASSIFY_TMP) : [];
+      throw new Error(
+        `could not remove ${KILL_CLASSIFY_TMP}: ${(error as Error).message}\n` +
+          `  still-live children reaped at teardown: ${reaped.length > 0 ? reaped.join(', ') : 'none'}\n` +
+          `  entries remaining: ${left.length > 0 ? left.join(', ') : '(none)'}`,
+      );
+    }
   };
   beforeEach(() => {
     rmTmp();
