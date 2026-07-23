@@ -288,6 +288,26 @@ function extractWorkerUrl(output: string): string | undefined {
   return output.match(/https:\/\/[a-z0-9.-]+\.workers\.dev(?:\/[^\s]*)?/)?.[0];
 }
 
+/** A `setTimeout` delay that also resolves immediately when `signal` aborts, so a pending retry wait
+ * never outlives a timed-out test. */
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
 /**
  * Poll the live worker until it serves a 200. A BRAND-NEW `*.workers.dev` hostname (every run uses a
  * unique worker name) needs the route to propagate globally before the first request succeeds, and
@@ -303,15 +323,28 @@ async function fetchWithRetry(
   init: RequestInit = {},
   attempts = 40,
   delayMs = 3000,
+  signal?: AbortSignal,
 ): Promise<Response> {
   let lastResponse: Response | undefined;
   let lastError: unknown;
   for (let i = 0; i < attempts; i++) {
+    // Overall deadline: callers pass the test's `ctx.signal`, which vitest aborts at the test timeout.
+    // Without it, a worker that accepts connections but never answers could keep this loop running
+    // (e.g. 40 × ~22s ≈ 15 min) long after vitest already failed the test, leaking requests and timers
+    // into later tests and teardown. Stop as soon as the enclosing test is done.
+    if (signal?.aborted) {
+      break;
+    }
     try {
       const res = await fetch(url, {
         ...init,
-        // Per-request deadline so a hung socket aborts and we retry, rather than blocking the poll.
-        signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        // Per-request deadline (fail a single stalled socket fast) AND the overall test signal, so
+        // neither one request nor the whole loop can outlive its budget.
+        signal:
+          init.signal ??
+          (signal
+            ? AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), signal])
+            : AbortSignal.timeout(REQUEST_TIMEOUT_MS)),
       });
       if (res.status === 200) {
         return res;
@@ -323,7 +356,7 @@ async function fetchWithRetry(
       lastResponse = undefined;
     }
     if (i < attempts - 1) {
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await abortableDelay(delayMs, signal);
     }
   }
   if (lastResponse) {
@@ -578,7 +611,7 @@ describe('void deploy --backend cloudflare (live account)', () => {
     const base = extractWorkerUrl(deployOutput);
     expect(base, deployOutput).toBeDefined();
     const url = `${base!.replace(/\/$/, '')}/api/hello`;
-    const res = await fetchWithRetry(url);
+    const res = await fetchWithRetry(url, {}, 40, 3000, ctx.signal);
     // On a persistent non-200, report the URL + whether the workers.dev route is even enabled, to
     // tell a slow-propagation 404 (route enabled) from a route that never went live (disabled).
     const diagnostic =
@@ -606,12 +639,13 @@ describe('void deploy --backend cloudflare (live account)', () => {
       },
       15,
       2000,
+      ctx.signal,
     );
     const createdBody = await created.text();
     expect(created.status, createdBody).toBe(200);
     expect(JSON.parse(createdBody)).toEqual({ created: true });
 
-    const list = await fetchWithRetry(`${root}/api/users`, {}, 15, 2000);
+    const list = await fetchWithRetry(`${root}/api/users`, {}, 15, 2000, ctx.signal);
     const listBody = await list.text();
     expect(list.status, listBody).toBe(200);
     const rows = JSON.parse(listBody) as Array<{ email: string }>;
@@ -635,12 +669,13 @@ describe('void deploy --backend cloudflare (live account)', () => {
       { method: 'PUT', body: value },
       15,
       2000,
+      ctx.signal,
     );
     expect(put.status, `PUT /api/kv/${key}`).toBe(200);
     // KV is eventually consistent and a first-read MISS can be negatively cached at the edge for up to
     // ~60s, so poll past that window (40 × 2s = 80s). A healthy binding whose first GET raced the
     // write's central visibility then converges rather than false-failing CI.
-    const got = await fetchWithRetry(`${root}/api/kv/${key}`, {}, 40, 2000);
+    const got = await fetchWithRetry(`${root}/api/kv/${key}`, {}, 40, 2000, ctx.signal);
     const gotBody = await got.text();
     expect(got.status, gotBody).toBe(200);
     expect(gotBody).toBe(value);
@@ -702,9 +737,9 @@ describe('void deploy --backend cloudflare (live account)', () => {
     const root = base!.replace(/\/$/, '');
     // The re-deployed worker still serves AND its bindings survived the update: /api/hello (static) is
     // 200, and /api/users (a D1-backed route) is 200 — a dropped or broken DB binding would 500.
-    const served = await fetchWithRetry(`${root}/api/hello`, {}, 15, 2000);
+    const served = await fetchWithRetry(`${root}/api/hello`, {}, 15, 2000, ctx.signal);
     expect(served.status).toBe(200);
-    const dbRoute = await fetchWithRetry(`${root}/api/users`, {}, 15, 2000);
+    const dbRoute = await fetchWithRetry(`${root}/api/users`, {}, 15, 2000, ctx.signal);
     expect(dbRoute.status, await dbRoute.text()).toBe(200);
   }, 600_000);
 });
