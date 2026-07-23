@@ -1,8 +1,10 @@
 import type { SubcommandDef } from './subcommand-prompt.ts';
 
 const LOG_LEVELS = new Set(['error', 'warn', 'info', 'log', 'debug', 'all']);
-// A status class (`5xx`), an exact 3-digit code (`500`), or `all`.
-const STATUS_FILTER = /^([1-5]xx|\d{3}|all)$/;
+// A status class (`5xx`), an exact code in the 100-599 HTTP range (`500`), or
+// `all`. Exact codes are range-bounded so a typo like `600` errors instead of
+// silently returning an empty result.
+const STATUS_FILTER = /^([1-5]xx|[1-5]\d{2}|all)$/;
 
 export const projectSubcommands: Array<SubcommandDef> = [
   { name: 'status', arg: '[name]', description: 'Show deployments (omit name for linked project)' },

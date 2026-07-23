@@ -113,6 +113,14 @@ describe('parseProjectArgs', () => {
       );
     });
 
+    it('rejects exact codes outside the 100-599 HTTP range', () => {
+      for (const v of ['000', '099', '600', '999']) {
+        expect(() => parseProjectArgs(['requests', '--status', v])).toThrow(
+          `project: Invalid --status '${v}'. Use a class like 5xx or an exact code like 500.`,
+        );
+      }
+    });
+
     it('rejects unknown flags', () => {
       expect(() => parseProjectArgs(['requests', '--bogus'])).toThrow(
         "project: Unexpected argument '--bogus'.",
