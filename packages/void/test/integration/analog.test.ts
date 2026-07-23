@@ -13,7 +13,7 @@ const CLEAN_ENV_KEYS = [
   'ComSpec',
   'HOME',
   'LOCALAPPDATA',
-  'pathslashXT',
+  'PATHEXT',
   'PNPM_HOME',
   'SystemDrive',
   'SystemRoot',
