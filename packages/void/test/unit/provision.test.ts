@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdir,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   realpath,
@@ -5705,7 +5706,9 @@ describe('acquireProvisionLock — quarantine sidecar gate', () => {
       const recorded = JSON.parse(readFileSync(sidecar, 'utf-8')) as Record<string, unknown>;
       expect(recorded).toMatchObject({
         pid: child.pid,
-        pgid: child.pid,
+        // Windows has no process groups, so `writeQuarantineSidecar` records `null` there by
+        // design and the gate falls back to probing the plain pid.
+        pgid: process.platform === 'win32' ? null : child.pid,
         reason: 'test quarantine (child unconfirmed)',
       });
       expect(typeof recorded.quarantinedAt).toBe('string');
@@ -6442,6 +6445,16 @@ describe('acquireProvisionLock — recovery decisions are serialized + generatio
   });
 });
 
+/**
+ * Windows cannot DELIVER a signal to another process. libuv maps SIGTERM/SIGINT/SIGKILL to
+ * `TerminateProcess`, which destroys the target immediately WITHOUT running any handler in it,
+ * and a synthetic Ctrl-C would need `GenerateConsoleCtrlEvent` (unreachable from Node). The
+ * cases carrying this note drive a real child `node` parent with `kill('SIGTERM')` and then
+ * assert on that parent's signal-teardown handler — work that only happens under POSIX signal
+ * semantics.
+ */
+const WINDOWS_NO_SIGNALS = 'signal delivery to another process is POSIX-only (see note above)';
+
 describe('createDefaultRunWrangler — signal-path kill failure quarantines the lock (child-process)', () => {
   const SIGNAL_KILL_TMP = join(import.meta.dirname, '.tmp-signal-kill');
   beforeEach(() => {
@@ -6465,7 +6478,8 @@ describe('createDefaultRunWrangler — signal-path kill failure quarantines the 
     return false;
   }
 
-  it('SIGTERM + an injected kill FAILURE: the parent dies with mutex + sidecar RETAINED; the gate blocks until the child dies', async () => {
+  it('SIGTERM + an injected kill FAILURE: the parent dies with mutex + sidecar RETAINED; the gate blocks until the child dies', async (ctx) => {
+    ctx.skip(process.platform === 'win32', WINDOWS_NO_SIGNALS);
     // Pre-fix, the signal-forwarding path re-raised IMMEDIATELY on a non-ESRCH kill
     // failure — the parent died, proper-lockfile's exit hook removed the still-tracked
     // mutex, and the live wrangler child kept creating resources with NO lock on disk.
@@ -6626,7 +6640,8 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     expect(result.signal).toBeNull();
   }, 15_000);
 
-  it('one SIGTERM (+ a repeat mid-teardown) is coalesced: the parent re-raises only after the group is dead', async () => {
+  it('one SIGTERM (+ a repeat mid-teardown) is coalesced: the parent re-raises only after the group is dead', async (ctx) => {
+    ctx.skip(process.platform === 'win32', WINDOWS_NO_SIGNALS);
     // Previously, runners installed per-runner listeners that detached themselves at
     // signal entry — a REPEATED signal during the bounded teardown took Node's default
     // action, killing the parent with the child alive, every tracked mutex swept, and
@@ -6703,7 +6718,8 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     }
   }, 20_000);
 
-  it('a spawn attempted AFTER teardown began is rejected fast (no child spawned, teardown unaffected)', async () => {
+  it('a spawn attempted AFTER teardown began is rejected fast (no child spawned, teardown unaffected)', async (ctx) => {
+    ctx.skip(process.platform === 'win32', WINDOWS_NO_SIGNALS);
     const pidFile = join(COORDINATOR_TMP, 'c.pid');
     const childScript = join(COORDINATOR_TMP, 'slow-exit-child2.cjs');
     writeFileSync(
@@ -6771,7 +6787,8 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     }
   }, 20_000);
 
-  it('the coordinator-WIDE deadline bounds an unconfirmable teardown (quarantine + re-raise, never a wedge)', async () => {
+  it('the coordinator-WIDE deadline bounds an unconfirmable teardown (quarantine + re-raise, never a wedge)', async (ctx) => {
+    ctx.skip(process.platform === 'win32', WINDOWS_NO_SIGNALS);
     // The runner's own confirmation window is 60s here and the child never dies (the
     // injected group-killer claims success but kills nothing) — pre-fix `pending`
     // stayed nonzero for the full 60s and the fatal signal was not re-raised. The
@@ -7156,13 +7173,69 @@ describe('provisionCloudflareResources — Hyperdrive lister deadline', () => {
 });
 
 describe('createDefaultRunWrangler — confirmed child termination + kill classification', () => {
-  const KILL_CLASSIFY_TMP = join(import.meta.dirname, '.tmp-kill-classify');
+  /**
+   * A UNIQUE directory per test. Every child spawned in this block runs with its `cwd` set to
+   * this directory, and a fixed shared path lets a crashed or concurrent run leave a stale
+   * `*.pid` file behind whose pid the OS may since have reassigned — so nothing may be inferred
+   * from, and certainly nothing killed by, a pid found on disk. Per-test isolation also stops
+   * one case's stranded child from blocking every later case's cleanup.
+   */
+  let killClassifyTmp = '';
+  /**
+   * Windows refuses to remove a directory that is a live process's CWD, and `waitForDead` only
+   * proves the exit CODE is set — the rundown that releases the CWD handle finishes slightly
+   * later. `maxRetries` is Node's documented remedy for exactly that: it retries
+   * EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM on a linear backoff, and is honored only when
+   * `recursive` is set. Inert on POSIX, which unlinks a directory regardless of open handles.
+   *
+   * This deliberately KILLS NOTHING. A pid read from a file is not proof that the process now
+   * holding that pid is the one that wrote it, so signalling it could terminate an unrelated
+   * process.
+   *
+   * A removal that still fails is then classified, not blanket-tolerated: a recorded pid that is
+   * STILL LIVE means a child was genuinely stranded — a real leak, failed loud. Otherwise the
+   * only things left are the dead child's own script and pid file, which Windows keeps mapped
+   * until process rundown completes; that can outlast any practical retry budget and is an OS
+   * artifact rather than a defect in the code under test, whose assertions have already passed.
+   */
+  const rmTmp = (): void => {
+    if (killClassifyTmp === '') {
+      return;
+    }
+    try {
+      rmSync(killClassifyTmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+      return;
+    } catch (error) {
+      const left = existsSync(killClassifyTmp) ? readdirSync(killClassifyTmp) : [];
+      const live = left
+        .filter((entry) => entry.endsWith('.pid'))
+        .map((entry) => Number(readFileSync(join(killClassifyTmp, entry), 'utf-8').trim()))
+        .filter((pid) => {
+          try {
+            process.kill(pid, 0);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+      const detail =
+        `${(error as Error).message}\n` +
+        `  entries remaining: ${left.length > 0 ? left.join(', ') : '(none)'}\n` +
+        `  recorded pids still resolving to a live process: ${live.length > 0 ? live.join(', ') : 'none'}`;
+      if (live.length > 0) {
+        throw new Error(`could not remove ${killClassifyTmp}: ${detail}`);
+      }
+      // Nothing of ours is running. Warn so it stays visible, rather than reddening a green
+      // behavioural test over temp-file hygiene; the directory is unique per test and ignored by
+      // git, so a leftover cannot affect any other case.
+      console.warn(`warn: leaving ${killClassifyTmp} behind — ${detail}`);
+    }
+  };
   beforeEach(() => {
-    rmSync(KILL_CLASSIFY_TMP, { recursive: true, force: true });
-    mkdirSync(KILL_CLASSIFY_TMP, { recursive: true });
+    killClassifyTmp = mkdtempSync(join(import.meta.dirname, '.tmp-kill-classify-'));
   });
   afterEach(() => {
-    rmSync(KILL_CLASSIFY_TMP, { recursive: true, force: true });
+    rmTmp();
   });
 
   async function waitForDead(pid: number, timeoutMs: number): Promise<boolean> {
@@ -7186,14 +7259,14 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
   });
 
   it('a REAL kill failure (EPERM) on timeout QUARANTINES: the runner REJECTS, never settle-and-release', async () => {
-    const pidFile = join(KILL_CLASSIFY_TMP, 'cli.pid');
-    const hungCli = join(KILL_CLASSIFY_TMP, 'hung.cjs');
+    const pidFile = join(killClassifyTmp, 'cli.pid');
+    const hungCli = join(killClassifyTmp, 'hung.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const run = createDefaultRunWrangler(KILL_CLASSIFY_TMP, {
+    const run = createDefaultRunWrangler(killClassifyTmp, {
       launcher: [process.execPath, hungCli],
       timeoutMs: 300,
       // Simulate a kill that FAILS for a non-ESRCH reason (the child is still alive).
@@ -7228,14 +7301,14 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
   }, 15_000);
 
   it('an unconfirmable termination (grace expiry, child still alive) QUARANTINES too', async () => {
-    const pidFile = join(KILL_CLASSIFY_TMP, 'cli3.pid');
-    const hungCli = join(KILL_CLASSIFY_TMP, 'hung3.cjs');
+    const pidFile = join(killClassifyTmp, 'cli3.pid');
+    const hungCli = join(killClassifyTmp, 'hung3.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const run = createDefaultRunWrangler(KILL_CLASSIFY_TMP, {
+    const run = createDefaultRunWrangler(killClassifyTmp, {
       launcher: [process.execPath, hungCli],
       timeoutMs: 250,
       confirmKillGraceMs: 500,
@@ -7263,14 +7336,14 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
   }, 15_000);
 
   it('an ESRCH kill (already gone) is treated as SUCCESS — settles as the timeout hard-failure, no kill-error text', async () => {
-    const pidFile = join(KILL_CLASSIFY_TMP, 'cli2.pid');
-    const hungCli = join(KILL_CLASSIFY_TMP, 'hung2.cjs');
+    const pidFile = join(killClassifyTmp, 'cli2.pid');
+    const hungCli = join(killClassifyTmp, 'hung2.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
         `setInterval(() => {}, 1 << 30);\n`,
     );
-    const run = createDefaultRunWrangler(KILL_CLASSIFY_TMP, {
+    const run = createDefaultRunWrangler(killClassifyTmp, {
       launcher: [process.execPath, hungCli],
       timeoutMs: 300,
       // Kill FOR REAL, then report ESRCH (the child exited in the race window) → treated as gone.
@@ -7293,12 +7366,12 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
     // Drive a FULL provision whose wrangler runner is the REAL default runner spawning a hung
     // CLI. The `d1 list` times out → confirmed-termination hard failure → provision rejects →
     // the whole-provision lock is released. The child must be dead and the mutex gone.
-    const cfgDir = join(KILL_CLASSIFY_TMP, 'app');
+    const cfgDir = join(killClassifyTmp, 'app');
     mkdirSync(cfgDir, { recursive: true });
     const cfgPath = join(cfgDir, 'wrangler.jsonc');
     writeFileSync(cfgPath, JSON.stringify({ name: 'app', account_id: 'acct' }));
-    const pidFile = join(KILL_CLASSIFY_TMP, 'prov-cli.pid');
-    const hungCli = join(KILL_CLASSIFY_TMP, 'prov-hung.cjs');
+    const pidFile = join(killClassifyTmp, 'prov-cli.pid');
+    const hungCli = join(killClassifyTmp, 'prov-hung.cjs');
     writeFileSync(
       hungCli,
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +

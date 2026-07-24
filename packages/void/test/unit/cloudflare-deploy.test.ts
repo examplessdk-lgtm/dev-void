@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { log } from '@clack/prompts';
 import { dirname, join } from 'pathslash';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
@@ -103,9 +104,18 @@ function emittedVars(vars: Record<string, unknown> = {}): EmittedWorkerVarsResul
   return { ok: true, vars };
 }
 
-/** Absolute src paths for runtime imports inside spawned-child env.ts fixtures. */
-const srcEnvPublic = join(import.meta.dirname, '..', '..', 'src', 'runtime', 'env-public.ts');
-const srcEnvHelpers = join(import.meta.dirname, '..', '..', 'src', 'runtime', 'env-helpers.ts');
+/**
+ * `file://` URLs for the runtime imports inside spawned-child env.ts fixtures. These are ESM
+ * SPECIFIERS, not filesystem paths: an absolute Windows path (`D:/…`, as `pathe` spells it)
+ * parses as a URL whose protocol is `d:`, so Node rejects it with
+ * ERR_UNSUPPORTED_ESM_URL_SCHEME and the child's env.ts never evaluates — the probe then
+ * reports `schema-error` for reasons that have nothing to do with the schema.
+ * `pathToFileURL` is the same form `loadUserEnvFile` uses for real user env files.
+ */
+const srcFileUrl = (...segments: Array<string>): string =>
+  pathToFileURL(join(import.meta.dirname, '..', '..', 'src', ...segments)).href;
+const srcEnvPublic = srcFileUrl('runtime', 'env-public.ts');
+const srcEnvHelpers = srcFileUrl('runtime', 'env-helpers.ts');
 
 /**
  * Wrangler's FULL credential env-var set, canonical names + deprecated `CF_*` aliases.

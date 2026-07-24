@@ -1,0 +1,27 @@
+# Enforce LF line endings for every text file on all platforms.
+#
+# Without this, the Windows CI runner (git's default `core.autocrlf=true`) checks out
+# text files with CRLF, and oxfmt — which `vp check` / `vp fmt` run and which enforces
+# LF — then flags every file as mis-formatted (the `test (windows-latest)` job). Every
+# committed blob is already LF, so this only changes checkout behavior on Windows; it
+# triggers no renormalization of existing files.
+* text=auto eol=lf
+
+# Binary assets — never apply any line-ending conversion.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.avif  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.eot   binary
+*.pdf   binary
+*.wasm  binary
+*.mp4   binary
+*.zip   binary
+*.gz    binary
