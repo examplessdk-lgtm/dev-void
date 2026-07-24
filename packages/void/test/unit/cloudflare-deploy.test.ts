@@ -106,7 +106,7 @@ function emittedVars(vars: Record<string, unknown> = {}): EmittedWorkerVarsResul
 
 /**
  * `file://` URLs for the runtime imports inside spawned-child env.ts fixtures. These are ESM
- * SPECIFIERS, not filesystem paths: an absolute Windows path (`D:/…`, as `pathe` spells it)
+ * SPECIFIERS, not filesystem paths: an absolute Windows path (`D:/…`, as `pathslash` spells it)
  * parses as a URL whose protocol is `d:`, so Node rejects it with
  * ERR_UNSUPPORTED_ESM_URL_SCHEME and the child's env.ts never evaluates — the probe then
  * reports `schema-error` for reasons that have nothing to do with the schema.

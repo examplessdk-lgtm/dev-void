@@ -2406,7 +2406,7 @@ function loadProperLockfileInternals(): ProperLockfileInternals | undefined {
 
 /**
  * `realpathSync` is `node:fs`, so it returns a NATIVE path — backslashes on Windows —
- * while every other path in this module comes from `pathe` and is POSIX-normalized,
+ * while every other path in this module comes from `pathslash` and is POSIX-normalized,
  * including the not-yet-created branch below (whose `join()` already normalizes). Without
  * this, `canonicalizeConfigPath` hands back TWO different spellings of the same file
  * depending only on whether it happens to exist yet, defeating the "ONE identity" contract
