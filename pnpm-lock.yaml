@@ -635,9 +635,6 @@ importers:
       '@void/react':
         specifier: workspace:*
         version: link:../../packages/react
-      pathslash:
-        specifier: 'catalog:'
-        version: 0.1.0
       vite:
         specifier: npm:@voidzero-dev/vite-plus-core@0.2.2
         version: '@voidzero-dev/vite-plus-core@0.2.2(@types/node@26.1.0)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.99.0)(terser@5.48.0)(tsx@4.23.0)(typescript@6.0.3)(yaml@2.9.0)'

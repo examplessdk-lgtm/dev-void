@@ -452,7 +452,7 @@ async function runNodePrerenderRunner<T>(root: string, config: NodeRunnerConfig)
     runnerPath,
     `
 import { pathToFileURL } from "node:url";
-import { join, dirname } from "pathslash";
+import { dirname, join } from "node:path";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 const config = JSON.parse(process.argv[2]);

@@ -1,6 +1,9 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { extname, isAbsolute, relative, resolve } from 'pathslash';
+// Keep this playground free of `pathslash` so the build catches bare
+// specifiers leaking into the generated prerender runner (#285).
+// oxlint-disable-next-line no-restricted-imports
+import { extname, isAbsolute, relative, resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '../dist/client');
 const port = Number(process.env.PORT || 4179);
