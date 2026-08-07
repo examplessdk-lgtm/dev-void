@@ -97,6 +97,23 @@ This is the path needed for preview auth and other middleware. Cloudflare's plat
 
 For Void apps with only `/api` routes, Void keeps the platform SPA fallback and scopes `run_worker_first` to `/api` and `/api/*`. Static assets and non-API SPA navigations stay on the asset platform. API requests, including browser document navigations such as OAuth callbacks, reach the worker instead of being rewritten to `index.html`.
 
+### Unmatched requests
+
+`not_found_handling` decides what the asset layer does with a request that matched no asset and no worker route. Void infers it:
+
+| App shape                                  | Inferred value            | Result for an unknown URL        |
+| ------------------------------------------ | ------------------------- | -------------------------------- |
+| Worker owns HTML (Pages, SSR, middleware…) | `none`                    | The worker's own 404             |
+| Asset-first (only `/api` routes, or none)  | `single-page-application` | `index.html` with status **200** |
+
+The SPA fallback is right for a single-page app, where deep links must boot the client router. It is wrong for a site whose HTML was generated per page: unknown URLs return 200 instead of 404, and the generator's `404.html` is never served. Nothing in a built asset tree distinguishes the two, so Void does not guess — override it with [`routing.notFound`](../../reference/config.md#routing-notfound):
+
+```json
+{ "routing": { "notFound": "404-page" } }
+```
+
+Accepted values are `"single-page-application"`, `"404-page"`, and `"none"`. Only `not_found_handling` changes; `run_worker_first` keeps its inferred value, so API routes, auth, and `/__void/*` still reach the worker first.
+
 ### Generated config
 
 Void owns the generated asset routing policy during dev and build. If a root `wrangler.jsonc` contains stale `not_found_handling` or `run_worker_first` values, Void replaces those fields so generated config cannot accidentally change which layer sees a request first.

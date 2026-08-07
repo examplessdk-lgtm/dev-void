@@ -1664,6 +1664,7 @@ export function voidPlugin(options?: {
     hasWebSockets: routeScanHasDocumentRoutes(websocketRoutes),
     authEnabled,
     liveEnabled: liveConfig !== undefined,
+    notFound: config.routing?.notFound,
   });
 
   workerConfig.main = join(root, '.void', 'entry.ts');

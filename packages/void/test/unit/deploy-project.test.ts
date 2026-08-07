@@ -10,11 +10,16 @@ import {
   resolveDeployWorkerMain,
   resolveDistDir,
   resolveDeployWranglerCompat,
+  resolveFullDeployBuildCommand,
   resolveStaticDeployPreset,
   resolveStaticBuildCommand,
   resolveWorkerDirName,
 } from '../../src/cli/deploy.ts';
-import { FRAMEWORK_PRESETS } from '../../src/cli/preset.ts';
+import {
+  formatProjectCommand,
+  resolveProjectCommand,
+  FRAMEWORK_PRESETS,
+} from '../../src/cli/preset.ts';
 import {
   getRequestedProjectSlug,
   inferDefaultSlug,
@@ -413,6 +418,54 @@ describe('resolveStaticBuildCommand', () => {
         true,
       ),
     ).toBeNull();
+  });
+});
+
+// The FULL (Class A / Void app) deploy used to hardcode `vite build`, ignoring
+// `inference.build`. That made "two builds, one command" impossible: an SSG that
+// emits the site first and then lets Void's own build package it (via
+// `publicDir`) alongside the worker had no way to say so, and a repo with no
+// root `index.html` died on `[UNRESOLVED_ENTRY] Cannot resolve entry module
+// index.html`. The static and framework paths already honored the override.
+describe('resolveFullDeployBuildCommand', () => {
+  const root = '/tmp/void-full-deploy-build-cmd';
+
+  it('uses inference.build verbatim when set', () => {
+    expect(resolveFullDeployBuildCommand(root, 'vitepress build && vite build')).toEqual({
+      label: 'vitepress build && vite build',
+      command: 'vitepress build && vite build',
+    });
+  });
+
+  it('prints exactly what it runs for a configured command', () => {
+    // No `formatProjectCommand`/`resolveProjectCommand` rewriting on the
+    // override path — the user's text is both shown and executed, so a shell
+    // chain like `a && b` cannot be mangled into an unrunnable single command.
+    const { label, command } = resolveFullDeployBuildCommand(root, 'pnpm run build:site');
+    expect(label).toBe(command);
+  });
+
+  it('falls back to the built-in vite build when inference.build is unset', () => {
+    expect(resolveFullDeployBuildCommand(root)).toEqual({
+      label: formatProjectCommand(root, 'vite build'),
+      command: resolveProjectCommand(root, 'vite build'),
+    });
+  });
+
+  it('keeps the fallback label/command distinction (display vs. local bin)', () => {
+    // `formatProjectCommand` is the user-facing form (`vite` → `vp`, no absolute
+    // path); `resolveProjectCommand` expands to node_modules/.bin. Collapsing
+    // them would either print an absolute path or execute an unresolvable bin.
+    const { label, command } = resolveFullDeployBuildCommand(root);
+    expect(label).toBe(formatProjectCommand(root, 'vite build'));
+    expect(command).toBe(resolveProjectCommand(root, 'vite build'));
+  });
+
+  it('treats an empty inference.build as unset', () => {
+    expect(resolveFullDeployBuildCommand(root, '')).toEqual({
+      label: formatProjectCommand(root, 'vite build'),
+      command: resolveProjectCommand(root, 'vite build'),
+    });
   });
 });
 

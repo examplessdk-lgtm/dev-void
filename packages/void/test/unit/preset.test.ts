@@ -4,7 +4,9 @@ import { join, resolve } from 'pathslash';
 import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
 import {
   detectPreset,
+  findBackendSources,
   formatProjectCommand,
+  hasBackendFiles,
   resolveProjectCommand,
   resolveWranglerArgv,
   resolveWranglerCommand,
@@ -213,6 +215,117 @@ describe('detectPreset', () => {
     });
     const result = detectPreset(root);
     expect(result).toBeNull();
+  });
+});
+
+// SSG detection (step 2) runs BEFORE the `hasBackendFiles` check (step 3), so an
+// SSG repo that also has `routes/` / `middleware/` / `crons/` / `queues/` /
+// `pages/` / an SSR entry returns a pure static preset and the backend is
+// dropped with no diagnostic at all. `strictBackend` makes the ambiguous case
+// loud — but only on the UNCONFIGURED auto-detect path, because `--dir` and a
+// configured `inference.appType` are the user stating their intent.
+describe('detectPreset — strictBackend', () => {
+  const vitepressPkg = { devDependencies: { vitepress: '^1.0.0' } };
+
+  it('throws when an SSG project also has routes/', () => {
+    const root = setupProject({ pkg: vitepressPkg, dirs: ['.vitepress', 'routes'] });
+    expect(() => detectPreset(root, { strictBackend: true })).toThrow('vitepress');
+  });
+
+  it('names the backend directories it found', () => {
+    const root = setupProject({
+      pkg: vitepressPkg,
+      dirs: ['.vitepress', 'routes', 'middleware', 'crons'],
+    });
+    let message = '';
+    try {
+      detectPreset(root, { strictBackend: true });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain('routes/');
+    expect(message).toContain('middleware/');
+    expect(message).toContain('crons/');
+    // ...and tells the user both ways out, so the error is actionable.
+    expect(message).toContain('"appType": "static"');
+    expect(message).toContain('"appType": "void"');
+    expect(message).toContain('"build"');
+  });
+
+  it('detects an SSR entry as a backend source too', () => {
+    const root = setupProject({
+      pkg: vitepressPkg,
+      dirs: ['.vitepress'],
+      files: { 'src/main.ssr.ts': 'export default {};' },
+    });
+    expect(() => detectPreset(root, { strictBackend: true })).toThrow('main.ssr.ts');
+  });
+
+  it('does NOT throw for an SSG project with no backend', () => {
+    const root = setupProject({ pkg: vitepressPkg, dirs: ['.vitepress'] });
+    expect(detectPreset(root, { strictBackend: true })).toEqual({
+      buildCommand: 'vitepress build',
+      outputDir: resolve(root, '.vitepress/dist'),
+      appType: 'static',
+    });
+  });
+
+  it('does NOT throw without the flag (auto-detect is opt-in)', () => {
+    const root = setupProject({ pkg: vitepressPkg, dirs: ['.vitepress', 'routes'] });
+    expect(detectPreset(root)).toEqual({
+      buildCommand: 'vitepress build',
+      outputDir: resolve(root, '.vitepress/dist'),
+      appType: 'static',
+    });
+  });
+
+  it('does NOT throw for an explicit --dir (the user said what they want)', () => {
+    const root = setupProject({ pkg: vitepressPkg, dirs: ['.vitepress', 'routes'] });
+    // `--dir` short-circuits at step 1, before SSG detection is even reached —
+    // and `resolveStaticDeployPreset` never passes strictBackend on that path.
+    expect(detectPreset(root, { dir: '.vitepress/dist', strictBackend: true })).toEqual({
+      buildCommand: null,
+      outputDir: resolve(root, '.vitepress/dist'),
+      appType: 'static',
+    });
+  });
+
+  it('does NOT throw when a non-SSG project has backend files', () => {
+    // Step 3 already returns null for these; the guard must not change that.
+    const root = setupProject({
+      pkg: { dependencies: { vite: '^6.0.0' } },
+      dirs: ['routes'],
+    });
+    expect(detectPreset(root, { strictBackend: true })).toBeNull();
+  });
+});
+
+describe('findBackendSources', () => {
+  it('lists every backend source relative to the root', () => {
+    const root = setupProject({
+      dirs: ['routes', 'pages', 'middleware', 'crons', 'queues'],
+      files: { 'src/main.ssr.tsx': 'export default {};' },
+    });
+    expect(findBackendSources(root)).toEqual([
+      'routes/',
+      'pages/',
+      'middleware/',
+      'crons/',
+      'queues/',
+      'src/main.ssr.tsx',
+    ]);
+  });
+
+  it('is empty for a project with no backend, and agrees with hasBackendFiles', () => {
+    const root = setupProject({ pkg: { devDependencies: { vitepress: '^1.0.0' } } });
+    expect(findBackendSources(root)).toEqual([]);
+    expect(hasBackendFiles(root)).toBe(false);
+  });
+
+  it('agrees with hasBackendFiles when a backend exists', () => {
+    const root = setupProject({ dirs: ['queues'] });
+    expect(findBackendSources(root)).toEqual(['queues/']);
+    expect(hasBackendFiles(root)).toBe(true);
   });
 });
 

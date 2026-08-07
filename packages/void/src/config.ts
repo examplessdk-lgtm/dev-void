@@ -25,6 +25,12 @@ export type WranglerConfig = {
   vars?: Record<string, string>;
 };
 
+/**
+ * How the asset layer answers a request that matched no asset and no worker
+ * route. Mirrors Cloudflare's `assets.not_found_handling`.
+ */
+export type NotFoundHandling = 'single-page-application' | '404-page' | 'none';
+
 /** Routing configuration — headers, redirects, rewrites, fallbacks, revalidation, prerendering. */
 export type RoutingConfig = {
   revalidate?: number | Record<string, number>;
@@ -34,6 +40,20 @@ export type RoutingConfig = {
   redirects?: Record<string, RedirectDestination>;
   rewrites?: Record<string, RewriteDestination>;
   fallbacks?: Record<string, RewriteDestination>;
+  /**
+   * Override the inferred `not_found_handling` for the asset layer.
+   *
+   * Void infers `single-page-application` whenever the worker does not own HTML
+   * routing, because a real SPA needs `/index.html` served for deep links. An
+   * app whose assets were emitted by a static site generator (VitePress,
+   * Docusaurus, …) wants the opposite: unknown URLs should serve the generator's
+   * own `404.html` with a real HTTP 404, not `index.html` with a 200. Nothing in
+   * a built asset tree distinguishes the two, so this is an explicit opt-in.
+   *
+   * Only `not_found_handling` is affected — `run_worker_first` is unchanged, so
+   * API routes, auth, and `/__void/*` still reach the worker first.
+   */
+  notFound?: NotFoundHandling;
 };
 
 /** Inference configuration — bindings, scanDirs, build, outputDir, appType. */
@@ -82,6 +102,15 @@ const CONFIG_FILE = 'void.json';
 const VALID_TARGETS = new Set(['cloudflare', 'node', 'bun', 'deno']);
 const VALID_APP_TYPES = new Set(['spa', 'static', 'void', 'framework']);
 const VALID_OUTPUTS = new Set(['server', 'static']);
+/**
+ * Accepted `routing.notFound` values. Source of truth for the framework, the
+ * `AssetConfig.not_found_handling` field, and the schema.json enum.
+ */
+export const VALID_NOT_FOUND_HANDLING: Set<string> = new Set([
+  'single-page-application',
+  '404-page',
+  'none',
+]);
 /**
  * Allowed 3xx redirect statuses. Source of truth for the framework, the
  * `_redirects` parser (`cli/headers.ts`), and the schema.json enum. 303 is
@@ -460,6 +489,15 @@ export function readConfig(root: string): VoidConfig {
       throw new Error(`config: "routing" in ${CONFIG_FILE} must be an object.`);
     }
     const routing = obj.routing as Record<string, unknown>;
+
+    // Validate routing.notFound
+    if (routing.notFound !== undefined) {
+      if (typeof routing.notFound !== 'string' || !VALID_NOT_FOUND_HANDLING.has(routing.notFound)) {
+        throw new Error(
+          `config: "routing.notFound" in ${CONFIG_FILE} must be one of: ${[...VALID_NOT_FOUND_HANDLING].join(', ')}.`,
+        );
+      }
+    }
 
     // Validate routing.revalidate
     if (routing.revalidate !== undefined) {

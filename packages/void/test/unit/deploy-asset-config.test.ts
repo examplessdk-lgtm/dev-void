@@ -290,3 +290,84 @@ describe('resolveAssetConfig', () => {
     });
   });
 });
+
+// `routing.notFound` (void.json) is an explicit escape hatch, not a new default.
+//
+// Without it, an app whose assets came from a static site generator and whose
+// only backend is an API route takes the `apiWorkerFirst` branch, so unknown
+// URLs are answered with `index.html` and HTTP **200**. The generator's real
+// `404.html` is never served and crawlers see 200 for every URL. The default
+// cannot change — a genuine SPA needs that fallback for deep links, and a built
+// asset tree carries nothing that distinguishes the two — so the user says so.
+//
+// Only `not_found_handling` moves: `run_worker_first` and every derived flag
+// stay as inferred, so which layer sees a request first is unaffected.
+describe('resolveAssetRoutingPolicy — routing.notFound override', () => {
+  const SPA_API_WORKER_FIRST = ['/api', '/api/*', '/__void', '/__void/*'];
+
+  const ssgWithApi = {
+    isSsr: false,
+    hasPages: false,
+    hasApiRoutes: true,
+    hasDocumentRoutes: false,
+    hasMiddleware: false,
+  } as const;
+
+  it('leaves the inferred SPA fallback in place when unset', () => {
+    expect(resolveAssetRoutingPolicy(ssgWithApi).assetConfig).toEqual({
+      not_found_handling: 'single-page-application',
+      run_worker_first: SPA_API_WORKER_FIRST,
+    });
+  });
+
+  it('serves a real 404 page when set to "404-page"', () => {
+    expect(resolveAssetRoutingPolicy({ ...ssgWithApi, notFound: '404-page' }).assetConfig).toEqual({
+      not_found_handling: '404-page',
+      run_worker_first: SPA_API_WORKER_FIRST,
+    });
+  });
+
+  it('leaves run_worker_first and the derived flags untouched', () => {
+    const inferred = resolveAssetRoutingPolicy(ssgWithApi);
+    const overridden = resolveAssetRoutingPolicy({ ...ssgWithApi, notFound: '404-page' });
+    expect(overridden.assetConfig.run_worker_first).toEqual(inferred.assetConfig.run_worker_first);
+    expect(overridden.apiWorkerFirst).toBe(inferred.apiWorkerFirst);
+    expect(overridden.workerFirst).toBe(inferred.workerFirst);
+    expect(overridden.workerSpaFallback).toBe(inferred.workerSpaFallback);
+  });
+
+  it('applies on the plain-asset branch too (no API routes)', () => {
+    const inputs = {
+      isSsr: false,
+      hasPages: false,
+      hasDocumentRoutes: false,
+      hasMiddleware: false,
+    } as const;
+    expect(resolveAssetRoutingPolicy({ ...inputs, notFound: 'none' }).assetConfig).toEqual({
+      not_found_handling: 'none',
+      run_worker_first: ['/__void', '/__void/*'],
+    });
+  });
+
+  it('can also override the worker-first branch, which infers "none"', () => {
+    const workerFirst = {
+      isSsr: false,
+      hasPages: true,
+      hasDocumentRoutes: false,
+      hasMiddleware: false,
+    } as const;
+    expect(resolveAssetRoutingPolicy(workerFirst).assetConfig.not_found_handling).toBe('none');
+    expect(resolveAssetRoutingPolicy({ ...workerFirst, notFound: '404-page' }).assetConfig).toEqual(
+      {
+        not_found_handling: '404-page',
+        run_worker_first: ['/**'],
+      },
+    );
+  });
+
+  it('is reachable through resolveAssetConfig (the deploy entry point)', () => {
+    expect(resolveAssetConfig({ ...ssgWithApi, notFound: '404-page' }).not_found_handling).toBe(
+      '404-page',
+    );
+  });
+});

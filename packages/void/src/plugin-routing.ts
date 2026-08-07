@@ -381,6 +381,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         hasWebSockets: false,
         authEnabled: compileOptions.auth !== null,
         liveEnabled: options.live !== undefined,
+        notFound: options.routing?.notFound,
       });
     }
     return resolveAssetRoutingPolicy({
@@ -395,6 +396,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       hasWebSockets: hasDocumentRoutes(scan.websockets ?? []),
       authEnabled: compileOptions.auth !== null,
       liveEnabled: options.live !== undefined,
+      notFound: options.routing?.notFound,
     });
   }
 

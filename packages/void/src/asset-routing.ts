@@ -1,4 +1,5 @@
 import type { AssetConfig } from './cli/types.ts';
+import type { NotFoundHandling } from './config.ts';
 import type { RouteDefinition } from './router/parse-filename.ts';
 
 export type AssetRoutingInputs = {
@@ -11,6 +12,13 @@ export type AssetRoutingInputs = {
   hasWebSockets?: boolean;
   authEnabled?: boolean;
   liveEnabled?: boolean;
+  /**
+   * `routing.notFound` from void.json. Overrides the INFERRED
+   * `not_found_handling` only; `run_worker_first` and every derived flag
+   * (`workerFirst` / `apiWorkerFirst` / `workerSpaFallback`) are untouched, so
+   * which layer sees a request first never changes.
+   */
+  notFound?: NotFoundHandling;
 };
 
 export type AssetRoutingPolicy = {
@@ -76,6 +84,12 @@ export function resolveAssetRoutingPolicy(inputs: AssetRoutingInputs): AssetRout
           not_found_handling: 'single-page-application',
           run_worker_first: [...VOID_INTERNAL_WORKER_FIRST],
         };
+  // Explicit `routing.notFound` wins over the inferred value. Applied here (on
+  // the inputs) rather than at the call sites so dev, build, and deploy can't
+  // drift apart. `run_worker_first` is deliberately left as inferred.
+  if (inputs.notFound !== undefined) {
+    assetConfig.not_found_handling = inputs.notFound;
+  }
   return {
     assetConfig,
     apiWorkerFirst,

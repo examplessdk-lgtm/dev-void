@@ -373,6 +373,46 @@ describe('readConfig', () => {
     cleanup();
   });
 
+  // `routing.notFound` overrides the INFERRED asset `not_found_handling`.
+  // Typos must fail at config-read time: an unvalidated string would be written
+  // straight into `assets.not_found_handling`, and the failure would only show
+  // up as Cloudflare rejecting the deployed worker config.
+  it('accepts routing.notFound: "404-page"', () => {
+    setup(JSON.stringify({ routing: { notFound: '404-page' } }));
+    expect(readConfig(tmpDir).routing?.notFound).toBe('404-page');
+    cleanup();
+  });
+
+  it('accepts routing.notFound: "single-page-application"', () => {
+    setup(JSON.stringify({ routing: { notFound: 'single-page-application' } }));
+    expect(readConfig(tmpDir).routing?.notFound).toBe('single-page-application');
+    cleanup();
+  });
+
+  it('accepts routing.notFound: "none"', () => {
+    setup(JSON.stringify({ routing: { notFound: 'none' } }));
+    expect(readConfig(tmpDir).routing?.notFound).toBe('none');
+    cleanup();
+  });
+
+  it('leaves routing.notFound undefined when omitted', () => {
+    setup(JSON.stringify({ routing: { revalidate: 60 } }));
+    expect(readConfig(tmpDir).routing?.notFound).toBeUndefined();
+    cleanup();
+  });
+
+  it('throws on an unknown routing.notFound value', () => {
+    setup(JSON.stringify({ routing: { notFound: '404' } }));
+    expect(() => readConfig(tmpDir)).toThrow('"routing.notFound"');
+    cleanup();
+  });
+
+  it('throws on a non-string routing.notFound', () => {
+    setup(JSON.stringify({ routing: { notFound: true } }));
+    expect(() => readConfig(tmpDir)).toThrow('"routing.notFound"');
+    cleanup();
+  });
+
   it('throws on invalid routing type', () => {
     setup(JSON.stringify({ routing: 'invalid' }));
     expect(() => readConfig(tmpDir)).toThrow('"routing" in void.json must be an object');

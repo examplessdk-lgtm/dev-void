@@ -1,14 +1,14 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'pathslash';
+import { dirname, join, relative, resolve } from 'pathslash';
 import { readProjectPaths } from '../project-paths.ts';
 import {
   getPackageDependencies,
   hasPackageDependency,
   readPackageJson,
 } from '../shared/package-json.ts';
-import { hasSsrEntry } from '../ssr/entry.ts';
+import { getSsrServerEntryPath, hasSsrEntry } from '../ssr/entry.ts';
 
 /** Build output conventions for a known SSG (static site generator). */
 export type SsgPreset = {
@@ -362,10 +362,19 @@ export function formatProjectCommand(root: string, command: string): string {
 /**
  * Detect a static deploy preset based on the project root.
  * Returns null when the project requires a full worker deploy.
+ *
+ * `strictBackend` refuses (throws) instead of returning an SSG preset when the
+ * project ALSO has backend sources. SSG detection (step 2) deliberately runs
+ * before the backend check (step 3), so without this an SSG repo that grew a
+ * single `routes/api/*.ts` would deploy as a pure static site with the backend
+ * silently dropped and no diagnostic. Opt-in because only the UNCONFIGURED
+ * auto-detect path is ambiguous: `--dir` and a configured
+ * `inference.appType: "static" | "spa"` are the user stating what they want, and
+ * must keep working silently.
  */
 export function detectPreset(
   root: string,
-  options?: { dir?: string; spa?: boolean },
+  options?: { dir?: string; spa?: boolean; strictBackend?: boolean },
 ): StaticPreset | null {
   // 1. Explicit --dir flag: skip build, use provided directory
   if (options?.dir) {
@@ -382,6 +391,12 @@ export function detectPreset(
     const allDeps = getPackageDependencies(pkg);
     for (const preset of Object.values(SSG_PRESETS)) {
       if (preset.dep in allDeps) {
+        if (options?.strictBackend) {
+          const backendSources = findBackendSources(root);
+          if (backendSources.length > 0) {
+            throw new Error(ssgWithBackendMessage(preset.dep, backendSources));
+          }
+        }
         const overrides = preset.resolve?.(root);
         const cmd = overrides?.buildCommand ?? preset.buildCommand;
         const out = overrides?.outputDir ?? preset.outputDir;
@@ -427,6 +442,26 @@ export function detectPreset(
   }
 
   return null;
+}
+
+/**
+ * The refusal shown when an SSG project also carries backend sources and no
+ * `inference.appType` says which one to deploy. Names the exact directories
+ * found and both ways out.
+ */
+function ssgWithBackendMessage(ssgDep: string, backendSources: Array<string>): string {
+  return [
+    `deploy: "${ssgDep}" was detected, but this project also has backend code: ${backendSources.join(', ')}.`,
+    'A static deploy would silently drop it, so Void will not guess. Pick one in void.json:',
+    '',
+    '  Deploy the static output only (the backend is NOT deployed):',
+    '    { "inference": { "appType": "static" } }',
+    '',
+    '  Deploy both — the SSG emits the site, then Void packages it with the worker:',
+    '    { "inference": { "appType": "void", "build": "<ssg> build && vite build" } }',
+    '    ...and in vite.config.ts add voidPlugin() plus `publicDir: "<ssg output dir>"`,',
+    '    so the generated site is copied into the client build alongside the worker.',
+  ].join('\n');
 }
 
 /**
@@ -490,6 +525,34 @@ function detectViteBinary(root: string): 'vite' | 'vp' {
     return 'vp';
   }
   return 'vite';
+}
+
+/**
+ * Every backend source in the project that requires a full worker deploy, named
+ * relative to the root (e.g. `routes/`, `src/main.ssr.tsx`).
+ *
+ * Returned as a list rather than a boolean so a caller that has to REJECT a
+ * static deploy can tell the user exactly what would have been dropped.
+ */
+export function findBackendSources(root: string): Array<string> {
+  const paths = readProjectPaths(root);
+  const found: Array<string> = [];
+  for (const dir of [
+    paths.routesDir,
+    paths.pagesDir,
+    paths.middlewareDir,
+    paths.cronsDir,
+    paths.queuesDir,
+  ]) {
+    if (existsSync(dir)) {
+      found.push(`${relative(root, dir)}/`);
+    }
+  }
+  const ssrEntry = getSsrServerEntryPath(root, paths);
+  if (ssrEntry) {
+    found.push(relative(root, ssrEntry));
+  }
+  return found;
 }
 
 /**
