@@ -14,9 +14,9 @@ export type AssetRoutingInputs = {
   liveEnabled?: boolean;
   /**
    * `routing.notFound` from void.json. Overrides the INFERRED
-   * `not_found_handling` only; `run_worker_first` and every derived flag
-   * (`workerFirst` / `apiWorkerFirst` / `workerSpaFallback`) are untouched, so
-   * which layer sees a request first never changes.
+   * `not_found_handling`. `run_worker_first`, `workerFirst` and
+   * `apiWorkerFirst` are untouched, so which layer sees a request first never
+   * changes. `workerSpaFallback` DOES follow it — see below.
    */
   notFound?: NotFoundHandling;
 };
@@ -94,6 +94,17 @@ export function resolveAssetRoutingPolicy(inputs: AssetRoutingInputs): AssetRout
     assetConfig,
     apiWorkerFirst,
     workerFirst,
-    workerSpaFallback: workerFirst && !inputs.isSsr && !inputs.hasPages,
+    // The worker-side SPA fallback exists only to REPLACE the platform switch
+    // that `run_worker_first: ['/**']` bypasses — it hardcodes `/index.html` at
+    // status 200. So an explicit `notFound` that asks for anything else must
+    // turn it off, or the generated helper answers the unmatched navigation
+    // with the shell before `not_found_handling` is ever consulted and the
+    // override is inert. `single-page-application` keeps it (that is what it
+    // asks for); `undefined` keeps the inferred behavior.
+    workerSpaFallback:
+      workerFirst &&
+      !inputs.isSsr &&
+      !inputs.hasPages &&
+      (inputs.notFound === undefined || inputs.notFound === 'single-page-application'),
   };
 }

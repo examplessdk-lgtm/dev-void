@@ -392,7 +392,7 @@ Override how the asset layer answers a request that matched no asset and no work
 
 Set `"404-page"` when your assets come from a static site generator (VitePress, Docusaurus, …) and you want unknown URLs to serve the generator's own `404.html` with a real HTTP 404. Without it, an app whose only backend is API routes keeps the inferred SPA fallback, so every unknown URL returns `index.html` with a `200` — correct for a single-page app, wrong for a generated site, and bad for crawlers.
 
-This changes `not_found_handling` only. `run_worker_first` is untouched, so API routes, auth, and `/__void/*` still reach the worker first.
+`run_worker_first` is untouched, so API routes, auth, and `/__void/*` still reach the worker first. When the worker owns HTML routing it also serves the resolved behavior itself, since `run_worker_first: ["/**"]` means the platform switch never runs — see [Unmatched requests](../guide/edge/static-assets.md#unmatched-requests).
 
 ### `inference`
 

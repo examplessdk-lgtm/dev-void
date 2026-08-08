@@ -16,7 +16,7 @@ vi.mock('@cloudflare/vite-plugin', () => ({
 
 const roots: Array<string> = [];
 
-function createTanStackRoot(): string {
+function createTanStackRoot(voidConfig?: Record<string, unknown>): string {
   const root = mkdtempSync(join(tmpdir(), 'void-class-a-wrapper-'));
   roots.push(root);
   writeFileSync(
@@ -30,7 +30,7 @@ function createTanStackRoot(): string {
   );
   writeFileSync(
     join(root, 'void.json'),
-    JSON.stringify({ worker: { compatibility_date: '2026-02-24' } }),
+    JSON.stringify({ worker: { compatibility_date: '2026-02-24' }, ...voidConfig }),
   );
   return root;
 }
@@ -77,5 +77,33 @@ describe('Class A framework build wrapper', () => {
     expect(code).toContain('request.method !== "GET" && request.method !== "HEAD"');
     expect(code).toContain('"public, max-age=31536000, immutable"');
     expect(code).toContain('"/static/"');
+    // No `routing.notFound` → the pre-existing "hand the framework's own 404
+    // back" behavior.
+    expect(code).not.toContain('asset.headers.get("content-type")');
+  });
+
+  // A Class A app deploys through `runFullDeploy`, which DOES honor
+  // `routing.notFound` when it builds the wrangler asset config. This wrapper is
+  // the code that then sits in front of the asset binding, so it has to agree —
+  // otherwise it fetches the generator's `404.html` and throws it away.
+  it('honors routing.notFound: 404-page in the generated wrapper', async () => {
+    const root = createTanStackRoot({ routing: { notFound: '404-page' } });
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    const { voidPlugin } = await import('../../src/index.ts');
+    const plugins = voidPlugin();
+    const wrapperPlugin = plugins.find((plugin) => plugin.name === 'void:framework-build-wrapper');
+    if (!wrapperPlugin) {
+      throw new Error('Expected Class A wrapper plugin.');
+    }
+
+    callConfigResolved(wrapperPlugin, {
+      command: 'build',
+      build: { assetsDir: 'static' } as ResolvedConfig['build'],
+    } as Partial<ResolvedConfig>);
+
+    const code = readFileSync(join(root, '.void', 'tanstack-start-trigger-wrapper.ts'), 'utf-8');
+    expect(code).toContain('asset.headers.get("content-type")');
+    expect(code).toContain('new Response(asset.body, asset)');
   });
 });

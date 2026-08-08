@@ -447,21 +447,29 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
  * step. Only the service-token pair is scrubbed; the cloudflared
  * `CF_ACCESS_TOKEN` JWT (dev path) is left untouched.
  *
- * The child env ALSO gets `<root>/node_modules/.bin` prepended to PATH. Build
- * commands are run through a shell (`execSync`), and a user-configured
- * `inference.build` (e.g. `vitepress build && vite build`) names bare binaries
- * that only exist in the project's local bin dir. Under the build container's
- * `npx --yes void deploy` this happens to work — npx prepends every ancestor
+ * `localBinRoot` is an explicit OPT-IN, not a default. Build commands are run
+ * through a shell (`execSync`) and a user-configured `inference.build` (e.g.
+ * `vitepress build && vite build`) names bare binaries that only exist in the
+ * project's own `node_modules/.bin`; under the build container's
+ * `npx --yes void deploy` that happens to work — npx prepends every ancestor
  * `.bin` itself — but a directly invoked `node_modules/.bin/void deploy` or a
  * globally installed `void` inherits no such PATH and the bare binary fails to
- * resolve. `root` defaults to the CWD so callers that pre-date this stay correct
- * for the common `void deploy` (run from the project root) case.
+ * resolve. Passing it makes the project's bin dir shadow the system one for
+ * that child, so it belongs ONLY on the three build execs. The other callers
+ * (`getGitCommit`, the drizzle-kit spawn) exec a system binary or an absolute
+ * path and must not hand a dependency-shipped `node_modules/.bin/git` a child
+ * process holding `VOID_TOKEN`.
  */
-export function buildEnv(extra?: Record<string, string>, root?: string): NodeJS.ProcessEnv {
+export function buildEnv(
+  extra?: Record<string, string>,
+  options?: { localBinRoot?: string },
+): NodeJS.ProcessEnv {
   const env = { ...process.env, ...extra };
   delete env.CF_ACCESS_CLIENT_ID;
   delete env.CF_ACCESS_CLIENT_SECRET;
-  return prependLocalBinToPath(env, root ?? process.cwd());
+  return options?.localBinRoot === undefined
+    ? env
+    : prependLocalBinToPath(env, options.localBinRoot);
 }
 
 /**
@@ -4722,6 +4730,10 @@ async function runDeployInner(
         const gitMetadata = collectGitDeployMetadata(
           root,
           options?.skipBuild ? null : getGitCommit(root),
+          process.env,
+          // Same scrub as `getGitCommit` right above: these git children can
+          // reach repo-configured hooks/credential helpers.
+          buildEnv(),
         );
         const fwPreset = FRAMEWORK_PRESETS[detected.name];
         if (detected.class === 'b' || detected.class === 'c') {
@@ -4772,6 +4784,8 @@ async function runDeployInner(
       const gitMetadata = collectGitDeployMetadata(
         root,
         options?.skipBuild ? null : getGitCommit(root),
+        process.env,
+        buildEnv(),
       );
 
       if (preset) {
@@ -5373,7 +5387,11 @@ export async function runStaticDeploy(
     log.step('Building...');
     cliLog?.info('build_start', { command: preset.buildCommand });
     const buildStartedAt = Date.now();
-    execSync(preset.buildCommand, { cwd: root, stdio: 'inherit', env: buildEnv(undefined, root) });
+    execSync(preset.buildCommand, {
+      cwd: root,
+      stdio: 'inherit',
+      env: buildEnv(undefined, { localBinRoot: root }),
+    });
     cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
   } else if (skipBuild) {
     cliLog?.info('build_skipped', { reason: 'skipBuild' });
@@ -5516,7 +5534,7 @@ async function runFrameworkDeploy(
     execSync(voidConfig.inference?.build ?? resolveProjectCommand(root, fwPreset.buildCommand), {
       cwd: root,
       stdio: 'inherit',
-      env: buildEnv(undefined, root),
+      env: buildEnv(undefined, { localBinRoot: root }),
     });
     cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
   } else {
@@ -5852,7 +5870,7 @@ async function runFullDeploy(
       execSync(buildExec, {
         cwd: root,
         stdio: 'inherit',
-        env: buildEnv({ VOID_DEPLOY_PROJECT_ID: config.projectId }, root),
+        env: buildEnv({ VOID_DEPLOY_PROJECT_ID: config.projectId }, { localBinRoot: root }),
       });
       cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
     } catch (err: unknown) {
@@ -6341,7 +6359,7 @@ function getGitCommit(root: string): string | null {
     // `git status` can invoke a repo-configured `core.fsmonitor` hook, so keep
     // the CF Access service-token pair out of these git children too (matches
     // the build spawns and the prior global env scrub).
-    const gitEnv = buildEnv(undefined, root);
+    const gitEnv = buildEnv();
     // Check if in a git repo
     execSync('git rev-parse --is-inside-work-tree', { cwd: root, stdio: 'ignore', env: gitEnv });
     // Check if working tree is clean
@@ -6417,7 +6435,7 @@ function runDrizzleKitGenerate(root: string, configPath: string): string {
     // drizzle-kit loads the user's drizzle config + schema (user code); keep the
     // CF Access service token AND every wrangler-auth credential out of it, matching the
     // build spawns. Generating migrations needs no Cloudflare credential.
-    env: scrubWranglerAuthCredentials(buildEnv(undefined, root)),
+    env: scrubWranglerAuthCredentials(buildEnv()),
   });
   const stderr = bufferToString(result.stderr);
   const stdout = bufferToString(result.stdout);

@@ -6,6 +6,7 @@ import {
   resolveAssetRoutingPolicy,
   workerOwnsHtmlRouting,
 } from '../../src/asset-routing.ts';
+import { compileAssetFallbackHelper } from '../../src/router/compile.ts';
 
 // `not_found_handling: 'none'` → asset binding 404s on unmatched paths,
 // worker (run_worker_first) owns HTML responses.
@@ -300,8 +301,10 @@ describe('resolveAssetConfig', () => {
 // cannot change — a genuine SPA needs that fallback for deep links, and a built
 // asset tree carries nothing that distinguishes the two — so the user says so.
 //
-// Only `not_found_handling` moves: `run_worker_first` and every derived flag
-// stay as inferred, so which layer sees a request first is unaffected.
+// `run_worker_first`, `workerFirst` and `apiWorkerFirst` stay as inferred, so
+// which layer sees a request first is unaffected. `workerSpaFallback` is the one
+// derived flag that MUST follow the override — see the worker-first describe
+// below for why.
 describe('resolveAssetRoutingPolicy — routing.notFound override', () => {
   const SPA_API_WORKER_FIRST = ['/api', '/api/*', '/__void', '/__void/*'];
 
@@ -327,13 +330,16 @@ describe('resolveAssetRoutingPolicy — routing.notFound override', () => {
     });
   });
 
-  it('leaves run_worker_first and the derived flags untouched', () => {
+  it('leaves run_worker_first and the request-trigger flags untouched', () => {
     const inferred = resolveAssetRoutingPolicy(ssgWithApi);
     const overridden = resolveAssetRoutingPolicy({ ...ssgWithApi, notFound: '404-page' });
     expect(overridden.assetConfig.run_worker_first).toEqual(inferred.assetConfig.run_worker_first);
     expect(overridden.apiWorkerFirst).toBe(inferred.apiWorkerFirst);
     expect(overridden.workerFirst).toBe(inferred.workerFirst);
-    expect(overridden.workerSpaFallback).toBe(inferred.workerSpaFallback);
+    // This shape is asset-first, so there is no worker-side shell fallback to
+    // begin with. The worker-first shape is a different story — below.
+    expect(inferred.workerSpaFallback).toBe(false);
+    expect(overridden.workerSpaFallback).toBe(false);
   });
 
   it('applies on the plain-asset branch too (no API routes)', () => {
@@ -369,5 +375,190 @@ describe('resolveAssetRoutingPolicy — routing.notFound override', () => {
     expect(resolveAssetConfig({ ...ssgWithApi, notFound: '404-page' }).not_found_handling).toBe(
       '404-page',
     );
+  });
+});
+
+// The shape the `routing.notFound` override was silently inert on.
+//
+// `workerSpaFallback` is true for `workerFirst && !isSsr && !hasPages` — any
+// non-SSR app with no `pages/` that still owns HTML routing: a `middleware/`
+// file, a route outside `/api`, a document websocket, or Live. That flag makes
+// the generated `serveWithAssets` answer every unmatched HTML navigation with
+// `/index.html` at status **200**, before `not_found_handling` is ever
+// consulted. So setting `routing.notFound: '404-page'` changed the wrangler
+// asset config and changed nothing a user could observe.
+//
+// This is exactly the app the docs walk people into: `docs/guide/app-types.md`
+// recommends `routing.notFound` for `appType: "void"` + `vitepress build &&
+// vite build`, and `docs/guide/edge/static-assets.md` names it as the override
+// for "Worker owns HTML (Pages, SSR, middleware…)". Add one `middleware/` file
+// to that VitePress app and the documented escape hatch stopped working.
+describe('resolveAssetRoutingPolicy — notFound on the worker-first SPA-fallback shape', () => {
+  // middleware/ → workerOwnsHtmlRouting, no pages/, no SSR.
+  const ssgWithMiddleware = {
+    isSsr: false,
+    hasPages: false,
+    hasDocumentRoutes: false,
+    hasMiddleware: true,
+  } as const;
+
+  it('keeps the worker-side shell fallback when notFound is unset', () => {
+    const policy = resolveAssetRoutingPolicy(ssgWithMiddleware);
+    expect(policy.workerFirst).toBe(true);
+    expect(policy.assetConfig.not_found_handling).toBe('none');
+    expect(policy.workerSpaFallback).toBe(true);
+  });
+
+  it('clears the worker-side shell fallback for notFound: "404-page"', () => {
+    const policy = resolveAssetRoutingPolicy({ ...ssgWithMiddleware, notFound: '404-page' });
+    expect(policy.assetConfig.not_found_handling).toBe('404-page');
+    expect(policy.workerSpaFallback).toBe(false);
+    // Which layer sees the request first is still unchanged.
+    expect(policy.workerFirst).toBe(true);
+    expect(policy.assetConfig.run_worker_first).toEqual(['/**']);
+  });
+
+  it('clears it for notFound: "none" too', () => {
+    expect(
+      resolveAssetRoutingPolicy({ ...ssgWithMiddleware, notFound: 'none' }).workerSpaFallback,
+    ).toBe(false);
+  });
+
+  it('keeps it for an explicit notFound: "single-page-application"', () => {
+    // The override names the shell, so the shell is what it gets.
+    expect(
+      resolveAssetRoutingPolicy({
+        ...ssgWithMiddleware,
+        notFound: 'single-page-application',
+      }).workerSpaFallback,
+    ).toBe(true);
+  });
+
+  it('applies to every workerOwnsHtmlRouting trigger, not just middleware', () => {
+    for (const trigger of [
+      { hasDocumentRoutes: true, hasMiddleware: false },
+      { hasDocumentRoutes: false, hasMiddleware: false, hasWebSockets: true },
+      { hasDocumentRoutes: false, hasMiddleware: false, liveEnabled: true },
+    ]) {
+      const base = { isSsr: false, hasPages: false, ...trigger } as const;
+      expect(resolveAssetRoutingPolicy(base).workerSpaFallback).toBe(true);
+      expect(resolveAssetRoutingPolicy({ ...base, notFound: '404-page' }).workerSpaFallback).toBe(
+        false,
+      );
+    }
+  });
+});
+
+// End-to-end over the REAL generated helper: policy in, executed worker code
+// out. A unit assertion on `workerSpaFallback` alone would not have caught the
+// second half of the bug — with the flag cleared the app returns a real 404,
+// but with the WORKER's generic body, while the docs promise the generator's
+// own `404.html`. `compileAssetFallbackHelper` has to pass the asset binding's
+// 404 through, and only executing it proves that.
+describe('generated serveWithAssets — routing.notFound end to end', () => {
+  /** Stand-in for CF's asset binding, implementing `not_found_handling`. */
+  function makeAssets(handling: string | undefined, opts?: { has404Page?: boolean }) {
+    return {
+      async fetch(req: Request): Promise<Response> {
+        const path = new URL(req.url).pathname;
+        if (path === '/index.html') {
+          return new Response('<html>SPA SHELL</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          });
+        }
+        if (handling === 'single-page-application') {
+          return new Response('<html>SPA SHELL</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          });
+        }
+        // CF serves the NEAREST 404.html, with a real 404 status — which is
+        // precisely why the helper's `asset.status !== 404` guard dropped it.
+        if (handling === '404-page' && opts?.has404Page !== false) {
+          return new Response('<html>GENERATED 404</html>', {
+            status: 404,
+            headers: { 'content-type': 'text/html' },
+          });
+        }
+        return new Response('', { status: 404 });
+      },
+    };
+  }
+
+  async function serveUnmatched(
+    inputs: Parameters<typeof resolveAssetRoutingPolicy>[0],
+    opts?: { has404Page?: boolean },
+  ): Promise<{ status: number; body: string }> {
+    const policy = resolveAssetRoutingPolicy(inputs);
+    const handling = policy.assetConfig.not_found_handling;
+    const source = compileAssetFallbackHelper('assets', policy.workerSpaFallback, handling);
+    const mod = (await import(
+      `data:text/javascript,${encodeURIComponent(`${source}\nexport { serveWithAssets };`)}`
+    )) as {
+      serveWithAssets: (req: Request, env: unknown, res: Response) => Promise<Response>;
+    };
+    const request = new Request('https://app.test/deep/link', {
+      headers: { accept: 'text/html' },
+    });
+    const res = await mod.serveWithAssets(
+      request,
+      { ASSETS: makeAssets(handling, opts) },
+      new Response('worker 404', { status: 404 }),
+    );
+    return { status: res.status, body: await res.text() };
+  }
+
+  const ssgWithMiddleware = {
+    isSsr: false,
+    hasPages: false,
+    hasDocumentRoutes: false,
+    hasMiddleware: true,
+  } as const;
+
+  it('serves the SPA shell at 200 when notFound is unset (unchanged default)', async () => {
+    expect(await serveUnmatched(ssgWithMiddleware)).toEqual({
+      status: 200,
+      body: '<html>SPA SHELL</html>',
+    });
+  });
+
+  it('serves the generator 404 page with a 404 status for notFound: "404-page"', async () => {
+    expect(await serveUnmatched({ ...ssgWithMiddleware, notFound: '404-page' })).toEqual({
+      status: 404,
+      body: '<html>GENERATED 404</html>',
+    });
+  });
+
+  it('keeps the worker response when 404-page finds no 404.html to serve', async () => {
+    // A bodyless platform 404 is strictly worse than whatever the worker said.
+    expect(
+      await serveUnmatched({ ...ssgWithMiddleware, notFound: '404-page' }, { has404Page: false }),
+    ).toEqual({ status: 404, body: 'worker 404' });
+  });
+
+  it('serves the worker 404 for notFound: "none"', async () => {
+    expect(await serveUnmatched({ ...ssgWithMiddleware, notFound: 'none' })).toEqual({
+      status: 404,
+      body: 'worker 404',
+    });
+  });
+
+  it('still serves the shell for an explicit notFound: "single-page-application"', async () => {
+    expect(
+      await serveUnmatched({ ...ssgWithMiddleware, notFound: 'single-page-application' }),
+    ).toEqual({ status: 200, body: '<html>SPA SHELL</html>' });
+  });
+
+  it('honors 404-page on the SSR shape, which never had a shell fallback', async () => {
+    expect(
+      await serveUnmatched({
+        isSsr: true,
+        hasPages: false,
+        hasDocumentRoutes: false,
+        hasMiddleware: false,
+        notFound: '404-page',
+      }),
+    ).toEqual({ status: 404, body: '<html>GENERATED 404</html>' });
   });
 });

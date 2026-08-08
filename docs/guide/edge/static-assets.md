@@ -101,10 +101,13 @@ For Void apps with only `/api` routes, Void keeps the platform SPA fallback and 
 
 `not_found_handling` decides what the asset layer does with a request that matched no asset and no worker route. Void infers it:
 
-| App shape                                  | Inferred value            | Result for an unknown URL        |
-| ------------------------------------------ | ------------------------- | -------------------------------- |
-| Worker owns HTML (Pages, SSR, middleware…) | `none`                    | The worker's own 404             |
-| Asset-first (only `/api` routes, or none)  | `single-page-application` | `index.html` with status **200** |
+| App shape                                   | Inferred value            | Result for an unknown URL        |
+| ------------------------------------------- | ------------------------- | -------------------------------- |
+| Pages or SSR                                | `none`                    | The worker's own 404             |
+| Worker owns HTML, no `pages/`, no SSR entry | `none` + worker fallback  | `index.html` with status **200** |
+| Asset-first (only `/api` routes, or none)   | `single-page-application` | `index.html` with status **200** |
+
+The middle row is a worker with `middleware/`, a route outside `/api`, a document websocket, or Live, but no `pages/` and no SSR entry. `run_worker_first: ['/**']` sends everything to the worker, which bypasses the platform's SPA switch, so the generated worker does that fallback itself for HTML navigations — after your middleware has run, so auth gates and OAuth callbacks still see the request first.
 
 The SPA fallback is right for a single-page app, where deep links must boot the client router. It is wrong for a site whose HTML was generated per page: unknown URLs return 200 instead of 404, and the generator's `404.html` is never served. Nothing in a built asset tree distinguishes the two, so Void does not guess — override it with [`routing.notFound`](../../reference/config.md#routing-notfound):
 
@@ -112,7 +115,7 @@ The SPA fallback is right for a single-page app, where deep links must boot the 
 { "routing": { "notFound": "404-page" } }
 ```
 
-Accepted values are `"single-page-application"`, `"404-page"`, and `"none"`. Only `not_found_handling` changes; `run_worker_first` keeps its inferred value, so API routes, auth, and `/__void/*` still reach the worker first.
+Accepted values are `"single-page-application"`, `"404-page"`, and `"none"`. `run_worker_first` keeps its inferred value, so API routes, auth, and `/__void/*` still reach the worker first. Setting anything other than `"single-page-application"` also turns off the worker-side `index.html` fallback described above — otherwise it would answer the request before `not_found_handling` was ever consulted. With `"404-page"` the worker serves whatever the asset binding returns for the unmatched path, which is Cloudflare's nearest `404.html`; if the build has no `404.html`, the worker's own 404 is kept.
 
 ### Generated config
 

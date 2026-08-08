@@ -2448,6 +2448,55 @@ describe('compileWorkerEntry', () => {
     expect(code).toMatch(/env\.ASSETS\.fetch\(new Request\(indexUrl/);
   });
 
+  // `routing.notFound: '404-page'` sets `assetConfig.not_found_handling`, so
+  // CF's asset binding answers an unmatched path with the NEAREST `404.html` —
+  // at a 404 status, which the `asset.status !== 404` guard above discards. The
+  // resolved handling has to reach the generated helper or the override is
+  // inert on every worker-first app.
+  it('serveWithAssets passes the asset 404 page through for not_found_handling: 404-page', () => {
+    const code = compileWorkerEntry(
+      false,
+      undefined,
+      'assets',
+      [],
+      'void/_env',
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      '404-page',
+    );
+
+    // Pass the binding's own response through — CF's `404-page` is
+    // directory-aware ("nearest 404.html"); a hardcoded `/404.html` fetch is not.
+    expect(code).toContain('asset.headers.get("content-type")');
+    expect(code).toContain('new Response(asset.body, asset)');
+    expect(code).not.toContain('"/404.html"');
+    // And it is NOT the SPA shell path.
+    expect(code).not.toContain('"/index.html"');
+  });
+
+  it('serveWithAssets keeps the worker response for not_found_handling: none', () => {
+    const code = compileWorkerEntry(
+      false,
+      undefined,
+      'assets',
+      [],
+      'void/_env',
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      'none',
+    );
+
+    // Byte-identical to the pre-existing default — `none` is what every
+    // worker-first app infers, so this is the no-regression guard.
+    expect(code).toBe(compileWorkerEntry());
+  });
+
   it('serveWithAssets only falls back to index.html for HTML accept', () => {
     const code = compileWorkerEntry(
       false,

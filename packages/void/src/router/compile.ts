@@ -1,5 +1,6 @@
 import type { VoidAuthProvider } from '../auth/providers.ts';
 import type { DevRedirectRule, HeaderRule } from '../cli/types.ts';
+import type { NotFoundHandling } from '../config.ts';
 import type { MigrationPlanBundle } from '../migrations/plan.ts';
 import { resolveLayoutIds } from '../pages/layout-resolution.ts';
 import { INTERNAL_BINDING_EXACT_NAMES, INTERNAL_BINDING_PREFIXES } from '../runtime/env-raw.ts';
@@ -2358,9 +2359,39 @@ function compilePageRoutes(
  * Class A framework wrappers. If the app returns 404, check ASSETS binding
  * for static files and set cache headers. Edge caching of hashed assets
  * happens at the dispatch layer (see design doc 0042).
+ *
+ * `notFound` is the RESOLVED `assetConfig.not_found_handling` for this build
+ * (`resolveAssetRoutingPolicy`), and it decides what happens once the asset
+ * binding has also answered 404. It is a separate argument from
+ * `serveSpaFallback` because the two are not derived from each other: the
+ * common worker-first app runs with `not_found_handling: 'none'` and STILL
+ * wants the worker-side shell fallback (that is the whole reason the flag
+ * exists). They are mutually exclusive in practice — `resolveAssetRoutingPolicy`
+ * clears `workerSpaFallback` whenever an explicit `routing.notFound` asks for
+ * anything other than the SPA shell.
  */
-export function compileAssetFallbackHelper(assetsDir = 'assets', serveSpaFallback = false): string {
-  const spaFallbackCode = serveSpaFallback
+export function compileAssetFallbackHelper(
+  assetsDir = 'assets',
+  serveSpaFallback = false,
+  notFound: NotFoundHandling = 'none',
+): string {
+  // `404-page`: the asset binding served its nearest `404.html` WITH a 404
+  // status, so the `asset.status !== 404` guard above discards it and the
+  // worker's generic body wins — making `routing.notFound: '404-page'` inert on
+  // every worker-first app. Pass the asset response through instead of fetching
+  // `/404.html` by hand: Cloudflare's `404-page` handling is directory-aware
+  // ("nearest 404.html"), a hardcoded root path is not. Guarded on an HTML
+  // content-type because with no `404.html` anywhere the binding answers a bare
+  // 404, and the worker's own response is the better answer then.
+  const notFoundPageCode = `  const assetContentType = asset.headers.get("content-type") ?? "";
+  if (assetContentType.includes("text/html")) {
+    const res = new Response(asset.body, asset);
+    res.headers.set("Cache-Control", "no-store");
+    return res;
+  }
+  return response;`;
+
+  const fallthroughCode = serveSpaFallback
     ? `  // SPA fallback: when HTML-owning features make
   // assetConfig.not_found_handling = 'none', the asset binding returns 404
   // instead of falling back to index.html itself. Do that fallback here, after
@@ -2381,7 +2412,9 @@ export function compileAssetFallbackHelper(assetsDir = 'assets', serveSpaFallbac
     }
   }
   return response;`
-    : `  return response;`;
+    : notFound === '404-page'
+      ? notFoundPageCode
+      : `  return response;`;
 
   return `
 async function serveWithAssets(request, env, response) {
@@ -2396,7 +2429,7 @@ async function serveWithAssets(request, env, response) {
     }
     return res;
   }
-${spaFallbackCode}
+${fallthroughCode}
 }
 `;
 }
@@ -2439,6 +2472,13 @@ export function compileWorkerEntry(
    * behavioral change for managed/dev/no-ISR builds).
    */
   isr?: { runtimePath: string },
+  /**
+   * Resolved `assetConfig.not_found_handling` for this build. Threaded to
+   * `compileAssetFallbackHelper` so `routing.notFound: '404-page'` is honored
+   * on the worker-first path instead of being discarded. Defaults to `'none'`,
+   * which emits the pre-existing helper byte-for-byte.
+   */
+  notFound: NotFoundHandling = 'none',
 ): string {
   const remotePath = remote?.remotePath;
   const remoteBindingNames = JSON.stringify(remote?.bindingNames);
@@ -2527,7 +2567,7 @@ function __filterInternalBindings(env) {
 }
 `;
 
-  const assetHelper = compileAssetFallbackHelper(assetsDir, serveSpaFallback);
+  const assetHelper = compileAssetFallbackHelper(assetsDir, serveSpaFallback, notFound);
 
   // ISR wiring (self-host only; injected by Task 8 for non-managed builds). When
   // `isr` is absent every fragment below is an empty string, so the generated

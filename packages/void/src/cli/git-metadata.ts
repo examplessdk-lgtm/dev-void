@@ -7,12 +7,13 @@ export type GitDeployMetadata = {
   repositoryUrl: string | null;
 };
 
-function git(root: string, args: Array<string>): string | null {
+function git(root: string, args: Array<string>, env?: NodeJS.ProcessEnv): string | null {
   try {
     return execFileSync('git', args, {
       cwd: root,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      env,
     }).trim();
   } catch {
     return null;
@@ -101,11 +102,25 @@ export function collectGitDeployMetadata(
   root: string,
   commit: string | null,
   env: NodeJS.ProcessEnv = process.env,
+  /**
+   * Env handed to the `git` CHILDREN. Separate from `env` (which is only READ,
+   * for the `GITHUB_*` CI vars) because the two are not interchangeable: a
+   * caller may pass a synthetic `env` to describe CI, and that must not become
+   * the child's whole environment.
+   *
+   * `void deploy` passes its scrubbed `buildEnv()` here. `git remote get-url` /
+   * `git rev-parse` can invoke repo-configured hooks and credential helpers, so
+   * the CF Access service-token pair must stay out of them — exactly what
+   * `getGitCommit` does for its own git children right beside this call.
+   * Defaults to `process.env`, which is what these children inherited before.
+   */
+  childEnv: NodeJS.ProcessEnv = process.env,
 ): GitDeployMetadata {
   const repositoryUrl =
     getGitHubRepositoryUrl(env) ??
-    normalizeGitRemoteUrl(git(root, ['remote', 'get-url', 'origin']));
-  const gitRef = getGitRefFromEnv(env) ?? git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    normalizeGitRemoteUrl(git(root, ['remote', 'get-url', 'origin'], childEnv));
+  const gitRef =
+    getGitRefFromEnv(env) ?? git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], childEnv);
 
   return {
     commit,

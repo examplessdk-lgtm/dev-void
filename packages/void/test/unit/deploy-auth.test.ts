@@ -372,6 +372,13 @@ describe('buildEnv', () => {
 // ancestor `.bin` itself — so the gap is invisible there and only bites a
 // directly invoked `node_modules/.bin/void deploy` or a globally installed
 // `void`, where nothing puts the project's bin dir on PATH.
+//
+// It is an explicit OPT-IN (`{ localBinRoot }`), never the default: prepending
+// the project's bin dir makes a dependency-shipped `node_modules/.bin/<name>`
+// shadow the system binary of that name for the child. That is exactly what a
+// build command wants, and exactly what `getGitCommit`'s `git` children — which
+// run BEFORE any build, with `VOID_TOKEN` in env, even in the no-build deploy
+// modes (`--dir`, static/spa presets with no build command) — must not get.
 describe('buildEnv — local node_modules/.bin on PATH', () => {
   const DELIMITER = process.platform === 'win32' ? ';' : ':';
 
@@ -384,7 +391,7 @@ describe('buildEnv — local node_modules/.bin on PATH', () => {
   it('prepends <root>/node_modules/.bin', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-build-env-'));
     try {
-      const childPath = readPath(buildEnv(undefined, root));
+      const childPath = readPath(buildEnv(undefined, { localBinRoot: root }));
       expect(childPath?.startsWith(join(root, 'node_modules', '.bin') + DELIMITER)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -396,7 +403,7 @@ describe('buildEnv — local node_modules/.bin on PATH', () => {
     const savedPath = process.env.PATH;
     try {
       process.env.PATH = `/usr/bin${DELIMITER}/bin`;
-      const childPath = readPath(buildEnv(undefined, root));
+      const childPath = readPath(buildEnv(undefined, { localBinRoot: root }));
       expect(childPath).toBe(
         `${join(root, 'node_modules', '.bin')}${DELIMITER}/usr/bin${DELIMITER}/bin`,
       );
@@ -415,7 +422,7 @@ describe('buildEnv — local node_modules/.bin on PATH', () => {
     const savedPath = process.env.PATH;
     try {
       process.env.PATH = '/usr/bin';
-      const childPath = readPath(buildEnv(undefined, root));
+      const childPath = readPath(buildEnv(undefined, { localBinRoot: root }));
       const binDir = join(root, 'node_modules', '.bin');
       expect(childPath).toBe(`${binDir}${DELIMITER}/usr/bin`);
       // Guard against the classic `:`-everywhere bug: on Windows a `:` would
@@ -436,7 +443,9 @@ describe('buildEnv — local node_modules/.bin on PATH', () => {
     const savedPath = process.env.PATH;
     try {
       delete process.env.PATH;
-      expect(readPath(buildEnv(undefined, root))).toBe(join(root, 'node_modules', '.bin'));
+      expect(readPath(buildEnv(undefined, { localBinRoot: root }))).toBe(
+        join(root, 'node_modules', '.bin'),
+      );
     } finally {
       if (savedPath === undefined) {
         delete process.env.PATH;
@@ -452,7 +461,7 @@ describe('buildEnv — local node_modules/.bin on PATH', () => {
     const savedId = process.env.CF_ACCESS_CLIENT_ID;
     try {
       process.env.CF_ACCESS_CLIENT_ID = 'svc-id.access';
-      const childEnv = buildEnv({ VOID_DEPLOY_PROJECT_ID: 'proj_1' }, root);
+      const childEnv = buildEnv({ VOID_DEPLOY_PROJECT_ID: 'proj_1' }, { localBinRoot: root });
       expect(childEnv.CF_ACCESS_CLIENT_ID).toBeUndefined();
       expect(childEnv.VOID_DEPLOY_PROJECT_ID).toBe('proj_1');
       expect(readPath(childEnv)?.startsWith(join(root, 'node_modules', '.bin'))).toBe(true);
@@ -466,10 +475,33 @@ describe('buildEnv — local node_modules/.bin on PATH', () => {
     }
   });
 
-  it('falls back to the CWD when no root is given', () => {
-    expect(readPath(buildEnv())?.startsWith(join(process.cwd(), 'node_modules', '.bin'))).toBe(
-      true,
-    );
+  // The privileged case must be opt-in. `getGitCommit` and the drizzle-kit
+  // spawn call `buildEnv()` with no options, and a dependency that ships
+  // `node_modules/.bin/git` must not be able to hijack them — `getGitCommit`
+  // runs before the build and, on `void deploy --dir dist` or a static/spa
+  // preset with no build command, is the ONLY child the deploy spawns.
+  it('leaves PATH untouched when no localBinRoot is given', () => {
+    const savedPath = process.env.PATH;
+    try {
+      process.env.PATH = `/usr/bin${DELIMITER}/bin`;
+      expect(readPath(buildEnv())).toBe(`/usr/bin${DELIMITER}/bin`);
+      expect(readPath(buildEnv({ VOID_DEPLOY_PROJECT_ID: 'proj_1' }))).toBe(
+        `/usr/bin${DELIMITER}/bin`,
+      );
+    } finally {
+      if (savedPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = savedPath;
+      }
+    }
+  });
+
+  it('hands the child the parent PATH byte-for-byte when no localBinRoot is given', () => {
+    // Deliberately NOT asserting on `process.cwd()/node_modules/.bin`: the test
+    // runner itself puts that on PATH, so an absence check there would be
+    // vacuous. Identity with the parent is the property that matters.
+    expect(readPath(buildEnv())).toBe(process.env.PATH);
   });
 });
 
