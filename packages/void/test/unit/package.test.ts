@@ -3,6 +3,7 @@ import { hash as blake3hash } from 'blake3-jit';
 import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
+  buildStaticManifest,
   buildVoidManifest,
   computeAssetHash,
   collectAndHashAssets,
@@ -249,6 +250,85 @@ describe('resolveSpaFallbackChain', () => {
     const result = resolveSpaFallbackChain(undefined, undefined);
     expect(result.assetConfig).toEqual({ not_found_handling: 'none' });
     expect(result.fallbackRules).toBeUndefined();
+  });
+
+  // `routing.notFound` (void.json) is appType-independent — the worker path
+  // already honors it via `resolveAssetRoutingPolicy`. `detectPreset`
+  // classifies any Vite project with no backend files as `spa`, so a plain
+  // Vite MPA lands on `appType: 'spa'` and this override is its only way to
+  // get a real 404 instead of the SPA shell with HTTP 200.
+  it('honors an explicit notFound over the appType-inferred handling (SPA)', () => {
+    expect(resolveSpaFallbackChain('spa', undefined, '404-page').assetConfig).toEqual({
+      not_found_handling: '404-page',
+    });
+    expect(resolveSpaFallbackChain('spa', undefined, 'none').assetConfig).toEqual({
+      not_found_handling: 'none',
+    });
+  });
+
+  it('does not synthesise the SPA catch-all when notFound overrides away from SPA', () => {
+    // Applying the override AFTER the SPA branch would leave the synthetic
+    // `/* -> /index.html` rule in place, so the SPA shell would still be
+    // served (via a rule instead of the platform switch) and the override
+    // would be a no-op.
+    const userRules = [{ source: '/docs/*', destination: '/docs.html', status: 200, force: false }];
+    const result = resolveSpaFallbackChain('spa', userRules, '404-page');
+    expect(result.assetConfig).toEqual({ not_found_handling: '404-page' });
+    expect(result.fallbackRules).toEqual(userRules);
+  });
+
+  it('takes the SPA branch when notFound explicitly asks for single-page-application', () => {
+    const userRules = [{ source: '/docs/*', destination: '/docs.html', status: 200, force: false }];
+    const result = resolveSpaFallbackChain('static', userRules, 'single-page-application');
+    expect(result.assetConfig).toEqual({ not_found_handling: 'none' });
+    expect(result.fallbackRules).toEqual([
+      ...userRules,
+      {
+        source: '/*',
+        destination: '/index.html',
+        status: 200,
+        force: false,
+        origin: 'spa-default',
+      },
+    ]);
+  });
+
+  it('falls back to the appType-inferred handling when notFound is undefined', () => {
+    expect(resolveSpaFallbackChain('static', undefined, undefined).assetConfig).toEqual({
+      not_found_handling: '404-page',
+    });
+    expect(resolveSpaFallbackChain('spa', undefined, undefined).assetConfig).toEqual({
+      not_found_handling: 'single-page-application',
+    });
+  });
+});
+
+describe('buildStaticManifest', () => {
+  it('infers not_found_handling from appType when notFound is unset', () => {
+    expect(buildStaticManifest({ appType: 'static' }).assetConfig).toEqual({
+      not_found_handling: '404-page',
+    });
+    expect(buildStaticManifest({ appType: 'spa' }).assetConfig).toEqual({
+      not_found_handling: 'single-page-application',
+    });
+  });
+
+  it('threads routing.notFound into manifest.assetConfig', () => {
+    const manifest = buildStaticManifest({ appType: 'spa', notFound: '404-page' });
+    expect(manifest.type).toBe('spa');
+    expect(manifest.assetConfig).toEqual({ not_found_handling: '404-page' });
+  });
+
+  it('ships only the user fallbacks when notFound overrides the SPA default', () => {
+    const manifest = buildStaticManifest({
+      appType: 'spa',
+      notFound: '404-page',
+      fallbackRules: [{ source: '/docs/*', destination: '/docs.html', status: 200, force: false }],
+    });
+    expect(manifest.assetConfig).toEqual({ not_found_handling: '404-page' });
+    expect(manifest.fallbackRules).toEqual([
+      { source: '/docs/*', destination: '/docs.html', status: 200 },
+    ]);
   });
 });
 

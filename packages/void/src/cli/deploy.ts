@@ -28,6 +28,7 @@ import {
   readConfig,
   resolveBindingNames,
   type DatabaseDialect,
+  type NotFoundHandling,
   type RoutingConfig,
   type VoidConfig,
   getDatabaseDialect,
@@ -5355,6 +5356,13 @@ export async function runStaticDeploy(
   fallbackRules?: Array<DevRedirectRule>,
   routing?: RoutingConfig,
   cliLog?: CliLogger,
+  /**
+   * Explicit `routing.notFound`. Normally carried by `routing`, but the
+   * "all pages prerendered -> static" redirect in `runFullDeploy` passes
+   * `routing: undefined` (its rules were already merged upstream), so that
+   * call site hands the value over directly. Wins over `routing.notFound`.
+   */
+  notFound?: NotFoundHandling,
 ): Promise<void> {
   const typeLabel = preset.appType === 'spa' ? 'Static SPA' : 'Static Site';
   log.info(`${typeLabel} deploy`);
@@ -5421,6 +5429,7 @@ export async function runStaticDeploy(
     headerRules,
     redirectRules,
     fallbackRules,
+    notFound: notFound ?? routing?.notFound,
   });
   cliLog?.info('package_end', {
     mode: 'static',
@@ -6076,8 +6085,10 @@ async function runFullDeploy(
         headerRules,
         redirectRules,
         fallbackRules,
+        // Rules were already merged above — pass only the notFound override.
         undefined,
         cliLog,
+        deployConfig.routing?.notFound,
       );
     }
   }

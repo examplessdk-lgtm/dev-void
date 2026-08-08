@@ -414,6 +414,68 @@ describe('direct-to-R2 deploy flow', () => {
     expect(body.preflight).toBe('true');
   });
 
+  // `routing.notFound` must reach the STATIC manifest, not only the
+  // worker-with-assets path. `detectPreset` classifies any Vite project with
+  // no backend files as `spa`, so a plain Vite MPA lands here and would
+  // otherwise ship `not_found_handling: 'single-page-application'` — every
+  // unknown URL answered with index.html and HTTP 200.
+  it('threads routing.notFound into the finalize manifest (static path)', async () => {
+    const state = installPlatformMocks();
+    const client = makeClient();
+
+    await runStaticDeploy(
+      workdir,
+      { projectId: 'proj_t', slug: 'test' },
+      client,
+      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { notFound: '404-page' },
+      undefined,
+    );
+
+    const body = JSON.parse(state.finalizeCalls[0].init.body as string);
+    expect(body.manifest.type).toBe('spa');
+    expect(body.manifest.assetConfig).toEqual({ not_found_handling: '404-page' });
+    // Overriding away from SPA must NOT leave the synthetic `/* -> /index.html`
+    // fallback behind, or the shell would still be served via a rule.
+    expect(body.manifest.fallbackRules).toBeUndefined();
+  });
+
+  // Calling convention of the "all pages prerendered -> static" redirect in
+  // `runFullDeploy`: it merged the routing RULES upstream and deliberately
+  // passes `routing: undefined`, so the notFound override has to ride the
+  // dedicated trailing param or it is silently dropped there too.
+  it('honors an explicit notFound when routing is undefined (full->static redirect shape)', async () => {
+    const state = installPlatformMocks();
+    const client = makeClient();
+
+    await runStaticDeploy(
+      workdir,
+      { projectId: 'proj_t', slug: 'test' },
+      client,
+      { buildCommand: null, outputDir: assetsDir, appType: 'static' },
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'single-page-application',
+    );
+
+    const body = JSON.parse(state.finalizeCalls[0].init.body as string);
+    expect(body.manifest.assetConfig).toEqual({
+      not_found_handling: 'single-page-application',
+    });
+  });
+
   it('retries 5xx R2 PUT failures up to 3 times', async () => {
     let attemptsForFirstAsset = 0;
     const state = installPlatformMocks({

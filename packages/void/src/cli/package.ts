@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { hash as blake3hash } from 'blake3-jit';
 import ignore from 'ignore';
 import { extname, join, relative } from 'pathslash';
+import type { NotFoundHandling } from '../config.ts';
 import type { InferredBindings } from '../inference/walk.ts';
 import { buildMigrationPlanBundle } from '../migrations/plan.ts';
 import type { MigrationFile } from '../migrations/validate.ts';
@@ -76,19 +77,36 @@ function stripDevOnlyRuleFields(
  *
  * When the user has no fallbacks configured, the platform-level SPA switch
  * is left intact (zero worker-side overhead for the common case).
+ *
+ * `notFound` is the explicit `routing.notFound` from void.json. It overrides
+ * the value this function would otherwise infer from `appType`, mirroring
+ * `resolveAssetRoutingPolicy` on the worker-with-assets path. It is resolved
+ * *before* the SPA branch, not patched onto the result afterwards: an override
+ * away from `single-page-application` must also skip the synthetic
+ * `/* -> /index.html` rule below, otherwise the SPA shell would still be
+ * served — just through a fallback rule instead of the platform switch — and
+ * the override would be a no-op. This matters because `detectPreset`
+ * classifies any Vite project without backend files as `spa`, so a plain Vite
+ * MPA lands on `appType: 'spa'` and `routing.notFound: '404-page'` is its only
+ * escape hatch.
  */
 export function resolveSpaFallbackChain(
   appType: 'spa' | 'static' | undefined,
   fallbackRules: Array<DevRedirectRule> | undefined,
+  notFound?: NotFoundHandling,
 ): {
   assetConfig: AssetConfig;
   fallbackRules: Array<DevRedirectRule> | undefined;
 } {
   const userRules = fallbackRules && fallbackRules.length > 0 ? fallbackRules : undefined;
 
-  if (appType !== 'spa') {
+  const handling: NotFoundHandling =
+    notFound ??
+    (appType === 'spa' ? 'single-page-application' : appType === 'static' ? '404-page' : 'none');
+
+  if (handling !== 'single-page-application') {
     return {
-      assetConfig: { not_found_handling: appType === 'static' ? '404-page' : 'none' },
+      assetConfig: { not_found_handling: handling },
       fallbackRules: userRules,
     };
   }
@@ -454,12 +472,16 @@ function toLiveManifest(live?: LiveBindingConfig): import('./types.ts').LiveMani
 }
 
 /**
- * If the user configured `routing.fallbacks` on a non-SPA app, the platform
- * still applies the rules but no `/* -> /index.html` SPA shell is synthesised
- * — unmatched paths fall through to the platform 404. Returns the warning
+ * If the user configured `routing.fallbacks` on an app whose resolved
+ * `not_found_handling` is not `single-page-application`, the platform still
+ * applies the rules but no `/* -> /index.html` SPA shell is synthesised —
+ * unmatched paths fall through to the platform 404. Returns the warning
  * message string when that mismatch is detected, or `null` otherwise. Pure
  * function; callers decide whether/how to surface the message (CLI progress,
  * `console.warn`, etc.).
+ *
+ * The message names `not_found_handling` rather than the app type because an
+ * explicit `routing.notFound` can land here too — the app may well be a SPA.
  */
 export function detectNonSpaFallbackWarning(
   assetConfig: AssetConfig | undefined,
@@ -472,7 +494,8 @@ export function detectNonSpaFallbackWarning(
     return null;
   }
   return (
-    `routing.fallbacks is set but appType is not "spa"; fallbacks will be applied, ` +
+    `routing.fallbacks is set but not_found_handling is not "single-page-application"; ` +
+    `fallbacks will be applied, ` +
     `but no "/* -> /index.html" SPA shell fallback is synthesised — unmatched paths fall through to the platform 404.`
   );
 }
@@ -717,11 +740,14 @@ export function buildStaticManifest(opts: {
   headerRules?: Array<HeaderRule>;
   redirectRules?: Array<DevRedirectRule>;
   fallbackRules?: Array<DevRedirectRule>;
+  /** Explicit `routing.notFound` — overrides the appType-inferred handling. */
+  notFound?: NotFoundHandling;
 }): DeployManifest {
-  const { appType, hashedAssetsPrefix, headerRules, redirectRules, fallbackRules } = opts;
+  const { appType, hashedAssetsPrefix, headerRules, redirectRules, fallbackRules, notFound } = opts;
   const { assetConfig, fallbackRules: resolvedFallbackRules } = resolveSpaFallbackChain(
     appType,
     fallbackRules,
+    notFound,
   );
 
   const manifest: DeployManifest = {
