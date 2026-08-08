@@ -5507,6 +5507,36 @@ export function warnRedundantForceOn3xx(count: number): void {
 }
 
 /**
+ * Class B/C framework deploys pin `not_found_handling: 'none'`, so
+ * `routing.notFound` does nothing there — say so instead of dropping it
+ * silently.
+ *
+ * These presets emit no `run_worker_first`, so Cloudflare's default applies and
+ * the asset layer answers before the framework worker: real prerendered files
+ * already win. `not_found_handling` only governs what the framework's own
+ * `env.ASSETS.fetch()` delegation returns, which is framework-internal
+ * plumbing. Honoring the override there would be a behavior change, not a fix —
+ * `single-page-application` makes an unmatched delegation return
+ * `dist/client/index.html` at **200** (Astro/SvelteKit hybrid builds commonly
+ * prerender the root, so real 404s silently become the home page), and
+ * `404-page` steals the 404 from the framework's own error route.
+ *
+ * Silenced when unset.
+ */
+export function warnIgnoredNotFoundForFramework(
+  notFound: NotFoundHandling | undefined,
+  frameworkName: string,
+): void {
+  if (notFound === undefined) {
+    return;
+  }
+  log.warn(
+    `"routing.notFound" in void.json is ignored for ${frameworkName} deploys ` +
+      `(not_found_handling is pinned to "none" — the framework's own worker owns unmatched HTML).`,
+  );
+}
+
+/**
  * Class B/C framework deploy: build with framework CLI, package with preset output paths.
  */
 async function runFrameworkDeploy(
@@ -5558,6 +5588,11 @@ async function runFrameworkDeploy(
     routing: voidConfig.routing,
   });
   warnRedundantForceOn3xx(redundantForceOn3xx);
+
+  // `assetConfig` below is pinned to `not_found_handling: 'none'` on this path,
+  // so `routing.notFound` is inert. Warned here (outside the packaging spinner)
+  // rather than at the pin itself.
+  warnIgnoredNotFoundForFramework(voidConfig.routing?.notFound, detected.name);
 
   // Lint each phase independently: duplicates across phases (redirects vs
   // fallbacks) don't shadow each other, only duplicates within a phase do.
@@ -5766,6 +5801,9 @@ async function runFrameworkDeploy(
     revalidate,
     revalidateQueryAllowlist: voidConfig.routing?.revalidateQueryAllowlist,
     prerender,
+    // Pinned, NOT threaded from `routing.notFound` — see
+    // `warnIgnoredNotFoundForFramework` for why the override must not apply to
+    // Class B/C. The warning above tells the user when they set it anyway.
     assetConfig: { not_found_handling: 'none' },
     vars: envVars,
     packageOptions,

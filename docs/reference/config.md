@@ -394,6 +394,8 @@ Set `"404-page"` when your assets come from a static site generator (VitePress, 
 
 `run_worker_first` is untouched, so API routes, auth, and `/__void/*` still reach the worker first. When the worker owns HTML routing it also serves the resolved behavior itself, since `run_worker_first: ["/**"]` means the platform switch never runs — see [Unmatched requests](../guide/edge/static-assets.md#unmatched-requests).
 
+This does **not** apply to SvelteKit, Nuxt, Analog, or Astro deploys: those pin `not_found_handling` to `"none"` because the framework's own worker owns unmatched HTML, and `void deploy` warns if you set `routing.notFound` anyway.
+
 ### `inference`
 
 Configuration for build-time inference, including how Void detects your app type, bindings, and build process.

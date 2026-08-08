@@ -581,6 +581,32 @@ describe('generated serveWithAssets — routing.notFound end to end', () => {
     ).toEqual({ status: 404, body: '<html>GENERATED 404</html>' });
   });
 
+  // Guard against a recurring misreading of `workerSpaFallback: false` on the
+  // SSR/Pages shapes as "the explicit override cannot work there". It already
+  // works: `serveWithAssets` returns the asset response as soon as it is not a
+  // 404, so SPA mode hands back the shell at 200 BEFORE `fallthroughCode` — the
+  // only place `workerSpaFallback` matters — is ever reached. Enabling the flag
+  // for `isSsr` / `hasPages` would be strictly dead code, so it must stay off.
+  for (const shape of [
+    { label: 'SSR', isSsr: true, hasPages: false },
+    { label: 'Pages', isSsr: false, hasPages: true },
+  ]) {
+    it(`serves the shell at 200 for ${shape.label} + notFound: "single-page-application", with the worker fallback off`, async () => {
+      const inputs = {
+        isSsr: shape.isSsr,
+        hasPages: shape.hasPages,
+        hasDocumentRoutes: false,
+        hasMiddleware: false,
+        notFound: 'single-page-application',
+      } as const;
+      expect(resolveAssetRoutingPolicy(inputs).workerSpaFallback).toBe(false);
+      expect(await serveUnmatched(inputs)).toEqual({
+        status: 200,
+        body: '<html>SPA SHELL</html>',
+      });
+    });
+  }
+
   // The axis the cases above miss: they all send `accept: text/html` to a
   // document path with a generic worker 404, so nothing here distinguished
   // "browser asked for a page" from "an API client asked for data".

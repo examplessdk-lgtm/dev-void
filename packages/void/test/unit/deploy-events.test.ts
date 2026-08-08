@@ -15,6 +15,7 @@ import type { SpinnerResult } from '@clack/prompts';
 import {
   applyDeployEvent,
   streamDeployEvents,
+  warnIgnoredNotFoundForFramework,
   warnUnpublishedRouting,
 } from '../../src/cli/deploy.ts';
 import type { CliLogger } from '../../src/cli/log-file.ts';
@@ -277,6 +278,49 @@ describe('warnUnpublishedRouting', () => {
     warnSpy.mockClear();
     warnUnpublishedRouting(makeDone(true));
     warnUnpublishedRouting(makeDone(undefined));
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+});
+
+// Class B/C framework deploys pin `not_found_handling: 'none'` and never read
+// `routing.notFound`. The config validator accepts the key in every mode, so
+// without this warning the option looks supported and silently does nothing.
+describe('warnIgnoredNotFoundForFramework', () => {
+  it('warns, naming the framework and the pinned value, when routing.notFound is set', async () => {
+    const { log } = await import('@clack/prompts');
+    const warnSpy = log.warn as ReturnType<typeof vi.fn>;
+    warnSpy.mockClear();
+
+    warnIgnoredNotFoundForFramework('404-page', 'astro');
+
+    expect(warnSpy).toHaveBeenCalledOnce();
+    const msg = String(warnSpy.mock.calls[0][0]);
+    expect(msg).toContain('"routing.notFound"');
+    expect(msg).toContain('astro');
+    expect(msg).toContain('"none"');
+    expect(msg).toMatch(/ignored/i);
+  });
+
+  it('warns for every accepted value, including the pinned one', async () => {
+    // Even `'none'` warns: it happens to match what the path pins, but the key
+    // is still not read, and staying silent there would teach that it works.
+    const { log } = await import('@clack/prompts');
+    const warnSpy = log.warn as ReturnType<typeof vi.fn>;
+
+    for (const value of ['single-page-application', '404-page', 'none'] as const) {
+      warnSpy.mockClear();
+      warnIgnoredNotFoundForFramework(value, 'sveltekit');
+      expect(warnSpy).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('does not warn when routing.notFound is unset', async () => {
+    const { log } = await import('@clack/prompts');
+    const warnSpy = log.warn as ReturnType<typeof vi.fn>;
+    warnSpy.mockClear();
+
+    warnIgnoredNotFoundForFramework(undefined, 'nuxt');
 
     expect(warnSpy).not.toHaveBeenCalled();
   });

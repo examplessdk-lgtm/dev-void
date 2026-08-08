@@ -147,7 +147,7 @@
         "notFound": {
           "type": "string",
           "enum": ["single-page-application", "404-page", "none"],
-          "description": "Override how the asset layer answers a request that matched no asset and no worker route. Void infers \"single-page-application\" when the worker does not own HTML routing; set \"404-page\" for a static-site-generator build so unknown URLs serve 404.html with a real HTTP 404 instead of index.html with a 200. Does not change run_worker_first."
+          "description": "Override how the asset layer answers a request that matched no asset and no worker route. Void infers \"single-page-application\" when the worker does not own HTML routing; set \"404-page\" for a static-site-generator build so unknown URLs serve 404.html with a real HTTP 404 instead of index.html with a 200. Does not change run_worker_first. Ignored for SvelteKit, Nuxt, Analog, and Astro deploys, which pin not_found_handling to \"none\" because the framework's own worker owns unmatched HTML."
         },
         "revalidate": {
           "description": "Edge caching TTL in seconds. A number sets a global TTL for all SSR pages. An object maps URL patterns to TTLs (first match wins). Set to 0 to disable caching for a path.",

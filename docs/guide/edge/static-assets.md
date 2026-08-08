@@ -101,11 +101,12 @@ For Void apps with only `/api` routes, Void keeps the platform SPA fallback and 
 
 `not_found_handling` decides what the asset layer does with a request that matched no asset and no worker route. Void infers it:
 
-| App shape                                   | Inferred value            | Result for an unknown URL        |
-| ------------------------------------------- | ------------------------- | -------------------------------- |
-| Pages or SSR                                | `none`                    | The worker's own 404             |
-| Worker owns HTML, no `pages/`, no SSR entry | `none` + worker fallback  | `index.html` with status **200** |
-| Asset-first (only `/api` routes, or none)   | `single-page-application` | `index.html` with status **200** |
+| App shape                                         | Inferred value                   | Result for an unknown URL        |
+| ------------------------------------------------- | -------------------------------- | -------------------------------- |
+| Pages or SSR                                      | `none`                           | The worker's own 404             |
+| Worker owns HTML, no `pages/`, no SSR entry       | `none` + worker fallback         | `index.html` with status **200** |
+| Asset-first (only `/api` routes, or none)         | `single-page-application`        | `index.html` with status **200** |
+| Framework deploy (SvelteKit, Nuxt, Analog, Astro) | `none` — pinned, not overridable | The framework worker's own 404   |
 
 The middle row is a worker with `middleware/`, a route outside `/api`, a document websocket, or Live, but no `pages/` and no SSR entry. `run_worker_first: ['/**']` sends everything to the worker, which bypasses the platform's SPA switch, so the generated worker does that fallback itself for HTML navigations — after your middleware has run, so auth gates and OAuth callbacks still see the request first.
 
@@ -116,6 +117,8 @@ The SPA fallback is right for a single-page app, where deep links must boot the 
 ```
 
 Accepted values are `"single-page-application"`, `"404-page"`, and `"none"`. `run_worker_first` keeps its inferred value, so API routes, auth, and `/__void/*` still reach the worker first. Setting anything other than `"single-page-application"` also turns off the worker-side `index.html` fallback described above — otherwise it would answer the request before `not_found_handling` was ever consulted. With `"404-page"` the worker serves whatever the asset binding returns for the unmatched path, which is Cloudflare's nearest `404.html` — but only for HTML navigations (requests whose `Accept` includes `text/html`), so an API route that deliberately returns a 404 keeps its own body, status and headers. If the build has no `404.html`, the worker's own 404 is kept.
+
+The last row is the exception: `routing.notFound` is **ignored** for SvelteKit, Nuxt, Analog, and Astro deploys, and `void deploy` warns when you set it. Those deploys emit no `run_worker_first`, so the asset layer already answers first and real prerendered files win — `not_found_handling` would only change what the framework's own `env.ASSETS.fetch()` delegation returns, where `"single-page-application"` turns genuine 404s into the prerendered home page at 200 and `"404-page"` takes the 404 away from the framework's own error route. TanStack Start and React Router deploys are not affected; they follow the rows above.
 
 ### Generated config
 

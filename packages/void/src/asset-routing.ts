@@ -94,10 +94,18 @@ export function resolveAssetRoutingPolicy(inputs: AssetRoutingInputs): AssetRout
     assetConfig,
     apiWorkerFirst,
     workerFirst,
-    // The worker-side SPA fallback exists only to REPLACE the platform switch
-    // that `run_worker_first: ['/**']` bypasses — it hardcodes `/index.html` at
-    // status 200. So an explicit `notFound` that asks for anything else must
-    // turn it off, or the generated helper answers the unmatched navigation
+    // The worker-side SPA fallback exists to REPLACE the SPA behavior the
+    // INFERRED config gives up on this shape: `workerFirst` infers
+    // `not_found_handling: 'none'`, so `env.ASSETS.fetch()` hands back a bare
+    // 404 for an unmatched navigation and the worker has to hardcode
+    // `/index.html` at status 200 itself.
+    //
+    // `run_worker_first: ['/**']` is NOT what disables the platform switch — it
+    // only decides who sees the request FIRST. It skips the pre-worker asset
+    // layer, but `not_found_handling` still applies inside `env.ASSETS.fetch()`.
+    //
+    // So an explicit `notFound` that asks for anything else must turn the
+    // fallback off, or the generated helper answers the unmatched navigation
     // with the shell before `not_found_handling` is ever consulted and the
     // override is inert. `single-page-application` keeps it (that is what it
     // asks for); `undefined` keeps the inferred behavior.
