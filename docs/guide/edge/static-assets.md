@@ -115,7 +115,7 @@ The SPA fallback is right for a single-page app, where deep links must boot the 
 { "routing": { "notFound": "404-page" } }
 ```
 
-Accepted values are `"single-page-application"`, `"404-page"`, and `"none"`. `run_worker_first` keeps its inferred value, so API routes, auth, and `/__void/*` still reach the worker first. Setting anything other than `"single-page-application"` also turns off the worker-side `index.html` fallback described above — otherwise it would answer the request before `not_found_handling` was ever consulted. With `"404-page"` the worker serves whatever the asset binding returns for the unmatched path, which is Cloudflare's nearest `404.html`; if the build has no `404.html`, the worker's own 404 is kept.
+Accepted values are `"single-page-application"`, `"404-page"`, and `"none"`. `run_worker_first` keeps its inferred value, so API routes, auth, and `/__void/*` still reach the worker first. Setting anything other than `"single-page-application"` also turns off the worker-side `index.html` fallback described above — otherwise it would answer the request before `not_found_handling` was ever consulted. With `"404-page"` the worker serves whatever the asset binding returns for the unmatched path, which is Cloudflare's nearest `404.html` — but only for HTML navigations (requests whose `Accept` includes `text/html`), so an API route that deliberately returns a 404 keeps its own body, status and headers. If the build has no `404.html`, the worker's own 404 is kept.
 
 ### Generated config
 

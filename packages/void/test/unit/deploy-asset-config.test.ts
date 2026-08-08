@@ -486,10 +486,21 @@ describe('generated serveWithAssets — routing.notFound end to end', () => {
     };
   }
 
-  async function serveUnmatched(
+  /**
+   * Runs the generated helper and hands back the raw `Response`, so a caller can
+   * assert on headers and not just status/body. `path`, `accept` and the worker
+   * response default to a browser navigation to an unmatched document path.
+   */
+  async function serveRaw(
     inputs: Parameters<typeof resolveAssetRoutingPolicy>[0],
-    opts?: { has404Page?: boolean },
-  ): Promise<{ status: number; body: string }> {
+    opts?: {
+      has404Page?: boolean;
+      path?: string;
+      /** `null` omits the header entirely. */
+      accept?: string | null;
+      workerResponse?: () => Response;
+    },
+  ): Promise<Response> {
     const policy = resolveAssetRoutingPolicy(inputs);
     const handling = policy.assetConfig.not_found_handling;
     const source = compileAssetFallbackHelper('assets', policy.workerSpaFallback, handling);
@@ -498,14 +509,22 @@ describe('generated serveWithAssets — routing.notFound end to end', () => {
     )) as {
       serveWithAssets: (req: Request, env: unknown, res: Response) => Promise<Response>;
     };
-    const request = new Request('https://app.test/deep/link', {
-      headers: { accept: 'text/html' },
+    const accept = opts?.accept === undefined ? 'text/html' : opts.accept;
+    const request = new Request(`https://app.test${opts?.path ?? '/deep/link'}`, {
+      headers: accept === null ? {} : { accept },
     });
-    const res = await mod.serveWithAssets(
+    return await mod.serveWithAssets(
       request,
       { ASSETS: makeAssets(handling, opts) },
-      new Response('worker 404', { status: 404 }),
+      opts?.workerResponse?.() ?? new Response('worker 404', { status: 404 }),
     );
+  }
+
+  async function serveUnmatched(
+    inputs: Parameters<typeof resolveAssetRoutingPolicy>[0],
+    opts?: { has404Page?: boolean },
+  ): Promise<{ status: number; body: string }> {
+    const res = await serveRaw(inputs, opts);
     return { status: res.status, body: await res.text() };
   }
 
@@ -560,5 +579,104 @@ describe('generated serveWithAssets — routing.notFound end to end', () => {
         notFound: '404-page',
       }),
     ).toEqual({ status: 404, body: '<html>GENERATED 404</html>' });
+  });
+
+  // The axis the cases above miss: they all send `accept: text/html` to a
+  // document path with a generic worker 404, so nothing here distinguished
+  // "browser asked for a page" from "an API client asked for data".
+  //
+  // `serveWithAssets` wraps EVERY app response with no path filtering and
+  // engages on any 404, so a GET/HEAD API handler that deliberately answers 404
+  // has to survive it intact. On the asset-first shape — this feature's own
+  // documented recipe — `404-page` means the asset layer answers document misses
+  // itself, so the worker only ever reaches this branch on `run_worker_first`
+  // paths (`/api/*`, `/__void/*`), where an HTML 404 page is never the answer.
+  describe('an API 404 is not replaced by the HTML 404 page', () => {
+    /** A handler deliberately answering 404 with JSON, plus a CORS header. */
+    const apiJson404 = () =>
+      new Response(JSON.stringify({ error: 'not found' }), {
+        status: 404,
+        headers: {
+          'content-type': 'application/json',
+          'access-control-allow-origin': 'https://client.test',
+        },
+      });
+
+    async function serveApi(accept: string | null) {
+      const res = await serveRaw(
+        { ...ssgWithMiddleware, notFound: '404-page' },
+        { path: '/api/thing', accept, workerResponse: apiJson404 },
+      );
+      return {
+        status: res.status,
+        contentType: res.headers.get('content-type'),
+        cors: res.headers.get('access-control-allow-origin'),
+        body: await res.text(),
+      };
+    }
+
+    it('preserves body, status and content-type for an API client (accept: application/json)', async () => {
+      expect(await serveApi('application/json')).toEqual({
+        status: 404,
+        contentType: 'application/json',
+        cors: 'https://client.test',
+        body: '{"error":"not found"}',
+      });
+    });
+
+    it('preserves it for a curl-style accept: */*', async () => {
+      // `*/*` does not literally contain `text/html`, and it must not be widened
+      // to match: a wildcard is what every non-browser client sends by default.
+      expect(await serveApi('*/*')).toEqual({
+        status: 404,
+        contentType: 'application/json',
+        cors: 'https://client.test',
+        body: '{"error":"not found"}',
+      });
+    });
+
+    it('preserves it when the request sends no accept header at all', async () => {
+      expect(await serveApi(null)).toEqual({
+        status: 404,
+        contentType: 'application/json',
+        cors: 'https://client.test',
+        body: '{"error":"not found"}',
+      });
+    });
+
+    it('keeps a middleware-set CORS header on an HTML-accepting API 404 too', async () => {
+      // Rebuilding the response from the asset would drop it, and a browser
+      // `fetch()` would then see a CORS failure instead of a 404. Only the
+      // document-navigation shape below is allowed to swap in the 404 page.
+      const res = await serveRaw(
+        { ...ssgWithMiddleware, notFound: '404-page' },
+        { path: '/api/thing', accept: 'application/json, text/plain', workerResponse: apiJson404 },
+      );
+      expect(res.headers.get('access-control-allow-origin')).toBe('https://client.test');
+    });
+
+    // Regression guards for the intended target — both document shapes still
+    // get the generator's 404 page. The `.html` case matters because VitePress
+    // defaults to `cleanUrls: false`, so its URLs carry the extension.
+    it('still serves the HTML 404 page for a browser navigation to an extension-less path', async () => {
+      expect(await serveUnmatched({ ...ssgWithMiddleware, notFound: '404-page' })).toEqual({
+        status: 404,
+        body: '<html>GENERATED 404</html>',
+      });
+    });
+
+    it('still serves the HTML 404 page for a browser navigation to a .html path', async () => {
+      const res = await serveRaw(
+        { ...ssgWithMiddleware, notFound: '404-page' },
+        {
+          path: '/guide/missing.html',
+          accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+      );
+      expect({ status: res.status, body: await res.text() }).toEqual({
+        status: 404,
+        body: '<html>GENERATED 404</html>',
+      });
+    });
   });
 });

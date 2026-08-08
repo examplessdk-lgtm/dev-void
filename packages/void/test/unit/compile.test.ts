@@ -2475,6 +2475,13 @@ describe('compileWorkerEntry', () => {
     expect(code).not.toContain('"/404.html"');
     // And it is NOT the SPA shell path.
     expect(code).not.toContain('"/index.html"');
+    // Gated on the REQUEST accepting HTML as well. `serveWithAssets` wraps every
+    // app response with no path filtering, so without this an API handler's
+    // deliberate JSON 404 gets replaced by the site's HTML 404 page.
+    expect(code).toContain('request.headers.get("accept")');
+    expect(code).toContain(
+      'accept.includes("text/html") && assetContentType.includes("text/html")',
+    );
   });
 
   it('serveWithAssets keeps the worker response for not_found_handling: none', () => {

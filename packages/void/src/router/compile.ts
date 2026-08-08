@@ -2383,8 +2383,18 @@ export function compileAssetFallbackHelper(
   // ("nearest 404.html"), a hardcoded root path is not. Guarded on an HTML
   // content-type because with no `404.html` anywhere the binding answers a bare
   // 404, and the worker's own response is the better answer then.
-  const notFoundPageCode = `  const assetContentType = asset.headers.get("content-type") ?? "";
-  if (assetContentType.includes("text/html")) {
+  //
+  // Also gated on the REQUEST accepting HTML — same guard the SPA-fallback
+  // branch below uses, and for the same reason. `serveWithAssets` wraps EVERY
+  // app response with no path filtering, so without this a GET/HEAD API handler
+  // that deliberately answers 404 with JSON has its body, content-type, and any
+  // middleware-set headers (CORS included) replaced by the site's HTML 404 page.
+  // `routing.notFound` is about document navigations; on the asset-first shape
+  // this branch is reached ONLY on `run_worker_first` paths (`/api/*`,
+  // `/__void/*`), where an HTML 404 page is never the right answer.
+  const notFoundPageCode = `  const accept = request.headers.get("accept") ?? "";
+  const assetContentType = asset.headers.get("content-type") ?? "";
+  if (accept.includes("text/html") && assetContentType.includes("text/html")) {
     const res = new Response(asset.body, asset);
     res.headers.set("Cache-Control", "no-store");
     return res;
