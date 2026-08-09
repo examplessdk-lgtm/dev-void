@@ -396,6 +396,8 @@ Set `"404-page"` when your assets come from a static site generator (VitePress, 
 
 This does **not** apply to SvelteKit, Nuxt, Analog, or Astro deploys: those pin `not_found_handling` to `"none"` because the framework's own worker owns unmatched HTML, and `void deploy` warns if you set `routing.notFound` anyway.
 
+TanStack Start and React Router honor it on a managed `void deploy`, which resolves the asset config itself. Void writes no `assets` policy into their built `dist/ssr/wrangler.json`, so running `wrangler deploy` on that output yourself leaves the setting inert — `vite build` warns when it is set.
+
 ### `inference`
 
 Configuration for build-time inference, including how Void detects your app type, bindings, and build process.

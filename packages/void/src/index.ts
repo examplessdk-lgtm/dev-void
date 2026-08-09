@@ -1505,11 +1505,37 @@ export function voidPlugin(options?: {
       devTriggerToken,
       config.routing?.notFound,
     );
+    // `routing.notFound` only reaches a Class A worker through the DEPLOYED
+    // script's `assets` config, and Void writes none for these frameworks: the
+    // Class A branch returns long before `applyAssetRoutingPolicy`, and writing
+    // `not_found_handling` on its own is worse than nothing — Cloudflare's asset
+    // layer would then answer unmatched requests itself and the framework worker
+    // would never run (only `run_worker_first` sends them to the worker first,
+    // and Void does not own `assets.binding`/`directory` here to complete that
+    // policy). Managed `void deploy` supplies the policy out-of-band
+    // (`runFullDeploy` → `resolveAssetConfig` → `manifest.assetConfig`), so it
+    // IS honored there; a hand-rolled `vite build && wrangler deploy` of the
+    // same output silently drops it. Say so once per build, and only when this
+    // build is not a managed deploy (`void deploy` sets `VOID_DEPLOY_BUILD` on
+    // the build child env).
+    let notFoundIgnoredWarned = false;
     const frameworkBuildWrapperPlugin: Plugin = {
       name: 'void:framework-build-wrapper',
       configResolved(resolved) {
         if (resolved.command !== 'build') {
           return;
+        }
+        if (
+          config.routing?.notFound !== undefined &&
+          !process.env.VOID_DEPLOY_BUILD &&
+          !notFoundIgnoredWarned
+        ) {
+          notFoundIgnoredWarned = true;
+          voidWarn(
+            `"routing.notFound" in void.json is not applied to this ${framework} build — Void writes no ` +
+              'asset routing policy for this framework, so a self-hosted `vite build && wrangler deploy` ' +
+              "keeps Cloudflare's default and the setting is inert. Managed `void deploy` does honor it.",
+          );
         }
         generateClassATriggerWrapper(
           root,

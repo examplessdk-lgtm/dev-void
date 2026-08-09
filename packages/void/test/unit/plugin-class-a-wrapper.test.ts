@@ -107,3 +107,83 @@ describe('Class A framework build wrapper', () => {
     expect(code).toContain('new Response(asset.body, asset)');
   });
 });
+
+// `routing.notFound` reaches a Class A worker only through the DEPLOYED script's
+// `assets` config, and Void writes none for these frameworks. Managed
+// `void deploy` supplies it out-of-band (`manifest.assetConfig`) and marks the
+// build child with `VOID_DEPLOY_BUILD`; every other build is a self-hosted
+// `vite build && wrangler deploy`, where the setting is inert and has to be
+// called out instead of dropped silently.
+describe('Class A routing.notFound self-host warning', () => {
+  /** Run a Class A `build` twice and return every line the plugin logged. */
+  async function buildTwiceWithNotFound(): Promise<Array<string>> {
+    const root = createTanStackRoot({ routing: { notFound: '404-page' } });
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const { voidPlugin } = await import('../../src/index.ts');
+    const wrapperPlugin = voidPlugin().find(
+      (plugin) => plugin.name === 'void:framework-build-wrapper',
+    );
+    if (!wrapperPlugin) {
+      throw new Error('Expected Class A wrapper plugin.');
+    }
+    const resolved = {
+      command: 'build',
+      build: { assetsDir: 'static' } as ResolvedConfig['build'],
+    } as Partial<ResolvedConfig>;
+    // Twice on purpose: at most one warning per build, however many times the
+    // hook runs (the Cloudflare plugin resolves config per environment).
+    callConfigResolved(wrapperPlugin, resolved);
+    callConfigResolved(wrapperPlugin, resolved);
+
+    return logSpy.mock.calls.map((args) => args.join(' '));
+  }
+
+  function notFoundWarnings(lines: Array<string>): Array<string> {
+    return lines.filter((line) => line.includes('"routing.notFound" in void.json'));
+  }
+
+  it('warns once that a self-hosted build ignores routing.notFound', async () => {
+    const warnings = notFoundWarnings(await buildTwiceWithNotFound());
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('tanstack-start');
+    expect(warnings[0]).toContain('vite build && wrangler deploy');
+    expect(warnings[0]).toContain('void deploy');
+  });
+
+  it('stays quiet when a managed `void deploy` drives the build', async () => {
+    const previous = process.env.VOID_DEPLOY_BUILD;
+    process.env.VOID_DEPLOY_BUILD = '1';
+    try {
+      expect(notFoundWarnings(await buildTwiceWithNotFound())).toEqual([]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.VOID_DEPLOY_BUILD;
+      } else {
+        process.env.VOID_DEPLOY_BUILD = previous;
+      }
+    }
+  });
+
+  it('says nothing when routing.notFound is unset', async () => {
+    const root = createTanStackRoot();
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const { voidPlugin } = await import('../../src/index.ts');
+    const wrapperPlugin = voidPlugin().find(
+      (plugin) => plugin.name === 'void:framework-build-wrapper',
+    );
+    if (!wrapperPlugin) {
+      throw new Error('Expected Class A wrapper plugin.');
+    }
+    callConfigResolved(wrapperPlugin, {
+      command: 'build',
+      build: { assetsDir: 'static' } as ResolvedConfig['build'],
+    } as Partial<ResolvedConfig>);
+
+    expect(notFoundWarnings(logSpy.mock.calls.map((args) => args.join(' ')))).toEqual([]);
+  });
+});

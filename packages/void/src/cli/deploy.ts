@@ -491,6 +491,27 @@ function prependLocalBinToPath(env: NodeJS.ProcessEnv, root: string): NodeJS.Pro
 }
 
 /**
+ * Marks a build child as driven by a MANAGED `void deploy`.
+ *
+ * The platform resolves the asset routing policy out-of-band (`resolveAssetConfig`
+ * → `manifest.assetConfig`) and applies it to the uploaded script, so settings the
+ * Vite plugin cannot safely write into the built wrangler config — `routing.notFound`
+ * for a Class A framework, which needs an `assets` policy Void does not own there —
+ * are still honored on this path. `void:framework-build-wrapper` warns about exactly
+ * those when this flag is ABSENT, i.e. on a self-hosted `vite build && wrangler deploy`.
+ *
+ * Passed through the CHILD env only (never `process.env`), the same way
+ * `VOID_DEPLOY_PROJECT_ID` is, so it cannot leak into an unrelated child process or a
+ * later `void dev` in the same shell.
+ *
+ * Deliberately NOT set by `runCloudflareDeploy` (`--backend cloudflare`): that flow
+ * hands the built output to `wrangler deploy` against the user's own account and IS the
+ * self-host path the warning is about. (It rejects framework SSR outright today, so no
+ * Class A build reaches it either way.)
+ */
+const MANAGED_DEPLOY_BUILD_ENV = { VOID_DEPLOY_BUILD: '1' } as const;
+
+/**
  * Deploy-time env selectors that pin the WRONG worker/config out from under the
  * top-level config this flow provisions + preflights. Scrubbed from every child env
  * and fenced in the project dotenv (see below), on top of the provisioner's transport
@@ -5390,7 +5411,7 @@ export async function runStaticDeploy(
     execSync(preset.buildCommand, {
       cwd: root,
       stdio: 'inherit',
-      env: buildEnv(undefined, { localBinRoot: root }),
+      env: buildEnv({ ...MANAGED_DEPLOY_BUILD_ENV }, { localBinRoot: root }),
     });
     cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
   } else if (skipBuild) {
@@ -5564,7 +5585,7 @@ async function runFrameworkDeploy(
     execSync(voidConfig.inference?.build ?? resolveProjectCommand(root, fwPreset.buildCommand), {
       cwd: root,
       stdio: 'inherit',
-      env: buildEnv(undefined, { localBinRoot: root }),
+      env: buildEnv({ ...MANAGED_DEPLOY_BUILD_ENV }, { localBinRoot: root }),
     });
     cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
   } else {
@@ -5908,7 +5929,10 @@ async function runFullDeploy(
       execSync(buildExec, {
         cwd: root,
         stdio: 'inherit',
-        env: buildEnv({ VOID_DEPLOY_PROJECT_ID: config.projectId }, { localBinRoot: root }),
+        env: buildEnv(
+          { VOID_DEPLOY_PROJECT_ID: config.projectId, ...MANAGED_DEPLOY_BUILD_ENV },
+          { localBinRoot: root },
+        ),
       });
       cliLog?.info('build_end', { durationMs: Date.now() - buildStartedAt });
     } catch (err: unknown) {
