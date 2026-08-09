@@ -120,7 +120,16 @@ Accepted values are `"single-page-application"`, `"404-page"`, and `"none"`. `ru
 
 The last row is the exception: `routing.notFound` is **ignored** for SvelteKit, Nuxt, Analog, and Astro deploys, and `void deploy` warns when you set it. Those deploys emit no `run_worker_first`, so the asset layer already answers first and real prerendered files win — `not_found_handling` would only change what the framework's own `env.ASSETS.fetch()` delegation returns, where `"single-page-application"` turns genuine 404s into the prerendered home page at 200 and `"404-page"` takes the 404 away from the framework's own error route.
 
-TanStack Start and React Router follow the rows above on a managed `void deploy` — that path resolves the asset config itself and applies it to the uploaded worker. Void writes no `assets` policy into their generated worker wrangler config (`dist/server/wrangler.json` for TanStack Start, `build/server/wrangler.json` for React Router), so on a self-hosted `wrangler deploy` the setting takes effect only if that config declares a complete `assets` policy of its own — `binding`, `directory`, `not_found_handling`, and `run_worker_first`. Void leaves those fields alone, so a policy you write yourself is honored by the generated wrapper; with no policy at all, Cloudflare's default applies. `vite build` warns when `routing.notFound` is set so the choice is not silent.
+TanStack Start, React Router, and vinext follow the rows above on a managed `void deploy` — that path resolves the asset config itself and applies it to the uploaded worker. Void writes no `assets` policy into their generated worker wrangler config:
+
+| Framework      | Generated worker config      |
+| -------------- | ---------------------------- |
+| TanStack Start | `dist/server/wrangler.json`  |
+| React Router   | `build/server/wrangler.json` |
+| vinext (App)   | `dist/rsc/wrangler.json`     |
+| vinext (Pages) | `dist/ssr/wrangler.json`     |
+
+So on a self-hosted `wrangler deploy` the setting takes effect only if that config declares a complete `assets` policy of its own — `binding`, `directory`, `not_found_handling`, and `run_worker_first`. Void leaves those fields alone, so a policy you write yourself is honored by the generated wrapper; with no policy at all, Cloudflare's default applies. `vite build` warns when `routing.notFound` is set so the choice is not silent.
 
 ### Generated config
 
