@@ -126,7 +126,7 @@ TanStack Start, React Router, and vinext follow the rows above on a managed `voi
 | -------------- | ---------------------------- |
 | TanStack Start | `dist/server/wrangler.json`  |
 | React Router   | `build/server/wrangler.json` |
-| vinext (App)   | `dist/rsc/wrangler.json`     |
+| vinext (App)   | `dist/server/wrangler.json`  |
 | vinext (Pages) | `dist/ssr/wrangler.json`     |
 
 So on a self-hosted `wrangler deploy` the setting takes effect only if that config declares a complete `assets` policy of its own — `binding`, `directory`, `not_found_handling`, and `run_worker_first`. Void leaves those fields alone, so a policy you write yourself is honored by the generated wrapper; with no policy at all, Cloudflare's default applies. `vite build` warns when `routing.notFound` is set so the choice is not silent.
