@@ -112,8 +112,14 @@ describe('Class A framework build wrapper', () => {
 // `assets` config, and Void writes none for these frameworks. Managed
 // `void deploy` supplies it out-of-band (`manifest.assetConfig`) and marks the
 // build child with `VOID_DEPLOY_BUILD`; every other build is a self-hosted
-// `vite build && wrangler deploy`, where the setting is inert and has to be
-// called out instead of dropped silently.
+// `vite build && wrangler deploy`, which has to be told that Void generated
+// nothing instead of having the setting dropped silently.
+//
+// The warning must NOT say the setting does nothing. The generated wrapper
+// consumes `routing.notFound` and serves through `env.ASSETS`, and
+// `mergeBindings` leaves a Class A root wrangler `assets` block untouched, so a
+// user who writes a complete policy themselves has a WORKING config and must
+// not be told otherwise.
 describe('Class A routing.notFound self-host warning', () => {
   /** Run a Class A `build` twice and return every line the plugin logged. */
   async function buildTwiceWithNotFound(): Promise<Array<string>> {
@@ -144,13 +150,27 @@ describe('Class A routing.notFound self-host warning', () => {
     return lines.filter((line) => line.includes('"routing.notFound" in void.json'));
   }
 
-  it('warns once that a self-hosted build ignores routing.notFound', async () => {
+  it('warns once that a self-hosted build generates no policy for routing.notFound', async () => {
     const warnings = notFoundWarnings(await buildTwiceWithNotFound());
 
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('tanstack-start');
     expect(warnings[0]).toContain('vite build && wrangler deploy');
     expect(warnings[0]).toContain('void deploy');
+  });
+
+  // Guards the correction from PR review: an earlier draft told every self-host
+  // build the setting was "inert", which is false for anyone who declares their
+  // own complete `assets` policy — Void leaves that policy alone and the wrapper
+  // honors it.
+  it('does not claim the setting is inert, and names the config that makes it work', async () => {
+    const [warning] = notFoundWarnings(await buildTwiceWithNotFound());
+
+    expect(warning).toBeDefined();
+    expect(warning).not.toMatch(/\binert\b/);
+    for (const field of ['binding', 'directory', 'not_found_handling', 'run_worker_first']) {
+      expect(warning).toContain(field);
+    }
   });
 
   it('stays quiet when a managed `void deploy` drives the build', async () => {

@@ -1514,10 +1514,18 @@ export function voidPlugin(options?: {
     // and Void does not own `assets.binding`/`directory` here to complete that
     // policy). Managed `void deploy` supplies the policy out-of-band
     // (`runFullDeploy` → `resolveAssetConfig` → `manifest.assetConfig`), so it
-    // IS honored there; a hand-rolled `vite build && wrangler deploy` of the
-    // same output silently drops it. Say so once per build, and only when this
-    // build is not a managed deploy (`void deploy` sets `VOID_DEPLOY_BUILD` on
-    // the build child env).
+    // IS honored there.
+    //
+    // On a hand-rolled `vite build && wrangler deploy` it is NOT necessarily
+    // dropped, which is why this says "Void does not generate it" rather than
+    // "it does nothing": the generated wrapper consumes `routing.notFound` and
+    // serves through `env.ASSETS`, and `mergeBindings` leaves a Class A root
+    // wrangler config's `assets` untouched (its gate needs `workerConfig.assets`,
+    // which is never set here). So a user who declares a COMPLETE policy of their
+    // own — `binding`, `directory`, `not_found_handling`, `run_worker_first` —
+    // gets working behavior, and must not be told their config is inert. Warn
+    // once per build, and only when this build is not a managed deploy
+    // (`void deploy` sets `VOID_DEPLOY_BUILD` on the build child env).
     let notFoundIgnoredWarned = false;
     const frameworkBuildWrapperPlugin: Plugin = {
       name: 'void:framework-build-wrapper',
@@ -1532,9 +1540,11 @@ export function voidPlugin(options?: {
         ) {
           notFoundIgnoredWarned = true;
           voidWarn(
-            `"routing.notFound" in void.json is not applied to this ${framework} build — Void writes no ` +
-              'asset routing policy for this framework, so a self-hosted `vite build && wrangler deploy` ' +
-              "keeps Cloudflare's default and the setting is inert. Managed `void deploy` does honor it.",
+            `Void generates no asset routing policy for a ${framework} build, so "routing.notFound" in ` +
+              'void.json is not written to the built worker config. On a self-hosted `vite build && ' +
+              'wrangler deploy` it takes effect only if your own wrangler config declares a complete ' +
+              '`assets` policy (`binding`, `directory`, `not_found_handling`, `run_worker_first`); ' +
+              "otherwise Cloudflare's default applies. Managed `void deploy` supplies the policy for you.",
           );
         }
         generateClassATriggerWrapper(
