@@ -266,7 +266,10 @@ function generateClassATriggerWrapper(
    * Resolved `assetConfig.not_found_handling`. A Class A app deploys through
    * `runFullDeploy`, which honors `routing.notFound`, so this wrapper's
    * `serveWithAssets` has to honor it too or the asset binding's 404 page is
-   * fetched and then thrown away.
+   * fetched and then thrown away. The reverse also holds — the wrapper's
+   * `404-page` branch is inert unless the BINDING is set to `404-page`, which
+   * is why `void:framework-build-wrapper` also writes it into the built
+   * wrangler config for anyone deploying that output themselves.
    */
   notFound?: NotFoundHandling,
 ): string {
@@ -988,9 +991,20 @@ export function voidPlugin(options?: {
     // wrangler settings instead of letting the Cloudflare plugin concatenate
     // them with generated rules. This preserves static-first behavior for
     // API-only apps while avoiding asset-served HTML bypassing middleware.
-    if (workerConfig.assets && resolved.assets) {
-      delete (resolved.assets as Record<string, unknown>).not_found_handling;
-      delete (resolved.assets as Record<string, unknown>).run_worker_first;
+    //
+    // Per FIELD, not per object: the default mode always generates both keys,
+    // but a Class A framework build generates ONLY `not_found_handling` (from
+    // an explicit `routing.notFound` — Void infers no asset policy for those
+    // apps). Deleting the whole pair there would silently drop a root
+    // wrangler `run_worker_first` that Void has no replacement for.
+    const generatedAssets = workerConfig.assets as Record<string, unknown> | undefined;
+    if (generatedAssets && resolved.assets) {
+      if (generatedAssets.not_found_handling !== undefined) {
+        delete (resolved.assets as Record<string, unknown>).not_found_handling;
+      }
+      if (generatedAssets.run_worker_first !== undefined) {
+        delete (resolved.assets as Record<string, unknown>).run_worker_first;
+      }
     }
 
     // D1 — auth requires the app DB only for sqlite apps
@@ -1507,6 +1521,34 @@ export function voidPlugin(options?: {
     );
     const frameworkBuildWrapperPlugin: Plugin = {
       name: 'void:framework-build-wrapper',
+      // The wrapper's `404-page` branch only fires when the asset binding
+      // itself answers with an HTML 404 page, which needs
+      // `assets.not_found_handling: '404-page'` on the deployed worker.
+      // Managed `void deploy` supplies that out-of-band (`runFullDeploy`
+      // resolves `manifest.assetConfig`, which is what the platform applies),
+      // but the built `dist/ssr/wrangler.json` never carried it: the Class A
+      // branch returns before `applyAssetRoutingPolicy`. So a `wrangler
+      // deploy` of the same build read the root wrangler value — normally
+      // absent, i.e. CF's `none` — and the option was inert.
+      //
+      // Write only `not_found_handling`, and only when the user asked for it.
+      // `run_worker_first`, `binding` and `directory` stay whatever the
+      // framework/root config says: Void infers no asset policy for Class A
+      // apps, and `defu` merges our partial over the resolved config.
+      //
+      // Build-only, matching the wrapper: the dev wrapper has no
+      // `serveWithAssets`, and flipping the dev asset router would change
+      // which layer answers an unmatched navigation in `vite dev`.
+      config(_userConfig, env) {
+        const notFound = config.routing?.notFound;
+        if (env.command !== 'build' || notFound === undefined) {
+          return;
+        }
+        workerConfig.assets = {
+          ...(workerConfig.assets as Record<string, unknown> | undefined),
+          not_found_handling: notFound,
+        };
+      },
       configResolved(resolved) {
         if (resolved.command !== 'build') {
           return;
