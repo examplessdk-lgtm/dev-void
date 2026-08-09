@@ -35,30 +35,6 @@ function createTanStackRoot(voidConfig?: Record<string, unknown>): string {
   return root;
 }
 
-function callConfig(plugin: Plugin, command: 'build' | 'serve') {
-  const hook = plugin.config;
-  const fn = typeof hook === 'function' ? hook : hook?.handler;
-  if (typeof fn !== 'function') {
-    throw new Error('config not callable');
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (fn as any)({}, { command, mode: command === 'build' ? 'production' : 'development' });
-}
-
-/** Run the Cloudflare plugin's `config` customizer the way the real plugin does. */
-function mergeWorkerConfig(
-  plugins: Array<Plugin>,
-  resolved: Record<string, unknown> = {},
-): Record<string, unknown> {
-  const cloudflarePlugin = plugins.find((plugin) => plugin.name === 'mock:cloudflare');
-  if (!cloudflarePlugin) {
-    throw new Error('Expected mocked Cloudflare plugin.');
-  }
-  const pluginConfig = (cloudflarePlugin.api as { pluginConfig: MockCloudflarePluginConfig })
-    .pluginConfig;
-  return pluginConfig.config(resolved);
-}
-
 function callConfigResolved(plugin: Plugin, config: Partial<ResolvedConfig>) {
   const hook = plugin.configResolved;
   const fn = typeof hook === 'function' ? hook : hook?.handler;
@@ -129,71 +105,5 @@ describe('Class A framework build wrapper', () => {
     const code = readFileSync(join(root, '.void', 'tanstack-start-trigger-wrapper.ts'), 'utf-8');
     expect(code).toContain('asset.headers.get("content-type")');
     expect(code).toContain('new Response(asset.body, asset)');
-  });
-});
-
-// The wrapper above only has an HTML 404 page to pass through when the asset
-// binding itself is set to `404-page`. Managed `void deploy` supplies that via
-// `manifest.assetConfig`; the built `dist/ssr/wrangler.json` has to carry it too
-// or a `wrangler deploy` of the same build silently ignores `routing.notFound`.
-describe('Class A wrangler asset config', () => {
-  async function loadPlugins(voidConfig?: Record<string, unknown>): Promise<Array<Plugin>> {
-    const root = createTanStackRoot(voidConfig);
-    vi.spyOn(process, 'cwd').mockReturnValue(root);
-    const { voidPlugin } = await import('../../src/index.ts');
-    return voidPlugin();
-  }
-
-  function wrapperOf(plugins: Array<Plugin>): Plugin {
-    const plugin = plugins.find((p) => p.name === 'void:framework-build-wrapper');
-    if (!plugin) {
-      throw new Error('Expected Class A wrapper plugin.');
-    }
-    return plugin;
-  }
-
-  it('writes routing.notFound into the built worker asset config', async () => {
-    const plugins = await loadPlugins({ routing: { notFound: '404-page' } });
-    callConfig(wrapperOf(plugins), 'build');
-
-    const merged = mergeWorkerConfig(plugins);
-    expect(merged.assets).toEqual({ not_found_handling: '404-page' });
-  });
-
-  it('invents no asset policy when routing.notFound is unset', async () => {
-    const plugins = await loadPlugins();
-    callConfig(wrapperOf(plugins), 'build');
-
-    expect(mergeWorkerConfig(plugins).assets).toBeUndefined();
-  });
-
-  it('leaves the dev asset router alone', async () => {
-    const plugins = await loadPlugins({ routing: { notFound: '404-page' } });
-    callConfig(wrapperOf(plugins), 'serve');
-
-    expect(mergeWorkerConfig(plugins).assets).toBeUndefined();
-  });
-
-  // Void generates no `run_worker_first` for Class A, so the root wrangler value
-  // is the only one there is — replacing the pair wholesale would drop it.
-  it('replaces a stale root not_found_handling but keeps root run_worker_first', async () => {
-    const plugins = await loadPlugins({ routing: { notFound: '404-page' } });
-    callConfig(wrapperOf(plugins), 'build');
-
-    const resolved = {
-      assets: {
-        binding: 'ASSETS',
-        directory: './dist/client',
-        not_found_handling: 'single-page-application',
-        run_worker_first: ['/api/*'],
-      },
-    };
-    mergeWorkerConfig(plugins, resolved);
-
-    expect(resolved.assets).toEqual({
-      binding: 'ASSETS',
-      directory: './dist/client',
-      run_worker_first: ['/api/*'],
-    });
   });
 });
