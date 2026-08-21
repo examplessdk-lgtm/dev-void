@@ -26,32 +26,30 @@ const RESERVED_KEYS = new Set(['ts', 'elapsedMs', 'lvl', 'msg', 'err']);
 
 /**
  * The trace was a file the user opened by hand; the summary publishes it to
- * whatever reads stderr, which in CI is a stored, often public, log. The three
- * patterns below scrub values, and `SECRET_KEY_RE` masks whole fields by name.
+ * whatever reads stderr, which in CI is a stored, often public, log.
+ *
+ * Scrubbing stops at values this code puts there itself, or that no log
+ * pipeline can recognize. Guessing at credential-shaped variable *names* is
+ * deliberately not attempted: GitHub Actions already masks every registered
+ * secret, and a literal baked into `void.json` is committed to the repo
+ * already, so a name-matching pattern buys little and misses more.
  */
 /** Query parameters whose value must never reach a CI log. */
 const SIGNED_QUERY_RE =
   /([?&](?:X-Amz-[A-Za-z0-9-]+|[Ss]ignature|sig|token|access_token|key)=)[^&\s]+/g;
 const BEARER_RE = /\b(Bearer\s+)\S+/g;
 /**
- * Inline `NAME=value` assignments where the name reads like a credential. The
- * build command comes from `void.json`, so `SENTRY_AUTH_TOKEN=... npm run build`
- * arrives as one ordinary field value.
- */
-const INLINE_SECRET_RE =
-  /\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY|AUTH)[A-Za-z0-9_]*=)\S+/gi;
-/**
- * Userinfo in a connection URI, wherever it appears. This catches what the
- * name-based pattern above cannot: `DATABASE_URL=postgres://user:pw@host/db`
- * names no credential term, and a bare `--registry https://u:pw@host` is not an
- * assignment at all. The scheme and host survive, because those are the parts
- * that make the record worth reading.
+ * Userinfo in a connection URI, wherever it appears. A secret masker keys on
+ * the whole secret value, so it does not recognize a password spliced into a
+ * URI: `DATABASE_URL=postgres://user:pw@host/db`, or a bare
+ * `--registry https://u:pw@host`. The scheme and host survive, because those
+ * are the parts that make the record worth reading.
  */
 const URI_USERINFO_RE = /([a-z][a-z0-9+.-]*:\/\/)([^\s/@:]+)(:[^\s/@]*)?@/gi;
 /**
  * Field keys whose value is masked whole, whatever it looks like. `auth` is
  * deliberately absent — it matches metadata keys such as `authMethod` far more
- * often than credentials, and the inline pattern above still catches `X_AUTH=`.
+ * often than credentials.
  */
 const SECRET_KEY_RE =
   /token|secret|password|passwd|credential|cookie|signature|api[-_]?key|private[-_]?key/i;
@@ -68,7 +66,6 @@ function redact(text: string): string {
   return text
     .replace(SIGNED_QUERY_RE, '$1[redacted]')
     .replace(BEARER_RE, '$1[redacted]')
-    .replace(INLINE_SECRET_RE, '$1[redacted]')
     .replace(URI_USERINFO_RE, (_match, scheme: string, user: string, password?: string) =>
       // No colon means the whole userinfo is one opaque value, and an opaque
       // value in that position is usually a token. Mask it entirely.

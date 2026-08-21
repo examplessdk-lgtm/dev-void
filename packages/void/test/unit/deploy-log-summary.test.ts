@@ -175,24 +175,22 @@ describe('formatDeployLogSummary', () => {
     expect(out).toContain('slug=my-app');
   });
 
-  it('masks an inline credential assignment inside a build command', () => {
+  // Guessing at credential-shaped variable names is deliberately not attempted.
+  // GitHub Actions masks every registered secret, and a literal baked into
+  // `void.json` is already committed. The build command prints as written.
+  it('does not guess at credential-shaped variable names', () => {
     const out = plain(
       formatDeployLogSummary([
         line({
           elapsedMs: 0,
           lvl: 'info',
           msg: 'build_start',
-          command: 'SENTRY_AUTH_TOKEN=sntrys_deadbeef NPM_SECRET=hunter2 npm run build',
+          command: 'SENTRY_AUTH_TOKEN=sntrys_deadbeef npm run build',
         }),
       ]),
     );
 
-    expect(out).not.toContain('sntrys_deadbeef');
-    expect(out).not.toContain('hunter2');
-    expect(out).toContain('SENTRY_AUTH_TOKEN=[redacted]');
-    expect(out).toContain('NPM_SECRET=[redacted]');
-    // The command itself is the point of the record, so it survives.
-    expect(out).toContain('npm run build');
+    expect(out).toContain('SENTRY_AUTH_TOKEN=sntrys_deadbeef npm run build');
   });
 
   // A connection URI carries its credential in the userinfo, where no variable
