@@ -111,6 +111,7 @@ import {
 } from './github-oidc.ts';
 import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers.ts';
 import { openDeployLog, type CliLogger } from './log-file.ts';
+import { buildDeployLogSummary } from './log-summary.ts';
 import { promptForLoginToken } from './login.ts';
 import { cliTitle, createSpinner, pc } from './output.ts';
 import {
@@ -423,6 +424,23 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
     cliLog.info('deploy_end', { ok: true });
   } catch (err) {
     cliLog.error('deploy_end', err, { ok: false });
+    // Flush before reading the file back. The `Detailed log:` path is useless
+    // on a CI runner that is destroyed with the job, so inline the errors and
+    // the trailing timeline into the message the caller prints.
+    await cliLog.close().catch(() => {});
+    try {
+      if (err instanceof Error) {
+        const summary = buildDeployLogSummary(cliLog.path);
+        if (summary) {
+          err.message = `${err.message}\n${summary}`;
+        }
+      }
+    } catch {
+      // A postmortem aid must never replace the failure it describes. The
+      // assignment alone can throw: `message` is read-only on a frozen Error
+      // and getter-only on a DOMException, which an aborted fetch produces.
+      // Losing the summary is fine; losing the deploy error is not.
+    }
     throw err;
   } finally {
     await cliLog.close().catch(() => {});

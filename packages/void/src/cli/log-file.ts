@@ -15,13 +15,50 @@ export type CliLogger = {
   close(): Promise<void>;
 };
 
-type ErrChainNode = {
+export type ErrChainNode = {
   name?: string;
   message?: string;
   code?: string | number;
   errno?: string | number;
   cause?: ErrChainNode;
 };
+
+/**
+ * Flatten an already-serialized `ErrChainNode` (as read back out of a JSONL
+ * record) to a single inline string. Mirrors `formatErrorChainInline`, which
+ * does the same job for a live `Error` before it is written.
+ */
+export function formatErrorNodeInline(
+  node: ErrChainNode | string | null | undefined,
+  depth = 0,
+): string {
+  // `typeof null` is `'object'`, so the null check has to come first.
+  if (node == null || typeof node !== 'object') {
+    return String(node);
+  }
+  // A JSONL record is data, not a typed value. Coerce every part instead of
+  // trusting the declared shape: a hand-edited log, or an `Error` subclass that
+  // assigned a non-string `message`, must not make a postmortem aid throw.
+  const message = node.message == null ? '' : String(node.message);
+  if (depth > 5) {
+    return message;
+  }
+  let head = node.name ? `${String(node.name)}: ${message}` : message;
+  const tags: Array<string> = [];
+  if (node.code !== undefined) {
+    tags.push(`code=${node.code}`);
+  }
+  if (node.errno !== undefined) {
+    tags.push(`errno=${node.errno}`);
+  }
+  if (tags.length > 0) {
+    head = `${head} (${tags.join(' ')})`;
+  }
+  if (node.cause != null) {
+    return `${head} -> ${formatErrorNodeInline(node.cause, depth + 1)}`;
+  }
+  return head;
+}
 
 /**
  * Walk `err.cause` up to 6 levels and return a plain JSON-friendly chain.
