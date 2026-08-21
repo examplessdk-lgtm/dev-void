@@ -28,24 +28,17 @@ const RESERVED_KEYS = new Set(['ts', 'elapsedMs', 'lvl', 'msg', 'err']);
  * The trace was a file the user opened by hand; the summary publishes it to
  * whatever reads stderr, which in CI is a stored, often public, log.
  *
- * Scrubbing stops at values this code puts there itself, or that no log
- * pipeline can recognize. Guessing at credential-shaped variable *names* is
- * deliberately not attempted: GitHub Actions already masks every registered
- * secret, and a literal baked into `void.json` is committed to the repo
- * already, so a name-matching pattern buys little and misses more.
+ * Scrubbing here covers only credentials this code emits itself — a presigned
+ * URL it built, an auth header it set, a field it named. Scrubbing user data is
+ * left to the CI platform, which owns the secrets and masks them before the log
+ * is written. GitHub Actions does this for everything under `secrets.*`. Void
+ * does not guess at credential-shaped names or at credentials embedded in
+ * values the user supplied.
  */
 /** Query parameters whose value must never reach a CI log. */
 const SIGNED_QUERY_RE =
   /([?&](?:X-Amz-[A-Za-z0-9-]+|[Ss]ignature|sig|token|access_token|key)=)[^&\s]+/g;
 const BEARER_RE = /\b(Bearer\s+)\S+/g;
-/**
- * Userinfo in a connection URI, wherever it appears. A secret masker keys on
- * the whole secret value, so it does not recognize a password spliced into a
- * URI: `DATABASE_URL=postgres://user:pw@host/db`, or a bare
- * `--registry https://u:pw@host`. The scheme and host survive, because those
- * are the parts that make the record worth reading.
- */
-const URI_USERINFO_RE = /([a-z][a-z0-9+.-]*:\/\/)([^\s/@:]+)(:[^\s/@]*)?@/gi;
 /**
  * Field keys whose value is masked whole, whatever it looks like. `auth` is
  * deliberately absent — it matches metadata keys such as `authMethod` far more
@@ -63,14 +56,7 @@ type LogRecord = {
 };
 
 function redact(text: string): string {
-  return text
-    .replace(SIGNED_QUERY_RE, '$1[redacted]')
-    .replace(BEARER_RE, '$1[redacted]')
-    .replace(URI_USERINFO_RE, (_match, scheme: string, user: string, password?: string) =>
-      // No colon means the whole userinfo is one opaque value, and an opaque
-      // value in that position is usually a token. Mask it entirely.
-      password === undefined ? `${scheme}[redacted]@` : `${scheme}${user}:[redacted]@`,
-    );
+  return text.replace(SIGNED_QUERY_RE, '$1[redacted]').replace(BEARER_RE, '$1[redacted]');
 }
 
 function truncate(text: string, max: number): string {

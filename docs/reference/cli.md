@@ -275,9 +275,9 @@ When a deploy fails after it starts, the CLI also prints a summary of that trace
 
 Pre-flight failures print no summary. A missing project, a rejected flag combination, or an unsupported `--backend cloudflare` feature stops before any trace exists, and each of those prints its own message explaining what to change. A build failure prints no summary either — the build streams its own output straight to the terminal.
 
-Some values are masked on the way out, because the summary reaches CI logs that the trace file never did: signed query parameters, bearer tokens, connection-URI userinfo, and any field whose key names a credential.
+Void masks the credentials it emits itself: signed query parameters, bearer tokens, and any field whose key names a credential.
 
-Masking stops there. Void does not guess at credential-shaped variable names — CI platforms already mask their own registered secrets, and GitHub Actions does this for everything under `secrets.*`. A credential written as a literal in `void.json` is committed to your repository and is not treated as secret.
+Masking your own values is left to your CI platform, which holds the secrets and masks them before the log is written. GitHub Actions does this for everything under `secrets.*`. Void does not guess at credential-shaped variable names, and it does not parse credentials out of values you supplied — a password inside a `DATABASE_URL` in your build command prints as written. Register such values as CI secrets, or keep them out of the build command.
 
 ```
 ■  deploy: Deploy failed: deploy in progress

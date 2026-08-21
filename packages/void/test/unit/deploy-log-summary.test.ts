@@ -149,8 +149,8 @@ describe('formatDeployLogSummary', () => {
     expect(out).toContain('detail=first second third');
   });
 
-  // The trace used to be a local file. Publishing it to stderr means CI stores
-  // it, so anything credential-shaped has to be scrubbed on the way out.
+  // Void masks the credentials it emits itself. Fields it names are its own,
+  // so a credential-shaped key is masked whatever the value looks like.
   it('masks a field whose key names a credential', () => {
     const out = plain(
       formatDeployLogSummary([
@@ -175,28 +175,10 @@ describe('formatDeployLogSummary', () => {
     expect(out).toContain('slug=my-app');
   });
 
-  // Guessing at credential-shaped variable names is deliberately not attempted.
-  // GitHub Actions masks every registered secret, and a literal baked into
-  // `void.json` is already committed. The build command prints as written.
-  it('does not guess at credential-shaped variable names', () => {
-    const out = plain(
-      formatDeployLogSummary([
-        line({
-          elapsedMs: 0,
-          lvl: 'info',
-          msg: 'build_start',
-          command: 'SENTRY_AUTH_TOKEN=sntrys_deadbeef npm run build',
-        }),
-      ]),
-    );
-
-    expect(out).toContain('SENTRY_AUTH_TOKEN=sntrys_deadbeef npm run build');
-  });
-
-  // A connection URI carries its credential in the userinfo, where no variable
-  // name gives it away: `DATABASE_URL` names nothing secret, and a bare
-  // `--registry https://u:pw@host` is not an assignment at all.
-  it('redacts credentials embedded in connection URIs', () => {
+  // Scrubbing user-supplied values is left to the CI platform, which owns the
+  // secrets and masks them before the log is written. Void neither guesses at
+  // credential-shaped names nor parses credentials out of values it was handed.
+  it('passes user-supplied values through unchanged', () => {
     const out = plain(
       formatDeployLogSummary([
         line({
@@ -211,23 +193,11 @@ describe('formatDeployLogSummary', () => {
           msg: 'note',
           registry: 'https://deploy:s3cr3t@npm.internal/',
         }),
-        line({
-          elapsedMs: 2,
-          lvl: 'info',
-          msg: 'note',
-          dsn: 'redis://opaquetokenvalue@cache:6379',
-        }),
       ]),
     );
 
-    expect(out).not.toContain('hunter2');
-    expect(out).not.toContain('s3cr3t');
-    expect(out).not.toContain('opaquetokenvalue');
-    // Scheme, user, and host survive — they are why the record is worth reading.
-    expect(out).toContain('postgres://appuser:[redacted]@db.host/app');
-    expect(out).toContain('https://deploy:[redacted]@npm.internal/');
-    // No colon means one opaque value, so the whole userinfo goes.
-    expect(out).toContain('redis://[redacted]@cache:6379');
+    expect(out).toContain('DATABASE_URL=postgres://appuser:hunter2@db.host/app npm run build');
+    expect(out).toContain('https://deploy:s3cr3t@npm.internal/');
   });
 
   it('leaves a credential-free URL untouched', () => {
