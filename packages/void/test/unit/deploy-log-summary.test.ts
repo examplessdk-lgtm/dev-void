@@ -195,6 +195,59 @@ describe('formatDeployLogSummary', () => {
     expect(out).toContain('npm run build');
   });
 
+  // A connection URI carries its credential in the userinfo, where no variable
+  // name gives it away: `DATABASE_URL` names nothing secret, and a bare
+  // `--registry https://u:pw@host` is not an assignment at all.
+  it('redacts credentials embedded in connection URIs', () => {
+    const out = plain(
+      formatDeployLogSummary([
+        line({
+          elapsedMs: 0,
+          lvl: 'info',
+          msg: 'build_start',
+          command: 'DATABASE_URL=postgres://appuser:hunter2@db.host/app npm run build',
+        }),
+        line({
+          elapsedMs: 1,
+          lvl: 'info',
+          msg: 'note',
+          registry: 'https://deploy:s3cr3t@npm.internal/',
+        }),
+        line({
+          elapsedMs: 2,
+          lvl: 'info',
+          msg: 'note',
+          dsn: 'redis://opaquetokenvalue@cache:6379',
+        }),
+      ]),
+    );
+
+    expect(out).not.toContain('hunter2');
+    expect(out).not.toContain('s3cr3t');
+    expect(out).not.toContain('opaquetokenvalue');
+    // Scheme, user, and host survive — they are why the record is worth reading.
+    expect(out).toContain('postgres://appuser:[redacted]@db.host/app');
+    expect(out).toContain('https://deploy:[redacted]@npm.internal/');
+    // No colon means one opaque value, so the whole userinfo goes.
+    expect(out).toContain('redis://[redacted]@cache:6379');
+  });
+
+  it('leaves a credential-free URL untouched', () => {
+    const out = plain(
+      formatDeployLogSummary([
+        line({
+          elapsedMs: 0,
+          lvl: 'info',
+          msg: 'deploy_post',
+          endpoint: 'https://api.void.app/projects/prj_9k1/deploy',
+        }),
+      ]),
+    );
+
+    expect(out).toContain('https://api.void.app/projects/prj_9k1/deploy');
+    expect(out).not.toContain('[redacted]');
+  });
+
   it('redacts signed-URL query values and bearer tokens', () => {
     const out = plain(
       formatDeployLogSummary([

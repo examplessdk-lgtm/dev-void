@@ -41,6 +41,14 @@ const BEARER_RE = /\b(Bearer\s+)\S+/g;
 const INLINE_SECRET_RE =
   /\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY|AUTH)[A-Za-z0-9_]*=)\S+/gi;
 /**
+ * Userinfo in a connection URI, wherever it appears. This catches what the
+ * name-based pattern above cannot: `DATABASE_URL=postgres://user:pw@host/db`
+ * names no credential term, and a bare `--registry https://u:pw@host` is not an
+ * assignment at all. The scheme and host survive, because those are the parts
+ * that make the record worth reading.
+ */
+const URI_USERINFO_RE = /([a-z][a-z0-9+.-]*:\/\/)([^\s/@:]+)(:[^\s/@]*)?@/gi;
+/**
  * Field keys whose value is masked whole, whatever it looks like. `auth` is
  * deliberately absent — it matches metadata keys such as `authMethod` far more
  * often than credentials, and the inline pattern above still catches `X_AUTH=`.
@@ -60,7 +68,12 @@ function redact(text: string): string {
   return text
     .replace(SIGNED_QUERY_RE, '$1[redacted]')
     .replace(BEARER_RE, '$1[redacted]')
-    .replace(INLINE_SECRET_RE, '$1[redacted]');
+    .replace(INLINE_SECRET_RE, '$1[redacted]')
+    .replace(URI_USERINFO_RE, (_match, scheme: string, user: string, password?: string) =>
+      // No colon means the whole userinfo is one opaque value, and an opaque
+      // value in that position is usually a token. Mask it entirely.
+      password === undefined ? `${scheme}[redacted]@` : `${scheme}${user}:[redacted]@`,
+    );
 }
 
 function truncate(text: string, max: number): string {

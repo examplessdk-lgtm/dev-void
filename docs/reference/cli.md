@@ -271,7 +271,11 @@ For Drizzle projects, deploy performs a read-only schema drift check. If a new m
 
 Every deploy writes a structured JSONL trace to `~/.void/logs/deploy-<timestamp>.jsonl` regardless of `--debug`. On failure the path is printed at the end of the error message so you can attach it when reporting platform issues. `VOID_DEPLOY_DEBUG=1` is accepted as an alternate trigger for stderr mirroring.
 
-A failed deploy also prints a summary of that trace under the error, so the cause is visible where the file is not — a CI runner, for example, is discarded with the job. The summary has two blocks: every `error` record with its flattened cause chain, then the last 20 records as a timeline.
+When a deploy fails after it starts, the CLI also prints a summary of that trace under the error, so the cause is visible where the file is not — a CI runner, for example, is discarded with the job. The summary has two blocks: every `error` record with its flattened cause chain, then the last 20 records as a timeline.
+
+Pre-flight failures print no summary. A missing project, a rejected flag combination, or an unsupported `--backend cloudflare` feature stops before any trace exists, and each of those prints its own message explaining what to change. A build failure prints no summary either — the build streams its own output straight to the terminal.
+
+Values that look like credentials are masked on the way out, because the summary reaches CI logs that the trace file never did: signed query parameters, bearer tokens, inline `NAME=value` assignments naming a credential, connection-URI userinfo, and any field whose key names a credential.
 
 ```
 ■  deploy: Deploy failed: deploy in progress
