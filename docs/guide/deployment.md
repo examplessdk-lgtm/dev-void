@@ -95,7 +95,9 @@ Join that installation instead:
 void github join
 ```
 
-::: 3. Link your repository to your project
+:::
+
+3. Link your repository to your project
 
 ```bash
 void github connect --executor container
