@@ -422,6 +422,8 @@ export type PackageOptions = {
   compatibilityDate?: string;
   /** Cloudflare compatibility_flags from framework's wrangler config. */
   compatibilityFlags?: Array<string>;
+  /** Workers CPU-time limit (ms) from void.json `worker.limits.cpu_ms`. */
+  cpuMs?: number;
   /** Cloudflare Sandbox container metadata for platform deploys. */
   sandbox?: ResolvedSandboxConfig;
   /** Resolved void/live Durable Object binding and class names. */
@@ -678,6 +680,9 @@ export function buildVoidManifest(opts: {
   if (options?.compatibilityFlags && options.compatibilityFlags.length > 0) {
     manifest.compatibilityFlags = options.compatibilityFlags;
   }
+  if (options?.cpuMs) {
+    manifest.limits = { cpuMs: options.cpuMs };
+  }
 
   if (hashedAssetsPrefix) {
     manifest.hashedAssetsPrefix = hashedAssetsPrefix;
@@ -874,6 +879,9 @@ export function buildFrameworkManifest(opts: {
   }
   if (po?.compatibilityFlags && po.compatibilityFlags.length > 0) {
     manifest.compatibilityFlags = po.compatibilityFlags;
+  }
+  if (po?.cpuMs) {
+    manifest.limits = { cpuMs: po.cpuMs };
   }
 
   if (opts.hashedAssetsPrefix) {

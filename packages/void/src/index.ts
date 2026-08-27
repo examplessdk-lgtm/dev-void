@@ -957,6 +957,14 @@ export function voidPlugin(options?: {
       workerConfig.compatibility_flags = wranglerCompat.compatibilityFlags;
     }
   }
+  // CPU cap from void.json `worker.limits.cpu_ms` (validated in config.ts as an
+  // integer 1..300000). The CF plugin passes `limits` through into the generated
+  // `dist/ssr/wrangler.json`, so a self-host `wrangler deploy` / `void deploy
+  // --backend cloudflare` enforces it directly. Managed `void deploy` ignores
+  // the generated wrangler config and carries the cap in the deploy manifest.
+  if (config.worker?.limits?.cpu_ms) {
+    workerConfig.limits = { cpu_ms: config.worker.limits.cpu_ms };
+  }
   const inspectorPortEnv = process.env.VOID_INSPECTOR_PORT;
   const inspectorPort =
     inspectorPortEnv === 'false'

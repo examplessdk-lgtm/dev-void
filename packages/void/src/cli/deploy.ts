@@ -5828,6 +5828,7 @@ async function runFrameworkDeploy(
     workerMain: actualWorkerMain,
     compatibilityDate: wranglerCompat?.compatibilityDate,
     compatibilityFlags: wranglerCompat?.compatibilityFlags,
+    cpuMs: voidConfig.worker?.limits?.cpu_ms,
   };
 
   const manifest = buildFrameworkManifest({
@@ -6301,6 +6302,7 @@ async function runFullDeploy(
   const voidPackageOptions = {
     compatibilityDate: wranglerCompat?.compatibilityDate,
     compatibilityFlags: wranglerCompat?.compatibilityFlags,
+    cpuMs: deployConfig.worker?.limits?.cpu_ms,
     ...(workerMain && { workerMain }),
     ...(sandboxConfig && { sandbox: sandboxConfig }),
     ...(liveConfig && { live: liveConfig }),
