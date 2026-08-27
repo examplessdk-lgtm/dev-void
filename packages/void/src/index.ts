@@ -663,7 +663,6 @@ export function voidPlugin(options?: {
     : getOrCreateDevTriggerToken(root);
   const config = readConfig(root);
   const paths = resolveProjectPaths(root, config);
-  let viteCommand: 'serve' | 'build' = 'build';
   let routeEnvironment: RouteEnvironment = 'prod';
   assertNoRootSourceConventionConflicts(paths);
   const dialect = getDatabaseDialect(config);
@@ -948,6 +947,10 @@ export function voidPlugin(options?: {
   if (config.worker?.vars) {
     workerConfig.vars = { ...config.worker.vars };
   }
+
+  // Tracks whether vite is running in dev or build mode. Set early in
+  // envPlugin.config so mergeBindings can gate credential injection on 'serve'.
+  let viteCommand: 'serve' | 'build' = 'build';
 
   // Merge curated wrangler fields from void.json
   const wranglerCompat = isNodeTarget(config.target) ? undefined : readWranglerCompat(root, config);
