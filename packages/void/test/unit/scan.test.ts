@@ -225,18 +225,44 @@ describe('scanRoutes', () => {
   });
 
   it('includes .dev routes and excludes .prod routes in dev', async () => {
+    createFile('routes/api/always.ts', 'export const GET = () => {}');
     createFile('routes/api/hello.dev.ts', 'export const GET = () => {}');
     createFile('routes/api/hello.prod.ts', 'export const GET = () => {}');
 
     const result = await scanRoutes(TMP, { environment: 'dev' });
-    expect(result.routes.map((r) => r.filePath)).toEqual(['api/hello.dev.ts']);
+    expect(result.routes.map((r) => r.filePath)).toEqual(['api/always.ts', 'api/hello.dev.ts']);
   });
 
   it('includes .prod routes and excludes .dev routes in prod', async () => {
+    createFile('routes/api/always.ts', 'export const GET = () => {}');
     createFile('routes/api/hello.dev.ts', 'export const GET = () => {}');
     createFile('routes/api/hello.prod.ts', 'export const GET = () => {}');
 
     const result = await scanRoutes(TMP, { environment: 'prod' });
-    expect(result.routes.map((r) => r.filePath)).toEqual(['api/hello.prod.ts']);
+    expect(result.routes.map((r) => r.filePath)).toEqual(['api/always.ts', 'api/hello.prod.ts']);
+  });
+
+  it('includes every route when no environment is specified', async () => {
+    createFile('routes/api/always.ts', 'export const GET = () => {}');
+    createFile('routes/api/hello.dev.ts', 'export const GET = () => {}');
+    createFile('routes/api/hello.prod.ts', 'export const GET = () => {}');
+
+    const result = await scanRoutes(TMP);
+    expect(result.routes.map((r) => r.filePath).sort()).toEqual([
+      'api/always.ts',
+      'api/hello.dev.ts',
+      'api/hello.prod.ts',
+    ]);
+  });
+
+  it('filters websocket routes by environment', async () => {
+    createFile('routes/chat.dev.ws.ts', 'export default defineWebSocket({})');
+    createFile('routes/chat.prod.ws.ts', 'export default defineWebSocket({})');
+
+    const dev = await scanRoutes(TMP, { environment: 'dev' });
+    const prod = await scanRoutes(TMP, { environment: 'prod' });
+
+    expect(dev.websockets?.map((r) => r.filePath)).toEqual(['chat.dev.ws.ts']);
+    expect(prod.websockets?.map((r) => r.filePath)).toEqual(['chat.prod.ws.ts']);
   });
 });

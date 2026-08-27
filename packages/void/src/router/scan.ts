@@ -6,7 +6,12 @@ import type { PageScanResult } from '../pages/types.ts';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import { scanQueues, type QueueDefinition } from '../queues/scan.ts';
 import { detectHttpExports } from './detect-exports.ts';
-import { parseRouteFilename, type RouteDefinition } from './parse-filename.ts';
+import {
+  isRouteEnabledForEnvironment,
+  parseRouteFilename,
+  type RouteDefinition,
+  type RouteEnvironment,
+} from './parse-filename.ts';
 import {
   isWebSocketPatternFile,
   scanWebSocketRoutes,
@@ -28,8 +33,6 @@ export type MiddlewareDefinition = {
   /** Original filename */
   filePath: string;
 };
-
-export type environmentOptions = 'dev' | 'prod' | 'all';
 
 const HANDLER_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
 const ROUTE_PATTERN = `**/*.{${HANDLER_EXTENSIONS.join(',')}}`;
@@ -78,13 +81,13 @@ export async function scanRoutes(
   options?: {
     output?: 'server' | 'static';
     paths?: ProjectPaths;
-    environment?: environmentOptions;
+    environment?: RouteEnvironment;
   },
 ): Promise<ScanResult> {
   const paths = options?.paths ?? readProjectPaths(root);
   const [routeFiles, websockets, middlewareFiles, jobs, queues, pages] = await Promise.all([
     glob(ROUTE_PATTERN, { cwd: paths.routesDir, absolute: false }),
-    scanWebSocketRoutes(root, paths),
+    scanWebSocketRoutes(root, paths, options?.environment),
     glob(ROUTE_PATTERN, { cwd: paths.middlewareDir, absolute: false }).catch(
       () => [] as Array<string>,
     ),
@@ -100,12 +103,7 @@ export async function scanRoutes(
     .filter((f) => !isWebSocketPatternFile(f))
     .filter((f) => !f.split('/').some((s) => s.startsWith('_')))
     .map((file) => parseRouteFilename(file))
-    .filter(
-      (route) =>
-        options?.environment === undefined ||
-        route.env === null ||
-        route.env === options.environment,
-    )
+    .filter((route) => isRouteEnabledForEnvironment(route, options?.environment))
     .map((route) => {
       route.methods = detectHttpExports(join(routesDir, route.filePath));
       return route;
@@ -136,6 +134,7 @@ export function scanMiddlewareSync(
 export function scanRoutePatternsSync(
   root: string,
   paths: ProjectPaths = readProjectPaths(root),
+  environment?: RouteEnvironment,
 ): Array<RouteDefinition> {
   let routeFiles: Array<string>;
   try {
@@ -148,5 +147,6 @@ export function scanRoutePatternsSync(
     .filter((f) => !isWebSocketPatternFile(f))
     .filter((f) => !f.split('/').some((s) => s.startsWith('_')))
     .map((f) => parseRouteFilename(f))
+    .filter((route) => isRouteEnabledForEnvironment(route, environment))
     .sort(compareRouteSpecificity);
 }

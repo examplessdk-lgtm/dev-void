@@ -14,7 +14,12 @@ import {
   type AstProperty,
   type AstVariableDeclaration,
 } from '../shared/ast.ts';
-import { parseWebSocketFilename, type RouteDefinition } from './parse-filename.ts';
+import {
+  isRouteEnabledForEnvironment,
+  parseWebSocketFilename,
+  type RouteDefinition,
+  type RouteEnvironment,
+} from './parse-filename.ts';
 
 const HANDLER_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
 const WEBSOCKET_ROUTE_RE = /(?:\.(?:dev|prod))?\.ws\.(?:ts|mts|js|mjs)$/;
@@ -167,10 +172,14 @@ function parseWebSocketFiles(
   root: string,
   files: Array<string>,
   paths = readProjectPaths(root),
+  environment?: RouteEnvironment,
 ): Array<WebSocketRouteDefinition> {
   return files
     .filter((f) => isWebSocketRouteFile(f))
     .filter((f) => !f.split('/').some((segment) => segment.startsWith('_')))
+    .filter((filePath) =>
+      isRouteEnabledForEnvironment(parseWebSocketFilename(filePath), environment),
+    )
     .map((filePath) => buildWebSocketRoute(root, filePath, paths))
     .sort((a, b) => {
       if (a.catchAll !== b.catchAll) {
@@ -183,17 +192,19 @@ function parseWebSocketFiles(
 export async function scanWebSocketRoutes(
   root: string,
   paths: ProjectPaths = readProjectPaths(root),
+  environment?: RouteEnvironment,
 ): Promise<Array<WebSocketRouteDefinition>> {
   const pattern = `**/*.{${HANDLER_EXTENSIONS.join(',')}}`;
   const files = await glob(pattern, { cwd: paths.routesDir, absolute: false }).catch(
     () => [] as Array<string>,
   );
-  return parseWebSocketFiles(root, files, paths);
+  return parseWebSocketFiles(root, files, paths, environment);
 }
 
 export function scanWebSocketRoutesSync(
   root: string,
   paths: ProjectPaths = readProjectPaths(root),
+  environment?: RouteEnvironment,
 ): Array<WebSocketRouteDefinition> {
   const pattern = `**/*.{${HANDLER_EXTENSIONS.join(',')}}`;
   let files: Array<string>;
@@ -202,7 +213,7 @@ export function scanWebSocketRoutesSync(
   } catch {
     files = [];
   }
-  return parseWebSocketFiles(root, files, paths);
+  return parseWebSocketFiles(root, files, paths, environment);
 }
 
 export function isWebSocketPatternFile(filePath: string): boolean {

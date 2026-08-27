@@ -3597,7 +3597,7 @@ export async function runCloudflareDeploy(
   // instead"). So a websocket app deployed to a fresh own-account hard-fails after the build.
   // Emitting `new_sqlite_classes` is a build-side follow-up; until then reject those apps.
   // (sandbox / void/live DOs already emit `new_sqlite_classes` — they stay supported.)
-  if (scanWebSocketRoutesSync(root, paths).length > 0) {
+  if (scanWebSocketRoutesSync(root, paths, 'prod').length > 0) {
     log.error(
       [
         'deploy: --backend cloudflare does not yet support WebSocket / Durable Object routes.',
@@ -6118,8 +6118,12 @@ async function runFullDeploy(
       cron,
     })),
   );
-  const routeScan = await scanRoutes(root, { output: deployConfig.output, paths });
-  const webSockets = routeScan.websockets ?? scanWebSocketRoutesSync(root, paths);
+  const routeScan = await scanRoutes(root, {
+    output: deployConfig.output,
+    paths,
+    environment: 'prod',
+  });
+  const webSockets = routeScan.websockets ?? scanWebSocketRoutesSync(root, paths, 'prod');
   const liveConfig = await resolveDeployLiveBindingConfig(root, client, config.projectId, {
     isFrameworkMode,
     needsLive: effectiveBindings.needsLive,

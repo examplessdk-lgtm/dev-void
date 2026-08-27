@@ -31,7 +31,8 @@ import {
   type SsrCompileOptions,
   type PagesCompileOptions,
 } from './router/compile.ts';
-import { scanRoutes, type ScanResult, type environmentOptions } from './router/scan.ts';
+import type { RouteEnvironment } from './router/parse-filename.ts';
+import { scanRoutes, type ScanResult } from './router/scan.ts';
 import type { VoidAuthRuntimeOptions } from './runtime/better-auth-shared.ts';
 import {
   validateSsrEntries,
@@ -97,7 +98,7 @@ type RoutingPluginOptions = {
 
 export function routingPlugin(root: string, options: RoutingPluginOptions): Plugin {
   let scan: ScanResult | null = null;
-  let routeEnvironment: environmentOptions = 'all';
+  let routeEnvironment: RouteEnvironment = 'prod';
   let ssr: SsrCompileOptions | null = null;
   let authConfigPath: string | null = null;
   const paths = readProjectPaths(root);
@@ -452,8 +453,6 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     name: 'void:routing',
     enforce: 'pre',
     configResolved(config) {
-      routeEnvironment = config.command === 'serve' ? 'dev' : 'prod';
-
       resolvedConfig = config;
       authClientPath = resolveAuthClientPath(config);
       compileOptions.dev = config.command === 'serve';
@@ -474,6 +473,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       }
     },
     config(_, env) {
+      routeEnvironment = env.command === 'serve' && !env.isPreview ? 'dev' : 'prod';
+
       if (env.command === 'serve' && options.isAuthEnabled()) {
         // Alias better-auth client subpaths to absolute file paths so
         // Vite can resolve them during SSR without the bare specifiers

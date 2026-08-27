@@ -1,3 +1,5 @@
+export type RouteEnvironment = 'dev' | 'prod';
+
 export type RouteDefinition = {
   /** URL pattern, e.g. "/api/users/:id" */
   pattern: string;
@@ -8,13 +10,13 @@ export type RouteDefinition = {
   /** Whether this route has a catch-all parameter */
   catchAll: boolean;
   /** Environment restriction: "dev", "prod", or null */
-  env: string | null;
+  env: RouteEnvironment | null;
   /** Original relative file path */
   filePath: string;
 };
 
 const EXTENSIONS = ['.ts', '.mts', '.js', '.mjs'];
-const ENV_SUFFIXES = ['dev', 'prod'];
+const ENV_SUFFIXES: Array<RouteEnvironment> = ['dev', 'prod'];
 
 function parsePath(relativePath: string, isWebSocketRoute: boolean): RouteDefinition {
   const filePath = relativePath;
@@ -40,7 +42,7 @@ function parsePath(relativePath: string, isWebSocketRoute: boolean): RouteDefini
   let filename = segments.pop()!;
 
   // 2. Check for env suffix
-  let env: string | null = null;
+  let env: RouteEnvironment | null = null;
   for (const suffix of ENV_SUFFIXES) {
     if (filename.endsWith(`.${suffix}`)) {
       env = suffix;
@@ -115,4 +117,11 @@ export function parseRouteFilename(relativePath: string): RouteDefinition {
 /** Parse a `.ws.*` route filename into a regular route definition. */
 export function parseWebSocketFilename(relativePath: string): RouteDefinition {
   return parsePath(relativePath, true);
+}
+
+export function isRouteEnabledForEnvironment(
+  route: Pick<RouteDefinition, 'env'>,
+  environment?: RouteEnvironment,
+): boolean {
+  return environment === undefined || route.env === null || route.env === environment;
 }
