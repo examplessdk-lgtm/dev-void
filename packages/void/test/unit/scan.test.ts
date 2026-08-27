@@ -223,4 +223,20 @@ describe('scanRoutes', () => {
     const result = await scanRoutes(TMP);
     expect(result.queues).toEqual([]);
   });
+
+  it('includes .dev routes and excludes .prod routes in dev', async () => {
+    createFile('routes/api/hello.dev.ts', 'export const GET = () => {}');
+    createFile('routes/api/hello.prod.ts', 'export const GET = () => {}');
+
+    const result = await scanRoutes(TMP, { environment: 'dev' });
+    expect(result.routes.map((r) => r.filePath)).toEqual(['api/hello.dev.ts']);
+  });
+
+  it('includes .prod routes and excludes .dev routes in prod', async () => {
+    createFile('routes/api/hello.dev.ts', 'export const GET = () => {}');
+    createFile('routes/api/hello.prod.ts', 'export const GET = () => {}');
+
+    const result = await scanRoutes(TMP, { environment: 'prod' });
+    expect(result.routes.map((r) => r.filePath)).toEqual(['api/hello.prod.ts']);
+  });
 });

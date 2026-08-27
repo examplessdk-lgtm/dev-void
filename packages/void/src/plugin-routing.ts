@@ -31,7 +31,7 @@ import {
   type SsrCompileOptions,
   type PagesCompileOptions,
 } from './router/compile.ts';
-import { scanRoutes, type ScanResult } from './router/scan.ts';
+import { scanRoutes, type ScanResult, type environmentOptions } from './router/scan.ts';
 import type { VoidAuthRuntimeOptions } from './runtime/better-auth-shared.ts';
 import {
   validateSsrEntries,
@@ -97,6 +97,7 @@ type RoutingPluginOptions = {
 
 export function routingPlugin(root: string, options: RoutingPluginOptions): Plugin {
   let scan: ScanResult | null = null;
+  let routeEnvironment: environmentOptions = 'all';
   let ssr: SsrCompileOptions | null = null;
   let authConfigPath: string | null = null;
   const paths = readProjectPaths(root);
@@ -141,7 +142,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   }
 
   async function rescan() {
-    scan = await scanRoutes(root, { output: options.output, paths });
+    scan = await scanRoutes(root, { output: options.output, paths, environment: routeEnvironment });
     authConfigPath = findVoidAuthConfig(root, paths);
     const entries = validateSsrEntries(root, paths);
     ssr = entries
@@ -451,6 +452,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     name: 'void:routing',
     enforce: 'pre',
     configResolved(config) {
+      routeEnvironment = config.command === 'serve' ? 'dev' : 'prod';
+
       resolvedConfig = config;
       authClientPath = resolveAuthClientPath(config);
       compileOptions.dev = config.command === 'serve';

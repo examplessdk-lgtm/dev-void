@@ -29,6 +29,8 @@ export type MiddlewareDefinition = {
   filePath: string;
 };
 
+export type environmentOptions = 'dev' | 'prod' | 'all';
+
 const HANDLER_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
 const ROUTE_PATTERN = `**/*.{${HANDLER_EXTENSIONS.join(',')}}`;
 
@@ -73,7 +75,11 @@ function compareRouteSpecificity(a: RouteDefinition, b: RouteDefinition): number
  */
 export async function scanRoutes(
   root: string,
-  options?: { output?: 'server' | 'static'; paths?: ProjectPaths },
+  options?: {
+    output?: 'server' | 'static';
+    paths?: ProjectPaths;
+    environment?: environmentOptions;
+  },
 ): Promise<ScanResult> {
   const paths = options?.paths ?? readProjectPaths(root);
   const [routeFiles, websockets, middlewareFiles, jobs, queues, pages] = await Promise.all([
@@ -93,9 +99,15 @@ export async function scanRoutes(
   const routes = routeFiles
     .filter((f) => !isWebSocketPatternFile(f))
     .filter((f) => !f.split('/').some((s) => s.startsWith('_')))
-    .map((f) => {
-      const route = parseRouteFilename(f);
-      route.methods = detectHttpExports(join(routesDir, f));
+    .map((file) => parseRouteFilename(file))
+    .filter(
+      (route) =>
+        options?.environment === undefined ||
+        route.env === null ||
+        route.env === options.environment,
+    )
+    .map((route) => {
+      route.methods = detectHttpExports(join(routesDir, route.filePath));
       return route;
     })
     // Sort by specificity: static routes before dynamic params, catch-all last.

@@ -12,5 +12,13 @@
     "types": ["void/env"],
     "allowImportingTsExtensions": true
   },
-  "include": ["pages", "routes", "middleware", "crons", "queues", "lib"]
+  "include": [
+    "pages",
+    "routes",
+    "middleware",
+    "crons",
+    "queues",
+    "lib",
+    "../spa/routes/api/hello1.prod.ts"
+  ]
 }
