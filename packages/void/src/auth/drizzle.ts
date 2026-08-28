@@ -472,9 +472,16 @@ export function generateVoidAuthDatabaseModule(
     `import { db as __voidDb } from "void/db";`,
     `import { schema as __voidAuthSchema } from ${schemaImport};`,
     '',
-    `export const __voidAuthDatabase = drizzleAdapter(__voidDb, { provider: ${JSON.stringify(
+    '// Better Auth reads Drizzle metadata while creating the adapter.',
+    '// Defer that work until request handling, when runtime bindings are available.',
+    'let __voidAuthDatabaseInstance: ReturnType<typeof drizzleAdapter> | undefined;',
+    '',
+    'export const __voidAuthDatabase: ReturnType<typeof drizzleAdapter> = (options) => {',
+    `  __voidAuthDatabaseInstance ??= drizzleAdapter(__voidDb, { provider: ${JSON.stringify(
       provider,
     )}, schema: __voidAuthSchema });`,
+    '  return __voidAuthDatabaseInstance(options);',
+    '};',
     '',
   ].join('\n');
 }
