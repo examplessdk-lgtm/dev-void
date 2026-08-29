@@ -27,9 +27,12 @@ routes/
 
 `dev` is the Vite dev server. `prod` is every build, `void deploy`, and `vite preview` — preview serves a production build, so it uses the production routes.
 
-An excluded route is stripped from the worker bundle, from the generated types, and from the generated Cloudflare config. It is not compiled and it is not deployed.
+An excluded route is stripped from the worker bundle, from the generated types, and from the generated route and WebSocket config. It is not compiled and it is not deployed.
 
-`void prepare` is the exception. It boots no Vite, so it has no environment to read and generates types for every route in both environments.
+Two things do not follow the suffix:
+
+- `void prepare` boots no Vite, so it has no environment to read. It generates types for every route in both environments.
+- [Binding inference](../reference/resource-inference.md) scans your source for imports and does not read the suffix. A `void/storage` import inside `api/debug.dev.ts` still adds an R2 binding to your production config, and `void deploy` still provisions the bucket. Set the binding explicitly with [`inference.bindings`](../reference/config.md#inference-bindings) if you do not want it.
 
 The suffix applies to files in `routes/` only. It has no effect in `pages/`, `middleware/`, `crons/`, or `queues/`.
 

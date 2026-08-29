@@ -64,6 +64,27 @@ describe('inferProjectBindings', () => {
     });
   });
 
+  // Binding inference is deliberately blind to the `.dev` / `.prod` route suffix.
+  // Over-emitting is the safe direction: a missing binding crashes the running
+  // worker, while a spare one only costs a resource. The environment is also not
+  // knowable where `inferProjectBindings()` runs — `index.ts` calls it during
+  // plugin construction, long before the `config` hook assigns `routeEnvironment`.
+  // Changing this means reordering `voidPlugin()`, so make it a deliberate change.
+  it('still infers a binding a dev-only route imports', () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'routes', 'api'), { recursive: true });
+    writeFileSync(
+      join(root, 'routes', 'api', 'debug.dev.ts'),
+      `
+      import { storage } from "void/storage";
+      export const GET = async () => Response.json(await storage.list());
+      `,
+    );
+
+    const result = inferProjectBindings(root, undefined, ['routes']);
+    expect(result.needsR2).toBe(true);
+  });
+
   it('detects auth from void/client import with auth specifier in src/', () => {
     const root = createTempRoot();
     writeFileSync(
