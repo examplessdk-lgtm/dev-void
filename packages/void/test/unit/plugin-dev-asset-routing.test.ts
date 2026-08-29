@@ -55,6 +55,16 @@ function createApiOnlyProjectRoot(): string {
   return root;
 }
 
+function createDevOnlyApiProjectRoot(): string {
+  const root = createProjectRoot();
+  mkdirSync(join(root, 'routes/api'), { recursive: true });
+  writeFileSync(
+    join(root, 'routes/api/debug.dev.ts'),
+    'export const GET = () => Response.json({});',
+  );
+  return root;
+}
+
 function createBindingProjectRoot(): string {
   const root = createProjectRoot();
   mkdirSync(join(root, 'routes/api'), { recursive: true });
@@ -137,6 +147,7 @@ describe('voidPlugin dev asset routing', () => {
   async function resolveCloudflareConfig(
     root: string,
     resolved: Record<string, unknown> = {},
+    configEnv: import('vite').ConfigEnv = { command: 'serve', mode: 'development' },
   ): Promise<Record<string, unknown>> {
     vi.spyOn(process, 'cwd').mockReturnValue(root);
 
@@ -148,7 +159,7 @@ describe('voidPlugin dev asset routing', () => {
       config: import('vite').UserConfig,
       env: import('vite').ConfigEnv,
     ) => void;
-    config({}, { command: 'serve', mode: 'development' });
+    config({}, configEnv);
 
     const cloudflarePlugin = plugins.find(
       (plugin): plugin is MockCloudflarePlugin => plugin.name === 'mock:cloudflare',
@@ -163,8 +174,9 @@ describe('voidPlugin dev asset routing', () => {
   async function resolveVoidPluginAssets(
     root: string,
     resolved: Record<string, unknown> = {},
+    configEnv?: import('vite').ConfigEnv,
   ): Promise<{ not_found_handling?: string; run_worker_first?: Array<string> }> {
-    const merged = await resolveCloudflareConfig(root, resolved);
+    const merged = await resolveCloudflareConfig(root, resolved, configEnv);
     return merged.assets as { not_found_handling?: string; run_worker_first?: Array<string> };
   }
 
@@ -194,6 +206,51 @@ describe('voidPlugin dev asset routing', () => {
         run_worker_first: ['/', '/*.html'],
       },
     });
+
+    expect(assets?.not_found_handling).toBe('single-page-application');
+    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
+  });
+
+  it('routes API requests to the worker in dev when the only route is dev-only', async () => {
+    const root = createDevOnlyApiProjectRoot();
+    const assets = await resolveVoidPluginAssets(root);
+
+    expect(assets?.not_found_handling).toBe('single-page-application');
+    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
+  });
+
+  it('drops the API worker-first rules in a build when the only route is dev-only', async () => {
+    const root = createDevOnlyApiProjectRoot();
+    const assets = await resolveVoidPluginAssets(
+      root,
+      {},
+      {
+        command: 'build',
+        mode: 'production',
+      },
+    );
+
+    expect(assets?.not_found_handling).toBe('single-page-application');
+    expect(assets?.run_worker_first).toEqual(['/__void', '/__void/*']);
+  });
+
+  it('keeps the API worker-first rules in a preview run of a prod-only route', async () => {
+    const root = createProjectRoot();
+    mkdirSync(join(root, 'routes/api'), { recursive: true });
+    writeFileSync(
+      join(root, 'routes/api/health.prod.ts'),
+      'export const GET = () => Response.json({});',
+    );
+
+    const assets = await resolveVoidPluginAssets(
+      root,
+      {},
+      {
+        command: 'serve',
+        mode: 'production',
+        isPreview: true,
+      },
+    );
 
     expect(assets?.not_found_handling).toBe('single-page-application');
     expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);

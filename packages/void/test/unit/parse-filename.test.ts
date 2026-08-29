@@ -1,6 +1,10 @@
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vite-plus/test';
-import { parseRouteFilename } from '../../src/router/parse-filename.ts';
+import {
+  isRouteEnabledForEnvironment,
+  parseRouteFilename,
+  parseWebSocketFilename,
+} from '../../src/router/parse-filename.ts';
 
 describe('parseRouteFilename', () => {
   describe('static routes', () => {
@@ -58,6 +62,18 @@ describe('parseRouteFilename', () => {
       const r = parseRouteFilename('health.prod.ts');
       expect(r.pattern).toBe('/health');
       expect(r.env).toBe('prod');
+    });
+
+    it('sits before the .ws segment on a websocket route', () => {
+      const r = parseWebSocketFilename('chat.dev.ws.ts');
+      expect(r.pattern).toBe('/chat');
+      expect(r.env).toBe('dev');
+    });
+
+    it('is not recognised after the .ws segment', () => {
+      const r = parseWebSocketFilename('chat.ws.ts');
+      expect(r.pattern).toBe('/chat');
+      expect(r.env).toBeNull();
     });
   });
 
@@ -155,4 +171,28 @@ describe('parseRouteFilename', () => {
       expect(r.methods).toEqual([]);
     });
   });
+});
+
+describe('isRouteEnabledForEnvironment', () => {
+  const cases: Array<{
+    env: 'dev' | 'prod' | null;
+    environment: 'dev' | 'prod' | undefined;
+    expected: boolean;
+  }> = [
+    { env: null, environment: 'dev', expected: true },
+    { env: null, environment: 'prod', expected: true },
+    { env: null, environment: undefined, expected: true },
+    { env: 'dev', environment: 'dev', expected: true },
+    { env: 'dev', environment: 'prod', expected: false },
+    { env: 'dev', environment: undefined, expected: true },
+    { env: 'prod', environment: 'dev', expected: false },
+    { env: 'prod', environment: 'prod', expected: true },
+    { env: 'prod', environment: undefined, expected: true },
+  ];
+
+  for (const { env, environment, expected } of cases) {
+    it(`env=${env} environment=${environment} -> ${expected}`, () => {
+      expect(isRouteEnabledForEnvironment({ env }, environment)).toBe(expected);
+    });
+  }
 });

@@ -14,7 +14,24 @@ Create route handlers in `routes/**/*.ts`. Each file maps to a URL path based on
 
 Dynamic segments use brackets: `[id]` becomes a route parameter and `[...slug]` becomes a catch-all. Files or directories starting with `_` are ignored. Directories wrapped in parentheses like `(admin)` are route groups. They help organize files without changing the URL.
 
-You can add a `.dev` or `.prod` suffix before the extension (e.g. `debug.dev.ts`) to include a route only in that environment.
+### Environment-only routes
+
+Add a `.dev` or `.prod` suffix before the extension to include a route in only one environment:
+
+```
+routes/
+  api/health.ts        →  always
+  api/debug.dev.ts     →  development only
+  api/metrics.prod.ts  →  production only
+```
+
+`dev` is the Vite dev server. `prod` is every build, `void deploy`, and `vite preview` — preview serves a production build, so it uses the production routes.
+
+An excluded route is stripped from the worker bundle, from the generated types, and from the generated Cloudflare config. It is not compiled and it is not deployed.
+
+`void prepare` is the exception. It boots no Vite, so it has no environment to read and generates types for every route in both environments.
+
+The suffix applies to files in `routes/` only. It has no effect in `pages/`, `middleware/`, `crons/`, or `queues/`.
 
 Each file exports named HTTP method constants to handle specific methods:
 

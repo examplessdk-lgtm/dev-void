@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { pathToFileURL } from 'node:url';
 import { log } from '@clack/prompts';
 import { dirname, join } from 'pathslash';
-import { afterEach, describe, expect, it } from 'vite-plus/test';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   assertMigrationsProduceAuthSchema,
   assertNoConfigOverrideInProjectDotenv,
@@ -1083,6 +1083,34 @@ describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)',
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
     expect(trace).toEqual([]);
+  });
+
+  it('does not reject a dev-only WebSocket route (.dev.ws.ts) — it never reaches production', async () => {
+    // The gate scans with `'prod'`, the same environment the build compiles with, so a
+    // dev-only room emits no `new_classes` migration and must not block the deploy. Compare
+    // with the test above: the same project with a suffix-free `.ws.ts` route is rejected
+    // pre-account with an empty trace.
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'wsapp' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'routes/chat/[room].dev.ws.ts': `import { defineRoom } from 'void/ws';\nexport default defineRoom({});`,
+    });
+    const errors: Array<string> = [];
+    const errorSpy = vi.spyOn(log, 'error').mockImplementation((message) => {
+      errors.push(String(message));
+    });
+    try {
+      const { deps } = harness();
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps).catch(
+        () => undefined,
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(errors.some((message) => message.includes('WebSocket / Durable Object routes'))).toBe(
+      false,
+    );
   });
 });
 

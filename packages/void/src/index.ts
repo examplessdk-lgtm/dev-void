@@ -758,6 +758,13 @@ export function voidPlugin(options?: {
   // Scan queues/websocket routes early so both framework-mode and default-mode
   // branches can safely close over these bindings.
   const queues = framework ? [] : scanQueuesSync(root, paths.queuesDir);
+  // Deliberately scanned with NO environment: this list is the superset used to
+  // RESERVE binding and Durable Object class names below, and reservation must
+  // not depend on which command is running. A filtered list would let the live
+  // DO resolve to `VOID_LIVE` under `vite dev` and `VOID_LIVE_2` under
+  // `vite build` for the same project. Consumers that emit config rather than
+  // reserve names re-filter by `routeEnvironment` (see `mergeBindings` and
+  // `resolveConfiguredAssetRoutingPolicy`).
   const websocketRoutes = framework ? [] : scanWebSocketRoutesSync(root, paths);
   const liveConfig = !isNodeTarget(config.target)
     ? bindings.needsLive
@@ -1312,7 +1319,19 @@ export function voidPlugin(options?: {
     },
     config(userConfig, { mode, command, isPreview }) {
       viteCommand = command;
+      // `dev` is the Vite dev server only. Every build, `void deploy`, and
+      // `vite preview` (which reports `command: 'serve'`) is `prod`.
       routeEnvironment = command === 'serve' && !isPreview ? 'dev' : 'prod';
+      // Re-resolve now that the environment is known — the construction-time
+      // value below always assumes `prod`.
+      //
+      // The guard is NOT an optimization. `envPlugin` is also returned by the
+      // framework and node-target branches, and both of those `return` before
+      // `ssrEntry` / `hasPages` / `hasMiddleware` are declared. Calling
+      // `resolveConfiguredAssetRoutingPolicy()` there throws a TDZ
+      // `ReferenceError`. Those branches also must not write
+      // `workerConfig.assets` at all — `mergeBindings` keys off it staying
+      // unset.
       if (!framework && !isNodeTarget(config.target)) {
         assetRouting = resolveConfiguredAssetRoutingPolicy();
         applyAssetRoutingPolicy(assetRouting);
@@ -1754,6 +1773,11 @@ export function voidPlugin(options?: {
     });
   }
 
+  // Provisional: `routeEnvironment` is still its `prod` default here, because no
+  // `config` hook has run yet. `envPlugin.config` recomputes this before any
+  // consumer reads it — `mergeBindings` runs inside the Cloudflare plugin's own
+  // `config` hook, which Vite sorts after `envPlugin`'s. It is assigned here so
+  // `assetRouting` is never read while unassigned.
   assetRouting = resolveConfiguredAssetRoutingPolicy();
 
   workerConfig.main = join(root, '.void', 'entry.ts');

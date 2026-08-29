@@ -1,7 +1,8 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'pathslash';
 import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
-import { scanRoutes } from '../../src/router/scan.ts';
+import { scanRoutePatternsSync, scanRoutes } from '../../src/router/scan.ts';
+import { scanWebSocketRoutesSync } from '../../src/router/websocket.ts';
 
 const TMP = join(import.meta.dirname, '__tmp_scan_test__');
 
@@ -264,5 +265,52 @@ describe('scanRoutes', () => {
 
     expect(dev.websockets?.map((r) => r.filePath)).toEqual(['chat.dev.ws.ts']);
     expect(prod.websockets?.map((r) => r.filePath)).toEqual(['chat.prod.ws.ts']);
+  });
+});
+
+describe('sync scanners', () => {
+  beforeEach(() => {
+    mkdirSync(TMP, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(TMP, { recursive: true, force: true });
+  });
+
+  it('scanRoutePatternsSync filters routes by environment', () => {
+    createFile('routes/api/always.ts');
+    createFile('routes/api/hello.dev.ts');
+    createFile('routes/api/hello.prod.ts');
+
+    expect(scanRoutePatternsSync(TMP, undefined, 'dev').map((r) => r.filePath)).toEqual([
+      'api/always.ts',
+      'api/hello.dev.ts',
+    ]);
+    expect(scanRoutePatternsSync(TMP, undefined, 'prod').map((r) => r.filePath)).toEqual([
+      'api/always.ts',
+      'api/hello.prod.ts',
+    ]);
+    expect(
+      scanRoutePatternsSync(TMP)
+        .map((r) => r.filePath)
+        .sort(),
+    ).toEqual(['api/always.ts', 'api/hello.dev.ts', 'api/hello.prod.ts']);
+  });
+
+  it('scanWebSocketRoutesSync filters websocket routes by environment', () => {
+    createFile('routes/chat.dev.ws.ts', 'export default defineWebSocket({})');
+    createFile('routes/chat.prod.ws.ts', 'export default defineWebSocket({})');
+
+    expect(scanWebSocketRoutesSync(TMP, undefined, 'dev').map((r) => r.filePath)).toEqual([
+      'chat.dev.ws.ts',
+    ]);
+    expect(scanWebSocketRoutesSync(TMP, undefined, 'prod').map((r) => r.filePath)).toEqual([
+      'chat.prod.ws.ts',
+    ]);
+    expect(
+      scanWebSocketRoutesSync(TMP)
+        .map((r) => r.filePath)
+        .sort(),
+    ).toEqual(['chat.dev.ws.ts', 'chat.prod.ws.ts']);
   });
 });

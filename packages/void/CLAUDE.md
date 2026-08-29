@@ -144,13 +144,15 @@ Build output uses `.mjs` / `.d.mts` extensions (`vp pack` / tsdown default).
 Applied in order to a path relative to `routes/`:
 
 1. Strip extension (`.ts`, `.js`, `.mts`, `.mjs`)
-2. Strip env suffix (`.dev`, `.prod`)
+2. Strip env suffix (`.dev`, `.prod`) and record it on `RouteDefinition.env`
 3. Strip trailing `index`
 4. Remove route group dirs `(groupname)`
 5. Convert `[param]` → `:param`, `[...param]` → `:param{.+}`, `[...]` → `*`
 6. Prefix with `/`
 
 HTTP methods are determined by **named exports** in each file (detected by `detect-exports.ts` via `parseSync`), not by filename suffixes. Files/dirs starting with `_` are ignored by the scanner.
+
+The recorded `env` is enforced by `isRouteEnabledForEnvironment()`. The scanners take an optional `environment` (`'dev' | 'prod'`); when it is omitted no filtering happens. `dev` is the Vite dev server, `prod` is every build, `void deploy`, and `vite preview`. A dev-only route is absent from the production bundle, types, and Cloudflare config. `void prepare` is the exception: it boots no Vite, passes no `environment`, and so generates types for both environments. The suffix is honoured in `routes/` only, not in `pages/`, `middleware/`, `crons/`, or `queues/`.
 
 ## Code Generation (`void gen`)
 
