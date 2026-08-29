@@ -51,7 +51,7 @@ describe('Better Auth Drizzle codegen', () => {
     expect(code).toContain('"name": "members"');
   });
 
-  it('can generate an auth database module that reuses void/db', () => {
+  it('lazily creates an auth database adapter that reuses void/db', () => {
     const code = generateVoidAuthDatabaseModule({
       dialect: 'postgresql',
       schemaImportPath: '/project/.void/better-auth-schema.ts',
@@ -59,7 +59,15 @@ describe('Better Auth Drizzle codegen', () => {
     });
 
     expect(code).toContain('import { db as __voidDb } from "void/db"');
-    expect(code).toContain('drizzleAdapter(__voidDb');
+    expect(code).toContain(
+      'let __voidAuthDatabaseInstance: ReturnType<typeof drizzleAdapter> | undefined;',
+    );
+    expect(code).toContain(
+      'export const __voidAuthDatabase: ReturnType<typeof drizzleAdapter> = (options) => {',
+    );
+    expect(code).toContain('__voidAuthDatabaseInstance ??= drizzleAdapter(__voidDb');
+    expect(code).toContain('return __voidAuthDatabaseInstance(options);');
+    expect(code).not.toContain('export const __voidAuthDatabase = drizzleAdapter(__voidDb');
     expect(code).not.toContain('import pg from');
   });
 });

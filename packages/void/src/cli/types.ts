@@ -200,6 +200,8 @@ export type DeployManifest = {
   workerMain?: string;
   compatibilityDate?: string;
   compatibilityFlags?: Array<string>;
+  /** Worker resource limit overrides from void.json `worker.limits`. */
+  limits?: { cpuMs?: number };
   hashedAssetsPrefix?: string;
   headerRules?: Array<HeaderRule>;
   redirectRules?: Array<RedirectRule>;

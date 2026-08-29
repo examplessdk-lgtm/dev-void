@@ -3,6 +3,7 @@ import { hash as blake3hash } from 'blake3-jit';
 import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
+  buildFrameworkManifest,
   buildStaticManifest,
   buildVoidManifest,
   computeAssetHash,
@@ -165,6 +166,58 @@ describe('buildVoidManifest — self-host non-regression', () => {
   it('omits manifest.pages when the pages array is empty or missing', () => {
     expect(buildVoidManifest({ bindings: makeBindings(), pages: [] }).pages).toBeUndefined();
     expect(buildVoidManifest({ bindings: makeBindings() }).pages).toBeUndefined();
+  });
+});
+
+describe('manifest limits (worker.limits.cpu_ms)', () => {
+  function makeBindings(overrides: Partial<InferredBindings> = {}): InferredBindings {
+    return {
+      needsD1: false,
+      needsKV: false,
+      needsR2: false,
+      needsAuth: false,
+      needsQueues: false,
+      needsAI: false,
+      needsSandbox: false,
+      ...overrides,
+    };
+  }
+
+  it('emits manifest.limits when options.cpuMs is set (void manifest)', () => {
+    const manifest = buildVoidManifest({ bindings: makeBindings(), options: { cpuMs: 50 } });
+    expect(manifest.limits).toEqual({ cpuMs: 50 });
+  });
+
+  it('omits the limits key entirely when options.cpuMs is unset (void manifest)', () => {
+    const manifest = buildVoidManifest({ bindings: makeBindings(), options: {} });
+    expect('limits' in manifest).toBe(false);
+  });
+
+  it('emits manifest.limits when packageOptions.cpuMs is set (framework manifest)', () => {
+    const manifest = buildFrameworkManifest({
+      frameworkName: 'astro',
+      workerMain: 'index.mjs',
+      bindings: makeBindings(),
+      packageOptions: { cpuMs: 30000 },
+    });
+    expect(manifest.limits).toEqual({ cpuMs: 30000 });
+  });
+
+  it('omits the limits key entirely when packageOptions.cpuMs is unset (framework manifest)', () => {
+    const manifest = buildFrameworkManifest({
+      frameworkName: 'astro',
+      workerMain: 'index.mjs',
+      bindings: makeBindings(),
+      packageOptions: {},
+    });
+    expect('limits' in manifest).toBe(false);
+  });
+
+  it('static manifests never carry limits', () => {
+    for (const appType of ['static', 'spa'] as const) {
+      const manifest = buildStaticManifest({ appType });
+      expect('limits' in manifest).toBe(false);
+    }
   });
 });
 

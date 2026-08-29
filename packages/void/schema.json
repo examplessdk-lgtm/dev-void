@@ -360,6 +360,19 @@
           "type": "object",
           "description": "Environment variables (plain text, not secrets)",
           "additionalProperties": { "type": "string" }
+        },
+        "limits": {
+          "type": "object",
+          "description": "Worker resource limit overrides.",
+          "properties": {
+            "cpu_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300000,
+              "description": "Caps Workers CPU time per request, in milliseconds (max 300000 = 5 minutes). The platform plan may cap it lower."
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

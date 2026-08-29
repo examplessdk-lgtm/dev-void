@@ -318,6 +318,57 @@ describe('readConfig', () => {
     cleanup();
   });
 
+  it('accepts valid worker.limits.cpu_ms', () => {
+    setup(JSON.stringify({ worker: { limits: { cpu_ms: 50 } } }));
+    const config = readConfig(tmpDir);
+    expect(config.worker?.limits).toEqual({ cpu_ms: 50 });
+    cleanup();
+  });
+
+  it('accepts worker.limits.cpu_ms boundary values (1 and 300000)', () => {
+    setup(JSON.stringify({ worker: { limits: { cpu_ms: 1 } } }));
+    expect(readConfig(tmpDir).worker?.limits?.cpu_ms).toBe(1);
+    setup(JSON.stringify({ worker: { limits: { cpu_ms: 300000 } } }));
+    expect(readConfig(tmpDir).worker?.limits?.cpu_ms).toBe(300000);
+    cleanup();
+  });
+
+  it('throws on non-object worker.limits', () => {
+    setup(JSON.stringify({ worker: { limits: 50 } }));
+    expect(() => readConfig(tmpDir)).toThrow('"worker.limits" in void.json must be an object');
+    cleanup();
+  });
+
+  it('throws on unknown key inside worker.limits', () => {
+    setup(JSON.stringify({ worker: { limits: { cpuMs: 50 } } }));
+    expect(() => readConfig(tmpDir)).toThrow("Unknown key 'worker.limits.cpuMs'");
+    cleanup();
+  });
+
+  it('throws on worker.limits.cpu_ms of 0', () => {
+    setup(JSON.stringify({ worker: { limits: { cpu_ms: 0 } } }));
+    expect(() => readConfig(tmpDir)).toThrow('"worker.limits.cpu_ms"');
+    cleanup();
+  });
+
+  it('throws on negative worker.limits.cpu_ms', () => {
+    setup(JSON.stringify({ worker: { limits: { cpu_ms: -5 } } }));
+    expect(() => readConfig(tmpDir)).toThrow('"worker.limits.cpu_ms"');
+    cleanup();
+  });
+
+  it('throws on non-integer worker.limits.cpu_ms', () => {
+    setup(JSON.stringify({ worker: { limits: { cpu_ms: 50.5 } } }));
+    expect(() => readConfig(tmpDir)).toThrow('"worker.limits.cpu_ms"');
+    cleanup();
+  });
+
+  it('throws on worker.limits.cpu_ms above 300000', () => {
+    setup(JSON.stringify({ worker: { limits: { cpu_ms: 300001 } } }));
+    expect(() => readConfig(tmpDir)).toThrow('"worker.limits.cpu_ms"');
+    cleanup();
+  });
+
   it('accepts routing.revalidate as a number', () => {
     setup(JSON.stringify({ routing: { revalidate: 60 } }));
     const config = readConfig(tmpDir);
@@ -786,6 +837,19 @@ describe('readConfig redirects', () => {
         expect(destPattern.test(dest)).toBe(false);
       }
     }
+  });
+
+  it('schema.json worker.limits.cpu_ms bounds match runtime validation', () => {
+    const schema = JSON.parse(readFileSync(join(import.meta.dirname, '../../schema.json'), 'utf8'));
+    const limits = schema.properties.worker.properties.limits;
+    expect(limits.type).toBe('object');
+    // Runtime (config.ts) rejects unknown keys inside limits.
+    expect(limits.additionalProperties).toBe(false);
+    expect(Object.keys(limits.properties)).toEqual(['cpu_ms']);
+    // Runtime accepts an integer between 1 and 300000 (Cloudflare's hard max).
+    expect(limits.properties.cpu_ms.type).toBe('integer');
+    expect(limits.properties.cpu_ms.minimum).toBe(1);
+    expect(limits.properties.cpu_ms.maximum).toBe(300000);
   });
 
   it('publishes schema.json as a package file and subpath export', () => {

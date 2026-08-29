@@ -23,6 +23,7 @@ export type WranglerConfig = {
   compatibility_date?: string;
   compatibility_flags?: Array<string>;
   vars?: Record<string, string>;
+  limits?: { cpu_ms?: number };
 };
 
 /**
@@ -119,6 +120,8 @@ export const VALID_NOT_FOUND_HANDLING: Set<string> = new Set([
  */
 export const VALID_REDIRECT_STATUSES: Set<number> = new Set([301, 302, 303, 307, 308]);
 const VALID_DATABASE_VALUES = new Set(['pg']);
+/** Cloudflare's hard maximum for Workers CPU time per request (5 minutes). */
+const MAX_WORKER_CPU_MS = 300000;
 const VALID_SANDBOX_INSTANCE_TYPES = new Set<SandboxInstanceType>([
   'dev',
   'lite',
@@ -913,6 +916,31 @@ export function readConfig(root: string): VoidConfig {
       for (const [key, value] of Object.entries(w.vars)) {
         if (typeof value !== 'string') {
           throw new Error(`config: "worker.vars.${key}" in ${CONFIG_FILE} must be a string.`);
+        }
+      }
+    }
+    if (w.limits !== undefined) {
+      if (typeof w.limits !== 'object' || w.limits === null || Array.isArray(w.limits)) {
+        throw new Error(`config: "worker.limits" in ${CONFIG_FILE} must be an object.`);
+      }
+      const limits = w.limits as Record<string, unknown>;
+      for (const key of Object.keys(limits)) {
+        if (key !== 'cpu_ms') {
+          throw new Error(
+            `config: Unknown key 'worker.limits.${key}' in ${CONFIG_FILE}. Valid: cpu_ms.`,
+          );
+        }
+      }
+      if (limits.cpu_ms !== undefined) {
+        if (
+          typeof limits.cpu_ms !== 'number' ||
+          !Number.isInteger(limits.cpu_ms) ||
+          limits.cpu_ms < 1 ||
+          limits.cpu_ms > MAX_WORKER_CPU_MS
+        ) {
+          throw new Error(
+            `config: "worker.limits.cpu_ms" in ${CONFIG_FILE} must be an integer between 1 and ${MAX_WORKER_CPU_MS}.`,
+          );
         }
       }
     }

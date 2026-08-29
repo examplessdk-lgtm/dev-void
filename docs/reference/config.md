@@ -254,6 +254,7 @@ Curated Cloudflare Workers configuration. Cloudflare-targeted apps require an ex
 | `compatibility_date`  | `string`   | Cloudflare Workers compatibility date  |
 | `compatibility_flags` | `string[]` | Cloudflare Workers compatibility flags |
 | `vars`                | `object`   | Plain-text worker variables            |
+| `limits`              | `object`   | Worker resource limit overrides        |
 
 ```json
 {
@@ -268,6 +269,18 @@ Curated Cloudflare Workers configuration. Cloudflare-targeted apps require an ex
 ```
 
 `worker.vars` values must be strings. They are merged into Worker bindings before `.env` files are loaded, so project `.env` values override `worker.vars` for local dev/build. Do not put secrets here; use `env.ts` plus `void secret put` for production secrets.
+
+`worker.limits.cpu_ms` caps Workers CPU time per request, in milliseconds. It must be an integer between 1 and 300000 (Cloudflare's hard maximum, 5 minutes). A deploy that requests more than your account plan's ceiling fails with an error naming both the requested value and the plan maximum. Only a rollback clamps: rolling back to a deployment whose configured limit now exceeds your plan applies the plan ceiling instead of failing. If your plan changes so that a previously valid value now exceeds the ceiling, deploys keep failing until you lower `cpu_ms` in `void.json`. On the self-hosted path (`void deploy --backend cloudflare`, or a bare `wrangler deploy` of the build output), the value is written into the generated `dist/ssr/wrangler.json` as `limits.cpu_ms` and enforced by Cloudflare directly. The Void plan ceiling does not apply there, but your Cloudflare account's own CPU-time allowance still does: the Workers Free plan caps CPU at 10 ms per request, and the Workers Paid plan allows up to 300000 ms. A value above what your Cloudflare account permits is constrained or rejected by Cloudflare, not by Void.
+
+```json
+{
+  "worker": {
+    "limits": {
+      "cpu_ms": 30000
+    }
+  }
+}
+```
 
 ### `routing`
 

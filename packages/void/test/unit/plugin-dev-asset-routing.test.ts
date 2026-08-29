@@ -250,6 +250,28 @@ describe('voidPlugin dev asset routing', () => {
     expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
   });
 
+  it('passes worker.limits.cpu_ms from void.json into the generated worker config', async () => {
+    const root = createProjectRoot();
+    writeFileSync(
+      join(root, 'void.json'),
+      JSON.stringify({
+        worker: { compatibility_date: '2026-02-24', limits: { cpu_ms: 120000 } },
+      }),
+    );
+
+    const config = await resolveCloudflareConfig(root);
+
+    expect(config.limits).toEqual({ cpu_ms: 120000 });
+  });
+
+  it('emits no limits key when worker.limits is not configured', async () => {
+    const root = createProjectRoot();
+
+    const config = await resolveCloudflareConfig(root);
+
+    expect('limits' in config).toBe(false);
+  });
+
   it('routes document routes through the worker before SPA fallback HTML', async () => {
     const root = createDocumentRouteProjectRoot();
     const assets = await resolveVoidPluginAssets(root);
