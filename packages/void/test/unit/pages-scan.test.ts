@@ -102,6 +102,51 @@ describe('scanPages', () => {
     expect(page!.methods).toEqual(['loader', 'actions']);
   });
 
+  it('ignores commented-out and string-contained server exports', async () => {
+    writeFile('comments.vue', '<template><div>Comments</div></template>');
+    writeFile(
+      'comments.server.ts',
+      `
+        export const action = () => ({});
+        const example = "export const loader = () => ({})";
+        // export const actions = {};
+        /*
+          export const loader = () => ({});
+          export const revalidate = 60;
+          export const prerender = true;
+          export const ssr = false;
+          export function getPrerenderPaths() {}
+        */
+      `,
+    );
+
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === 'comments');
+    expect(page).toBeDefined();
+    expect(page!.methods).toEqual(['action']);
+    expect(page!.revalidate).toBeUndefined();
+    expect(page!.prerender).toBeUndefined();
+    expect(page!.ssr).toBeUndefined();
+    expect(page!.hasGetPrerenderPaths).toBeUndefined();
+  });
+
+  it.each([
+    ['ts', 'export const action: () => void = () => {};'],
+    ['tsx', 'export const action = () => <div />;'],
+    ['js', 'export const action = () => {};'],
+    ['mjs', 'export const action = () => {};'],
+    ['mts', 'export const action: () => void = () => {};'],
+  ])('parses .server.%s exports', async (extension, source) => {
+    writeFile('extension.vue', '<template><div>Extension</div></template>');
+    writeFile(`extension.server.${extension}`, source);
+
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === 'extension');
+    expect(page).toBeDefined();
+    expect(page!.serverPath).toBe(`extension.server.${extension}`);
+    expect(page!.methods).toEqual(['action']);
+  });
+
   it('identifies layout.vue files separately', async () => {
     writeFile('layout.vue', '<template><slot /></template>');
     writeFile('users/layout.vue', '<template><slot /></template>');

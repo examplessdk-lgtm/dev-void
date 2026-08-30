@@ -50,6 +50,7 @@ export type AstVariableDeclarator = AstNode & {
 
 export type AstVariableDeclaration = AstNode & {
   type: 'VariableDeclaration';
+  kind?: string;
   declarations?: Array<AstVariableDeclarator>;
 };
 

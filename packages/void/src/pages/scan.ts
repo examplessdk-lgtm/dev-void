@@ -1,8 +1,18 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname, basename, extname } from 'pathslash';
 import { glob } from 'tinyglobby';
+import { parseSync } from 'vite';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import { parseRouteFilename } from '../router/parse-filename.ts';
+import {
+  isIdentifier,
+  isLiteral,
+  type AstExportNamedDeclaration,
+  type AstFunctionDeclaration,
+  type AstNode,
+  type AstProgram,
+  type AstVariableDeclaration,
+} from '../shared/ast.ts';
 import { resolveNamedLayout } from './layout-resolution.ts';
 import type {
   ExplicitBoolean,
@@ -17,13 +27,7 @@ import type {
 
 const COMPONENT_EXTENSIONS = ['vue', 'tsx', 'jsx', 'svelte', 'md'];
 const SERVER_EXTENSIONS = ['ts', 'tsx', 'js', 'mjs', 'mts'];
-const PAGES_EXPORT_RE = /export\s+(?:const|function|async\s+function)\s+(loader|actions?)\b/g;
-const REVALIDATE_RE = /export\s+const\s+revalidate\s*=\s*(\d+)\s*;?/;
-const PRERENDER_RE = /export\s+const\s+prerender\s*=\s*true\s*;?/;
-const PRERENDER_FALSE_RE = /export\s+const\s+prerender\s*=\s*false\s*;?/;
-const SSR_TRUE_RE = /export\s+const\s+ssr\s*=\s*true\s*;?/;
-const SSR_FALSE_RE = /export\s+const\s+ssr\s*=\s*false\s*;?/;
-const GET_PRERENDER_PATHS_RE = /export\s+(?:async\s+)?function\s+getPrerenderPaths\b/;
+const PAGE_METHODS = new Set(['loader', 'action', 'actions']);
 const LAYOUT_STRING_RE = /export\s+const\s+layout\s*=\s*["']([^"']+)["']\s*;?/;
 const LAYOUT_FALSE_RE = /export\s+const\s+layout\s*=\s*false\s*;?/;
 export const MAX_REVALIDATE = 31536000; // 1 year in seconds
@@ -47,6 +51,97 @@ type ResolvedPageRendering = {
   renderMode: PageRenderMode;
   shouldPrerender: boolean;
 };
+
+type PageServerMetadata = {
+  methods: Array<string>;
+  revalidate?: number;
+  prerender?: ExplicitBoolean;
+  ssr?: ExplicitBoolean;
+  hasGetPrerenderPaths?: boolean;
+};
+
+function extractPageServerMetadata(filename: string, code: string): PageServerMetadata {
+  let parsed: ReturnType<typeof parseSync>;
+  try {
+    parsed = parseSync(filename, code);
+  } catch {
+    return { methods: [] };
+  }
+
+  const metadata: PageServerMetadata = { methods: [] };
+  const methodNames = new Set<string>();
+
+  const recordExport = (name: string, init?: AstNode): void => {
+    if (PAGE_METHODS.has(name)) {
+      methodNames.add(name);
+      return;
+    }
+    if (name === 'getPrerenderPaths') {
+      metadata.hasGetPrerenderPaths = true;
+      return;
+    }
+    if (!isLiteral(init)) {
+      return;
+    }
+    if (
+      name === 'revalidate' &&
+      typeof init.value === 'number' &&
+      Number.isInteger(init.value) &&
+      init.value >= 0
+    ) {
+      metadata.revalidate = init.value;
+    } else if (name === 'prerender' && typeof init.value === 'boolean') {
+      metadata.prerender = init.value;
+    } else if (name === 'ssr' && typeof init.value === 'boolean') {
+      metadata.ssr = init.value;
+    }
+  };
+
+  const program = parsed.program as unknown as AstProgram;
+  for (const node of program.body ?? []) {
+    if (node.type !== 'ExportNamedDeclaration') {
+      continue;
+    }
+    const exported = node as AstExportNamedDeclaration;
+    if (exported.exportKind === 'type') {
+      continue;
+    }
+
+    const declaration = exported.declaration;
+    if (declaration?.type === 'VariableDeclaration') {
+      const variableDeclaration = declaration as AstVariableDeclaration;
+      if (variableDeclaration.kind === 'const') {
+        for (const declarator of variableDeclaration.declarations ?? []) {
+          if (isIdentifier(declarator.id)) {
+            recordExport(declarator.id.name, declarator.init);
+          }
+        }
+      }
+    } else if (declaration?.type === 'FunctionDeclaration') {
+      const functionDeclaration = declaration as AstFunctionDeclaration;
+      if (isIdentifier(functionDeclaration.id)) {
+        recordExport(functionDeclaration.id.name);
+      }
+    }
+
+    for (const specifier of exported.specifiers ?? []) {
+      if (specifier.exportKind === 'type') {
+        continue;
+      }
+      const name = isIdentifier(specifier.exported)
+        ? specifier.exported.name
+        : isIdentifier(specifier.local)
+          ? specifier.local.name
+          : undefined;
+      if (name) {
+        recordExport(name);
+      }
+    }
+  }
+
+  metadata.methods = [...methodNames];
+  return metadata;
+}
 
 function inferAutoPrerender(page: PageRenderingSource, options?: PageScanOptions): boolean {
   const isDynamic = page.params.length > 0 || page.catchAll;
@@ -167,26 +262,12 @@ export async function scanPages(root: string, options?: PageScanOptions): Promis
       if (existsSync(join(pagesDir, candidate))) {
         serverPath = candidate;
         const content = readFileSync(join(pagesDir, candidate), 'utf-8');
-        for (const m of content.matchAll(PAGES_EXPORT_RE)) {
-          methods.push(m[1]);
-        }
-        const revalidateMatch = content.match(REVALIDATE_RE);
-        if (revalidateMatch) {
-          revalidate = Number(revalidateMatch[1]);
-        }
-        if (PRERENDER_RE.test(content)) {
-          prerender = true;
-        } else if (PRERENDER_FALSE_RE.test(content)) {
-          prerender = false;
-        }
-        if (SSR_TRUE_RE.test(content)) {
-          ssr = true;
-        } else if (SSR_FALSE_RE.test(content)) {
-          ssr = false;
-        }
-        if (GET_PRERENDER_PATHS_RE.test(content)) {
-          hasGetPrerenderPaths = true;
-        }
+        const metadata = extractPageServerMetadata(candidate, content);
+        methods.push(...metadata.methods);
+        revalidate = metadata.revalidate;
+        prerender = metadata.prerender;
+        ssr = metadata.ssr;
+        hasGetPrerenderPaths = metadata.hasGetPrerenderPaths;
         break;
       }
     }
