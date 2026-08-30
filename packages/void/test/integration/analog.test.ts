@@ -2,7 +2,15 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import {
+  ENV_VALIDATION_TEST_KEY,
+  captureChildOutput,
+  getPort,
+  installEnvValidationFixture,
+  killChild,
+  waitForEnvValidation,
+  waitForServer,
+} from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/analog';
@@ -95,11 +103,14 @@ describe('playground/analog build', () => {
 
 describe('playground/analog dev', () => {
   let child: ReturnType<typeof spawn>;
+  let cleanupEnvFixture: (() => void) | undefined;
   let DEV_PORT: number;
   let DEV_BASE: string;
+  let readDevOutput = () => '';
 
   beforeAll(async () => {
     const pg = PLAYGROUND_ROOT;
+    cleanupEnvFixture = installEnvValidationFixture(pg);
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
     removeWranglerConfig(pg);
@@ -128,16 +139,21 @@ describe('playground/analog dev', () => {
         },
       },
     );
-
-    child.stderr!.on('data', () => {});
+    readDevOutput = captureChildOutput(child);
 
     await waitForServer(DEV_BASE, 30_000);
+    await waitForEnvValidation();
   });
 
   afterAll(async () => {
     if (child) {
       await killChild(child);
     }
+    cleanupEnvFixture?.();
+  });
+
+  it('accepts required env values from .env.local without warning', () => {
+    expect(readDevOutput()).not.toContain(`${ENV_VALIDATION_TEST_KEY} is required but missing`);
   });
 
   it('syncs wrangler.jsonc with bindings from void.json', () => {

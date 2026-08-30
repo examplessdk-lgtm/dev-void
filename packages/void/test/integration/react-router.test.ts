@@ -3,7 +3,15 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import {
+  ENV_VALIDATION_TEST_KEY,
+  captureChildOutput,
+  getPort,
+  installEnvValidationFixture,
+  killChild,
+  waitForEnvValidation,
+  waitForServer,
+} from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/react-router';
@@ -45,9 +53,12 @@ describe('playground/react-router build', () => {
 
 describe('playground/react-router dev', { retry: 2 }, () => {
   let child: ReturnType<typeof spawn>;
+  let cleanupEnvFixture: (() => void) | undefined;
+  let readDevOutput = () => '';
   let stderr = '';
 
   beforeAll(async () => {
+    cleanupEnvFixture = installEnvValidationFixture(join(ROOT, PLAYGROUND));
     DEV_PORT = await getPort();
     DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
@@ -72,21 +83,28 @@ describe('playground/react-router dev', { retry: 2 }, () => {
         },
       },
     );
+    readDevOutput = captureChildOutput(child);
 
     child.stderr!.on('data', (chunk: Buffer) => {
       stderr += String(chunk);
     });
 
     await waitForServer(DEV_BASE, 30_000);
+    await waitForEnvValidation();
   });
 
   afterAll(async () => {
     if (child) {
       await killChild(child);
     }
+    cleanupEnvFixture?.();
     if (stderr.includes('error when starting dev server')) {
       throw new Error(stderr);
     }
+  });
+
+  it('accepts required env values from .env.local without warning', () => {
+    expect(readDevOutput()).not.toContain(`${ENV_VALIDATION_TEST_KEY} is required but missing`);
   });
 
   it('renders home page with SSR', async () => {

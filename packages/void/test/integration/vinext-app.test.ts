@@ -3,7 +3,15 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import {
+  ENV_VALIDATION_TEST_KEY,
+  captureChildOutput,
+  getPort,
+  installEnvValidationFixture,
+  killChild,
+  waitForEnvValidation,
+  waitForServer,
+} from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/vinext-app';
@@ -104,5 +112,56 @@ describe.skip('playground/vinext-app dev', () => {
     const html = await response.text();
     expect(html).toContain('Alice');
     expect(html).toContain('ok');
+  });
+});
+
+describe('playground/vinext-app env validation', () => {
+  let child: ReturnType<typeof spawn>;
+  let cleanupEnvFixture: (() => void) | undefined;
+  let readDevOutput = () => '';
+
+  beforeAll(async () => {
+    cleanupEnvFixture = installEnvValidationFixture(join(ROOT, PLAYGROUND));
+    DEV_PORT = await getPort();
+    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
+
+    child = spawn(
+      'vp',
+      [
+        'run',
+        '--filter',
+        `./${PLAYGROUND}`,
+        'dev',
+        '--host',
+        '127.0.0.1',
+        '--port',
+        String(DEV_PORT),
+      ],
+      {
+        cwd: ROOT,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          VOID_INSPECTOR_PORT: 'false',
+        },
+      },
+    );
+    readDevOutput = captureChildOutput(child);
+
+    await waitForServer(DEV_BASE, 30_000, {
+      isAlive: () => child.exitCode === null && child.signalCode === null,
+    });
+    await waitForEnvValidation();
+  });
+
+  afterAll(async () => {
+    if (child) {
+      await killChild(child);
+    }
+    cleanupEnvFixture?.();
+  });
+
+  it('accepts required env values from .env.local without warning', () => {
+    expect(readDevOutput()).not.toContain(`${ENV_VALIDATION_TEST_KEY} is required but missing`);
   });
 });

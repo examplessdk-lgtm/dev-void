@@ -1,6 +1,48 @@
 import { execSync, type spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
+import { join } from 'pathslash';
+
+export const ENV_VALIDATION_TEST_KEY = 'VOID_ENV_FRAMEWORK_TEST';
+
+export function installEnvValidationFixture(root: string): () => void {
+  const schemaPath = join(root, 'env.ts');
+  const localEnvPath = join(root, '.env.local');
+  if (existsSync(schemaPath) || existsSync(localEnvPath)) {
+    throw new Error(`Env validation fixture would overwrite an existing file in ${root}`);
+  }
+
+  writeFileSync(
+    schemaPath,
+    `import { defineEnv, string } from 'void/env';\n\n` +
+      `export default defineEnv({\n` +
+      `  ${ENV_VALIDATION_TEST_KEY}: string(),\n` +
+      `});\n`,
+  );
+  writeFileSync(localEnvPath, `${ENV_VALIDATION_TEST_KEY}=present\n`);
+
+  return () => {
+    rmSync(schemaPath, { force: true });
+    rmSync(localEnvPath, { force: true });
+  };
+}
+
+export function captureChildOutput(child: ReturnType<typeof spawn>): () => string {
+  let output = '';
+  const capture = (chunk: Buffer) => {
+    output += String(chunk);
+  };
+  child.stdout?.on('data', capture);
+  child.stderr?.on('data', capture);
+  return () => output;
+}
+
+export async function waitForEnvValidation(): Promise<void> {
+  // envSchemaPlugin intentionally validates 100ms after the server starts
+  // listening. Leave enough headroom for framework startup work and CI load.
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+}
 
 /**
  * Timeout multiplier for Windows CI runners, which are 2–3× slower

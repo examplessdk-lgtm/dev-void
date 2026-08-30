@@ -3,7 +3,15 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import {
+  ENV_VALIDATION_TEST_KEY,
+  captureChildOutput,
+  getPort,
+  installEnvValidationFixture,
+  killChild,
+  waitForEnvValidation,
+  waitForServer,
+} from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/nuxt';
@@ -38,11 +46,14 @@ describe(
   'playground/nuxt dev',
   () => {
     let child: ReturnType<typeof spawn>;
+    let cleanupEnvFixture: (() => void) | undefined;
+    let readDevOutput = () => '';
     let stderr = '';
 
     beforeAll(
       async () => {
         const pg = join(ROOT, PLAYGROUND);
+        cleanupEnvFixture = installEnvValidationFixture(pg);
         rmSync(join(pg, '.void'), { recursive: true, force: true });
         rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
         removeWranglerConfig(pg);
@@ -71,6 +82,7 @@ describe(
             },
           },
         );
+        readDevOutput = captureChildOutput(child);
 
         child.stderr!.on('data', (chunk: Buffer) => {
           stderr += String(chunk);
@@ -78,6 +90,7 @@ describe(
 
         const serverTimeout = process.platform === 'win32' ? 60_000 : 30_000;
         await waitForServer(DEV_BASE, serverTimeout);
+        await waitForEnvValidation();
       },
       process.platform === 'win32' ? 75_000 : 45_000,
     );
@@ -86,6 +99,11 @@ describe(
       if (child) {
         await killChild(child);
       }
+      cleanupEnvFixture?.();
+    });
+
+    it('accepts required env values from .env.local without warning', () => {
+      expect(readDevOutput()).not.toContain(`${ENV_VALIDATION_TEST_KEY} is required but missing`);
     });
 
     it('syncs wrangler.jsonc with bindings from void.json', () => {
