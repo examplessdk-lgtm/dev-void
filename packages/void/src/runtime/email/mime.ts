@@ -1,0 +1,625 @@
+/**
+ * Minimal RFC 5322 / 2047 / 2045 MIME builder for the void/email runtime.
+ *
+ * Scope is intentionally narrow — text/plain, text/html, multipart/alternative,
+ * and multipart/mixed for attachments — covering >95% of transactional sends.
+ * Inline images use multipart/related when both attachments and html are present.
+ */
+
+import type { Address, Attachment, NormalizedAttachment, NormalizedEmail } from './types.ts';
+
+/** Cloudflare Email Workers reject messages larger than ~10 MB after base64 expansion. */
+export const MAX_MESSAGE_BYTES: number = 10 * 1024 * 1024;
+
+const CRLF = '\r\n';
+const ASCII_PRINTABLE = /^[\x20-\x7e]*$/;
+const HEADER_NAME = /^[!-9;-~]+$/;
+
+function rejectCRLF(field: string, value: string): void {
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c === 0x0d || c === 0x0a || c === 0x00) {
+      throw new MimeError('MIME_ERROR', `${field}: must not contain CR, LF, or NUL.`);
+    }
+  }
+}
+
+const COMMON_TYPES: Record<string, string> = {
+  txt: 'text/plain',
+  html: 'text/html',
+  htm: 'text/html',
+  css: 'text/css',
+  csv: 'text/csv',
+  pdf: 'application/pdf',
+  json: 'application/json',
+  xml: 'application/xml',
+  zip: 'application/zip',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  ico: 'image/x-icon',
+  ics: 'text/calendar',
+  eml: 'message/rfc822',
+};
+
+function inferContentType(filename: string): string {
+  const ext = filename.split('.').pop()?.toLowerCase() ?? '';
+  return COMMON_TYPES[ext] ?? 'application/octet-stream';
+}
+
+export type MimeErrorCode = 'INVALID_FROM' | 'INVALID_TO' | 'MIME_ERROR';
+
+export class MimeError extends Error {
+  code: MimeErrorCode;
+  constructor(code: MimeErrorCode, message: string) {
+    super(message);
+    this.name = 'MimeError';
+    this.code = code;
+  }
+}
+
+function fieldErrorCode(field: string): MimeErrorCode {
+  if (field === 'from') {
+    return 'INVALID_FROM';
+  }
+  if (field === 'to') {
+    return 'INVALID_TO';
+  }
+  return 'MIME_ERROR';
+}
+
+function validateAddressParts(field: string, email: string, name?: string): void {
+  rejectCRLF(`${field} address`, email);
+  // Address must be a single token with an '@' and no whitespace, no
+  // quoting, and no list-separators. Without this, a `to: "a@x,b@y"`
+  // would slip through the bare-string path and split into two
+  // recipients in the rendered headers.
+  if (!email.includes('@') || /\s/.test(email) || /[,;<>"()[\]\\]/.test(email)) {
+    throw new MimeError(
+      fieldErrorCode(field),
+      `${field}: '${email}' is not a valid email address.`,
+    );
+  }
+  if (name !== undefined) {
+    rejectCRLF(`${field} display name`, name);
+    // `@` in a display name almost always means a typo like
+    // `a@x.dev<b@evil.dev>` got mis-parsed as `name=a@x.dev,
+    // email=b@evil.dev`. Reject so the caller sees a clear validation
+    // error rather than silently rerouting to a different address.
+    if (name.includes('@')) {
+      throw new MimeError(
+        fieldErrorCode(field),
+        `${field}: display name '${name}' must not contain '@' (likely a malformed address).`,
+      );
+    }
+  }
+}
+
+function parseAddress(value: Address, field: string): { email: string; name?: string } {
+  if (typeof value === 'string') {
+    rejectCRLF(`${field} address`, value);
+    // Match `Display Name <email@domain>` with paired quotes around the
+    // name (both or neither). The earlier regex had two independent
+    // optional quotes, so a single stray `"` slipped through.
+    const angle =
+      value.match(/^\s*"((?:[^"\\]|\\.)*)"\s*<\s*([^>\s]+)\s*>\s*$/) ??
+      value.match(/^\s*([^"<]+?)?\s*<\s*([^>\s]+)\s*>\s*$/);
+    if (angle) {
+      const name = angle[1]?.trim();
+      const email = angle[2];
+      validateAddressParts(field, email, name);
+      return name ? { email, name } : { email };
+    }
+    const trimmed = value.trim();
+    validateAddressParts(field, trimmed);
+    return { email: trimmed };
+  }
+  validateAddressParts(field, value.email ?? '', value.name);
+  return value.name ? { email: value.email, name: value.name } : { email: value.email };
+}
+
+function parseAddresses(
+  value: Address | Array<Address>,
+  field: string,
+): Array<{ email: string; name?: string }> {
+  const list = Array.isArray(value) ? value : [value];
+  return list.map((entry) => parseAddress(entry, field));
+}
+
+async function toBytes(content: Attachment['content']): Promise<Uint8Array> {
+  if (content instanceof Uint8Array) {
+    return content;
+  }
+  if (content instanceof ArrayBuffer) {
+    return new Uint8Array(content);
+  }
+  if (typeof Blob !== 'undefined' && content instanceof Blob) {
+    return new Uint8Array(await content.arrayBuffer());
+  }
+  if (typeof content === 'string') {
+    return new TextEncoder().encode(content);
+  }
+  throw new MimeError(
+    'MIME_ERROR',
+    'attachment content must be string, Uint8Array, ArrayBuffer, or Blob.',
+  );
+}
+
+async function normalizeAttachment(att: Attachment): Promise<NormalizedAttachment> {
+  if (!att.filename) {
+    throw new MimeError('MIME_ERROR', 'attachment: missing filename.');
+  }
+  rejectCRLF('attachment filename', att.filename);
+  if (att.contentType !== undefined) {
+    rejectCRLF('attachment contentType', att.contentType);
+  }
+  if (att.contentId !== undefined) {
+    rejectCRLF('attachment contentId', att.contentId);
+  }
+  const bytes = await toBytes(att.content);
+  return {
+    filename: att.filename,
+    contentType: att.contentType ?? inferContentType(att.filename),
+    bytes,
+    contentId: att.contentId,
+    disposition: att.disposition ?? (att.contentId ? 'inline' : 'attachment'),
+  };
+}
+
+/**
+ * Validate inputs and produce a normalized email shape that can be handed to
+ * the MIME builder, the dev inbox, or the test harness without re-parsing.
+ */
+export async function normalizeEmail(opts: {
+  from: Address;
+  to: Address | Array<Address>;
+  subject: string;
+  text?: string;
+  html?: string;
+  replyTo?: Address;
+  cc?: Address | Array<Address>;
+  bcc?: Address | Array<Address>;
+  headers?: Record<string, string>;
+  attachments?: Array<Attachment>;
+  threading?: { inReplyTo?: string; references?: string };
+}): Promise<NormalizedEmail> {
+  if (!opts.text && !opts.html) {
+    throw new MimeError('MIME_ERROR', "email: at least one of 'text' or 'html' is required.");
+  }
+  if (opts.subject !== undefined) {
+    rejectCRLF('subject', opts.subject);
+  }
+  if (opts.headers) {
+    for (const [name, value] of Object.entries(opts.headers)) {
+      if (!HEADER_NAME.test(name)) {
+        throw new MimeError(
+          'MIME_ERROR',
+          `headers: '${name}' is not a valid RFC 5322 header name.`,
+        );
+      }
+      rejectCRLF(`header '${name}'`, value);
+    }
+  }
+  const from = parseAddress(opts.from, 'from');
+  const to = parseAddresses(opts.to, 'to');
+  if (to.length === 0) {
+    throw new MimeError('INVALID_TO', "email: 'to' must include at least one recipient.");
+  }
+  const cc = opts.cc ? parseAddresses(opts.cc, 'cc') : [];
+  const bcc = opts.bcc ? parseAddresses(opts.bcc, 'bcc') : [];
+  const replyTo = opts.replyTo ? parseAddress(opts.replyTo, 'replyTo') : undefined;
+  const attachments = opts.attachments
+    ? await Promise.all(opts.attachments.map(normalizeAttachment))
+    : [];
+  // Threading headers are passed through as-is — they come from the
+  // trusted reply path (buildReplyMessage), not user input. We still
+  // reject CR/LF inside them, same as any other header value.
+  if (opts.threading?.inReplyTo) {
+    rejectCRLF('threading.inReplyTo', opts.threading.inReplyTo);
+  }
+  if (opts.threading?.references) {
+    rejectCRLF('threading.references', opts.threading.references);
+  }
+
+  return {
+    from,
+    to,
+    cc,
+    bcc,
+    replyTo,
+    subject: opts.subject ?? '',
+    text: opts.text,
+    html: opts.html,
+    headers: opts.headers ? { ...opts.headers } : {},
+    attachments,
+    threading: opts.threading,
+  };
+}
+
+/** RFC 2047 encoded-word for non-ASCII text in headers (UTF-8, base64). */
+function encodeWord(text: string): string {
+  if (ASCII_PRINTABLE.test(text)) {
+    return text;
+  }
+  const b64 = base64(new TextEncoder().encode(text));
+  return `=?UTF-8?B?${b64}?=`;
+}
+
+// RFC 5322 specials — names containing any of these MUST be quoted as a
+// phrase. The earlier code path put this check inside the ATOM_SAFE
+// branch, but ATOM_SAFE already excluded these specials, so the check was
+// unreachable for `,` `(` `)` `<` `>` etc. — the fall-through hit
+// encodeWord which short-circuits on ASCII and emitted unquoted, letting
+// a comma in a display name split the address list.
+const RFC5322_SPECIALS = /[",()<>:;@[\]\\]/;
+
+function formatAddress(addr: { email: string; name?: string }): string {
+  if (!addr.name) {
+    return addr.email;
+  }
+  // Non-ASCII → RFC 2047 encoded-word.
+  if (!ASCII_PRINTABLE.test(addr.name)) {
+    return `${encodeWord(addr.name)} <${addr.email}>`;
+  }
+  // ASCII with any specials → quoted-string. Escape backslashes first so
+  // the subsequent quote-escape doesn't double-escape them.
+  if (RFC5322_SPECIALS.test(addr.name)) {
+    const escaped = addr.name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return `"${escaped}" <${addr.email}>`;
+  }
+  // Plain atom / atom-with-spaces.
+  return `${addr.name} <${addr.email}>`;
+}
+
+function formatAddressList(addrs: Array<{ email: string; name?: string }>): string {
+  return addrs.map(formatAddress).join(', ');
+}
+
+/**
+ * Soft-fold long header lines at address-list boundaries (`, `) outside
+ * any double-quoted string. A naive `split(/, /)` would split inside
+ * `"Smith, John"`, corrupting quoted display names.
+ */
+function splitAddressList(value: string): Array<string> {
+  const parts: Array<string> = [];
+  let current = '';
+  let inQuotes = false;
+  let escape = false;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (escape) {
+      current += ch;
+      escape = false;
+      continue;
+    }
+    if (ch === '\\' && inQuotes) {
+      current += ch;
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      current += ch;
+      continue;
+    }
+    if (!inQuotes && ch === ',' && value[i + 1] === ' ') {
+      parts.push(current);
+      current = '';
+      i++; // skip the space
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
+}
+
+function foldHeader(name: string, value: string): string {
+  const line = `${name}: ${value}`;
+  if (line.length <= 78) {
+    return line;
+  }
+  const parts = splitAddressList(value);
+  if (parts.length > 1) {
+    let out = `${name}: ${parts[0]}`;
+    let lineLen = out.length;
+    for (let i = 1; i < parts.length; i++) {
+      const next = `, ${parts[i]}`;
+      if (lineLen + next.length > 78) {
+        out += ',\r\n ' + parts[i];
+        lineLen = parts[i].length + 1;
+      } else {
+        out += next;
+        lineLen += next.length;
+      }
+    }
+    return out;
+  }
+  // No address-list separators to fold at. Some headers (notably
+  // `References:` with many message IDs) accumulate whitespace-separated
+  // tokens that can blow past RFC 5322's 998-octet hard limit on a
+  // single physical line. Fall back to whitespace folding: split on
+  // runs of whitespace and emit at most ~76 octets per physical line,
+  // each continuation prefixed with CRLF + a space (the structured
+  // folding rule). Tokens that individually exceed 76 chars are emitted
+  // unbroken on their own line — RFC 5322 §3.2.2 lets folding only
+  // occur at WSP, never inside a token.
+  const whitespaceTokens = value.split(/\s+/).filter((t) => t.length > 0);
+  if (whitespaceTokens.length <= 1) {
+    return line;
+  }
+  let out = `${name}: ${whitespaceTokens[0]}`;
+  // First emitted line includes the header name; subsequent emitted
+  // lines are continuations and start with a single leading WSP.
+  let lineLen = out.length;
+  const MAX_LINE = 76;
+  for (let i = 1; i < whitespaceTokens.length; i++) {
+    const tok = whitespaceTokens[i];
+    if (lineLen + 1 + tok.length > MAX_LINE) {
+      out += '\r\n ' + tok;
+      lineLen = 1 + tok.length;
+    } else {
+      out += ' ' + tok;
+      lineLen += 1 + tok.length;
+    }
+  }
+  return out;
+}
+
+function base64(bytes: Uint8Array): string {
+  // workerd, browsers, and Node 18+ all expose btoa + binary string conversion.
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64Wrapped(bytes: Uint8Array): string {
+  const encoded = base64(bytes);
+  const lines: Array<string> = [];
+  for (let i = 0; i < encoded.length; i += 76) {
+    lines.push(encoded.slice(i, i + 76));
+  }
+  return lines.join(CRLF);
+}
+
+function quotedPrintable(text: string): string {
+  // Encode as UTF-8 bytes then quote per RFC 2045.
+  const bytes = new TextEncoder().encode(text);
+  let out = '';
+  let lineLen = 0;
+  const flush = (chunk: string) => {
+    if (lineLen + chunk.length > 75) {
+      out += '=' + CRLF;
+      lineLen = 0;
+    }
+    out += chunk;
+    lineLen += chunk.length;
+  };
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b === 0x0a) {
+      out += CRLF;
+      lineLen = 0;
+      continue;
+    }
+    if (b === 0x0d) {
+      // CR alone or part of CRLF — emit CRLF on the LF side, skip standalone CR.
+      if (bytes[i + 1] === 0x0a) {
+        continue;
+      }
+      out += CRLF;
+      lineLen = 0;
+      continue;
+    }
+    if (b === 0x20 || b === 0x09) {
+      // Defer encoding decision: a space at end-of-line must be quoted.
+      const isLast = i === bytes.length - 1 || bytes[i + 1] === 0x0a || bytes[i + 1] === 0x0d;
+      if (isLast) {
+        flush(b === 0x20 ? '=20' : '=09');
+      } else {
+        flush(String.fromCharCode(b));
+      }
+      continue;
+    }
+    if (b === 0x3d || b < 0x20 || b > 0x7e) {
+      flush('=' + b.toString(16).toUpperCase().padStart(2, '0'));
+      continue;
+    }
+    flush(String.fromCharCode(b));
+  }
+  return out;
+}
+
+function needsQuotedPrintable(text: string): boolean {
+  // Encode any non-ASCII or any line longer than 998 bytes (RFC 5322 limit).
+  if (!ASCII_PRINTABLE.test(text.replace(/\r?\n/g, ''))) {
+    return true;
+  }
+  return text.split(/\r?\n/).some((line) => line.length > 990);
+}
+
+interface MimePart {
+  headers: Array<[string, string]>;
+  body: string;
+}
+
+function renderPart(part: MimePart): string {
+  const lines = part.headers.map(([k, v]) => foldHeader(k, v));
+  return lines.join(CRLF) + CRLF + CRLF + part.body;
+}
+
+function buildBodyPart(contentType: string, body: string): MimePart {
+  const useQp = needsQuotedPrintable(body);
+  return {
+    headers: [
+      ['Content-Type', `${contentType}; charset=UTF-8`],
+      ['Content-Transfer-Encoding', useQp ? 'quoted-printable' : '7bit'],
+    ],
+    body: useQp ? quotedPrintable(body) : body.replace(/\r?\n/g, CRLF),
+  };
+}
+
+function buildAttachmentPart(att: NormalizedAttachment): MimePart {
+  const headers: Array<[string, string]> = [
+    ['Content-Type', `${att.contentType}; name="${att.filename.replace(/"/g, '')}"`],
+    ['Content-Transfer-Encoding', 'base64'],
+    ['Content-Disposition', `${att.disposition}; filename="${att.filename.replace(/"/g, '')}"`],
+  ];
+  if (att.contentId) {
+    const cid = att.contentId.startsWith('<') ? att.contentId : `<${att.contentId}>`;
+    headers.push(['Content-ID', cid]);
+  }
+  return { headers, body: base64Wrapped(att.bytes) };
+}
+
+function makeBoundary(prefix: string): string {
+  // 16 random bytes → 24-char base64. Workers + browsers expose crypto.
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return `=_void_${prefix}_${base64(bytes).replace(/[+/=]/g, '')}`;
+}
+
+function wrapMultipart(
+  type: 'mixed' | 'alternative' | 'related',
+  parts: Array<MimePart>,
+  extra: Record<string, string> = {},
+): MimePart {
+  const boundary = makeBoundary(type);
+  const headerEntries: Array<[string, string]> = [
+    ['Content-Type', `multipart/${type}; boundary="${boundary}"`],
+  ];
+  for (const [k, v] of Object.entries(extra)) {
+    headerEntries.push([k, v]);
+  }
+  const body =
+    parts.map((p) => `--${boundary}${CRLF}${renderPart(p)}`).join(CRLF) +
+    `${CRLF}--${boundary}--${CRLF}`;
+  return { headers: headerEntries, body };
+}
+
+const RESERVED_HEADERS = new Set(
+  [
+    'from',
+    'to',
+    'cc',
+    'bcc',
+    'subject',
+    'reply-to',
+    'date',
+    'message-id',
+    // Threading headers are owned by replyEmail() — accepting them via
+    // the user-supplied `headers` map would let a caller spoof reply
+    // chains. replyEmail builds them itself from the original message.
+    'in-reply-to',
+    'references',
+    'mime-version',
+    'content-type',
+    'content-transfer-encoding',
+    'content-disposition',
+  ].map((h) => h.toLowerCase()),
+);
+
+function generateMessageId(fromEmail: string): string {
+  const domain = fromEmail.split('@')[1] ?? 'localhost';
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  const id = base64(bytes).replace(/[+/=]/g, '');
+  return `<${id}@${domain}>`;
+}
+
+/**
+ * Build the raw RFC 5322 message body. Returns the message bytes plus the
+ * generated Message-ID header so callers can surface it in the result.
+ */
+export function buildMime(email: NormalizedEmail): { raw: Uint8Array; messageId: string } {
+  const messageId = generateMessageId(email.from.email);
+  const date = new Date().toUTCString().replace('GMT', '+0000');
+
+  const topHeaders: Array<[string, string]> = [
+    ['Date', date],
+    ['From', formatAddress(email.from)],
+    ['To', formatAddressList(email.to)],
+  ];
+  if (email.cc.length > 0) {
+    topHeaders.push(['Cc', formatAddressList(email.cc)]);
+  }
+  // Bcc is intentionally omitted from the rendered headers. The CF `send_email`
+  // binding fans out one envelope per recipient, but every envelope carries
+  // the same raw MIME body — so a `Bcc:` header here would expose the BCC list
+  // to every To/Cc recipient. The envelope itself handles BCC delivery.
+  if (email.replyTo) {
+    topHeaders.push(['Reply-To', formatAddress(email.replyTo)]);
+  }
+  topHeaders.push(['Subject', encodeWord(email.subject)]);
+  topHeaders.push(['Message-ID', messageId]);
+  // Threading headers from the trusted reply path. These are reserved
+  // against user-supplied `headers` (RESERVED_HEADERS) so the only way
+  // they land in the wire MIME is via `email.threading`.
+  if (email.threading?.inReplyTo) {
+    topHeaders.push(['In-Reply-To', email.threading.inReplyTo]);
+  }
+  if (email.threading?.references) {
+    topHeaders.push(['References', email.threading.references]);
+  }
+  topHeaders.push(['MIME-Version', '1.0']);
+
+  for (const [name, value] of Object.entries(email.headers)) {
+    if (RESERVED_HEADERS.has(name.toLowerCase())) {
+      continue;
+    }
+    topHeaders.push([name, encodeWord(value)]);
+  }
+
+  const textPart = email.text ? buildBodyPart('text/plain', email.text) : undefined;
+  const htmlPart = email.html ? buildBodyPart('text/html', email.html) : undefined;
+
+  let bodyPart: MimePart;
+  if (textPart && htmlPart) {
+    bodyPart = wrapMultipart('alternative', [textPart, htmlPart]);
+  } else {
+    bodyPart = (textPart ?? htmlPart) as MimePart;
+  }
+
+  if (email.attachments.length > 0) {
+    const inlineAttachments = email.attachments.filter((a) => a.disposition === 'inline');
+    const fileAttachments = email.attachments.filter((a) => a.disposition !== 'inline');
+
+    if (inlineAttachments.length > 0 && htmlPart) {
+      // Wrap (alternative or html) with inline attachments via multipart/related.
+      bodyPart = wrapMultipart('related', [
+        bodyPart,
+        ...inlineAttachments.map(buildAttachmentPart),
+      ]);
+    } else {
+      // No inline images — treat all as regular file attachments.
+      fileAttachments.push(...inlineAttachments);
+    }
+    if (fileAttachments.length > 0) {
+      bodyPart = wrapMultipart('mixed', [bodyPart, ...fileAttachments.map(buildAttachmentPart)]);
+    }
+  }
+
+  // Promote the body part's headers into the top-level headers.
+  for (const [k, v] of bodyPart.headers) {
+    topHeaders.push([k, v]);
+  }
+
+  const headerBlock = topHeaders.map(([k, v]) => foldHeader(k, v)).join(CRLF);
+  const rawText = headerBlock + CRLF + CRLF + bodyPart.body;
+  const raw = new TextEncoder().encode(rawText);
+
+  if (raw.byteLength > MAX_MESSAGE_BYTES) {
+    throw new MimeError(
+      'MIME_ERROR',
+      `email: message size ${raw.byteLength} bytes exceeds Cloudflare limit of ${MAX_MESSAGE_BYTES} bytes.`,
+    );
+  }
+
+  return { raw, messageId };
+}

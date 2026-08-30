@@ -41,6 +41,7 @@ import { pagesDevCssAssetsPlugin } from './pages/dev-css-assets.ts';
 import { bindingRuntimePlugin } from './plugin-binding-runtime.ts';
 import { devTriggersHintPlugin } from './plugin-dev-triggers-hint.ts';
 import { drizzlePlugin } from './plugin-drizzle.ts';
+import { emailDevInboxPlugin } from './plugin-email-dev-inbox.ts';
 import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
 import { envClientGuardPlugin } from './plugin-env-client-guard.ts';
 import { envSchemaPlugin } from './plugin-env-schema.ts';
@@ -1070,6 +1071,11 @@ export function voidPlugin(options?: {
       result.vars = vars;
     }
 
+    // Email — no binding is emitted on purpose. Outbound mail routes through
+    // __VOID_PROXY/email/send (the proxy worker holds the platform-level
+    // send_email binding), so `bindings.needsEmail` only gates the dev-inbox
+    // plugin and the deploy manifest flag.
+
     // Queues — add producer + consumer bindings for local dev
     if (queues.length > 0) {
       (result as Record<string, unknown>).queues = {
@@ -1502,6 +1508,9 @@ export function voidPlugin(options?: {
             if (fileBindings.needsSandbox && !bindings.needsSandbox) {
               newBindings.push('Sandbox (void/sandbox)');
             }
+            if (fileBindings.needsEmail && !bindings.needsEmail) {
+              newBindings.push('Email (void/email)');
+            }
           }
           if (autoDetectAuth && fileBindings.needsAuth) {
             newBindings.push('Auth (void/auth)');
@@ -1648,6 +1657,7 @@ export function voidPlugin(options?: {
       createWranglerCompatPersistPlugin(root, config),
       restartPlugin(),
       bindingWatchPlugin,
+      ...(bindings.needsEmail ? [emailDevInboxPlugin()] : []),
       envPlugin,
       envSchemaPlugin(root, { onDefaults: applySchemaDefaultsToWorkerVars }),
       envClientGuardPlugin(root),
@@ -1819,6 +1829,7 @@ export function voidPlugin(options?: {
     createWranglerCompatPersistPlugin(root, config),
     restartPlugin(),
     bindingWatchPlugin,
+    ...(bindings.needsEmail ? [emailDevInboxPlugin()] : []),
     envPlugin,
     envSchemaPlugin(root, { onDefaults: applySchemaDefaultsToWorkerVars }),
     envClientGuardPlugin(root),

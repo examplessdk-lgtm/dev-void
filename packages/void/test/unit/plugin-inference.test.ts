@@ -60,6 +60,7 @@ describe('inferProjectBindings', () => {
       needsQueues: false,
       needsAI: false,
       needsSandbox: false,
+      needsEmail: false,
       needsLive: false,
     });
   });

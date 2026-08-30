@@ -259,6 +259,10 @@
             "ai": {
               "type": "boolean",
               "description": "Enable Workers AI binding"
+            },
+            "email": {
+              "type": "boolean",
+              "description": "Enable email support (used by void/email)."
             }
           },
           "additionalProperties": false

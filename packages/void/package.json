@@ -21,6 +21,7 @@
   "imports": {
     "#self": "./dist/index.mjs",
     "#self/_env": "./dist/runtime/env.mjs",
+    "#self/email": "./dist/runtime/email.mjs",
     "#self/env": "./dist/runtime/env-public.mjs",
     "#self/client": "./dist/runtime/client.mjs",
     "#self/handler": "./dist/runtime/handler.mjs",
@@ -203,6 +204,16 @@
       "import": "./dist/runtime/ai.mjs",
       "require": "./dist/runtime/ai.mjs"
     },
+    "./email": {
+      "types": "./dist/runtime/email.d.mts",
+      "import": "./dist/runtime/email.mjs",
+      "require": "./dist/runtime/email.mjs"
+    },
+    "./email/testing": {
+      "types": "./dist/runtime/email/testing.d.mts",
+      "import": "./dist/runtime/email/testing.mjs",
+      "require": "./dist/runtime/email/testing.mjs"
+    },
     "./sandbox": {
       "types": "./dist/runtime/sandbox.d.mts",
       "import": "./dist/runtime/sandbox.mjs",
@@ -332,6 +343,7 @@
     "ignore": "^7.0.5",
     "jsonc-parser": "3.3.1",
     "pg": "8.22.0",
+    "postal-mime": "^2.7.4",
     "proper-lockfile": "^4.1.2",
     "wrangler": "catalog:"
   },

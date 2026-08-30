@@ -312,6 +312,32 @@ describe('inferBindingsFromSource', () => {
     expect(result.needsAI).toBe(true);
   });
 
+  it("detects import { sendEmail } from 'void/email'", () => {
+    const code = `
+      import { sendEmail } from "void/email";
+      export const POST = defineHandler(async () => {
+        await sendEmail({ from: "a@x.dev", to: "b@y.dev", subject: "hi", text: "hi" });
+      })
+    `;
+    const result = inferBindingsFromSource(code, 'test.ts');
+    expect(result.needsEmail).toBe(true);
+  });
+
+  it('does NOT detect c.env.SEND_EMAIL access (binding lives on the proxy, not the user worker)', () => {
+    // SEND_EMAIL is intentionally absent from the env-binding regex —
+    // outbound email routes through __VOID_PROXY/email/send, so a user
+    // worker accessing `env.SEND_EMAIL` will get undefined regardless of
+    // whether we'd inferred the import. Inference is now solely driven
+    // by `void/email` import-source detection.
+    const code = `
+      export const POST = defineHandler(async (c) => {
+        return c.env.SEND_EMAIL.send(message);
+      })
+    `;
+    const result = inferBindingsFromSource(code, 'test.ts');
+    expect(result.needsEmail).toBe(false);
+  });
+
   it('does not detect needsAI from unrelated identifiers', () => {
     const code = `
       const AI = someLibrary;

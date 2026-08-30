@@ -12,8 +12,13 @@ export type InferredBindings = {
   needsAI: boolean;
   needsSandbox: boolean;
   needsLive?: boolean;
+  needsEmail?: boolean;
 };
 
+// SEND_EMAIL is intentionally absent from this regex: outbound email routes
+// through __VOID_PROXY/email/send, so the user worker never has a SEND_EMAIL
+// binding to detect. The `void/email` import source (tiers 1-2 below) is the
+// sole driver of `needsEmail`.
 const ENV_BINDING_RE = /\benv\s*\.\s*(DB|KV|STORAGE|QUEUE_\w+|AI|SANDBOX)\b/;
 
 /**
@@ -34,6 +39,7 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
     needsAI: false,
     needsSandbox: false,
     needsLive: false,
+    needsEmail: false,
   };
 
   // Tier 1: Fast import detection via es-module-lexer
@@ -66,6 +72,9 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
           break;
         case 'void/sandbox':
           result.needsSandbox = true;
+          break;
+        case 'void/email':
+          result.needsEmail = true;
           break;
         case 'void/live':
           if (!isTypeOnlyImportStatement(code.slice(imp.ss, imp.se + 1))) {
@@ -109,6 +118,9 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
     if (/\bfrom\s+["']void\/sandbox["']/.test(code)) {
       result.needsSandbox = true;
     }
+    if (/\bfrom\s+["']void\/email["']/.test(code)) {
+      result.needsEmail = true;
+    }
     if (hasRuntimeImportFrom(code, 'void/live')) {
       result.needsLive = true;
     }
@@ -120,7 +132,10 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
     }
   }
 
-  // If imports resolved all bindings, we're done
+  // If imports resolved every binding the AST tier could still discover, we're
+  // done. `needsEmail` is deliberately not part of this predicate: it has no
+  // env-binding form (see ENV_BINDING_RE above), so it is already final here
+  // and requiring it would only suppress an otherwise-valid early exit.
   if (
     result.needsD1 &&
     result.needsKV &&
@@ -251,5 +266,6 @@ export function mergeBindings(bindings: Array<InferredBindings>): InferredBindin
     needsAI: bindings.some((b) => b.needsAI),
     needsSandbox: bindings.some((b) => b.needsSandbox),
     needsLive: bindings.some((b) => b.needsLive),
+    needsEmail: bindings.some((b) => b.needsEmail),
   };
 }

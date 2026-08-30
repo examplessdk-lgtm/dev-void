@@ -64,6 +64,7 @@ export type InferenceConfig = {
     kv?: boolean | string;
     storage?: boolean | string;
     ai?: boolean;
+    email?: boolean;
   };
   scanDirs?: ReadonlyArray<string>;
   build?: string;
@@ -757,12 +758,12 @@ export function readConfig(root: string): VoidConfig {
       }
       const b = inf.bindings as Record<string, unknown>;
       for (const key of Object.keys(b)) {
-        if (!['db', 'kv', 'storage', 'ai'].includes(key)) {
+        if (!['db', 'kv', 'storage', 'ai', 'email'].includes(key)) {
           throw new Error(
-            `config: Unknown binding '${key}' in ${CONFIG_FILE}. Valid: db, kv, storage, ai.`,
+            `config: Unknown binding '${key}' in ${CONFIG_FILE}. Valid: db, kv, storage, ai, email.`,
           );
         }
-        if (key === 'ai') {
+        if (key === 'ai' || key === 'email') {
           if (typeof b[key] !== 'boolean') {
             throw new Error(
               `config: "inference.bindings.${key}" in ${CONFIG_FILE} must be a boolean.`,

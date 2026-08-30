@@ -1,0 +1,92 @@
+import { describe, expect, it } from 'vitest';
+import { parseEmailArgs } from '../../src/cli/email-args.ts';
+
+describe('parseEmailArgs', () => {
+  it('parses usage', () => {
+    expect(parseEmailArgs(['usage'])).toEqual({
+      subcommand: 'usage',
+      projectSlug: undefined,
+      limit: undefined,
+      address: undefined,
+    });
+  });
+
+  it('parses logs with --limit', () => {
+    expect(parseEmailArgs(['logs', '--limit', '50'])).toEqual({
+      subcommand: 'logs',
+      projectSlug: undefined,
+      limit: 50,
+      address: undefined,
+    });
+  });
+
+  it('parses destinations with --project', () => {
+    expect(parseEmailArgs(['destinations', '--project', 'my-app'])).toEqual({
+      subcommand: 'destinations',
+      projectSlug: 'my-app',
+      limit: undefined,
+      address: undefined,
+    });
+  });
+
+  it('parses allow with address and --project', () => {
+    expect(parseEmailArgs(['allow', 'user@example.com', '--project', 'my-app'])).toEqual({
+      subcommand: 'allow',
+      projectSlug: 'my-app',
+      limit: undefined,
+      address: 'user@example.com',
+    });
+  });
+
+  it('parses disallow with address', () => {
+    expect(parseEmailArgs(['disallow', 'user@example.com'])).toEqual({
+      subcommand: 'disallow',
+      projectSlug: undefined,
+      limit: undefined,
+      address: 'user@example.com',
+    });
+  });
+
+  it('errors on missing subcommand', () => {
+    expect(() => parseEmailArgs([])).toThrow(/email: Usage:/);
+  });
+
+  it('errors on unknown subcommand', () => {
+    expect(() => parseEmailArgs(['nope'])).toThrow(/email: Usage:/);
+  });
+
+  it('errors when allow is missing the address', () => {
+    expect(() => parseEmailArgs(['allow'])).toThrow(/void email allow <address>/);
+  });
+
+  it('errors when disallow is missing the address', () => {
+    expect(() => parseEmailArgs(['disallow'])).toThrow(/void email disallow <address>/);
+  });
+
+  it('errors on non-numeric --limit', () => {
+    expect(() => parseEmailArgs(['logs', '--limit', 'abc'])).toThrow(
+      /--limit must be a positive integer/,
+    );
+  });
+
+  it('errors on zero --limit', () => {
+    expect(() => parseEmailArgs(['logs', '--limit', '0'])).toThrow(
+      /--limit must be a positive integer/,
+    );
+  });
+
+  it('errors when allow receives more than one positional argument', () => {
+    // Previously the second address was silently dropped — confusing UX
+    // for users who typed `void email allow a@x.dev b@y.dev` and didn't
+    // realize only the first took effect.
+    expect(() => parseEmailArgs(['allow', 'a@x.dev', 'b@y.dev'])).toThrow(
+      /takes exactly one positional argument/,
+    );
+  });
+
+  it('errors when disallow receives more than one positional argument', () => {
+    expect(() => parseEmailArgs(['disallow', 'a@x.dev', 'b@y.dev'])).toThrow(
+      /takes exactly one positional argument/,
+    );
+  });
+});

@@ -37,6 +37,11 @@ Use this page as a command reference. If you are setting up a project for the fi
 | `void project cancel`             | Cancel an active deployment                                         |
 | `void project purge-cache`        | Purge all cached pages                                              |
 | `void build logs`                 | Stream, tail, or download build logs                                |
+| `void email usage`                | Show monthly email send/receive counts and quota                    |
+| `void email logs`                 | Show recent email delivery activity                                 |
+| `void email destinations`         | List verified recipient addresses                                   |
+| `void email allow <address>`      | Add a recipient and send a verification email                       |
+| `void email disallow <address>`   | Remove a recipient from the allowlist                               |
 | `void mcp`                        | Start the Void MCP server                                           |
 | `void init`                       | Setup wizard for new or existing projects                           |
 
@@ -880,6 +885,54 @@ Check verification and SSL status for a specific domain. Prints a rolled-up stat
 Pass `--verbose` to additionally print the raw multi-line status breakdown (DB status, SSL status, ownership state, verification errors) underneath the rollup.
 
 Project resolution for domain commands follows the same order as deploy (`--project`, `VOID_PROJECT`, linked project).
+
+## Email
+
+Inspect email usage and manage the recipients a project is allowed to send to. See [Email](../guide/email.md) for the runtime API.
+
+Project resolution for email commands follows the same order as deploy (`--project`, `VOID_PROJECT`, linked project).
+
+### `void email usage`
+
+```
+void email usage [--project <name>]
+```
+
+Show the current month's outbound and inbound counts, the monthly outbound limit, and how much of it is left. A suspended project is flagged in the output.
+
+### `void email logs`
+
+```
+void email logs [--limit <n>] [--project <name>]
+```
+
+Show recent email activity — timestamp, direction, sender, recipient, status, and subject. `--limit` takes a positive integer. While persistent log storage is still being wired up, the command says so and points you at `wrangler tail` for real-time activity.
+
+### `void email destinations`
+
+```
+void email destinations [--project <name>]
+```
+
+List the project's recipient addresses and their state (`verified`, `pending`, or `failed`). Outbound mail is only delivered to verified addresses.
+
+### `void email allow`
+
+```
+void email allow <address> [--project <name>]
+```
+
+Add one recipient to the project's destination list. Cloudflare emails that address a verification link — the recipient clicks it, with no Void or Cloudflare account required — and the project can send to them from then on. Re-run `void email destinations` to check whether they have verified yet.
+
+The project owner's email is added automatically when the project is created, so sending to yourself works without this step.
+
+### `void email disallow`
+
+```
+void email disallow <address> [--project <name>]
+```
+
+Remove one recipient from the project's destination list. Outbound mail to that address is rejected from the next deploy onward.
 
 ## Agent
 

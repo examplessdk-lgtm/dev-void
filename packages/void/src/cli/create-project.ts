@@ -59,6 +59,16 @@ export async function promptAndCreateProject(
   }
   const config: ProjectConfig = { projectId: project.id, slug: project.slug };
   writeProjectConfig(root, config);
+  if (project.owner_email_destination) {
+    const { address, verified } = project.owner_email_destination;
+    if (verified) {
+      log.info(`${address} is already verified as a sender for this project.`);
+    } else {
+      log.info(
+        `Added ${address} as a sender for this project — check your inbox for a Cloudflare verification link.`,
+      );
+    }
+  }
   return config;
 }
 

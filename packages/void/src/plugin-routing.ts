@@ -106,6 +106,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   const middlewareDir = paths.middlewareDir;
   const jobsDir = paths.cronsDir;
   const queuesDir = paths.queuesDir;
+  const emailDir = paths.emailDir;
   const pagesDir = paths.pagesDir;
   const ssrDir = paths.ssrDir;
   const authConfigPaths = new Set(paths.authConfigCandidates.map((path) => normalizePath(path)));
@@ -114,6 +115,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   const normalizedMiddlewareDir = normalizePath(middlewareDir);
   const normalizedJobsDir = normalizePath(jobsDir);
   const normalizedQueuesDir = normalizePath(queuesDir);
+  const normalizedEmailDir = normalizePath(emailDir);
   const normalizedPagesDir = normalizePath(pagesDir);
   const normalizedSsrDir = normalizePath(ssrDir);
   const ssrEntryAbsPaths = new Set(
@@ -121,6 +123,11 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       normalizePath(join(ssrDir, path.split('/').pop()!)),
     ),
   );
+
+  function hasEmailHandlers(): boolean {
+    const email = scan?.email;
+    return Boolean(email && (email.addresses.length > 0 || email.defaultHandler));
+  }
 
   function isInDirectory(path: string, directory: string): boolean {
     return path === directory || path.startsWith(directory + '/');
@@ -199,6 +206,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     responsePath: resolveFile('#self/response'),
     handlerPath: resolveFile('#self/handler'),
     runtimeEnvPath: resolveFile('#self/_env'),
+    runtimeEmailPath: resolveFile('#self/email'),
+    emailDir,
     projectRoot: root,
     homeDir: homedir(),
     webSocketRuntimePath: resolveFile('#self/runtime/ws-server'),
@@ -429,23 +438,20 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   } else {
     writeFileIfChanged(
       join(outDir, 'entry.ts'),
-      compileWorkerEntry(
-        false,
+      compileWorkerEntry({
         remote,
-        undefined,
-        undefined,
-        compileOptions.runtimeEnvPath,
-        getEnvSchemaModule(),
-        options.hasSandbox
+        runtimeEnvPath: compileOptions.runtimeEnvPath,
+        runtimeEmailPath: compileOptions.runtimeEmailPath,
+        envSchemaModule: getEnvSchemaModule(),
+        sandbox: options.hasSandbox
           ? {
               bindingName: options.sandboxBindingName,
               className: options.sandboxClassName,
               runtimePath: sandboxRuntimePath,
             }
           : false,
-        undefined,
-        options.live,
-      ),
+        live: options.live,
+      }),
     );
   }
 
@@ -567,25 +573,27 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         const isr = emitIsr ? { runtimePath: resolveFile('#self/runtime/isr-cache') } : undefined;
         writeFileIfChanged(
           join(outDir, 'entry.ts'),
-          compileWorkerEntry(
-            scan!.queues.length > 0,
+          compileWorkerEntry({
+            hasQueues: scan!.queues.length > 0,
             remote,
-            resolvedConfig?.build.assetsDir,
-            (scan!.websockets ?? []).map((route) => route.className),
-            compileOptions.runtimeEnvPath,
-            getEnvSchemaModule(),
-            options.hasSandbox
+            assetsDir: resolvedConfig?.build.assetsDir,
+            webSocketClasses: (scan!.websockets ?? []).map((route) => route.className),
+            runtimeEnvPath: compileOptions.runtimeEnvPath,
+            runtimeEmailPath: compileOptions.runtimeEmailPath,
+            envSchemaModule: getEnvSchemaModule(),
+            sandbox: options.hasSandbox
               ? {
                   bindingName: options.sandboxBindingName,
                   className: options.sandboxClassName,
                   runtimePath: sandboxRuntimePath,
                 }
               : false,
-            shouldServeSpaFallback(),
-            options.live,
-            isr,
-            currentNotFoundHandling(),
-          ),
+            hasEmail: hasEmailHandlers(),
+            serveSpaFallback: shouldServeSpaFallback(),
+            live: options.live,
+            isr: isr,
+            notFound: currentNotFoundHandling(),
+          }),
         );
       }
     },
@@ -661,6 +669,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           isInDirectory(normalizedPath, normalizedMiddlewareDir) ||
           isInDirectory(normalizedPath, normalizedJobsDir) ||
           isInDirectory(normalizedPath, normalizedQueuesDir) ||
+          isInDirectory(normalizedPath, normalizedEmailDir) ||
           isInDirectory(normalizedPath, normalizedPagesDir) ||
           isPotentialAuthConfigPath(normalizedPath) ||
           isPotentialEnvFilePath(normalizedPath);
@@ -704,25 +713,27 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         } else {
           writeFileIfChanged(
             join(outDir, 'entry.ts'),
-            compileWorkerEntry(
-              scan!.queues.length > 0,
+            compileWorkerEntry({
+              hasQueues: scan!.queues.length > 0,
               remote,
-              resolvedConfig?.build.assetsDir,
-              (scan!.websockets ?? []).map((route) => route.className),
-              compileOptions.runtimeEnvPath,
-              getEnvSchemaModule(),
-              options.hasSandbox
+              assetsDir: resolvedConfig?.build.assetsDir,
+              webSocketClasses: (scan!.websockets ?? []).map((route) => route.className),
+              runtimeEnvPath: compileOptions.runtimeEnvPath,
+              runtimeEmailPath: compileOptions.runtimeEmailPath,
+              envSchemaModule: getEnvSchemaModule(),
+              sandbox: options.hasSandbox
                 ? {
                     bindingName: options.sandboxBindingName,
                     className: options.sandboxClassName,
                     runtimePath: sandboxRuntimePath,
                   }
                 : false,
-              shouldServeSpaFallback(),
-              options.live,
-              undefined,
-              currentNotFoundHandling(),
-            ),
+              hasEmail: hasEmailHandlers(),
+              serveSpaFallback: shouldServeSpaFallback(),
+              live: options.live,
+              isr: undefined,
+              notFound: currentNotFoundHandling(),
+            }),
           );
         }
 

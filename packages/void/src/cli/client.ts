@@ -115,6 +115,16 @@ export type ProjectResponse = {
 export type CreateProjectResponse = {
   id: string;
   slug: string;
+  /**
+   * Present when the platform auto-added the project owner's own address as
+   * an outbound email destination. `verified: false` means Cloudflare has
+   * mailed them a verification link that must be clicked before any send to
+   * that address is accepted.
+   */
+  owner_email_destination?: {
+    address: string;
+    verified: boolean;
+  };
 };
 
 export type DeleteProjectResponse = {
@@ -193,6 +203,38 @@ export type BuildLogsResponse = {
   status: string;
   terminal: boolean;
   external: string | null;
+};
+
+export type EmailUsageResponse = {
+  month: string;
+  sent: number;
+  received: number;
+  limit: number;
+  remaining: number;
+  suspended: boolean;
+};
+
+export type EmailLogEntry = {
+  timestamp: number;
+  direction: 'sent' | 'received';
+  from: string;
+  to: string;
+  subject?: string;
+  status: string;
+};
+
+export type EmailLogsResponse = {
+  logs: Array<EmailLogEntry>;
+  pending?: boolean;
+  note?: string;
+};
+
+export type EmailDestinationResponse = {
+  id: string;
+  address: string;
+  status: 'pending' | 'verified' | 'failed';
+  verified_at: string | null;
+  created_at: string;
 };
 
 export type DomainResponse = {
@@ -1193,6 +1235,88 @@ export class PlatformClient {
 
     if (!res.ok) {
       await throwPlatformApiError('Failed to complete GitHub join', res);
+    }
+
+    return res.json();
+  }
+
+  async getEmailUsage(projectId: string): Promise<EmailUsageResponse> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/email/usage`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to fetch email usage', res);
+    }
+
+    return res.json();
+  }
+
+  async getEmailLogs(projectId: string, limit?: number): Promise<EmailLogsResponse> {
+    const url = new URL(`${this.baseUrl}/projects/${projectId}/email/logs`);
+    if (limit !== undefined) {
+      url.searchParams.set('limit', String(limit));
+    }
+
+    const res = await fetch(url, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to fetch email logs', res);
+    }
+
+    return res.json();
+  }
+
+  async listEmailDestinations(projectId: string): Promise<Array<EmailDestinationResponse>> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/email/destinations`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to list email destinations', res);
+    }
+
+    return res.json();
+  }
+
+  async addEmailDestination(projectId: string, address: string): Promise<EmailDestinationResponse> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/email/destinations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.authHeaders,
+      },
+      body: JSON.stringify({ address }),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to add email destination', res);
+    }
+
+    return res.json();
+  }
+
+  async removeEmailDestination(projectId: string, destinationId: string): Promise<{ ok: boolean }> {
+    const res = await fetch(
+      `${this.baseUrl}/projects/${projectId}/email/destinations/${destinationId}`,
+      {
+        method: 'DELETE',
+        headers: {
+          ...this.authHeaders,
+        },
+      },
+    );
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to remove email destination', res);
     }
 
     return res.json();

@@ -8,6 +8,7 @@ const SOURCE_CONVENTION_DIRECTORIES = [
   'middleware',
   'crons',
   'queues',
+  'email',
   'db',
 ] as const;
 
@@ -36,6 +37,7 @@ export type ProjectPaths = {
   middlewareDir: string;
   cronsDir: string;
   queuesDir: string;
+  emailDir: string;
   pagesDir: string;
   dbDir: string;
   migrationsDir: string;
@@ -101,6 +103,7 @@ export function resolveProjectPaths(root: string, config?: VoidConfig): ProjectP
     middlewareDir: join(sourceRoot, 'middleware'),
     cronsDir: join(sourceRoot, 'crons'),
     queuesDir: join(sourceRoot, 'queues'),
+    emailDir: join(sourceRoot, 'email'),
     pagesDir: join(sourceRoot, 'pages'),
     dbDir: join(sourceRoot, 'db'),
     migrationsDir: join(sourceRoot, 'db', 'migrations'),

@@ -6,6 +6,7 @@ import type { PageScanResult } from '../pages/types.ts';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import { scanQueues, type QueueDefinition } from '../queues/scan.ts';
 import { detectHttpExports } from './detect-exports.ts';
+import { scanEmailHandlers, type EmailHandlersScan } from './email.ts';
 import {
   isRouteEnabledForEnvironment,
   parseRouteFilename,
@@ -25,6 +26,7 @@ export type ScanResult = {
   jobs: Array<JobDefinition>;
   queues: Array<QueueDefinition>;
   pages: PageScanResult;
+  email?: EmailHandlersScan;
 };
 
 export type MiddlewareDefinition = {
@@ -85,7 +87,7 @@ export async function scanRoutes(
   },
 ): Promise<ScanResult> {
   const paths = options?.paths ?? readProjectPaths(root);
-  const [routeFiles, websockets, middlewareFiles, jobs, queues, pages] = await Promise.all([
+  const [routeFiles, websockets, middlewareFiles, jobs, queues, pages, email] = await Promise.all([
     glob(ROUTE_PATTERN, { cwd: paths.routesDir, absolute: false }),
     scanWebSocketRoutes(root, paths, options?.environment),
     glob(ROUTE_PATTERN, { cwd: paths.middlewareDir, absolute: false }).catch(
@@ -94,6 +96,11 @@ export async function scanRoutes(
     scanJobs(root, paths.cronsDir),
     scanQueues(root, paths.queuesDir),
     scanPages(root, { output: options?.output, paths }),
+    // `email/` is a source convention like `crons/` and `queues/`, so it lives
+    // under `sourceRoot` — which is `root` when no `sourceDir` is configured.
+    // `scanEmailHandlers` joins its own `email` segment, so this resolves to
+    // `paths.emailDir`.
+    scanEmailHandlers(paths.sourceRoot),
   ]);
 
   const routesDir = paths.routesDir;
@@ -114,7 +121,7 @@ export async function scanRoutes(
   // Parse middleware, sorted by numeric prefix
   const middleware = parseMiddlewareDefinitions(middlewareFiles);
 
-  return { routes, websockets, middleware, jobs, queues, pages };
+  return { routes, websockets, middleware, jobs, queues, pages, email };
 }
 
 export function scanMiddlewareSync(

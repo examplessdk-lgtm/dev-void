@@ -2235,13 +2235,24 @@ describe('compileWorkerEntry', () => {
     expect(code).toContain('import { withRuntimeEnv } from "void/_env"');
     expect(code).toContain('serveWithAssets');
     expect(code).toContain('return withRuntimeEnv(env, async () => {');
-    expect(code).toContain('export default { fetch:');
-    expect(code).toContain('scheduled: handleScheduled');
+    expect(code).toContain('import { WorkerEntrypoint } from "cloudflare:workers";');
+    expect(code).toContain('export default class extends WorkerEntrypoint {');
+    expect(code).toContain(
+      'async fetch(request) { return __voidFetch(request, this.env, this.ctx); }',
+    );
+    expect(code).toContain(
+      'async scheduled(controller) { return handleScheduled(controller, this.env, this.ctx); }',
+    );
     expect(code).not.toContain('queue(');
+    expect(code).not.toContain('email(');
   });
 
   it('re-exports websocket classes when present', () => {
-    const code = compileWorkerEntry(false, undefined, 'assets', ['ChatRoomWs']);
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: ['ChatRoomWs'],
+    });
 
     expect(code).toContain('__voidHandleWebSocket');
     expect(code).toContain('ChatRoomWs');
@@ -2250,17 +2261,15 @@ describe('compileWorkerEntry', () => {
   });
 
   it('re-exports the live Durable Object class when enabled', () => {
-    const code = compileWorkerEntry(
-      false,
-      undefined,
-      'assets',
-      [],
-      'void/_env',
-      undefined,
-      false,
-      false,
-      true,
-    );
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      sandbox: false,
+      serveSpaFallback: false,
+      live: true,
+    });
 
     expect(code).toContain('VoidLiveStreamDurableObject');
     expect(code).toContain('export { VoidLiveStreamDurableObject };');
@@ -2268,20 +2277,18 @@ describe('compileWorkerEntry', () => {
   });
 
   it('re-exports the configured live Durable Object class', () => {
-    const code = compileWorkerEntry(
-      false,
-      undefined,
-      'assets',
-      [],
-      'void/_env',
-      undefined,
-      false,
-      false,
-      {
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      sandbox: false,
+      serveSpaFallback: false,
+      live: {
         bindingName: 'VOID_LIVE_abcd1234',
         className: 'VoidLiveStreamDurableObject_abcd1234',
       },
-    );
+    });
 
     expect(code).toContain(
       'export { VoidLiveStreamDurableObject as VoidLiveStreamDurableObject_abcd1234 };',
@@ -2290,7 +2297,13 @@ describe('compileWorkerEntry', () => {
   });
 
   it('re-exports the VoidPlatformSandbox Durable Object class when enabled', () => {
-    const code = compileWorkerEntry(false, undefined, 'assets', [], 'void/_env', undefined, true);
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      sandbox: true,
+    });
 
     // Platform sandbox wraps Cloudflare's Sandbox with metering/gate hooks.
     // Importing it (instead of the bare Sandbox class) lets user subclasses
@@ -2304,10 +2317,16 @@ describe('compileWorkerEntry', () => {
   });
 
   it('exports the configured Sandbox Durable Object subclass via VoidPlatformSandbox', () => {
-    const code = compileWorkerEntry(false, undefined, 'assets', [], 'void/_env', undefined, {
-      bindingName: 'CODE',
-      className: 'CodeSandbox',
-      runtimePath: 'void/sandbox',
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      sandbox: {
+        bindingName: 'CODE',
+        className: 'CodeSandbox',
+        runtimePath: 'void/sandbox',
+      },
     });
 
     expect(code).toContain(
@@ -2321,8 +2340,14 @@ describe('compileWorkerEntry', () => {
   });
 
   it('uses the resolved sandbox runtime path when one is provided', () => {
-    const code = compileWorkerEntry(false, undefined, 'assets', [], 'void/_env', undefined, {
-      runtimePath: '/abs/path/to/sandbox.mjs',
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      sandbox: {
+        runtimePath: '/abs/path/to/sandbox.mjs',
+      },
     });
 
     expect(code).toContain(
@@ -2340,12 +2365,12 @@ describe('compileWorkerEntry', () => {
   });
 
   it('generates queue() export in worker entry when hasQueues=true', () => {
-    const code = compileWorkerEntry(true);
+    const code = compileWorkerEntry({ hasQueues: true });
 
-    expect(code).toContain('async function queue(batch, env, ctx)');
+    expect(code).toContain('async function __voidQueue(batch, env, ctx)');
     expect(code).toContain('async function handleScheduled(controller, env, ctx)');
     expect(code).toContain('serveWithAssets');
-    expect(code).toContain('scheduled: handleScheduled, queue }');
+    expect(code).toContain('async queue(batch) { return __voidQueue(batch, this.env, this.ctx); }');
     expect(code).toContain('__processQueue');
     expect(code).toContain('batch.queue');
     expect(code).toContain('m.timestamp.toISOString()');
@@ -2354,7 +2379,7 @@ describe('compileWorkerEntry', () => {
   });
 
   it('omits queue() export when hasQueues=false', () => {
-    const code = compileWorkerEntry(false);
+    const code = compileWorkerEntry({ hasQueues: false });
 
     expect(code).not.toContain('queue');
   });
@@ -2410,7 +2435,7 @@ describe('compileWorkerEntry', () => {
   });
 
   it('uses custom assetsDir in serveWithAssets path check', () => {
-    const code = compileWorkerEntry(false, undefined, '_astro');
+    const code = compileWorkerEntry({ hasQueues: false, assetsDir: '_astro' });
 
     expect(code).toContain('"/_astro/"');
     expect(code).not.toContain('"/assets/"');
@@ -2426,16 +2451,14 @@ describe('compileWorkerEntry', () => {
   });
 
   it('serveWithAssets falls back to /index.html for unmatched HTML GET/HEADs when enabled', () => {
-    const code = compileWorkerEntry(
-      false,
-      undefined,
-      'assets',
-      [],
-      'void/_env',
-      undefined,
-      false,
-      true,
-    );
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      sandbox: false,
+      serveSpaFallback: true,
+    });
 
     // With assetConfig.not_found_handling: 'none' (now the default for any
     // routes/middleware SPA), the asset binding returns 404 instead of a SPA
@@ -2454,19 +2477,15 @@ describe('compileWorkerEntry', () => {
   // resolved handling has to reach the generated helper or the override is
   // inert on every worker-first app.
   it('serveWithAssets passes the asset 404 page through for not_found_handling: 404-page', () => {
-    const code = compileWorkerEntry(
-      false,
-      undefined,
-      'assets',
-      [],
-      'void/_env',
-      undefined,
-      false,
-      false,
-      undefined,
-      undefined,
-      '404-page',
-    );
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      sandbox: false,
+      serveSpaFallback: false,
+      notFound: '404-page',
+    });
 
     // Pass the binding's own response through — CF's `404-page` is
     // directory-aware ("nearest 404.html"); a hardcoded `/404.html` fetch is not.
@@ -2485,19 +2504,15 @@ describe('compileWorkerEntry', () => {
   });
 
   it('serveWithAssets keeps the worker response for not_found_handling: none', () => {
-    const code = compileWorkerEntry(
-      false,
-      undefined,
-      'assets',
-      [],
-      'void/_env',
-      undefined,
-      false,
-      false,
-      undefined,
-      undefined,
-      'none',
-    );
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      sandbox: false,
+      serveSpaFallback: false,
+      notFound: 'none',
+    });
 
     // Byte-identical to the pre-existing default — `none` is what every
     // worker-first app infers, so this is the no-regression guard.
@@ -2505,16 +2520,14 @@ describe('compileWorkerEntry', () => {
   });
 
   it('serveWithAssets only falls back to index.html for HTML accept', () => {
-    const code = compileWorkerEntry(
-      false,
-      undefined,
-      'assets',
-      [],
-      'void/_env',
-      undefined,
-      false,
-      true,
-    );
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      sandbox: false,
+      serveSpaFallback: true,
+    });
 
     // Non-HTML requests (e.g. JSON API calls hitting an unknown route) must
     // get the worker's original 404 — not the SPA shell — so clients can
@@ -2523,7 +2536,7 @@ describe('compileWorkerEntry', () => {
   });
 
   it('native queue handler calls __processQueue directly without HTTP', () => {
-    const code = compileWorkerEntry(true);
+    const code = compileWorkerEntry({ hasQueues: true });
 
     // Native queue handler must call __processQueue directly (no /__void/queue HTTP round-trip)
     // This avoids the global-flag race condition with concurrent fetch events
@@ -2544,7 +2557,7 @@ describe('compileWorkerEntry', () => {
   });
 
   it('filters internal bindings in native queue handler', () => {
-    const code = compileWorkerEntry(true);
+    const code = compileWorkerEntry({ hasQueues: true });
 
     // Queue handler must filter env before passing to __processQueue
     expect(code).toContain('const userEnv = __filterInternalBindings(env)');
@@ -2557,9 +2570,15 @@ describe('compileWorkerEntry', () => {
   });
 
   it('splices boot-time env validation when envSchemaModule is provided', () => {
-    const code = compileWorkerEntry(true, undefined, 'assets', [], 'void/_env', {
-      importPath: '/abs/path/to/env.ts',
-      helperPath: '/resolved/env-public.mjs',
+    const code = compileWorkerEntry({
+      hasQueues: true,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      envSchemaModule: {
+        importPath: '/abs/path/to/env.ts',
+        helperPath: '/resolved/env-public.mjs',
+      },
     });
     // Side-effect import of user env.ts so the schema is registered
     expect(code).toContain('import "/abs/path/to/env.ts"');
@@ -2571,13 +2590,13 @@ describe('compileWorkerEntry', () => {
   });
 
   it('wraps remote-mode fetch and scheduled handlers with resolved runtime env', () => {
-    const code = compileWorkerEntry(
-      false,
-      { remotePath: '/resolved/remote.mjs', envPath: '/resolved/env-legacy.mjs' },
-      'assets',
-      [],
-      '/resolved/env.mjs',
-    );
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      remote: { remotePath: '/resolved/remote.mjs', envPath: '/resolved/env-legacy.mjs' },
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: '/resolved/env.mjs',
+    });
 
     expect(code).toContain('import { withRuntimeEnv } from "/resolved/env.mjs"');
     expect(code).toContain('import { createRemoteEnv } from "/resolved/remote.mjs"');
@@ -2589,17 +2608,17 @@ describe('compileWorkerEntry', () => {
   });
 
   it('passes custom binding names to remote env proxying', () => {
-    const code = compileWorkerEntry(
-      true,
-      {
+    const code = compileWorkerEntry({
+      hasQueues: true,
+      remote: {
         bindingNames: { d1: 'myapp_db', kv: 'myapp_kv', r2: 'myapp_storage' },
         remotePath: '/resolved/remote.mjs',
         envPath: '/resolved/env-legacy.mjs',
       },
-      'assets',
-      [],
-      '/resolved/env.mjs',
-    );
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: '/resolved/env.mjs',
+    });
 
     expect(code).toContain(
       'createRemoteEnv(env, {"d1":"myapp_db","kv":"myapp_kv","r2":"myapp_storage"})',
@@ -2905,18 +2924,14 @@ describe('compileWorkerEntry — ISR wiring', () => {
   });
 
   it('wires the ISR cache ladder with the two baked imports when the isr param is present', () => {
-    const code = compileWorkerEntry(
-      false, // hasQueues
-      undefined, // remote
-      'assets', // assetsDir
-      [], // webSocketClasses
-      'void/_env', // runtimeEnvPath
-      undefined, // envSchemaModule
-      undefined, // sandbox
-      false, // serveSpaFallback
-      undefined, // live
-      { runtimePath: 'void/isr' },
-    );
+    const code = compileWorkerEntry({
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      serveSpaFallback: false,
+      isr: { runtimePath: 'void/isr' },
+    });
 
     // Baked import #1: handleIsr from the supplied runtime path.
     expect(code).toContain('import { handleIsr } from "void/isr"');
@@ -2948,18 +2963,14 @@ describe('compileWorkerEntry — ISR wiring', () => {
   // there is no request) so a self-host `revalidate()` from a scheduled or queue
   // handler can find it and purge KV instead of no-oping.
   it('stamps the deployment id at the top of the scheduled + queue handlers when isr is set', () => {
-    const code = compileWorkerEntry(
-      true, // hasQueues — emits the queue() handler too
-      undefined, // remote
-      'assets', // assetsDir
-      [], // webSocketClasses
-      'void/_env', // runtimeEnvPath
-      undefined, // envSchemaModule
-      undefined, // sandbox
-      false, // serveSpaFallback
-      undefined, // live
-      { runtimePath: 'void/isr' },
-    );
+    const code = compileWorkerEntry({
+      hasQueues: true,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      serveSpaFallback: false,
+      isr: { runtimePath: 'void/isr' },
+    });
 
     // Scheduled handler stamps the id (deployment id only — no __VOID_ISR_HOST).
     expect(code).toContain(
@@ -2969,7 +2980,7 @@ describe('compileWorkerEntry — ISR wiring', () => {
     );
     // Queue handler stamps the id (deployment id only — no __VOID_ISR_HOST).
     expect(code).toContain(
-      'async function queue(batch, env, ctx) {\n' +
+      'async function __voidQueue(batch, env, ctx) {\n' +
         '  env.__VOID_ISR_DEPLOYMENT_ID ??= __VOID_ISR_DEPLOYMENT_ID;\n' +
         '  const userEnv = __filterInternalBindings(env);',
     );
@@ -2978,7 +2989,7 @@ describe('compileWorkerEntry — ISR wiring', () => {
   });
 
   it('does NOT stamp the deployment id in scheduled/queue handlers when isr is absent', () => {
-    const code = compileWorkerEntry(true); // hasQueues, no isr
+    const code = compileWorkerEntry({ hasQueues: true }); // hasQueues, no isr
     // Byte-identical to today: no deployment-id stamp anywhere.
     expect(code).not.toContain('__VOID_ISR_DEPLOYMENT_ID ??=');
     expect(code).toContain(
@@ -2986,7 +2997,7 @@ describe('compileWorkerEntry — ISR wiring', () => {
         '  const userEnv = __filterInternalBindings(env);',
     );
     expect(code).toContain(
-      'async function queue(batch, env, ctx) {\n  const userEnv = __filterInternalBindings(env);',
+      'async function __voidQueue(batch, env, ctx) {\n  const userEnv = __filterInternalBindings(env);',
     );
   });
 });

@@ -381,6 +381,33 @@ describe('syncWranglerBindings', () => {
     expect(created).toEqual({});
   });
 
+  it('does NOT add a send_email binding even when needsEmail is true', () => {
+    // Outbound email goes through __VOID_PROXY/email/send (the proxy
+    // worker holds the platform-level send_email binding). User workers
+    // never get one, so wrangler sync intentionally skips emission.
+    setup('wrangler.jsonc', '{ "name": "test" }');
+    const result = syncWranglerBindings(tmpDir, { ...noBindings, needsEmail: true });
+    expect(result).toBe(false);
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.send_email).toBeUndefined();
+  });
+
+  it('leaves a user-defined send_email block alone (does not strip it)', () => {
+    // If a user manually added one, that's harmless dead config they
+    // should remove — but the framework never rewrites it.
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        name: 'test',
+        send_email: [{ name: 'CUSTOM_EMAIL', destination_address: 'me@x.dev' }],
+      }),
+    );
+    const result = syncWranglerBindings(tmpDir, { ...noBindings, needsEmail: true });
+    expect(result).toBe(false);
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.send_email).toEqual([{ name: 'CUSTOM_EMAIL', destination_address: 'me@x.dev' }]);
+  });
+
   it('adds D1 binding when needsD1 is true', () => {
     setup('wrangler.jsonc', '{ "name": "test" }');
     const result = syncWranglerBindings(tmpDir, { ...noBindings, needsD1: true });

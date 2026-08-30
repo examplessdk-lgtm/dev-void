@@ -223,6 +223,7 @@ export default extendConfig(
             collapsed: false,
             items: [
               { text: 'AI', link: '/guide/ai' },
+              { text: 'Email', link: '/guide/email' },
               { text: 'Sandboxes', link: '/guide/sandboxes' },
               { text: 'Authentication', link: '/guide/auth' },
               { text: 'WebSockets', link: '/guide/websockets' },

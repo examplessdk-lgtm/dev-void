@@ -9,6 +9,7 @@ import { authSubcommands, parseAuthArgs } from './auth-args.ts';
 import { buildSubcommands, parseBuildArgs } from './build-args.ts';
 import { dbSubcommands, parseDbArgs } from './db-args.ts';
 import { domainSubcommands, parseDomainArgs } from './domain-args.ts';
+import { emailSubcommands, parseEmailArgs } from './email-args.ts';
 import { envSubcommands, parseEnvArgs } from './env-args.ts';
 import { genSubcommands, parseGenArgs } from './gen-args.ts';
 import { githubSubcommands, parseGithubArgs } from './github-args.ts';
@@ -124,6 +125,10 @@ if (helpPath) {
   runSubcommandGroup('domain', domainSubcommands, parseDomainArgs, (root, parsed) =>
     import('./domain.ts').then(({ runDomainCommand }) => runDomainCommand(root, parsed)),
   );
+} else if (command === 'email') {
+  runSubcommandGroup('email', emailSubcommands, parseEmailArgs, (root, parsed) =>
+    import('./email.ts').then(({ runEmailCommand }) => runEmailCommand(root, parsed)),
+  );
 } else if (command === 'db') {
   runSubcommandGroup('db', dbSubcommands, parseDbArgs, (root, parsed) =>
     import('./db.ts').then(({ runDbCommand }) => runDbCommand(root, parsed)),
@@ -205,6 +210,11 @@ if (helpPath) {
       name: 'domain',
       hint: 'add | delete | list | status',
       description: 'Configure custom domains',
+    },
+    {
+      name: 'email',
+      hint: 'usage | logs | destinations | allow | disallow',
+      description: 'Inspect email activity and manage verified recipients',
     },
     {
       name: 'github',
@@ -290,6 +300,10 @@ if (helpPath) {
       case 'build':
         return runSubcommandGroup('build', buildSubcommands, parseBuildArgs, (r, p) =>
           import('./build-cmd.ts').then(({ runBuildCommand }) => runBuildCommand(r, p)),
+        );
+      case 'email':
+        return runSubcommandGroup('email', emailSubcommands, parseEmailArgs, (r, p) =>
+          import('./email.ts').then(({ runEmailCommand }) => runEmailCommand(r, p)),
         );
       case 'db':
         return runSubcommandGroup('db', dbSubcommands, parseDbArgs, (r, p) =>

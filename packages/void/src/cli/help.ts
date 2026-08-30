@@ -233,6 +233,36 @@ const HELP_TREE: HelpTree = {
       },
     },
   },
+  email: {
+    summary: 'Inspect email activity and manage verified recipients.',
+    usage: ['void email <command>'],
+    commands: [
+      { command: 'usage', description: 'Show monthly outbound/inbound counts and quota' },
+      { command: 'logs', description: 'Show recent email delivery activity' },
+      { command: 'destinations', description: 'List verified recipient addresses' },
+      { command: 'allow <address>', description: 'Add a recipient and trigger CF verification' },
+      { command: 'disallow <address>', description: 'Remove a recipient from the allowlist' },
+    ],
+    children: {
+      usage: withProjectOption(
+        'Show monthly outbound/inbound counts and quota.',
+        'void email usage [options]',
+      ),
+      logs: withProjectOption('Show recent email delivery activity.', 'void email logs [options]'),
+      destinations: withProjectOption(
+        'List verified recipient addresses.',
+        'void email destinations [options]',
+      ),
+      allow: withProjectOption(
+        'Add a recipient and trigger a Cloudflare verification email.',
+        'void email allow <address> [options]',
+      ),
+      disallow: withProjectOption(
+        'Remove a recipient from the verified allowlist.',
+        'void email disallow <address> [options]',
+      ),
+    },
+  },
   github: {
     summary: 'Connect a GitHub repository for automatic deploys.',
     usage: ['void github <command>'],
@@ -629,6 +659,8 @@ export function printGlobalHelp(): void {
       ...globalCommandLines('secret'),
       '',
       ...globalCommandGroup('domain'),
+      '',
+      ...globalCommandGroup('email'),
       '',
       ...globalCommandGroup('github'),
       '',

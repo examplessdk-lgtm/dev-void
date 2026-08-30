@@ -42,6 +42,8 @@ function injectWorkersTypesReferencePlugin() {
           'runtime/sandbox.d.mts',
           'runtime/live.d.mts',
           'runtime/live-server.d.mts',
+          'runtime/email.d.mts',
+          'runtime/email/testing.d.mts',
         ]);
         if (!targets.has(output.fileName)) {
           continue;
@@ -113,6 +115,8 @@ export default defineConfig({
       'src/runtime/isr-cache.ts',
       'src/runtime/log.ts',
       'src/runtime/ai.ts',
+      'src/runtime/email.ts',
+      'src/runtime/email/testing.ts',
       'src/runtime/sandbox.ts',
       'src/runtime/remote/index.ts',
       'src/runtime/remote/binding-handler.ts',
@@ -147,6 +151,7 @@ export default defineConfig({
         '@cloudflare/vite-plugin',
         'better-sqlite3',
         'cloudflare:workers',
+        'cloudflare:email',
         '@void/vue',
         '@void/react',
         '@void/svelte',

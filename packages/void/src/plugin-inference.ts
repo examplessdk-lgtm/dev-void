@@ -29,13 +29,20 @@ export const FRAMEWORK_SCAN_DIRS = [
   'queues',
 ] as const;
 
-/** Directories to scan for binding inference in Void app mode. */
+/**
+ * Directories to scan for binding inference in Void app mode.
+ *
+ * `email` is included so a `sendEmail()` call from inside an inbound handler
+ * (`email/<addr>.ts`) registers `needsEmail = true`. Otherwise the manifest
+ * flag and the dev-inbox plugin would miss those callsites.
+ */
 export const DEFAULT_SCAN_DIRS = [
   'routes',
   'middleware',
   'queues',
   'pages',
   'crons',
+  'email',
   'src',
 ] as const;
 
@@ -89,6 +96,7 @@ export type InferenceOptions = {
     kv?: boolean | string;
     storage?: boolean | string;
     ai?: boolean;
+    email?: boolean;
   };
   paths?: ProjectPaths;
 };
@@ -134,6 +142,7 @@ export function inferProjectBindings(
       needsAI: Boolean(options.bindings.ai),
       needsSandbox: false,
       needsLive: false,
+      needsEmail: Boolean(options.bindings.email),
     };
   }
 

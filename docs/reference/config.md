@@ -431,8 +431,11 @@ Each binding accepts `true` (use default name), `false` (disable), or a string (
 | `kv`      | `KV`            | `KVNamespace` | `"kv": "MY_KV"`          |
 | `storage` | `STORAGE`       | `R2Bucket`    | `"storage": "MY_BUCKET"` |
 | `ai`      | `AI`            | `Ai`          | Boolean only             |
+| `email`   | —               | —             | Boolean only             |
 
 Custom names are used in the deploy manifest, Wrangler config generation/sync, remote binding proxying, internal migrations, and generated runtime helpers such as `void/db`, `void/kv`, and `void/storage`.
+
+`email` is a feature switch rather than a Cloudflare binding, so it has no binding name or type. Outbound mail is sent through the Void platform proxy, which owns the `send_email` binding — none is written into your worker. Set it to `true` to turn the [email integration](../guide/email.md) on — which registers the `void dev` inbox — even when no scanned file imports `void/email`, or `false` to turn it off.
 
 #### `inference.build`
 

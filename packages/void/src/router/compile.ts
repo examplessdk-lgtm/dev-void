@@ -649,6 +649,15 @@ export type CompileOptions = {
   handlerPath: string;
   /** Absolute path to the void/_env module */
   runtimeEnvPath: string;
+  /** Absolute path to the void/email module (inbound `createMessageProxy`) */
+  runtimeEmailPath?: string;
+  /**
+   * Absolute path to the project's top-level `email/` directory. Set when the
+   * app declares inbound email handlers; the route table then emits
+   * `__emailHandler`. Lives here rather than in `compileRouteTable`'s
+   * positional list so the ~68 existing call sites keep binding correctly.
+   */
+  emailDir?: string;
   /** Absolute path to the project root */
   projectRoot: string;
   /** Absolute path to the current user's home directory */
@@ -1535,6 +1544,112 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('  return c.json(result);');
     lines.push('};');
     lines.push('app.post("/__void/queue", __queueHandler);');
+    lines.push('');
+  }
+
+  // Inbound email — generate __emailHandler that dispatches by recipient
+  // local-part. Patterns are tried in specificity order (static-tag > static
+  // > dynamic-tag > dynamic); on match, captured groups become `info.params`
+  // and the handler is invoked with (message, env, ctx, info). Falls through
+  // to email/_default.ts when no per-address pattern matches.
+  //
+  // Slug stripping: the shared platform sender rewrites every recipient to
+  // `<slug>+<tag>@<platform mail domain>`, where `<slug>` is the
+  // project slug. User-defined handlers are written against the `<tag>` only
+  // (the slug is invisible to them — see design-doc 0078). The dispatcher
+  // therefore strips everything up to and including the first `+` from the
+  // local-part before running it through the pattern table. If the recipient
+  // arrived without a `+` (e.g. local-dev edge cases or future custom-domain
+  // routing), the stripped value is empty, no anchored pattern matches, and
+  // we fall through to `_default`.
+  const email = scan.email;
+  const emailDir = options.emailDir;
+  if (emailDir && email && (email.addresses.length > 0 || email.defaultHandler)) {
+    if (email.defaultHandler) {
+      lines.push(
+        `const __emailDefault = () => import(${JSON.stringify(`${emailDir}/${email.defaultHandler}`)});`,
+      );
+    }
+    for (let i = 0; i < email.addresses.length; i++) {
+      const def = email.addresses[i];
+      lines.push(
+        `const __emailAddr${i} = () => import(${JSON.stringify(`${emailDir}/${def.filePath}`)});`,
+      );
+    }
+    if (email.addresses.length > 0) {
+      lines.push('const __emailPatterns = [');
+      for (let i = 0; i < email.addresses.length; i++) {
+        const def = email.addresses[i];
+        const path = `${emailDir}/${def.filePath}`;
+        lines.push(
+          `  { re: new RegExp(${JSON.stringify(def.pattern.regexSource)}, "i"), params: ${JSON.stringify(def.pattern.paramNames)}, path: ${JSON.stringify(path)}, load: __emailAddr${i} },`,
+        );
+      }
+      lines.push('];');
+    }
+    lines.push('');
+    lines.push('export async function __emailHandler(message, env, ctx) {');
+    // Route on the PLATFORM (wire) recipient, not `message.to`.
+    // `createMessageProxy` has already removed the `<slug>+` prefix from
+    // `message.to` so handler authors see the address they wrote, and it
+    // preserves the wire form as `__voidPlatformTo`. Reading `message.to`
+    // here would strip the slug a SECOND time, leaving an empty tag that no
+    // anchored pattern can match. When no slug was injected the two are
+    // identical, so the fallback is exact.
+    // Case is PRESERVED here and the patterns carry the `i` flag instead.
+    // Lowercasing the address first would lowercase the captured groups too,
+    // silently corrupting a case-sensitive tag such as a ticket id or a token
+    // (`support+T-42@` reached the handler as `t-42`).
+    lines.push(
+      '  const __to = String((message && (message.__voidPlatformTo ?? message.to)) || "");',
+    );
+    lines.push('  const __localFull = __to.split("@")[0] || "";');
+    // Strip the platform-injected `<slug>+` prefix. The shared sender
+    // rewrites every recipient to `<slug>+<tag>`; user-defined
+    // handlers match on the `<tag>` only. If there is no `+` (recipient came
+    // in without sub-addressing), tag is empty — falls through to `_default`.
+    lines.push('  const __plus = __localFull.indexOf("+");');
+    lines.push('  const __local = __plus === -1 ? "" : __localFull.slice(__plus + 1);');
+    if (email.addresses.length > 0) {
+      lines.push('  for (const __p of __emailPatterns) {');
+      lines.push('    const __m = __p.re.exec(__local);');
+      lines.push('    if (!__m) continue;');
+      lines.push('    const __params = {};');
+      lines.push('    for (let __i = 0; __i < __p.params.length; __i++) {');
+      lines.push('      __params[__p.params[__i]] = __m[__i + 1];');
+      lines.push('    }');
+      lines.push('    const __mod = await __p.load();');
+      lines.push('    if (typeof __mod.default !== "function") {');
+      lines.push(
+        '      throw new Error("email handler at " + __p.path + " has no default export");',
+      );
+      lines.push('    }');
+      lines.push('    return await __mod.default(message, env, ctx, { params: __params });');
+      lines.push('  }');
+    }
+    if (email.defaultHandler) {
+      const defaultPath = `${emailDir}/${email.defaultHandler}`;
+      lines.push('  const __dmod = await __emailDefault();');
+      lines.push('  if (typeof __dmod.default !== "function") {');
+      lines.push(
+        `    throw new Error("email handler at " + ${JSON.stringify(defaultPath)} + " has no default export");`,
+      );
+      lines.push('  }');
+      lines.push('  return await __dmod.default(message, env, ctx, { params: {} });');
+    } else {
+      // No-match without _default — explicitly reject so the remote MTA
+      // gets a non-delivery report. Silent acceptance would mark the
+      // message accepted on our end while never invoking any handler,
+      // which is invisible to the sender (no NDR) and to the recipient
+      // (no delivery). The reject reason is generic so user-handler
+      // authors can add `_default.ts` to customize.
+      lines.push('  if (typeof message.setReject === "function") {');
+      lines.push(
+        '    message.setReject("no handler matched recipient \\"" + __to + "\\" — add email/_default.ts to handle unmatched mail");',
+      );
+      lines.push('  }');
+    }
+    lines.push('}');
     lines.push('');
   }
 
@@ -2459,37 +2574,79 @@ ${fallthroughCode}
  * remote mode (`__VOID_REMOTE`) and replace local bindings with
  * proxy-backed versions.
  */
-export function compileWorkerEntry(
-  hasQueues = false,
+// Both modules are siblings under `runtime/`, so `_env` -> `email` is the only
+// transform needed. Works for bare specifiers (`void/_env` -> `void/email`) and
+// for resolved file paths (`/.../runtime/env.mjs` -> `/.../runtime/email.mjs`).
+function deriveEmailRuntimePath(runtimeEnvPath: string): string {
+  return runtimeEnvPath.replace(/_?env(\.[^/]+)?$/, (_m, ext) => 'email' + (ext ?? ''));
+}
+
+export interface WorkerEntryOptions {
+  hasQueues?: boolean;
   remote?: {
     remotePath: string;
     envPath: string;
     bindingNames?: { d1?: string; kv?: string; r2?: string };
-  },
-  assetsDir = 'assets',
-  webSocketClasses: Array<string> = [],
-  runtimeEnvPath = 'void/_env',
-  envSchemaModule?: { importPath: string; helperPath: string },
-  sandbox?: boolean | { bindingName?: string; className?: string; runtimePath?: string },
-  serveSpaFallback = false,
-  live?: boolean | { bindingName?: string; className?: string },
+  };
+  assetsDir?: string;
+  webSocketClasses?: Array<string>;
+  runtimeEnvPath?: string;
+  /**
+   * Path to the `void/email` runtime, used for `createMessageProxy` in the
+   * generated `email()` handler. Defaults to a sibling-of-`runtimeEnvPath`
+   * derivation, which covers both bare specifiers (`void/_env` -> `void/email`)
+   * and resolved file paths.
+   */
+  runtimeEmailPath?: string;
+  envSchemaModule?: { importPath: string; helperPath: string };
+  sandbox?: boolean | { bindingName?: string; className?: string; runtimePath?: string };
+  /**
+   * Emit an SPA-style fallback in the asset-fallthrough path: when
+   * `assetConfig.not_found_handling = "none"`, the worker returns
+   * `/index.html` for HTML navigations after user routes have run. Pages
+   * and SSR apps leave this disabled so intentional 404s stay 404.
+   */
+  serveSpaFallback?: boolean;
+  /**
+   * Emit the `email()` RPC method and the inbound dispatch glue. The route
+   * table must export `__emailHandler` when this is set.
+   */
+  hasEmail?: boolean;
+  live?: boolean | { bindingName?: string; className?: string };
   /**
    * When present, wraps the render path with the self-host ISR cache ladder.
-   * `runtimePath` is the import specifier for `handleIsr` (Task 10 export). The
-   * deployment id is NOT passed here — the single source of truth is the
-   * compile-time `__VOID_ISR_DEPLOYMENT_ID` const imported from the route table.
-   * When absent, the render path is emitted byte-identical to today (zero
+   * `runtimePath` is the import specifier for `handleIsr`. The deployment id is
+   * NOT passed here - the single source of truth is the compile-time
+   * `__VOID_ISR_DEPLOYMENT_ID` const imported from the route table. When
+   * absent, the render path is emitted byte-identical to today (zero
    * behavioral change for managed/dev/no-ISR builds).
    */
-  isr?: { runtimePath: string },
+  isr?: { runtimePath: string };
   /**
    * Resolved `assetConfig.not_found_handling` for this build. Threaded to
    * `compileAssetFallbackHelper` so `routing.notFound: '404-page'` is honored
    * on the worker-first path instead of being discarded. Defaults to `'none'`,
    * which emits the pre-existing helper byte-for-byte.
    */
-  notFound: NotFoundHandling = 'none',
-): string {
+  notFound?: NotFoundHandling;
+}
+
+export function compileWorkerEntry(options: WorkerEntryOptions = {}): string {
+  const {
+    hasQueues = false,
+    remote,
+    assetsDir = 'assets',
+    webSocketClasses = [],
+    runtimeEnvPath = 'void/_env',
+    runtimeEmailPath,
+    envSchemaModule,
+    sandbox,
+    serveSpaFallback = false,
+    hasEmail = false,
+    live,
+    isr,
+    notFound = 'none',
+  } = options;
   const remotePath = remote?.remotePath;
   const remoteBindingNames = JSON.stringify(remote?.bindingNames);
   const createRemoteEnvCall = `createRemoteEnv(env${
@@ -2672,12 +2829,65 @@ ${envValidateCall}${isrDeploymentStamp}  const userEnv = __filterInternalBinding
   return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
 }`;
 
+  // `ForwardableEmailMessage` is not in workerd's RPC BaseType allowlist, so the
+  // platform router serializes the message to an `EmailEnvelope`, this worker's
+  // `email()` method rebuilds a proxy through `createMessageProxy`, runs the user
+  // handler, and returns the recorded `EmailAction[]` for the router to enact.
+  const emailImport = hasEmail ? ', __emailHandler' : '';
+  const emailRuntimePath = runtimeEmailPath ?? deriveEmailRuntimePath(runtimeEnvPath);
+  const emailProxyImport = hasEmail
+    ? `import { createMessageProxy as __createMessageProxy } from ${JSON.stringify(emailRuntimePath)};\n`
+    : '';
+  // `__VOID_PROJECT_SLUG` is the same binding the outbound `sendEmail` reads to
+  // default `from`. It is passed to `createMessageProxy` so the user-visible
+  // `message.to` is the bare `<tag>@<domain>` rather than the wire form. The
+  // generated `__emailHandler` routes on the wire address instead, which
+  // `createMessageProxy` preserves as `__voidPlatformTo`.
+  const emailHandler = hasEmail
+    ? remotePath
+      ? `async function handleEmail(envelope, env, ctx) {
+${envValidateCall}  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
+  const userEnv = __filterInternalBindings(env);
+  const __slug = typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined;
+  const { message, getActions } = __createMessageProxy(envelope, { slug: __slug });
+  await __withRawEnv(env, () => withRuntimeEnv(env, () => __emailHandler(message, userEnv, ctx)));
+  return getActions();
+}`
+      : `async function handleEmail(envelope, env, ctx) {
+${envValidateCall}  const userEnv = __filterInternalBindings(env);
+  const __slug = typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined;
+  const { message, getActions } = __createMessageProxy(envelope, { slug: __slug });
+  await __withRawEnv(env, () => withRuntimeEnv(env, () => __emailHandler(message, userEnv, ctx)));
+  return getActions();
+}`
+    : '';
+
+  // The default export is a `WorkerEntrypoint` subclass. A plain default object
+  // only exposes `.fetch()` through a Workers-for-Platforms dispatch stub, so
+  // `email()` would be unreachable; class methods on a `WorkerEntrypoint`
+  // subclass become RPC provider methods on that stub. `fetch()` stays
+  // HTTP-compatible inside the class.
+  const entryImport = `import { WorkerEntrypoint } from "cloudflare:workers";\n`;
+  const fetchDeclaration = `const __voidFetch = ${fetchHandler};`;
+  const queueMethodBody = hasQueues
+    ? `  async queue(batch) { return __voidQueue(batch, this.env, this.ctx); }\n`
+    : '';
+  const emailMethodBody = hasEmail
+    ? `  async email(envelope) { return handleEmail(envelope, this.env, this.ctx); }\n`
+    : '';
+  const entryClass = `export default class extends WorkerEntrypoint {
+  async fetch(request) { return __voidFetch(request, this.env, this.ctx); }
+  async scheduled(controller) { return handleScheduled(controller, this.env, this.ctx); }
+${queueMethodBody}${emailMethodBody}}`;
+
   if (hasQueues) {
-    return `${sandboxImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __voidHandleWebSocket, __withRawEnv, __processQueue${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
-${runtimeEnvImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
+    return `${sandboxImport}${entryImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __voidHandleWebSocket, __withRawEnv, __processQueue${emailImport}${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
+${runtimeEnvImport}${emailProxyImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
+${fetchDeclaration}
 ${scheduledHandler}
-async function queue(batch, env, ctx) {
+${emailHandler}
+async function __voidQueue(batch, env, ctx) {
 ${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};\n` : ''}${isrDeploymentStamp}  const userEnv = __filterInternalBindings(env);
   const messages = [...batch.messages].map(m => ({
     id: m.id, timestamp: m.timestamp.toISOString(),
@@ -2701,16 +2911,18 @@ ${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = ${creat
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
 ${liveExport}
 ${sandboxExport}
-export default { fetch: ${fetchHandler}, scheduled: handleScheduled, queue };`;
+${entryClass}`;
   }
-  return `${sandboxImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __voidHandleWebSocket, __withRawEnv${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
-${runtimeEnvImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
+  return `${sandboxImport}${entryImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __voidHandleWebSocket, __withRawEnv${emailImport}${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
+${runtimeEnvImport}${emailProxyImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
+${fetchDeclaration}
 ${scheduledHandler}
+${emailHandler}
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
 ${liveExport}
 ${sandboxExport}
-export default { fetch: ${fetchHandler}, scheduled: handleScheduled };`;
+${entryClass}`;
 }
 
 /**
