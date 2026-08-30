@@ -123,6 +123,12 @@ app.get('/:id', async (context) => {
             <td>{project.type}</td>
           </tr>
           <tr>
+            <th>Email</th>
+            <td>
+              <a href={`/admin/email/${project.id}`}>usage, limits, destinations</a>
+            </td>
+          </tr>
+          <tr>
             <th>Created</th>
             <td>{project.created_at}</td>
           </tr>

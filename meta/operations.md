@@ -178,15 +178,16 @@ openssl rand -base64 32
 
 Account-level:
 
-| Permission         | Access | Operations                                                       |
-| ------------------ | ------ | ---------------------------------------------------------------- |
-| Workers Scripts    | Edit   | Upload/delete user workers in dispatch namespace                 |
-| Workers Tail       | Read   | Create/delete tail sessions for live log streaming               |
-| D1                 | Edit   | Create/delete user project D1 databases, execute user migrations |
-| Workers KV Storage | Edit   | Create/delete KV namespaces                                      |
-| Workers R2 Storage | Edit   | Create/delete R2 buckets                                         |
-| Queues             | Edit   | Create/delete queues, manage queue consumers                     |
-| Account Analytics  | Read   | Query Analytics Engine SQL API for usage metering                |
+| Permission         | Access | Operations                                                            |
+| ------------------ | ------ | --------------------------------------------------------------------- |
+| Workers Scripts    | Edit   | Upload/delete user workers in dispatch namespace                      |
+| Workers Tail       | Read   | Create/delete tail sessions for live log streaming                    |
+| D1                 | Edit   | Create/delete user project D1 databases, execute user migrations      |
+| Email Routing      | Edit   | Manage account-wide verified destinations and the shared inbound zone |
+| Workers KV Storage | Edit   | Create/delete KV namespaces                                           |
+| Workers R2 Storage | Edit   | Create/delete R2 buckets                                              |
+| Queues             | Edit   | Create/delete queues, manage queue consumers                          |
+| Account Analytics  | Read   | Query Analytics Engine SQL API for usage metering                     |
 
 Zone-level (on `void.app`):
 
@@ -545,6 +546,79 @@ pnpm health:staging    # Check staging API health
 | `dash.staging.void.cloud`  | `void.cloud` | Staging dashboard worker                   |
 | `*.staging.void.app`       | `void.app`   | Staging dispatch worker (wildcard route)   |
 | `proxy.staging.void.cloud` | `void.cloud` | Staging proxy worker                       |
+| `mail.void.cloud`          | (own zone)   | Email Routing (catch-all to the proxy)     |
+
+## Email
+
+The platform runs one shared mail facility for every project. A project sends
+as `<slug>[+tag]@<mail domain>` and receives at `<slug>+anything@<mail domain>`.
+No per-project DNS work.
+
+The mail domain is a var, not a constant. The api worker and the proxy worker
+each declare `EMAIL_SENDER_DOMAIN`, and deployed user workers receive it as the
+`__VOID_EMAIL_DOMAIN` binding. **The two worker values must match.** The proxy
+validates every sender against its own copy, so a mismatch makes the api's own
+verification mail fail with `INVALID_FROM` from our own proxy. Production is
+`mail.void.cloud`; staging is `mail.staging.void.cloud`.
+
+Every reader fails closed when the var is absent. Nothing falls back to a
+baked-in domain.
+
+### One-time zone setup, per environment
+
+Do these in order. Step 3 before step 4, or the catch-all points at a worker
+with no `email()` export.
+
+1. **Extend `CF_API_TOKEN` with `Email Routing: Edit`.** Without it every
+   `addDestination` returns 403. That reaches a CLI user as a 502, and the
+   auto-add on project create swallows it entirely — the owner never gets a
+   verification mail and cannot send to their own address.
+2. **Register the zone** in the platform Cloudflare account. Add it in the
+   dashboard, or `POST /zones { name, account: { id } }`. Confirm the
+   nameservers at the registrar.
+3. **Enable Email Routing** on the zone. This creates the MX records and the
+   `cf-{tag}._domainkey` DKIM record. Cloudflare does NOT create SPF or DMARC.
+   Add both yourself, then confirm.
+4. **Deploy the proxy** with `send_email` bound and the `email()` export live.
+   Check all three scopes in `packages/proxy/wrangler.jsonc`: the top level,
+   `env.production` and `env.staging`. Wrangler does not inherit `send_email`
+   into a named env, and `deploy:proxy` runs `--env production`.
+5. **Create the catch-all rule.** Action _Send to a Worker_, destination
+   `void-proxy` (or `void-proxy-staging`). This rule is the real kill switch:
+   deleting it stops all inbound immediately.
+6. **Backfill the slug mirror.** The proxy resolves a sender through
+   `email-slug:<projectId>` in `ROUTING` KV, and only `createProject` writes it.
+   Every project that predates this feature has no mirror and every send returns
+   a 502 `project slug unknown`. Run a one-time pass over existing projects.
+7. **Verify.** `wrangler tail void-proxy`, then send to
+   `<test-slug>+test@<mail domain>`. Expect an `[email-router]` line and either
+   a dispatch or a `setReject` with a readable reason.
+
+### Deploy order
+
+Deploy the **proxy before the api**. The api's verification mail posts to the
+proxy's `/email/internal/send`, so an api-first deploy leaves that mail silently
+dark until the proxy catches up. `vp run deploy` runs api first, so run the two
+as explicit steps for the release that turns email on.
+
+### Rollback
+
+- Delete the catch-all rule to stop inbound.
+- Redeploy the proxy without `send_email` to stop outbound.
+
+### Before you deploy this the first time
+
+Two changes are retroactive and server-side. Check production first.
+
+- `SEND_EMAIL`, `__VOID_EMAIL_DOMAIN` and `__VOID_PROJECT_SLUG` are now
+  reserved binding names. A project holding one as a var or a stored secret
+  starts failing deploys with `reserved binding names: ...`, and a user cannot
+  remove a stored secret from the manifest. Query
+  `project_secrets.name IN (...)` before deploying the api.
+- `noreply`, `postmaster`, `abuse`, `bounce` and `security` are now reserved
+  slugs. That gates creation only, so a project already holding one keeps it —
+  and `noreply` is the platform's own verification sender. Check for existing
+  holders.
 
 ## Fresh Environment Setup
 

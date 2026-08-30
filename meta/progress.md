@@ -63,6 +63,7 @@
 - [x] Remote bindings (`remote: true` — D1/KV/R2 via proxy for local dev)
 - [x] Better Auth integration
 - [x] Cloudflare Sandboxes (`void/sandbox` with platform container provisioning)
+- [x] Email (`void/email` — outbound send and inbound handlers on a shared platform sender; see `meta/design-docs/0078-email-cf-native.md`). Code complete; the mail zone and its catch-all rule are not provisioned yet, so it is unshipped.
 
 ### Remaining
 
@@ -135,7 +136,7 @@
 
 ### Platform
 
-- [ ] Email binding
+- [ ] Email — custom sender domains per project (DKIM), and a provider abstraction. Follow-up to the shared-sender rollout.
 - [ ] Durable Object session abstraction
 - [ ] Preview environments with database forks (cloned D1 per PR)
 - [ ] Integration marketplace (Resend, Stripe plugin architecture)

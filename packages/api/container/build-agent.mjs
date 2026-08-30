@@ -73,7 +73,7 @@ const DO_POST_TIMEOUT_MS = 10000;
 // build-manager test asserts against the framework submodule — this file is
 // plain JS copied into the container image, so it can't import that constant
 // and the test mirrors the literal instead.
-export const DEFAULT_VOID_CLI_VERSION = '0.10.12';
+export const DEFAULT_VOID_CLI_VERSION = '0.10.13';
 
 // --- source-download bounds --------------------------------------------------
 //

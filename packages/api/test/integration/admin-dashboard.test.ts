@@ -43,6 +43,13 @@ function req(path: string, cookie?: string, init?: RequestInit): Response | Prom
   if (cookie) {
     headers.Cookie = `admin_token=${cookie}`;
   }
+  // Admin writes are guarded against cross-origin form posts, so a write must
+  // carry the Origin a real browser would send. The guard itself is covered in
+  // admin-email.test.ts, which builds its cross-origin requests by hand.
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD' && headers.Origin === undefined) {
+    headers.Origin = 'http://localhost';
+  }
   return app.fetch(
     new Request(`http://localhost${path}`, { ...init, headers, redirect: 'manual' }),
     env,
@@ -487,6 +494,8 @@ describe('POST /admin/users/:id/plan', () => {
         headers: {
           Cookie: `admin_token=${admin.adminJwt}`,
           'Content-Type': 'application/x-www-form-urlencoded',
+          // A real admin form post is same-origin; the write guard requires it.
+          Origin: 'http://localhost',
         },
         body: new URLSearchParams({ plan: 'pro' }).toString(),
         redirect: 'manual',
@@ -645,6 +654,8 @@ describe('POST /admin/users/:id/suspend + unsuspend', () => {
         headers: {
           Cookie: `admin_token=${adminJwt}`,
           'Content-Type': 'application/x-www-form-urlencoded',
+          // A real admin form post is same-origin; the write guard requires it.
+          Origin: 'http://localhost',
         },
         body: '',
         redirect: 'manual',
@@ -667,6 +678,8 @@ describe('POST /admin/users/:id/suspend + unsuspend', () => {
         headers: {
           Cookie: `admin_token=${adminJwt}`,
           'Content-Type': 'application/x-www-form-urlencoded',
+          // A real admin form post is same-origin; the write guard requires it.
+          Origin: 'http://localhost',
         },
         body: new URLSearchParams({ reason }).toString(),
         redirect: 'manual',

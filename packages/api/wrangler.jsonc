@@ -159,6 +159,8 @@
     "PLATFORM_ENV": "production",
     "REQUESTS_DATASET": "void_requests",
     "TAIL_SERVICE_NAME": "void-tail",
+    // Must match packages/proxy/wrangler.jsonc — the proxy validates senders against its own copy.
+    "EMAIL_SENDER_DOMAIN": "mail.void.cloud",
     // Bucket name plumbing for the presigned R2 PUT URL path. Must match the
     // `r2_buckets[].bucket_name` value above — the binding surfaces an
     // R2Bucket object but not its name, and the presigner needs the name.
@@ -290,6 +292,7 @@
         "PLATFORM_ENV": "production",
         "REQUESTS_DATASET": "void_requests",
         "TAIL_SERVICE_NAME": "void-tail",
+        "EMAIL_SENDER_DOMAIN": "mail.void.cloud",
         "R2_STATIC_ASSETS_BUCKET": "void-static-assets-overflow",
         "USAGE_EVENTS_QUEUE_NAME": "void-usage-events",
       },
@@ -413,6 +416,7 @@
         "AUTH_REDIRECT_URI": "https://api.staging.void.cloud/auth/callback",
         "LOGS_DATASET": "void_logs_staging",
         "REQUESTS_DATASET": "void_requests_staging",
+        "EMAIL_SENDER_DOMAIN": "mail.staging.void.cloud",
         "PLATFORM_ENV": "staging",
         "TAIL_SERVICE_NAME": "void-tail-staging",
         "R2_STATIC_ASSETS_BUCKET": "void-static-assets-overflow-staging",

@@ -1,8 +1,16 @@
 ---
 title: Email — Send & Receive via Resend
-status: deferred
+status: superseded
 created: 2026-03-03
+superseded_by: 0078-email-cf-native.md
 ---
+
+> **Superseded on 2026-08-30 by `0078-email-cf-native.md`.** The cost argument
+> below was about Resend. Email was later built on Cloudflare Email Routing
+> instead, which removes the $90/mo floor and the third-party dependency, so
+> the deferral no longer applies. The inbound reasoning held up: routing to the
+> correct user worker on Workers for Platforms was the hard part, and it is
+> what `0078` spends most of its design on.
 
 # Email — Send & Receive via Resend
 

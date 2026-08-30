@@ -5,8 +5,22 @@
 - Worktrees: create real git worktrees with `git worktree add` under `.worktrees/`. Do not apply worktree changes back to the main tree without explicit user confirmation.
 - Design/doc work: stay in design mode until the user asks for implementation. If a feature is not live yet, prefer a clean cutover over legacy migration work.
 - Docs/progress: code is the source of truth, but public docs may intentionally omit paused features. Describe root scripts exactly as implemented; root `dev` and `build` are dashboard-only. Track "implemented", "shipped", and "done" separately unless the user says they are equivalent.
-- Commands: avoid HEREDOC commit messages with apostrophes; run `pnpm test <path-or-pattern>` without `--`; in `framework/`, use `pnpm build:all` for a full build.
+- Commands: avoid HEREDOC commit messages with apostrophes; run `pnpm test <path-or-pattern>` without `--`; in `framework/`, use `pnpm build:core` for the `void` package and `pnpm build` for every package (`build:all` was renamed and no longer exists — an unknown script exits 0 through a `| tail` pipe, so the build silently never ran).
 - `vp run` argv: unlike `pnpm`, `vp run <script> -- <args>` forwards the literal `--` to the script. For wrangler the `--` separator hides `--env`, so the deploy silently targets the top-level (prod) env. Always write `vp run --filter <pkg> deploy --env production|staging` (no `--` separator), and require production deploys to pass `--env production` explicitly.
+
+## Re-Landing A Stale Branch
+
+- Re-apply, do not rebase, once a branch is a few hundred commits behind. Reversal commits inside the branch (a binding added then removed, an RPC method renamed then reverted) get replayed against ground `main` rewrote, and the hardest file then has to be rewritten inside conflict markers.
+- The dangerous drift is the kind git merges cleanly. A signature that GREW parameters is the worst case: converting it to an options object from the branch's old parameter list silently deletes everything `main` added. Rebuild the option type from `main`'s CURRENT signature, then diff the generated output to prove each interpolation survived.
+- Give a new option a NAMED home, never a new positional slot. The branch inserted `emailDir` at slot 6 of a 9-argument call with ~68 call sites; every later argument would have shifted by one, and a same-typed shift binds silently. It belonged on the options object the function already took.
+- Check whether the branch's hard-coded path still matches `main`'s conventions. The branch used `join(root, 'email')`; `main` had since introduced `readProjectPaths` with a source-root concept, so the branch's version would have broken every project using a `src/` layout.
+- When a positional-to-named codemod runs over tests, strip each argument's trailing line comment. `false, // hasQueues` otherwise becomes `remote: // hasQueues`, which still parses, still typechecks, and now documents the wrong parameter.
+
+## Email And Address Routing
+
+- Strip a platform address prefix in exactly ONE place. `createMessageProxy` removed the `<slug>+` prefix so handler authors see the address they wrote, and the generated dispatcher removed it again before matching, leaving an empty tag that no anchored pattern could match. Both halves were individually correct; the seam was untested. Route on the preserved wire address (`__voidPlatformTo`) and let the user-visible field stay stripped.
+- Lowercasing an address to match it case-insensitively also lowercases the CAPTURED groups. `support+T-42@` reached the handler as `t-42`, quietly corrupting any case-sensitive tag. Match with the `i` flag against the original string instead.
+- Assert on generated code by RUNNING it, not by searching it for substrings. Every codegen test for the dispatcher passed while it could not route a single real message. Stub the dynamic imports, feed it a message built by the real proxy, and assert which handler ran.
 
 ## Framework And Schema
 

@@ -679,19 +679,26 @@ describe('buildSandboxIdentityBindings', () => {
     image: 'docker.io/cloudflare/sandbox:0.8.11',
   };
 
-  it('returns the __VOID_USER_ID + __VOID_PROJECT_SLUG plain-text bindings the framework runtime reads', () => {
-    expect(
-      buildSandboxIdentityBindings(sandbox, { userId: 'user_1', projectSlug: 'my-app' }),
-    ).toEqual([
+  it('returns the __VOID_USER_ID plain-text binding the framework runtime reads', () => {
+    expect(buildSandboxIdentityBindings(sandbox, { userId: 'user_1' })).toEqual([
       { type: 'plain_text', name: '__VOID_USER_ID', text: 'user_1' },
-      { type: 'plain_text', name: '__VOID_PROJECT_SLUG', text: 'my-app' },
     ]);
   });
 
-  it('returns an empty list when sandbox is absent', () => {
+  it('does NOT emit __VOID_PROJECT_SLUG — provisionBindings is its sole producer', () => {
+    // `void/email` needs the slug on every worker, not just sandbox ones, so
+    // it moved to `provisionBindings`. Emitting it here too would upload the
+    // same binding name twice in one `metadata.bindings` array.
+    // `api-sandbox.test.ts` pins that sandbox workers still receive it.
     expect(
-      buildSandboxIdentityBindings(undefined, { userId: 'user_1', projectSlug: 'my-app' }),
-    ).toEqual([]);
+      buildSandboxIdentityBindings(sandbox, { userId: 'user_1' }).some(
+        (b) => b.name === '__VOID_PROJECT_SLUG',
+      ),
+    ).toBe(false);
+  });
+
+  it('returns an empty list when sandbox is absent', () => {
+    expect(buildSandboxIdentityBindings(undefined, { userId: 'user_1' })).toEqual([]);
   });
 });
 

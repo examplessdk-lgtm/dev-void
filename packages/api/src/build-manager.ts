@@ -268,7 +268,7 @@ export function withDeadline<T>(work: Promise<T>, ms: number, reason: string): P
 // against) so a moving `void@latest` can't change deploy behavior with no repo
 // diff. The comment alone let this sit a full minor behind for the whole life of
 // the feature, so `build-manager.test.ts` now asserts the equality instead.
-export const PINNED_VOID_CLI_VERSION = '0.10.12';
+export const PINNED_VOID_CLI_VERSION = '0.10.13';
 
 // Ceiling on how long a queued build may wait for the just-in-time branch-head
 // freshness recheck to succeed. While the GitHub compare API is unreachable

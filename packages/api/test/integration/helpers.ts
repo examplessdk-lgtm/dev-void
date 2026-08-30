@@ -69,6 +69,14 @@ export type TestEnv = {
   AUTH_REDIRECT_URI?: string;
   DEV_AUTH_BYPASS?: string;
   SITE_DOMAIN?: string;
+  /**
+   * Platform mail zone for the environment (`mail.void.cloud` in production,
+   * `mail.staging.void.cloud` in staging). Left UNSET by `setupEnv` on
+   * purpose: every reader fails closed without it, and a test that wants the
+   * email paths must opt in with `{ ...env, EMAIL_SENDER_DOMAIN: '...' }` so
+   * the fail-closed branch stays reachable.
+   */
+  EMAIL_SENDER_DOMAIN?: string;
   REQUESTS_DATASET?: string;
   TAIL_SERVICE_NAME?: string;
   USAGE_COUNTER: DurableObjectNamespace;
@@ -877,6 +885,11 @@ export type CfApiMocks = {
   deleteCustomHostname: (url: string, init?: RequestInit) => Response | Promise<Response>;
   purgeCache: (url: string, init?: RequestInit) => Response | Promise<Response>;
   analyticsQuery: (url: string, init?: RequestInit) => Response | Promise<Response>;
+  // CF Email Routing account-level destination-address API. Backs
+  // `provisioning/email-routing.ts` (add / list / delete).
+  addEmailDestination: (url: string, init?: RequestInit) => Response | Promise<Response>;
+  listEmailDestinations: (url: string, init?: RequestInit) => Response | Promise<Response>;
+  deleteEmailDestination: (url: string, init?: RequestInit) => Response | Promise<Response>;
   // Dispatch script / container-app endpoints. State-aware defaults are wired
   // up when overrides are not supplied. Tests can still override individually.
   getDispatchScript?: (url: string, init?: RequestInit) => Response | Promise<Response>;
@@ -987,6 +1000,28 @@ const baseDefaultMocks: Omit<CfApiMocks, 'uploadWorker' | 'listWorkerBindings' |
   deleteCustomHostname: () => cfSuccess(null),
   purgeCache: () => cfSuccess({ id: 'purge-test-id' }),
   analyticsQuery: () => Response.json({ data: [{ requests: 0, bandwidth_bytes: 0 }] }),
+  // Fresh add: CF echoes the row back immediately with `verified: null` —
+  // the recipient has been mailed a link but hasn't clicked it yet. The tag
+  // is derived from the address so a test can predict it without capturing
+  // the response.
+  addEmailDestination: (_url: string, init?: RequestInit) => {
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+    const email = typeof body.email === 'string' ? body.email : 'test@example.com';
+    return cfSuccess({
+      tag: `cf-tag-${email}`,
+      email,
+      verified: null,
+      created: '2026-04-27T00:00:00Z',
+      modified: '2026-04-27T00:00:00Z',
+    });
+  },
+  // `listDestinations` paginates until a short page comes back, so an empty
+  // array terminates after one request.
+  listEmailDestinations: () => cfSuccess([]),
+  deleteEmailDestination: (url: string) => {
+    const tag = url.split('/').pop()?.split('?')[0] ?? 'unknown';
+    return cfSuccess({ tag });
+  },
 };
 
 /**
@@ -1370,6 +1405,21 @@ export function mockCfApi(overrides: Partial<CfApiMocks> = {}): MockCfApiHandle 
     // Order matters: more specific patterns first.
     if (method === 'POST' && url.includes('/purge_cache')) {
       return mocks.purgeCache(url, init);
+    }
+    // CF Email Routing destinations. All three verbs share the
+    // `/email/routing/addresses` prefix — DELETE and GET both land on
+    // `/addresses/<tag>` or `/addresses?page=...`, POST on the bare
+    // collection — so the method is the only disambiguator.
+    if (url.includes('/email/routing/addresses')) {
+      if (method === 'DELETE') {
+        return mocks.deleteEmailDestination(url, init);
+      }
+      if (method === 'GET') {
+        return mocks.listEmailDestinations(url, init);
+      }
+      if (method === 'POST') {
+        return mocks.addEmailDestination(url, init);
+      }
     }
     if (method === 'POST' && url.includes('/custom_hostnames')) {
       return mocks.createCustomHostname(url, init);

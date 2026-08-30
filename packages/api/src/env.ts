@@ -153,6 +153,15 @@ export type ApiEnv = Env & {
     R2_STATIC_ASSETS_BUCKET: string;
     EMAIL?: SendEmail;
     /**
+     * Platform mail domain for this environment (`mail.void.cloud` in
+     * production, `mail.staging.void.cloud` in staging). The proxy worker
+     * declares the SAME var and validates every sender against it, so the two
+     * values must match or a correctly-signed send is rejected by its own
+     * proxy. Optional on the type because the var is absent until the mail
+     * zone exists; every reader fails closed rather than defaulting.
+     */
+    EMAIL_SENDER_DOMAIN?: string;
+    /**
      * Test-only override for the deploy handler's heartbeat interval in ms.
      * Falls back to 15_000 when undefined, falsy, or non-positive. Kept on
      * `ApiEnv` (rather than wiring a fresh plumbing path) so integration tests

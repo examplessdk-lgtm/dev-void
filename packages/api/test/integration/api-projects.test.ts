@@ -10,7 +10,13 @@ import {
 import * as db from '../../src/db.ts';
 import app from '../../src/index.ts';
 import { users } from '../../src/schema.ts';
-import { domains, projects, resources, projectDatabaseCredentials } from '../../src/schema.ts';
+import {
+  domains,
+  emailDestinations,
+  projects,
+  resources,
+  projectDatabaseCredentials,
+} from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -2010,5 +2016,204 @@ describe('GET /projects/:id/logs limit validation', () => {
     );
     expect(res.status).toBe(400);
     expect(queried).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Owner auto-add on project create.
+//
+// The project owner's own address is registered with CF Email Routing so mail
+// to themselves works from the first deploy. Entirely best-effort — every
+// failure is logged and swallowed — which is exactly why it needs a test: a
+// regression here is silent.
+// ---------------------------------------------------------------------------
+describe('POST /projects — owner email destination auto-add', () => {
+  // The gate the route checks. Without a platform mail domain there is no
+  // sender to allow-list a recipient for, so the auto-add stays inert.
+  const emailEnv = () => ({ ...env, EMAIL_SENDER_DOMAIN: 'mail.staging.void.cloud' });
+
+  function stubEmailRouting(
+    respond: (method: string, url: string) => Response,
+  ): Array<{ method: string; url: string }> {
+    const calls: Array<{ method: string; url: string }> = [];
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes('/email/routing/addresses')) {
+        const method = init?.method ?? 'GET';
+        calls.push({ method, url });
+        return respond(method, url);
+      }
+      return inner(input, init);
+    });
+    return calls;
+  }
+
+  // `createTestUser` stores `email: null`, which the route treats as
+  // "nothing to register". Give the owner a real address.
+  async function withEmail(userId: string, email: string): Promise<string> {
+    await env.db.update(users).set({ email }).where(eq(users.id, userId));
+    return email;
+  }
+
+  async function createProjectAs(user: { jwt: string }, slug: string, bindings: TestEnv) {
+    return app.fetch(
+      new Request('http://localhost/projects', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${user.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug }),
+      }),
+      bindings,
+    );
+  }
+
+  it('registers the owner address and stores a pending row', async () => {
+    const user = await createTestUser(env.db);
+    const ownerEmail = await withEmail(user.id, 'Owner@Example.com');
+    mockCfApi();
+    stubEmailRouting(() =>
+      Response.json({
+        success: true,
+        errors: [],
+        messages: [],
+        // CF returns the row immediately; `verified` stays null until the
+        // owner clicks the link it just mailed them.
+        result: { tag: 'cf-tag-new', email: ownerEmail, verified: null },
+      }),
+    );
+
+    const res = await createProjectAs(user, 'auto-add-app', emailEnv());
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string };
+
+    const [row] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.project_id, project.id));
+    expect(row).toMatchObject({
+      // Stored lowercased regardless of how the user cased it.
+      address: ownerEmail.toLowerCase(),
+      cf_destination_id: 'cf-tag-new',
+      status: 'pending',
+      verification_source: 'cf',
+    });
+    // Nothing was inherited, so no consent to attribute.
+    expect(row.verified_by_user_id).toBeNull();
+  });
+
+  it('reuses the tag and verified status when CF already has the address', async () => {
+    // Second-or-later project for the same owner. Without the already-exists
+    // recovery this project would start with an empty allowlist.
+    const user = await createTestUser(env.db);
+    const ownerEmail = await withEmail(user.id, 'repeat-owner@example.com');
+    mockCfApi();
+    stubEmailRouting((method) => {
+      if (method === 'POST') {
+        return Response.json(
+          {
+            success: false,
+            errors: [{ code: 10037, message: 'destination address already exists' }],
+            messages: [],
+            result: null,
+          },
+          { status: 400 },
+        );
+      }
+      return Response.json({
+        success: true,
+        errors: [],
+        messages: [],
+        result: [{ tag: 'cf-tag-existing', email: ownerEmail, verified: '2026-01-01T00:00:00Z' }],
+      });
+    });
+
+    const res = await createProjectAs(user, 'auto-add-second', emailEnv());
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string };
+
+    const [row] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.project_id, project.id));
+    expect(row).toMatchObject({
+      cf_destination_id: 'cf-tag-existing',
+      status: 'verified',
+      verification_source: 'cf',
+      // Owner-relaxed reuse: record whose prior consent this inherited.
+      verified_by_user_id: user.id,
+    });
+    expect(row.verified_at).toContain('2026-01-01');
+
+    // Verified on arrival, so the proxy's allowlist mirror is primed now
+    // rather than waiting for a refresh.
+    expect(JSON.parse((await env.ROUTING.get(`email-allowlist:${project.id}`))!)).toEqual([
+      ownerEmail,
+    ]);
+  });
+
+  it('still creates the project when CF Email Routing is down', async () => {
+    const user = await createTestUser(env.db);
+    await withEmail(user.id, 'owner@example.com');
+    mockCfApi();
+    stubEmailRouting(() =>
+      Response.json(
+        { success: false, errors: [{ code: 1000, message: 'boom' }], messages: [], result: null },
+        { status: 500 },
+      ),
+    );
+
+    const res = await createProjectAs(user, 'auto-add-cf-down', emailEnv());
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string };
+    const rows = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.project_id, project.id));
+    expect(rows).toHaveLength(0);
+  });
+
+  it('makes no CF call when the environment has no platform mail domain', async () => {
+    const user = await createTestUser(env.db);
+    await withEmail(user.id, 'owner@example.com');
+    mockCfApi();
+    const calls = stubEmailRouting(() => Response.json({ success: true, errors: [], result: {} }));
+
+    // `env` as-is — EMAIL_SENDER_DOMAIN unset.
+    const res = await createProjectAs(user, 'auto-add-no-domain', env);
+    expect(res.status).toBe(201);
+    expect(calls).toEqual([]);
+  });
+
+  it('skips synthetic GitHub noreply addresses, which are not deliverable', async () => {
+    const user = await createTestUser(env.db);
+    await withEmail(user.id, 'octocat@users.noreply.github.com');
+    mockCfApi();
+    const calls = stubEmailRouting(() => Response.json({ success: true, errors: [], result: {} }));
+
+    const res = await createProjectAs(user, 'auto-add-synthetic', emailEnv());
+    expect(res.status).toBe(201);
+    expect(calls).toEqual([]);
+  });
+
+  // The project-slug mirror the email proxy reads to pin a project's outbound
+  // `from` to its own slug. Written at create time; without it the proxy
+  // refuses every send with `project slug unknown`.
+  it('writes the email-slug KV mirror for the new project', async () => {
+    const user = await createTestUser(env.db);
+    const ownerEmail = await withEmail(user.id, 'owner@example.com');
+    mockCfApi();
+    stubEmailRouting(() =>
+      Response.json({
+        success: true,
+        errors: [],
+        messages: [],
+        result: { tag: 'cf-tag-slug', email: ownerEmail, verified: null },
+      }),
+    );
+
+    const res = await createProjectAs(user, 'slug-mirror-app', emailEnv());
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string };
+    expect(await env.ROUTING.get(`email-slug:${project.id}`)).toBe('slug-mirror-app');
   });
 });

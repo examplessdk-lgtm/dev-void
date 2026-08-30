@@ -1,0 +1,1737 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+
+// `cloudflare:email` is a workerd built-in with no npm shim. The root
+// vite.config.ts aliases `cloudflare:workers` to a stub for the same reason;
+// until it does the same for `cloudflare:email`, this file registers its own
+// mock (vi.mock is hoisted above the import below).
+vi.mock('cloudflare:email', () => ({
+  EmailMessage: class MockEmailMessage {
+    constructor(
+      public readonly from: string,
+      public readonly to: string,
+      public readonly raw: unknown,
+    ) {}
+  },
+}));
+
+const worker = (await import('../../src/index.ts')).default;
+
+const JWT_SECRET = 'test-secret-key';
+const PROD_DOMAIN = 'mail.void.cloud';
+const STAGING_DOMAIN = 'mail.staging.void.cloud';
+
+// --- HMAC helper (mirrors the worker's project token signing) ---
+
+function base64urlEncode(data: Uint8Array): string {
+  let binary = '';
+  for (const byte of data) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function signHmac(data: string, secret: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  return base64urlEncode(
+    new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(data))),
+  );
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)),
+  );
+  let hex = '';
+  for (const b of digest) {
+    hex += b.toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+// --- Mock env ---
+
+type MockKv = ReturnType<typeof createMockKv>;
+
+function createMockKv(data: Record<string, string> = {}) {
+  const store = new Map(Object.entries(data));
+  return {
+    store,
+    get: vi.fn(async (key: string, _options?: unknown) => store.get(key) ?? null),
+    put: vi.fn(async (key: string, value: string, _options?: unknown) => {
+      store.set(key, value);
+    }),
+    delete: vi.fn(async (key: string) => {
+      store.delete(key);
+    }),
+  };
+}
+
+function createMockEnv(
+  kv: MockKv,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    AI: {},
+    JWT_SECRET,
+    ROUTING: kv,
+    CF_ACCOUNT_ID: 'acct',
+    CF_API_TOKEN: 'cf-token',
+    API: { fetch: vi.fn() },
+    DISPATCH: { get: vi.fn(() => ({ email: vi.fn(async () => []) })) },
+    SEND_EMAIL: { send: vi.fn(async () => ({ messageId: 'msg_1' })) },
+    EMAIL_SENDER_DOMAIN: PROD_DOMAIN,
+    ...overrides,
+  };
+}
+
+/** Minimal base64 of an RFC 5322-ish body — content is irrelevant here. */
+function mimeBase64(body = 'Subject: hi\r\n\r\nhello\r\n'): string {
+  let binary = '';
+  for (const b of new TextEncoder().encode(body)) {
+    binary += String.fromCharCode(b);
+  }
+  return btoa(binary);
+}
+
+async function postSend(
+  env: Record<string, unknown>,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  return (worker.fetch as (req: Request, env: unknown) => Promise<Response>)(
+    new Request('https://proxy.void.cloud/email/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+    env,
+  );
+}
+
+/** A `/email/send` body that passes every gate for `proj_1` / slug `acme`. */
+async function sendBody(overrides: Record<string, unknown> = {}) {
+  return {
+    projectId: 'proj_1',
+    aiToken: await signHmac('proj_1', JWT_SECRET),
+    from: `acme+noreply@${PROD_DOMAIN}`,
+    recipients: ['dev@example.com'],
+    mimeBase64: mimeBase64(),
+    requestId: 'req_1',
+    ...overrides,
+  };
+}
+
+/** KV contents that let `proj_1` send to `dev@example.com`. */
+function happyPathKv(extra: Record<string, string> = {}) {
+  return createMockKv({
+    'email-slug:proj_1': 'acme',
+    'email-allowlist:proj_1': JSON.stringify(['dev@example.com']),
+    ...extra,
+  });
+}
+
+// --- Inbound helpers ---
+
+function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
+
+function createInboundMessage(to: string, from = 'sender@example.com') {
+  const bytes = new TextEncoder().encode('Subject: hi\r\n\r\nhello\r\n');
+  return {
+    from,
+    to,
+    rawSize: bytes.byteLength,
+    raw: streamOf(bytes),
+    headers: new Headers({ Subject: 'hi' }),
+    setReject: vi.fn(),
+    forward: vi.fn(async () => {}),
+    reply: vi.fn(async () => {}),
+  };
+}
+
+function createCtx() {
+  const pending: Array<Promise<unknown>> = [];
+  return {
+    ctx: { waitUntil: (p: Promise<unknown>) => pending.push(p), passThroughOnException: () => {} },
+    settle: () => Promise.allSettled(pending),
+  };
+}
+
+type InboundMessage = ReturnType<typeof createInboundMessage>;
+
+async function routeInboundMessage(
+  env: Record<string, unknown>,
+  message: InboundMessage,
+): Promise<void> {
+  const { ctx, settle } = createCtx();
+  await (worker.email as (m: unknown, e: unknown, c: unknown) => Promise<void>)(message, env, ctx);
+  await settle();
+}
+
+// --- wrangler.jsonc ---
+
+/**
+ * Strip `//` line comments and trailing commas so JSON.parse can read the
+ * JSONC config. String-aware so a `//` inside a value is preserved.
+ */
+function parseJsonc(source: string): Record<string, unknown> {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    if (inString) {
+      out += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '/') {
+      while (i < source.length && source[i] !== '\n') {
+        i++;
+      }
+      out += '\n';
+      continue;
+    }
+    out += ch;
+  }
+  return JSON.parse(out.replace(/,(\s*[}\]])/g, '$1')) as Record<string, unknown>;
+}
+
+const wranglerConfig = parseJsonc(
+  readFileSync(fileURLToPath(new URL('../../wrangler.jsonc', import.meta.url)), 'utf8'),
+);
+
+describe('proxy wrangler config', () => {
+  // Wrangler does NOT inherit `send_email` or `vars` into a named env, and
+  // `deploy` runs `--env production`. A binding declared only at the top
+  // level (or only in staging) ships a production proxy where
+  // `env.SEND_EMAIL` is undefined — which staging never reproduces.
+  const scopes: Array<[string, Record<string, unknown>]> = [
+    ['top level', wranglerConfig],
+    ['env.production', (wranglerConfig.env as Record<string, Record<string, unknown>>).production],
+    ['env.staging', (wranglerConfig.env as Record<string, Record<string, unknown>>).staging],
+  ];
+
+  for (const [name, scope] of scopes) {
+    it(`declares the SEND_EMAIL binding in ${name}`, () => {
+      expect(scope, `${name} scope is missing from wrangler.jsonc`).toBeDefined();
+      expect(scope.send_email).toEqual([{ name: 'SEND_EMAIL' }]);
+    });
+
+    it(`declares EMAIL_SENDER_DOMAIN in ${name}`, () => {
+      const vars = scope.vars as Record<string, string> | undefined;
+      expect(vars?.EMAIL_SENDER_DOMAIN).toBeTruthy();
+    });
+  }
+
+  it('points staging at its own mail zone', () => {
+    const env = wranglerConfig.env as Record<string, Record<string, unknown>>;
+    expect((wranglerConfig.vars as Record<string, string>).EMAIL_SENDER_DOMAIN).toBe(PROD_DOMAIN);
+    expect((env.production.vars as Record<string, string>).EMAIL_SENDER_DOMAIN).toBe(PROD_DOMAIN);
+    expect((env.staging.vars as Record<string, string>).EMAIL_SENDER_DOMAIN).toBe(STAGING_DOMAIN);
+  });
+});
+
+describe('POST /email/send — sender domain', () => {
+  let kv: MockKv;
+
+  beforeEach(() => {
+    kv = happyPathKv();
+  });
+
+  it('sends when `from` is on the configured domain', async () => {
+    const env = createMockEnv(kv);
+    const res = await postSend(env, await sendBody());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      ids: [{ recipient: 'dev@example.com', messageId: 'msg_1' }],
+    });
+  });
+
+  it('rejects a production `from` when the worker is configured for staging', async () => {
+    const env = createMockEnv(kv, { EMAIL_SENDER_DOMAIN: STAGING_DOMAIN });
+    const res = await postSend(env, await sendBody());
+    const body = (await res.json()) as { ok: boolean; error: { code: string; message: string } };
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe('INVALID_FROM');
+    expect(body.error.message).toContain(STAGING_DOMAIN);
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
+  });
+
+  it('accepts a staging `from` when the worker is configured for staging', async () => {
+    const env = createMockEnv(kv, { EMAIL_SENDER_DOMAIN: STAGING_DOMAIN });
+    const res = await postSend(env, await sendBody({ from: `acme+noreply@${STAGING_DOMAIN}` }));
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
+  });
+
+  it('escapes the domain so a `.` cannot match an arbitrary character', async () => {
+    const env = createMockEnv(kv);
+    const res = await postSend(env, await sendBody({ from: 'acme+noreply@mailxvoid.cloud' }));
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(false);
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
+  });
+
+  it('fails closed — and burns no quota — when EMAIL_SENDER_DOMAIN is unset', async () => {
+    const env = createMockEnv(kv, { EMAIL_SENDER_DOMAIN: undefined });
+    const res = await postSend(env, await sendBody());
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('UPSTREAM_ERROR');
+    expect(kv.put).not.toHaveBeenCalled();
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
+  });
+
+  it('fails closed — and burns no quota — when the SEND_EMAIL binding is missing', async () => {
+    const env = createMockEnv(kv, { SEND_EMAIL: undefined });
+    const res = await postSend(env, await sendBody());
+    expect(res.status).toBe(502);
+    expect(kv.put).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /email/send — suspension', () => {
+  it('refuses when the routing blob carries the platform-wide suspended marker', async () => {
+    const kv = happyPathKv({ acme: JSON.stringify({ projectId: 'proj_1', suspended: 'abuse' }) });
+    const env = createMockEnv(kv);
+    const res = await postSend(env, await sendBody());
+    const body = (await res.json()) as { ok: boolean; error: { code: string; message: string } };
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe('QUOTA_EXCEEDED');
+    expect(body.error.message).toContain('abuse');
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
+  });
+
+  it('still sends when the routing blob exists without a suspended marker', async () => {
+    const kv = happyPathKv({ acme: JSON.stringify({ projectId: 'proj_1', workerName: 'w' }) });
+    const res = await postSend(createMockEnv(kv), await sendBody());
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
+  });
+
+  it('still sends when the project has no routing blob at all', async () => {
+    // A missing blob is a legitimate production state: the marker is only
+    // ever written INTO an existing entry, so a project that has not been
+    // routed yet has nothing suspended. Failing closed on absence would
+    // break every send made before the first routing write.
+    const kv = happyPathKv();
+    const res = await postSend(createMockEnv(kv), await sendBody());
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
+    expect(kv.get.mock.calls.some((call) => call[0] === 'acme')).toBe(true);
+  });
+
+  it('fails closed with 502 when the routing blob is unparseable', async () => {
+    // Unlike a missing blob, a malformed one has no legitimate writer —
+    // every producer JSON.stringify's an object. Reading a parse failure as
+    // "not suspended" would silently disable the platform-wide suspension
+    // gate for exactly the project whose routing entry got corrupted.
+    const kv = happyPathKv({ acme: '{"projectId":"proj_1","suspended":' });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await postSend(env, await sendBody());
+      expect(res.status).toBe(502);
+      const body = await readSend(res);
+      expect(body.error?.code).toBe('UPSTREAM_ERROR');
+      expect(body.error?.message).toContain('malformed');
+      expect(consoleError).toHaveBeenCalled();
+      expect(sender.calls).toHaveLength(0);
+      expect(kv.put).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('refuses when the email-only kill-switch is set', async () => {
+    const kv = happyPathKv({ 'email-suspended:proj_1': '1' });
+    const env = createMockEnv(kv);
+    const res = await postSend(env, await sendBody());
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('QUOTA_EXCEEDED');
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
+  });
+
+  // Suspension is an abuse-response control: convergence latency is the whole
+  // point, so both suspension reads deliberately pay for an uncached KV get.
+  // Nothing else pins this — a stray `{ cacheTtl: 60 }` would leave a
+  // suspended project sending for another minute per colo.
+  it('reads both suspension keys with no cacheTtl', async () => {
+    const kv = happyPathKv({ acme: JSON.stringify({ projectId: 'proj_1' }) });
+    await postSend(createMockEnv(kv), await sendBody());
+
+    const suspendCall = kv.get.mock.calls.find((call) => call[0] === 'email-suspended:proj_1');
+    expect(suspendCall, 'the email suspend key was never read').toBeDefined();
+    expect(suspendCall?.[1]).toBeUndefined();
+
+    const routingCall = kv.get.mock.calls.find((call) => call[0] === 'acme');
+    expect(routingCall, 'the routing blob was never read').toBeDefined();
+    expect(routingCall?.[1]).toBeUndefined();
+  });
+
+  it('reads the allowlist with a cacheTtl (the non-abuse-response path)', async () => {
+    const kv = happyPathKv();
+    await postSend(createMockEnv(kv), await sendBody());
+    const call = kv.get.mock.calls.find((c) => c[0] === 'email-allowlist:proj_1');
+    expect(call?.[1]).toEqual({ cacheTtl: 60 });
+  });
+});
+
+describe('POST /email/internal/send', () => {
+  async function internalBody(
+    domain: string,
+    overrides: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
+    const from = `noreply@${domain}`;
+    const to = 'dev@example.com';
+    const mime = mimeBase64();
+    const body = { from, to, mimeBase64: mime, ...overrides };
+    const timestamp = Math.floor(Date.now() / 1000);
+    const hash = await sha256Hex(
+      `${body.from as string}|${body.to as string}|${body.mimeBase64 as string}`,
+    );
+    return {
+      ...body,
+      platformTimestamp: timestamp,
+      platformToken: await signHmac(
+        `void-platform-internal-email-v1.${timestamp}.${hash}`,
+        JWT_SECRET,
+      ),
+    };
+  }
+
+  async function postInternal(
+    env: Record<string, unknown>,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    return (worker.fetch as (req: Request, env: unknown) => Promise<Response>)(
+      new Request('https://proxy.void.cloud/email/internal/send', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+      env,
+    );
+  }
+
+  it('accepts noreply@ on the configured domain', async () => {
+    const env = createMockEnv(createMockKv());
+    const res = await postInternal(env, await internalBody(PROD_DOMAIN));
+    expect(res.status).toBe(200);
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects noreply@ on a different domain than the one configured', async () => {
+    const env = createMockEnv(createMockKv(), { EMAIL_SENDER_DOMAIN: STAGING_DOMAIN });
+    const res = await postInternal(env, await internalBody(PROD_DOMAIN));
+    expect(res.status).toBe(403);
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-noreply local part on the configured domain', async () => {
+    const env = createMockEnv(createMockKv());
+    const res = await postInternal(
+      env,
+      await internalBody(PROD_DOMAIN, { from: `billing@${PROD_DOMAIN}` }),
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects an unsigned request', async () => {
+    const env = createMockEnv(createMockKv());
+    const body = await internalBody(PROD_DOMAIN);
+    const res = await postInternal(env, { ...body, platformToken: 'nope' });
+    expect(res.status).toBe(403);
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when EMAIL_SENDER_DOMAIN is unset', async () => {
+    const env = createMockEnv(createMockKv(), { EMAIL_SENDER_DOMAIN: '' });
+    const res = await postInternal(env, await internalBody(PROD_DOMAIN));
+    expect(res.status).toBe(502);
+  });
+});
+
+describe('inbound email router', () => {
+  function routingKv(entry: Record<string, unknown>, extra: Record<string, string> = {}) {
+    return createMockKv({
+      acme: JSON.stringify(entry),
+      'email-allowlist:proj_1': JSON.stringify(['dev@example.com']),
+      ...extra,
+    });
+  }
+
+  it('passes the project dispatch limits into DISPATCH.get', async () => {
+    const kv = routingKv({
+      workerName: 'user-worker',
+      projectId: 'proj_1',
+      limits: { cpuMs: 12_345 },
+    });
+    const env = createMockEnv(kv);
+    await routeInboundMessage(env, createInboundMessage(`acme+support@${PROD_DOMAIN}`));
+
+    const dispatchGet = (env.DISPATCH as { get: ReturnType<typeof vi.fn> }).get;
+    expect(dispatchGet).toHaveBeenCalledWith('user-worker', {}, { limits: { cpuMs: 12_345 } });
+  });
+
+  it('omits the limits argument when routing has none', async () => {
+    const kv = routingKv({ workerName: 'user-worker', projectId: 'proj_1' });
+    const env = createMockEnv(kv);
+    await routeInboundMessage(env, createInboundMessage(`acme@${PROD_DOMAIN}`));
+    expect((env.DISPATCH as { get: ReturnType<typeof vi.fn> }).get).toHaveBeenCalledWith(
+      'user-worker',
+    );
+  });
+
+  it('rejects — without dispatching — when the project is platform-suspended', async () => {
+    const kv = routingKv({ workerName: 'user-worker', projectId: 'proj_1', suspended: 'abuse' });
+    const env = createMockEnv(kv);
+    const message = createInboundMessage(`acme+support@${PROD_DOMAIN}`);
+    await routeInboundMessage(env, message);
+
+    expect((env.DISPATCH as { get: ReturnType<typeof vi.fn> }).get).not.toHaveBeenCalled();
+    expect(message.setReject).toHaveBeenCalledTimes(1);
+    expect(String(message.setReject.mock.calls[0][0])).toContain('suspended');
+  });
+
+  it('rejects — without dispatching — when the email kill-switch is set', async () => {
+    const kv = routingKv(
+      { workerName: 'user-worker', projectId: 'proj_1' },
+      { 'email-suspended:proj_1': '1' },
+    );
+    const env = createMockEnv(kv);
+    const message = createInboundMessage(`acme+support@${PROD_DOMAIN}`);
+    await routeInboundMessage(env, message);
+
+    expect((env.DISPATCH as { get: ReturnType<typeof vi.fn> }).get).not.toHaveBeenCalled();
+    expect(message.setReject).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the inbound suspend key with no cacheTtl', async () => {
+    const kv = routingKv({ workerName: 'user-worker', projectId: 'proj_1' });
+    await routeInboundMessage(createMockEnv(kv), createInboundMessage(`acme@${PROD_DOMAIN}`));
+    const call = kv.get.mock.calls.find((c) => c[0] === 'email-suspended:proj_1');
+    expect(call, 'the email suspend key was never read').toBeDefined();
+    expect(call?.[1]).toBeUndefined();
+  });
+
+  it('names the configured zone in reject reasons', async () => {
+    const env = createMockEnv(createMockKv(), { EMAIL_SENDER_DOMAIN: STAGING_DOMAIN });
+    const message = createInboundMessage(`nosuchproject@${STAGING_DOMAIN}`);
+    await routeInboundMessage(env, message);
+    expect(String(message.setReject.mock.calls[0][0])).toContain(STAGING_DOMAIN);
+  });
+
+  it('still routes when EMAIL_SENDER_DOMAIN is unset (inbound never fails closed on it)', async () => {
+    const kv = routingKv({ workerName: 'user-worker', projectId: 'proj_1' });
+    const env = createMockEnv(kv, { EMAIL_SENDER_DOMAIN: undefined });
+    const message = createInboundMessage(`acme@${PROD_DOMAIN}`);
+    await routeInboundMessage(env, message);
+    expect((env.DISPATCH as { get: ReturnType<typeof vi.fn> }).get).toHaveBeenCalled();
+    expect(message.setReject).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Outbound coverage restored from the original PR, re-aimed at the current
+// contracts: the mail domain is configuration (`EMAIL_SENDER_DOMAIN`), the
+// slug mirror pins the `from` local-part, and the gate chain runs
+// size -> from -> suspend -> allowlist -> quota.
+// ---------------------------------------------------------------------------
+
+/**
+ * Drain the `raw` argument the handler passed to `new EmailMessage(...)`.
+ *
+ * The bytes matter, not just the call count: `bytesToStream(raw)` is built
+ * INSIDE the fan-out loop precisely because a ReadableStream is one-shot. A
+ * regression that hoisted one stream out of the loop still records N sends —
+ * only the delivered bytes show that recipients 2..N got an empty body.
+ */
+async function drainStream(raw: unknown): Promise<Uint8Array> {
+  if (typeof raw === 'string') {
+    return new TextEncoder().encode(raw);
+  }
+  if (!(raw instanceof ReadableStream)) {
+    return new Uint8Array(0);
+  }
+  const reader = (raw as ReadableStream<Uint8Array>).getReader();
+  const chunks: Array<Uint8Array> = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value) {
+        chunks.push(value);
+        total += value.byteLength;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+interface SenderCall {
+  from: string;
+  to: string;
+  bytes: Uint8Array;
+}
+
+/** Recording `send_email` binding: captures from/to and the delivered bytes. */
+function createSender(
+  options: {
+    fail?: (to: string) => Error | undefined;
+    result?: (n: number) => unknown;
+    onSend?: (to: string) => void;
+  } = {},
+) {
+  const calls: Array<SenderCall> = [];
+  const send = vi.fn(async (msg: { from: string; to: string; raw: unknown }) => {
+    const bytes = await drainStream(msg.raw);
+    calls.push({ from: msg.from, to: msg.to, bytes });
+    options.onSend?.(msg.to);
+    const failure = options.fail?.(msg.to);
+    if (failure) {
+      throw failure;
+    }
+    return options.result ? options.result(calls.length) : { messageId: `cf-msg-${calls.length}` };
+  });
+  return {
+    calls,
+    send,
+    binding: { send },
+    texts: (): Array<string> => calls.map((c) => new TextDecoder().decode(c.bytes)),
+    recipients: (): Array<string> => calls.map((c) => c.to),
+  };
+}
+
+function monthKeyFor(projectId: string): string {
+  const now = new Date();
+  return `email-sent:${projectId}:${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function putsWithPrefix(kv: MockKv, prefix: string): Array<Array<unknown>> {
+  return kv.put.mock.calls.filter((call) => String(call[0]).startsWith(prefix));
+}
+
+interface SendResponseBody {
+  ok: boolean;
+  error?: { code: string; message: string };
+  ids?: Array<{ recipient: string; messageId: string }>;
+  deliveries?: Array<{
+    recipient: string;
+    ok: boolean;
+    messageId?: string;
+    error?: { code: string };
+  }>;
+}
+
+async function readSend(res: Response): Promise<SendResponseBody> {
+  return (await res.json()) as SendResponseBody;
+}
+
+describe('POST /email/send — request validation', () => {
+  it.each([
+    ['from', { from: undefined }],
+    ['mimeBase64', { mimeBase64: undefined }],
+    ['recipients', { recipients: undefined }],
+  ])('rejects a body missing `%s` with 400', async (_field, override) => {
+    const env = createMockEnv(happyPathKv());
+    const res = await postSend(env, await sendBody(override));
+    expect(res.status).toBe(400);
+    expect((await readSend(res)).error?.code).toBe('UPSTREAM_ERROR');
+  });
+
+  it('rejects a non-array `recipients` with 400', async () => {
+    const env = createMockEnv(happyPathKv());
+    const res = await postSend(env, await sendBody({ recipients: 'dev@example.com' }));
+    expect(res.status).toBe(400);
+  });
+
+  it.each([
+    ['an empty array', []],
+    ['only non-string entries', [123, null, { to: 'dev@example.com' }]],
+    ['only blank strings', ['', '   ']],
+  ])('answers INVALID_TO when recipients are %s', async (_label, recipients) => {
+    const env = createMockEnv(happyPathKv());
+    const res = await postSend(env, await sendBody({ recipients }));
+    expect(res.status).toBe(200);
+    expect((await readSend(res)).error?.code).toBe('INVALID_TO');
+  });
+
+  it('dedupes + normalizes recipients before quota math and fan-out', async () => {
+    const kv = happyPathKv();
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(
+      env,
+      await sendBody({
+        recipients: ['Dev@Example.com', 'dev@example.com', '  DEV@EXAMPLE.COM  '],
+      }),
+    );
+    expect((await readSend(res)).ok).toBe(true);
+    expect(sender.recipients()).toEqual(['dev@example.com']);
+    // One recipient, therefore one unit of quota — not three.
+    expect(kv.store.get(monthKeyFor('proj_1'))).toBe('1');
+  });
+
+  it('rejects invalid base64 with 400 MIME_ERROR', async () => {
+    const env = createMockEnv(happyPathKv());
+    const res = await postSend(env, await sendBody({ mimeBase64: '!!!not-base64!!!' }));
+    expect(res.status).toBe(400);
+    expect((await readSend(res)).error?.code).toBe('MIME_ERROR');
+  });
+
+  it('rejects a bad project HMAC with 403 before any handler work', async () => {
+    const kv = happyPathKv();
+    const env = createMockEnv(kv);
+    const res = await postSend(env, await sendBody({ aiToken: 'not-a-valid-hmac' }));
+    expect(res.status).toBe(403);
+    expect(kv.get).not.toHaveBeenCalled();
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing project token with 400', async () => {
+    const env = createMockEnv(happyPathKv());
+    const res = await postSend(env, await sendBody({ aiToken: undefined }));
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('POST /email/send — sender pinning (cross-project tenancy)', () => {
+  it.each([
+    ['bare <slug>@domain', `acme@${PROD_DOMAIN}`],
+    ['<slug>+tag@domain', `acme+billing@${PROD_DOMAIN}`],
+    ['a tag using the full safe charset', `acme+a.b_c=d/e-f@${PROD_DOMAIN}`],
+    ['mixed case (normalized before the compare)', 'ACME+Tag@MAIL.VOID.CLOUD'],
+  ])('accepts %s', async (_label, from) => {
+    const sender = createSender();
+    const env = createMockEnv(happyPathKv(), { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ from }));
+    expect((await readSend(res)).ok, `${from} should have been accepted`).toBe(true);
+    expect(sender.calls).toHaveLength(1);
+    // The envelope is forwarded verbatim — normalization is for the compare
+    // only, so CF sees exactly the address the caller submitted.
+    expect(sender.calls[0].from).toBe(from);
+  });
+
+  it("refuses to send as another project's slug", async () => {
+    // proj_1 is `acme`; proj_2 is `victim`. The account-level send_email
+    // binding would happily accept either — the slug mirror is the only
+    // thing standing between the two tenants.
+    const kv = happyPathKv({ 'email-slug:proj_2': 'victim' });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ from: `victim+noreply@${PROD_DOMAIN}` }));
+    const body = await readSend(res);
+    expect(body.ok).toBe(false);
+    expect(body.error?.code).toBe('INVALID_FROM');
+    expect(sender.calls).toHaveLength(0);
+    expect(putsWithPrefix(kv, 'email-')).toHaveLength(0);
+  });
+
+  it.each([
+    ['a different local part entirely', `spoof@${PROD_DOMAIN}`],
+    ['the slug as a PREFIX of a longer local part', `acmex@${PROD_DOMAIN}`],
+    ['the slug with a dotted suffix', `acme.evil@${PROD_DOMAIN}`],
+    ['the slug with a dashed suffix', `acme-evil@${PROD_DOMAIN}`],
+    ['an unrelated domain', 'acme@evil.com'],
+    ['a subdomain of the configured zone', `acme@sub.${PROD_DOMAIN}`],
+    ['the configured zone as a prefix of a longer domain', `acme@${PROD_DOMAIN}.evil.com`],
+    ['a `+` tag with a disallowed character', `acme+a%b@${PROD_DOMAIN}`],
+    ['a second `@`', `acme@${PROD_DOMAIN}@${PROD_DOMAIN}`],
+    ['an empty local part', `@${PROD_DOMAIN}`],
+    ['an empty `+` tag', `acme+@${PROD_DOMAIN}`],
+  ])('rejects %s with INVALID_FROM', async (_label, from) => {
+    const sender = createSender();
+    const env = createMockEnv(happyPathKv(), { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ from }));
+    const body = await readSend(res);
+    expect(body.ok, `${from} should have been rejected`).toBe(false);
+    expect(body.error?.code).toBe('INVALID_FROM');
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['carriage return', `acme+x\r\nX-Bcc: attacker@evil.com@${PROD_DOMAIN}`],
+    ['line feed', `acme+x\nX-Bcc: attacker@evil.com@${PROD_DOMAIN}`],
+    ['display name with angle brackets', `Foo <acme@${PROD_DOMAIN}>`],
+    ['quoted local part', `"ac+me"@${PROD_DOMAIN}`],
+    ['leading whitespace', ` acme@${PROD_DOMAIN}`],
+    ['trailing whitespace', `acme@${PROD_DOMAIN} `],
+    ['null byte in the local part', `acme\x00@${PROD_DOMAIN}`],
+    ['control byte in the +tag', `acme+\x01abc@${PROD_DOMAIN}`],
+    ['DEL in the +tag', `acme+abc\x7fdef@${PROD_DOMAIN}`],
+    ['BEL in the +tag', `acme+\x07@${PROD_DOMAIN}`],
+  ])('rejects header-injection shaped from (%s)', async (_label, from) => {
+    const sender = createSender();
+    const env = createMockEnv(happyPathKv(), { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ from }));
+    const body = await readSend(res);
+    expect(body.ok, `${JSON.stringify(from)} should have been rejected`).toBe(false);
+    expect(body.error?.code).toBe('INVALID_FROM');
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('names the expected slug and the configured zone in the refusal', async () => {
+    const env = createMockEnv(happyPathKv());
+    const res = await postSend(env, await sendBody({ from: `spoof@${PROD_DOMAIN}` }));
+    const message = (await readSend(res)).error?.message ?? '';
+    expect(message).toContain('acme');
+    expect(message).toContain(PROD_DOMAIN);
+  });
+
+  it('fails closed with 502 when the slug mirror is missing', async () => {
+    const kv = createMockKv({ 'email-allowlist:proj_1': JSON.stringify(['dev@example.com']) });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody());
+    expect(res.status).toBe(502);
+    expect((await readSend(res)).error?.code).toBe('UPSTREAM_ERROR');
+    expect(sender.calls).toHaveLength(0);
+    expect(kv.put).not.toHaveBeenCalled();
+  });
+
+  it('fails closed with 502 when the slug mirror is poisoned with a malformed slug', async () => {
+    // A poisoned slug must surface as an operator-visible error, not as a
+    // silent permanent denial for every future send by that project.
+    const kv = happyPathKv({ 'email-slug:proj_1': 'BADSLUG!' });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await postSend(env, await sendBody({ from: `badslug!@${PROD_DOMAIN}` }));
+      expect(res.status).toBe(502);
+      const body = await readSend(res);
+      expect(body.error?.code).toBe('UPSTREAM_ERROR');
+      expect(body.error?.message).toContain('malformed');
+      expect(sender.calls).toHaveLength(0);
+      expect(kv.put).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('reads the slug mirror without pinning a cacheTtl', async () => {
+    const kv = happyPathKv();
+    await postSend(createMockEnv(kv), await sendBody());
+    const call = kv.get.mock.calls.find((c) => c[0] === 'email-slug:proj_1');
+    expect(call, 'the slug mirror was never read').toBeDefined();
+    expect(call?.[1]).toBeUndefined();
+  });
+});
+
+describe('POST /email/send — allowlist fails closed', () => {
+  it.each([
+    ['the key is missing entirely', undefined],
+    ['the value is not JSON at all', 'not json'],
+    ['the value is a JSON object, not an array', JSON.stringify({ dev: true })],
+    ['the value is a bare JSON string', JSON.stringify('dev@example.com')],
+    ['the value is JSON null', 'null'],
+    ['the value is a JSON number', '42'],
+  ])('denies every recipient when %s', async (_label, raw) => {
+    const kv = createMockKv({
+      'email-slug:proj_1': 'acme',
+      ...(raw === undefined ? {} : { 'email-allowlist:proj_1': raw }),
+    });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody());
+    expect(res.status).toBe(200);
+    const body = await readSend(res);
+    expect(body.ok).toBe(false);
+    expect(body.deliveries).toHaveLength(1);
+    expect(body.deliveries?.[0].error?.code).toBe('UNVERIFIED_DESTINATION');
+    expect(sender.calls).toHaveLength(0);
+    // A fully-denied batch must not touch either counter.
+    expect(putsWithPrefix(kv, 'email-')).toHaveLength(0);
+  });
+
+  it('ignores non-string entries but honors the strings beside them', async () => {
+    const kv = happyPathKv({
+      'email-allowlist:proj_1': JSON.stringify([42, null, 'dev@example.com']),
+    });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody());
+    expect((await readSend(res)).ok).toBe(true);
+    expect(sender.recipients()).toEqual(['dev@example.com']);
+  });
+
+  it('matches allowlist entries case-insensitively', async () => {
+    const kv = happyPathKv({ 'email-allowlist:proj_1': JSON.stringify(['DEV@Example.COM']) });
+    const res = await postSend(createMockEnv(kv), await sendBody());
+    expect((await readSend(res)).ok).toBe(true);
+  });
+
+  it('sends only to the allowed recipients and reports the rest mid-batch', async () => {
+    const kv = happyPathKv();
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(
+      env,
+      await sendBody({ recipients: ['dev@example.com', 'bob@example.com'] }),
+    );
+    expect(res.status).toBe(200);
+    const body = await readSend(res);
+    expect(body.ok).toBe(false);
+    expect(body.deliveries).toHaveLength(2);
+    expect(body.deliveries?.find((d) => d.recipient === 'dev@example.com')?.ok).toBe(true);
+    const bob = body.deliveries?.find((d) => d.recipient === 'bob@example.com');
+    expect(bob?.ok).toBe(false);
+    expect(bob?.error?.code).toBe('UNVERIFIED_DESTINATION');
+    expect(sender.recipients()).toEqual(['dev@example.com']);
+  });
+});
+
+describe('POST /email/send — quota', () => {
+  it('charges both counters by the ALLOWED recipient count and scopes the burst key', async () => {
+    const kv = happyPathKv({
+      'email-allowlist:proj_1': JSON.stringify(['dev@example.com', 'ops@example.com']),
+    });
+    const env = createMockEnv(kv);
+    const res = await postSend(
+      env,
+      await sendBody({ recipients: ['dev@example.com', 'ops@example.com'] }),
+    );
+    expect((await readSend(res)).ok).toBe(true);
+
+    expect(kv.store.get(monthKeyFor('proj_1'))).toBe('2');
+    const monthPuts = putsWithPrefix(kv, 'email-sent:proj_1:');
+    expect(monthPuts).toHaveLength(1);
+    // KV refuses an expirationTtl under 60s; the month bucket rolls on its own.
+    expect((monthPuts[0][2] as { expirationTtl: number }).expirationTtl).toBeGreaterThanOrEqual(60);
+
+    const burstPuts = putsWithPrefix(kv, 'email-burst:proj_1:');
+    expect(burstPuts).toHaveLength(1);
+    expect(burstPuts[0][1]).toBe('2');
+    // Fixed 5-minute TTL on a per-minute bucket — the bucket rolls, the key
+    // expires, and a stale bucket can never gate a later minute.
+    expect(burstPuts[0][2]).toEqual({ expirationTtl: 5 * 60 });
+    expect(String(burstPuts[0][0])).toMatch(/^email-burst:proj_1:\d{8}T\d{4}$/);
+  });
+
+  it('counts ONLY allowed recipients — unverified ones never burn quota', async () => {
+    // Monthly limit 5 with 4 already spent. One of the three recipients is
+    // verified, so this must fit. Counting all three would 429.
+    const kv = happyPathKv({
+      'email-limit:proj_1': '5',
+      [monthKeyFor('proj_1')]: '4',
+    });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(
+      env,
+      await sendBody({
+        recipients: ['dev@example.com', 'bob@example.com', 'carol@example.com'],
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(sender.recipients()).toEqual(['dev@example.com']);
+    expect(kv.store.get(monthKeyFor('proj_1'))).toBe('5');
+  });
+
+  it('charges quota BEFORE the first send, not after the batch', async () => {
+    const kv = happyPathKv();
+    const observed: Array<string | undefined> = [];
+    const sender = createSender({
+      onSend: () => observed.push(kv.store.get(monthKeyFor('proj_1'))),
+    });
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    await postSend(env, await sendBody());
+    // The counter is already advanced when CF is called — a crash mid-batch
+    // cannot hand back free quota.
+    expect(observed).toEqual(['1']);
+  });
+
+  it('keeps the charge when every send fails upstream', async () => {
+    const kv = happyPathKv();
+    const sender = createSender({ fail: () => new Error('upstream blew up') });
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody());
+    expect((await readSend(res)).ok).toBe(false);
+    expect(kv.store.get(monthKeyFor('proj_1'))).toBe('1');
+  });
+
+  it('denies with 429 when the burst cap would be exceeded, advancing no counter', async () => {
+    const kv = happyPathKv({
+      'email-allowlist:proj_1': JSON.stringify(['dev@example.com', 'ops@example.com']),
+      'email-burst-limit:proj_1': '1',
+    });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(
+      env,
+      await sendBody({ recipients: ['dev@example.com', 'ops@example.com'] }),
+    );
+    expect(res.status).toBe(429);
+    const body = await readSend(res);
+    expect(body.error?.code).toBe('QUOTA_EXCEEDED');
+    expect(body.error?.message).toContain('burst');
+    expect(sender.calls).toHaveLength(0);
+    expect(putsWithPrefix(kv, 'email-')).toHaveLength(0);
+  });
+
+  it('denies with 429 when the monthly cap would be exceeded, advancing no counter', async () => {
+    const kv = happyPathKv({
+      'email-limit:proj_1': '5',
+      [monthKeyFor('proj_1')]: '5',
+    });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody());
+    expect(res.status).toBe(429);
+    const body = await readSend(res);
+    expect(body.error?.code).toBe('QUOTA_EXCEEDED');
+    expect(body.error?.message).toContain('monthly');
+    expect(sender.calls).toHaveLength(0);
+    expect(putsWithPrefix(kv, 'email-')).toHaveLength(0);
+  });
+
+  it('checks the burst cap before the monthly cap', async () => {
+    const kv = happyPathKv({
+      'email-burst-limit:proj_1': '1',
+      'email-limit:proj_1': '1',
+      [monthKeyFor('proj_1')]: '1',
+      'email-allowlist:proj_1': JSON.stringify(['dev@example.com', 'ops@example.com']),
+    });
+    const res = await postSend(
+      createMockEnv(kv),
+      await sendBody({ recipients: ['dev@example.com', 'ops@example.com'] }),
+    );
+    expect((await readSend(res)).error?.message).toContain('burst');
+  });
+
+  it('defaults to 10/min when no burst limit is configured', async () => {
+    const recipients = Array.from({ length: 11 }, (_, i) => `r${i}@example.com`);
+    const kv = happyPathKv({ 'email-allowlist:proj_1': JSON.stringify(recipients) });
+    const res = await postSend(createMockEnv(kv), await sendBody({ recipients }));
+    expect(res.status).toBe(429);
+    expect((await readSend(res)).error?.message).toContain('10/min');
+  });
+
+  it('defaults to 200/month when no monthly limit is configured', async () => {
+    const kv = happyPathKv({ [monthKeyFor('proj_1')]: '200' });
+    const res = await postSend(createMockEnv(kv), await sendBody());
+    expect(res.status).toBe(429);
+    expect((await readSend(res)).error?.message).toContain('200');
+  });
+
+  it.each([
+    ['a non-numeric value', 'abc'],
+    ['zero', '0'],
+    ['a negative value', '-5'],
+  ])('falls back to the default limits when the override is %s', async (_label, raw) => {
+    const kv = happyPathKv({
+      'email-burst-limit:proj_1': raw,
+      'email-limit:proj_1': raw,
+    });
+    const res = await postSend(createMockEnv(kv), await sendBody());
+    // A poisoned override must not read as "limit 0" (deny everything) nor as
+    // NaN (allow everything) — the documented behavior is the default.
+    expect((await readSend(res)).ok).toBe(true);
+    expect(kv.store.get(monthKeyFor('proj_1'))).toBe('1');
+  });
+
+  it.each([
+    ['NaN', 'NaN'],
+    ['a non-numeric string', 'abc'],
+    ['a negative number', '-7'],
+  ])('reads a %s-poisoned counter as 0 instead of bypassing the gate', async (_label, raw) => {
+    // `parseInt('NaN', 10)` is NaN, and `NaN > limit` is false — a naive read
+    // would BYPASS the cap and then write the literal "NaN" back.
+    const kv = happyPathKv({ [monthKeyFor('proj_1')]: raw });
+    const res = await postSend(createMockEnv(kv), await sendBody());
+    expect(res.status).toBe(200);
+    expect(kv.store.get(monthKeyFor('proj_1'))).toBe('1');
+  });
+
+  it('logs and continues when a counter put fails (documented best-effort)', async () => {
+    const kv = happyPathKv();
+    kv.put.mockImplementation(async () => {
+      throw new Error('kv unavailable');
+    });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await postSend(env, await sendBody());
+      expect((await readSend(res)).ok).toBe(true);
+      expect(sender.calls).toHaveLength(1);
+      expect(consoleError).toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+});
+
+describe('POST /email/send — per-recipient fan-out', () => {
+  it('gives every recipient its own message with a FRESH body stream', async () => {
+    // A regression that hoisted `bytesToStream(raw)` out of the loop would
+    // still record three sends — but recipients 2 and 3 would receive an
+    // already-drained (empty) stream. Assert the delivered BYTES.
+    const mime = 'Subject: fan-out\r\n\r\nbody bytes\r\n';
+    const recipients = ['a@example.com', 'b@example.com', 'c@example.com'];
+    const kv = happyPathKv({ 'email-allowlist:proj_1': JSON.stringify(recipients) });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ recipients, mimeBase64: mimeBase64(mime) }));
+
+    const body = await readSend(res);
+    expect(body.ok).toBe(true);
+    expect(sender.recipients()).toEqual(recipients);
+    expect(sender.texts()).toEqual([mime, mime, mime]);
+    // One envelope sender for the whole batch; one message per recipient.
+    expect(new Set(sender.calls.map((c) => c.from)).size).toBe(1);
+    expect(body.ids).toEqual([
+      { recipient: 'a@example.com', messageId: 'cf-msg-1' },
+      { recipient: 'b@example.com', messageId: 'cf-msg-2' },
+      { recipient: 'c@example.com', messageId: 'cf-msg-3' },
+    ]);
+  });
+
+  it('surfaces an empty messageId rather than crashing when CF returns none', async () => {
+    const sender = createSender({ result: () => ({}) });
+    const env = createMockEnv(happyPathKv(), { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody());
+    const body = await readSend(res);
+    expect(body.ok).toBe(true);
+    expect(body.ids).toEqual([{ recipient: 'dev@example.com', messageId: '' }]);
+  });
+
+  it('records per-recipient outcomes when one send fails mid-batch', async () => {
+    const recipients = ['alice@example.com', 'bob@example.com', 'carol@example.com'];
+    const kv = happyPathKv({ 'email-allowlist:proj_1': JSON.stringify(recipients) });
+    const sender = createSender({
+      fail: (to) => (to === 'bob@example.com' ? new Error('upstream blew up') : undefined),
+    });
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ recipients }));
+
+    expect(res.status).toBe(200);
+    const body = await readSend(res);
+    expect(body.ok).toBe(false);
+    expect(body.deliveries).toHaveLength(3);
+    expect(body.deliveries?.find((d) => d.recipient === 'alice@example.com')?.ok).toBe(true);
+    expect(body.deliveries?.find((d) => d.recipient === 'carol@example.com')?.ok).toBe(true);
+    const bob = body.deliveries?.find((d) => d.recipient === 'bob@example.com');
+    expect(bob?.ok).toBe(false);
+    expect(bob?.error?.code).toBe('UPSTREAM_ERROR');
+    // One failure does not abort the batch.
+    expect(sender.calls).toHaveLength(3);
+  });
+});
+
+describe('POST /email/send — upstream error classification', () => {
+  async function sendWithError(message: string): Promise<SendResponseBody> {
+    const sender = createSender({ fail: () => new Error(message) });
+    const env = createMockEnv(happyPathKv(), { SEND_EMAIL: sender.binding });
+    return readSend(await postSend(env, await sendBody()));
+  }
+
+  it.each([
+    ['destination address dev@example.com is not verified'],
+    ['destination address dev@example.com is not yet verified'],
+    ['Destination Address dev@example.com Not Verified'],
+  ])('classifies %s as UNVERIFIED_DESTINATION (non-retryable)', async (message) => {
+    const body = await sendWithError(message);
+    expect(body.deliveries?.[0].error?.code).toBe('UNVERIFIED_DESTINATION');
+  });
+
+  it.each([
+    [
+      'transient MX error mentioning an unrelated RDNS check',
+      'could not deliver to destination MX; reason: domain not yet RDNS-verified',
+    ],
+    [
+      'a preamble longer than the leading bound',
+      `${'x'.repeat(300)} destination address dev@example.com is not verified`,
+    ],
+    [
+      'reverse phrasing — verified domain, different destination',
+      'sender domain verified; destination address differs from configured allow list',
+    ],
+    ['a transient SMTP DSN', '4.7.1 temporary delivery failure; please retry later'],
+    [
+      'a match dragged in from a later log line',
+      'connection reset\ndestination address dev@example.com is not verified',
+    ],
+  ])('does NOT classify %s as UNVERIFIED_DESTINATION', async (_label, message) => {
+    // A false positive here turns a retryable transient failure into a
+    // permanent "go verify your address" for the developer.
+    const body = await sendWithError(message);
+    expect(body.deliveries?.[0].error?.code).toBe('UPSTREAM_ERROR');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gate ORDER. Each gate has its own negative test above; these pin the
+// SEQUENCE — size -> from -> suspend -> allowlist -> quota. A reordering that
+// let an unverified recipient burn quota (or an oversized body reach the
+// allowlist read) passes every per-gate test and only fails here.
+// ---------------------------------------------------------------------------
+describe('POST /email/send — gate order', () => {
+  /** Was `key` ever read from KV during this request? */
+  function readKey(kv: MockKv, key: string): boolean {
+    return kv.get.mock.calls.some((call) => call[0] === key);
+  }
+
+  /** KV where every downstream gate would ALSO refuse. */
+  function everyGateTrippedKv() {
+    return createMockKv({
+      'email-slug:proj_1': 'acme',
+      acme: JSON.stringify({ projectId: 'proj_1', suspended: 'abuse' }),
+      'email-suspended:proj_1': '1',
+      'email-allowlist:proj_1': JSON.stringify([]),
+      'email-burst-limit:proj_1': '1',
+      'email-limit:proj_1': '1',
+      [monthKeyFor('proj_1')]: '99',
+    });
+  }
+
+  it('missing sender configuration short-circuits before any KV work', async () => {
+    const kv = everyGateTrippedKv();
+    const env = createMockEnv(kv, { EMAIL_SENDER_DOMAIN: undefined });
+    const res = await postSend(env, await sendBody());
+    expect(res.status).toBe(502);
+    expect(kv.get).not.toHaveBeenCalled();
+    expect(kv.put).not.toHaveBeenCalled();
+  });
+
+  it('an oversized body is refused before the slug, suspend and allowlist reads', async () => {
+    const MAX_MIME_BYTES = 10 * 1024 * 1024;
+    const overBound = Math.ceil((MAX_MIME_BYTES * 4) / 3) + 5;
+    const kv = everyGateTrippedKv();
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(
+      env,
+      // Deliberately not valid base64 — the pre-decode length guard runs
+      // before atob(), so an adversary can't force a ~75 MB allocation.
+      await sendBody({ mimeBase64: 'A'.repeat(overBound) }),
+    );
+    expect(res.status).toBe(413);
+    expect((await readSend(res)).error?.code).toBe('MIME_ERROR');
+    expect(kv.get).not.toHaveBeenCalled();
+    expect(kv.put).not.toHaveBeenCalled();
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('a bad `from` is refused before the suspend, allowlist and quota reads', async () => {
+    const kv = everyGateTrippedKv();
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ from: `spoof@${PROD_DOMAIN}` }));
+
+    expect((await readSend(res)).error?.code).toBe('INVALID_FROM');
+    expect(readKey(kv, 'email-slug:proj_1'), 'the slug mirror must be read first').toBe(true);
+    expect(readKey(kv, 'acme')).toBe(false);
+    expect(readKey(kv, 'email-suspended:proj_1')).toBe(false);
+    expect(readKey(kv, 'email-allowlist:proj_1')).toBe(false);
+    expect(putsWithPrefix(kv, 'email-')).toHaveLength(0);
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('platform suspension is answered before the allowlist and quota reads', async () => {
+    const kv = everyGateTrippedKv();
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody());
+
+    const body = await readSend(res);
+    expect(body.error?.code).toBe('QUOTA_EXCEEDED');
+    expect(body.error?.message).toContain('abuse');
+    expect(readKey(kv, 'email-allowlist:proj_1')).toBe(false);
+    expect(readKey(kv, 'email-burst-limit:proj_1')).toBe(false);
+    expect(putsWithPrefix(kv, 'email-')).toHaveLength(0);
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('the email kill-switch is answered before the allowlist and quota reads', async () => {
+    const kv = createMockKv({
+      'email-slug:proj_1': 'acme',
+      'email-suspended:proj_1': '1',
+      'email-allowlist:proj_1': JSON.stringify([]),
+      'email-limit:proj_1': '1',
+      [monthKeyFor('proj_1')]: '99',
+    });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody());
+
+    const body = await readSend(res);
+    expect(body.error?.code).toBe('QUOTA_EXCEEDED');
+    expect(body.error?.message).toContain('suspended');
+    expect(readKey(kv, 'email-allowlist:proj_1')).toBe(false);
+    expect(putsWithPrefix(kv, 'email-')).toHaveLength(0);
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('unverified recipients are answered BEFORE the quota gates and burn nothing', async () => {
+    // The regression this guards: moving the quota gates ahead of the
+    // allowlist would let anyone charge a project's monthly cap by naming
+    // recipients it never verified — and would answer 429 instead of the
+    // actionable UNVERIFIED_DESTINATION.
+    const kv = createMockKv({
+      'email-slug:proj_1': 'acme',
+      'email-allowlist:proj_1': JSON.stringify([]),
+      'email-limit:proj_1': '1',
+      [monthKeyFor('proj_1')]: '99',
+    });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody());
+
+    expect(res.status).toBe(200);
+    const body = await readSend(res);
+    expect(body.error).toBeUndefined();
+    expect(body.deliveries?.[0].error?.code).toBe('UNVERIFIED_DESTINATION');
+    expect(readKey(kv, 'email-burst-limit:proj_1')).toBe(false);
+    expect(readKey(kv, 'email-limit:proj_1')).toBe(false);
+    expect(putsWithPrefix(kv, 'email-')).toHaveLength(0);
+    expect(sender.calls).toHaveLength(0);
+  });
+});
+
+describe('POST /email/send — sender domain is configuration, never a baked-in default', () => {
+  it.each([
+    ['unset', undefined],
+    ['an empty string', ''],
+    ['whitespace only', '   '],
+    ['a non-string', 123],
+  ])('fails closed with 502 when EMAIL_SENDER_DOMAIN is %s', async (_label, value) => {
+    // The old build hard-coded `mail.void.cloud`. A fallback here would let a
+    // misconfigured staging proxy accept — and send — production senders.
+    const kv = happyPathKv();
+    const sender = createSender();
+    const env = createMockEnv(kv, { EMAIL_SENDER_DOMAIN: value, SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ from: `acme@${PROD_DOMAIN}` }));
+    expect(res.status).toBe(502);
+    expect((await readSend(res)).error?.message).toContain('domain');
+    expect(sender.calls).toHaveLength(0);
+    expect(kv.put).not.toHaveBeenCalled();
+  });
+
+  it('trims and lowercases the configured domain before pinning the regex', async () => {
+    const sender = createSender();
+    const env = createMockEnv(happyPathKv(), {
+      EMAIL_SENDER_DOMAIN: `  MAIL.VOID.CLOUD  `,
+      SEND_EMAIL: sender.binding,
+    });
+    const res = await postSend(env, await sendBody({ from: `acme@${PROD_DOMAIN}` }));
+    expect((await readSend(res)).ok).toBe(true);
+    expect(sender.calls).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Platform-internal endpoint. Auth is an HMAC of
+// `<sentinel>.<unixSeconds>.<sha256(from|to|mimeBase64)>` under JWT_SECRET.
+// The content binding is what stops a captured token inside the skew window
+// from being replayed against a different recipient or different bytes.
+// ---------------------------------------------------------------------------
+describe('POST /email/internal/send — replay window + content binding', () => {
+  const SENTINEL = 'void-platform-internal-email-v1';
+  const FROM = `noreply@${PROD_DOMAIN}`;
+  const TO = 'recipient@example.com';
+
+  async function signPlatform(opts: {
+    unixSeconds: number;
+    from: string;
+    to: string;
+    mimeBase64: string;
+  }): Promise<string> {
+    const hash = await sha256Hex(`${opts.from}|${opts.to}|${opts.mimeBase64}`);
+    return signHmac(`${SENTINEL}.${opts.unixSeconds}.${hash}`, JWT_SECRET);
+  }
+
+  async function post(
+    env: Record<string, unknown>,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    return (worker.fetch as (req: Request, env: unknown) => Promise<Response>)(
+      new Request('https://proxy.void.cloud/email/internal/send', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+      env,
+    );
+  }
+
+  it('accepts a token signed for exactly this body', async () => {
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64('Subject: Confirm\r\n\r\nclick the link\r\n');
+    const platformTimestamp = Math.floor(Date.now() / 1000);
+    const res = await post(env, {
+      platformToken: await signPlatform({
+        unixSeconds: platformTimestamp,
+        from: FROM,
+        to: TO,
+        mimeBase64: mime,
+      }),
+      platformTimestamp,
+      from: FROM,
+      to: TO,
+      mimeBase64: mime,
+    });
+    expect(res.status).toBe(200);
+    expect(sender.recipients()).toEqual([TO]);
+    expect(sender.texts()).toEqual(['Subject: Confirm\r\n\r\nclick the link\r\n']);
+  });
+
+  it.each([
+    ['stale by more than the 5-minute window', -6 * 60],
+    ['future-dated by more than the 5-minute window', 6 * 60],
+  ])('rejects a token %s with 403', async (_label, offset) => {
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64();
+    const platformTimestamp = Math.floor(Date.now() / 1000) + offset;
+    const res = await post(env, {
+      platformToken: await signPlatform({
+        unixSeconds: platformTimestamp,
+        from: FROM,
+        to: TO,
+        mimeBase64: mime,
+      }),
+      platformTimestamp,
+      from: FROM,
+      to: TO,
+      mimeBase64: mime,
+    });
+    expect(res.status).toBe(403);
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['4 minutes in the past', -4 * 60],
+    ['4 minutes in the future', 4 * 60],
+  ])('accepts a token %s (inside the skew window)', async (_label, offset) => {
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64();
+    const platformTimestamp = Math.floor(Date.now() / 1000) + offset;
+    const res = await post(env, {
+      platformToken: await signPlatform({
+        unixSeconds: platformTimestamp,
+        from: FROM,
+        to: TO,
+        mimeBase64: mime,
+      }),
+      platformTimestamp,
+      from: FROM,
+      to: TO,
+      mimeBase64: mime,
+    });
+    expect(res.status).toBe(200);
+    expect(sender.calls).toHaveLength(1);
+  });
+
+  it('rejects a captured token replayed with a different (in-window) timestamp', async () => {
+    // Extending a captured token's life by moving the timestamp forward must
+    // fail: the timestamp is part of the signed message.
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64();
+    const signedAt = Math.floor(Date.now() / 1000);
+    const res = await post(env, {
+      platformToken: await signPlatform({
+        unixSeconds: signedAt,
+        from: FROM,
+        to: TO,
+        mimeBase64: mime,
+      }),
+      platformTimestamp: signedAt + 60,
+      from: FROM,
+      to: TO,
+      mimeBase64: mime,
+    });
+    expect(res.status).toBe(403);
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['the recipient', { to: 'attacker@evil.com' }],
+    ['the MIME bytes', { mimeBase64: mimeBase64('Subject: swapped\r\n\r\nB\r\n') }],
+    ['the envelope sender', { from: `noreply@${STAGING_DOMAIN}` }],
+  ])('rejects a token replayed after changing %s', async (_label, tamper) => {
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64('Subject: Confirm\r\n\r\nA\r\n');
+    const platformTimestamp = Math.floor(Date.now() / 1000);
+    const platformToken = await signPlatform({
+      unixSeconds: platformTimestamp,
+      from: FROM,
+      to: TO,
+      mimeBase64: mime,
+    });
+    const res = await post(env, {
+      platformToken,
+      platformTimestamp,
+      from: FROM,
+      to: TO,
+      mimeBase64: mime,
+      ...tamper,
+    });
+    expect(res.status).toBe(403);
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['platformToken', 'platformToken'],
+    ['platformTimestamp', 'platformTimestamp'],
+    ['from', 'from'],
+    ['to', 'to'],
+    ['mimeBase64', 'mimeBase64'],
+  ])('rejects with 403 when `%s` is missing', async (_label, field) => {
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64();
+    const platformTimestamp = Math.floor(Date.now() / 1000);
+    const body: Record<string, unknown> = {
+      platformToken: await signPlatform({
+        unixSeconds: platformTimestamp,
+        from: FROM,
+        to: TO,
+        mimeBase64: mime,
+      }),
+      platformTimestamp,
+      from: FROM,
+      to: TO,
+      mimeBase64: mime,
+    };
+    delete body[field];
+    const res = await post(env, body);
+    // Malformed bodies are rejected at the auth boundary, not by the handler,
+    // so nothing leaks about which field the verifier could not bind.
+    expect(res.status).toBe(403);
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it("refuses a user worker's own project HMAC aimed at the internal endpoint", async () => {
+    // A user worker holds HMAC(projectId); it does not hold JWT_SECRET and
+    // cannot produce HMAC(sentinel.ts.hash).
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const res = await post(env, {
+      platformToken: await signHmac('proj_1', JWT_SECRET),
+      platformTimestamp: Math.floor(Date.now() / 1000),
+      from: FROM,
+      to: TO,
+      mimeBase64: mimeBase64(),
+    });
+    expect(res.status).toBe(403);
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('allows exactly one `from` — noreply@ on the configured zone', async () => {
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64();
+    const platformTimestamp = Math.floor(Date.now() / 1000);
+    // Correctly signed for this exact body — auth passes, the allow-list is
+    // what refuses. Without it, a compromised api worker could send
+    // arbitrary platform-branded mail.
+    const from = `support@${PROD_DOMAIN}`;
+    const res = await post(env, {
+      platformToken: await signPlatform({
+        unixSeconds: platformTimestamp,
+        from,
+        to: TO,
+        mimeBase64: mime,
+      }),
+      platformTimestamp,
+      from,
+      to: TO,
+      mimeBase64: mime,
+    });
+    expect(res.status).toBe(403);
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('rejects invalid base64 with 400 and oversized MIME with 413', async () => {
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+
+    const badTs = Math.floor(Date.now() / 1000);
+    const bad = await post(env, {
+      platformToken: await signPlatform({
+        unixSeconds: badTs,
+        from: FROM,
+        to: TO,
+        mimeBase64: '!!!not-base64!!!',
+      }),
+      platformTimestamp: badTs,
+      from: FROM,
+      to: TO,
+      mimeBase64: '!!!not-base64!!!',
+    });
+    expect(bad.status).toBe(400);
+
+    // 11 MB decodes past the 10 MB cap. The size bound for this endpoint lives
+    // at the AUTH boundary, not in the handler: the token binds
+    // sha256(from|to|mimeBase64), so hashing an unbounded body would let an
+    // unauthenticated caller choose how much work we do. The middleware
+    // therefore refuses to hash anything longer than the base64 form of the
+    // cap, and an oversized body is rejected as an invalid token rather than
+    // reaching the handler's 413. Outsiders get one uniform rejection.
+    const big = new Uint8Array(11 * 1024 * 1024);
+    let binary = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < big.length; i += CHUNK) {
+      binary += String.fromCharCode(...big.subarray(i, i + CHUNK));
+    }
+    const oversized = btoa(binary);
+    const bigTs = Math.floor(Date.now() / 1000);
+    const tooBig = await post(env, {
+      platformToken: await signPlatform({
+        unixSeconds: bigTs,
+        from: FROM,
+        to: TO,
+        mimeBase64: oversized,
+      }),
+      platformTimestamp: bigTs,
+      from: FROM,
+      to: TO,
+      mimeBase64: oversized,
+    });
+    expect(tooBig.status).toBe(403);
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('fails closed with 502 when the SEND_EMAIL binding is missing', async () => {
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: undefined });
+    const mime = mimeBase64();
+    const platformTimestamp = Math.floor(Date.now() / 1000);
+    const res = await post(env, {
+      platformToken: await signPlatform({
+        unixSeconds: platformTimestamp,
+        from: FROM,
+        to: TO,
+        mimeBase64: mime,
+      }),
+      platformTimestamp,
+      from: FROM,
+      to: TO,
+      mimeBase64: mime,
+    });
+    expect(res.status).toBe(502);
+  });
+
+  it('reports 502 without leaking the upstream message when CF rejects the send', async () => {
+    const sender = createSender({ fail: () => new Error('cf mta exploded') });
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const mime = mimeBase64();
+      const platformTimestamp = Math.floor(Date.now() / 1000);
+      const res = await post(env, {
+        platformToken: await signPlatform({
+          unixSeconds: platformTimestamp,
+          from: FROM,
+          to: TO,
+          mimeBase64: mime,
+        }),
+        platformTimestamp,
+        from: FROM,
+        to: TO,
+        mimeBase64: mime,
+      });
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({ ok: false, error: 'upstream error' });
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('applies no per-project gate: platform mail touches neither quota nor allowlist', async () => {
+    // Documented contract — verification mail is account-level, bounded by
+    // the api worker's own rate limit on POST /destinations.
+    const kv = happyPathKv({ 'email-suspended:proj_1': '1' });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64();
+    const platformTimestamp = Math.floor(Date.now() / 1000);
+    const res = await post(env, {
+      platformToken: await signPlatform({
+        unixSeconds: platformTimestamp,
+        from: FROM,
+        to: TO,
+        mimeBase64: mime,
+      }),
+      platformTimestamp,
+      from: FROM,
+      to: TO,
+      mimeBase64: mime,
+    });
+    expect(res.status).toBe(200);
+    expect(kv.get).not.toHaveBeenCalled();
+    expect(kv.put).not.toHaveBeenCalled();
+    expect(sender.calls).toHaveLength(1);
+  });
+});
+
+describe('POST /email/send — the envelope handed to CF', () => {
+  /**
+   * The regex is tested against `from.toLowerCase()` but `EmailMessage`
+   * receives the ORIGINAL string, so the validated value and the transmitted
+   * value are not the same bytes. That divergence is only safe while nothing
+   * can fold INTO the allowed set from outside it — no Unicode code point
+   * lower-cases to CR, LF or NUL, so header injection stays closed. This test
+   * pins the invariant that actually matters, whichever way the divergence is
+   * resolved: nothing with a control character reaches the shared sender.
+   *
+   * (U+212A KELVIN SIGN does fold to `k`, so a slug containing `k` currently
+   * lets a non-ASCII byte through into the envelope — reported separately,
+   * deliberately not asserted here so a tightening fix does not read as a
+   * regression.)
+   */
+  it.each([
+    ['ASCII upper case', `ACME@${PROD_DOMAIN}`, 'acme'],
+    ['a code point that case-folds into the slug', `acmeK@${PROD_DOMAIN}`, 'acmek'],
+    ['a carriage return', `acme\r\nX-Bcc: attacker@evil.com@${PROD_DOMAIN}`, 'acme'],
+    ['a null byte', `acme\x00@${PROD_DOMAIN}`, 'acme'],
+  ])('never hands a control character to the send binding (%s)', async (_label, from, slug) => {
+    const kv = happyPathKv({ 'email-slug:proj_1': slug });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    await postSend(env, await sendBody({ from }));
+    for (const call of sender.calls) {
+      // oxlint-disable-next-line no-control-regex
+      expect(new RegExp('[\\u0000-\\u001f\\u007f]').test(call.from)).toBe(false);
+    }
+  });
+});

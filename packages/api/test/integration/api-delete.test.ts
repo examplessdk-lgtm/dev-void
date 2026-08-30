@@ -12,7 +12,7 @@ import {
 import { createBuild } from '../../src/db.ts';
 import * as db from '../../src/db.ts';
 import app from '../../src/index.ts';
-import { resources, projects, deployments, builds } from '../../src/schema.ts';
+import { resources, projects, deployments, builds, emailDestinations } from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -489,5 +489,149 @@ describe('DELETE /projects/:id', () => {
       expect(await env.STATIC_ASSETS_R2.head(key)).toBeNull();
     }
     expect(await env.STATIC_ASSETS_R2.head(otherKey)).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CF Email Routing destination cleanup.
+//
+// Destinations are ACCOUNT-level on Cloudflare: one address added for project
+// A is a valid `send_email` recipient for every worker in the account. The
+// `email_destinations` rows are the only thing that maps them back to
+// projects, and `deleteProjectCascade` deletes those rows — so the cleanup
+// MUST run before the cascade. If it runs after (or not at all) the
+// destination leaks onto the account forever with nothing left to compute the
+// reference count from. These tests fail if the call is dropped or reordered.
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap the fetch stub `mockCfApi()` installed so `/email/routing/addresses`
+ * calls are recorded and answered here. Kept local rather than pushed into
+ * `mockCfApi` — the only thing under test is which destinations teardown
+ * decides to delete.
+ */
+function captureEmailRoutingCalls(): Array<{ method: string; url: string }> {
+  const calls: Array<{ method: string; url: string }> = [];
+  const inner = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes('/email/routing/addresses')) {
+      const method = init?.method ?? 'GET';
+      calls.push({ method, url });
+      const tag = url.split('/').pop()?.split('?')[0] ?? 'unknown';
+      return Response.json({ success: true, errors: [], messages: [], result: { tag } });
+    }
+    return inner(input, init);
+  });
+  return calls;
+}
+
+async function addEmailDestination(
+  projectId: string,
+  address: string,
+  cfDestinationId: string,
+): Promise<void> {
+  await env.db.insert(emailDestinations).values({
+    id: `edst_${projectId}_${cfDestinationId}`,
+    project_id: projectId,
+    address,
+    status: 'verified',
+    cf_destination_id: cfDestinationId,
+  });
+}
+
+describe('DELETE /projects/:id — CF email destination cleanup', () => {
+  it('DELETEs a destination this project is the only referent of', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'mail-solo');
+    mockCfApi();
+    const emailCalls = captureEmailRoutingCalls();
+
+    await addEmailDestination(project.id, 'owner@example.com', 'cf-tag-solo');
+    await env.ROUTING.put(`email-allowlist:${project.id}`, JSON.stringify(['owner@example.com']));
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    // The whole point: the account-level address is gone from Cloudflare.
+    // A cleanup that ran AFTER `deleteProjectCascade` would see no rows and
+    // make no call here.
+    expect(emailCalls).toEqual([
+      {
+        method: 'DELETE',
+        url: expect.stringContaining('/email/routing/addresses/cf-tag-solo') as unknown as string,
+      },
+    ]);
+
+    // Proxy read-caches for the dead project are dropped too.
+    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
+    expect(await env.ROUTING.get(`email-slug:${project.id}`)).toBeNull();
+  });
+
+  it('leaves a destination another project still references on the account', async () => {
+    const user = await createTestUser(env.db);
+    const doomed = await createTestProject(env.db, user.id, 'mail-shared-a');
+    const survivor = await createTestProject(env.db, user.id, 'mail-shared-b');
+    mockCfApi();
+    const emailCalls = captureEmailRoutingCalls();
+
+    // Same CF tag on both projects — deleting it would silently break the
+    // surviving project's ability to mail that recipient.
+    await addEmailDestination(doomed.id, 'shared@example.com', 'cf-tag-shared');
+    await addEmailDestination(survivor.id, 'shared@example.com', 'cf-tag-shared');
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${doomed.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(emailCalls).toEqual([]);
+
+    // The survivor keeps its row.
+    const rows = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.project_id, survivor.id));
+    expect(rows).toHaveLength(1);
+  });
+
+  it('still deletes the project when Cloudflare refuses the destination delete', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'mail-cf-down');
+    mockCfApi();
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes('/email/routing/addresses')) {
+        return Response.json(
+          { success: false, errors: [{ code: 1000, message: 'boom' }], messages: [], result: null },
+          { status: 500 },
+        );
+      }
+      return inner(input, init);
+    });
+
+    await addEmailDestination(project.id, 'owner@example.com', 'cf-tag-down');
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    // A CF orphan is recoverable by a sweep; a half-torn-down project is not.
+    expect(res.status).toBe(200);
+    const [dbProject] = await env.db.select().from(projects).where(eq(projects.id, project.id));
+    expect(dbProject).toBeUndefined();
   });
 });

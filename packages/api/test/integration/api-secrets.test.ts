@@ -53,6 +53,50 @@ describe('project secrets API', () => {
     expect(res.status).toBe(401);
   });
 
+  // Reserved-binding guard. Only names that also pass `isValidSecretName`
+  // (`^[A-Z][A-Z0-9_]*$`) can reach it — the `__VOID_*` bindings are already
+  // rejected one step earlier as invalid names. Without this check the row is
+  // encrypted and persisted, then silently shadowed by the platform binding at
+  // the next deploy, with no clean error anywhere near the PUT that caused it.
+  it.each(['SEND_EMAIL', 'USAGE_EVENTS_QUEUE', 'ASSETS'])(
+    'returns 400 for reserved binding name: %s',
+    async (name) => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(
+        env.db,
+        user.id,
+        `secret-reserved-${name.toLowerCase().replaceAll('_', '-')}`,
+      );
+      const res = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/secrets/${name}`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${user.jwt}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: 'whatever' }),
+        }),
+        env,
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'reserved binding name' });
+    },
+  );
+
+  // Not reserved: there is exactly one project-slug binding and it is
+  // `__VOID_PROJECT_SLUG`. Reserving an undotted twin nothing injects would
+  // take a usable name away for no benefit.
+  it('allows a secret named VOID_PROJECT_SLUG', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'secret-bare-slug');
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/secrets/VOID_PROJECT_SLUG`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${user.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: 'whatever' }),
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+  });
+
   it('sets a secret for owned project', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'secret-app');
