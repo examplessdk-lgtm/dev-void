@@ -5,7 +5,6 @@ import { findEnvFile, generateEnvTypes } from './codegen/env-types.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import { loadUserEnvFile } from './host/load-user-env.ts';
 import { voidLog, voidWarn } from './log.ts';
-import { filterLoadedEnv } from './shared/env.ts';
 
 type RegisteredSchemaModule = {
   _getRegisteredSchema(): Record<
@@ -150,7 +149,10 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       return;
     }
     const { loadEnv } = await import('vite');
-    const merged = filterLoadedEnv(loadEnv(viteMode, envDir, ''));
+    // Validation checks only registered schema keys, so use Vite's effective
+    // environment directly. Filtering is reserved for values that will be
+    // serialized into worker bindings, where shell pollution must be removed.
+    const merged = loadEnv(viteMode, envDir, '');
     const report = await validateAllEnv(merged as Record<string, unknown>);
     if (report.valid) {
       return;
