@@ -5,6 +5,26 @@ import {
   withRuntimeEnv,
   requireRuntimeBinding,
 } from '../../src/runtime/env.ts';
+import { filterLoadedEnv } from '../../src/shared/env.ts';
+
+describe('loaded env filtering', () => {
+  it('filters initial shell values but retains values loaded after the baseline snapshot', () => {
+    const loaded = {
+      SHELL_ONLY: 'from-shell',
+      FRAMEWORK_DOTENV: 'from-dotenv',
+      SHELL_OVERRIDDEN: 'from-dotenv',
+    };
+    const initialShellEnv = {
+      SHELL_ONLY: 'from-shell',
+      SHELL_OVERRIDDEN: 'from-shell',
+    };
+
+    expect(filterLoadedEnv(loaded, initialShellEnv)).toEqual({
+      FRAMEWORK_DOTENV: 'from-dotenv',
+      SHELL_OVERRIDDEN: 'from-dotenv',
+    });
+  });
+});
 
 describe('internal binding filtering (real implementation)', () => {
   const testEnv = {

@@ -5,6 +5,7 @@ import { findEnvFile, generateEnvTypes } from './codegen/env-types.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import { loadUserEnvFile } from './host/load-user-env.ts';
 import { voidLog, voidWarn } from './log.ts';
+import { filterLoadedEnv } from './shared/env.ts';
 
 type RegisteredSchemaModule = {
   _getRegisteredSchema(): Record<
@@ -70,6 +71,10 @@ function resolveEnvPrefixes(prefix: ResolvedConfig['envPrefix']): ReadonlyArray<
 }
 
 export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = {}): Plugin {
+  // Some framework plugins copy dotenv values into process.env during their
+  // config hooks. Capture the actual shell before those hooks run so validation
+  // can distinguish framework-loaded values from ambient shell-only values.
+  const initialShellEnv = { ...process.env };
   const outDir = join(root, '.void');
   let envFile: string | null = null;
   let viteMode = 'development';
@@ -149,17 +154,17 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       return;
     }
     const { loadEnv } = await import('vite');
-    // Validation checks only registered schema keys, so use Vite's effective
-    // environment directly. Filtering is reserved for values that will be
-    // serialized into worker bindings, where shell pollution must be removed.
-    const merged = loadEnv(viteMode, envDir, '');
-    const report = await validateAllEnv(merged as Record<string, unknown>);
+    // Match the Worker binding surface: exclude values inherited from the
+    // initial shell, but retain dotenv values that framework hooks copied into
+    // process.env after this plugin was constructed.
+    const merged = filterLoadedEnv(loadEnv(viteMode, envDir, ''), initialShellEnv);
+    const report = await validateAllEnv(merged);
     if (report.valid) {
       return;
     }
     const lines: Array<string> = ['Env validation issues:'];
     for (const key of report.missing) {
-      lines.push(`  • ${key} is required but missing — add it to .env.local or set in your shell`);
+      lines.push(`  • ${key} is required but missing — add it to .env.local`);
     }
     for (const { key, messages } of report.invalid) {
       lines.push(`  • ${key}: ${messages.join('; ')}`);
@@ -213,7 +218,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     async configResolved(config) {
       viteMode = config.mode;
       // `envDir: false` disables Vite's .env loading entirely — fall back to
-      // root so our own validate-against-merged-env still picks up shell vars.
+      // root so our own validation can still load project dotenv files.
       envDir = typeof config.envDir === 'string' ? config.envDir : root;
       await applyClientDefaultsToViteEnv(config);
       // Warn when vite `define` shadows a schema key. The two systems coexist

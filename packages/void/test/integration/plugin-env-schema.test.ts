@@ -50,6 +50,40 @@ async function runConfigResolved(
   }
 }
 
+async function runConfigureServer(plugin: ReturnType<typeof envSchemaPlugin>): Promise<void> {
+  const hook = plugin.configureServer as unknown;
+  const server = {
+    httpServer: undefined,
+    watcher: {
+      add() {},
+      on() {},
+    },
+    config: {},
+    ws: {
+      send() {},
+    },
+  };
+  if (typeof hook === 'function') {
+    await (hook as (server: unknown) => unknown).call({}, server);
+    return;
+  }
+  if (hook && typeof hook === 'object' && 'handler' in hook) {
+    const handler = (hook as { handler: (server: unknown) => unknown }).handler;
+    await handler.call({}, server);
+  }
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out waiting for asynchronous env validation');
+}
+
 afterEach(() => {
   for (const root of roots.splice(0, roots.length)) {
     rmSync(root, { recursive: true, force: true });
@@ -255,5 +289,103 @@ describe('envSchemaPlugin auto-discovery', () => {
     await runConfigResolved(plugin, resolved);
 
     expect(resolved.env).toEqual({ PUBLIC_TITLE: 'Public' });
+  });
+
+  it('treats initial shell-only schema values as missing during validation', async () => {
+    const key = 'VOID_ENV_SCHEMA_SHELL_ONLY_TEST';
+    const previous = process.env[key];
+    process.env[key] = 'from-shell';
+
+    const root = createTempRoot();
+    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+    const plugin = envSchemaPlugin(root);
+
+    try {
+      await runConfig(plugin);
+      const { defineEnv } = await import('../../src/runtime/env-public.ts');
+      const { string } = await import('../../src/runtime/env-helpers.ts');
+      defineEnv({ [key]: string() });
+      await runConfigResolved(plugin, {
+        mode: 'development',
+        envDir: root,
+        envPrefix: 'VITE_',
+        env: {},
+        define: {},
+      });
+
+      const warnSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await runConfigureServer(plugin);
+        await waitFor(() =>
+          warnSpy.mock.calls.some((call) =>
+            String(call[0] ?? '').includes(`${key} is required but missing`),
+          ),
+        );
+        const output = warnSpy.mock.calls.map((call) => String(call[0] ?? '')).join('\n');
+        expect(output).toContain('add it to .env.local');
+        expect(output).not.toContain('set in your shell');
+      } finally {
+        warnSpy.mockRestore();
+      }
+    } finally {
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    }
+  });
+
+  it('validates values copied into process.env after plugin construction', async () => {
+    const key = 'VOID_ENV_SCHEMA_FRAMEWORK_DOTENV_TEST';
+    const missingKey = 'VOID_ENV_SCHEMA_VALIDATION_SENTINEL';
+    const previous = process.env[key];
+    const previousMissing = process.env[missingKey];
+    delete process.env[key];
+    delete process.env[missingKey];
+
+    const root = createTempRoot();
+    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+    const plugin = envSchemaPlugin(root);
+    process.env[key] = 'from-framework-dotenv';
+
+    try {
+      await runConfig(plugin);
+      const { defineEnv } = await import('../../src/runtime/env-public.ts');
+      const { string } = await import('../../src/runtime/env-helpers.ts');
+      defineEnv({ [key]: string(), [missingKey]: string() });
+      await runConfigResolved(plugin, {
+        mode: 'development',
+        envDir: root,
+        envPrefix: 'VITE_',
+        env: {},
+        define: {},
+      });
+
+      const warnSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await runConfigureServer(plugin);
+        await waitFor(() =>
+          warnSpy.mock.calls.some((call) =>
+            String(call[0] ?? '').includes(`${missingKey} is required but missing`),
+          ),
+        );
+        const output = warnSpy.mock.calls.map((call) => String(call[0] ?? '')).join('\n');
+        expect(output).not.toContain(`${key} is required but missing`);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    } finally {
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+      if (previousMissing === undefined) {
+        delete process.env[missingKey];
+      } else {
+        process.env[missingKey] = previousMissing;
+      }
+    }
   });
 });

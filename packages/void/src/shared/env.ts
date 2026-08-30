@@ -14,11 +14,14 @@
  * shipping the developer's shell environment (PATH, HOME, etc.) into
  * `wrangler.json` or the prerender Miniflare instance.
  */
-export function filterLoadedEnv(loaded: Record<string, string>): Record<string, string> {
-  const shellKeys = new Set(Object.keys(process.env));
+export function filterLoadedEnv(
+  loaded: Record<string, string>,
+  shellEnv: Readonly<Record<string, string | undefined>> = process.env,
+): Record<string, string> {
+  const shellKeys = new Set(Object.keys(shellEnv));
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(loaded)) {
-    if (!shellKeys.has(key) || process.env[key] !== value) {
+    if (!shellKeys.has(key) || shellEnv[key] !== value) {
       env[key] = value;
     }
   }
