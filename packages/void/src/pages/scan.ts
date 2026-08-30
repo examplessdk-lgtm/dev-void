@@ -60,6 +60,33 @@ type PageServerMetadata = {
   hasGetPrerenderPaths?: boolean;
 };
 
+const TRANSPARENT_EXPRESSION_TYPES = new Set([
+  'ParenthesizedExpression',
+  'TSAsExpression',
+  'TSNonNullExpression',
+  'TSSatisfiesExpression',
+  'TSTypeAssertion',
+]);
+
+function asAstNode(value: unknown): AstNode | undefined {
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { type?: unknown }).type === 'string'
+  ) {
+    return value as AstNode;
+  }
+  return undefined;
+}
+
+function unwrapTransparentExpression(node: AstNode | null | undefined): AstNode | undefined {
+  let current = node ?? undefined;
+  while (current && TRANSPARENT_EXPRESSION_TYPES.has(current.type)) {
+    current = asAstNode(current.expression);
+  }
+  return current;
+}
+
 function extractPageServerMetadata(filename: string, code: string): PageServerMetadata {
   let parsed: ReturnType<typeof parseSync>;
   try {
@@ -80,20 +107,21 @@ function extractPageServerMetadata(filename: string, code: string): PageServerMe
       metadata.hasGetPrerenderPaths = true;
       return;
     }
-    if (!isLiteral(init)) {
+    const literal = unwrapTransparentExpression(init);
+    if (!isLiteral(literal)) {
       return;
     }
     if (
       name === 'revalidate' &&
-      typeof init.value === 'number' &&
-      Number.isInteger(init.value) &&
-      init.value >= 0
+      typeof literal.value === 'number' &&
+      Number.isInteger(literal.value) &&
+      literal.value >= 0
     ) {
-      metadata.revalidate = init.value;
-    } else if (name === 'prerender' && typeof init.value === 'boolean') {
-      metadata.prerender = init.value;
-    } else if (name === 'ssr' && typeof init.value === 'boolean') {
-      metadata.ssr = init.value;
+      metadata.revalidate = literal.value;
+    } else if (name === 'prerender' && typeof literal.value === 'boolean') {
+      metadata.prerender = literal.value;
+    } else if (name === 'ssr' && typeof literal.value === 'boolean') {
+      metadata.ssr = literal.value;
     }
   };
 

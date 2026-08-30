@@ -147,6 +147,25 @@ describe('scanPages', () => {
     expect(page!.methods).toEqual(['action']);
   });
 
+  it('unwraps TypeScript expressions around rendering metadata literals', async () => {
+    writeFile('typed.vue', '<template><div>Typed</div></template>');
+    writeFile(
+      'typed.server.ts',
+      `
+        export const prerender = true as const;
+        export const ssr = false satisfies boolean;
+        export const revalidate = (60 as number)!;
+      `,
+    );
+
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === 'typed');
+    expect(page).toBeDefined();
+    expect(page!.prerender).toBe(true);
+    expect(page!.ssr).toBe(false);
+    expect(page!.revalidate).toBe(60);
+  });
+
   it('identifies layout.vue files separately', async () => {
     writeFile('layout.vue', '<template><slot /></template>');
     writeFile('users/layout.vue', '<template><slot /></template>');
