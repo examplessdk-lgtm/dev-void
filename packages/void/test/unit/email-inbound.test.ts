@@ -731,11 +731,38 @@ describe('createInboundTestHarness', () => {
     );
   });
 
-  it('lowercases the recipient before matching', async () => {
+  it('matches the recipient case-insensitively', async () => {
     const handler = vi.fn(async () => {});
     const harness = createInboundTestHarness({ routes: { support: handler } });
     const result = await harness.deliver({ from: 'u@x.dev', to: 'MYSLUG+SUPPORT@APP.DEV' });
     expect(result.handler).toBe('support');
+  });
+
+  // The harness is the only thing a user tests their handler against, so a
+  // captured tag has to arrive with the case production would give it. The
+  // codegen twin of this assertion is 'captures the tag parameter from the
+  // wire recipient, not the stripped one' above; the two must agree or a
+  // green test suite says nothing about the deployed behavior.
+  it('preserves the case of a captured tag, like the generated dispatcher', async () => {
+    let seen: unknown;
+    const harness = createInboundTestHarness({
+      routes: {
+        'support+[ticket]': async (
+          _message: unknown,
+          _env: unknown,
+          _ctx: unknown,
+          info?: { params: Record<string, string> },
+        ) => {
+          seen = info?.params;
+        },
+      },
+    });
+
+    const result = await harness.deliver({ from: 'u@x.dev', to: 'myslug+support+T-42@app.dev' });
+
+    expect(result.handler).toBe('support+[ticket]');
+    expect(result.params).toEqual({ ticket: 'T-42' });
+    expect(seen).toEqual({ ticket: 'T-42' });
   });
 });
 

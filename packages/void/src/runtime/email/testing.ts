@@ -18,7 +18,10 @@
  *   });
  *   const result = await inbound.deliver({
  *     from: "user@example.com",
- *     to: "support+abc-1@app.dev",
+ *     // The WIRE address: `<slug>+<tag>@<domain>`, as the platform delivers
+ *     // it. The harness strips `<slug>+` before matching, so passing the
+ *     // user-facing "support+abc-1@app.dev" would read `support` as the slug.
+ *     to: "myslug+support+abc-1@app.dev",
  *     subject: "help",
  *     text: "thanks",
  *   });
@@ -358,7 +361,12 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // router strips through the first `+` before matching. The test
     // harness must do the same so tests don't pass against routing paths
     // that can't occur in production.
-    const fullLocal = (input.to.split('@')[0] ?? '').toLowerCase();
+    // Case is PRESERVED and the patterns carry the `i` flag instead, exactly
+    // as the generated dispatcher does (`router/compile.ts`). Lowercasing
+    // here would lowercase the CAPTURED groups too, so a handler under test
+    // would see `t-42` for `support+T-42@` while production hands it `T-42` —
+    // a green test asserting behavior the deployed code does not have.
+    const fullLocal = input.to.split('@')[0] ?? '';
     const plus = fullLocal.indexOf('+');
     const local = plus === -1 ? '' : fullLocal.slice(plus + 1);
     // Note: a recipient with no `+` (e.g. `slug@mail.void.cloud`) has no
@@ -366,7 +374,7 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // no-op. We mirror that here.
 
     for (const route of compiled) {
-      const re = new RegExp(route.pattern.regexSource);
+      const re = new RegExp(route.pattern.regexSource, 'i');
       const m = re.exec(local);
       if (!m) {
         continue;

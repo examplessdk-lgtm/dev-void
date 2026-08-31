@@ -1,18 +1,34 @@
-// Dev-only Vite plugin: registers an in-memory email sink and serves
+// Dev-only Vite plugin: owns the in-memory email buffer and serves
 // `/__void/inbox` routes for browsing captured messages. Activated when
 // binding inference detected `void/email` usage.
+//
+// Two ways a message lands in the buffer:
+//   * `POST /__void/inbox/_capture` — the real `void dev` path. `sendEmail`
+//     runs in workerd (a separate OS process), so it cannot reach this
+//     process's sink registry; it POSTs the captured message here through its
+//     dev assets binding, which @cloudflare/vite-plugin wires directly into
+//     this middleware stack.
+//   * the in-process sink — only fires for a `sendEmail` that happens to run
+//     inside this Node process (e.g. a prerender pass). Kept so that path is
+//     still captured; it is not the dev-server transport.
 
 import type { Plugin } from 'vite';
 import {
   clearDevBuffer,
+  DEV_INBOX_ACK_HEADER,
+  DEV_INBOX_ACK_VALUE,
+  DEV_INBOX_CAPTURE_PATH,
+  DEV_INBOX_MAX_CAPTURE_BYTES,
+  DEV_INBOX_PREFIX,
   findDevMessage,
   listDevMessages,
+  parseCapturedMessage,
   pushToDevBuffer,
   registerEmailSink,
   type CapturedMessage,
 } from './runtime/email/dev-inbox.ts';
 
-const INBOX_PREFIX = '/__void/inbox';
+const INBOX_PREFIX = DEV_INBOX_PREFIX;
 
 const SECURITY_HEADERS = {
   'Cache-Control': 'no-store',
@@ -61,6 +77,10 @@ export function emailDevInboxPlugin(): Plugin {
         const url = new URL(req.url ?? '/', 'http://localhost');
         const path = url.pathname;
 
+        if (req.method === 'POST' && path === DEV_INBOX_CAPTURE_PATH) {
+          void handleCapture(req, res);
+          return;
+        }
         if (req.method === 'DELETE' && path === '/') {
           clearDevBuffer();
           res.writeHead(204, SECURITY_HEADERS);
@@ -109,6 +129,71 @@ export function emailDevInboxPlugin(): Plugin {
       });
     },
   };
+}
+
+// Structural shapes rather than `node:http` classes: the same handler is
+// exercised in unit tests against a synthesized req/res pair.
+interface CaptureRequest extends AsyncIterable<Uint8Array | string> {
+  headers: Record<string, string | Array<string> | undefined>;
+}
+interface CaptureResponse {
+  writeHead(status: number, headers?: Record<string, string>): unknown;
+  end(chunk?: string | Buffer): unknown;
+}
+
+/**
+ * `POST /__void/inbox/_capture` — the worker's dev-inbox hop.
+ *
+ * Fails with a status the worker can distinguish, and only a success carries
+ * the ack header, so the worker never mistakes an ordinary asset 200 for a
+ * capture. Never throws: an exception here would surface as a dev-server 500
+ * in the middle of the user's `sendEmail`.
+ */
+async function handleCapture(req: CaptureRequest, res: CaptureResponse): Promise<void> {
+  try {
+    const contentType = String(req.headers['content-type'] ?? '');
+    if (!contentType.includes('application/json')) {
+      res.writeHead(415, SECURITY_HEADERS);
+      res.end();
+      return;
+    }
+    const chunks: Array<Buffer> = [];
+    let size = 0;
+    for await (const chunk of req) {
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk);
+      size += buf.byteLength;
+      if (size > DEV_INBOX_MAX_CAPTURE_BYTES) {
+        res.writeHead(413, SECURITY_HEADERS);
+        res.end();
+        return;
+      }
+      chunks.push(buf);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    } catch {
+      res.writeHead(400, SECURITY_HEADERS);
+      res.end();
+      return;
+    }
+    const message = parseCapturedMessage(parsed);
+    if (!message) {
+      res.writeHead(400, SECURITY_HEADERS);
+      res.end();
+      return;
+    }
+    pushToDevBuffer(message);
+    res.writeHead(200, {
+      ...SECURITY_HEADERS,
+      [DEV_INBOX_ACK_HEADER]: DEV_INBOX_ACK_VALUE,
+      'Content-Type': 'application/json',
+    });
+    res.end(JSON.stringify({ ok: true, id: message.id }));
+  } catch {
+    res.writeHead(500, SECURITY_HEADERS);
+    res.end();
+  }
 }
 
 function escapeHtml(s: string): string {

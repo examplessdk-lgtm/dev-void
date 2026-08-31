@@ -71,6 +71,7 @@ import { compileAssetFallbackHelper } from './router/compile.ts';
 import { isRouteEnabledForEnvironment, type RouteEnvironment } from './router/parse-filename.ts';
 import { scanMiddlewareSync, scanRoutePatternsSync } from './router/scan.ts';
 import { scanWebSocketRoutesSync } from './router/websocket.ts';
+import { DEV_INBOX_ENV_VAR } from './runtime/email/dev-inbox.ts';
 import { SANDBOX_MIGRATION_TAG, isSandboxEnabled, resolveSandboxConfig } from './sandbox/config.ts';
 import { filterLoadedEnv, resolveRemoteMode, stripInternalEnvKeys } from './shared/env.ts';
 import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy.ts';
@@ -383,6 +384,40 @@ export function shouldBindWorkersAi(
   resultAi: unknown,
 ): boolean {
   return needsAI && command === 'build' && !resultAi && !resolvedAi;
+}
+
+/**
+ * Decide whether to inject the `void dev` email-inbox loopback var.
+ *
+ * The dev inbox buffer lives in the Vite dev server's Node process;
+ * `sendEmail` runs in workerd and reaches it by fetching the inbox capture
+ * endpoint through the worker's assets binding, which
+ * `@cloudflare/vite-plugin` wires straight into the dev server's middleware
+ * stack. The var carries that binding's NAME (`ASSETS` for a Void app, or
+ * whatever a Class A framework's own wrangler config declares) and its
+ * presence is what arms the dev path at runtime — so it must never reach a
+ * production build's `wrangler.json`, exactly like the `__VOID_TOKEN`
+ * credential gate.
+ *
+ * Gated on `routeEnvironment`, not on `command`: `vite preview` also reports
+ * `command: 'serve'`, but it runs the BUILT worker whose assets binding is a
+ * real asset directory rather than a dev-server loopback. `routeEnvironment`
+ * is the existing `command === 'serve' && !isPreview` distinction.
+ *
+ * Without an assets binding there is no loopback, so injecting the var would
+ * only arm a path that must then fail; gate on it instead.
+ */
+export function shouldInjectEmailDevInboxVar(
+  routeEnvironment: RouteEnvironment,
+  needsEmail: boolean | undefined,
+  assetsBinding: string | undefined,
+): boolean {
+  return (
+    routeEnvironment === 'dev' &&
+    !!needsEmail &&
+    typeof assetsBinding === 'string' &&
+    !!assetsBinding
+  );
 }
 
 const CLOUDFLARE_BUILTIN_IMPORT = /^cloudflare:/;
@@ -1071,10 +1106,22 @@ export function voidPlugin(options?: {
       result.vars = vars;
     }
 
-    // Email — no binding is emitted on purpose. Outbound mail routes through
-    // __VOID_PROXY/email/send (the proxy worker holds the platform-level
-    // send_email binding), so `bindings.needsEmail` only gates the dev-inbox
-    // plugin and the deploy manifest flag.
+    // Email — no send binding is emitted on purpose. Outbound mail routes
+    // through __VOID_PROXY/email/send (the proxy worker holds the
+    // platform-level send_email binding), so `bindings.needsEmail` only gates
+    // the dev-inbox plugin and the deploy manifest flag.
+    //
+    // Dev only: name the assets binding so `sendEmail` can loop back into the
+    // Vite dev server and reach the `/__void/inbox` buffer, which lives in the
+    // Node process rather than in this worker's isolate.
+    const emailDevInboxBinding =
+      (workerConfig.assets as { binding?: string } | undefined)?.binding ??
+      (resolved.assets as { binding?: string } | undefined)?.binding;
+    if (shouldInjectEmailDevInboxVar(routeEnvironment, bindings.needsEmail, emailDevInboxBinding)) {
+      const vars = (result.vars as Record<string, string>) ?? {};
+      vars[DEV_INBOX_ENV_VAR] = emailDevInboxBinding as string;
+      result.vars = vars;
+    }
 
     // Queues — add producer + consumer bindings for local dev
     if (queues.length > 0) {

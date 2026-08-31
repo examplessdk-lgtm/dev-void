@@ -2,16 +2,24 @@
  * In-memory capture sink for emails during local dev / tests.
  *
  * Two consumers:
- *   1. The Vite dev-server middleware (`/__void/inbox`) — registers a sink at
- *      plugin start so `sendEmail` calls during `void dev` go to a buffer
- *      browsable in the dashboard route handlers.
+ *   1. The Vite dev-server middleware (`/__void/inbox`) — owns the buffer that
+ *      backs the browsable inbox during `void dev`.
  *   2. The test harness (`void/email/testing`) — registers a sink so
  *      assertions like `expect(harness.messages).toHaveLength(1)` work without
  *      mocking the SEND_EMAIL binding.
  *
- * Sinks live on globalThis so they survive bundling boundaries (the Vite
- * dev-server plugin runs in Node; user code runs in workerd; both share the
- * same JS runtime in `vite dev`'s in-process worker mode).
+ * The sink registry lives on globalThis, but it is only ever an IN-ISOLATE
+ * channel. It is NOT a bridge between the dev server and user code: under
+ * `void dev` the Vite plugin runs in Node while user code runs in workerd — a
+ * separate OS process started by miniflare — so each has its own globalThis and
+ * its own (empty) registry. A `sendEmail` call inside the worker therefore
+ * never sees the plugin's sink.
+ *
+ * The cross-process hop is explicit instead: the worker POSTs the captured
+ * message to {@link DEV_INBOX_CAPTURE_URL} through its dev assets binding
+ * (which `@cloudflare/vite-plugin` wires straight into the Vite dev server's
+ * Node middleware stack), and the plugin's middleware pushes it into the
+ * buffer. See `runtime/email.ts` and `plugin-email-dev-inbox.ts`.
  */
 
 import type { NormalizedEmail, NormalizedAttachment } from './types.ts';
@@ -40,6 +48,157 @@ export interface CapturedMessage {
 }
 
 export type EmailSink = (message: CapturedMessage) => void;
+
+// ---------------------------------------------------------------------------
+// Cross-process capture protocol (workerd -> Vite dev server)
+// ---------------------------------------------------------------------------
+
+/** Mount point of the dev inbox on the Vite dev server. */
+export const DEV_INBOX_PREFIX: string = '/__void/inbox';
+/** Capture endpoint, relative to {@link DEV_INBOX_PREFIX} (connect strips the mount). */
+export const DEV_INBOX_CAPTURE_PATH: string = '/_capture';
+/** Absolute path the worker POSTs a captured message to. */
+export const DEV_INBOX_CAPTURE_URL: string = `${DEV_INBOX_PREFIX}${DEV_INBOX_CAPTURE_PATH}`;
+
+/**
+ * Serve-only var naming the fetcher binding that loops back to the Vite dev
+ * server. Its presence is also the dev gate: `sendEmail` only attempts the dev
+ * inbox when this var is set, and it is injected exclusively when
+ * `viteCommand === 'serve'` (see `shouldInjectEmailDevInboxVar` in index.ts),
+ * so a production build never carries it.
+ */
+export const DEV_INBOX_ENV_VAR: string = '__VOID_EMAIL_DEV_INBOX';
+
+/**
+ * Acknowledgement marker on the capture response. The transport rides the
+ * assets binding, so a 200 alone proves nothing — if that binding ever stops
+ * being a dev-server loopback, a plain static/SPA response would also be 200.
+ * The worker treats a capture as delivered only when this header comes back.
+ */
+export const DEV_INBOX_ACK_HEADER: string = 'x-void-email-inbox';
+export const DEV_INBOX_ACK_VALUE: string = 'captured';
+
+/** Upper bound on a capture body. Dev-only, but an unbounded read is still a footgun. */
+export const DEV_INBOX_MAX_CAPTURE_BYTES: number = 32 * 1024 * 1024;
+
+function bytesToBase64(bytes: Uint8Array): string {
+  // 8KB chunks keep us well under the typical V8 fromCharCode arg limit.
+  const CHUNK = 0x2000;
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + CHUNK, bytes.byteLength)));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array | undefined {
+  try {
+    const binary = atob(value);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      out[i] = binary.charCodeAt(i);
+    }
+    return out;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Encode a captured message for the worker -> dev-server hop (`raw` as base64). */
+export function serializeCapturedMessage(message: CapturedMessage): string {
+  return JSON.stringify({ ...message, raw: bytesToBase64(message.raw) });
+}
+
+function asAddress(value: unknown): { email: string; name?: string } | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as { email?: unknown; name?: unknown };
+  if (typeof v.email !== 'string') {
+    return undefined;
+  }
+  return typeof v.name === 'string' ? { email: v.email, name: v.name } : { email: v.email };
+}
+
+function asAddressList(value: unknown): Array<{ email: string; name?: string }> | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const out: Array<{ email: string; name?: string }> = [];
+  for (const entry of value) {
+    const address = asAddress(entry);
+    if (!address) {
+      return undefined;
+    }
+    out.push(address);
+  }
+  return out;
+}
+
+/**
+ * Decode a capture payload. Returns `undefined` for anything malformed — the
+ * endpoint is reachable from the dev server's own origin, so it must reject
+ * junk rather than throw inside the middleware.
+ */
+export function parseCapturedMessage(value: unknown): CapturedMessage | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.id !== 'string' || typeof v.raw !== 'string') {
+    return undefined;
+  }
+  const raw = base64ToBytes(v.raw);
+  const from = asAddress(v.from);
+  const to = asAddressList(v.to);
+  const cc = asAddressList(v.cc);
+  const bcc = asAddressList(v.bcc);
+  if (!raw || !from || !to || !cc || !bcc) {
+    return undefined;
+  }
+  const attachments: CapturedMessage['attachments'] = [];
+  if (!Array.isArray(v.attachments)) {
+    return undefined;
+  }
+  for (const entry of v.attachments) {
+    if (typeof entry !== 'object' || entry === null) {
+      return undefined;
+    }
+    const a = entry as Record<string, unknown>;
+    attachments.push({
+      filename: typeof a.filename === 'string' ? a.filename : '',
+      contentType: typeof a.contentType === 'string' ? a.contentType : 'application/octet-stream',
+      size: typeof a.size === 'number' ? a.size : 0,
+      ...(typeof a.contentId === 'string' && { contentId: a.contentId }),
+      disposition: a.disposition === 'inline' ? 'inline' : 'attachment',
+    });
+  }
+  const headers: Record<string, string> = {};
+  if (typeof v.headers === 'object' && v.headers !== null) {
+    for (const [k, hv] of Object.entries(v.headers as Record<string, unknown>)) {
+      if (typeof hv === 'string') {
+        headers[k] = hv;
+      }
+    }
+  }
+  const replyTo = asAddress(v.replyTo);
+  return {
+    id: v.id,
+    capturedAt: typeof v.capturedAt === 'number' ? v.capturedAt : Date.now(),
+    raw,
+    messageId: typeof v.messageId === 'string' ? v.messageId : '',
+    from,
+    to,
+    cc,
+    bcc,
+    ...(replyTo && { replyTo }),
+    subject: typeof v.subject === 'string' ? v.subject : '',
+    ...(typeof v.text === 'string' && { text: v.text }),
+    ...(typeof v.html === 'string' && { html: v.html }),
+    headers,
+    attachments,
+  };
+}
 
 const SINK_KEY = '__voidEmailSinks__';
 const BUFFER_KEY = '__voidEmailDevBuffer__';

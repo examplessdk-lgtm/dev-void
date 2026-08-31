@@ -35,7 +35,7 @@ export type EmailPatternKind = 'static' | 'static-tag' | 'dynamic' | 'dynamic-ta
 
 export interface CompiledEmailPattern {
   kind: EmailPatternKind;
-  /** Regex source (anchored), targeting the lowercased local-part. */
+  /** Regex source (anchored). Apply with the `i` flag; see the file header. */
   regexSource: string;
   /** Capture-group names in order; empty for `static`. */
   paramNames: Array<string>;

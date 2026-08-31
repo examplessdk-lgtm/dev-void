@@ -393,7 +393,16 @@ export function createMessageProxy(
 }
 
 export interface ReplyEmailOptions {
-  /** Defaults to the original `message.to` envelope address. */
+  /**
+   * Defaults to `<__VOID_PROJECT_SLUG>+noreply@<__VOID_EMAIL_DOMAIN>`, and
+   * THROWS when those bindings are absent — a reply sender is never guessed.
+   *
+   * An override must stay on your own slug. The platform accepts a reply
+   * sender whose local-part before the first `+` equals the slug the message
+   * was delivered to; anything else is dropped silently. In particular
+   * `message.to` is the STRIPPED address (`<tag>@<domain>`), so passing it
+   * here is exactly the shape the platform rejects.
+   */
   from?: Address;
   /**
    * Defaults to the original `message.from` envelope address. A reply is a

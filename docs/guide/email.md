@@ -176,6 +176,8 @@ The inbox shows a list view with subject, sender, recipient, and timestamp. Clic
 
 The buffer holds the most recent 100 messages and survives HMR but not a full server restart. No disk persistence.
 
+Under the hood, your code runs in workerd (a separate process from the Vite dev server), so `sendEmail` hands each captured message to the dev server over the worker's `assets` binding, which Vite wires back into its own middleware. Void apps always have that binding. If you drive `void/email` from a meta-framework whose wrangler config declares no `assets` binding, there is no loopback: those sends return `BINDING_MISSING` instead of reaching the inbox. When the inbox is configured but unreachable, `sendEmail` returns `UPSTREAM_ERROR` — nothing is captured and nothing is sent.
+
 To bypass the inbox for a single send during dev (e.g. to verify real delivery against a verified address), pass `sendInDev: true`:
 
 ```ts
@@ -287,15 +289,44 @@ export default defineEmail(async (message, env, ctx, info) => {
 });
 ```
 
-`replyEmail` builds the reply MIME with `Subject: Re: <original>` (no double-prefix), `In-Reply-To: <Message-ID>`, and a continued `References` chain, then dispatches via the message's native `reply()`. Defaults: `from = message.to`, `to = message.from`, `subject = "Re: <original>"`. Override any of them in opts.
+`replyEmail` builds the reply MIME with `Subject: Re: <original>` (no double-prefix), `In-Reply-To: <Message-ID>`, and a continued `References` chain, then dispatches through the message's `reply()`. Defaults: `to = message.from`, `subject = "Re: <original>"`.
+
+The `from` default is **not** `message.to`. A reply is sent from your project's
+own slug on the platform mail zone — `<slug>+noreply@<domain>` — built from the
+`__VOID_PROJECT_SLUG` and `__VOID_EMAIL_DOMAIN` bindings the platform injects.
+`replyEmail` throws when those are absent and you omitted `from`, rather than
+guessing a sender.
+
+::: warning The platform pins the reply sender
+You may override `from`, but only with an address on your own slug. The proxy
+accepts a reply sender whose local-part before the first `+` equals the slug the
+message was delivered to, on the zone it arrived on. Anything else is **dropped
+silently** — `replyEmail` still resolves, and the only trace is in the platform's
+log stream, not your project's.
+
+This is what stops one project replying as another project's address. Note that
+`message.to` is the _stripped_ address (`<tag>@<domain>`), so `from: message.to`
+is exactly the shape the pin rejects.
+:::
+
+Note the asymmetry with `sendEmail`: `sendEmail` returns an error result and
+never throws, while `replyEmail` throws when it cannot determine a sender.
 
 ### Configuring inbound delivery
 
-In production, inbound delivery requires a Cloudflare Email Routing rule that points your domain at your worker. **Void manages this for you** — there's nothing to configure in the Cloudflare dashboard. (Provisioning lands in the platform's Phase 3; until then, deployed handlers sit dormant. Locally, use the dev inbox round-trip described below.)
+In production, inbound delivery requires a Cloudflare Email Routing rule that points your domain at your worker. **Void manages this for you** — there's nothing to configure in the Cloudflare dashboard. (Provisioning lands in the platform's Phase 3; until then, deployed handlers sit dormant.) There is no local inbound trigger yet — `void dev` serves the outbound dev inbox only, so test inbound handlers with `createInboundTestHarness` below.
 
 ### Testing inbound handlers
 
-Use `createInboundTestHarness` to run handlers through the real dispatcher with a synthesized message and capture replies / forwards / rejects:
+Use `createInboundTestHarness` to run handlers through the real dispatcher with a synthesized message and capture replies / forwards / rejects.
+
+`deliver({ to })` takes the address **as it arrives on the wire**, which is
+`<slug>+<tag>@<domain>` — the same form the platform delivers to your worker.
+The harness strips the `<slug>+` prefix before matching, exactly as the
+generated dispatcher does, so `acme+support+abc-123@acme.dev` is what matches
+`email/support+[ticket].ts`. Pass the user-facing `support+abc-123@acme.dev`
+and the harness reads `support` as the slug, leaving `abc-123` to match — which
+falls through to `_default`.
 
 ```ts
 import { describe, it, expect } from 'vitest';
@@ -310,7 +341,7 @@ describe('email handlers', () => {
     });
     const result = await harness.deliver({
       from: 'user@example.com',
-      to: 'support+abc-123@acme.dev',
+      to: 'acme+support+abc-123@acme.dev',
       subject: 'Help',
       text: 'I have a problem',
     });
@@ -322,7 +353,7 @@ describe('email handlers', () => {
     const harness = createInboundTestHarness({ routes: { _default: defaultHandler } });
     await harness.deliver({
       from: 'user@example.com',
-      to: 'unknown@acme.dev',
+      to: 'acme+unknown@acme.dev',
       subject: 'STOP',
       text: 'bye',
     });

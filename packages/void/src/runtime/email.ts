@@ -7,10 +7,23 @@
 // destinations allowlist (mirrored from `email_destinations` into KV by
 // the API on every CRUD).
 //
-// In `void dev` (no `__VOID_PROXY`) sends are captured by the in-memory
-// dev inbox; pass `sendInDev: true` for a single call to bypass.
+// In `void dev` (no `__VOID_PROXY`) sends are captured by the dev inbox;
+// pass `sendInDev: true` for a single call to bypass. The dev inbox buffer
+// lives in the Vite dev server's NODE process while this code runs in
+// workerd, so the capture is an explicit HTTP hop over the dev assets
+// binding — see `resolveDevInbox` below and `plugin-email-dev-inbox.ts`.
 
-import { captureMessage, dispatchToSinks, hasActiveSink } from './email/dev-inbox.ts';
+import {
+  captureMessage,
+  DEV_INBOX_ACK_HEADER,
+  DEV_INBOX_ACK_VALUE,
+  DEV_INBOX_CAPTURE_URL,
+  DEV_INBOX_ENV_VAR,
+  dispatchToSinks,
+  hasActiveSink,
+  serializeCapturedMessage,
+  type CapturedMessage,
+} from './email/dev-inbox.ts';
 import { buildMime, MimeError, normalizeEmail } from './email/mime.ts';
 import type {
   NormalizedEmail,
@@ -325,12 +338,105 @@ async function readResponseAsResult(res: Response, fallbackId: string): Promise<
   }
 }
 
+interface DevInboxFetcher {
+  fetch(req: Request | string, init?: RequestInit): Promise<Response>;
+}
+
+/**
+ * Resolve the loopback into the `void dev` inbox, or `undefined` outside dev.
+ *
+ * `DEV_INBOX_ENV_VAR` is injected only when `viteCommand === 'serve'` and it
+ * names the worker's assets binding. In dev, `@cloudflare/vite-plugin` binds
+ * that name to a miniflare service whose implementation is the Vite dev
+ * server's Node middleware stack, so a fetch through it lands on the inbox
+ * middleware in the dev-server process — the only place the buffer exists.
+ * In a production build neither the var nor that wiring is present.
+ */
+function resolveDevInbox(env: Record<string, unknown> | undefined): DevInboxFetcher | undefined {
+  const bindingName = env?.[DEV_INBOX_ENV_VAR];
+  if (typeof bindingName !== 'string' || bindingName.length === 0) {
+    return undefined;
+  }
+  const binding = env?.[bindingName];
+  if (typeof binding !== 'object' || binding === null) {
+    return undefined;
+  }
+  return typeof (binding as { fetch?: unknown }).fetch === 'function'
+    ? (binding as DevInboxFetcher)
+    : undefined;
+}
+
+// A local loopback answers immediately; this only exists so a wedged dev
+// server degrades into an error instead of hanging the user's request.
+const DEV_INBOX_TIMEOUT_MS = 5000;
+
+async function postToDevInbox(
+  fetcher: DevInboxFetcher,
+  captured: CapturedMessage,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const attempt = Promise.resolve(
+      fetcher.fetch(`http://localhost${DEV_INBOX_CAPTURE_URL}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: serializeCapturedMessage(captured),
+      }),
+    ).then(
+      (res) => ({ kind: 'response' as const, res }),
+      (cause: unknown) => ({ kind: 'error' as const, cause }),
+    );
+    const settled = await Promise.race([
+      attempt,
+      new Promise<{ kind: 'timeout' }>((resolve) => {
+        timer = setTimeout(() => resolve({ kind: 'timeout' }), DEV_INBOX_TIMEOUT_MS);
+      }),
+    ]);
+    if (settled.kind === 'timeout') {
+      return { ok: false, reason: `no response within ${DEV_INBOX_TIMEOUT_MS}ms` };
+    }
+    if (settled.kind === 'error') {
+      const cause = settled.cause;
+      return { ok: false, reason: cause instanceof Error ? cause.message : String(cause) };
+    }
+    const { res } = settled;
+    if (!res.ok) {
+      return { ok: false, reason: `dev server responded ${res.status}` };
+    }
+    // A 200 alone is not proof: if the assets binding ever stops being a
+    // dev-server loopback, a static/SPA response is also a 200.
+    if (res.headers.get(DEV_INBOX_ACK_HEADER) !== DEV_INBOX_ACK_VALUE) {
+      return { ok: false, reason: 'response did not come from the dev inbox' };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/** Shared result shape for both capture paths (in-process sink and dev inbox). */
+function capturedResult(normalized: NormalizedEmail, captureId: string): SendEmailResult {
+  const recipients = [...normalized.to, ...normalized.cc, ...normalized.bcc];
+  if (recipients.length === 0) {
+    return err('INVALID_TO', "email: 'to' must include at least one recipient.");
+  }
+  return {
+    ok: true,
+    ids: recipients.map((r) => ({ recipient: r.email, messageId: captureId })),
+  };
+}
+
 /**
  * Send an email via the Void platform proxy.
  *
- * During `void dev` (when an email sink is registered) the message is
- * captured locally and never reaches the proxy. Pass `sendInDev: true`
- * to override for a single call.
+ * During `void dev` the message is captured by the local inbox
+ * (`/__void/inbox`) and never reaches the proxy; an in-process sink
+ * (`void/email/testing`) takes precedence over it. Pass `sendInDev: true` to
+ * override for a single call.
  */
 export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult> {
   const resolvedOpts = resolveDefaultFrom(opts);
@@ -370,30 +476,42 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
     return err('MIME_ERROR', e instanceof Error ? e.message : String(e), e);
   }
 
+  const rawEnv = tryGetRawRuntimeEnv();
+
   // Each sink owns its storage; sendEmail must NOT also push to the dev
-  // buffer or every dev send ends up captured twice.
+  // buffer or every dev send ends up captured twice. This path only fires
+  // for a send that runs in the SAME isolate as the sink — the test harness,
+  // or a prerender pass inside the dev server's own process.
   if (!opts.sendInDev && hasActiveSink()) {
     const captured = captureMessage(normalized, raw, messageId);
     dispatchToSinks(captured);
-    const recipients = [...normalized.to, ...normalized.cc, ...normalized.bcc];
-    if (recipients.length === 0) {
-      return err('INVALID_TO', "email: 'to' must include at least one recipient.");
-    }
-    const ids: Array<SendEmailDelivery> = recipients.map((r) => ({
-      recipient: r.email,
-      messageId: captured.id,
-    }));
-    return { ok: true, ids };
+    return capturedResult(normalized, captured.id);
   }
 
-  const env = tryGetRawRuntimeEnv() as ProxyEnv | undefined;
+  // `void dev`: the inbox buffer lives in the Vite dev server's Node process,
+  // which this isolate has no shared memory with. Hand the message over.
+  const devInbox = opts.sendInDev ? undefined : resolveDevInbox(rawEnv);
+  if (devInbox) {
+    const captured = captureMessage(normalized, raw, messageId);
+    const delivered = await postToDevInbox(devInbox, captured);
+    if (delivered.ok) {
+      return capturedResult(normalized, captured.id);
+    }
+    const message = `email: the void dev inbox at ${DEV_INBOX_CAPTURE_URL} is unreachable (${delivered.reason}), so nothing was captured and nothing was sent.`;
+    console.warn(`[void/email] ${message}`);
+    return err('UPSTREAM_ERROR', message);
+  }
+
+  const env = rawEnv as ProxyEnv | undefined;
   const proxy = env?.__VOID_PROXY;
   const projectId = env?.__PROJECT_ID;
   const proxyToken = env?.__VOID_PROXY_TOKEN;
   if (!proxy || !projectId || !proxyToken) {
     return err(
       'BINDING_MISSING',
-      'email: __VOID_PROXY is not available. Deploy via Void so the platform proxy is bound, or run `void dev` for the local dev inbox.',
+      'email: __VOID_PROXY is not available, so nothing was sent. Deploy via Void to bind the platform proxy. ' +
+        'Under `void dev` messages are captured by the local inbox at /__void/inbox instead — reaching this error there means ' +
+        'that path was bypassed (`sendInDev: true`) or unavailable (the worker has no assets binding to reach the dev server through).',
     );
   }
 
