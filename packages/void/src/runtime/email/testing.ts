@@ -396,6 +396,20 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
       deliveries.push(result);
       return result;
     }
+    // Nothing matched and there is no `_default`. The generated dispatcher
+    // rejects here so the remote MTA gets a non-delivery report
+    // (`router/compile.ts`), and the harness has to mirror that or a test
+    // for catch-all or anti-spam behavior observes an ACCEPTED message
+    // where deployment bounces it. Routed through `setReject` rather than
+    // pushed directly, so the terminal-reject semantics stay identical.
+    //
+    // The reason is byte-for-byte the dispatcher's, built from the WIRE
+    // recipient with its original case — that string reaches the sender's
+    // DSN, and rebuilding it from the stripped or lowercased address would
+    // recreate the divergence class this mirroring exists to prevent.
+    message.setReject(
+      `no handler matched recipient "${input.to}" — add email/_default.ts to handle unmatched mail`,
+    );
     const result: InboundDeliveryResult = { handler: undefined, params: {} };
     deliveries.push(result);
     return result;

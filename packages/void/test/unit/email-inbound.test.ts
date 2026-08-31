@@ -14,6 +14,7 @@ import {
   createMessageProxy,
   defineEmail,
   parseEmail,
+  ParseEmailError,
   replyEmail,
   type EmailEnvelope,
 } from '../../src/runtime/email/inbound.ts';
@@ -763,6 +764,103 @@ describe('createInboundTestHarness', () => {
     expect(result.handler).toBe('support+[ticket]');
     expect(result.params).toEqual({ ticket: 'T-42' });
     expect(seen).toEqual({ ticket: 'T-42' });
+  });
+});
+
+describe('harness rejects an unmatched delivery, like production', () => {
+  // The generated dispatcher calls setReject when nothing matches and there
+  // is no _default, so the sender gets an NDR. The harness used to return
+  // silently, so a test for catch-all or anti-spam behavior could observe an
+  // ACCEPTED message where deployment bounces it. Same divergence class as
+  // the captured-tag casing bug: the harness has to mirror the dispatcher.
+  it('records the reject when nothing matches and there is no _default', async () => {
+    const harness = createInboundTestHarness({ routes: { 'support+[ticket]': async () => {} } });
+
+    const result = await harness.deliver({ from: 'u@x.dev', to: 'myslug+billing@app.dev' });
+
+    expect(result.handler).toBeUndefined();
+    expect(harness.rejects).toHaveLength(1);
+    // The reason must match the dispatcher's byte for byte — it reaches the
+    // sender's DSN. `__to` is the WIRE address, case preserved.
+    expect(harness.rejects[0]).toBe(
+      'no handler matched recipient "myslug+billing@app.dev" — add email/_default.ts to handle unmatched mail',
+    );
+  });
+
+  it('uses the wire address with its original case in the reason', async () => {
+    const harness = createInboundTestHarness({ routes: { 'support+[ticket]': async () => {} } });
+
+    await harness.deliver({ from: 'u@x.dev', to: 'MySlug+Billing@App.Dev' });
+
+    expect(harness.rejects[0]).toContain('"MySlug+Billing@App.Dev"');
+  });
+
+  it('does not reject when _default handles the unmatched message', async () => {
+    const handler = vi.fn(async () => {});
+    const harness = createInboundTestHarness({
+      routes: { 'support+[ticket]': async () => {}, _default: handler },
+    });
+
+    const result = await harness.deliver({ from: 'u@x.dev', to: 'myslug+billing@app.dev' });
+
+    expect(result.handler).toBe('_default');
+    expect(harness.rejects).toEqual([]);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a recipient with no tag when there is no _default', async () => {
+    const harness = createInboundTestHarness({ routes: { 'support+[ticket]': async () => {} } });
+
+    await harness.deliver({ from: 'u@x.dev', to: 'myslug@app.dev' });
+
+    expect(harness.rejects).toHaveLength(1);
+    expect(harness.rejects[0]).toContain('"myslug@app.dev"');
+  });
+});
+
+describe('parseEmail error contract', () => {
+  // `PARSE_FAILED` was declared in the code union but never constructed, so
+  // the one thing that does make postal-mime reject — a deeply nested
+  // message — escaped as a bare Error carrying parser internals. The union
+  // has to be honest: every code it names is reachable.
+  it('wraps a parser rejection as PARSE_FAILED', async () => {
+    // postal-mime refuses past 256 levels of nesting. Build one bomb that
+    // trips exactly that, and nothing else.
+    const depth = 300;
+    let body = 'boom\r\n';
+    for (let i = depth; i > 0; i--) {
+      const boundary = `b${i}`;
+      body =
+        `Content-Type: multipart/mixed; boundary="${boundary}"\r\n\r\n` +
+        `--${boundary}\r\n${body}\r\n--${boundary}--\r\n`;
+    }
+    const raw = new TextEncoder().encode(body);
+    const { message } = createMessageProxy(
+      { from: 'a@b.dev', to: 'acme+x@mail.void.cloud', headers: {}, raw, rawSize: raw.length },
+      { slug: 'acme' },
+    );
+
+    await expect(parseEmail(message)).rejects.toSatisfy(
+      (e: unknown) => e instanceof ParseEmailError && e.code === 'PARSE_FAILED',
+    );
+  });
+
+  it('still reports an oversized message as INBOUND_TOO_LARGE', async () => {
+    const raw = new TextEncoder().encode('Subject: hi\r\n\r\nbody\r\n');
+    const { message } = createMessageProxy(
+      {
+        from: 'a@b.dev',
+        to: 'acme+x@mail.void.cloud',
+        headers: {},
+        raw,
+        rawSize: 100 * 1024 * 1024,
+      },
+      { slug: 'acme' },
+    );
+
+    await expect(parseEmail(message)).rejects.toSatisfy(
+      (e: unknown) => e instanceof ParseEmailError && e.code === 'INBOUND_TOO_LARGE',
+    );
   });
 });
 

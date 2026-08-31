@@ -176,7 +176,9 @@ The inbox shows a list view with subject, sender, recipient, and timestamp. Clic
 
 The buffer holds the most recent 100 messages and survives HMR but not a full server restart. No disk persistence.
 
-Under the hood, your code runs in workerd (a separate process from the Vite dev server), so `sendEmail` hands each captured message to the dev server over the worker's `assets` binding, which Vite wires back into its own middleware. Void apps always have that binding. If you drive `void/email` from a meta-framework whose wrangler config declares no `assets` binding, there is no loopback: those sends return `BINDING_MISSING` instead of reaching the inbox. When the inbox is configured but unreachable, `sendEmail` returns `UPSTREAM_ERROR` — nothing is captured and nothing is sent.
+Under the hood, your code runs in workerd (a separate process from the Vite dev server), so `sendEmail` hands each captured message to the dev server over the worker's `assets` binding, which Vite wires back into its own middleware. Void apps always have that binding, and so do apps built on a Class A framework (TanStack Start, React Router) once their wrangler config declares one.
+
+The dev inbox is **not** available under a Class B or C framework — SvelteKit, Nuxt, Analog, Astro. Those adapters own their own dev server and worker build, so Void never installs the Cloudflare Vite plugin for them and has nowhere to register the inbox. Declaring an `assets` binding does not help: SvelteKit, Nuxt and Analog do not run your code in a workerd instance fronted by Vite at all, so there is no loopback to bind to. Sends from those apps return `BINDING_MISSING`. Use `createEmailTestHarness` from `void/email/testing` instead, which captures in-process and works everywhere. When the inbox is configured but unreachable, `sendEmail` returns `UPSTREAM_ERROR` — nothing is captured and nothing is sent.
 
 To bypass the inbox for a single send during dev (e.g. to verify real delivery against a verified address), pass `sendInDev: true`:
 

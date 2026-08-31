@@ -239,13 +239,60 @@ export async function normalizeEmail(opts: {
   };
 }
 
-/** RFC 2047 encoded-word for non-ASCII text in headers (UTF-8, base64). */
+/**
+ * RFC 2047 §2 caps an encoded-word at 75 characters *including* the
+ * `=?UTF-8?B?` prefix (10) and the `?=` suffix (2). That leaves 63
+ * characters of base64, and base64 spends 4 characters per 3 input
+ * bytes, so 45 source bytes is the largest payload that fits — 48 would
+ * need 64.
+ */
+const ENCODED_WORD_PAYLOAD_BYTES = 45;
+
+/**
+ * RFC 2047 encoded-word for non-ASCII text in headers (UTF-8, base64).
+ *
+ * Text longer than one word's payload becomes several encoded-words
+ * separated by a space, which `foldHeader` turns into CRLF + SPACE
+ * wherever a line would otherwise overrun (RFC 2047 §6.2: whitespace
+ * between adjacent encoded-words is dropped on decode either way). A
+ * single unbounded word breached both §2's 75-character ceiling and —
+ * for a long subject or display name — RFC 5322 §2.1.1's 998-octet hard
+ * line limit, which nothing downstream repairs.
+ */
 function encodeWord(text: string): string {
   if (ASCII_PRINTABLE.test(text)) {
     return text;
   }
-  const b64 = base64(new TextEncoder().encode(text));
-  return `=?UTF-8?B?${b64}?=`;
+  const encoder = new TextEncoder();
+  // A code point is at most 4 UTF-8 bytes, so the buffer never needs
+  // more than the budget plus one character of overshoot.
+  const pending = new Uint8Array(ENCODED_WORD_PAYLOAD_BYTES + 4);
+  let length = 0;
+  const words: Array<string> = [];
+  const flush = () => {
+    if (length > 0) {
+      words.push(`=?UTF-8?B?${base64(pending.subarray(0, length))}?=`);
+      length = 0;
+    }
+  };
+  // `for..of` iterates code points, so a surrogate pair is never split
+  // across two words — RFC 2047 §5 forbids splitting a multi-octet
+  // character between adjacent encoded-words, and half a pair would
+  // decode to U+FFFD. Each chunk is base64'd on its own for the same
+  // reason: encoding once and slicing the output would cut characters
+  // mid-sequence. Every character is measured and appended exactly once,
+  // so a character wider than the whole budget (impossible in UTF-8)
+  // lands alone in its own word instead of spinning.
+  for (const char of text) {
+    const bytes = encoder.encode(char);
+    if (length > 0 && length + bytes.length > ENCODED_WORD_PAYLOAD_BYTES) {
+      flush();
+    }
+    pending.set(bytes, length);
+    length += bytes.length;
+  }
+  flush();
+  return words.join(' ');
 }
 
 // RFC 5322 specials — names containing any of these MUST be quoted as a
@@ -317,53 +364,97 @@ function splitAddressList(value: string): Array<string> {
   return parts;
 }
 
+/**
+ * Split one address-list part at whitespace runs outside any
+ * double-quoted string. RFC 5322 §3.2.2 permits folding only at WSP,
+ * and keeping quoted strings whole means a fold never lands inside a
+ * display name like `"Smith, John"`.
+ */
+function splitFoldPoints(part: string): Array<string> {
+  const tokens: Array<string> = [];
+  let current = '';
+  let inQuotes = false;
+  let escape = false;
+  for (let i = 0; i < part.length; i++) {
+    const ch = part[i];
+    if (escape) {
+      current += ch;
+      escape = false;
+      continue;
+    }
+    if (ch === '\\' && inQuotes) {
+      current += ch;
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      current += ch;
+      continue;
+    }
+    if (!inQuotes && (ch === ' ' || ch === '\t')) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+  return tokens;
+}
+
 function foldHeader(name: string, value: string): string {
   const line = `${name}: ${value}`;
   if (line.length <= 78) {
     return line;
   }
+  // Fold points, strongest first: address-list separators (a `, `
+  // outside any quoted string), then any remaining unquoted whitespace
+  // inside a part. Folding only between whole parts is not enough — one
+  // recipient carrying a long encoded display name, or a `References:`
+  // run of message IDs, is a single part that can blow past RFC 5322
+  // §2.1.1's 998-octet hard limit on its own.
+  const chunks: Array<{ text: string; comma: boolean }> = [];
   const parts = splitAddressList(value);
-  if (parts.length > 1) {
-    let out = `${name}: ${parts[0]}`;
-    let lineLen = out.length;
-    for (let i = 1; i < parts.length; i++) {
-      const next = `, ${parts[i]}`;
-      if (lineLen + next.length > 78) {
-        out += ',\r\n ' + parts[i];
-        lineLen = parts[i].length + 1;
-      } else {
-        out += next;
-        lineLen += next.length;
-      }
+  for (let i = 0; i < parts.length; i++) {
+    const isLast = i === parts.length - 1;
+    const tokens = splitFoldPoints(parts[i]);
+    if (tokens.length === 0) {
+      // An empty part (`a, , b`) still owes its separator; without a
+      // placeholder chunk the rendered value would lose a comma.
+      chunks.push({ text: '', comma: !isLast });
+      continue;
     }
-    return out;
+    for (let j = 0; j < tokens.length; j++) {
+      chunks.push({ text: tokens[j], comma: !isLast && j === tokens.length - 1 });
+    }
   }
-  // No address-list separators to fold at. Some headers (notably
-  // `References:` with many message IDs) accumulate whitespace-separated
-  // tokens that can blow past RFC 5322's 998-octet hard limit on a
-  // single physical line. Fall back to whitespace folding: split on
-  // runs of whitespace and emit at most ~76 octets per physical line,
-  // each continuation prefixed with CRLF + a space (the structured
-  // folding rule). Tokens that individually exceed 76 chars are emitted
-  // unbroken on their own line — RFC 5322 §3.2.2 lets folding only
-  // occur at WSP, never inside a token.
-  const whitespaceTokens = value.split(/\s+/).filter((t) => t.length > 0);
-  if (whitespaceTokens.length <= 1) {
+  // One unbreakable token — a single long Message-ID, say. RFC 5322
+  // §3.2.2 only allows folding at WSP, so there is nowhere to fold and
+  // `Name:\r\n <token>` would shorten nothing.
+  if (chunks.length <= 1) {
     return line;
   }
-  let out = `${name}: ${whitespaceTokens[0]}`;
-  // First emitted line includes the header name; subsequent emitted
-  // lines are continuations and start with a single leading WSP.
-  let lineLen = out.length;
+  // RFC 2047 §2 limits any header line carrying an encoded-word to 76
+  // characters; RFC 5322 §2.1.1 makes 78 a SHOULD and 998 a MUST.
+  // Folding at 76 satisfies all three. A comma always stays on the line
+  // it terminates. A chunk longer than the budget still gets its own
+  // line, which is the best a WSP-only fold rule allows.
   const MAX_LINE = 76;
-  for (let i = 1; i < whitespaceTokens.length; i++) {
-    const tok = whitespaceTokens[i];
-    if (lineLen + 1 + tok.length > MAX_LINE) {
-      out += '\r\n ' + tok;
-      lineLen = 1 + tok.length;
+  let out = `${name}:`;
+  let lineLen = out.length;
+  for (const chunk of chunks) {
+    const piece = chunk.comma ? `${chunk.text},` : chunk.text;
+    if (piece.length > 0 && lineLen + 1 + piece.length > MAX_LINE) {
+      out += `${CRLF} ${piece}`;
+      lineLen = 1 + piece.length;
     } else {
-      out += ' ' + tok;
-      lineLen += 1 + tok.length;
+      out += ` ${piece}`;
+      lineLen += 1 + piece.length;
     }
   }
   return out;

@@ -75,8 +75,8 @@ export type ParseEmailErrorCode = 'INBOUND_TOO_LARGE' | 'PARSE_FAILED';
  */
 export class ParseEmailError extends Error {
   readonly code: ParseEmailErrorCode;
-  constructor(code: ParseEmailErrorCode, message: string) {
-    super(message);
+  constructor(code: ParseEmailErrorCode, message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = 'ParseEmailError';
     this.code = code;
   }
@@ -101,7 +101,20 @@ export async function parseEmail(message: ForwardableEmailMessage): Promise<Pars
   const { default: PostalMime } = await import('postal-mime');
   const cached = proxyRawCache.get(message);
   const source = cached ? await cached.read() : message.raw;
-  return await PostalMime.parse(source);
+  try {
+    return await PostalMime.parse(source);
+  } catch (cause) {
+    // postal-mime is lenient — binary garbage, truncated parts and bad
+    // header bytes all parse. What it does reject is a nesting bomb (>256
+    // levels), and a one-shot `raw` stream can fail on a real CF message.
+    // Both used to escape as a bare Error carrying parser internals, which
+    // left `PARSE_FAILED` declared in the code union but never constructed.
+    throw new ParseEmailError(
+      'PARSE_FAILED',
+      `parseEmail: could not parse the message body. ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+  }
 }
 
 /**
