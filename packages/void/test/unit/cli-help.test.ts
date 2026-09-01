@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vite-plus/test';
-import { getHelpPath, hasHelpPage } from '../../src/cli/help.ts';
+import { describe, expect, it, vi } from 'vite-plus/test';
+import { parseEmailArgs } from '../../src/cli/email-args.ts';
+import { getHelpPath, hasHelpPage, printHelpPage } from '../../src/cli/help.ts';
 
 describe('CLI help resolver', () => {
   it('resolves top-level help requests', () => {
@@ -68,5 +69,49 @@ describe('CLI help resolver', () => {
     expect(hasHelpPage(['github', 'status'])).toBe(true);
     expect(hasHelpPage(['github', 'disconnect'])).toBe(true);
     expect(hasHelpPage(['github', 'missing'])).toBe(false);
+  });
+});
+
+describe('rendered help advertises the flags the parser honours', () => {
+  /** The page as printed, ANSI stripped, so an assertion reads like the terminal. */
+  function render(path: Array<string>): string {
+    const lines: Array<string> = [];
+    // The page renders through clack's `note`, which writes to stdout, not
+    // through console.log.
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+    try {
+      printHelpPage(path);
+    } finally {
+      spy.mockRestore();
+    }
+    // eslint-disable-next-line no-control-regex
+    return lines.join('\n').replace(/\u001b\[[0-9;]*m/g, '');
+  }
+
+  // `void email logs --limit <n>` is parsed, honoured, and documented in the
+  // CLI reference, but the help page was built with the shared project-only
+  // helper, so the flag was invisible in every help surface. Nothing asserted
+  // rendered help content before, so nothing would have caught it.
+  it('shows --limit on `email logs`, which is the only email flag that does anything', () => {
+    expect(parseEmailArgs(['logs', '--limit', '7'])).toMatchObject({
+      subcommand: 'logs',
+      limit: 7,
+    });
+
+    const page = render(['email', 'logs']);
+
+    expect(page).toContain('--limit <n>');
+    expect(page).toContain('--project <name>');
+  });
+
+  it('still shows --project on the email subcommands that take only that', () => {
+    for (const sub of ['usage', 'destinations', 'allow', 'disallow']) {
+      const page = render(['email', sub]);
+      expect(page).toContain('--project <name>');
+      expect(page).not.toContain('--limit');
+    }
   });
 });

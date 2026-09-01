@@ -129,6 +129,30 @@ describe('normalizeEmail', () => {
     ).rejects.toThrow(/from/);
   });
 
+  // The shape check only required an '@' to be present anywhere, so a
+  // trailing, leading or doubled separator passed the preflight and was
+  // reported as a successful capture in the dev inbox — then failed only
+  // after reaching the platform. Every code below is the ADVERTISED one.
+  it.each(['user@', '@example.com', 'a@b@c'])(
+    'rejects %s, which used to pass the preflight',
+    async (bad) => {
+      await expect(
+        normalizeEmail({ from: bad, to: 'b@y.dev', subject: 's', text: 't' }),
+      ).rejects.toThrow(/from/);
+      await expect(
+        normalizeEmail({ from: 'a@x.dev', to: bad, subject: 's', text: 't' }),
+      ).rejects.toThrow(/to/);
+    },
+  );
+
+  // Deliberately NOT the platform's own `isValidEmail`, which requires a dot
+  // in the domain. These two are legal RFC 5321 and accepted today; adopting
+  // that stricter rule here would newly reject them.
+  it.each(['user@localhost', 'x@y'])('still accepts %s (no dot in the domain)', async (ok) => {
+    const email = await normalizeEmail({ from: ok, to: ok, subject: 's', text: 't' });
+    expect(email.from.email).toBe(ok);
+  });
+
   it('rejects CRLF in subject', async () => {
     await expect(
       normalizeEmail({

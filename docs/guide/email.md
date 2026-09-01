@@ -18,9 +18,21 @@ const result = await sendEmail({
 });
 
 if (!result.ok) {
-  console.error(result.error.code, result.error.message);
+  if ('error' in result) {
+    // Nothing was sent — the whole call failed before delivery.
+    console.error(result.error.code, result.error.message);
+  } else {
+    // Some recipients failed. `deliveries` says which.
+    for (const d of result.deliveries.filter((d) => !d.ok)) {
+      console.error(d.recipient, d.error.code, d.error.message);
+    }
+  }
 }
 ```
+
+Both branches are real. `result.error` exists only on the first, so reading it
+unconditionally throws on the second — and the second is the one a new project
+hits first, because a recipient you have not verified yet fails per-recipient.
 
 ## Setup
 
@@ -163,6 +175,13 @@ Error codes:
 | `MIME_ERROR`             | Failed to build the MIME message (oversize attachments, malformed input).           |
 | `QUOTA_EXCEEDED`         | Platform quota for outbound email reached. Retry next billing period.               |
 | `UPSTREAM_ERROR`         | Other binding failure; the original error is attached as `error.cause`.             |
+
+Which branch carries the code depends on when the send failed.
+`BINDING_MISSING`, `INVALID_FROM`, `INVALID_TO` and `MIME_ERROR` are pre-flight,
+so they arrive as a top-level `result.error`. `UNVERIFIED_DESTINATION` is always
+per-recipient and therefore only ever appears inside `result.deliveries` —
+never as `result.error`. `QUOTA_EXCEEDED` and `UPSTREAM_ERROR` can arrive either
+way. Narrow with `'error' in result` rather than assuming.
 
 ## Local development
 

@@ -73,11 +73,22 @@ function fieldErrorCode(field: string): MimeErrorCode {
 
 function validateAddressParts(field: string, email: string, name?: string): void {
   rejectCRLF(`${field} address`, email);
-  // Address must be a single token with an '@' and no whitespace, no
-  // quoting, and no list-separators. Without this, a `to: "a@x,b@y"`
-  // would slip through the bare-string path and split into two
-  // recipients in the rendered headers.
-  if (!email.includes('@') || /\s/.test(email) || /[,;<>"()[\]\\]/.test(email)) {
+  // Address must be a single token with EXACTLY ONE '@', a non-empty local
+  // part and a non-empty domain, and no whitespace, quoting, or
+  // list-separators. Without the separator rule, a `to: "a@x,b@y"` would
+  // slip through the bare-string path and split into two recipients in the
+  // rendered headers; without the exactly-one/non-empty rule, `user@`,
+  // `@example.com` and `a@b@c` passed the preflight and were reported as a
+  // successful capture in the dev inbox, only to fail once they reached the
+  // platform — and as a different error code than the one advertised here.
+  //
+  // Deliberately NOT the platform's `isValidEmail`, which also requires a
+  // dot in the domain: `user@localhost` and `x@y` are legal RFC 5321 and
+  // are accepted today. Quoted local parts (`"a@b"@example.com`) stay
+  // rejected by the `"` in the specials class below, as they already were.
+  const at = email.indexOf('@');
+  const singleAt = at > 0 && at === email.lastIndexOf('@') && at < email.length - 1;
+  if (!singleAt || /\s/.test(email) || /[,;<>"()[\]\\]/.test(email)) {
     throw new MimeError(
       fieldErrorCode(field),
       `${field}: '${email}' is not a valid email address.`,

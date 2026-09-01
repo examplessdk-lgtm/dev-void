@@ -248,7 +248,20 @@ const HELP_TREE: HelpTree = {
         'Show monthly outbound/inbound counts and quota.',
         'void email usage [options]',
       ),
-      logs: withProjectOption('Show recent email delivery activity.', 'void email logs [options]'),
+      // Not `withProjectOption`: `logs` is the one email subcommand with a
+      // flag of its own that actually does something, so the shared helper
+      // would hide it. Same shape as `domain status` above.
+      logs: {
+        summary: 'Show recent email delivery activity.',
+        usage: ['void email logs [options]'],
+        options: [
+          { command: '--project <name>', description: 'Project name override' },
+          {
+            command: '--limit <n>',
+            description: 'How many entries to show (positive integer)',
+          },
+        ],
+      },
       destinations: withProjectOption(
         'List verified recipient addresses.',
         'void email destinations [options]',
