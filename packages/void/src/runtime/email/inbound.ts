@@ -405,6 +405,22 @@ export function createMessageProxy(
   return { message, getActions: () => [...actions] };
 }
 
+/**
+ * Whether `Name: value` can be emitted without breaking RFC 5322 §2.1.1.
+ *
+ * Folding only happens at whitespace (§3.2.2), so the widest unbreakable run
+ * is what decides it — a `References` chain of ordinary ids folds fine however
+ * long, while one oversized id inside it does not.
+ */
+function fitsHeaderLine(name: string, value: string | undefined): value is string {
+  if (!value) {
+    return false;
+  }
+  const encoder = new TextEncoder();
+  const widest = Math.max(...value.split(/\s+/).map((token) => encoder.encode(token).length));
+  return name.length + 2 + widest <= 998;
+}
+
 export interface ReplyEmailOptions {
   /**
    * Defaults to `<__VOID_PROJECT_SLUG>+noreply@<__VOID_EMAIL_DOMAIN>`, and
@@ -570,13 +586,22 @@ export async function buildReplyMessage(
   // RESERVED_HEADERS guard against `In-Reply-To`/`References` spoofing
   // from user input intact while letting the trusted reply path emit
   // them.
+  //
+  // Both values come off the INBOUND message, so a remote sender controls
+  // them. `buildMime` rejects any header line over RFC 5322's 998-octet
+  // limit, and a message-id has no whitespace to fold at — so threading a
+  // hostile one verbatim would let anyone make this app's reply throw, with
+  // the app at fault for nothing. Threading is best-effort: drop a value
+  // that cannot be represented and still send the reply.
   const threading: { inReplyTo?: string; references?: string } = {};
-  if (originalMessageId) {
-    threading.inReplyTo = originalMessageId;
-    threading.references = originalReferences
-      ? `${originalReferences} ${originalMessageId}`.trim()
-      : originalMessageId;
-  } else if (originalReferences) {
+  const messageId = fitsHeaderLine('In-Reply-To', originalMessageId) ? originalMessageId : '';
+  if (messageId) {
+    threading.inReplyTo = messageId;
+    const chain = originalReferences ? `${originalReferences} ${messageId}`.trim() : messageId;
+    // A `References` chain folds at its spaces, so a long one is usually
+    // fine; it is a single oversized id in the chain that is not.
+    threading.references = fitsHeaderLine('References', chain) ? chain : messageId;
+  } else if (originalReferences && fitsHeaderLine('References', originalReferences)) {
     threading.references = originalReferences;
   }
 

@@ -471,6 +471,54 @@ function foldHeader(name: string, value: string): string {
   return out;
 }
 
+/** RFC 5322 §2.1.1: each line MUST be at most 998 octets, excluding CRLF. */
+const MAX_LINE_OCTETS = 998;
+
+/**
+ * First line of `text` that exceeds the octet limit, if any.
+ *
+ * Every line is scanned, not just the top header block: a multipart part's
+ * own headers (`Content-Disposition: …; filename="…"`) live inside the body
+ * and are just as unfoldable. Body content cannot trip this — text is
+ * quoted-printable re-encoded above 990 octets and base64 is emitted at a
+ * fixed width — so a hit is always a header.
+ */
+function findOverlongLine(text: string): { index: number; octets: number } | undefined {
+  const lines = text.split(CRLF);
+  const encoder = new TextEncoder();
+  for (let i = 0; i < lines.length; i++) {
+    const octets = encoder.encode(lines[i]).length;
+    if (octets > MAX_LINE_OCTETS) {
+      return { index: i, octets };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Escape a value for a quoted-string parameter (RFC 2045 §5.1 value, whose
+ * quoted-string comes from RFC 5322 §3.2.4).
+ *
+ * `qtext` excludes both `\\` and `"`, so each may appear only as a
+ * quoted-pair. Deleting the quotes and leaving backslashes raw — what this
+ * did before — is wrong in two ways: a TRAILING backslash escapes the
+ * closing quote and leaves the parameter unterminated, and every embedded
+ * backslash is silently eaten by a conformant parser, so a Windows path
+ * `C:\\Users\\bob\\report.pdf` arrived as `C:Usersbobreport.pdf`. Measured,
+ * Python's `email.policy.default` and postal-mime both report
+ * `InvalidHeaderDefect: end of header inside quoted string` on the first
+ * case and disagree with a naive parser on the second.
+ *
+ * Backslash first, then quote — the other order would double-escape.
+ *
+ * Note this file's own `splitAddressList` and `splitFoldPoints` already
+ * track quoted-pairs when folding, so the emitter was contradicting the
+ * folder.
+ */
+function quoteParam(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 function base64(bytes: Uint8Array): string {
   // workerd, browsers, and Node 18+ all expose btoa + binary string conversion.
   let binary = '';
@@ -569,9 +617,9 @@ function buildBodyPart(contentType: string, body: string): MimePart {
 
 function buildAttachmentPart(att: NormalizedAttachment): MimePart {
   const headers: Array<[string, string]> = [
-    ['Content-Type', `${att.contentType}; name="${att.filename.replace(/"/g, '')}"`],
+    ['Content-Type', `${att.contentType}; name="${quoteParam(att.filename)}"`],
     ['Content-Transfer-Encoding', 'base64'],
-    ['Content-Disposition', `${att.disposition}; filename="${att.filename.replace(/"/g, '')}"`],
+    ['Content-Disposition', `${att.disposition}; filename="${quoteParam(att.filename)}"`],
   ];
   if (att.contentId) {
     const cid = att.contentId.startsWith('<') ? att.contentId : `<${att.contentId}>`;
@@ -715,6 +763,32 @@ export function buildMime(email: NormalizedEmail): { raw: Uint8Array; messageId:
   const headerBlock = topHeaders.map(([k, v]) => foldHeader(k, v)).join(CRLF);
   const rawText = headerBlock + CRLF + CRLF + bodyPart.body;
   const raw = new TextEncoder().encode(rawText);
+
+  // RFC 5322 §2.1.1 makes 998 octets per line a MUST, and RFC 5321
+  // §4.5.3.1.6 caps an SMTP text line at 1000 including CRLF. `foldHeader`
+  // can only fold at whitespace (§3.2.2), so a long token with none —
+  // a JWT, a signed URL, a machine-generated Message-ID — cannot be folded
+  // at all and leaks through both its single-chunk early return AND its
+  // fold loop, which still gives an over-long chunk its own line.
+  //
+  // Checked here, after rendering, rather than per field: this is the only
+  // place that sees every header path at once, including the header NAME
+  // and the `filename=` / `name=` / `Content-ID` parameters that are built
+  // outside `foldHeader`. Encoding the value instead of rejecting is not a
+  // general remedy — RFC 2047 §5 permits encoded-words only in unstructured
+  // fields, comments and phrases, so it is illegal in `References`,
+  // `In-Reply-To`, `Content-ID` and parameter values, where a receiver
+  // would read `=?UTF-8?B?…?=` as a literal id or filename. Truncating
+  // silently corrupts: a clipped `References` breaks threading with no
+  // signal, a clipped `Content-ID` orphans a `cid:` reference.
+  const overlong = findOverlongLine(rawText);
+  if (overlong !== undefined) {
+    throw new MimeError(
+      'MIME_ERROR',
+      `email: header line ${overlong.index + 1} is ${overlong.octets} octets, over the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. ` +
+        'A value with no whitespace cannot be folded — shorten it, or move it into the body.',
+    );
+  }
 
   if (raw.byteLength > MAX_MESSAGE_BYTES) {
     throw new MimeError(

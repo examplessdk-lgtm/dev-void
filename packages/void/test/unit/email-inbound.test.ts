@@ -818,6 +818,65 @@ describe('harness rejects an unmatched delivery, like production', () => {
   });
 });
 
+describe('reply threading survives a hostile inbound header', () => {
+  // `buildReplyMessage` threads the inbound `Message-ID` and `References`
+  // into the reply verbatim, and those are controlled by whoever sent the
+  // mail. The 998-octet line guard would therefore let a remote sender make
+  // an app's reply throw, with the app at fault for nothing. Threading is
+  // best-effort, so an unusable value is dropped and the reply still goes.
+  const HUGE = 'x'.repeat(1100);
+
+  function inbound(headers: Record<string, string>) {
+    const raw = new TextEncoder().encode('Subject: hi\r\n\r\nbody\r\n');
+    return createMessageProxy(
+      {
+        from: 'sender@remote.dev',
+        to: 'acme+support@mail.void.cloud',
+        headers,
+        raw,
+        rawSize: raw.length,
+      },
+      { slug: 'acme' },
+    ).message;
+  }
+
+  it('drops an unusable Message-ID rather than failing the reply', async () => {
+    const message = inbound({ 'message-id': `<${HUGE}@remote.dev>`, subject: 'hi' });
+
+    const reply = await buildReplyMessage(message, { text: 'thanks', from: 'acme+noreply@x.dev' });
+
+    const text = new TextDecoder().decode(reply.raw);
+    expect(text).toContain('Subject: Re: hi');
+    expect(text).not.toContain(HUGE);
+    expect(Math.max(...text.split('\r\n').map((l) => l.length))).toBeLessThanOrEqual(998);
+  });
+
+  it('drops an unusable References chain rather than failing the reply', async () => {
+    const message = inbound({ references: `<${HUGE}@remote.dev>`, subject: 'hi' });
+
+    const reply = await buildReplyMessage(message, { text: 'thanks', from: 'acme+noreply@x.dev' });
+
+    expect(
+      Math.max(
+        ...new TextDecoder()
+          .decode(reply.raw)
+          .split('\r\n')
+          .map((l) => l.length),
+      ),
+    ).toBeLessThanOrEqual(998);
+  });
+
+  it('still threads a normal Message-ID', async () => {
+    const message = inbound({ 'message-id': '<abc123@remote.dev>', subject: 'hi' });
+
+    const reply = await buildReplyMessage(message, { text: 'thanks', from: 'acme+noreply@x.dev' });
+
+    const text = new TextDecoder().decode(reply.raw);
+    expect(text).toContain('In-Reply-To: <abc123@remote.dev>');
+    expect(text).toContain('References: <abc123@remote.dev>');
+  });
+});
+
 describe('parseEmail error contract', () => {
   // `PARSE_FAILED` was declared in the code union but never constructed, so
   // the one thing that does make postal-mime reject — a deeply nested

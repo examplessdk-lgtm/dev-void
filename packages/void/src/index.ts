@@ -759,6 +759,38 @@ export function voidPlugin(options?: {
       }
       export const sandbox = { get: getSandbox };
     `,
+    // Server-only for the same reason as the rest: `void/email` reaches
+    // `runtime/env-raw.ts`, whose top-level `node:async_hooks` import and
+    // module-scope `new AsyncLocalStorage()` have no browser equivalent.
+    // Without a stub the client build SUCCEEDS with only an externalization
+    // warning and ships `new (emptyStub).AsyncLocalStorage` — the page then
+    // white-screens on load, which is worse than a build failure.
+    // `void/email/testing` needs its own entry (the filter is anchored) for
+    // a different reason: it pulls `router/email.ts`, dragging node:path,
+    // node:fs and node:module plus ~24 KB of build-time router machinery
+    // into the browser bundle.
+    //
+    // Throwing rather than returning `{}`, following `void/sandbox`: an
+    // accidental client import should fail legibly instead of silently
+    // no-oping a send the caller believes happened.
+    'void/email': `
+      const serverOnly = (name) => () => {
+        throw new Error(name + ' is server-only and cannot be imported by browser code.');
+      };
+      export const sendEmail = serverOnly('sendEmail');
+      export const createEmail = serverOnly('createEmail');
+      export const defineEmail = serverOnly('defineEmail');
+      export const parseEmail = serverOnly('parseEmail');
+      export const replyEmail = serverOnly('replyEmail');
+      export const createMessageProxy = serverOnly('createMessageProxy');
+    `,
+    'void/email/testing': `
+      const serverOnly = (name) => () => {
+        throw new Error(name + ' is server-only and cannot be imported by browser code.');
+      };
+      export const createEmailTestHarness = serverOnly('createEmailTestHarness');
+      export const createInboundTestHarness = serverOnly('createInboundTestHarness');
+    `,
     'void/live': '',
   };
   const STUB_RESOLVE_FILTER = new RegExp(

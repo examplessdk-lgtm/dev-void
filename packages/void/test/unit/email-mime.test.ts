@@ -153,6 +153,93 @@ describe('normalizeEmail', () => {
     expect(email.from.email).toBe(ok);
   });
 
+  // RFC 5322 §2.1.1 makes 998 a MUST and §3.2.2 allows folding ONLY at
+  // whitespace, so a long token with no spaces cannot be folded at all —
+  // `Subject:\r\n <token>` shortens nothing. The RFC 2047 chunking added
+  // earlier only covers NON-ASCII values; a pure-ASCII token bypasses
+  // `encodeWord` entirely and leaks through two separate paths in
+  // `foldHeader`: the single-chunk early return, and the fold loop, which
+  // still gives an over-long chunk its own line. Nothing downstream
+  // repairs it — the proxy streams our bytes verbatim.
+  const TOKEN = 'x'.repeat(1100);
+
+  /** Longest physical line of the rendered message, in octets. */
+  async function longestLine(opts: Record<string, unknown>): Promise<number> {
+    const email = await normalizeEmail(opts as never);
+    const raw = new TextDecoder().decode(buildMime(email).raw);
+    return Math.max(...raw.split('\r\n').map((l) => new TextEncoder().encode(l).length));
+  }
+
+  it.each([
+    ['subject', { from: 'a@x.dev', to: 'b@y.dev', subject: TOKEN, text: 't' }],
+    [
+      'a custom header value',
+      { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', headers: { 'X-Trace': TOKEN } },
+    ],
+    [
+      'a display name',
+      { from: { email: 'a@x.dev', name: TOKEN }, to: 'b@y.dev', subject: 's', text: 't' },
+    ],
+    [
+      'an attachment filename',
+      {
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        attachments: [{ filename: `${TOKEN}.pdf`, content: new Uint8Array([1, 2, 3]) }],
+      },
+    ],
+  ])('rejects an unbreakable token in %s rather than emitting a >998 octet line', async (_w, o) => {
+    await expect(normalizeEmail(o as never).then((e) => buildMime(e))).rejects.toThrow(
+      /998|line length/i,
+    );
+  });
+
+  it('still accepts a token that lands exactly on the limit', async () => {
+    // `Subject: ` costs 9 octets, so 989 is the largest token that fits.
+    expect(
+      await longestLine({ from: 'a@x.dev', to: 'b@y.dev', subject: 'x'.repeat(989), text: 't' }),
+    ).toBe(998);
+  });
+
+  it('leaves foldable values alone', async () => {
+    const spaced = Array.from({ length: 200 }, (_, i) => `word${i}`).join(' ');
+    expect(
+      await longestLine({ from: 'a@x.dev', to: 'b@y.dev', subject: spaced, text: 't' }),
+    ).toBeLessThanOrEqual(998);
+  });
+
+  // A quoted-string parameter carries `\\` and `"` only as quoted-pairs
+  // (RFC 5322 §3.2.4 — qtext excludes both). Deleting quotes and leaving
+  // backslashes raw makes a trailing backslash escape the CLOSING quote,
+  // and silently eats embedded ones: a Windows path `C:\\Users\\bob\\r.pdf`
+  // reached the recipient as `C:Usersbobr.pdf`. This file's own folder
+  // already tracks quoted-pairs, so the emitter was contradicting it.
+  it.each([
+    ['a trailing backslash', 'bad\\'],
+    ['an embedded backslash', 'a\\b'],
+    ['a Windows path', 'C:\\Users\\bob\\report.pdf'],
+    ['an embedded quote', 'he said "hi".pdf'],
+    ['a plain name', 'normal.pdf'],
+  ])('round-trips %s in the attachment filename', async (_what, filename) => {
+    const email = await normalizeEmail({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 't',
+      attachments: [{ filename, content: new Uint8Array([1, 2, 3]) }],
+    });
+    const text = new TextDecoder().decode(buildMime(email).raw);
+
+    // Recover it the way a receiver does: read the quoted-string back,
+    // undoing quoted-pairs. A raw backslash before the closing quote would
+    // leave the parameter unterminated and this would not match.
+    const m = text.match(/Content-Disposition: attachment; filename="((?:[^"\\]|\\.)*)"/);
+    expect(m, `no terminated filename parameter in:\n${text.slice(0, 400)}`).not.toBeNull();
+    expect(m![1].replace(/\\(.)/g, '$1')).toBe(filename);
+  });
+
   it('rejects CRLF in subject', async () => {
     await expect(
       normalizeEmail({
