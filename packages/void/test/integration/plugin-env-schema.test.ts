@@ -336,7 +336,7 @@ describe('envSchemaPlugin auto-discovery', () => {
     }
   });
 
-  it('validates values copied into process.env after plugin construction', async () => {
+  it('validates post-construction process.env values for framework-owned runtimes', async () => {
     const key = 'VOID_ENV_SCHEMA_FRAMEWORK_DOTENV_TEST';
     const missingKey = 'VOID_ENV_SCHEMA_VALIDATION_SENTINEL';
     const previous = process.env[key];
@@ -346,7 +346,7 @@ describe('envSchemaPlugin auto-discovery', () => {
 
     const root = createTempRoot();
     writeFileSync(join(root, 'env.ts'), 'export default {};\n');
-    const plugin = envSchemaPlugin(root);
+    const plugin = envSchemaPlugin(root, { frameworkOwnsRuntimeEnv: true });
     process.env[key] = 'from-framework-dotenv';
 
     try {
@@ -385,6 +385,51 @@ describe('envSchemaPlugin auto-discovery', () => {
         delete process.env[missingKey];
       } else {
         process.env[missingKey] = previousMissing;
+      }
+    }
+  });
+
+  it('excludes post-construction process.env values for Void-owned runtimes', async () => {
+    const key = 'VOID_ENV_SCHEMA_POST_CONSTRUCTION_SHELL_TEST';
+    const previous = process.env[key];
+    delete process.env[key];
+
+    const root = createTempRoot();
+    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+    const plugin = envSchemaPlugin(root);
+    process.env[key] = 'from-earlier-plugin';
+
+    try {
+      await runConfig(plugin);
+      const { defineEnv } = await import('../../src/runtime/env-public.ts');
+      const { string } = await import('../../src/runtime/env-helpers.ts');
+      defineEnv({ [key]: string() });
+      await runConfigResolved(plugin, {
+        mode: 'development',
+        envDir: root,
+        envPrefix: 'VITE_',
+        env: {},
+        define: {},
+      });
+
+      const warnSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await runConfigureServer(plugin);
+        await waitFor(() =>
+          warnSpy.mock.calls.some((call) =>
+            String(call[0] ?? '').includes(`${key} is required but missing`),
+          ),
+        );
+        const output = warnSpy.mock.calls.map((call) => String(call[0] ?? '')).join('\n');
+        expect(output).toContain(`${key} is required but missing`);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    } finally {
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
       }
     }
   });

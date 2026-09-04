@@ -31,6 +31,15 @@ export type EnvSchemaPluginOptions = {
    * "skip if already set" semantics.
    */
   onDefaults?: (defaults: Record<string, string>) => void;
+  /**
+   * Class B/C frameworks own their runtime env and may copy dotenv values
+   * into process.env before this plugin validates. When true, preserve values
+   * added after plugin construction while still excluding the initial shell.
+   *
+   * Leave false when Void owns worker vars so validation uses the same
+   * current-process filtering as the worker binding path.
+   */
+  frameworkOwnsRuntimeEnv?: boolean;
 };
 
 let cachedSchemaModule: RegisteredSchemaModule | null = null;
@@ -71,10 +80,7 @@ function resolveEnvPrefixes(prefix: ResolvedConfig['envPrefix']): ReadonlyArray<
 }
 
 export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = {}): Plugin {
-  // Some framework plugins copy dotenv values into process.env during their
-  // config hooks. Capture the actual shell before those hooks run so validation
-  // can distinguish framework-loaded values from ambient shell-only values.
-  const initialShellEnv = { ...process.env };
+  const initialShellEnv = options.frameworkOwnsRuntimeEnv ? { ...process.env } : undefined;
   const outDir = join(root, '.void');
   let envFile: string | null = null;
   let viteMode = 'development';
@@ -154,10 +160,10 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       return;
     }
     const { loadEnv } = await import('vite');
-    // Match the Worker binding surface: exclude values inherited from the
-    // initial shell, but retain dotenv values that framework hooks copied into
-    // process.env after this plugin was constructed.
-    const merged = filterLoadedEnv(loadEnv(viteMode, envDir, ''), initialShellEnv);
+    // Framework-owned runtimes retain dotenv values copied into process.env
+    // after plugin construction. Void-owned runtimes filter against the current
+    // process.env, matching envPlugin's worker-vars binding path.
+    const merged = filterLoadedEnv(loadEnv(viteMode, envDir, ''), initialShellEnv ?? process.env);
     const report = await validateAllEnv(merged);
     if (report.valid) {
       return;

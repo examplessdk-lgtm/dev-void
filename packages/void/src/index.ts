@@ -923,7 +923,7 @@ export function voidPlugin(options?: {
       // apply equally to SvelteKit/Nuxt/Analog/Astro. We intentionally omit
       // envPlugin itself — it mutates workerConfig.vars for Void's own CF
       // build, which Class B/C frameworks don't go through.
-      envSchemaPlugin(root),
+      envSchemaPlugin(root, { frameworkOwnsRuntimeEnv: true }),
       envClientGuardPlugin(root),
       envClientFoldPlugin(),
       drizzlePlugin(root, false, dialect, {
