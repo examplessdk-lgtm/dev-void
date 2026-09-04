@@ -389,6 +389,56 @@ describe('envSchemaPlugin auto-discovery', () => {
     }
   });
 
+  it('validates the Void-loaded env snapshot after process.env is mutated', async () => {
+    const key = 'VOID_ENV_SCHEMA_WORKER_ENV_TEST';
+    const missingKey = 'VOID_ENV_SCHEMA_WORKER_ENV_SENTINEL';
+    const previous = process.env[key];
+    delete process.env[key];
+
+    const root = createTempRoot();
+    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+    const loadedUserEnv = { [key]: 'from-dotenv' };
+    const plugin = envSchemaPlugin(root, { getValidationEnv: () => loadedUserEnv });
+
+    try {
+      await runConfig(plugin);
+      const { defineEnv } = await import('../../src/runtime/env-public.ts');
+      const { string } = await import('../../src/runtime/env-helpers.ts');
+      defineEnv({ [key]: string(), [missingKey]: string() });
+      await runConfigResolved(plugin, {
+        mode: 'development',
+        envDir: root,
+        envPrefix: 'VITE_',
+        env: {},
+        define: {},
+      });
+
+      // Simulate a later framework/plugin copying the dotenv value into the
+      // process environment after Void captured its worker-vars snapshot.
+      process.env[key] = loadedUserEnv[key];
+
+      const warnSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await runConfigureServer(plugin);
+        await waitFor(() =>
+          warnSpy.mock.calls.some((call) =>
+            String(call[0] ?? '').includes(`${missingKey} is required but missing`),
+          ),
+        );
+        const output = warnSpy.mock.calls.map((call) => String(call[0] ?? '')).join('\n');
+        expect(output).not.toContain(`${key} is required but missing`);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    } finally {
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    }
+  });
+
   it('excludes post-construction process.env values for Void-owned runtimes', async () => {
     const key = 'VOID_ENV_SCHEMA_POST_CONSTRUCTION_SHELL_TEST';
     const previous = process.env[key];

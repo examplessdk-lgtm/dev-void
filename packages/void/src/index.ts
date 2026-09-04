@@ -668,6 +668,7 @@ export function voidPlugin(options?: {
   const dialect = getDatabaseDialect(config);
   const detected = detectFramework(root);
   const framework = detected?.class === 'a' ? (detected.name as Framework) : undefined;
+  const initialFrameworkShellEnv = framework ? { ...process.env } : undefined;
 
   // Infer bindings synchronously from source files
   const scanDirs = config.inference?.scanDirs ?? (detected ? FRAMEWORK_SCAN_DIRS : undefined);
@@ -1311,6 +1312,7 @@ export function voidPlugin(options?: {
   // loaded env from the value it saw — the preflight reading the final value would then diverge
   // from what the build baked.
   let voidDeployBuildConfig: { mode: string; envDir: string | undefined } | undefined;
+  let loadedUserEnv: Record<string, string> | undefined;
   const envPlugin: Plugin = {
     name: 'void:env',
     api: {
@@ -1353,8 +1355,12 @@ export function voidPlugin(options?: {
       // .env-file vars reach worker bindings. stripInternalEnvKeys then
       // removes any internal Void keys a user may have set in their .env
       // files, so they can't hijack credential-shaped worker bindings.
-      const filtered = filterLoadedEnv(loadEnv(mode, envDir, ''));
+      const filtered = filterLoadedEnv(
+        loadEnv(mode, envDir, ''),
+        initialFrameworkShellEnv ?? process.env,
+      );
       const { sanitized: env, stripped } = stripInternalEnvKeys(filtered);
+      loadedUserEnv = env;
       if (stripped.length > 0) {
         voidWarn(
           `Ignoring internal env keys from .env files: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
@@ -1649,7 +1655,10 @@ export function voidPlugin(options?: {
       restartPlugin(),
       bindingWatchPlugin,
       envPlugin,
-      envSchemaPlugin(root, { onDefaults: applySchemaDefaultsToWorkerVars }),
+      envSchemaPlugin(root, {
+        onDefaults: applySchemaDefaultsToWorkerVars,
+        getValidationEnv: () => loadedUserEnv,
+      }),
       envClientGuardPlugin(root),
       envClientFoldPlugin(),
       clientStubsPlugin,
@@ -1714,7 +1723,7 @@ export function voidPlugin(options?: {
     return [
       restartPlugin(),
       envPlugin,
-      envSchemaPlugin(root),
+      envSchemaPlugin(root, { getValidationEnv: () => loadedUserEnv }),
       ...pagesDevCssAssetsPlugin(root, devTriggerToken),
       routingPlugin(root, {
         isAuthEnabled: () => false,
@@ -1820,7 +1829,10 @@ export function voidPlugin(options?: {
     restartPlugin(),
     bindingWatchPlugin,
     envPlugin,
-    envSchemaPlugin(root, { onDefaults: applySchemaDefaultsToWorkerVars }),
+    envSchemaPlugin(root, {
+      onDefaults: applySchemaDefaultsToWorkerVars,
+      getValidationEnv: () => loadedUserEnv,
+    }),
     envClientGuardPlugin(root),
     envClientFoldPlugin(),
     clientStubsPlugin,

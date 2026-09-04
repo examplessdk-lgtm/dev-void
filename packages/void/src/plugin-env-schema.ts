@@ -32,6 +32,12 @@ export type EnvSchemaPluginOptions = {
    */
   onDefaults?: (defaults: Record<string, string>) => void;
   /**
+   * Returns the sanitized dotenv values already loaded by Void's env plugin.
+   * Using the original snapshot keeps validation aligned with worker vars even
+   * when a later plugin copies those values into process.env.
+   */
+  getValidationEnv?: () => Record<string, string> | undefined;
+  /**
    * Class B/C frameworks own their runtime env and may copy dotenv values
    * into process.env before this plugin validates. When true, preserve values
    * added after plugin construction while still excluding the initial shell.
@@ -161,9 +167,11 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     }
     const { loadEnv } = await import('vite');
     // Framework-owned runtimes retain dotenv values copied into process.env
-    // after plugin construction. Void-owned runtimes filter against the current
-    // process.env, matching envPlugin's worker-vars binding path.
-    const merged = filterLoadedEnv(loadEnv(viteMode, envDir, ''), initialShellEnv ?? process.env);
+    // after plugin construction. Void-owned runtimes validate the exact
+    // sanitized dotenv snapshot used for worker vars.
+    const merged =
+      options.getValidationEnv?.() ??
+      filterLoadedEnv(loadEnv(viteMode, envDir, ''), initialShellEnv ?? process.env);
     const report = await validateAllEnv(merged);
     if (report.valid) {
       return;
