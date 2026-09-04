@@ -86,7 +86,6 @@ const integrationItems = [
   { text: 'Hono', link: '/integrations/hono' },
   { text: 'Cloudflare', link: '/integrations/cloudflare' },
   { text: 'Node.js / Bun / Deno', link: '/integrations/nodejs-bun-deno' },
-  { text: 'Payment Processors', link: '/integrations/payment-processors' },
 ];
 
 const integrationLinks = {
@@ -254,7 +253,6 @@ export default extendConfig(
             Cloudflare: 'devicon:cloudflare',
             'Node.js / Bun / Deno': 'material-icon-theme:nodejs-alt',
             'Auth Providers': 'lucide:shield',
-            'Payment Processors': 'lucide:credit-card',
           };
           return integrationItems.map((item) =>
             item.text === 'Meta Frameworks'
