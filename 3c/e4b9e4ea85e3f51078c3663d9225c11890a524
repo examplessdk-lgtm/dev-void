@@ -1,0 +1,29 @@
+packages/void/CLAUDE.md
+  s_994b2c5ddc2bcd::t_f6a674e684e557 97
+packages/void/test/integration/cloudflare-deploy-build.test.ts
+  s_994b2c5ddc2bcd::t_b79e38559c626e 21,48-50,196,200
+packages/void/test/integration/kitchen-sink-build.test.ts
+  s_994b2c5ddc2bcd::t_ef0dde12459409 104,108,110,112
+packages/void/test/integration/kitchen-sink.test.ts
+  s_994b2c5ddc2bcd::t_b3b1bf2f8495f0 542-543
+playground/kitchen-sink/pages/index.vue
+  s_994b2c5ddc2bcd::t_692b06dce769ae 10
+playground/kitchen-sink/wrangler.jsonc
+  s_994b2c5ddc2bcd::t_e877c7ae46b678 1-5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3ce4b9e4ea85e3f51078c3663d9225c11890a524",
+  "prompts": {},
+  "sessions": {
+    "s_994b2c5ddc2bcd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a06f95-066c-7931-a260-36c50963133b",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    }
+  }
+}
