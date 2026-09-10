@@ -818,6 +818,102 @@ describe('harness rejects an unmatched delivery, like production', () => {
   });
 });
 
+describe('harness headers match the bytes, like production', () => {
+  // In production `buildEnvelope` copies every wire header verbatim, so
+  // `message.headers` and `message.raw` agree by construction. The harness
+  // rebuilt `headers` from `input` alone, so its own synthetic MIME carried
+  // a Message-ID that its own `headers` did not expose — and `replyEmail`
+  // reads exactly that header, so a harness reply came out UNTHREADED while
+  // the same handler threaded correctly in production. Third divergence of
+  // this shape on this feature, after captured-param casing and the
+  // unmatched-delivery reject.
+  it('exposes the generated Message-ID, so replyEmail threads', async () => {
+    let seen: string | null = null;
+    const harness = createInboundTestHarness({
+      routes: {
+        _default: async (message: { headers: Headers }) => {
+          seen = message.headers.get('Message-ID');
+        },
+      },
+    });
+
+    await harness.deliver({ from: 'u@x.dev', to: 'myslug+support@app.dev', subject: 'Help' });
+
+    expect(seen).toMatch(/^<.+@.+>$/);
+  });
+
+  it('exposes headers from a caller-supplied raw MIME', async () => {
+    // The `raw:` override hands the harness exact wire bytes. Ignoring their
+    // headers is the sharpest form of the divergence: the caller supplied
+    // precisely what production would receive.
+    const raw = [
+      'Message-ID: <fromraw@remote.dev>',
+      'From: u@x.dev',
+      'To: myslug+support@app.dev',
+      'Subject: Help',
+      'X-Custom: kept',
+      '',
+      'body',
+      '',
+    ].join('\r\n');
+    let seen: Record<string, string | null> = {};
+    const harness = createInboundTestHarness({
+      routes: {
+        _default: async (message: { headers: Headers }) => {
+          seen = {
+            id: message.headers.get('Message-ID'),
+            custom: message.headers.get('X-Custom'),
+          };
+        },
+      },
+    });
+
+    await harness.deliver({ from: 'u@x.dev', to: 'myslug+support@app.dev', raw });
+
+    expect(seen.id).toBe('<fromraw@remote.dev>');
+    expect(seen.custom).toBe('kept');
+  });
+
+  it('exposes Subject the way the wire carries it, not decoded', async () => {
+    // `buildMime` RFC 2047-encodes a non-ASCII subject and production hands
+    // the handler that encoded form. A handler comparing
+    // `message.headers.get('Subject')` — the pattern the guide shows — must
+    // see the same string in both places.
+    let seen: string | null = null;
+    const harness = createInboundTestHarness({
+      routes: {
+        _default: async (message: { headers: Headers }) => {
+          seen = message.headers.get('Subject');
+        },
+      },
+    });
+
+    await harness.deliver({ from: 'u@x.dev', to: 'myslug+support@app.dev', subject: 'café' });
+
+    expect(seen).toBe('=?UTF-8?B?Y2Fmw6k=?=');
+  });
+
+  it('lets an explicit input header win over the bytes', async () => {
+    let seen: string | null = null;
+    const harness = createInboundTestHarness({
+      routes: {
+        _default: async (message: { headers: Headers }) => {
+          seen = message.headers.get('Message-ID');
+        },
+      },
+    });
+
+    await harness.deliver({
+      from: 'u@x.dev',
+      to: 'myslug+support@app.dev',
+      subject: 'Help',
+      headers: { 'Message-ID': '<explicit@remote.dev>' },
+    });
+
+    expect(seen).toBe('<explicit@remote.dev>');
+  });
+});
+
 describe('reply threading survives a hostile inbound header', () => {
   // `buildReplyMessage` threads the inbound `Message-ID` and `References`
   // into the reply verbatim, and those are controlled by whoever sent the

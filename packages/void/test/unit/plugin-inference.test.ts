@@ -618,6 +618,59 @@ describe('detectFramework', () => {
     }
   });
 
+  // Inbound handlers compile through `routingPlugin`, which the framework
+  // branches never install. Without this guard the build succeeds and every
+  // handler in `email/` is dead code.
+  it('rejects an email/ handler directory in framework adapter mode', () => {
+    const root = createTempRoot();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ dependencies: { '@sveltejs/kit': '^2.0.0' } }),
+    );
+    mkdirSync(join(root, 'email'), { recursive: true });
+    writeFileSync(
+      join(root, 'email', '_default.ts'),
+      `
+      import { defineEmail } from "void/email";
+      export default defineEmail(async () => {});
+      `,
+    );
+
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    try {
+      expect(() => voidPlugin()).toThrow(
+        'email: inbound email handlers are only supported in Void apps',
+      );
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  // Outbound is a binding, not a compiled export, so it stays supported.
+  it('allows sendEmail without an email/ directory in framework adapter mode', () => {
+    const root = createTempRoot();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ dependencies: { '@sveltejs/kit': '^2.0.0' } }),
+    );
+    writeFileSync(
+      join(root, 'src', 'mailer.ts'),
+      `
+      import { sendEmail } from "void/email";
+      export const send = () => sendEmail({ to: "a@b.dev", subject: "x", text: "y" });
+      `,
+    );
+
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    try {
+      expect(() => voidPlugin()).not.toThrow();
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
   it('rejects void/live in framework adapter mode', () => {
     const root = createTempRoot();
     writeFileSync(

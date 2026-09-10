@@ -543,6 +543,7 @@ export function findBackendSources(root: string): Array<string> {
     paths.middlewareDir,
     paths.cronsDir,
     paths.queuesDir,
+    paths.emailDir,
   ]) {
     if (existsSync(dir)) {
       found.push(`${relative(root, dir)}/`);
@@ -573,6 +574,9 @@ export function hasBackendFiles(root: string): boolean {
     return true;
   }
   if (existsSync(paths.queuesDir)) {
+    return true;
+  }
+  if (existsSync(paths.emailDir)) {
     return true;
   }
   if (hasSsrEntry(root, paths)) {

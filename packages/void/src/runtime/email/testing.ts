@@ -191,6 +191,45 @@ async function buildSyntheticRaw(opts: InboundDeliverOptions): Promise<Uint8Arra
   return buildMime(normalized).raw;
 }
 
+/**
+ * Headers of a raw MIME message, up to the first blank line.
+ *
+ * Unfolds continuation lines (RFC 5322 §2.2.3: a line starting with WSP
+ * continues the one before it). Anything it cannot parse is skipped rather
+ * than thrown, because a test may deliver deliberately malformed bytes.
+ */
+function parseHeaderBlock(raw: Uint8Array): Headers {
+  const headers = new Headers();
+  const text = new TextDecoder().decode(raw);
+  const end = text.indexOf('\r\n\r\n');
+  const block = end === -1 ? text : text.slice(0, end);
+  let current = '';
+  const commit = () => {
+    const colon = current.indexOf(':');
+    if (colon > 0) {
+      try {
+        headers.set(current.slice(0, colon).trim(), current.slice(colon + 1).trim());
+      } catch {
+        // Not a name/value a Headers object accepts — skip it.
+      }
+    }
+    current = '';
+  };
+  for (const line of block.split('\r\n')) {
+    if (line === '') {
+      break;
+    }
+    if (/^[ \t]/.test(line) && current !== '') {
+      current += ` ${line.trim()}`;
+      continue;
+    }
+    commit();
+    current = line;
+  }
+  commit();
+  return headers;
+}
+
 function stripSlugForHarness(address: string, slug: string | undefined): string {
   if (!slug) {
     return address;
@@ -228,8 +267,33 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
 
   async function deliver(input: InboundDeliverOptions): Promise<InboundDeliveryResult> {
     const raw = await buildSyntheticRaw(input);
-    const headers = new Headers(input.headers ?? {});
-    if (input.subject && !headers.has('Subject')) {
+    // Production's `buildEnvelope` copies every wire header verbatim, so
+    // `message.headers` and `message.raw` agree by construction. Start from
+    // the bytes for the same reason: the harness's own synthetic MIME
+    // carries a generated `Message-ID`, and `replyEmail` reads exactly that
+    // header — rebuilding from `input` alone made a harness reply come out
+    // unthreaded while the same handler threaded in production. It also
+    // dropped the headers of a caller-supplied `raw:`, which are the exact
+    // wire bytes the caller asked to deliver.
+    //
+    // Parsed from the local `raw`, never from `message.raw`: that is a
+    // one-shot stream here, so reading it would steal the handler's read.
+    // A hand-rolled header split rather than postal-mime, so a deliberately
+    // malformed `raw:` fixture still reaches the handler instead of
+    // throwing PARSE_FAILED inside the harness.
+    const headers = parseHeaderBlock(raw);
+    // The caller's own headers win, so an explicit override stays an escape
+    // hatch.
+    for (const [k, v] of new Headers(input.headers ?? {})) {
+      headers.set(k, v);
+    }
+    // Subject is NOT re-set from `input.subject`. The bytes already carry it,
+    // and they carry it the way the wire does: `buildMime` RFC 2047-encodes a
+    // non-ASCII subject, and production hands the handler that encoded form.
+    // Overriding with the decoded string here would make
+    // `message.headers.get('Subject')` differ between harness and production
+    // for any non-ASCII subject — the pattern the guide itself shows.
+    if (!headers.has('Subject') && input.subject) {
       headers.set('Subject', input.subject);
     }
     if (!headers.has('From')) {

@@ -68,6 +68,7 @@ import { routingPlugin } from './plugin-routing.ts';
 import { assertNoRootSourceConventionConflicts, resolveProjectPaths } from './project-paths.ts';
 import { scanQueuesSync } from './queues/scan.ts';
 import { compileAssetFallbackHelper } from './router/compile.ts';
+import { hasEmailHandlers, scanEmailHandlersSync } from './router/email.ts';
 import { isRouteEnabledForEnvironment, type RouteEnvironment } from './router/parse-filename.ts';
 import { scanMiddlewareSync, scanRoutePatternsSync } from './router/scan.ts';
 import { scanWebSocketRoutesSync } from './router/websocket.ts';
@@ -728,6 +729,20 @@ export function voidPlugin(options?: {
   }
   if (detected && bindings.needsLive) {
     throw new Error('live: void/live is currently supported in Void apps only.');
+  }
+  // Inbound handlers are compiled into the worker's `email()` export by
+  // `routingPlugin`, which no framework branch installs — the framework
+  // wrapper wires crons and queues only. Without this guard the build
+  // succeeds, every file in `email/` is dead code, and inbound mail bounces
+  // at the platform with a message telling the user to redeploy.
+  //
+  // Gated on the handler DIRECTORY, not on `bindings.needsEmail`. Outbound
+  // `sendEmail` is a binding rather than a compiled export, so it keeps
+  // working in every framework and must not be caught here.
+  if (detected && hasEmailHandlers(scanEmailHandlersSync(paths.sourceRoot))) {
+    throw new Error(
+      'email: inbound email handlers are only supported in Void apps. Remove the email/ directory — `sendEmail` from void/email keeps working.',
+    );
   }
 
   // Server-only void/* imports (db, kv, ai, etc.) must not pull in

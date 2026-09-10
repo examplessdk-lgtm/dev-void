@@ -242,7 +242,9 @@ The harness intercepts every `sendEmail` call until `dispose()` is called. `clea
 
 ## Inbound
 
-Receive inbound mail by dropping handlers in the top-level `email/` directory — alongside `crons/` and `queues/`. Void detects them, generates the worker's `email()` export, and dispatches incoming messages by recipient address.
+Inbound mail is a **Void-app-only** feature. Receive it by dropping handlers in the top-level `email/` directory — alongside `crons/` and `queues/`. Void detects them, generates the worker's `email()` export, and dispatches incoming messages by recipient address.
+
+Under a third-party framework — TanStack Start, React Router, SvelteKit, Nuxt, Analog, Astro — Void wires only crons and queues into the framework's own worker entry, so there is nowhere to attach an `email()` export. An `email/` directory in those projects is a build error, not silently dead code. Outbound is unaffected: `sendEmail` is a binding, and it works in every framework.
 
 ```ts
 // email/_default.ts — fallback for any unmatched recipient
@@ -335,7 +337,9 @@ never throws, while `replyEmail` throws when it cannot determine a sender.
 
 ### Configuring inbound delivery
 
-In production, inbound delivery requires a Cloudflare Email Routing rule that points your domain at your worker. **Void manages this for you** — there's nothing to configure in the Cloudflare dashboard. (Provisioning lands in the platform's Phase 3; until then, deployed handlers sit dormant.) There is no local inbound trigger yet — `void dev` serves the outbound dev inbox only, so test inbound handlers with `createInboundTestHarness` below.
+In production, inbound runs on one shared mail facility. The platform routes `<slug>+anything@<mail domain>` to your worker's `email()` export — **there is nothing to configure in the Cloudflare dashboard and no per-project DNS work**. Your handlers are live as soon as the deploy lands.
+
+There is no local inbound trigger yet — `void dev` serves the outbound dev inbox only, so test inbound handlers with `createInboundTestHarness` below.
 
 ### Testing inbound handlers
 

@@ -56,6 +56,7 @@ import {
   resolveProjectPaths,
 } from '../project-paths.ts';
 import { scanQueuesSync } from '../queues/scan.ts';
+import { hasEmailHandlers } from '../router/email.ts';
 import { scanRoutes } from '../router/scan.ts';
 import { scanWebSocketRoutesSync } from '../router/websocket.ts';
 import {
@@ -3565,7 +3566,7 @@ export async function runCloudflareDeploy(
       [
         'deploy: --backend cloudflare found no Void backend to deploy.',
         'A full Void app has at least one of: routes/, pages/, middleware, crons/, queues/,',
-        'or an SSR entry. Add your server code, or use `void deploy` for a static site.',
+        'email/, or an SSR entry. Add your server code, or use `void deploy` for a static site.',
       ].join('\n'),
     );
     return exit(1);
@@ -4990,6 +4991,42 @@ export function hasPrerenderSources(inputs: PrerenderSourceInputs): boolean {
   return inputs.hasPages || inputs.hasSsrEntry || (inputs.explicitPrerenderPaths?.length ?? 0) > 0;
 }
 
+export type NonPageBackendInputs = {
+  hasRoutes: boolean;
+  hasMiddleware: boolean;
+  hasWebSockets: boolean;
+  hasEmail: boolean;
+  authEnabled: boolean;
+  hasLive: boolean;
+};
+
+/**
+ * Whether the project needs a worker for something other than its pages.
+ *
+ * An `output: "static"` project whose pages all prerender takes the static-site
+ * path, which uploads assets and NO worker script. Every worker surface that is
+ * not a page has to be listed here, because a missing one is not a failed
+ * deploy — it is a successful deploy with that feature silently absent.
+ *
+ * `email` belongs here for the same reason `hasRoutes` does: an `email/`
+ * handler compiles to the worker's `email()` export (`router/compile.ts`), and
+ * the platform dispatches inbound mail through that export. With no worker, the
+ * mail bounces at the proxy with `project has no email handler`.
+ *
+ * Schedules and queues are deliberately NOT folded in. They are checked at the
+ * call site against their own resolved lists, not against a scan flag.
+ */
+export function hasNonPageBackend(inputs: NonPageBackendInputs): boolean {
+  return (
+    inputs.hasRoutes ||
+    inputs.hasMiddleware ||
+    inputs.hasWebSockets ||
+    inputs.hasEmail ||
+    inputs.authEnabled ||
+    inputs.hasLive
+  );
+}
+
 export function resolveStaticDeployPreset(
   root: string,
   voidConfig: VoidConfig,
@@ -6168,9 +6205,15 @@ async function runFullDeploy(
       (p) =>
         p.shouldPrerender && ((p.params.length === 0 && !p.catchAll) || p.hasGetPrerenderPaths),
     );
-    const hasNonPageBackend =
-      hasRoutes || hasMiddleware || hasWebSockets || authEnabled || liveConfig !== undefined;
-    if (allPrerenderable && !hasNonPageBackend && schedules.length === 0 && queues.length === 0) {
+    const nonPageBackend = hasNonPageBackend({
+      hasRoutes,
+      hasMiddleware,
+      hasWebSockets,
+      hasEmail: routeScan.email !== undefined && hasEmailHandlers(routeScan.email),
+      authEnabled,
+      hasLive: liveConfig !== undefined,
+    });
+    if (allPrerenderable && !nonPageBackend && schedules.length === 0 && queues.length === 0) {
       log.info('All pages prerendered — deploying as static site');
       cliLog?.info('full_to_static_redirect', { reason: 'all_pages_prerendered' });
       return runStaticDeploy(
