@@ -1,5 +1,4 @@
 import { join } from 'pathslash';
-import { loadEnv } from 'vite';
 import { readConfig } from '../config.ts';
 import { getMiniflareDatabasePath } from '../migrations/runner.ts';
 import {
@@ -8,6 +7,7 @@ import {
   applySqliteAuthMigrations,
 } from '../runtime/auth-migrations.ts';
 import type { VoidAuthDialect, VoidAuthEnv } from '../runtime/better-auth-shared.ts';
+import { loadLocalEnv } from '../shared/env.ts';
 import { findVoidAuthConfig, loadVoidAuthConfig } from './config.ts';
 import { resolveVoidAuthMigrationSchema } from './drizzle.ts';
 
@@ -24,7 +24,7 @@ export async function runLocalVoidAuthMigrations(
     providers: readConfig(root).auth?.providers ?? null,
     userConfig: authConfig,
   };
-  const env = loadEnv('development', root, '') as unknown as VoidAuthEnv;
+  const env = { ...loadLocalEnv(root), ...process.env } as unknown as VoidAuthEnv;
   const migrationSchema = resolveVoidAuthMigrationSchema(runtime, env);
 
   if (dialect === 'sqlite') {

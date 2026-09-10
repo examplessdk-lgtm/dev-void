@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { intro, outro, log, note, cancel, isCancel, password, confirm } from '@clack/prompts';
 import { getToken } from './auth.ts';
 import { PlatformClient } from './client.ts';
+import { validateSecretValues } from './env-validation.ts';
 import { cliTitle } from './output.ts';
 import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
@@ -58,6 +59,7 @@ export async function runSecretCommand(root: string, args: SecretArgs): Promise<
 
   if (args.action === 'put') {
     const value = args.value ?? (await readSecretValue());
+    await validateSecretValues(root, [{ name: args.name, value }]);
     await client.setSecret(projectId, args.name, value);
     outro(`Secret ${args.name} set.`);
     return;
@@ -70,6 +72,8 @@ export async function runSecretCommand(root: string, args: SecretArgs): Promise<
       outro('Nothing to sync.');
       return;
     }
+
+    await validateSecretValues(root, secrets);
 
     log.info(`Found ${secrets.length} secret(s):`);
     for (const s of secrets) {
@@ -123,6 +127,7 @@ async function runCloudflareSecretCommand(root: string, args: SecretArgs): Promi
   }
   if (args.action === 'put') {
     const value = args.value ?? (await readSecretValue());
+    await validateSecretValues(root, [{ name: args.name, value }]);
     await putCloudflareSecret(context, args.name, value);
     outro(`Secret ${args.name} set.`);
     return;
@@ -134,6 +139,7 @@ async function runCloudflareSecretCommand(root: string, args: SecretArgs): Promi
       outro('Nothing to sync.');
       return;
     }
+    await validateSecretValues(root, secrets);
     log.info(`Found ${secrets.length} secret(s):`);
     for (const secret of secrets) {
       log.message(`  ${secret.name}`);

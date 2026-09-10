@@ -2580,14 +2580,14 @@ function scaffoldPagesApp(
   if (starterMode === 'postgresql') {
     const devCommand = getDevCommand(root);
     note(
-      `Add DATABASE_URL to .env.local before running \`${devCommand}\`.\n` +
+      `Add DATABASE_URL to .env before running \`${devCommand}\`.\n` +
         'Void uses that direct connection for local PostgreSQL development.',
       'PostgreSQL local dev',
     );
   } else if (starterMode === 'mysql') {
     const devCommand = getDevCommand(root);
     note(
-      `Add DATABASE_URL to .env.local before running \`${devCommand}\`.\n` +
+      `Add DATABASE_URL to .env before running \`${devCommand}\`.\n` +
         'Void uses that direct connection for local MySQL development.',
       'MySQL local dev',
     );
@@ -3804,9 +3804,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     if (scaffoldResult.written) {
       const rel = relative(root, scaffoldResult.written) || 'env.ts';
       if (scaffoldResult.entries.length > 0) {
-        log.success(
-          `Scaffolded ${rel} from your .env files — review inferred types before running dev.`,
-        );
+        log.success(`Scaffolded ${rel} from .env — review inferred types before running dev.`);
       } else {
         log.success(`Created empty ${rel} — add your env keys with \`defineEnv({...})\`.`);
       }

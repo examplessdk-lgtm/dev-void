@@ -1,4 +1,3 @@
-import type { SecretOverride } from '../shared/env-mask.ts';
 /**
  * Built-in env schema helpers — Standard Schema-conformant.
  *
@@ -25,44 +24,11 @@ type Parser<T> = (raw: string) => ParseResult<T> | ParseError;
 type BuilderState<T> = {
   optional: boolean;
   defaultValue: T | undefined;
-  secretOverride: SecretOverride;
 };
-
-/**
- * Marker property read by the mask helpers. Present only on built-in
- * schema builders; third-party Standard Schema validators fall back to the
- * name/value heuristic (documented in `docs/guide/env-vars.md`).
- */
-export const SECRET_OVERRIDE_SYMBOL: unique symbol = Symbol.for('void.env.secretOverride');
-
-/**
- * Pull the explicit `.secret()` / `.public()` flag off a Standard Schema
- * validator, if it was authored through our built-in helpers. Returns
- * `undefined` for third-party validators (valibot, zod, arktype, …) —
- * they are redacted purely via the heuristic.
- */
-export function getSecretOverride(
-  validator: { [SECRET_OVERRIDE_SYMBOL]?: SecretOverride } | unknown,
-): SecretOverride {
-  if (!validator || typeof validator !== 'object') {
-    return undefined;
-  }
-  return (validator as { [SECRET_OVERRIDE_SYMBOL]?: SecretOverride })[SECRET_OVERRIDE_SYMBOL];
-}
 
 export type EnvSchema<T> = StandardSchemaV1<unknown, T> & {
   optional(): EnvSchema<T | undefined>;
   default(value: NonNullable<T>): EnvSchema<NonNullable<T>>;
-  /**
-   * Force redaction of this key's value in every validation/error surface,
-   * regardless of the key-name / value-content heuristics.
-   */
-  secret(): EnvSchema<T>;
-  /**
-   * Opt this key out of redaction — useful for public config (URLs, app
-   * titles) that happens to match the heuristic (`PUBLIC_KEY`, `…_TOKEN_URL`).
-   */
-  public(): EnvSchema<T>;
 };
 
 function build<T>(parse: Parser<T>, state: BuilderState<T>): EnvSchema<T> {
@@ -93,36 +59,21 @@ function build<T>(parse: Parser<T>, state: BuilderState<T>): EnvSchema<T> {
       return build<T | undefined>(parse as Parser<T | undefined>, {
         optional: true,
         defaultValue: state.defaultValue,
-        secretOverride: state.secretOverride,
       });
     },
     default(value: NonNullable<T>): EnvSchema<NonNullable<T>> {
       return build<NonNullable<T>>(parse as Parser<NonNullable<T>>, {
         optional: false,
         defaultValue: value,
-        secretOverride: state.secretOverride,
       });
     },
-    secret() {
-      return build<T>(parse, { ...state, secretOverride: 'secret' });
-    },
-    public() {
-      return build<T>(parse, { ...state, secretOverride: 'public' });
-    },
   };
-  // Non-enumerable so it doesn't pollute `Object.keys` on user schemas.
-  Object.defineProperty(schema, SECRET_OVERRIDE_SYMBOL, {
-    value: state.secretOverride,
-    enumerable: false,
-    configurable: true,
-  });
   return schema;
 }
 
 const empty = <T>(): BuilderState<T> => ({
   optional: false,
   defaultValue: undefined,
-  secretOverride: undefined,
 });
 
 /** Required string env value. */

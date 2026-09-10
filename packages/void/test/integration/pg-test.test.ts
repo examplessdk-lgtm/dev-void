@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
-const ENV_LOCAL_PATH = join(ROOT, 'playground/pg-test/.env.local');
+const ENV_PATH = join(ROOT, 'playground/pg-test/.env');
 type User = { id: number; name: string; email: string };
 type Post = { id: number; title: string; author: string };
 type PageData = {
@@ -45,10 +45,9 @@ describe('playground/pg-test', () => {
     await once(pgServer, 'listening');
     pgPort = (pgServer.address() as import('node:net').AddressInfo).port;
 
-    // 2. Write .env.local with dynamic DATABASE_URL
-    // Vite's loadEnv reads .env.local and passes vars to the workerd runtime.
+    // 2. Write the single local .env with the dynamic DATABASE_URL.
     const databaseUrl = `postgresql://postgres@127.0.0.1:${pgPort}/postgres`;
-    writeFileSync(ENV_LOCAL_PATH, `DATABASE_URL=${databaseUrl}\n`);
+    writeFileSync(ENV_PATH, `DATABASE_URL=${databaseUrl}\n`);
 
     // 3. Start vite dev server
     devPort = await getPort();
@@ -97,7 +96,7 @@ describe('playground/pg-test', () => {
       await pglite.close();
     }
     try {
-      unlinkSync(ENV_LOCAL_PATH);
+      unlinkSync(ENV_PATH);
     } catch {
       // Ignore missing cleanup files between test runs.
     }

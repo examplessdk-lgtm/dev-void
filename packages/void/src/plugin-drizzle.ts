@@ -166,7 +166,7 @@ function getConnectionString() {
   if (url) return url;
   const hd = getRuntimeBinding("HYPERDRIVE");
   if (hd?.connectionString) return hd.connectionString;
-  throw new Error("db: MySQL is not configured. Add DATABASE_URL to .env.local for local dev, or configure Hyperdrive for production.");
+  throw new Error("db: MySQL is not configured. Add DATABASE_URL to .env for local dev, or configure Hyperdrive for production.");
 }
 
 function getInstance() {
@@ -204,7 +204,7 @@ function getConnectionString() {
   if (url) return url;
   const hd = getRuntimeBinding("HYPERDRIVE");
   if (hd?.connectionString) return hd.connectionString;
-  throw new Error("db: PostgreSQL is not configured. Add DATABASE_URL to .env.local for local dev, or configure Hyperdrive for production.");
+  throw new Error("db: PostgreSQL is not configured. Add DATABASE_URL to .env for local dev, or configure Hyperdrive for production.");
 }
 
 function getInstance() {

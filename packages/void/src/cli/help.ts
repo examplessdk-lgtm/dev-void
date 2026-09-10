@@ -727,27 +727,21 @@ const HELP_TREE: HelpTree = {
     },
   },
   env: {
-    summary: 'Validate env.ts and generate environment artifacts.',
+    summary: 'Validate env.ts and generate environment types.',
     usage: ['void env <command>'],
     commands: [
-      { command: 'check', description: 'Validate env.ts against .env files' },
+      { command: 'check', description: 'Validate local .env or remote secret names' },
       { command: 'types', description: 'Regenerate .void/env.d.ts from env.ts' },
-      { command: 'example', description: 'Generate .env.example from env.ts schema' },
     ],
     children: {
       check: {
-        summary: 'Validate env.ts against .env files and optionally remote secrets.',
+        summary: 'Validate local .env or required remote secret names.',
         usage: ['void env check [options]'],
         options: [
-          { command: '--remote', description: 'Also check required keys as remote secrets' },
+          { command: '--remote', description: 'Check required server keys as remote secrets' },
         ],
       },
       types: basicSubcommand('Regenerate .void/env.d.ts from env.ts.', 'void env types'),
-      example: {
-        summary: 'Refresh the Void-managed block in .env.example.',
-        usage: ['void env example [options]'],
-        options: [{ command: '--force', description: 'Suppress the appended block notice' }],
-      },
     },
   },
   gen: {

@@ -280,8 +280,8 @@ if (helpPath) {
     },
     {
       name: 'env',
-      hint: 'check | types | example',
-      description: 'Validate env.ts, generate types, or scaffold .env.example',
+      hint: 'check | types',
+      description: 'Validate env.ts or generate types',
     },
     {
       name: 'gen',

@@ -302,7 +302,7 @@ describe('envClientGuardPlugin', () => {
     expect(ctx.errors).toHaveLength(1);
   });
 
-  it('honours a custom envPrefix string', async () => {
+  it('does not let a custom Vite envPrefix redefine Void client keys', async () => {
     defineEnv({ PUBLIC_TITLE: string() });
     const ctx = makeContext('client');
     const result = await runTransform(
@@ -311,11 +311,11 @@ describe('envClientGuardPlugin', () => {
       `${ROOT}/src/page.ts`,
       { envPrefix: 'PUBLIC_' },
     );
-    expect(result.threw).toBe(false);
-    expect(ctx.errors).toEqual([]);
+    expect(result.threw).toBe(true);
+    expect(ctx.errors[0]!.message).toContain('VITE_*');
   });
 
-  it('honours a custom envPrefix array', async () => {
+  it('rejects non-VITE keys even when Vite exposes multiple custom prefixes', async () => {
     defineEnv({ PUBLIC_A: string(), NEXT_PUBLIC_B: string() });
     const ctx = makeContext('client');
     const result = await runTransform(
@@ -324,11 +324,11 @@ describe('envClientGuardPlugin', () => {
       `${ROOT}/src/page.ts`,
       { envPrefix: ['PUBLIC_', 'NEXT_PUBLIC_'] },
     );
-    expect(result.threw).toBe(false);
-    expect(ctx.errors).toEqual([]);
+    expect(result.threw).toBe(true);
+    expect(ctx.errors).toHaveLength(1);
   });
 
-  it('errors with custom envPrefix in the message when set', async () => {
+  it('always points to the fixed VITE prefix', async () => {
     defineEnv({ STRIPE_KEY: string() });
     const ctx = makeContext('client');
     const result = await runTransform(
@@ -338,6 +338,6 @@ describe('envClientGuardPlugin', () => {
       { envPrefix: 'PUBLIC_' },
     );
     expect(result.threw).toBe(true);
-    expect(ctx.errors[0]!.message).toContain('PUBLIC_*');
+    expect(ctx.errors[0]!.message).toContain('VITE_*');
   });
 });

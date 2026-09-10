@@ -98,12 +98,8 @@ import {
   resolveSandboxConfig,
 } from '../sandbox/config.ts';
 import { trustedCloudflareWorkerAccessHeaders } from '../shared/cf-access.ts';
-import { mergeAndExpand, parseDotenvFile, scanWranglerDotenvKeys } from '../shared/dotenv.ts';
-import {
-  CLOUDFLARE_DEPLOY_BUILD_ENV,
-  resolveRemoteMode,
-  stripInternalEnvKeys,
-} from '../shared/env.ts';
+import { scanWranglerDotenvKeys } from '../shared/dotenv.ts';
+import { CLOUDFLARE_DEPLOY_BUILD_ENV, resolveRemoteMode } from '../shared/env.ts';
 import { buildEnv, WRANGLER_AUTH_CREDENTIAL_ENV_VARS } from '../shared/untrusted-env.ts';
 import { validateSsrEntry } from '../ssr/entry.ts';
 import { getApiUrl, getToken, getTokenSource } from './auth.ts';
@@ -146,14 +142,11 @@ import type {
   EnvSchemaProbeResult,
   EnvSchemaValidateResult,
 } from './env-schema-probe.ts';
-import type { PlaintextVarWarning } from './env-validation.ts';
 import {
-  collectPlaintextVarWarningsFromVars,
   deriveSelfHostEnvContextFromVars,
   dischargeSelfHostEnvContext,
   fetchRemoteSecretNames,
   formatEnvReport,
-  getDeployEnvDefaults,
   listSelfHostSecretNames,
   readEmittedWorkerVars,
   selfHostSchemaFailureMessage,
@@ -1449,8 +1442,7 @@ function buildSchemaProbeEnv(accountId: string, apiBaseUrl: string): NodeJS.Proc
 
 /**
  * Default {@link CloudflareDeployDeps.resolveSchemaFacts} seam: derive the
- * env-INSENSITIVE schema facts (required-secret NAMES + `.secret()` flags) — and the
- * v1 envDir/mode narrowing — in an ISOLATED SUBPROCESS ({@link
+ * env-INSENSITIVE schema facts (server and required key names) in an ISOLATED SUBPROCESS ({@link
  * resolveEnvSchemaFactsViaSubprocess}) under the scrubbed `env`. The parent runs NO
  * project code: importing the user's env.ts (and resolving the Vite config) happens in
  * the child, so a deferred handler can never read the parent's credentials. Loaded
@@ -1479,33 +1471,6 @@ async function validateEmittedVarsDefault(
   return validateEmittedVarsViaSubprocess(input, env);
 }
 
-/**
- * Clear, values-free guidance for the v1 envDir/mode rejection the facts probe raised
- * (a custom Vite `envDir` or a non-`production` build mode). Rendered from the fixed
- * reason CODE alone — the raw resolved envDir/mode strings never crossed the probe
- * boundary, so nothing here can echo a Vite-config-derived value.
- */
-function cloudflareEnvDirModeRejectMessage(
-  reject: Extract<EnvSchemaProbeResult, { kind: 'reject' }>,
-): string {
-  if (reject.reason === 'custom-envdir') {
-    return [
-      'deploy: --platform cloudflare does not support a custom Vite `envDir` (including `envDir: false`).',
-      'v1 loads env from the project root only. The build reads `.env*` from your envDir but',
-      'generates the auth schema from the project root, so a custom envDir could validate a',
-      'different table set than the worker actually ships. Remove `envDir` from your Vite config',
-      '(or point it back at the project root), then rerun — or deploy this app with `void deploy`',
-      '(the managed platform).',
-    ].join('\n');
-  }
-  return [
-    'deploy: --platform cloudflare builds in production mode only (your build resolves to a non-production mode).',
-    'A non-production build mode selects a different `.env.<mode>` set than this backend validates.',
-    'Remove the custom `mode` from your Vite config / build command so the build runs in production,',
-    'then rerun — or deploy this app with `void deploy` (the managed platform).',
-  ].join('\n');
-}
-
 /** Re-export so existing importers (and tests) keep reading the type from deploy.ts. */
 export type { EmittedWorkerVarsResult };
 
@@ -1520,230 +1485,31 @@ function readEmittedWorkerVarsDefault(root: string): EmittedWorkerVarsResult {
   return readEmittedWorkerVars(root);
 }
 
-type CloudflareSchemaSecretFailureReason =
-  | 'invalid-value'
-  | 'config-invalid'
-  | 'uploader-changed'
-  | 'list-failed'
-  | 'bulk-failed'
-  | 'verification-failed';
-
-/** Values-free failure from promotion of schema-marked Cloudflare secrets. */
-export class CloudflareSchemaSecretError extends Error {
-  override name = 'CloudflareSchemaSecretError';
-
-  constructor(
-    message: string,
-    readonly reason: CloudflareSchemaSecretFailureReason,
-  ) {
-    super(message);
+function resolveGeneratedDeployConfigPathDefault(root: string): string {
+  const pointerPath = deployPointerPath(root);
+  const pointer = JSON.parse(readFileSync(pointerPath, 'utf-8')) as { configPath?: unknown };
+  if (typeof pointer.configPath !== 'string' || pointer.configPath.length === 0) {
+    throw new Error(`Generated Cloudflare deploy pointer ${pointerPath} has no configPath.`);
   }
+  return resolve(dirname(pointerPath), pointer.configPath);
 }
 
 function readGeneratedDeployConfig(root: string): {
   path: string;
   config: Record<string, unknown>;
 } {
-  const pointerPath = deployPointerPath(root);
-  let redirectedPath: string;
-  try {
-    const pointer = JSON.parse(readFileSync(pointerPath, 'utf-8')) as { configPath?: unknown };
-    if (typeof pointer.configPath !== 'string' || pointer.configPath.length === 0) {
-      throw new Error('missing pointer');
-    }
-    redirectedPath = resolve(dirname(pointerPath), pointer.configPath);
-  } catch {
-    throw new CloudflareSchemaSecretError(
-      'deploy: could not resolve the generated Cloudflare config while preparing schema secrets.',
-      'config-invalid',
-    );
-  }
+  const redirectedPath = resolveGeneratedDeployConfigPathDefault(root);
   try {
     const config = JSON.parse(readFileSync(redirectedPath, 'utf-8')) as unknown;
     if (config === null || typeof config !== 'object' || Array.isArray(config)) {
       throw new Error('malformed config');
     }
     return { path: redirectedPath, config: config as Record<string, unknown> };
-  } catch (error) {
-    if (error instanceof CloudflareSchemaSecretError) {
-      throw error;
-    }
-    throw new CloudflareSchemaSecretError(
-      'deploy: the generated Cloudflare config is not valid JSON; no schema secrets were uploaded.',
-      'config-invalid',
+  } catch {
+    throw new Error(
+      `Generated Cloudflare deploy config ${redirectedPath} is missing or invalid JSON.`,
     );
   }
-}
-
-/**
- * Promote explicit `env.ts` `.secret()` values from generated plaintext vars to
- * Cloudflare Worker secrets. Values are streamed as JSON over stdin, remote-only
- * marked secrets are inherited, and no remote secret is ever deleted.
- */
-export async function syncCloudflareSchemaSecrets(options: {
-  root: string;
-  configPath: string;
-  accountId?: string;
-  workerName: string;
-  emittedVars: Record<string, unknown>;
-  secretKeys: Array<string>;
-  excludeKeys?: Array<string>;
-  runWrangler: DeployWranglerRun;
-  beforeWranglerRun?: () => boolean;
-}): Promise<{
-  requiredSecretNames: Array<string>;
-  uploaded: number;
-  workerWasMissing?: true;
-}> {
-  const excluded = new Set(options.excludeKeys ?? []);
-  const secretKeys = [...new Set(options.secretKeys)].filter((key) => !excluded.has(key));
-  if (secretKeys.length === 0) {
-    return { requiredSecretNames: [], uploaded: 0 };
-  }
-
-  const uploadValues: Record<string, string> = {};
-  for (const key of secretKeys) {
-    if (!Object.prototype.hasOwnProperty.call(options.emittedVars, key)) {
-      continue;
-    }
-    const value = options.emittedVars[key];
-    if (value === '') {
-      continue;
-    }
-    if (typeof value !== 'string') {
-      throw new CloudflareSchemaSecretError(
-        `deploy: schema secret ${key} must resolve to a string before it can be uploaded.`,
-        'invalid-value',
-      );
-    }
-    uploadValues[key] = value;
-  }
-
-  const beforeRun = (): void => {
-    if (options.beforeWranglerRun && !options.beforeWranglerRun()) {
-      throw new CloudflareSchemaSecretError('', 'uploader-changed');
-    }
-  };
-  let workerWasMissing = false;
-  const list = async (allowMissingWorker: boolean): Promise<Array<string>> => {
-    beforeRun();
-    try {
-      return await listSelfHostSecretNames(
-        {
-          root: options.root,
-          configPath: options.configPath,
-          accountId: options.accountId,
-          workerName: options.workerName,
-          runWrangler: (args) => options.runWrangler(args, { capture: true }),
-        },
-        secretKeys,
-      );
-    } catch (error) {
-      if (allowMissingWorker && error instanceof SelfHostFirstDeployError) {
-        workerWasMissing = true;
-        return [];
-      }
-      if (error instanceof SelfHostFirstDeployError || error instanceof SelfHostSecretListError) {
-        throw new CloudflareSchemaSecretError(
-          'deploy: could not confirm the remote schema secrets. No Worker was uploaded; run `void secret list` and retry.',
-          allowMissingWorker ? 'list-failed' : 'verification-failed',
-        );
-      }
-      throw error;
-    }
-  };
-
-  const existing = await list(true);
-  const marked = new Set(secretKeys);
-  const requiredSecretNames = [
-    ...new Set([...Object.keys(uploadValues), ...existing.filter((name) => marked.has(name))]),
-  ].sort();
-
-  const generated = readGeneratedDeployConfig(options.root);
-  const rawVars = generated.config.vars;
-  if (
-    rawVars !== undefined &&
-    (rawVars === null || typeof rawVars !== 'object' || Array.isArray(rawVars))
-  ) {
-    throw new CloudflareSchemaSecretError(
-      'deploy: the generated Cloudflare config has a malformed vars field; no schema secrets were uploaded.',
-      'config-invalid',
-    );
-  }
-  const vars = { ...((rawVars as Record<string, unknown> | undefined) ?? {}) };
-  for (const key of secretKeys) {
-    delete vars[key];
-  }
-  generated.config.vars = vars;
-
-  const rawSecrets = generated.config.secrets;
-  if (
-    rawSecrets !== undefined &&
-    (rawSecrets === null || typeof rawSecrets !== 'object' || Array.isArray(rawSecrets))
-  ) {
-    throw new CloudflareSchemaSecretError(
-      'deploy: the generated Cloudflare config has a malformed secrets field; no schema secrets were uploaded.',
-      'config-invalid',
-    );
-  }
-  const secrets = { ...((rawSecrets as Record<string, unknown> | undefined) ?? {}) };
-  const rawRequired = secrets.required;
-  if (
-    rawRequired !== undefined &&
-    (!Array.isArray(rawRequired) || !rawRequired.every((name) => typeof name === 'string'))
-  ) {
-    throw new CloudflareSchemaSecretError(
-      'deploy: the generated Cloudflare config has a malformed secrets.required field; no schema secrets were uploaded.',
-      'config-invalid',
-    );
-  }
-  const existingRequired = (rawRequired as Array<string> | undefined) ?? [];
-  secrets.required = [...new Set([...existingRequired, ...requiredSecretNames])].sort();
-  generated.config.secrets = secrets;
-  writeFileSync(generated.path, `${JSON.stringify(generated.config, null, 2)}\n`);
-
-  const entries = Object.entries(uploadValues);
-  for (let offset = 0; offset < entries.length; offset += 100) {
-    const chunk = Object.fromEntries(entries.slice(offset, offset + 100));
-    beforeRun();
-    let result: DeployWranglerRunResult;
-    try {
-      result = await Promise.resolve(
-        options.runWrangler(['secret', 'bulk', '-c', options.configPath, '--env='], {
-          capture: true,
-          input: `${JSON.stringify(chunk)}\n`,
-        }),
-      );
-    } catch {
-      throw new CloudflareSchemaSecretError(
-        'deploy: Cloudflare schema-secret upload failed. No secret value was logged; retry the deploy.',
-        'bulk-failed',
-      );
-    }
-    if (!isCleanWranglerExit(result)) {
-      throw new CloudflareSchemaSecretError(
-        `deploy: Cloudflare schema-secret upload failed (wrangler exit ${String(result.status)}). No secret value was logged; retry the deploy.`,
-        'bulk-failed',
-      );
-    }
-  }
-
-  if (entries.length > 0) {
-    const verified = new Set(await list(false));
-    const missing = Object.keys(uploadValues).filter((key) => !verified.has(key));
-    if (missing.length > 0) {
-      throw new CloudflareSchemaSecretError(
-        `deploy: Cloudflare did not confirm these uploaded schema secrets: ${missing.join(', ')}. No Worker was uploaded; retry once secret storage is available.`,
-        'verification-failed',
-      );
-    }
-  }
-
-  return {
-    requiredSecretNames,
-    uploaded: entries.length,
-    ...(workerWasMissing ? { workerWasMissing: true as const } : {}),
-  };
 }
 
 /**
@@ -2374,8 +2140,6 @@ export interface CloudflareDeployDeps {
   dischargeSelfHostEnv?: typeof dischargeSelfHostEnvContext;
   /** Persistent Better Auth secret seam (default: {@link ensureCloudflareAuthSecret}). */
   ensureAuthSecret?: typeof ensureCloudflareAuthSecret;
-  /** Schema-marked Worker secret sync seam (default: {@link syncCloudflareSchemaSecrets}). */
-  syncSchemaSecrets?: typeof syncCloudflareSchemaSecrets;
   /** Generated-deploy-config verification seam (default: {@link verifyGeneratedDeployConfig}). */
   verifyDeployConfig?: typeof verifyGeneratedDeployConfig;
   /** Resolve the generated config selected by the fresh deploy pointer. */
@@ -2397,7 +2161,7 @@ export interface CloudflareDeployDeps {
   /**
    * Isolated env-schema probe seam (default: the {@link EnvSchemaProbeInput}
    * subprocess). Receives a scrubbed env and returns the env-INSENSITIVE schema facts
-   * (required-secret NAMES + `.secret()` flags), derived by importing env.ts in the
+   * (server and required key names), derived by importing env.ts in the
    * child, so the parent runs no project code. A `schema-error` (env.ts failed to
    * evaluate, or a validator threw) fails the deploy closed.
    */
@@ -2419,7 +2183,7 @@ export interface CloudflareDeployDeps {
   /**
    * Emitted-worker-vars read seam (default: {@link readEmittedWorkerVarsDefault}).
    * Runs POST-build: reads the REAL `vars` map the build baked into
-   * `dist/ssr/wrangler.json` — the ground truth the plaintext warnings + secret gate
+   * `dist/ssr/wrangler.json` — the ground truth the plaintext-server-key + secret gate
    * validate.
    */
   readEmittedWorkerVars?: (root: string) => EmittedWorkerVarsResult;
@@ -2433,17 +2197,6 @@ const CLOUDFLARE_RESOURCE_LABELS: Record<ProvisionDriftEntry['kind'], string> = 
   kv: 'KV namespace',
   r2: 'R2 bucket',
   hyperdrive: 'Hyperdrive config',
-};
-
-/**
- * Why a plaintext worker var was flagged, rendered next to its key name. These
- * are VALUES-FREE by construction — the classifier inspects a value to pick the
- * reason, but only ever returns the key, so nothing here can echo a secret.
- */
-const PLAINTEXT_WARNING_REASONS: Record<PlaintextVarWarning['reason'], string> = {
-  'schema-secret': ' (env.ts .secret())',
-  heuristic: '',
-  'value-shape': ' (value looks like a connection URL with embedded credentials)',
 };
 
 const BETTER_AUTH_SECRET_NAME = 'BETTER_AUTH_SECRET';
@@ -4040,20 +3793,10 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
-  // 3c. Derive the env-INSENSITIVE schema facts — the required-secret NAMES + the keys
-  // flagged `.secret()` — AND enforce the v1 envDir/mode narrowing, in an ISOLATED
-  // SUBPROCESS under a scrubbed env. Importing the user's env.ts + resolving the Vite
-  // config is arbitrary project code, so it must not run in this credential-bearing
-  // parent; the child does it safely (it `process.exit`s). The child resolves the config
-  // purely to read the effective `{ envDir, mode }` and REJECTS a custom envDir /
-  // non-production mode: the build generates the auth artifact under the project ROOT
-  // while the worker `vars` come from the build's envDir, so a custom envDir could
-  // validate a different table set than the worker ships. The REAL worker vars the gate
-  // validates come from the emitted `dist/ssr/wrangler.json` AFTER the build (ground
-  // truth), not from here. The child env scrubs the FULL wrangler-auth credential set and
-  // pins `NODE_ENV=production` (see {@link buildSchemaProbeEnv}). Run pre-build so a custom
-  // envDir / non-production mode / broken env.ts fails fast, before any account op
-  // (whoami / provision / build).
+  // 3c. Derive the env-INSENSITIVE server and required key names in an ISOLATED
+  // SUBPROCESS under a scrubbed env. Importing the user's env.ts is arbitrary project
+  // code, so it must not run in this credential-bearing parent. Run pre-build so a
+  // broken env.ts fails fast before any account operation.
   const schemaProbeEnv = buildSchemaProbeEnv(accountId, apiBaseUrl);
   let schemaResult: EnvSchemaProbeResult;
   try {
@@ -4062,13 +3805,7 @@ export async function runCloudflareDeploy(
       schemaProbeEnv,
     );
   } catch (err) {
-    log.error(
-      `deploy: could not derive the env schema (required secrets / .secret() flags) — ${getErrorMessage(err)}`,
-    );
-    return exit(1);
-  }
-  if (schemaResult.kind === 'reject') {
-    log.error(cloudflareEnvDirModeRejectMessage(schemaResult));
+    log.error(`deploy: could not derive the env schema — ${getErrorMessage(err)}`);
     return exit(1);
   }
   if (schemaResult.kind === 'schema-error') {
@@ -4502,6 +4239,7 @@ export async function runCloudflareDeploy(
         voidConfig,
         detectedFramework,
         frameworkPreset,
+        schemaFacts.requiredKeys,
       );
     } catch (error) {
       log.error(
@@ -4562,31 +4300,6 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
   const emittedVars = emitted.vars;
-  const schemaSecretKeys = schemaFacts.hasSchema
-    ? schemaFacts.secretKeys.filter((key) => !(authEnabled && key === BETTER_AUTH_SECRET_NAME))
-    : [];
-  if (existingWorker && schemaSecretKeys.some((key) => Object.hasOwn(emittedVars, key))) {
-    throw new Error(
-      'Linking preserves existing encrypted secrets. Remove local secret overrides and make secret changes after the handoff.',
-    );
-  }
-
-  // Explicit schema secrets are about to be promoted, so classify warnings
-  // against the plaintext vars that will actually remain in the artifact.
-  // Validate the transport shape early and without printing any value.
-  const remainingPlaintextVars = { ...emittedVars };
-  for (const key of schemaSecretKeys) {
-    if (!Object.prototype.hasOwnProperty.call(emittedVars, key)) {
-      continue;
-    }
-    const value = emittedVars[key];
-    if (value !== '' && typeof value !== 'string') {
-      log.error(`deploy: schema secret ${key} must resolve to a string before it can be uploaded.`);
-      return exit(1);
-    }
-    delete remainingPlaintextVars[key];
-  }
-
   // Better Auth's signing secret must never be baked into the generated config.
   // Match the managed Void deploy contract: the deploy target owns this secret
   // and stores it through its encrypted secret API, not through plaintext vars.
@@ -4594,26 +4307,23 @@ export async function runCloudflareDeploy(
     log.error(
       [
         `deploy: ${BETTER_AUTH_SECRET_NAME} must be stored as a Cloudflare Worker secret, not a plaintext worker var.`,
-        'Remove it from .env / .env.production and rerun. This deploy command preserves an',
+        'Remove it from Worker vars and rerun. This deploy command preserves an',
         'existing remote value or creates a persistent one automatically when it is missing.',
       ].join('\n'),
     );
     return exit(1);
   }
 
-  // 8a. Plaintext-var warnings — classify the secret-looking keys among the REAL emitted vars
-  // (`.secret()`-flagged from the schema facts, OR the shared name heuristic). Ground truth —
-  // no `loadEnv`, no facsimile.
-  const warnings = collectPlaintextVarWarningsFromVars(remainingPlaintextVars, []);
-  if (warnings.secretKeys.length > 0) {
-    log.warn(
+  const plaintextServerKeys = schemaFacts.serverKeys.filter((key) => key in emittedVars);
+  if (plaintextServerKeys.length > 0) {
+    log.error(
       [
-        'deploy: these worker vars ship as PLAINTEXT in the deployed config:',
-        // Key names + why they were flagged only — never a value.
-        ...warnings.secretKeys.map((k) => `  • ${k.key}${PLAINTEXT_WARNING_REASONS[k.reason]}`),
-        'Move real secrets to `void secret put <NAME>` so they are not baked into wrangler.json.',
+        'deploy: server env keys cannot ship as plaintext Worker vars:',
+        ...plaintextServerKeys.map((key) => `  • ${key}`),
+        'Remove them from Worker vars and set them with `void secret put <NAME>`.',
       ].join('\n'),
     );
+    return exit(1);
   }
 
   // 8b. Required-secret gate — build the values-free context from the REAL emitted vars + the
@@ -5027,40 +4737,7 @@ export async function runCloudflareDeploy(
     }
   }
 
-  // 10. Promote explicit `.secret()` schema values only after every migration
-  // gate/apply has succeeded, immediately before final verification + upload.
-  // The sync rewrites the fresh generated artifact to remove plaintext values,
-  // bulk uploads over stdin, and inherits both uploaded and remote-only marked
-  // secrets without pruning anything from Cloudflare.
-  let requiredSchemaSecretNames: Array<string> = [];
-  if (schemaSecretKeys.length > 0) {
-    try {
-      const synced = await (deps.syncSchemaSecrets ?? syncCloudflareSchemaSecrets)({
-        root,
-        configPath,
-        accountId,
-        workerName,
-        emittedVars,
-        secretKeys: schemaSecretKeys,
-        runWrangler,
-        beforeWranglerRun: assertUploaderStillPinned,
-      });
-      workerWasMissingBeforeSecretProvisioning ||= synced.workerWasMissing === true;
-      requiredSchemaSecretNames = synced.requiredSecretNames;
-      cliLog.info('cloudflare_schema_secrets_ready', { uploaded: synced.uploaded });
-    } catch (error) {
-      if (error instanceof CloudflareSchemaSecretError && error.reason === 'uploader-changed') {
-        return exit(1);
-      }
-      if (error instanceof CloudflareSchemaSecretError) {
-        log.error(error.message);
-        return exit(1);
-      }
-      throw error;
-    }
-  }
-
-  // 10b. Verify the generated deploy config targets the pinned account + expected worker
+  // 10. Verify the generated deploy config targets the pinned account + expected worker
   // AND the exact provisioned binding IDENTITIES BEFORE uploading. A `CLOUDFLARE_ENV` /
   // `CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH` the CF plugin loaded could have baked a
   // different account/name — or the SAME account/name with a flattened, DIFFERENT binding
@@ -5080,7 +4757,7 @@ export async function runCloudflareDeploy(
     passthroughRawFields,
     needsAI,
     authEnabled,
-    requiredSecretNames: requiredSchemaSecretNames,
+    requiredSecretNames: schemaFacts.requiredKeys,
     expectedContainers,
     expectedCrons,
   });
@@ -5121,8 +4798,7 @@ export async function runCloudflareDeploy(
   // Final uploader re-verification immediately before the deploy — the last and most privileged
   // credentialed run of the hashed bundle. Against the same pre-build baseline; fail closed.
   const generatedConfigPath = (
-    deps.resolveGeneratedConfigPath ??
-    ((projectRoot) => readGeneratedDeployConfig(projectRoot).path)
+    deps.resolveGeneratedConfigPath ?? resolveGeneratedDeployConfigPathDefault
   )(root);
   const queueConsumerCleanup = readWranglerManagedQueueCleanupCandidates(configPath);
   if (existingWorker) {
@@ -5379,6 +5055,7 @@ export async function prepareCloudflareFrameworkArtifact(
   voidConfig: VoidConfig,
   framework: DetectedFramework,
   preset: FrameworkPreset,
+  requiredSecretNames: ReadonlyArray<string> = [],
 ): Promise<void> {
   const workerMain = join(root, preset.workerDir, preset.workerMain);
   const assetsDirectory = join(root, preset.assetsDir);
@@ -5422,6 +5099,7 @@ export async function prepareCloudflareFrameworkArtifact(
       '2026-09-11',
     compatibilityFlags: preset.cloudflareCompatibilityFlags,
     crons: crons.flatMap((job) => job.crons),
+    requiredSecrets: requiredSecretNames,
     ...(preset.workerDir === preset.assetsDir
       ? {
           assetsIgnore: [
@@ -6245,13 +5923,9 @@ export type PrerenderSourceInputs = {
  * returns `[...new Set([])]`, so skipping is result-identical.
  *
  * Skipping matters beyond speed. `collectPrerenderPaths` boots the worker in
- * Miniflare with bindings from `wranglerVars + loadEnv('production', root, '')`
- * only, and the generated fetch handler validates the `env.ts` schema at boot.
- * An app whose secrets live on the platform (never in a committed `.env`) gets
- * an HTTP 500 there and the deploy dies — for an app that had nothing to
- * prerender in the first place. The only workaround was moving the secret into
- * `.env.production`, which `loadDeployEnv` then publishes as a plaintext
- * manifest var. So this guard also removes a real incentive to leak secrets.
+ * Miniflare without remote production secrets, and the generated fetch handler
+ * validates `env.ts` at boot. An app with nothing to prerender should not fail
+ * merely because that unnecessary worker boot cannot access the remote store.
  */
 export function hasPrerenderSources(inputs: PrerenderSourceInputs): boolean {
   return inputs.hasPages || inputs.hasSsrEntry || (inputs.explicitPrerenderPaths?.length ?? 0) > 0;
@@ -7060,16 +6734,12 @@ async function runFrameworkDeploy(
     ...(q.maxBatchTimeout != null && { maxBatchTimeout: q.maxBatchTimeout }),
   }));
 
-  // 10. Load .env vars for production (excludes .local files)
-  const envVars = loadDeployEnv(root);
+  // Production env values are remote secrets. Client values are compiled
+  // from schema defaults or the build shell; no dotenv value enters the manifest.
+  const envVars: Record<string, string> = {};
 
   // 10a. Validate against env.ts schema if present.
   await assertEnvSchemaValid(root, client, config.projectId);
-
-  // 10b. Overlay schema `.default(value)` entries for keys not set in
-  //     .env files so the deployed worker sees the same fallback as the
-  //     typed `env.X` proxy.
-  await applySchemaDefaultsToVars(root, envVars);
 
   // 11. Package & deploy
   const s = createSpinner();
@@ -7573,16 +7243,11 @@ async function runFullDeploy(
   );
   const workerMain = resolveDeployWorkerMain(deployConfig, join(distDir, workerDirName));
 
-  // 9. Load .env vars for production (excludes .local files)
-  const envVars = loadDeployEnv(root);
+  // Production env values are remote secrets; dotenv is local-only.
+  const envVars: Record<string, string> = {};
 
   // 9a. Validate against env.ts schema if present.
   await assertEnvSchemaValid(root, client, config.projectId);
-
-  // 9b. Overlay schema `.default(value)` entries for keys not set in
-  //     .env files so the deployed worker sees the same fallback as the
-  //     typed `env.X` proxy.
-  await applySchemaDefaultsToVars(root, envVars);
 
   // 10. Package & Upload
   const s = createSpinner();
@@ -8023,24 +7688,6 @@ function migrationSnapshotsEqual(
 }
 
 /**
- * Overlay schema `.default(value)` entries onto the deploy manifest vars so
- * the deployed worker sees the same fallback as the typed `env.X` proxy at
- * runtime. User-provided `.env*` values always win — defaults only fill
- * gaps. No-op when the project has no `env.ts`.
- */
-async function applySchemaDefaultsToVars(
-  root: string,
-  envVars: Record<string, string>,
-): Promise<void> {
-  const defaults = await getDeployEnvDefaults(root);
-  for (const [key, value] of Object.entries(defaults)) {
-    if (envVars[key] === undefined) {
-      envVars[key] = value;
-    }
-  }
-}
-
-/**
  * If the project has an `env.ts`, validate its schema against the union of
  * production env files and remote secret names. Hard-error before upload so
  * deploys never ship missing required env vars.
@@ -8068,29 +7715,10 @@ async function assertEnvSchemaValid(
   log.error(`Env validation failed:\n${formatted}`);
   if (report.missing.length > 0) {
     log.info(
-      `Add the missing values to .env / .env.production, or upload them with \`void secret put <NAME>\`.`,
+      'Upload missing server values with `void secret put <NAME>`; set VITE_* values in the build shell or schema defaults.',
     );
   }
   throw new DeployEventError('deploy: Aborting because env.ts schema is not satisfied.');
-}
-
-/**
- * Load env vars for deploy — only .env and .env.production (not .local files).
- * Later files win on conflict.
- */
-export function loadDeployEnv(root: string): Record<string, string> {
-  // Same parse + merge + expand path env validation uses, so the shipped
-  // values match what was validated.
-  const files = ['.env', '.env.production'];
-  const parsed = files.map((file) => parseDotenvFile(join(root, file), { expand: false }));
-  const env = mergeAndExpand(parsed, { onWarn: (msg) => voidWarn(msg) });
-  const { sanitized, stripped } = stripInternalEnvKeys(env);
-  if (stripped.length > 0) {
-    voidWarn(
-      `Ignoring internal env keys from .env files: ${stripped.join(', ')}. These are reserved for Void runtime use and will not be shipped in the deploy manifest.`,
-    );
-  }
-  return sanitized;
 }
 
 /**

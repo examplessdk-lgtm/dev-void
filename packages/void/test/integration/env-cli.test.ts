@@ -90,19 +90,19 @@ describe('void env check (subprocess)', () => {
     expect(combined).toContain('STRIPE_KEY');
   });
 
-  it('exits 0 when .env.production satisfies every required key', () => {
+  it('exits 0 when .env satisfies every required key locally', () => {
     const root = createProject('{ STRIPE_KEY: string(), PORT: number() }');
-    writeFileSync(join(root, '.env.production'), 'STRIPE_KEY=sk_live\nPORT=8080\n');
+    writeFileSync(join(root, '.env'), 'STRIPE_KEY=sk_dev\nPORT=8080\n');
     const { stdout, status } = runVoid(root, ['env', 'check']);
     expect(status).toBe(0);
-    expect(stdout).toContain('All required env vars');
+    expect(stdout).toContain('Local .env values are valid');
   });
 
   it('redacts secret-looking values from invalid-env report output', () => {
     // PORT expects a number; the user accidentally pasted an API key.
     // The CLI output must NOT contain the raw token.
     const root = createProject('{ PORT: number() }');
-    writeFileSync(join(root, '.env.production'), 'PORT=sk_live_abc123456\n');
+    writeFileSync(join(root, '.env'), 'PORT=sk_live_abc123456\n');
     const { stdout, status } = runVoid(root, ['env', 'check']);
     expect(status).toBe(1);
     expect(stdout).toContain('PORT');
@@ -110,15 +110,13 @@ describe('void env check (subprocess)', () => {
     expect(stdout).toContain('<redacted>');
   });
 
-  it('ignores .env.local in the deploy-style productionOnly check', () => {
-    // This is the guardrail behaviour: `void env check` defaults to the
-    // same productionOnly filter deploy uses. A dev-only .env.local must
-    // not mask a missing prod secret.
+  it('rejects legacy .env.local files', () => {
     const root = createProject('{ STRIPE_KEY: string() }');
     writeFileSync(join(root, '.env.local'), 'STRIPE_KEY=sk_dev\n');
     const { stdout, status } = runVoid(root, ['env', 'check']);
     expect(status).toBe(1);
-    expect(stdout).toContain('STRIPE_KEY');
+    expect(stdout).toContain('only .env is supported');
+    expect(stdout).toContain('.env.local');
   });
 });
 

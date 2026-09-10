@@ -113,6 +113,61 @@ describe('envSchemaPlugin auto-discovery', () => {
     expect(existsSync(join(root, '.void', 'env.d.ts'))).toBe(false);
   });
 
+  it('rejects legacy dotenv variants when env.ts exists', async () => {
+    const root = createTempRoot();
+    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+    writeFileSync(join(root, '.env.production'), 'API_URL=https://example.com\n');
+
+    await expect(runConfig(envSchemaPlugin(root))).rejects.toThrow('supports one local file: .env');
+  });
+
+  it('removes local .env client values from production builds', async () => {
+    const { defineEnv } = await import('../../src/runtime/env-public.ts');
+    const { string } = await import('../../src/runtime/env-helpers.ts');
+    const root = createTempRoot();
+    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+    writeFileSync(join(root, '.env'), 'VITE_TITLE=Local only\n');
+
+    const plugin = envSchemaPlugin(root);
+    await runConfig(plugin);
+    defineEnv({ VITE_TITLE: string() });
+    const resolved = {
+      command: 'build',
+      mode: 'production',
+      envDir: root,
+      envPrefix: 'VITE_',
+      env: { VITE_TITLE: 'Local only' },
+      define: {},
+    };
+
+    await expect(runConfigResolved(plugin, resolved)).rejects.toThrow('VITE_TITLE is required');
+    expect(resolved.env.VITE_TITLE).toBeUndefined();
+  });
+
+  it('reports server and required names without values', async () => {
+    const { defineEnv } = await import('../../src/runtime/env-public.ts');
+    const { string } = await import('../../src/runtime/env-helpers.ts');
+    defineEnv({
+      API_TOKEN: string(),
+      OPTIONAL_REGION: string().optional(),
+      VITE_TITLE: string(),
+    });
+    const root = createTempRoot();
+    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+    const facts: Array<unknown> = [];
+
+    const plugin = envSchemaPlugin(root, { onSchema: (value) => facts.push(value) });
+    const configHook = plugin.config as (config: Record<string, unknown>, env: unknown) => unknown;
+    await configHook.call({}, { envPrefix: 'PUBLIC_' }, { mode: 'production' });
+
+    expect(facts.at(-1)).toEqual({
+      keys: ['API_TOKEN', 'OPTIONAL_REGION', 'VITE_TITLE'],
+      clientKeys: ['VITE_TITLE'],
+      serverKeys: ['API_TOKEN', 'OPTIONAL_REGION'],
+      requiredServerKeys: ['API_TOKEN'],
+    });
+  });
+
   // The define-overlap warning runs in `configResolved`. We register the
   // schema directly via `defineEnv` (rather than through a temp env.ts loaded
   // by jiti) so the singleton the plugin reads matches the one the test
@@ -232,7 +287,7 @@ describe('envSchemaPlugin auto-discovery', () => {
     expect(resolved.env.VITE_TITLE).toBe('FromEnv');
   });
 
-  it('honours custom envPrefix values when exposing schema defaults', async () => {
+  it('uses VITE_ even when Vite has a custom envPrefix', async () => {
     const { defineEnv } = await import('../../src/runtime/env-public.ts');
     const { string } = await import('../../src/runtime/env-helpers.ts');
     const root = createTempRoot();
@@ -254,29 +309,6 @@ describe('envSchemaPlugin auto-discovery', () => {
     };
     await runConfigResolved(plugin, resolved);
 
-    expect(resolved.env).toEqual({ PUBLIC_TITLE: 'Public' });
-  });
-
-  it('reports only keys explicitly marked secret', async () => {
-    const { defineEnv } = await import('../../src/runtime/env-public.ts');
-    const { string } = await import('../../src/runtime/env-helpers.ts');
-    defineEnv({
-      API_TOKEN: string().secret(),
-      PUBLIC_KEY: string().public(),
-      ORDINARY: string(),
-    });
-    const root = createTempRoot();
-    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
-    let secretKeys: Array<string> = [];
-
-    await runConfig(
-      envSchemaPlugin(root, {
-        onSecrets(keys) {
-          secretKeys = keys;
-        },
-      }),
-    );
-
-    expect(secretKeys).toEqual(['API_TOKEN']);
+    expect(resolved.env).toEqual({ VITE_TITLE: 'Vite' });
   });
 });

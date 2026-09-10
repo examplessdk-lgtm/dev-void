@@ -26,6 +26,7 @@ import { detectFramework } from '../plugin-inference.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import type { SeedFn } from '../runtime/seed.ts';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
+import { loadLocalEnv } from '../shared/env.ts';
 import { getProxyUrl, getToken } from './auth.ts';
 import { PlatformApiError, PlatformClient } from './client.ts';
 import type { DbArgs } from './db-args.ts';
@@ -84,51 +85,22 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function readEnvLocal(root: string): Record<string, string> {
-  const envPath = join(root, '.env.local');
-  if (!existsSync(envPath)) {
-    return {};
-  }
-  const content = readFileSync(envPath, 'utf-8');
-  const vars: Record<string, string> = {};
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
-      continue;
-    }
-    const eqIndex = trimmed.indexOf('=');
-    if (eqIndex === -1) {
-      continue;
-    }
-    const key = trimmed.slice(0, eqIndex).trim();
-    let value = trimmed.slice(eqIndex + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    vars[key] = value;
-  }
-  return vars;
-}
-
 function getPgUrl(root: string): string {
-  const vars = readEnvLocal(root);
+  const vars = loadLocalEnv(root);
   const url = vars.DATABASE_URL;
   if (!url) {
     throw new Error(
-      'DATABASE_URL not found in .env.local. Add it to connect to your PostgreSQL database.',
+      'DATABASE_URL not found in .env. Add it to connect to your local PostgreSQL database.',
     );
   }
   return url;
 }
 
 function getMySqlUrl(root: string): string {
-  const url = readEnvLocal(root).DATABASE_URL;
+  const url = loadLocalEnv(root).DATABASE_URL;
   if (!url) {
     throw new Error(
-      'DATABASE_URL not found in .env.local. Add it to connect to your MySQL database.',
+      'DATABASE_URL not found in .env. Add it to connect to your local MySQL database.',
     );
   }
   return url;
@@ -222,7 +194,7 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
 }
 
 export function writeLocalDatabaseUrl(root: string, connectionString: string): void {
-  const envPath = join(root, '.env.local');
+  const envPath = join(root, '.env');
   const original = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : '';
   const lines = original ? original.replace(/\r\n/g, '\n').split('\n') : [];
   const assignment = `DATABASE_URL=${JSON.stringify(connectionString)}`;
@@ -351,7 +323,7 @@ async function runConnect(
   }
 
   writeLocalDatabaseUrl(root, connectionString);
-  log.success('Saved DATABASE_URL to .env.local.');
+  log.success('Saved DATABASE_URL to .env.');
 
   if (!args.localOnly) {
     const token = getToken(root);
@@ -397,11 +369,10 @@ async function runGenerate(root: string, dialect: DatabaseDialect): Promise<void
   const { prepareProject } = await import('../codegen/prepare.ts');
   const { writeDrizzleConfig } = await import('../drizzle/config.ts');
 
-  // Generate the auth schema using the same production env mode Cloudflare deploy
-  // builds with, then include those tables in Drizzle Kit's schema input. This makes
+  // Generate the auth schema, then include those tables in Drizzle Kit's schema input. This makes
   // Better Auth tables ordinary, reviewable migration SQL instead of a deploy-time
   // side effect. `prepareProject` removes a stale file when auth is no longer enabled.
-  await prepareProject(root, { mode: 'production' });
+  await prepareProject(root);
   const authSchemaPath = join(root, '.void', 'better-auth-schema.ts');
   const additionalSchemas = existsSync(authSchemaPath) ? [authSchemaPath] : undefined;
 

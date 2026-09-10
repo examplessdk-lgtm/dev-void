@@ -3,14 +3,9 @@ import { hasPrerenderSources } from '../../src/cli/deploy.ts';
 import { compileRouteTable } from '../../src/router/compile.ts';
 import type { ScanResult } from '../../src/router/scan.ts';
 
-// `collectPrerenderPaths` boots the BUILT worker in Miniflare with bindings from
-// `wranglerVars + loadEnv('production', root, '')` only. The generated fetch
-// handler validates the `env.ts` schema at boot, so an app whose secrets live on
-// the platform (never in a committed `.env`) gets HTTP 500 there and the deploy
-// dies. The only workaround was moving the secret into `.env.production`, which
-// `loadDeployEnv` then publishes as a PLAINTEXT manifest var — so skipping the
-// boot when it provably cannot contribute anything also removes a real incentive
-// to leak a secret.
+// `collectPrerenderPaths` boots the built worker in Miniflare without remote
+// production secrets. The generated handler validates `env.ts` at boot, so an
+// unnecessary boot could fail even when there is nothing to prerender.
 //
 // The skip is only safe if it is result-identical, which is what the second
 // describe block below pins against the real code generator.

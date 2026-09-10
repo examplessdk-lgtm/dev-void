@@ -88,14 +88,6 @@ describe('maskValue', () => {
     expect(maskValue('NODE_ENV', 'production')).toBe('production');
   });
 
-  it('override="public" beats every heuristic', () => {
-    expect(maskValue('STRIPE_KEY', 'sk_live_abc', { override: 'public' })).toBe('sk_live_abc');
-  });
-
-  it('override="secret" redacts even neutral keys/values', () => {
-    expect(maskValue('PORT', '3000', { override: 'secret' })).toBe(REDACTED);
-  });
-
   it('unmask=true disables all redaction', () => {
     expect(maskValue('STRIPE_KEY', 'sk_test', { unmask: true })).toBe('sk_test');
   });
@@ -117,21 +109,9 @@ describe('redactMessage', () => {
     expect(msg).toBe(`Expected a number, got "${REDACTED}"`);
   });
 
-  it('leaves plain values alone', () => {
+  it('redacts plain invalid values too', () => {
     const msg = redactMessage('PORT', 'abc', 'Expected a number, got "abc"');
-    expect(msg).toBe('Expected a number, got "abc"');
-  });
-
-  it('respects override="public" even for secret-looking keys', () => {
-    const msg = redactMessage('API_KEY', 'sk_live_abc', 'got "sk_live_abc"', {
-      override: 'public',
-    });
-    expect(msg).toBe('got "sk_live_abc"');
-  });
-
-  it('respects override="secret" even for plain keys/values', () => {
-    const msg = redactMessage('FLAG', 'abc', 'got "abc"', { override: 'secret' });
-    expect(msg).toBe(`got "${REDACTED}"`);
+    expect(msg).toBe(`Expected a number, got "${REDACTED}"`);
   });
 
   it('is a no-op when unmask=true', () => {

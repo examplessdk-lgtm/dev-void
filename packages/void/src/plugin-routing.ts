@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'pathslash';
-import { loadEnv, normalizePath, type Plugin } from 'vite';
+import { normalizePath, type Plugin } from 'vite';
 import {
   hasApiRoutes,
   hasDocumentRoutes,
@@ -34,6 +34,7 @@ import {
 import type { RouteEnvironment } from './router/parse-filename.ts';
 import { scanRoutes, type ScanResult } from './router/scan.ts';
 import type { VoidAuthRuntimeOptions } from './runtime/better-auth-shared.ts';
+import { loadLocalEnv } from './shared/env.ts';
 import {
   validateSsrEntries,
   SSR_SERVER_ENTRY_RELATIVE_PATHS,
@@ -282,7 +283,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       providers: compileOptions.auth.providers,
       userConfig: await loadVoidAuthConfig(compileOptions.auth.authConfigPath),
     };
-    const env = loadEnv(resolvedConfig?.mode ?? 'development', root, '') as Record<string, unknown>;
+    const local = resolvedConfig?.command === 'serve' ? loadLocalEnv(root) : {};
+    const env = { ...local, ...process.env } as Record<string, unknown>;
     const schemaPath = join(outDir, 'better-auth-schema.ts');
     const databasePath = join(outDir, 'better-auth-db.ts');
 

@@ -694,6 +694,7 @@ export async function activateCloudflareVersion(options: {
   if (!options.verifyUploader()) {
     return { ok: false, reason: 'uploader-changed' };
   }
+  const previousVersionId = previous.versionId;
   let inheritanceBaseline: Array<RecentCloudflareVersion> | undefined;
   if (options.expectedPreviousVersionId !== undefined) {
     const recent = await readRecentCloudflareVersionIds(options, commonArgs);
@@ -726,10 +727,22 @@ export async function activateCloudflareVersion(options: {
       : options.configPath
         ? readCloudflareTriggerConfig(options.configPath)
         : triggerConfigFromWrangler({});
-  const previousMetadata =
-    previous.versionId && desiredMetadata?.schema === 2
-      ? await readCloudflareVersionMetadata(options, commonArgs, previous.versionId)
+  let previousVersion =
+    previousVersionId && desiredMetadata?.schema === 2
+      ? await readCloudflareVersionInspection(options, commonArgs, previousVersionId)
       : null;
+  async function previousIsSecretOnlyDraft(): Promise<boolean> {
+    if (!previousVersionId) {
+      return false;
+    }
+    previousVersion ??= await readCloudflareVersionInspection(
+      options,
+      commonArgs,
+      previousVersionId,
+    );
+    return previousVersion?.isSecretOnlyDraft === true;
+  }
+  const previousMetadata = desiredMetadata?.schema === 2 ? previousVersion?.metadata : null;
   const continuesOpaqueTriggerPreservation =
     !options.preserveTriggers &&
     !options.previousTrafficConfig &&
@@ -763,7 +776,7 @@ export async function activateCloudflareVersion(options: {
     const resolved = resolvePreservedTraffic(
       desiredTriggerConfig,
       previousTrafficConfig,
-      previous.versionId !== null,
+      previous.versionId !== null && !(await previousIsSecretOnlyDraft()),
     );
     if (!resolved) {
       return {
@@ -814,11 +827,15 @@ export async function activateCloudflareVersion(options: {
   if (!isCleanCommandExit(upload)) {
     const output = `${upload.stdout}\n${upload.stderr}`;
     const cloudflareErrorCode = parseCloudflareErrorCode(output);
+    const isBootstrapError =
+      cloudflareErrorCode === DURABLE_MIGRATION_VERSION_ERROR ||
+      /cannot upload a new version of a worker that does not yet exist/i.test(output);
     if (
       !options.preserveTriggers &&
-      (previous.versionId === null || options.allowFirstDeploymentBootstrap === true) &&
-      (cloudflareErrorCode === DURABLE_MIGRATION_VERSION_ERROR ||
-        /cannot upload a new version of a worker that does not yet exist/i.test(output))
+      isBootstrapError &&
+      (previous.versionId === null ||
+        options.allowFirstDeploymentBootstrap === true ||
+        (await previousIsSecretOnlyDraft()))
     ) {
       return bootstrapFirstDeployment({ ...options, message }, commonArgs, previous.versionId);
     }
@@ -886,7 +903,9 @@ export async function activateCloudflareVersion(options: {
   if (!readinessUrl) {
     if (
       !options.preserveTriggers &&
-      (previous.versionId === null || options.allowFirstDeploymentBootstrap === true)
+      (previous.versionId === null ||
+        options.allowFirstDeploymentBootstrap === true ||
+        (await previousIsSecretOnlyDraft()))
     ) {
       return bootstrapFirstDeployment({ ...options, message }, commonArgs, previous.versionId);
     }
@@ -1284,6 +1303,19 @@ async function readCloudflareVersionMetadata(
   commonArgs: Array<string>,
   versionId: string,
 ): Promise<CloudflareVersionMetadata | null> {
+  return (await readCloudflareVersionInspection(options, commonArgs, versionId))?.metadata ?? null;
+}
+
+type CloudflareVersionInspection = Readonly<{
+  metadata: CloudflareVersionMetadata | null;
+  isSecretOnlyDraft: boolean;
+}>;
+
+async function readCloudflareVersionInspection(
+  options: Pick<Parameters<typeof activateCloudflareVersion>[0], 'runWrangler' | 'workerName'>,
+  commonArgs: Array<string>,
+  versionId: string,
+): Promise<CloudflareVersionInspection | null> {
   const result = await Promise.resolve(
     options.runWrangler(
       ['versions', 'list', ...commonArgs, '--name', options.workerName, '--json'],
@@ -1299,11 +1331,15 @@ async function readCloudflareVersionMetadata(
       return null;
     }
     for (const entry of versions) {
-      if (!isRecord(entry) || entry.id !== versionId || !isRecord(entry.annotations)) {
+      if (!isRecord(entry) || entry.id !== versionId) {
         continue;
       }
-      const message = entry.annotations['workers/message'];
-      return typeof message === 'string' ? parseCloudflareVersionMessage(message) : null;
+      const annotations = isRecord(entry.annotations) ? entry.annotations : undefined;
+      const message = annotations?.['workers/message'];
+      return {
+        metadata: typeof message === 'string' ? parseCloudflareVersionMessage(message) : null,
+        isSecretOnlyDraft: isWranglerSecretOnlyDraft(entry),
+      };
     }
   } catch {
     return null;
@@ -1349,6 +1385,64 @@ async function readRecentCloudflareVersionIds(
 
 function arraysEqual(left: ReadonlyArray<string>, right: ReadonlyArray<string>): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+/**
+ * `wrangler secret put` creates a fetch-only draft before attaching a first secret to a Worker.
+ * Accept that draft as first-deployment proof only when its complete deployable shape contains no
+ * application code configuration or non-secret resource that an ordinary deploy could own.
+ */
+function isWranglerSecretOnlyDraft(entry: Record<string, unknown>): boolean {
+  if (!isRecord(entry.annotations)) {
+    return false;
+  }
+  const annotationKeys = Object.keys(entry.annotations);
+  if (
+    entry.annotations['workers/triggered_by'] !== 'secret' ||
+    annotationKeys.some((key) => key !== 'workers/triggered_by')
+  ) {
+    return false;
+  }
+
+  if (!isRecord(entry.resources)) {
+    return false;
+  }
+  const { bindings, script, script_runtime: scriptRuntime } = entry.resources;
+  if (
+    !Array.isArray(bindings) ||
+    bindings.length === 0 ||
+    !bindings.every(
+      (binding) =>
+        isRecord(binding) &&
+        typeof binding.name === 'string' &&
+        binding.name.length > 0 &&
+        binding.type === 'secret_text' &&
+        Object.keys(binding).every((key) => key === 'name' || key === 'type'),
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    !isRecord(script) ||
+    !Array.isArray(script.handlers) ||
+    script.handlers.length !== 1 ||
+    script.handlers[0] !== 'fetch' ||
+    script.placement_mode !== undefined
+  ) {
+    return false;
+  }
+
+  if (!isRecord(scriptRuntime)) {
+    return false;
+  }
+  const runtimeKeys = Object.keys(scriptRuntime);
+  return (
+    scriptRuntime.usage_model === 'standard' &&
+    isRecord(scriptRuntime.limits) &&
+    Object.keys(scriptRuntime.limits).length === 0 &&
+    runtimeKeys.every((key) => key === 'usage_model' || key === 'limits')
+  );
 }
 
 /**

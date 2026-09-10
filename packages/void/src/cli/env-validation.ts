@@ -2,7 +2,7 @@
  * Shared env-schema validation for CLI commands.
  *
  * Loads the user's `env.ts` (which calls `defineEnv` as a side effect),
- * collects sources of env values (`.env*` files, remote secrets), and
+ * validates the local `.env` or remote production-secret state, and
  * validates each declared key against the registered schema.
  *
  * Used by both `void deploy` (hard error on missing prod env) and
@@ -15,36 +15,53 @@ import { dirname, join, resolve } from 'pathslash';
 import { findEnvFile } from '../codegen/env-types.ts';
 import { loadUserEnvFile } from '../host/load-user-env.ts';
 import { voidWarn } from '../log.ts';
-import { getSecretOverride } from '../runtime/env-helpers.ts';
 import type { EnvValidationReport } from '../runtime/env-public.ts';
-import { mergeAndExpand, parseDotenvFile } from '../shared/dotenv.ts';
-import { isLikelySecretKey } from '../shared/env-mask.ts';
+import { findLegacyEnvFiles, isClientEnvKey, loadLocalEnv } from '../shared/env.ts';
 import type { StandardSchemaV1 } from '../standard-schema.ts';
 import type { PlatformClient } from './client.ts';
 import { resolveWranglerArgv } from './preset.ts';
 
 type EnvPublicModule = {
-  _getRegisteredSchema(): Record<string, unknown> | null;
+  _getRegisteredSchema(): Record<string, StandardSchemaV1<unknown, unknown>> | null;
   _hasRegisteredSchema(): boolean;
   _getSchemaDefaults(): Record<string, string>;
   validateAllEnv(values: Record<string, unknown>): Promise<EnvValidationReport>;
 };
 
 /**
- * After the user's env.ts has been imported (via `validateProdEnv` or
- * `loadSchema`), read the registered schema's `.default(value)` entries.
- * Returns `{}` if no schema was registered.
+ * Validate plaintext while it is still available to `void secret put/sync`.
+ * Existing remote values remain unreadable and are validated again at worker boot.
  */
-export async function getDeployEnvDefaults(root: string): Promise<Record<string, string>> {
+export async function validateSecretValues(
+  root: string,
+  entries: Array<{ name: string; value: string }>,
+): Promise<void> {
   const envFile = findEnvFile(root);
   if (!envFile) {
-    return {};
+    throw new Error('secret: env.ts is required before setting production values.');
   }
   const mod = await loadSchema(envFile);
-  if (!mod) {
-    return {};
+  const schema = mod?._getRegisteredSchema();
+  if (!schema) {
+    throw new Error('secret: env.ts did not register a schema with defineEnv().');
   }
-  return mod._getSchemaDefaults();
+
+  for (const { name, value } of entries) {
+    if (isClientEnvKey(name)) {
+      throw new Error(
+        `secret: ${name} is client-exposed. Set it in the build shell or give it a schema default.`,
+      );
+    }
+    const validator = schema[name];
+    if (!validator) {
+      throw new Error(`secret: ${name} is not declared in env.ts.`);
+    }
+    const result = validator['~standard'].validate(value);
+    const resolved = result instanceof Promise ? await result : result;
+    if (resolved.issues) {
+      throw new Error(`secret: ${name} failed env.ts validation.`);
+    }
+  }
 }
 
 /** Load the registered schema by importing the user's env.ts. */
@@ -58,7 +75,7 @@ async function loadSchema(envFile: string): Promise<EnvPublicModule | null> {
 }
 
 export type ValidateProdEnvOptions = {
-  /** When true (deploy mode), only `.env` + `.env.production` are read. */
+  /** When true, validate build-shell + remote state and never read `.env`. */
   productionOnly: boolean;
   /** Optional remote secret list (names only). Treated as "value present". */
   remoteSecrets?: Array<string>;
@@ -74,14 +91,20 @@ function emptyReport(): EnvValidationReport {
 }
 
 /**
- * Validate the user's env schema against the union of .env files and
- * remote secret names. Remote secrets are treated as "present" (we can't
- * fetch their values), which is sufficient for the missing-key check.
+ * Validate local development against `.env` + the shell, or production
+ * against the build shell + remote secret names. `.env` is never a
+ * production source.
  */
 export async function validateProdEnv(
   root: string,
   options: ValidateProdEnvOptions,
 ): Promise<ProdEnvValidationResult> {
+  const legacyFiles = findLegacyEnvFiles(root);
+  if (legacyFiles.length > 0) {
+    throw new Error(
+      `env: only .env is supported for local development. Remove ${legacyFiles.join(', ')} and follow the env migration guide.`,
+    );
+  }
   const envFile = findEnvFile(root);
   if (!envFile) {
     return { hasSchema: false, report: emptyReport() };
@@ -91,24 +114,22 @@ export async function validateProdEnv(
     return { hasSchema: false, report: emptyReport() };
   }
 
-  const files = options.productionOnly
-    ? ['.env', '.env.production']
-    : ['.env', '.env.local', '.env.production', '.env.production.local'];
-  // Parse each file with expansion disabled, then merge + expand across the
-  // union so that (e.g.) `.env.local` can reference a key declared in `.env`.
-  const parsedFiles = files.map((file) => parseDotenvFile(join(root, file), { expand: false }));
-  const merged: Record<string, unknown> = mergeAndExpand(parsedFiles, {
-    onWarn: (msg) => voidWarn(msg),
-  });
+  const local = options.productionOnly
+    ? {}
+    : loadLocalEnv(root, { onWarn: (message) => voidWarn(message) });
+  const shell = options.productionOnly
+    ? Object.fromEntries(Object.entries(process.env).filter(([key]) => isClientEnvKey(key)))
+    : process.env;
+  const merged: Record<string, unknown> = { ...local, ...shell };
 
   const report = await mod.validateAllEnv(merged);
   // Remote secrets are present on the deployed worker but not readable here,
   // so we can't run the user's validator against the real value. Treat any
-  // schema key that is only "missing locally" but "present remotely" as OK —
+  // server schema key that is only missing but present remotely as OK —
   // the boot-time `_validateEnvOnce` will validate the real value per isolate.
   const remoteSet = new Set(options.remoteSecrets ?? []);
   if (remoteSet.size > 0 && report.missing.length > 0) {
-    report.missing = report.missing.filter((key) => !remoteSet.has(key));
+    report.missing = report.missing.filter((key) => isClientEnvKey(key) || !remoteSet.has(key));
     if (report.missing.length === 0 && report.invalid.length === 0) {
       report.valid = true;
     }
@@ -157,67 +178,11 @@ export async function fetchRemoteSecretNames(
 // against the platform's secret store. The self-host path bypasses the platform
 // entirely, so it needs its own safety units over the REAL build artifact
 // (`dist/ssr/wrangler.json` `vars`), defined further below:
-//   1. `collectPlaintextVarWarningsFromVars` — WARN: the build bakes worker
-//      `vars` verbatim into the uploaded config (plaintext); report which of the
-//      emitted keys look like secrets so the caller can warn.
-//   2. `deriveSelfHostEnvContextFromVars` + `dischargeSelfHostEnvContext` — GATE:
+//   `deriveSelfHostEnvContextFromVars` + `dischargeSelfHostEnvContext` — GATE:
 //      the platform-free analogue of `assertEnvSchemaValid`, sourcing remote
 //      secret names from `wrangler secret list` instead of the platform API.
 // Both consume ground truth (the emitted map), never a pre-build facsimile.
 // ---------------------------------------------------------------------------
-
-/** One worker-vars key that looks like a secret, with why it was flagged. */
-export type PlaintextVarWarning = {
-  key: string;
-  /**
-   * `schema-secret` — the user's env.ts flags this key `.secret()` (explicit,
-   * always wins). `heuristic` — the key NAME matches the shared
-   * `isLikelySecretKey` credential heuristic (`KEY|TOKEN|SECRET|…`).
-   * `value-shape` — the key name looks benign but the VALUE is a
-   * credential-bearing connection URL ({@link isCredentialBearingUrlValue}).
-   * An explicit `.public()` does NOT suppress the heuristics here (it only means
-   * "not a schema secret"): the value still ships as PLAINTEXT in the worker
-   * config, so a secret-looking public key is still worth flagging.
-   */
-  reason: 'schema-secret' | 'heuristic' | 'value-shape';
-};
-
-/**
- * A `scheme://user:password@host…` connection URL — the shape that carries a
- * live credential in a key nothing in the NAME heuristic would catch. The
- * motivating case is `DATABASE_URL`: `SECRET_KEY_RE` has no `URL`/`DATABASE`
- * branch, and the shared `isLikelySecretValue` cannot help either — its
- * `HIGH_ENTROPY_RE` character class excludes `@`, so a connection URL never
- * matches it. Both halves of the userinfo must be non-empty, so a bare
- * `postgres://host/db` or a password-less `https://user@host` is NOT flagged.
- *
- * Deliberately local to the DEPLOY-side warning rather than added to
- * `shared/env-mask.ts`: that module is also the runtime/managed redaction
- * heuristic, and widening it would change masking behaviour well outside this
- * warning.
- */
-const CREDENTIAL_URL_VALUE_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/;
-
-/**
- * `true` when a var's VALUE is a connection URL carrying inline credentials.
- * Inspecting the value is safe here: only the KEY name ever leaves
- * {@link collectPlaintextVarWarningsFromVars}.
- */
-function isCredentialBearingUrlValue(value: unknown): boolean {
-  return typeof value === 'string' && CREDENTIAL_URL_VALUE_RE.test(value);
-}
-
-/**
- * Result of {@link collectPlaintextVarWarningsFromVars}. Carries KEY NAMES ONLY —
- * never values — so nothing here can leak a secret into logs, no matter how
- * the caller formats it.
- */
-export type PlaintextVarWarningsResult = {
-  /** Secret-looking keys the build will bake into worker `vars`, sorted by key. */
-  secretKeys: Array<PlaintextVarWarning>;
-  /** Total number of keys the build will merge into worker `vars`. */
-  totalVarKeys: number;
-};
 
 /** Minimal structural view of a Standard Schema validator's probe entrypoint. */
 type SchemaProbe = StandardSchemaV1<unknown, unknown>['~standard'];
@@ -392,8 +357,8 @@ export class SelfHostFirstDeployError extends SelfHostSecretListError {
 
 /**
  * The env schema is not satisfied for a self-host production deploy: required
- * keys are missing (not in `.env`/`.env.production` and not present as remote
- * worker secrets), local values are invalid, or an EMPTY local assignment would
+ * keys are missing from remote worker secrets, values are invalid, or an EMPTY
+ * plaintext assignment would
  * shadow a remote secret. The message and the attached `report` carry the
  * offending key NAMES plus stable, values-free reason codes only — never raw
  * input, never resolved values — so nothing on this path can echo a secret
@@ -536,30 +501,24 @@ function emptyEnvContext(): SelfHostEnvContext {
 // The redesigned `void deploy --backend cloudflare` gate validates the REAL
 // build artifact the build emits — `dist/ssr/wrangler.json` `vars` (the plaintext
 // worker vars) — instead of a pre-build `loadEnv` facsimile. It needs only ONE
-// piece of project-derived data: the env-INSENSITIVE schema facts (required key
-// names + `.secret()` flags), which do NOT depend on which `.env` file the build
-// reads. Those are derived once in an isolated subprocess; everything else is pure
+// piece of project-derived data: the env-INSENSITIVE server and required key
+// names. Those are derived once in an isolated subprocess; everything else is pure
 // parent work over the emitted map.
 // ---------------------------------------------------------------------------
 
 /**
  * The env-INSENSITIVE structural facts the self-host secret gate needs from the
- * project's env schema: whether a schema is registered, the REQUIRED key names (a
- * validator that rejects the ABSENT value — {@link requiredSchemaKeys}), and the
- * keys the schema flags `.secret()` ({@link getSecretOverride} === 'secret').
- * NONE of these depend on which `.env` file the build reads — they are fixed by
- * env.ts's structure — so this needs no `loadEnv` and no build env, and the result
- * is the SAME regardless of the build's mode/envDir. That is precisely why the old
- * probe-vs-build divergence class is gone: nothing derived here can diverge from
- * the build over which `.env*` set was loaded.
+ * project's env schema: whether a schema is registered, every server key, and the
+ * REQUIRED key names (validators that reject the absent value). These are fixed by
+ * env.ts's structure and require no dotenv loading.
  */
 export type SelfHostSchemaFacts = {
   /** Whether the project registered an env schema at all (no schema → nothing to gate). */
   hasSchema: boolean;
+  /** Every server-only schema key. These may never be emitted as plaintext vars. */
+  serverKeys: Array<string>;
   /** Required key NAMES — validator rejects `undefined`. Values-free. */
   requiredKeys: Array<string>;
-  /** Keys the schema flags `.secret()`. Values-free. */
-  secretKeys: Array<string>;
 };
 
 /**
@@ -573,22 +532,19 @@ export type SelfHostSchemaFacts = {
 export async function deriveSelfHostSchemaFacts(root: string): Promise<SelfHostSchemaFacts> {
   const envFile = findEnvFile(root);
   if (envFile == null) {
-    return { hasSchema: false, requiredKeys: [], secretKeys: [] };
+    return { hasSchema: false, serverKeys: [], requiredKeys: [] };
   }
   const mod = await withSchemaBoundary('schema-load-failed', () => loadSchema(envFile));
   if (!mod) {
-    return { hasSchema: false, requiredKeys: [], secretKeys: [] };
+    return { hasSchema: false, serverKeys: [], requiredKeys: [] };
   }
   const schema = mod._getRegisteredSchema() ?? {};
-  const requiredKeys = await withSchemaBoundary('schema-validation-error', () =>
+  const serverKeys = Object.keys(schema).filter((key) => !isClientEnvKey(key));
+  const required = await withSchemaBoundary('schema-validation-error', () =>
     requiredSchemaKeys(schema),
   );
-  // `.secret()` is a STATIC flag on the validator (getSecretOverride) — no value
-  // read, no env dependency.
-  const secretKeys = Object.keys(schema).filter(
-    (key) => getSecretOverride(schema[key]) === 'secret',
-  );
-  return { hasSchema: true, requiredKeys: [...requiredKeys], secretKeys };
+  const requiredKeys = [...required].filter((key) => !isClientEnvKey(key));
+  return { hasSchema: true, serverKeys, requiredKeys };
 }
 
 /**
@@ -755,44 +711,6 @@ export async function computeInvalidEmittedKeys(
     }
   }
   return Array.from(invalid).sort((a, b) => a.localeCompare(b));
-}
-
-/**
- * Classify the secret-looking keys among the REAL worker `vars` the build baked
- * into `dist/ssr/wrangler.json` (ground truth). PURE: for each emitted var key, a
- * `.secret()`-flagged key ({@link SelfHostSchemaFacts.secretKeys}) is
- * `schema-secret`; otherwise the shared {@link isLikelySecretKey} name heuristic
- * applies (so a secret-looking key ships plaintext regardless of any schema, and
- * heuristic classification still works with no env.ts at all); failing both, a
- * VALUE shaped like a credential-bearing connection URL
- * ({@link isCredentialBearingUrlValue}) flags the key as `value-shape`, catching
- * the `DATABASE_URL`-class leak no name heuristic sees.
- *
- * KEYS ONLY leave here — a value may be INSPECTED to classify it, but is never
- * copied into the result, so no caller can format a value into a log.
- */
-export function collectPlaintextVarWarningsFromVars(
-  emittedVars: Record<string, unknown>,
-  secretFlaggedKeys: Array<string>,
-): PlaintextVarWarningsResult {
-  const flagged = new Set(secretFlaggedKeys);
-  const keys = Object.keys(emittedVars);
-  const secretKeys: Array<PlaintextVarWarning> = [];
-  for (const key of keys) {
-    if (flagged.has(key)) {
-      secretKeys.push({ key, reason: 'schema-secret' });
-      continue;
-    }
-    if (isLikelySecretKey(key)) {
-      secretKeys.push({ key, reason: 'heuristic' });
-      continue;
-    }
-    if (isCredentialBearingUrlValue(emittedVars[key])) {
-      secretKeys.push({ key, reason: 'value-shape' });
-    }
-  }
-  secretKeys.sort((a, b) => a.key.localeCompare(b.key));
-  return { secretKeys, totalVarKeys: keys.length };
 }
 
 /** Build a values-free invalid {@link EnvValidationReport} from key names only. */
@@ -1038,11 +956,7 @@ function selfHostEnvError(report: EnvValidationReport): SelfHostEnvValidationErr
     }
   }
   if (missing.length > 0) {
-    lines.push(
-      '',
-      'Set each missing production secret with `void secret put <NAME>`, ' +
-        'or add a value to .env / .env.production.',
-    );
+    lines.push('', 'Set each missing production secret with `void secret put <NAME>`.');
   }
   // Sanitized report: key names + the fixed reason code, no messages, no values.
   const safeReport: EnvValidationReport = {
@@ -1130,9 +1044,7 @@ function firstDeployMessage(missingKeys: Array<string>): string {
     ...sorted.map((key) => `  • ${key}`),
     '',
     'Bootstrap them on the draft Worker before deploying:',
-    ...names.map((key) => `  wrangler secret put ${key}`),
-    '',
-    'or add a value to .env / .env.production, then run the deploy again.',
+    ...names.map((key) => `  void secret put ${key}`),
   ].join('\n');
 }
 

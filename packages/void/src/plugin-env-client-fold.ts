@@ -142,8 +142,7 @@ function pushHit(node: AstMemberExpression, hits: Array<FoldHit>): void {
   // to the runtime Proxy — not our problem.
 }
 
-/** Default Vite `envPrefix`. */
-const DEFAULT_ENV_PREFIXES: ReadonlyArray<string> = ['VITE_'];
+const CLIENT_ENV_PREFIX = 'VITE_';
 
 /**
  * Build-time constant folding for client-only `env.FOO` reads.
@@ -159,21 +158,19 @@ const DEFAULT_ENV_PREFIXES: ReadonlyArray<string> = ['VITE_'];
  *   • Runs only when `this.environment.name === 'client'`. Server / SSR /
  *     worker builds keep the full runtime Proxy (secrets, runtime-injected
  *     vars, HMR remain live).
- *   • Only folds keys that match the configured `envPrefix` — the exact
- *     set Vite is already willing to ship to the browser bundle. A
+ *   • Only folds keys that match Void's fixed `VITE_` client prefix. A
  *     server-only key is never folded (and the env-client-guard plugin
  *     would have errored out earlier anyway).
  *   • Only folds static member access: `env.FOO` and `env["FOO"]`.
  *     Dynamic access, destructuring, and reassignment fall through to the
  *     runtime Proxy.
- *   • Only folds keys with a known build-time value (loaded .env* merged
- *     with schema `.default(...)` entries). Unknown keys are left as-is
+ *   • Only folds keys with a known build-time value (build shell or schema
+ *     `.default(...)`). Unknown keys are left as-is
  *     and the Proxy handles them at runtime — no "undefined" shoved in.
- *   • Build-only (`apply: 'build'`). Dev runs through the Proxy so HMR
- *     and editing `.env.local` take effect without a full rebuild.
+ *   • Build-only (`apply: 'build'`). Dev runs through the Proxy so local
+ *     `.env` edits take effect without a full rebuild.
  */
 export function envClientFoldPlugin(): Plugin {
-  let envPrefixes: ReadonlyArray<string> = DEFAULT_ENV_PREFIXES;
   let loadedEnv: Record<string, string> = {};
   const schemaDefaults: Record<string, string> = {};
 
@@ -189,7 +186,7 @@ export function envClientFoldPlugin(): Plugin {
   }
 
   function isExposedToClient(key: string): boolean {
-    return envPrefixes.some((p) => key.startsWith(p));
+    return key.startsWith(CLIENT_ENV_PREFIX);
   }
 
   return {
@@ -202,21 +199,11 @@ export function envClientFoldPlugin(): Plugin {
     // about for folding correctness.
     enforce: 'post',
     async configResolved(config: ResolvedConfig) {
-      const prefix = config.envPrefix;
-      if (typeof prefix === 'string') {
-        envPrefixes = [prefix];
-      } else if (Array.isArray(prefix) && prefix.length > 0) {
-        envPrefixes = prefix;
-      } else {
-        envPrefixes = DEFAULT_ENV_PREFIXES;
-      }
-
-      // Vite has already resolved `.env*` + process.env into config.env,
-      // filtered by the same envPrefix list. Reuse it so we match exactly
-      // what Vite injects into `import.meta.env`.
+      // The env-schema plugin has already removed local `.env` values on
+      // builds. Reuse the remaining build-shell client values from config.env.
       loadedEnv = { ...(config.env ?? {}) } as Record<string, string>;
 
-      // Schema `.default(...)` values back-fill keys missing from .env*.
+      // Schema `.default(...)` values back-fill missing client keys.
       // We only surface client-exposed ones so server-only defaults never
       // leak into the client bundle.
       try {

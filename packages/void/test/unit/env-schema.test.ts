@@ -167,39 +167,6 @@ describe('defineEnv + env proxy', () => {
   });
 });
 
-describe('.secret() / .public() modifiers', () => {
-  it('.secret() marks the schema for forced redaction', async () => {
-    defineEnv({ TOKEN: string().secret() });
-    const report = await validateAllEnv({ TOKEN: 'sk_live_abc' });
-    expect(report.valid).toBe(true);
-    // Force a validation failure to observe redaction in messages:
-    defineEnv({ FLAG: oneOf(['a', 'b'] as const).secret() });
-    const bad = await validateAllEnv({ FLAG: 'c' });
-    expect(bad.valid).toBe(false);
-    const msg = bad.invalid[0]!.messages.join(' ');
-    expect(msg).not.toContain('"c"');
-    expect(msg).toContain('<redacted>');
-  });
-
-  it('.public() disables redaction even for secret-looking keys', async () => {
-    defineEnv({
-      // A key whose NAME looks like a secret (matches /KEY/) but whose value
-      // is deliberately public; `.public()` preserves the value in errors.
-      APIKEY: oneOf(['a', 'b'] as const).public(),
-    });
-    const bad = await validateAllEnv({ APIKEY: 'nope' });
-    expect(bad.valid).toBe(false);
-    expect(bad.invalid[0]!.messages.join(' ')).toContain('"nope"');
-  });
-
-  it('.secret() / .public() compose with .optional() and .default()', () => {
-    const s = string().secret().default('x');
-    expect(s['~standard'].validate(undefined)).toEqual({ value: 'x' });
-    const p = string().public().optional();
-    expect(p['~standard'].validate(undefined)).toEqual({ value: undefined });
-  });
-});
-
 describe('redaction roundtrip (heuristic + content)', () => {
   beforeEach(() => {
     resetSchema();

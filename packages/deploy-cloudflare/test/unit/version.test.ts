@@ -17,6 +17,22 @@ const CURRENT = '11111111-1111-4111-8111-111111111111';
 const NEXT = '22222222-2222-4222-8222-222222222222';
 const CONCURRENT = '33333333-3333-4333-8333-333333333333';
 
+function secretOnlyDraftVersion() {
+  return {
+    id: CURRENT,
+    annotations: { 'workers/triggered_by': 'secret' },
+    resources: {
+      bindings: [{ name: 'API_TOKEN', type: 'secret_text' }],
+      script: {
+        etag: 'draft',
+        handlers: ['fetch'],
+        last_deployed_from: 'wrangler',
+      },
+      script_runtime: { usage_model: 'standard', limits: {} },
+    },
+  };
+}
+
 function ok(stdout = ''): CloudflareCommandResult {
   return { stdout, stderr: '', status: 0 };
 }
@@ -1400,6 +1416,7 @@ describe('Cloudflare version activation', () => {
     expect(runWrangler.mock.calls.map(([args]) => args.slice(0, 2))).toEqual([
       ['deployments', 'status'],
       ['versions', 'upload'],
+      ['versions', 'list'],
       ['versions', 'deploy'],
       ['deployments', 'status'],
       ['versions', 'deploy'],
@@ -1407,10 +1424,10 @@ describe('Cloudflare version activation', () => {
       ['triggers', 'deploy'],
       ['deployments', 'status'],
     ]);
-    expect(runWrangler.mock.calls[2]![0]).toEqual(
+    expect(runWrangler.mock.calls[3]![0]).toEqual(
       expect.arrayContaining([`${CURRENT}@100`, `${NEXT}@0`]),
     );
-    expect(runWrangler.mock.calls[4]![0]).toContain(`${NEXT}@100`);
+    expect(runWrangler.mock.calls[5]![0]).toContain(`${NEXT}@100`);
     expect(fetcher).toHaveBeenCalledWith(
       'https://my-worker.developer-platform-experience.workers.dev/__void/ready',
       expect.objectContaining({
@@ -1441,10 +1458,10 @@ describe('Cloudflare version activation', () => {
       rollback: 'succeeded',
     });
 
-    expect(runWrangler.mock.calls[2]![0]).toEqual(
+    expect(runWrangler.mock.calls[3]![0]).toEqual(
       expect.arrayContaining([`${CURRENT}@100`, `${NEXT}@0`]),
     );
-    expect(runWrangler.mock.calls[3]![0]).toContain(`${CURRENT}@100`);
+    expect(runWrangler.mock.calls[4]![0]).toContain(`${CURRENT}@100`);
     expect(runWrangler.mock.calls.some(([args]) => args[0] === 'triggers')).toBe(false);
   });
 
@@ -1471,6 +1488,7 @@ describe('Cloudflare version activation', () => {
 
     expect(runWrangler.mock.calls.map(([args]) => args[0])).toEqual([
       'deployments',
+      'versions',
       'versions',
       'versions',
     ]);
@@ -1887,5 +1905,70 @@ describe('Cloudflare version activation', () => {
       }),
     ).resolves.toMatchObject({ ok: true, previousVersionId: CURRENT });
     expect(runWrangler.mock.calls.some(([args]) => args[0] === 'deploy')).toBe(true);
+  });
+
+  it("recognizes Wrangler's active secret-only draft without same-process provisioning proof", async () => {
+    const runWrangler = runner({
+      versions: ok(JSON.stringify([secretOnlyDraftVersion()])),
+      upload: {
+        stdout: '',
+        stderr: 'Durable Object migrations require deploy. [code: 10211]',
+        status: 1,
+      },
+      bootstrap: ok(`Current Version ID: ${NEXT}\nhttps://first.example.workers.dev`),
+    });
+
+    await expect(
+      activateCloudflareVersion({
+        runWrangler,
+        verifyUploader: () => true,
+        workerName: 'first-with-existing-secret',
+        message: encodeCloudflareVersionMessage(['0001_state.sql']),
+        fetch: async () => Response.json({ ready: true }),
+      }),
+    ).resolves.toMatchObject({ ok: true, previousVersionId: CURRENT });
+    expect(runWrangler.mock.calls.some(([args]) => args[0] === 'deploy')).toBe(true);
+  });
+
+  it('rejects a secret-triggered version that also contains application configuration', async () => {
+    const draft = secretOnlyDraftVersion();
+    const version = {
+      ...draft,
+      annotations: {
+        ...draft.annotations,
+        'workers/message': 'deployed application',
+      },
+      resources: {
+        ...draft.resources,
+        bindings: [...draft.resources.bindings, { name: 'PUBLIC_VALUE', type: 'plain_text' }],
+        script_runtime: {
+          ...draft.resources.script_runtime,
+          compatibility_date: '2026-09-01',
+        },
+      },
+    };
+    const runWrangler = runner({
+      versions: ok(JSON.stringify([version])),
+      upload: {
+        stdout: '',
+        stderr: 'Durable Object migrations require deploy. [code: 10211]',
+        status: 1,
+      },
+    });
+
+    await expect(
+      activateCloudflareVersion({
+        runWrangler,
+        verifyUploader: () => true,
+        workerName: 'existing-with-secret',
+        message: encodeCloudflareVersionMessage(['0002_state.sql']),
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      reason: 'upload-failed',
+      status: 1,
+      cloudflareErrorCode: 10211,
+    });
+    expect(runWrangler.mock.calls.some(([args]) => args[0] === 'deploy')).toBe(false);
   });
 });

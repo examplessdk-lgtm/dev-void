@@ -1,12 +1,34 @@
+import { readdirSync } from 'node:fs';
+import { join } from 'pathslash';
+import { parseDotenvFile } from './dotenv.ts';
+
 // Shared helpers for environment resolution. Imported by the Vite plugin
 // (index.ts), the prerender runner (prerender.ts), and the prerender Vite
 // plugin (plugin-prerender.ts). Keep these as leaf helpers — they must not
 // import from any non-leaf module, otherwise the prerender subprocess's
 // worker bundle acquires unwanted transitive dependencies.
 
+/** Void's single local dotenv file. It is never a production configuration source. */
+export const LOCAL_ENV_FILE = '.env';
+
+/** The fixed browser-exposure convention supported by `void/env`. */
+export const CLIENT_ENV_PREFIX = 'VITE_';
+
+export function isClientEnvKey(key: string): boolean {
+  return key.startsWith(CLIENT_ENV_PREFIX);
+}
+
+/** Read the one local-development dotenv file. */
+export function loadLocalEnv(
+  root: string,
+  options: { onWarn?: (message: string) => void } = {},
+): Record<string, string> {
+  return parseDotenvFile(join(root, LOCAL_ENV_FILE), { onWarn: options.onWarn });
+}
+
 /**
  * Marks the isolated probes and Vite build run by
- * `void deploy --backend cloudflare`.
+ * `void deploy --platform cloudflare`.
  *
  * Kept here so the deploy orchestrator and Vite plugin share one spelling.
  * The marker is passed through child-process env only; it is never a Worker
@@ -15,24 +37,23 @@
 export const CLOUDFLARE_DEPLOY_BUILD_ENV = 'VOID_CLOUDFLARE_DEPLOY_BUILD';
 
 /**
- * Strip shell environment pollution from a Vite `loadEnv(mode, root, '')`
- * result. Vite returns `.env`-file entries AND every `process.env` entry
- * when called with an empty prefix; we want only the keys that came from
- * `.env` files (either new keys or keys that override a shell value).
- *
- * Used anywhere we need to populate worker vars from `.env` without
- * shipping the developer's shell environment (PATH, HOME, etc.) into
- * `wrangler.json` or the prerender Miniflare instance.
+ * Find legacy Vite dotenv variants. Void intentionally supports only `.env`;
+ * production configuration is project-scoped remote state instead of a file.
  */
-export function filterLoadedEnv(loaded: Record<string, string>): Record<string, string> {
-  const shellKeys = new Set(Object.keys(process.env));
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(loaded)) {
-    if (!shellKeys.has(key) || process.env[key] !== value) {
-      env[key] = value;
-    }
+export function findLegacyEnvFiles(root: string): Array<string> {
+  try {
+    return readdirSync(root)
+      .filter(
+        (name) =>
+          name.startsWith('.env.') ||
+          name === '.env.example' ||
+          name === '.dev.vars' ||
+          name.startsWith('.dev.vars.'),
+      )
+      .sort((a, b) => a.localeCompare(b));
+  } catch {
+    return [];
   }
-  return env;
 }
 
 /**
@@ -67,10 +88,9 @@ export function resolveRemoteMode(configRemote: boolean | undefined): boolean {
  * of them should ever originate from user-authored `.env` files, shell env,
  * or CI config — if they do, we strip them and warn at the call site.
  *
- * Callers: `index.ts` envPlugin.config (dev/build wrangler.json vars),
+ * Callers: `index.ts` envPlugin.config (dev wrangler.json vars),
  * `prerender.ts` buildPrerenderBindings (CF prerender subprocess bindings),
- * `prerender.ts` runNodePrerenderRunner (Node prerender child process env),
- * `cli/deploy.ts` loadDeployEnv (deploy manifest vars).
+ * `prerender.ts` runNodePrerenderRunner (Node prerender child process env).
  */
 export const INTERNAL_ENV_KEYS = [
   '__VOID_TOKEN',

@@ -4,7 +4,7 @@ import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vi
 import { appendSqliteClassMigration } from '@void/deploy-core';
 import { join } from 'pathslash';
 import pc from 'picocolors';
-import { loadEnv, type Plugin } from 'vite';
+import { type Plugin } from 'vite';
 import {
   hasApiRoutes as routeScanHasApiRoutes,
   hasDocumentRoutes as routeScanHasDocumentRoutes,
@@ -48,7 +48,7 @@ import { devTriggersHintPlugin } from './plugin-dev-triggers-hint.ts';
 import { drizzlePlugin } from './plugin-drizzle.ts';
 import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
 import { envClientGuardPlugin } from './plugin-env-client-guard.ts';
-import { envSchemaPlugin } from './plugin-env-schema.ts';
+import { envSchemaPlugin, type EnvSchemaFacts } from './plugin-env-schema.ts';
 import {
   analogDevTriggerInjectPlugin,
   astroDevTriggerInjectPlugin,
@@ -76,10 +76,9 @@ import { isRouteEnabledForEnvironment, type RouteEnvironment } from './router/pa
 import { scanMiddlewareSync, scanRoutePatternsSync } from './router/scan.ts';
 import { scanWebSocketRoutesSync } from './router/websocket.ts';
 import { SANDBOX_MIGRATION_TAG, isSandboxEnabled, resolveSandboxConfig } from './sandbox/config.ts';
-import { mergeAndExpand, parseDotenvFile } from './shared/dotenv.ts';
 import {
   CLOUDFLARE_DEPLOY_BUILD_ENV,
-  filterLoadedEnv,
+  loadLocalEnv,
   resolveRemoteMode,
   stripInternalEnvKeys,
 } from './shared/env.ts';
@@ -1015,6 +1014,7 @@ export function voidPlugin(options?: {
       crons: jobs.flatMap((job) => job.crons),
     };
   }
+  let envSchemaFacts: EnvSchemaFacts | undefined;
   let assetRouting: AssetRoutingPolicy;
   if (config.worker?.vars) {
     workerConfig.vars = { ...config.worker.vars };
@@ -1070,16 +1070,32 @@ export function voidPlugin(options?: {
     );
     const result: Record<string, unknown> = { ...workerConfig };
 
-    // Direct Cloudflare deploys create BETTER_AUTH_SECRET before upload. Tell
-    // Wrangler to inherit that remote secret into the new Worker version;
-    // otherwise a normal deploy can replace the version without carrying the
-    // secret forward. Scope this to the Void CLI's Cloudflare build marker so
-    // local dev, managed Void deploys, and bare user builds keep their existing
-    // behavior. Preserve and dedupe any user-declared required secrets.
-    if (authEnabled && process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1') {
-      const resolvedSecrets = (resolved as { secrets?: { required?: Array<string> } }).secrets;
-      if (!resolvedSecrets?.required?.includes('BETTER_AUTH_SECRET')) {
-        result.secrets = { required: ['BETTER_AUTH_SECRET'] };
+    if (envSchemaFacts || (authEnabled && process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1')) {
+      const plaintextVars = {
+        ...((resolved.vars as Record<string, unknown> | undefined) ?? {}),
+        ...((result.vars as Record<string, unknown> | undefined) ?? {}),
+      };
+      const plaintextServerKeys = (envSchemaFacts?.serverKeys ?? []).filter(
+        (key) => key in plaintextVars,
+      );
+      if (viteCommand === 'build' && plaintextServerKeys.length > 0) {
+        throw new Error(
+          `Server env keys cannot be Worker plaintext vars: ${plaintextServerKeys.join(', ')}. ` +
+            'Remove them from worker.vars/wrangler vars and set them with the remote secret store.',
+        );
+      }
+      const configuredRequired = resolved.secrets?.required ?? [];
+      const required = [
+        ...new Set([
+          ...configuredRequired,
+          ...(envSchemaFacts?.requiredServerKeys ?? []),
+          ...(authEnabled && process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1'
+            ? ['BETTER_AUTH_SECRET']
+            : []),
+        ]),
+      ];
+      if (required.length > 0) {
+        result.secrets = { required };
       }
     }
 
@@ -1450,77 +1466,16 @@ export function voidPlugin(options?: {
     return result as Partial<WorkerConfig>;
   }
 
-  // Merge schema defaults from env.ts into workerConfig.vars without
-  // shadowing values already provided by .env files / shell. Wired into
-  // envSchemaPlugin's onDefaults callback for CF targets only (the node
-  // target reads from process.env at runtime).
-  function applySchemaDefaultsToWorkerVars(defaults: Record<string, string>): void {
-    const vars = (workerConfig.vars as Record<string, string> | undefined) ?? {};
-    for (const [key, value] of Object.entries(defaults)) {
-      if (vars[key] === undefined) {
-        vars[key] = value;
-      }
-    }
-    workerConfig.vars = vars;
+  function applyEnvSchema(facts: EnvSchemaFacts): void {
+    envSchemaFacts = facts;
   }
 
-  // A direct Cloudflare deploy promotes only explicitly `.secret()`-marked
-  // schema values to Worker secrets. Make production-local and CI shell values
-  // available to the post-build validator/uploader without exposing unrelated
-  // machine env or changing ordinary Vite build behaviour.
-  function applySchemaSecretsToWorkerVars(secretKeys: Array<string>): void {
-    if (process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] !== '1' || secretKeys.length === 0) {
-      return;
-    }
-    const mode = voidDeployBuildConfig?.mode ?? 'production';
-    const rawEnvDir = voidDeployBuildConfig?.envDir;
-    const envDir = rawEnvDir ? join(root, rawEnvDir) : root;
-    const local = mergeAndExpand(
-      [parseDotenvFile(join(envDir, `.env.${mode}.local`), { expand: false })],
-      { onWarn: (message) => voidWarn(message) },
-    );
-    const selected: Record<string, string> = {};
-    for (const key of secretKeys) {
-      if (authEnabled && key === 'BETTER_AUTH_SECRET') {
-        continue;
-      }
-      if (Object.prototype.hasOwnProperty.call(local, key)) {
-        selected[key] = local[key]!;
-      }
-      if (process.env[key] !== undefined) {
-        selected[key] = process.env[key]!;
-      }
-    }
-    const { sanitized, stripped } = stripInternalEnvKeys(selected);
-    if (stripped.length > 0) {
-      voidWarn(
-        `Ignoring schema secret keys reserved for Void runtime use: ${stripped.join(', ')}.`,
-      );
-    }
-    workerConfig.vars = {
-      ...(workerConfig.vars as Record<string, string> | undefined),
-      ...sanitized,
-    };
-  }
-
-  // Plugin that loads .env files and merges them into workerConfig.vars.
-  // Runs before the Cloudflare plugin so vars are available as worker bindings.
-  //
-  // The `{ mode, envDir }` this hook OBSERVES (raw, root-relative) is exposed via `api` so the
-  // self-host `void deploy --backend cloudflare` secret preflight can validate the SAME `.env*`
-  // set the build ships. It must be captured HERE, at this hook's position, not read off the
-  // final `resolved.envDir`: config hooks run in sequence, and a LATER plugin's `config` hook
-  // that returns a different `envDir` would change `resolved.envDir` while this hook already
-  // loaded env from the value it saw — the preflight reading the final value would then diverge
-  // from what the build baked.
-  let voidDeployBuildConfig: { mode: string; envDir: string | undefined } | undefined;
+  // Plugin that loads the single local `.env` file into worker bindings for
+  // local dev and preview only. Production values come from remote secrets;
+  // builds never turn local dotenv entries into deployable Worker vars.
   const envPlugin: Plugin = {
     name: 'void:env',
-    api: {
-      getVoidDeployBuildConfig: (): { mode: string; envDir: string | undefined } | undefined =>
-        voidDeployBuildConfig,
-    },
-    config(userConfig, { mode, command, isPreview }) {
+    config(_userConfig, { command, isPreview }) {
       viteCommand = command;
       // `dev` is the Vite dev server only. Every build, `void deploy`, and
       // `vite preview` (which reports `command: 'serve'`) is `prod`.
@@ -1542,50 +1497,28 @@ export function voidPlugin(options?: {
       // Exclude the .void cache directory from the file watcher so that
       // miniflare SQLite writes don't trigger infinite HMR refreshes.
       const ignored = ['**/.void/**'];
-      // Honour the user's `envDir` config — projects that keep .env files
-      // in `config/` or similar would otherwise be silently ignored. Falls
-      // back to the project root, matching Vite's own default.
-      const rawEnvDir =
-        typeof userConfig.envDir === 'string' && userConfig.envDir.length > 0
-          ? userConfig.envDir
-          : undefined;
-      voidDeployBuildConfig = { mode, envDir: rawEnvDir };
-      const envDir = rawEnvDir ? join(root, rawEnvDir) : root;
-      // Direct Cloudflare deploys must never turn machine-local dotenv files
-      // into plaintext Worker vars. Rebuild the deploy env from the two
-      // portable files instead of trying to delete `.local` keys from Vite's
-      // already-merged result: a key overridden by `.env.production.local`
-      // must fall back to its `.env.production` value, not disappear or retain
-      // the local override. Development and ordinary Vite builds keep Vite's
-      // standard four-file loading for compatibility.
-      let filtered: Record<string, string>;
-      if (process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1') {
-        const deployFiles = ['.env', `.env.${mode}`];
-        filtered = mergeAndExpand(
-          deployFiles.map((file) => parseDotenvFile(join(envDir, file), { expand: false })),
-          { onWarn: (message) => voidWarn(message) },
-        );
-        // Vite gives the shell precedence over dotenv, after which
-        // filterLoadedEnv removes those shell-sourced keys. Preserve that
-        // invariant so credentials exported for the CLI never become vars.
-        for (const key of Object.keys(process.env)) {
-          delete filtered[key];
+      if (command === 'serve') {
+        const local = loadLocalEnv(root, { onWarn: (message) => voidWarn(message) });
+        const { sanitized: env, stripped } = stripInternalEnvKeys(local);
+        if (stripped.length > 0) {
+          voidWarn(
+            `Ignoring internal env keys from .env: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
+          );
         }
-      } else {
-        // loadEnv with prefix "" returns .env file vars AND all process.env
-        // vars. filterLoadedEnv strips shell pollution (PATH, HOME, etc.) so
-        // only .env-file vars reach worker bindings.
-        filtered = filterLoadedEnv(loadEnv(mode, envDir, ''));
+        workerConfig.vars = {
+          ...(workerConfig.vars as Record<string, string> | undefined),
+          ...env,
+        };
+        // The Cloudflare preview server runs the already-built wrangler
+        // artifact and sources its declared secrets from process.env instead
+        // of the in-memory worker config. Populate only missing entries so the
+        // shell still wins and `.env` remains a local runtime input.
+        if (isPreview) {
+          for (const [key, value] of Object.entries(env)) {
+            process.env[key] ??= value;
+          }
+        }
       }
-      // Remove any internal Void keys a user may have set in portable env
-      // files so they cannot hijack credential-shaped Worker bindings.
-      const { sanitized: env, stripped } = stripInternalEnvKeys(filtered);
-      if (stripped.length > 0) {
-        voidWarn(
-          `Ignoring internal env keys from .env files: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
-        );
-      }
-      workerConfig.vars = { ...(workerConfig.vars as Record<string, string> | undefined), ...env };
 
       // In dev, keep document requests on the user worker. If this is deleted,
       // the CF router may route a page request to the user worker, the dev
@@ -1874,10 +1807,7 @@ export function voidPlugin(options?: {
       restartPlugin(),
       bindingWatchPlugin,
       envPlugin,
-      envSchemaPlugin(root, {
-        onDefaults: applySchemaDefaultsToWorkerVars,
-        onSecrets: applySchemaSecretsToWorkerVars,
-      }),
+      envSchemaPlugin(root, { onSchema: applyEnvSchema }),
       envClientGuardPlugin(root),
       envClientFoldPlugin(),
       clientStubsPlugin,
@@ -2046,10 +1976,7 @@ export function voidPlugin(options?: {
     restartPlugin(),
     bindingWatchPlugin,
     envPlugin,
-    envSchemaPlugin(root, {
-      onDefaults: applySchemaDefaultsToWorkerVars,
-      onSecrets: applySchemaSecretsToWorkerVars,
-    }),
+    envSchemaPlugin(root, { onSchema: applyEnvSchema }),
     envClientGuardPlugin(root),
     envClientFoldPlugin(),
     clientStubsPlugin,

@@ -48,11 +48,11 @@ describe('database provider adapters', () => {
   it('updates DATABASE_URL without discarding other local env values', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-db-connect-'));
     roots.push(root);
-    writeFileSync(join(root, '.env.local'), 'API_KEY=test\nDATABASE_URL="old"\n');
+    writeFileSync(join(root, '.env'), 'API_KEY=test\nDATABASE_URL="old"\n');
 
     writeLocalDatabaseUrl(root, 'postgresql://user:p@ss@host/app');
 
-    expect(readFileSync(join(root, '.env.local'), 'utf-8')).toBe(
+    expect(readFileSync(join(root, '.env'), 'utf-8')).toBe(
       'API_KEY=test\nDATABASE_URL="postgresql://user:p@ss@host/app"\n',
     );
   });

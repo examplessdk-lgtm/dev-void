@@ -28,17 +28,33 @@
  */
 /// <reference types="@cloudflare/workers-types" />
 
-import { isUnmaskActive, redactMessage, type SecretOverride } from '../shared/env-mask.ts';
+import { isUnmaskActive, redactMessage } from '../shared/env-mask.ts';
 import type { StandardSchemaV1 } from '../standard-schema.ts';
-import { getSecretOverride } from './env-helpers.ts';
 import { getRawRuntimeEnv, type RuntimeEnv } from './env-raw.ts';
 import { getRuntimeEnv, isInternalBinding } from './env.ts';
 
 type AnyValidator = StandardSchemaV1<unknown, unknown>;
 type AnySchema = Record<string, AnyValidator>;
 
-let registeredSchema: AnySchema | null = null;
-let hasDefineEnvBeenCalled = false;
+type BootValidationState = { ok: true } | { ok: false; error: EnvValidationError };
+type EnvRegistryState = {
+  schema: AnySchema | null;
+  hasDefineEnvBeenCalled: boolean;
+  bootValidation: BootValidationState | null;
+};
+
+// Tooling can load `void/env` through a different module instance than the Vite
+// plugin (source workspace, built package, or cache-busted HMR import). Keep the
+// registry process-global so every instance observes the same schema.
+const ENV_REGISTRY_SYMBOL = Symbol.for('void.env.registry');
+const registryGlobal = globalThis as typeof globalThis & {
+  [ENV_REGISTRY_SYMBOL]?: EnvRegistryState;
+};
+const registry = (registryGlobal[ENV_REGISTRY_SYMBOL] ??= {
+  schema: null,
+  hasDefineEnvBeenCalled: false,
+  bootValidation: null,
+});
 const validatedCache = new WeakMap<object, Map<string, unknown>>();
 
 /**
@@ -67,21 +83,18 @@ type InferEnv<S extends AnySchema> = {
  * `import { env } from "~/env"` pattern.
  */
 export function defineEnv<S extends AnySchema>(schema: S): InferEnv<S> {
-  registeredSchema = schema;
+  registry.schema = schema;
   // Flip the presence flag once and leave it on — even if a future call
   // swaps in an empty schema, we still know defineEnv was declared.
-  hasDefineEnvBeenCalled = true;
+  registry.hasDefineEnvBeenCalled = true;
   // Drop any cached entries from a prior schema (HMR / re-import).
   for (const map of validatedCacheValues()) {
     map.clear();
   }
   // Reset boot-time validation state so a re-imported schema is re-checked.
-  bootValidationState = null;
+  registry.bootValidation = null;
   return env as unknown as InferEnv<S>;
 }
-
-type BootValidationState = { ok: true } | { ok: false; error: EnvValidationError };
-let bootValidationState: BootValidationState | null = null;
 
 /**
  * Internal: validate the entire schema against the worker's actual env on
@@ -101,18 +114,18 @@ let bootValidationState: BootValidationState | null = null;
  * throw with guidance pointing back to this boot-time pre-validation.
  */
 export async function _validateEnvOnce(envValues: unknown): Promise<void> {
-  if (bootValidationState) {
-    if (!bootValidationState.ok) {
-      throw bootValidationState.error;
+  if (registry.bootValidation) {
+    if (!registry.bootValidation.ok) {
+      throw registry.bootValidation.error;
     }
     return;
   }
-  if (!registeredSchema) {
-    bootValidationState = { ok: true };
+  if (!registry.schema) {
+    registry.bootValidation = { ok: true };
     return;
   }
   const values = (envValues ?? {}) as Record<string, unknown>;
-  const report = await validateAllEnvWithValues(registeredSchema, values);
+  const report = await validateAllEnvWithValues(registry.schema, values);
   if (report.valid) {
     // Seed the sync cache with already-validated values so subsequent
     // `env.X` reads (including ones with async validators) hit the cache
@@ -147,7 +160,7 @@ export async function _validateEnvOnce(envValues: unknown): Promise<void> {
     } catch {
       // No runtime env available — no proxy reads will happen, so no seeding needed.
     }
-    bootValidationState = { ok: true };
+    registry.bootValidation = { ok: true };
     return;
   }
   const lines: Array<string> = ['Env validation failed at worker boot:'];
@@ -159,7 +172,7 @@ export async function _validateEnvOnce(envValues: unknown): Promise<void> {
     lines.push(`  • ${key}: ${messages.join('; ')}`);
   }
   const error = new EnvValidationError('__init__', [{ message: lines.join('\n') }]);
-  bootValidationState = { ok: false, error };
+  registry.bootValidation = { ok: false, error };
   throw error;
 }
 
@@ -171,7 +184,7 @@ const cacheList: Array<Map<string, unknown>> = [];
 
 /** Internal: framework-only access to the registered schema (for plugin/CLI). */
 export function _getRegisteredSchema(): AnySchema | null {
-  return registeredSchema;
+  return registry.schema;
 }
 
 /**
@@ -181,14 +194,12 @@ export function _getRegisteredSchema(): AnySchema | null {
  * `defineEnv({})` (an intentional empty schema) from "never called".
  */
 export function _hasRegisteredSchema(): boolean {
-  return hasDefineEnvBeenCalled;
+  return registry.hasDefineEnvBeenCalled;
 }
 
 /**
  * Internal: extract `.default(value)` values from the registered schema as
- * stringified env values. Used by the plugin and deploy CLI to seed worker
- * `vars` so `c.env.X` and `process.env.X` see the same fallback that the
- * typed `env.X` proxy returns.
+ * stringified env values. Used for explicit build-time client fallbacks.
  *
  * Detection is schema-agnostic: probe each validator with `undefined` and,
  * if it succeeds with a non-undefined value, that value is the default.
@@ -196,16 +207,14 @@ export function _hasRegisteredSchema(): boolean {
  * Schema validator with intrinsic default behaviour. Async validators are
  * skipped (we can't get a sync default).
  *
- * Keys with no default — required keys, plain `.optional()` — are omitted
- * from the result so they don't shadow user `.env*` entries with empty
- * strings.
+ * Keys with no default — required keys and plain `.optional()` keys — are omitted.
  */
 export function _getSchemaDefaults(): Record<string, string> {
   const defaults: Record<string, string> = {};
-  if (!registeredSchema) {
+  if (!registry.schema) {
     return defaults;
   }
-  for (const [key, validator] of Object.entries(registeredSchema)) {
+  for (const [key, validator] of Object.entries(registry.schema)) {
     let result: unknown;
     try {
       result = validator['~standard'].validate(undefined);
@@ -258,10 +267,10 @@ function readKey(key: string): unknown {
   // Filtered env hides internal __VOID_*/__PROJECT_* bindings from user code.
   const filtered = getRuntimeEnv() as Record<string, unknown>;
   const rawValue = filtered[key];
-  if (!registeredSchema) {
+  if (!registry.schema) {
     return rawValue;
   }
-  const validator = registeredSchema[key];
+  const validator = registry.schema[key];
   if (!validator) {
     return rawValue;
   }
@@ -290,10 +299,9 @@ function readKey(key: string): unknown {
   }
   if (result.issues) {
     const unmask = isUnmaskActive();
-    const override = getSecretOverride(validator);
     const redactedIssues = result.issues.map((i) => ({
       ...i,
-      message: redactMessage(key, rawValue, i.message, { override, unmask }),
+      message: redactMessage(key, rawValue, i.message, { unmask }),
     }));
     throw new EnvValidationError(key, redactedIssues);
   }
@@ -354,7 +362,7 @@ export type EnvValidationReport = {
 };
 
 /**
- * Validate an env record (e.g. merged `.env*` + remote secret list) against
+ * Validate an env record (local dotenv, build inputs, or runtime bindings) against
  * the registered schema. Used by the dev plugin (warnings), the deploy CLI
  * (hard error), and `_validateEnvOnce` at worker boot.
  *
@@ -364,10 +372,10 @@ export type EnvValidationReport = {
 export async function validateAllEnv(
   envValues: Record<string, unknown>,
 ): Promise<EnvValidationReport> {
-  if (!registeredSchema) {
+  if (!registry.schema) {
     return { valid: true, missing: [], invalid: [], values: new Map() };
   }
-  return await validateAllEnvWithValues(registeredSchema, envValues);
+  return await validateAllEnvWithValues(registry.schema, envValues);
 }
 
 /**
@@ -395,12 +403,9 @@ async function validateAllEnvWithValues(
       if (isMissing) {
         report.missing.push(key);
       } else {
-        const override: SecretOverride = getSecretOverride(validator);
         report.invalid.push({
           key,
-          messages: result.issues.map((i) =>
-            redactMessage(key, raw, i.message, { override, unmask }),
-          ),
+          messages: result.issues.map((i) => redactMessage(key, raw, i.message, { unmask })),
         });
       }
     } else {
