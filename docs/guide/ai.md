@@ -266,7 +266,7 @@ For production, add your API key as a project secret:
 void secret put OPENAI_API_KEY=sk-...
 ```
 
-For local development, add it to `.env.local` in your project root:
+For local development, add it to `.env` in your project root:
 
 ```
 OPENAI_API_KEY=sk-...

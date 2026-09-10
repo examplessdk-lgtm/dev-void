@@ -80,7 +80,7 @@ pnpm void deploy
 - **One CLI** — deploy and manage your app on your Cloudflare account or your team's Void platform
 - **Team platforms** — install a shared deployment service in your company's Cloudflare account and connect developers through the same CLI
 - **Automatic provisioning** — use `void/db`, `void/kv`, `void/storage`, or `void/ai`, and Void provisions the resources your app needs
-- **Typed secrets** — mark env schema keys with `.secret()`; direct Cloudflare deploys upload them as encrypted Worker secrets instead of plaintext vars
+- **Typed production secrets** — schema-declared server keys are required in remote secret storage and rejected as plaintext Worker vars
 - **File-based routing** — drop a file in `routes/`, get an endpoint with method exports, dynamic params, middleware, and [Standard Schema](https://standardschema.dev/) validation
 - **Full-stack pages** — `pages/` directory for server-rendered UI with co-located data loading, SPA navigation, and typed forms (React, Vue, Svelte, Solid)
 - **End-to-end type safety** — SQL migrations generate DB types, route handlers infer return types, typed fetch client checks everything at the call site

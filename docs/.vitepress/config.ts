@@ -219,6 +219,7 @@ export default extendConfig(
               { text: 'Key-Value Storage', link: '/guide/kv' },
               { text: 'Object Storage', link: '/guide/storage' },
               { text: 'Environment Variables', link: '/guide/env-vars' },
+              { text: 'Environment Migration', link: '/guide/env-migration' },
             ],
           },
           {

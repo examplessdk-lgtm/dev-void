@@ -164,7 +164,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 Declare environment variables in `env.ts`, then read them with `import { env } from "void/env"`. Void supplies types, checks values during build and deploy, and stops the build if client code references a server-only key. See [Environment Variables](../../guide/env-vars.md).
 
-Astro-specific note: the client prefix is `PUBLIC_*` (Astro's default `envPrefix`), not `VITE_*` — name client-exposed keys accordingly and the leak guard + constant folding honour the prefix automatically.
+Void always uses `VITE_*` for client-exposed schema keys, including in Astro projects. Astro's separate `PUBLIC_*` convention still applies to direct `import.meta.env` access, but it does not change the `void/env` server/client boundary.
 
 `void/env` replaces [`astro:env`](https://docs.astro.build/en/guides/environment-variables/) and `Astro.locals.runtime.env` for env-var access. Keep `Astro.locals.runtime.env` around when you need raw binding access (D1, KV, R2, etc.).
 

@@ -55,15 +55,15 @@ export function devTriggersHintPlugin(
         console.log();
         voidLog(`Detected ${summary.join(' and ')}. Trigger locally:`);
         // `__VOID_PROXY_TOKEN` is the platform's prod handshake header, mirrored
-        // locally via `.dev.vars` (which @cloudflare/vite-plugin populates into
+        // locally via `.env` (which Void loads into the dev worker),
         // worker bindings). Other env sources are intentionally NOT considered:
         // `.env`/process.env entries are stripped by `stripInternalEnvKeys` on
         // the Void path, and wrangler `[vars]` go through the CF plugin which
         // also surfaces them via the worker env — but that's a deploy-config
-        // path, not a dev-trigger ergonomics one. `.dev.vars` is the single
+        // path, not a dev-trigger ergonomics one. `.env` is the single
         // place a developer is expected to define this token, so it's the
         // single source we consult here to keep hint and dispatcher in sync.
-        const configuredProxyToken = parseDotenvFile(join(root, '.dev.vars'), {
+        const configuredProxyToken = parseDotenvFile(join(root, '.env'), {
           expand: false,
         }).__VOID_PROXY_TOKEN;
         const authHeader = configuredProxyToken

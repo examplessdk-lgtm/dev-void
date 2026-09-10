@@ -121,7 +121,7 @@ You can set non-binding Cloudflare fields like `compatibility_date` and `compati
 }
 ```
 
-For environment variables, use `.env` files for local values and secrets. Void automatically loads `.env` files through Vite's `loadEnv` and merges them into the worker's `vars` bindings:
+For environment variables, declare the schema in `env.ts` and put local values in the single root `.env` file. Void loads `.env` into local development bindings only; it never becomes production configuration:
 
 ```bash
 # .env
@@ -130,7 +130,7 @@ API_URL=https://api.example.com
 
 Binding arrays such as `d1_databases`, `kv_namespaces`, and `r2_buckets` are not allowed in the `worker` field because Void manages bindings for you. If you need custom bindings with real resource IDs, add a `wrangler.jsonc` to the project root instead. See [Cloudflare config merging](#cloudflare-config-merging) for details.
 
-For non-secret plain-text defaults, you can also set `worker.vars` in `void.json`. Values from `.env` files override `worker.vars`.
+For non-secret plain-text defaults, you can also set `worker.vars` in `void.json`. Local `.env` values override `worker.vars` during development. Production builds reject any `worker.vars` name that is declared as a server key in `env.ts`; store those values remotely with `void secret put` instead.
 
 ## Cloudflare config merging
 
@@ -260,7 +260,7 @@ Void reads your app's configuration and source, then:
 1. Checks the app type, selected account, and Cloudflare credentials.
 2. Creates missing resources or reuses resources already in your account.
 3. Builds the app and checks the generated Worker config, secrets, and migration history.
-4. Preserves or creates the auth secret, applies pending migrations, and uploads keys marked `.secret()` as encrypted Worker secrets.
+4. Preserves or creates the auth secret, verifies required server keys in encrypted remote storage, and applies pending migrations.
 5. Uploads a Worker Version and checks that it is ready.
 6. Sends traffic to the new version and applies routes, custom domains, cron schedules, and queue consumers.
 
@@ -298,9 +298,7 @@ For auth-enabled apps, run `void db generate` and commit the migrations. Void in
 
 Custom D1 layouts are supported through `migrations_dir`, `migrations_table`, and `migrations_pattern`. The files Cloudflare will apply must match the files Void validated, including their content and numeric order. Missing, extra, or reordered migrations stop deployment.
 
-Mark sensitive values with [`.secret()`](../guide/env-vars.md). Void removes them from plaintext Worker vars and uploads them as encrypted secrets. Values can come from `.env`, `.env.production`, `.env.production.local`, or the deploy environment; the environment takes precedence. Existing remote secrets are preserved, optional missing secrets are skipped, and deploy doesn't delete remote secrets.
-
-Unmarked values from `.env` and `.env.production` are deployed as plaintext vars. Unmarked local and shell values aren't deployed. Warnings about likely secrets don't encrypt them for you; use `.secret()`.
+Root `.env` is local-only and is never emitted into Worker vars. Every non-client key declared in `env.ts` is a server value: store it with `void secret put <NAME>`. Void emits required server names through `secrets.required`, rejects plaintext Worker vars with those names, and preserves existing remote secrets.
 
 For apps using auth, Void creates a random 32-byte `BETTER_AUTH_SECRET` only when the remote secret is missing. It reuses that value on later deploys. Both auth secrets and schema-marked secrets can be set up on a new Worker's draft before its first upload.
 
@@ -337,6 +335,8 @@ Worker apps support D1, KV, R2, Queues, typed state, PostgreSQL and MySQL throug
 - **Node.js, Bun, and Deno use a different deployment path.** See their [integration guide](./nodejs-bun-deno.md).
 
 WebSocket routes and typed state use SQLite-backed Durable Objects. Commit the bindings and `new_sqlite_classes` migration history in `wrangler.jsonc`; don't delete or reorder deployed migration steps. Older hosted classes using `new_classes` keep their existing storage.
+
+Bare `vite build && wrangler deploy` does not provision schema-declared secrets. Use `wrangler secret bulk` / `wrangler secret put` and list every inherited name under `secrets.required` yourself.
 
 ISR uses the shared cache protocol. Entries are scoped to a deployment and hostname, and `routing.revalidateQueryAllowlist` adds bounded query variants. `revalidate()` purges matching entries and variants from KV and the local edge cache. See [ISR](#isr-self-host) below for cache behavior across regions.
 
