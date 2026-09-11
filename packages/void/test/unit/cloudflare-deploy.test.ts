@@ -2661,8 +2661,8 @@ describe('runCloudflareDeploy — pre-build queue existence probe', () => {
 describe('runCloudflareDeploy — pre-build queue name validation', () => {
   /**
    * A worker-bearing app whose desired queues come from the given `queues/` filenames.
-   * Queue names are the filenames verbatim (`queues/scan.ts` strips only the extension),
-   * so this fixture is how an adversarial name actually reaches the deploy.
+   * Queue names are derived from those paths (`queues/scan.ts` strips the extension and joins
+   * nested segments with `-`), so this fixture is how an adversarial name actually reaches deploy.
    */
   function queueNameProject(...fileNames: Array<string>): string {
     return makeProject({
@@ -2756,6 +2756,23 @@ describe('runCloudflareDeploy — pre-build queue name validation', () => {
       'queues',
       'info',
       'jobs',
+      '-c',
+      join(root, 'wrangler.jsonc'),
+      '--env=',
+    ]);
+    expect(trace.indexOf('wrangler:queues')).toBeLessThan(trace.indexOf('build'));
+    expect(trace).toContain('wrangler:deploy');
+  });
+
+  it('probes a nested queue using its normalized Cloudflare resource name', async () => {
+    const root = queueNameProject('order/notifications.ts');
+    const { deps, wranglerArgs, trace } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(wranglerArgs.find((args) => args[0] === 'queues')).toEqual([
+      'queues',
+      'info',
+      'order-notifications',
       '-c',
       join(root, 'wrangler.jsonc'),
       '--env=',

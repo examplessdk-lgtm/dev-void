@@ -56,7 +56,7 @@ src/
     db-types.ts             # (removed — Drizzle schema is now the type source)
     queue-types.ts          # Generates .void/queues.d.ts (QueueMap with payload types)
   queues/
-    scan.ts                 # Queue file scanner (queues/ dir, name from filename + consumer options)
+    scan.ts                 # Queue file scanner (name from relative path, nested segments joined by `-`, consumer options)
   runtime/
     handler.ts              # defineHandler(), defineHandler.withValidator(), defineMiddleware(), defineHead(), defineQueue()
     queues.ts               # QueueMap stub interface + typed `queues` proxy using env.QUEUE_*
