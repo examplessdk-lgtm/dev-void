@@ -17,8 +17,9 @@
  *
  * Best-effort for DELIVERY: the destination row is already inserted as
  * 'pending' before we get here. If the send fails, the row stays pending
- * and the user can re-trigger it from the admin / dashboard, so we log
- * and return rather than throw.
+ * and a repeat `POST /projects/:id/email/destinations` for the same
+ * address (`void email allow <address>` again) resends the link, so we
+ * log and return rather than throw.
  *
  * NOT best-effort for CONFIGURATION: a missing `EMAIL_SENDER_DOMAIN`
  * throws before anything is attempted. Every send from this worker would

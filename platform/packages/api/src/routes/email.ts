@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { signConfirmToken, type ConfirmTokenPayload } from '../auth/confirm-token.ts';
 import {
   countProjectsUsingDestination,
@@ -214,6 +215,18 @@ const app = new Hono<ApiEnv>()
 
     const existing = await getEmailDestinationByAddress(context.get('db'), projectId, address);
     if (existing) {
+      // A platform-pending row waits on OUR link (Option B below), which is
+      // best-effort and expires in 24h — so a repeat POST is the resend, and
+      // the only one a project owner has. The rate check above already
+      // bounds it. A CF-pending row is not resendable: CF mails its own link
+      // on create only, and the row flips via the GET refresh when clicked.
+      if (existing.status === 'pending' && existing.verification_source === 'platform') {
+        await dispatchPlatformVerification(context, project, existing, address);
+        return context.json(
+          { ...serializeDestination(existing), platformVerificationPending: true },
+          200,
+        );
+      }
       return context.json(serializeDestination(existing), 200);
     }
 
@@ -319,35 +332,7 @@ const app = new Hono<ApiEnv>()
       // this gate it would also dispatch a platform email, doubling
       // recipient mail per race.
       if (inserted.inserted && row.status === 'pending' && row.verification_source === 'platform') {
-        const now = Math.floor(Date.now() / 1000);
-        const tokenPayload: ConfirmTokenPayload = {
-          v: 1,
-          pid: projectId,
-          did: row.id,
-          addr: address,
-          iat: now,
-          exp: now + 24 * 60 * 60,
-        };
-        const token = await signConfirmToken(tokenPayload, context.env.JWT_SECRET);
-        const sendPromise = sendPlatformVerificationEmail(
-          context.env,
-          { id: project.id, slug: project.slug },
-          address,
-          token,
-        );
-        // Same shape the rest of the api uses for post-response work: the
-        // call STARTS synchronously so it cannot be skipped, and a test
-        // harness that invoked `app.request` without an ExecutionContext
-        // falls back to an inline await so the send still happens.
-        // `sendPlatformVerificationEmail` logs and swallows delivery
-        // failures itself — the only thing that escapes it is a missing
-        // `EMAIL_SENDER_DOMAIN`, which is a deploy-time misconfiguration
-        // and is deliberately left loud.
-        try {
-          context.executionCtx.waitUntil(sendPromise);
-        } catch {
-          await sendPromise;
-        }
+        await dispatchPlatformVerification(context, project, row, address);
       }
       return context.json({ ...serializeDestination(row), platformVerificationPending: true }, 201);
     }
@@ -476,6 +461,49 @@ function serializeDestination(row: EmailDestination) {
     verification_source: row.verification_source,
     created_at: row.created_at,
   };
+}
+
+/**
+ * Mint a fresh 24h confirmation token for a platform-pending row and mail
+ * the link (Option B). Shared by the first insert and the repeat-POST
+ * resend; the token is single-use by ROW state, so an earlier unexpired
+ * link stays valid and a second click is idempotent.
+ */
+async function dispatchPlatformVerification(
+  context: Context<ApiEnv>,
+  project: { id: string; slug: string },
+  row: EmailDestination,
+  address: string,
+): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  const tokenPayload: ConfirmTokenPayload = {
+    v: 1,
+    pid: project.id,
+    did: row.id,
+    addr: address,
+    iat: now,
+    exp: now + 24 * 60 * 60,
+  };
+  const token = await signConfirmToken(tokenPayload, context.env.JWT_SECRET);
+  const sendPromise = sendPlatformVerificationEmail(
+    context.env,
+    { id: project.id, slug: project.slug },
+    address,
+    token,
+  );
+  // Same shape the rest of the api uses for post-response work: the
+  // call STARTS synchronously so it cannot be skipped, and a test
+  // harness that invoked `app.request` without an ExecutionContext
+  // falls back to an inline await so the send still happens.
+  // `sendPlatformVerificationEmail` logs and swallows delivery
+  // failures itself — the only thing that escapes it is a missing
+  // `EMAIL_SENDER_DOMAIN`, which is a deploy-time misconfiguration
+  // and is deliberately left loud.
+  try {
+    context.executionCtx.waitUntil(sendPromise);
+  } catch {
+    await sendPromise;
+  }
 }
 
 /**

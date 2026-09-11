@@ -54,7 +54,7 @@ Cloudflare's `send_email` binding only delivers to addresses you've registered a
 void email allow user@acme.com
 ```
 
-Cloudflare emails the recipient with a verification link. Once they click it, you can send to that address from your project. List the project's recipients:
+Cloudflare emails the recipient with a verification link. Once they click it, you can send to that address from your project. If the link did not arrive or has expired, run `void email allow <address>` again while the address is still pending — the CLI re-sends the link, or tells you how to get a fresh one. List the project's recipients:
 
 ```sh
 void email destinations

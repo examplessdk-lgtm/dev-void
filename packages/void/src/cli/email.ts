@@ -134,10 +134,18 @@ async function emailAllow(
   const dest = await client.addEmailDestination(projectId, address);
   if (dest.status === 'verified') {
     log.success(`${dest.address} is already verified.`);
-  } else {
+  } else if (dest.created || dest.platformVerificationPending) {
+    // A new row always mails a link (Cloudflare's or the platform's); a
+    // repeat add re-sends only the platform's link.
     log.success(`Verification email sent to ${dest.address}.`);
     log.info(
       'They click the link in their inbox — no Void or Cloudflare account needed. `void email destinations` to poll status.',
+    );
+  } else {
+    // A repeat add of an address still waiting on Cloudflare's link: CF only
+    // mails it on create, so nothing was sent.
+    log.info(
+      `${dest.address} is still pending — Cloudflare emailed them a verification link when the address was added. For a fresh link: \`void email disallow ${dest.address}\` then \`void email allow ${dest.address}\`.`,
     );
   }
 }

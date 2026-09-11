@@ -952,7 +952,7 @@ List the project's recipient addresses and their state (`verified`, `pending`, o
 void email allow <address> [--project <name>]
 ```
 
-Add one recipient to the project's destination list. Cloudflare emails that address a verification link — the recipient clicks it, with no Void or Cloudflare account required — and the project can send to them from then on. Re-run `void email destinations` to check whether they have verified yet.
+Add one recipient to the project's destination list. Cloudflare emails that address a verification link — the recipient clicks it, with no Void or Cloudflare account required — and the project can send to them from then on. Re-run `void email destinations` to check whether they have verified yet. If the link did not arrive or has expired, run `void email allow <address>` again while the address is still pending — the CLI re-sends the link, or tells you how to get a fresh one.
 
 The project owner's email is added automatically when the project is created, so sending to yourself works without this step.
 

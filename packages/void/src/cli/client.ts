@@ -235,6 +235,12 @@ export type EmailDestinationResponse = {
   status: 'pending' | 'verified' | 'failed';
   verified_at: string | null;
   created_at: string;
+  /**
+   * Set when the platform (not Cloudflare) mailed the confirmation link —
+   * on the first add AND on every repeat add while the row is pending, since
+   * a repeat POST is how that link gets re-sent.
+   */
+  platformVerificationPending?: boolean;
 };
 
 export type DomainResponse = {
@@ -1287,7 +1293,10 @@ export class PlatformClient {
     return res.json();
   }
 
-  async addEmailDestination(projectId: string, address: string): Promise<EmailDestinationResponse> {
+  async addEmailDestination(
+    projectId: string,
+    address: string,
+  ): Promise<EmailDestinationResponse & { created: boolean }> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/email/destinations`, {
       method: 'POST',
       headers: {
@@ -1301,7 +1310,11 @@ export class PlatformClient {
       await throwPlatformApiError('Failed to add email destination', res);
     }
 
-    return res.json();
+    // 201 registered the address just now (a verification link went out);
+    // 200 found it already on the project's list. The body is the same
+    // shape either way, so the status is the only signal for the caller.
+    const body = (await res.json()) as EmailDestinationResponse;
+    return { ...body, created: res.status === 201 };
   }
 
   async removeEmailDestination(projectId: string, destinationId: string): Promise<{ ok: boolean }> {

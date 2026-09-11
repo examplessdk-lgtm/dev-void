@@ -417,18 +417,23 @@ describe('POST /projects/:id/email/destinations', () => {
   it('returns the existing row without calling CF when the address is already in the DB', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfApi();
+    // Proxy reachable and sender configured, so a platform send COULD
+    // happen here — the assertion below is that it does not.
+    const fetchMock = mockCfWithProxy();
 
-    const first = await addDestination(project.id, user.jwt, 'a@b.com');
+    const first = await addDestination(project.id, user.jwt, 'a@b.com', emailEnv());
     expect(first.status).toBe(201);
 
-    const second = await addDestination(project.id, user.jwt, 'a@b.com');
+    const second = await addDestination(project.id, user.jwt, 'a@b.com', emailEnv());
     expect(second.status).toBe(200);
 
     // CF is touched once — the duplicate is fully short-circuited, so the
     // recipient gets one verification email rather than one per click.
     expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(1);
     expect(await rowsFor(project.id)).toHaveLength(1);
+    // A CF-pending row waits on CLOUDFLARE's link, which CF mails on create
+    // only — there is nothing for the platform to resend.
+    expect(proxySends(fetchMock)).toHaveLength(0);
   });
 
   it('recovers via list when CF reports "already exists"', async () => {
@@ -1020,7 +1025,26 @@ describe('per-project verification (Option C + Option B)', () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+    // Park both requests inside the CF call until both have arrived, so both
+    // miss the existing-row lookup and both reach the INSERT — the race this
+    // test is about. Left to itself the harness serializes them, and the
+    // second one would take the repeat-POST resend path instead.
+    let arrived = 0;
+    let release!: () => void;
+    const bothArrived = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const cfMocks = cfAlreadyVerified('cf-tag-shared', 'shared@example.com');
+    const fetchMock = mockCfWithProxy({
+      ...cfMocks,
+      addEmailDestination: async () => {
+        if (++arrived === 2) {
+          release();
+        }
+        await bothArrived;
+        return cfMocks.addEmailDestination();
+      },
+    });
 
     // The unique constraint on (project_id, address) lets exactly one INSERT
     // win; ON CONFLICT DO NOTHING + RETURNING is what tells the loser it did
@@ -1035,6 +1059,45 @@ describe('per-project verification (Option C + Option B)', () => {
     const sends = proxySends(fetchMock);
     expect(sends).toHaveLength(1);
     expect(sends[0]!.body.to).toBe('shared@example.com');
+    expect(await rowsFor(project.id)).toHaveLength(1);
+  });
+
+  it('Option B: a repeat POST for a platform-pending row resends the link', async () => {
+    // A platform-pending row waits on OUR link, and that link is best-effort
+    // (a failed delivery is logged and swallowed) and expires in 24h. The
+    // repeat POST is the only surface a project owner has to re-issue it.
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    let proxyStatus = 500;
+    const fetchMock = mockCfWithProxy(
+      cfAlreadyVerified('cf-tag-shared', 'shared@example.com'),
+      () => Response.json({ ok: proxyStatus === 200 }, { status: proxyStatus }),
+    );
+
+    // First add: the row lands, the delivery fails, and the failure is
+    // swallowed — the recipient has nothing to click.
+    const first = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
+    expect(first.status).toBe(201);
+    expect(proxySends(fetchMock)).toHaveLength(1);
+
+    // Repeat: no new CF registration, no new row — one more link.
+    proxyStatus = 200;
+    const second = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
+    expect(second.status).toBe(200);
+    const body = (await second.json()) as {
+      status: string;
+      verification_source: string;
+      platformVerificationPending?: boolean;
+    };
+    expect(body.status).toBe('pending');
+    expect(body.verification_source).toBe('platform');
+    expect(body.platformVerificationPending).toBe(true);
+
+    const sends = proxySends(fetchMock);
+    expect(sends).toHaveLength(2);
+    expect(sends[1]!.body.to).toBe('shared@example.com');
+    expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(1);
     expect(await rowsFor(project.id)).toHaveLength(1);
   });
 
@@ -1057,9 +1120,9 @@ describe('per-project verification (Option C + Option B)', () => {
     expect(proxySends(fetchMock)).toHaveLength(0);
     expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
     // But the row was already committed before the sender was resolved, so
-    // the misconfigured environment leaves behind a destination nobody can
-    // ever confirm: no link was mailed, and a retry short-circuits on the
-    // existing row instead of re-attempting the send. Reported, not fixed.
+    // the misconfigured environment leaves behind a platform-pending row
+    // with no link in anyone's inbox. Once the var is set, a repeat POST is
+    // the resend: it mails the link against the existing row.
     const stranded = await rowsFor(project.id);
     expect(stranded).toHaveLength(1);
     expect(stranded[0]?.status).toBe('pending');
@@ -1067,7 +1130,10 @@ describe('per-project verification (Option C + Option B)', () => {
 
     const retry = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
     expect(retry.status).toBe(200);
-    expect(proxySends(fetchMock)).toHaveLength(0);
+    const sends = proxySends(fetchMock);
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.body.to).toBe('shared@example.com');
+    expect(await rowsFor(project.id)).toHaveLength(1);
   });
 
   it("defaults verification_source to 'cf' for rows that predate the column", async () => {
