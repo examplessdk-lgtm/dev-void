@@ -356,6 +356,7 @@
     "@types/proper-lockfile": "^4.1.4",
     "@typescript/native-preview": "catalog:",
     "arktype": "^2.2.2",
+    "ci-info": "^4.4.0",
     "estree-walker": "^3.0.3",
     "magic-string": "^0.30.21",
     "ofetch": "2.0.0-alpha.3",
