@@ -1,0 +1,23 @@
+packages/void/test/integration/cli-help.test.ts
+  s_5a06e7c4c4ad3d::t_2d464af3363271 19
+packages/void/test/integration/env-cli.test.ts
+  s_5a06e7c4c4ad3d::t_fa0e052f51828e 47
+packages/void/test/integration/prepare-cli.test.ts
+  s_5a06e7c4c4ad3d::t_6173ca1baeac3a 49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "29ef2d4a117e5bb57e4ed53acb22a9d11278d583",
+  "prompts": {},
+  "sessions": {
+    "s_5a06e7c4c4ad3d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e6e-3b48-7183-ac5e-670cd59a2ddc",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
