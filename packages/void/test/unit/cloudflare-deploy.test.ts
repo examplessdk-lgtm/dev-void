@@ -1996,21 +1996,50 @@ describe('runCloudflareDeploy — static, SPA, and SSG apps', () => {
     expect(wranglerArgs).toEqual([]);
   });
 
-  it('deploys a WebSocket app with a SQLite Durable Object migration', async () => {
+  it('appends a WebSocket migration when a later deploy adds a route', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'wsapp' }),
       'void.json': JSON.stringify({}),
-      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123' }),
+      'wrangler.jsonc': `{
+  // Preserve this user-owned configuration.
+  "account_id": "acc123",
+  "vars": { "FEATURE": "on" }
+}`,
       'routes/index.ts': `export const GET = () => new Response('ok');`,
       'routes/chat/[room].ws.ts': `import { defineRoom } from 'void/ws';\nexport default defineRoom({});`,
     });
-    const { deps, trace, exitCalls } = harness();
-    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    const first = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, first.deps);
 
-    expect(exitCalls).toEqual([]);
-    expect(trace).toEqual(['wrangler:whoami', 'build', 'gate', 'wrangler:deploy']);
+    expect(first.exitCalls).toEqual([]);
+    expect(first.trace).toEqual(['wrangler:whoami', 'build', 'gate', 'wrangler:deploy']);
     expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc'))).toMatchObject({
       migrations: [{ tag: 'void-ws-v1', new_sqlite_classes: ['ChatRoomWs'] }],
+    });
+
+    writeFileSync(
+      join(root, 'routes/notifications.ws.ts'),
+      `import { defineWebSocket } from 'void/ws';\nexport default defineWebSocket({});`,
+    );
+    const second = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, second.deps);
+
+    expect(second.exitCalls).toEqual([]);
+    expect(second.trace).toEqual(['wrangler:whoami', 'build', 'gate', 'wrangler:deploy']);
+    const raw = readFileSync(join(root, 'wrangler.jsonc'), 'utf8');
+    expect(raw).toContain('// Preserve this user-owned configuration.');
+    expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc'))).toMatchObject({
+      vars: { FEATURE: 'on' },
+      durable_objects: {
+        bindings: [
+          { name: 'ChatRoomWs', class_name: 'ChatRoomWs' },
+          { name: 'NotificationsWs', class_name: 'NotificationsWs' },
+        ],
+      },
+      migrations: [
+        { tag: 'void-ws-v1', new_sqlite_classes: ['ChatRoomWs'] },
+        { tag: 'void-ws-v1-2', new_sqlite_classes: ['NotificationsWs'] },
+      ],
     });
   });
 

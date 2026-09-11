@@ -64,4 +64,35 @@ describe('Durable Object migration planning', () => {
       { tag: 'void-ws-v1-2', new_sqlite_classes: ['ChatRoom'] },
     ]);
   });
+
+  it('respects classes established by rename and transfer history', () => {
+    expect(
+      appendSqliteClassMigration(
+        [
+          { tag: 'v1', new_classes: ['LegacyRoom'] },
+          { tag: 'v2', renamed_classes: [{ from: 'LegacyRoom', to: 'RenamedRoom' }] },
+          {
+            tag: 'v3',
+            transferred_classes: [
+              { from: 'ExternalRoom', from_script: 'old-worker', to: 'TransferredRoom' },
+            ],
+          },
+        ],
+        ['RenamedRoom', 'TransferredRoom'],
+        'void-ws-v1',
+      ),
+    ).toEqual({
+      migrations: [
+        { tag: 'v1', new_classes: ['LegacyRoom'] },
+        { tag: 'v2', renamed_classes: [{ from: 'LegacyRoom', to: 'RenamedRoom' }] },
+        {
+          tag: 'v3',
+          transferred_classes: [
+            { from: 'ExternalRoom', from_script: 'old-worker', to: 'TransferredRoom' },
+          ],
+        },
+      ],
+      added: false,
+    });
+  });
 });

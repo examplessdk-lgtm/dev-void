@@ -1,3 +1,4 @@
+import { readFileSync, rmSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathslash';
 import { chromium, type Browser, type Page } from 'playwright';
@@ -73,6 +74,15 @@ describe('playground/websockets', () => {
   let stderr = '';
 
   beforeAll(async () => {
+    const playground = join(ROOT, 'playground/websockets');
+    rmSync(join(playground, 'dist'), { recursive: true, force: true });
+    const build = spawn.sync('vp', ['run', '--filter', './playground/websockets', 'build'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: { ...process.env, VOID_INSPECTOR_PORT: 'false' },
+    });
+    expect(build.status).toBe(0);
+
     browser = await chromium.launch();
 
     port = await getPort();
@@ -106,6 +116,25 @@ describe('playground/websockets', () => {
     });
 
     await waitForServer(base, 20_000);
+  });
+
+  it('builds WebSocket routes as SQLite-backed Durable Objects', () => {
+    const config = JSON.parse(
+      readFileSync(join(ROOT, 'playground/websockets/dist/ssr/wrangler.json'), 'utf8'),
+    );
+    expect(config.durable_objects.bindings).toEqual(
+      expect.arrayContaining([
+        { name: 'WsChatRoomWs', class_name: 'WsChatRoomWs' },
+        { name: 'WsNotificationsWs', class_name: 'WsNotificationsWs' },
+      ]),
+    );
+    expect(config.migrations).toContainEqual({
+      tag: 'void-ws-v1',
+      new_sqlite_classes: ['WsChatRoomWs', 'WsNotificationsWs'],
+    });
+    expect(
+      config.migrations.some((migration: Record<string, unknown>) => 'new_classes' in migration),
+    ).toBe(false);
   });
 
   afterAll(async () => {
