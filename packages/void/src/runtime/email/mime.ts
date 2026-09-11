@@ -109,7 +109,13 @@ function validateAddressParts(field: string, email: string, name?: string): void
   }
 }
 
-function parseAddress(value: Address, field: string): { email: string; name?: string } {
+/**
+ * Parse one address — a bare `email@domain` or `Display Name <email@domain>`
+ * — into its parts, throwing a `MimeError` for `field` on anything else.
+ * Exported so `void.json` `email.from` is validated by the same rules the
+ * runtime applies to `from` at send time.
+ */
+export function parseAddress(value: Address, field: string): { email: string; name?: string } {
   if (typeof value === 'string') {
     rejectCRLF(`${field} address`, value);
     // Match `Display Name <email@domain>` with paired quotes around the

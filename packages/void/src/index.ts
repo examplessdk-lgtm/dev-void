@@ -1170,6 +1170,33 @@ export function voidPlugin(options?: {
       result.vars = vars;
     }
 
+    // Serve never carries a `send_email` binding, so the dev inbox stays the
+    // only sink. `void deploy --backend cloudflare` writes
+    // `send_email: [{ name: "SEND_EMAIL" }]` into the root wrangler.jsonc, and
+    // `sendEmail` falls through to `env.SEND_EMAIL` whenever the inbox is not
+    // armed — under miniflare that binding writes .eml files to disk, or with
+    // `remote: true` sends real mail. Mutate `resolved`, as the assets policy
+    // above does: the return value is defu-merged over it, so this is the only
+    // way to remove a key. Build passes the root entry through untouched.
+    if (viteCommand === 'serve') {
+      delete (resolved as Record<string, unknown>).send_email;
+    }
+
+    // Default sender for `sendEmail()` from void.json `email.from`. Serve-only,
+    // the same gate as `__VOID_TOKEN` — not because it is a credential, but
+    // because on a build the root wrangler.jsonc already owns the var:
+    // `void deploy --backend cloudflare` writes the same `__VOID_EMAIL_FROM`
+    // there once the domain's routing or sending is ready, and that entry
+    // reaches `dist/ssr/wrangler.json` through `resolved.vars`. Injecting it on
+    // build too would advertise a sender on an account nothing was set up on.
+    // The managed deploy ignores the generated wrangler config and injects its
+    // own sender.
+    if (viteCommand === 'serve' && config.email?.from) {
+      const vars = (result.vars as Record<string, string>) ?? {};
+      vars.__VOID_EMAIL_FROM = config.email.from;
+      result.vars = vars;
+    }
+
     // Queues — add producer + consumer bindings for local dev
     if (queues.length > 0) {
       (result as Record<string, unknown>).queues = {

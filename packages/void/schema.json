@@ -396,6 +396,17 @@
         }
       },
       "additionalProperties": false
+    },
+    "email": {
+      "type": "object",
+      "description": "Email configuration for void/email.",
+      "properties": {
+        "from": {
+          "type": "string",
+          "description": "Default sender for sendEmail(): one address, optionally with a display name (\"Acme <noreply@mail.acme.com>\"). On `void deploy --backend cloudflare` its host is the domain Void sets Email Routing and Email Sending up on."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false
