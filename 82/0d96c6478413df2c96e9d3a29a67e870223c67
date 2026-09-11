@@ -1,0 +1,27 @@
+platform/packages/api/src/revalidate-core.ts
+  s_0add8c35799930::t_4f252a1f004e20 39
+platform/packages/api/src/routes/deploy.ts
+  s_0add8c35799930::t_198c4f6e9ce7ee 3197
+platform/packages/api/test/integration/api-revalidate.test.ts
+  s_0add8c35799930::t_5fab3c0cac57a5 44
+platform/packages/dispatch/README.md
+  s_0add8c35799930::t_4053aa9b55baf6 28
+platform/tsconfig.json
+  s_0add8c35799930::t_d258c58692e56a 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "820d96c6478413df2c96e9d3a29a67e870223c67",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
