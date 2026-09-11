@@ -1,0 +1,160 @@
+packages/void/src/migrations/runner-mysql.ts
+  s_21e37aad7ca081::t_af41c7e6582cdc 1-79
+packages/void/src/cli/wrapper.ts
+  s_21e37aad7ca081::t_63b2e98037d234 27,124-128,169,175,195-197
+packages/void/src/plugin-drizzle.ts
+  s_21e37aad7ca081::t_c9aabfab5aed74 17,43,155-190
+  s_21e37aad7ca081::t_535a60e945eaae 149-153
+  s_21e37aad7ca081::t_95fe4fd2c66d00 154
+docs/guide/database.md
+  s_21e37aad7ca081::t_0f0954a3920528 42,44,46-51,55,88-99,400-411,417
+packages/void/test/unit/gen.test.ts
+  s_21e37aad7ca081::t_769c96382dd195 1047-1049,1060,1078,1088,1106,2344-2368
+packages/void/test/unit/plugin-drizzle.test.ts
+  s_21e37aad7ca081::t_e023899ffc6b0f 83-96
+  s_21e37aad7ca081::t_feea86a14d248c 73-82
+docs/guide/deployment.md
+  s_21e37aad7ca081::t_99557f38a2c9c3 175-178
+packages/void/src/cli/template.ts
+  s_21e37aad7ca081::t_5c02c9c05e5287 13,248-249,274-284
+packages/void/src/runtime/auth-migrations.ts
+  s_21e37aad7ca081::t_c3c605dc127839 20-31,43,50-75,117,124,135,137,169,178-179,187-193,195-196,216,239,312-359
+packages/void/vite.config.ts
+  s_21e37aad7ca081::t_eb23f5ca767771 97,104,111,124
+pnpm-lock.yaml
+  s_21e37aad7ca081::t_4e15e760d46573 445,454,460,463,466,479-481,610,646,649,826,6276-6279,7377-7379,7547-7550,7670-7672,8000-8002,8013-8016,8231-8240,9144-9146,9349-9352,10393,10396,10400,10470,10475,10662,10667,11060,11065,12218,12248,12313,12330,12332,12340,12415,12433,15301,15350,15410-15411,15508,15511,15532-15533,15890,15894-15895,15898,15902-15903,15982,15985,15994-16006,16014,16017,16025,16029,16031,16034,16036,16382-16385,16568-16571,16675-16676,16961-16962,16971-16972,17205-17231,17253,17274,17320,17363,17384,17430,17529,17533,17535,17538,18823-18824,19165-19166,19715,19727,19730,19742,19745,19756-19757
+packages/void/getting-started-prompt.txt
+  s_21e37aad7ca081::t_9d9c627d5c0beb 12,22
+  s_21e37aad7ca081::t_67f26c012e00a7 23
+packages/void/src/cli/init.ts
+  s_21e37aad7ca081::t_0daa0118a86cd3 1653,1685-1696,1704-1706,1744-1748,1812-1816,1820,2359,2362-2366,2624-2630
+packages/void/test/unit/drizzle-config.test.ts
+  s_21e37aad7ca081::t_3fa45128ff76e7 46-53
+packages/void/AGENT_PROMPT.md
+  s_21e37aad7ca081::t_7c99f3842d209f 7
+  s_21e37aad7ca081::t_51d8d822556c3f 8
+packages/void/src/cli/types.ts
+  s_21e37aad7ca081::t_5304876862160e 171
+packages/void/src/runtime/better-auth-mysql.ts
+  s_21e37aad7ca081::t_362a369b12131b 1-83
+packages/void/src/cli/client.ts
+  s_21e37aad7ca081::t_1dedfcec585a3a 663
+packages/void/src/runtime/migration-handler.ts
+  s_21e37aad7ca081::t_45ea966f5c601e 68
+packages/void/src/auth/drizzle.ts
+  s_21e37aad7ca081::t_73c0d8c48b6610 39,45,84,164,171-196,256,268-270,302,306-309,312,336,340,344-346,350-352,356-357,385-396,513-514
+packages/void/src/cli/package.ts
+  s_21e37aad7ca081::t_d62bd2a4d85b15 531
+  s_21e37aad7ca081::t_7c7101aaeff167 562,591,805,813,834
+packages/void/test/unit/config.test.ts
+  s_21e37aad7ca081::t_29bf01a678634c 1577,1579-1586,1592
+docs/reference/config.md
+  s_21e37aad7ca081::t_d360661d85a290 114,126,128,131,133
+packages/void/src/runtime/auth.ts
+  s_21e37aad7ca081::t_1cd4db144b7f86 17
+packages/void/src/plugin-routing.ts
+  s_21e37aad7ca081::t_7e8d84808b4e8d 260-262,534-536
+docs/integrations/cloudflare.md
+  s_d8c30422e2fe73::t_a41486d379749a 259
+  s_21e37aad7ca081::t_5a031d99c440d5 242,252
+docs/reference/api.md
+  s_21e37aad7ca081::t_fce7417685fe6c 591,608,625,641-643,1171
+  s_21e37aad7ca081::t_bfa7c26951e160 1172
+packages/void/package.json
+  s_21e37aad7ca081::t_d58ba14efab290 44,177-181,237-241,320-324,350
+packages/void/src/runtime/migration-handler-mysql.ts
+  s_21e37aad7ca081::t_a00f8beb8f8246 1-87
+packages/void/src/cli/deploy.ts
+  s_47ef2a780dfb1e::t_055982a30a148e 6722
+  s_21e37aad7ca081::t_5ae46efbc90c09 3754,3761,4248,4626
+  s_21e37aad7ca081::t_c2958ed0def34d 43,376,2103-2104,2574,2583,2623,2626,2633,3758,4612-4625,5916-5920,5922-5929,6293,6296,6310-6314
+  s_21e37aad7ca081::t_5d427affd970a1 2634-2636
+  s_21e37aad7ca081::t_b93e05c7fc8659 4627-4629
+  s_47ef2a780dfb1e::t_07eb3a9d90ac23 6723-6725
+  s_21e37aad7ca081::t_d5cc18b5c11fe9 4250,4630-4632,5901-5902,6316-6323,6726
+packages/void/src/runtime/better-auth-shared.ts
+  s_21e37aad7ca081::t_66dd714e3a3cb7 14
+packages/void/src/runtime/migration-handler-pg.ts
+  s_21e37aad7ca081::t_c1d185a547354e 7
+packages/void/src/auth/node.ts
+  s_21e37aad7ca081::t_1987cf585394de 5-9,60-81
+docs/.vitepress/config.ts
+  s_21e37aad7ca081::t_7a2b49923bbfd7 212
+packages/void/test/unit/auth-drizzle.test.ts
+  s_21e37aad7ca081::t_c4752fa6db85f0 54-63
+packages/void/test/unit/init.test.ts
+  s_21e37aad7ca081::t_3b99e21f57f129 1302-1306,2862-2866,2870
+packages/void/AGENTS.md
+  s_21e37aad7ca081::t_112fc5b250692a 89,187
+docs/reference/cli.md
+  s_d8c30422e2fe73::t_c03ce5fb63703d 335
+  s_21e37aad7ca081::t_e273365f730ba5 13-40,76,85
+  s_21e37aad7ca081::t_6490e0bc1bbb3a 352,397,421,430
+packages/void/src/runtime/seed.ts
+  s_21e37aad7ca081::t_27bcdc5138a2c4 2,17-22,47-51,55-57,64
+packages/void/src/runtime/schema-mysql.ts
+  s_21e37aad7ca081::t_979e56f541138e 1
+docs/guide/database/mysql.md
+  s_21e37aad7ca081::t_bf525fba0e7f47 1-60
+packages/void/src/cli/db.ts
+  s_21e37aad7ca081::t_6089214840d567 74-81,126-135,148-172,225-227,258-259,261-267,311-324,430-451,467,496-504,629,656-657,661-686,763-776,847,849,961-994,1023,1030,1047,1058,1060-1061,1488-1521,1578-1594,1674-1732,1815,1817,1837-1841,1843-1847,1929-1943
+  s_21e37aad7ca081::t_7327780c1d0b43 1944
+packages/void/src/runtime/db-mysql.ts
+  s_21e37aad7ca081::t_68cb051bf66410 1
+packages/void/schema.json
+  s_21e37aad7ca081::t_6dc66f0d26026a 382-383
+packages/void/src/config.ts
+  s_21e37aad7ca081::t_2a362f74640d20 19,97,122,952,1016-1022
+packages/void/src/cli/gen.ts
+  s_21e37aad7ca081::t_dc74099c1fbf18 191-227,546-563,785,793,798-799,805,821-822,824-830
+packages/void/src/codegen/db-types.ts
+  s_21e37aad7ca081::t_9e9047bcaf2097 22,27,31,34-35,37,42-44,46,49-93
+packages/void/test/unit/runner-mysql.test.ts
+  s_21e37aad7ca081::t_e37b9761e63d96 1-33
+packages/void/test/unit/seed-types.test.ts
+  s_21e37aad7ca081::t_050705dba3dadf 3,22-28,31,41-44,49
+packages/void/test/unit/wrapper.test.ts
+  s_21e37aad7ca081::t_acf07bce54817b 245-268
+packages/void/src/plugin-migration.ts
+  s_21e37aad7ca081::t_450729626140a9 42,64,70-72,85-95,97,103-110
+packages/void/src/router/compile.ts
+  s_21e37aad7ca081::t_a38ae6a91ab986 639,678-679
+packages/void/src/drizzle/config.ts
+  s_21e37aad7ca081::t_298c72d3b15c25 16,34-40
+docs/guide/quickstart.md
+  s_21e37aad7ca081::t_66fbd249220750 37,63
+packages/void/src/index.ts
+  s_21e37aad7ca081::t_fa2f136cd0b8be 1783
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5e6f4453b957116de79b596618aaee765cd580bb",
+  "prompts": {},
+  "sessions": {
+    "s_21e37aad7ca081": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f34-5783-7541-af26-16a1cb0340d6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_47ef2a780dfb1e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f0b-c30c-7e52-8da4-5dc1e348aee7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_d8c30422e2fe73": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f40-1820-7a50-93fa-ab8d6b3f77c5",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
