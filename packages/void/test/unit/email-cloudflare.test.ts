@@ -3,9 +3,12 @@ import { join } from 'pathslash';
 import { describe, expect, it } from 'vite-plus/test';
 import {
   applyEmailSetup,
+  createSessionBearerGetter,
   deriveAddresses,
   emailFromDomain,
   fetchWithSessionBearer,
+  isInteractiveTerminal,
+  parseAuthTokenJson,
   parseRoutingRules,
   parseRoutingSettings,
   parseSendingSettings,
@@ -348,6 +351,74 @@ describe('emailFromDomain', () => {
     expect(emailFromDomain('@acme.com')).toBeNull();
     expect(emailFromDomain('a@')).toBeNull();
     expect(emailFromDomain('a@localhost')).toBeNull();
+  });
+
+  it('accepts the display-name form void.json allows', () => {
+    expect(emailFromDomain('Acme <NoReply@Mail.Acme.com>')).toBe('mail.acme.com');
+    expect(emailFromDomain('"Acme, Inc" <noreply@acme.com> ')).toBe('acme.com');
+    expect(emailFromDomain('Acme <>')).toBeNull();
+  });
+});
+
+// ── Shared seams: the bearer bridge and the interactivity gate ───────────────────
+
+describe('createSessionBearerGetter', () => {
+  const calls: Array<Call> = [];
+  const getter = (result: EmailWranglerRunResult | (() => never)) =>
+    createSessionBearerGetter((args, opts) => {
+      calls.push({ args: [...args], capture: opts.capture });
+      return typeof result === 'function' ? result() : result;
+    });
+
+  it('runs exactly `auth token --json`, captured, and returns the oauth token', async () => {
+    calls.length = 0;
+    const token = await getter({
+      status: 0,
+      stdout: `{\n  "type": "oauth",\n  "token": "${BEARER}"\n}\n`,
+      stderr: '',
+    })();
+    expect(token).toBe(BEARER);
+    expect(calls).toEqual([{ args: ['auth', 'token', '--json'], capture: true }]);
+  });
+
+  it('accepts an api_token session and refuses an api_key pair', async () => {
+    expect(
+      await getter({ status: 0, stdout: '{"type":"api_token","token":"abc"}', stderr: '' })(),
+    ).toBe('abc');
+    expect(
+      await getter({
+        status: 0,
+        stdout: '{"type":"api_key","key":"k","email":"dev@example.com"}',
+        stderr: '',
+      })(),
+    ).toBeNull();
+  });
+
+  it('resolves null on a failed, signal-killed, unspawnable, or throwing run — never throws', async () => {
+    expect(await getter({ status: 1, stdout: '', stderr: 'Not logged in.' })()).toBeNull();
+    expect(await getter({ status: 0, stdout: '', stderr: '', signal: 'SIGKILL' })()).toBeNull();
+    expect(await getter({ status: 0, stdout: '{}', stderr: '', error: 'ENOENT' })()).toBeNull();
+    expect(
+      await getter(() => {
+        throw new Error('boom');
+      })(),
+    ).toBeNull();
+    expect(parseAuthTokenJson('not json')).toBeNull();
+    expect(parseAuthTokenJson('{"type":"oauth"}')).toBeNull();
+  });
+});
+
+describe('isInteractiveTerminal', () => {
+  const tty = { isTTY: true };
+  const pipe = { isTTY: false };
+  it("matches wrangler's gate: not CI, and BOTH stdin and stdout are TTYs", () => {
+    expect(isInteractiveTerminal({}, tty, tty)).toBe(true);
+    expect(isInteractiveTerminal({}, tty, pipe)).toBe(false);
+    expect(isInteractiveTerminal({}, pipe, tty)).toBe(false);
+    expect(isInteractiveTerminal({ CI: 'true' }, tty, tty)).toBe(false);
+    expect(isInteractiveTerminal({ CI: '1' }, tty, tty)).toBe(false);
+    expect(isInteractiveTerminal({ CI: 'false' }, tty, tty)).toBe(true);
+    expect(isInteractiveTerminal({ CI: '' }, tty, tty)).toBe(true);
   });
 });
 
@@ -1361,6 +1432,22 @@ describe('renderAddressMap', () => {
         '    inbound   support@acme.com  →  email/support.ts',
         '    inbound   *@acme.com        →  email/_default.ts   (no rule this deploy)',
         '    outbound  sendEmail() from noreply@acme.com   (verified destinations only)',
+      ].join('\n'),
+    );
+  });
+
+  it('takes a pending label that does not name a deploy (`void email status`)', () => {
+    const text = renderAddressMap({
+      from: 'noreply@acme.com',
+      routes: [{ address: 'support@acme.com', handler: 'email/support.ts' }],
+      addresses: [],
+      sendingReady: true,
+      pendingLabel: '(no rule yet)',
+    });
+    expect(text).toBe(
+      [
+        '    inbound   support@acme.com  →  email/support.ts   (no rule yet)',
+        '    outbound  sendEmail() from noreply@acme.com',
       ].join('\n'),
     );
   });

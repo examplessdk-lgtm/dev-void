@@ -89,4 +89,64 @@ describe('parseEmailArgs', () => {
       /takes exactly one positional argument/,
     );
   });
+
+  // Mode B (design doc 0078): `status` and `setup` take `--backend cloudflare` and
+  // read the local project, never a Void project.
+  it('parses status and setup with --backend cloudflare (space and = forms)', () => {
+    expect(parseEmailArgs(['status', '--backend', 'cloudflare'])).toEqual({
+      subcommand: 'status',
+      projectSlug: undefined,
+      limit: undefined,
+      address: undefined,
+      backend: 'cloudflare',
+    });
+    expect(parseEmailArgs(['setup', '--backend=cloudflare'])).toEqual({
+      subcommand: 'setup',
+      projectSlug: undefined,
+      limit: undefined,
+      address: undefined,
+      backend: 'cloudflare',
+    });
+  });
+
+  it('parses status and setup without a backend (the platform shape)', () => {
+    expect(parseEmailArgs(['status'])).toMatchObject({ subcommand: 'status' });
+    expect(parseEmailArgs(['status']).backend).toBeUndefined();
+    expect(parseEmailArgs(['setup', '--project', 'my-app'])).toMatchObject({
+      subcommand: 'setup',
+      projectSlug: 'my-app',
+    });
+  });
+
+  it('errors on --backend without a value or with another value', () => {
+    expect(() => parseEmailArgs(['setup', '--backend'])).toThrow(
+      /--backend requires a value \('cloudflare'\)/,
+    );
+    expect(() => parseEmailArgs(['setup', '--backend', '--limit', '3'])).toThrow(
+      /--backend requires a value/,
+    );
+    expect(() => parseEmailArgs(['setup', '--backend', 'vercel'])).toThrow(
+      /--backend must be 'cloudflare'/,
+    );
+  });
+
+  it('rejects --backend cloudflare on the platform-only subcommands', () => {
+    for (const sub of ['usage', 'logs', 'destinations']) {
+      expect(() => parseEmailArgs([sub, '--backend', 'cloudflare'])).toThrow(
+        /applies to `void email status` and `void email setup` only/,
+      );
+    }
+    expect(() => parseEmailArgs(['allow', 'a@x.dev', '--backend', 'cloudflare'])).toThrow(
+      /applies to `void email status` and `void email setup` only/,
+    );
+  });
+
+  it('rejects --project and a positional argument with --backend cloudflare', () => {
+    expect(() => parseEmailArgs(['setup', '--backend', 'cloudflare', '--project', 'x'])).toThrow(
+      /--project cannot be combined with --backend cloudflare/,
+    );
+    expect(() => parseEmailArgs(['status', 'acme.com', '--backend', 'cloudflare'])).toThrow(
+      /takes no argument/,
+    );
+  });
 });

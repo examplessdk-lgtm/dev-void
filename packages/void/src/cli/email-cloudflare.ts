@@ -10,6 +10,10 @@
  *   applyEmailSetup      preflight             →  only the rows not ready, in order,
  *                                                  returning the wrangler.jsonc patch
  *
+ * Plus the two seams both callers (`void deploy --backend cloudflare` step 3b-ii and
+ * `void email setup|status --backend cloudflare`) share: `createSessionBearerGetter`
+ * (the `wrangler auth token --json` bridge) and `isInteractiveTerminal` (wrangler's gate).
+ *
  * Rules that hold the whole thing together (0078 "The flow, by lane"):
  *
  *   - Void never refreshes, stores or forwards a token. Everything with a wrangler
@@ -146,13 +150,19 @@ export interface DerivedEmailAddresses {
   routes: Array<{ address: string; handler: string }>;
 }
 
-/** Host part of `email.from`, lowercased; `null` when it is not `local@host`. */
+/**
+ * Host part of `email.from`, lowercased; `null` when it is not `local@host`. Accepts the
+ * display-name form `void.json` allows (`Acme <noreply@mail.acme.com>`) by reading the
+ * address inside the angle brackets.
+ */
 export function emailFromDomain(from: string): string | null {
-  const at = from.lastIndexOf('@');
-  if (at <= 0 || at === from.length - 1) {
+  const bracketed = /<([^<>]*)>\s*$/.exec(from.trim());
+  const address = bracketed ? (bracketed[1] as string) : from;
+  const at = address.lastIndexOf('@');
+  if (at <= 0 || at === address.length - 1) {
     return null;
   }
-  const host = from
+  const host = address
     .slice(at + 1)
     .trim()
     .toLowerCase();
@@ -1142,6 +1152,72 @@ export async function fetchWithSessionBearer(
   };
 }
 
+/**
+ * `wrangler auth token --json` stdout → the bearer, or `null` when the session cannot
+ * be borrowed. Only `oauth` and `api_token` sessions yield a bearer; an `api_key` pair
+ * (CLOUDFLARE_API_KEY + CLOUDFLARE_EMAIL) has none. Tolerates a leading banner.
+ */
+export function parseAuthTokenJson(stdout: string): string | null {
+  const start = stdout.indexOf('{');
+  if (start < 0) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(stdout.slice(start)) as { type?: unknown; token?: unknown };
+    if (
+      (parsed.type === 'oauth' || parsed.type === 'api_token') &&
+      typeof parsed.token === 'string' &&
+      parsed.token.length > 0
+    ) {
+      return parsed.token;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The session-bearer bridge (0078 "The flow, by lane"): borrow the login session's
+ * token through `wrangler auth token --json` on void's pinned wrangler, resolving
+ * `null` on ANY failure so a caller never sees the deploy fail on it (decision 11).
+ *
+ * The runner MUST spawn with `WRANGLER_WRITE_LOGS=false`: without it wrangler appends
+ * the token to `~/.wrangler/logs/wrangler-*.log` (mode `-rw-r--r--`). The captured
+ * stdout is parsed and dropped — never logged, never placed in an env.
+ */
+export function createSessionBearerGetter(
+  runWrangler: EmailWranglerRun,
+): () => Promise<string | null> {
+  return async () => {
+    try {
+      const result = await runWrangler(['auth', 'token', '--json'], { capture: true });
+      if (isHardFailure(result) || result.status !== 0) {
+        return null;
+      }
+      return parseAuthTokenJson(result.stdout);
+    } catch {
+      return null;
+    }
+  };
+}
+
+/**
+ * The interactivity gate, matching wrangler's own (`ci-info.isCI || !(stdin.isTTY &&
+ * stdout.isTTY)`) so the two halves of one deploy — Void's prompt and wrangler's
+ * destructive-rule prompt — never disagree about whether a run is interactive. `CI`
+ * is read the way ci-info reads it: set and not `false`.
+ */
+export function isInteractiveTerminal(
+  env: NodeJS.ProcessEnv = process.env,
+  stdin: { isTTY?: boolean } = process.stdin,
+  stdout: { isTTY?: boolean } = process.stdout,
+): boolean {
+  const ci = env.CI;
+  const inCI = ci !== undefined && ci !== '' && ci.toLowerCase() !== 'false';
+  return !inCI && stdin.isTTY === true && stdout.isTTY === true;
+}
+
 // ── Apply ──────────────────────────────────────────────────────────────────────
 
 /**
@@ -1362,13 +1438,16 @@ export function renderAddressMap(map: {
   /** Addresses actually written to `addresses` — routes outside it are marked pending. */
   addresses: Array<string>;
   sendingReady: boolean;
+  /** The pending marker; `void email status` passes one that does not name a deploy. */
+  pendingLabel?: string;
 }): string {
   const lines: Array<string> = [];
   const width = Math.max(0, ...map.routes.map((r) => r.address.length));
+  const pending = map.pendingLabel ?? '(no rule this deploy)';
   for (const route of map.routes) {
     const live = map.addresses.includes(route.address);
     lines.push(
-      `    inbound   ${pad(route.address, width + 2)}→  ${route.handler}${live ? '' : '   (no rule this deploy)'}`,
+      `    inbound   ${pad(route.address, width + 2)}→  ${route.handler}${live ? '' : `   ${pending}`}`,
     );
   }
   lines.push(

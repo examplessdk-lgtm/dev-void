@@ -1,11 +1,55 @@
-import { log, note } from '@clack/prompts';
+import { confirm, isCancel, log, note } from '@clack/prompts';
+import { readConfig } from '../config.ts';
+import { readProjectPaths } from '../project-paths.ts';
+import { scanEmailHandlersSync } from '../router/email.ts';
 import { getToken } from './auth.ts';
 import { PlatformClient } from './client.ts';
+import {
+  createDeployWranglerRunner,
+  deriveWorkerName,
+  discoverRootWranglerConfig,
+  loadProvisionModule,
+  parseRootWranglerConfig,
+  readWranglerTopLevelString,
+  resolveDeployTransport,
+} from './deploy.ts';
 import type { EmailArgs } from './email-args.ts';
+import {
+  applyEmailSetup,
+  createNodeEmailDns,
+  createSessionBearerGetter,
+  isInteractiveTerminal,
+  preflightEmail,
+  renderAddressMap,
+  renderEmailChecklist,
+  type EmailCloudflareInputs,
+  type EmailDns,
+  type EmailFetch,
+  type EmailPreflight,
+  type EmailWranglerRun,
+} from './email-cloudflare.ts';
 import { pc } from './output.ts';
 import { readProjectConfig } from './project.ts';
+import { writeProvisionedWranglerConfig } from './wrangler.ts';
 
 export async function runEmailCommand(root: string, args: EmailArgs): Promise<void> {
+  // Mode B (design doc 0078) never touches the Void platform: no token, no project.
+  if (args.backend === 'cloudflare') {
+    return runEmailCloudflareCommand(root, args);
+  }
+  if (args.subcommand === 'setup') {
+    log.error(
+      'email: `void email setup` sets email up on your OWN Cloudflare account — run it with `--backend cloudflare`. The Void platform needs no setup: deploy, and `void email usage` shows your address.',
+    );
+    process.exit(1);
+  }
+  if (args.subcommand === 'status') {
+    log.error(
+      'email: `void email status` is available with `--backend cloudflare` today. On the Void platform use `void email usage` and `void email destinations`.',
+    );
+    process.exit(1);
+  }
+
   const token = getToken(root);
   if (!token) {
     log.error('Not logged in. Run `void auth login` first.');
@@ -134,4 +178,198 @@ async function emailLogs(client: PlatformClient, projectId: string, limit?: numb
     return `${ts}  ${dir}  ${entry.from} → ${entry.to}  ${entry.status}${subject}`;
   });
   note(lines.join('\n'), 'Email Logs');
+}
+
+// ── Mode B: the developer's own Cloudflare account ─────────────────────────────
+
+/**
+ * Seams for {@link runEmailCloudflareCommand}, so the command is unit-testable with no
+ * wrangler, network, DNS, terminal, or Cloudflare account — the same pattern the deploy
+ * orchestrator's `CloudflareDeployDeps` uses.
+ */
+export interface EmailCloudflareCommandDeps {
+  /** wrangler runner for the read-only probes and the `email … enable` writes. */
+  runWrangler?: EmailWranglerRun;
+  /** The session-bearer bridge (default: `wrangler auth token --json`, logs off). */
+  getSessionBearer?: () => Promise<string | null>;
+  fetchImpl?: EmailFetch;
+  dns?: EmailDns;
+  /** Override the interactivity gate (default: {@link isInteractiveTerminal}). */
+  isInteractive?: boolean;
+  /** The one Enter (default: clack `confirm`, default Yes). */
+  confirm?: (message: string) => Promise<boolean>;
+  /** Block printer for the checklist / address map (default: clack `log.message`). */
+  print?: (block: string) => void;
+  exit?: (code: number) => never;
+}
+
+/**
+ * `void email setup --backend cloudflare` and `void email status --backend cloudflare`.
+ *
+ * `setup` is the deploy's step 3b-ii on its own: preflight → checklist → the one Enter →
+ * apply → write the root wrangler.jsonc. It exists for CI: a non-interactive deploy that
+ * finds email not ready prints the checklist and says to run this once, commit
+ * wrangler.jsonc, and redeploy. Rules and the catch-all stay wrangler's job — the next
+ * `void deploy --backend cloudflare` applies the plan from the written `addresses`.
+ *
+ * `status` is the preflight alone, printed, exit 1 when not ready.
+ */
+export async function runEmailCloudflareCommand(
+  root: string,
+  args: EmailArgs,
+  deps: EmailCloudflareCommandDeps = {},
+): Promise<void> {
+  const exit = deps.exit ?? ((code: number): never => process.exit(code));
+  const print = deps.print ?? ((block: string): void => log.message(block));
+  const fail = (message: string): never => {
+    log.error(message);
+    return exit(1);
+  };
+
+  // 1. Inputs from the local project: `email.from` is the ONLY domain input (decision 9).
+  const voidConfig = readConfig(root);
+  const from = voidConfig.email?.from;
+  if (!from) {
+    return fail(
+      'email: no sender configured. Add "email": { "from": "you@mail.acme.com" } to void.json — its host is the domain email is set up on.',
+    );
+  }
+  const paths = readProjectPaths(root);
+  const handlers = scanEmailHandlersSync(paths.sourceRoot);
+
+  // 2. The same pinned transport + account + worker name as `void deploy --backend
+  //    cloudflare`, so every wrangler child here consults the account the deploy will.
+  const configPath = discoverRootWranglerConfig(root);
+  const rootConfig = parseRootWranglerConfig(configPath);
+  await loadProvisionModule();
+  let apiBaseUrl: string;
+  try {
+    apiBaseUrl = resolveDeployTransport(root, rootConfig);
+  } catch (err) {
+    return fail(`email: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const accountId =
+    readWranglerTopLevelString(rootConfig, 'account_id') ??
+    (process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || undefined);
+  if (!accountId) {
+    return fail(
+      [
+        'email: no Cloudflare account is pinned.',
+        'Set `account_id` in your root wrangler.jsonc, or export CLOUDFLARE_ACCOUNT_ID —',
+        'the same pin `void deploy --backend cloudflare` needs.',
+      ].join('\n'),
+    );
+  }
+  const workerName = readWranglerTopLevelString(rootConfig, 'name') ?? deriveWorkerName(root);
+  const runWrangler = deps.runWrangler ?? createDeployWranglerRunner(root, accountId, apiBaseUrl);
+  // `wrangler auth token` gets its OWN child env pin: without WRANGLER_WRITE_LOGS=false
+  // wrangler appends the printed token to its on-disk log (see createSessionBearerGetter).
+  const getSessionBearer =
+    deps.getSessionBearer ??
+    createSessionBearerGetter(
+      createDeployWranglerRunner(root, accountId, apiBaseUrl, { WRANGLER_WRITE_LOGS: 'false' }),
+    );
+  const sendEmail = rootConfig.send_email;
+  const inputs: EmailCloudflareInputs = {
+    handlers,
+    from,
+    workerName,
+    accountId,
+    existingSendEmail: Array.isArray(sendEmail) ? (sendEmail as Array<{ name?: unknown }>) : null,
+    existingAddresses: rootConfig.addresses,
+    wranglerArgs: ['-c', configPath, '--env='],
+    apiBaseUrl,
+    runWrangler,
+    getSessionBearer,
+    fetchImpl: deps.fetchImpl ?? fetch,
+    dns: deps.dns ?? (await createNodeEmailDns()),
+  };
+
+  // 3. Preflight — read-only.
+  let pre: EmailPreflight;
+  try {
+    pre = await preflightEmail(inputs);
+  } catch (err) {
+    return fail(`email: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  print(renderEmailChecklist(pre));
+
+  if (args.subcommand === 'status') {
+    print(
+      renderAddressMap({
+        from,
+        routes: pre.derived.routes,
+        addresses: pre.rules.mine,
+        sendingReady: pre.sending.state === 'ready',
+        pendingLabel: '(no rule yet)',
+      }),
+    );
+    if (pre.ready) {
+      log.success(`Email is set up on ${pre.domain}.`);
+      return;
+    }
+    log.warn(
+      `Email is not set up on ${pre.domain} yet — run \`void email setup --backend cloudflare\`.`,
+    );
+    return exit(1);
+  }
+
+  // 4. The one Enter. An `all` blocker means nothing can be applied; a ready preflight
+  //    needs no prompt (apply makes zero calls and the config write is idempotent).
+  if (pre.blockers.some((b) => b.scope === 'all')) {
+    return fail('email: nothing was changed — fix the ✘ rows above and rerun.');
+  }
+  if (!pre.ready) {
+    const interactive = deps.isInteractive ?? isInteractiveTerminal();
+    if (!interactive) {
+      return fail(
+        'email: `void email setup` changes your Cloudflare account, so it needs an interactive terminal. Run it locally once, commit wrangler.jsonc, then redeploy.',
+      );
+    }
+    const ask =
+      deps.confirm ??
+      (async (message: string): Promise<boolean> => {
+        const answer = await confirm({ message, initialValue: true });
+        return !isCancel(answer) && answer === true;
+      });
+    if (!(await ask(`Set up email on ${pre.domain}?`))) {
+      log.info('Nothing changed.');
+      return;
+    }
+  }
+
+  // 5. Apply, then write the root config through the one comment-preserving writer.
+  const out = await applyEmailSetup(pre, inputs);
+  if (out.lines.length > 0) {
+    print(out.lines.join('\n'));
+  }
+  try {
+    writeProvisionedWranglerConfig(root, out.patch, { configPath });
+  } catch (err) {
+    return fail(
+      `email: could not update ${configPath} — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  print(
+    renderAddressMap({
+      from,
+      routes: pre.derived.routes,
+      addresses: out.patch.addresses ?? [],
+      sendingReady: out.sendingReady,
+      pendingLabel: '(no rule yet)',
+    }),
+  );
+  if (!out.routingReady) {
+    log.warn(
+      `Email routing on ${pre.domain} is not ready yet — finish the step above, then rerun \`void email setup --backend cloudflare\`.`,
+    );
+    return exit(1);
+  }
+  if ((out.patch.addresses ?? []).length > 0) {
+    log.info(
+      'Routing rules are created by the next `void deploy --backend cloudflare` (wrangler applies the Email Routing plan on deploy).',
+    );
+  }
+  log.success(`Email set up on ${pre.domain}.`);
 }

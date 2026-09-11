@@ -160,7 +160,7 @@ let loadedProvisionModule: ProvisionModule | undefined;
  * Cloudflare fork (`runCloudflareDeploy` / `computeDesiredCloudflareResources`)
  * so a managed deploy never imports it — and thus never loads `proper-lockfile`.
  */
-async function loadProvisionModule(): Promise<ProvisionModule> {
+export async function loadProvisionModule(): Promise<ProvisionModule> {
   loadedProvisionModule ??= await import('./provision.ts');
   return loadedProvisionModule;
 }
@@ -642,7 +642,7 @@ export function assertNoConfigOverrideInProjectDotenv(
  * the deploy tail (build / whoami / migrate / deploy) share one source of truth.
  * Returns the single resolved API base URL to pin into every child env.
  */
-function resolveDeployTransport(root: string, rootConfig: Record<string, unknown>): string {
+export function resolveDeployTransport(root: string, rootConfig: Record<string, unknown>): string {
   const provision = requireProvisionModule();
   assertNoAmbientConfigOverride();
   provision.assertNoTransportRedirectInProjectDotenv(root);
@@ -2191,7 +2191,7 @@ export function parseRootWranglerConfig(configPath: string): Record<string, unkn
 }
 
 /** Read a non-empty top-level string field (`account_id` / `name`) from the config. */
-function readWranglerTopLevelString(
+export function readWranglerTopLevelString(
   config: Record<string, unknown>,
   field: string,
 ): string | undefined {
@@ -2372,7 +2372,7 @@ function suffixedResourceName(workerName: string, suffix: string): string {
  * build emits (and the deploy uploads) the non-override name; deriving from the
  * override here would pin a name the scrubbed build never produces.
  */
-function deriveWorkerName(root: string): string {
+export function deriveWorkerName(root: string): string {
   let pkgName: string | undefined;
   try {
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8')) as { name?: unknown };
@@ -3395,16 +3395,19 @@ export async function checkWranglerMigrationApplySet(
  * every transport selector incl. `CLOUDFLARE_ENV` + the deploy config-override vars
  * scrubbed, one account + API base pinned), so `whoami`/`migrate`/`deploy` can never
  * consult a different ambient account or endpoint. `capture` pipes or inherits stdio.
+ * `extraEnv` is layered on top of the pinned env for a caller that needs one more pin
+ * (`void email setup` runs `wrangler auth token` with `WRANGLER_WRITE_LOGS=false`).
  */
-function createDeployWranglerRunner(
+export function createDeployWranglerRunner(
   root: string,
   accountId: string,
   apiBaseUrl: string,
+  extraEnv?: Record<string, string>,
 ): DeployWranglerRun {
   const launcher = resolveWranglerArgv(root);
   const [command, ...prefix] = launcher;
   return (args, opts) => {
-    const childEnv = deployChildEnv(accountId, apiBaseUrl);
+    const childEnv = { ...deployChildEnv(accountId, apiBaseUrl), ...extraEnv };
     const result = spawnSync(command as string, [...prefix, ...args], {
       cwd: root,
       stdio: opts.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
@@ -4615,7 +4618,7 @@ export async function runCloudflareDeploy(
  * writer do (wrangler.jsonc first, then wrangler.json). Falls back to the
  * default wrangler.jsonc path when none exists yet — the provisioner creates it.
  */
-function discoverRootWranglerConfig(root: string): string {
+export function discoverRootWranglerConfig(root: string): string {
   for (const name of ['wrangler.jsonc', 'wrangler.json']) {
     const candidate = join(root, name);
     if (existsSync(candidate)) {
