@@ -1,0 +1,21 @@
+pnpm-lock.yaml
+  s_b5e19775e502a3::t_9eb399c26b9b43 208-209,607,610,823,1397,10352,10354,10402,10415,10421,12177,12207,12272,12289,12291,12299,12374,12392,17262,17329,17428,17432,17434,17437,19640
+pnpm-workspace.yaml
+  s_b5e19775e502a3::t_388656d03a288d 38-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "eccb327a4f8b4bb2f23cc68008c688fbb7565139",
+  "prompts": {},
+  "sessions": {
+    "s_b5e19775e502a3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e9c-eb3e-7512-b496-36c50161a94f",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
