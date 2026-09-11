@@ -1,0 +1,29 @@
+packages/void/src/cli/cloudflare-operations.ts
+  s_0add8c35799930::t_1ac279f61a2fca 7,9,60-67,148-258
+packages/void/src/cli/db.ts
+  s_0add8c35799930::t_73c37daedfb450 35,487-488,490-497,499-511,766-800,830,832,841-873,897,1063-1119,1296-1316
+packages/void/test/unit/cloudflare-operations.test.ts
+  s_0add8c35799930::t_f46d8a5a657dfe 9-10,17-18,213-282
+packages/void/test/unit/db-commands.test.ts
+  s_0add8c35799930::t_2d59f8a9db9708 78
+packages/void/test/unit/db-execute-remote.test.ts
+  s_0add8c35799930::t_d74c0b1435499e 24
+packages/void/test/unit/db-studio-remote.test.ts
+  s_0add8c35799930::t_d0c77064e60e5c 20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2e1f4a23e8ae26335a3e74bcb52809b78ff73c8c",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
