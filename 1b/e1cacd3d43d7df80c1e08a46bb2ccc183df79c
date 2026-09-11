@@ -1,0 +1,21 @@
+docs/reference/cli.md
+  s_0add8c35799930::t_a0fa72edfa7ca4 927
+packages/void/src/cli/domain.ts
+  s_0add8c35799930::t_1af0c8d3e5d839 110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1be1cacd3d43d7df80c1e08a46bb2ccc183df79c",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
