@@ -1,0 +1,49 @@
+packages/void/src/cli/env-validation.ts
+  s_866d02a94190a8::t_a5a820638ef673 859,1321-1350
+packages/void/test/unit/cloudflare-deploy.test.ts
+  s_866d02a94190a8::t_595379cc1b35c9 17,284-289,311-451,2278,2281,2284,2291,2294,2297,2299,6207,6213,6215,6223,6228,6245,6252
+  s_866d02a94190a8::t_740e9423048132 2275-2277
+  s_866d02a94190a8::t_7b388fdb44bf9e 2279-2280
+  s_866d02a94190a8::t_c48d3bf7363e58 2282-2283
+  s_866d02a94190a8::t_b89d70db4a2e9e 2285-2290
+  s_866d02a94190a8::t_b38cf527c0f73e 2292-2293
+  s_866d02a94190a8::t_ab75603de6eaae 2295-2296
+  s_866d02a94190a8::t_2989151452c6ac 2298
+  s_866d02a94190a8::t_ce86ba0a91e885 2300
+  s_866d02a94190a8::t_6de0f5c0dfb302 6204-6206
+  s_866d02a94190a8::t_3b21d9800fae03 6208-6212
+  s_866d02a94190a8::t_cf3f8526bc9510 6214
+  s_866d02a94190a8::t_7b515e5394e2ac 6216-6218,6220-6222
+  s_866d02a94190a8::t_f2204765308f0f 6224-6227
+  s_866d02a94190a8::t_3cde8144c83228 6229-6231,6242-6244
+  s_866d02a94190a8::t_4cd84716036138 6246-6251
+  s_866d02a94190a8::t_e427c3ebb38b09 6253
+packages/void/src/cli/deploy.ts
+  s_866d02a94190a8::t_f169b2458f6d54 2,100,1562-1567,1628-1646,2083,2107-2108,2173-2191,3441-3447,3463-3553,4300-4313,4361-4371,4555-4608
+packages/void/src/index.ts
+  s_0b909f64536d14::t_d42f8f36375759 1014-1026
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1106c7006d880862eca90d34b130b1a08a39d66d",
+  "prompts": {},
+  "sessions": {
+    "s_0b909f64536d14": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f2b-7046-72a3-af4f-c1f8d587a9ce",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_866d02a94190a8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f33-8099-77a0-9b44-fded12661495",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
