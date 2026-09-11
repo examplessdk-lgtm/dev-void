@@ -1,0 +1,89 @@
+packages/void/getting-started-prompt.txt
+  s_47ef2a780dfb1e::t_b11cc1bad0f375 18
+packages/void/AGENT_PROMPT.md
+  s_47ef2a780dfb1e::t_af7fffff30b68d 17
+docs/integrations/cloudflare.md
+  s_2fadf2a0ca1275::t_07cb1602416775 242,248
+  s_0b909f64536d14::t_97f30d80debb28 266,322-327
+docs/guide/auth.md
+  s_0b909f64536d14::t_2d92bf5b5b6de9 223,225
+docs/reference/cli.md
+  s_2fadf2a0ca1275::t_01db5836771105 335
+  s_0b909f64536d14::t_552a06315bd978 344
+packages/void/skills/void/SKILL.md
+  s_47ef2a780dfb1e::t_24a91c43f7c8d9 16
+packages/void/README.md
+  s_47ef2a780dfb1e::t_30b6ac8e9de242 26
+docs/guide/deployment.md
+  s_47ef2a780dfb1e::t_afa3f9c7157bf6 177
+docs/guide/env-vars.md
+  s_0b909f64536d14::t_94e57d6aaba18d 155-156
+packages/void/test/unit/cloudflare-deploy.test.ts
+  s_866d02a94190a8::t_2989151452c6ac 2298
+  s_866d02a94190a8::t_b38cf527c0f73e 2292-2293
+  s_866d02a94190a8::t_3cde8144c83228 6231-6246
+  s_866d02a94190a8::t_595379cc1b35c9 17,284-289,311-451,2278,2281,2284,2291,2294,2297,2299,6209,6215,6217,6225,6230,6247,6254
+  s_866d02a94190a8::t_b89d70db4a2e9e 2285-2290
+  s_866d02a94190a8::t_6de0f5c0dfb302 6206-6208
+  s_866d02a94190a8::t_4cd84716036138 4846,6248-6253
+  s_866d02a94190a8::t_c48d3bf7363e58 2282-2283
+  s_866d02a94190a8::t_f707538428281d 4847
+  s_866d02a94190a8::t_7b515e5394e2ac 6218-6224
+  s_866d02a94190a8::t_e427c3ebb38b09 6255
+  s_866d02a94190a8::t_7b388fdb44bf9e 2279-2280
+  s_866d02a94190a8::t_740e9423048132 2275-2277
+  s_866d02a94190a8::t_f2204765308f0f 6226-6229
+  s_866d02a94190a8::t_cf3f8526bc9510 6216
+  s_866d02a94190a8::t_ce86ba0a91e885 2300
+  s_866d02a94190a8::t_ab75603de6eaae 2295-2296
+  s_866d02a94190a8::t_3b21d9800fae03 6210-6214
+packages/void/src/cli/deploy.ts
+  s_866d02a94190a8::t_f169b2458f6d54 2,100,1562-1567,1628-1646,2083,2107-2108,2173-2191,3441-3447,3463-3553,4300-4313,4361-4371,4555-4608
+  s_0b909f64536d14::t_5441160dc0d407 4706
+packages/void/src/index.ts
+  s_0b909f64536d14::t_d42f8f36375759 1014-1026
+packages/void/src/cli/env-validation.ts
+  s_866d02a94190a8::t_a5a820638ef673 859,1321-1350
+packages/void/test/integration/kitchen-sink-build.test.ts
+  s_0b909f64536d14::t_8270d0b0040f75 129-135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3770a78a7080f2b7baecff242007aba9d2712a2d",
+  "prompts": {},
+  "sessions": {
+    "s_0b909f64536d14": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f2b-7046-72a3-af4f-c1f8d587a9ce",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_2fadf2a0ca1275": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08eec-5904-7643-b66a-a4cabbb4b55d",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_47ef2a780dfb1e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f0b-c30c-7e52-8da4-5dc1e348aee7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_866d02a94190a8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f33-8099-77a0-9b44-fded12661495",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
