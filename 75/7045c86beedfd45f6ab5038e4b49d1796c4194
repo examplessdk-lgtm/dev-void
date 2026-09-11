@@ -1,0 +1,69 @@
+README.md
+  s_21e37aad7ca081::t_dd97f6346aec48 5,75
+docs/.vitepress/config.ts
+  s_21e37aad7ca081::t_5de225ca93a2ff 232
+docs/guide/deployment.md
+  s_21e37aad7ca081::t_9daf0888edb262 181
+docs/guide/durable-state.md
+  s_21e37aad7ca081::t_95264ff56ad2bd 1-134
+docs/integrations/cloudflare.md
+  s_21e37aad7ca081::t_68afa26ffb1455 88-95,154,253,256
+docs/reference/api.md
+  s_21e37aad7ca081::t_091471b15d705e 589-613,1185
+docs/reference/resource-inference.md
+  s_21e37aad7ca081::t_63262d88302067 21-30,34-35,71
+packages/void/AGENTS.md
+  s_21e37aad7ca081::t_d8793f307fe949 48-49,67,94,116
+packages/void/AGENT_PROMPT.md
+  s_21e37aad7ca081::t_391070d68e7c70 3,9-10,23
+packages/void/README.md
+  s_21e37aad7ca081::t_a5846332f419db 12,57,82
+packages/void/getting-started-prompt.txt
+  s_21e37aad7ca081::t_3303d855cee38c 18-20
+packages/void/package.json
+  s_21e37aad7ca081::t_05ef873222db2b 152-156
+packages/void/src/cli/deploy.ts
+  s_21e37aad7ca081::t_150214742be8e1 40,207,3709,6130-6137,6161-6162
+packages/void/src/cli/wrangler.ts
+  s_21e37aad7ca081::t_80718b723c402b 17,413,503-554,676-697
+packages/void/src/durable/scan.ts
+  s_21e37aad7ca081::t_f3ae1db8b6c856 1-57
+packages/void/src/index.ts
+  s_21e37aad7ca081::t_41428162518958 28,39,735,750,752-754,780-806,810-813,816,1178-1250,1856-1860,2003
+packages/void/src/plugin-routing.ts
+  s_21e37aad7ca081::t_03284598fdf0f4 96,451-453,596,734
+packages/void/src/router/compile.ts
+  s_21e37aad7ca081::t_af64382a104152 2492,2528-2539,2690,2717,2721,2727
+packages/void/src/runtime/durable.ts
+  s_21e37aad7ca081::t_d151ffb28ee02d 1-289
+packages/void/test/unit/compile.test.ts
+  s_21e37aad7ca081::t_8273674ccac10f 2230-2256
+packages/void/test/unit/deploy-platform.test.ts
+  s_21e37aad7ca081::t_f73be50d5c9be3 5-9,59-68
+packages/void/test/unit/durable-scan.test.ts
+  s_21e37aad7ca081::t_305e334c37bbcc 1-41
+packages/void/test/unit/durable-state.test.ts
+  s_21e37aad7ca081::t_3ce0015c80253e 1-164
+packages/void/test/unit/plugin-inference.test.ts
+  s_21e37aad7ca081::t_a99a79ea09baed 451,476-486,610-656
+packages/void/test/unit/wrangler.test.ts
+  s_21e37aad7ca081::t_2fa244eb8e41c8 17,452-476
+packages/void/vite.config.ts
+  s_21e37aad7ca081::t_f8a8464694b62a 106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "757045c86beedfd45f6ab5038e4b49d1796c4194",
+  "prompts": {},
+  "sessions": {
+    "s_21e37aad7ca081": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f34-5783-7541-af26-16a1cb0340d6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
