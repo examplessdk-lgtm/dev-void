@@ -60,6 +60,11 @@ const HELP_TREE: HelpTree = {
           'Create missing D1/KV/R2/Queue/Hyperdrive resources (with --backend cloudflare)',
       },
       {
+        command: '--require-email',
+        description:
+          'Fail instead of deploying without email when the mail domain is not set up (with --backend cloudflare)',
+      },
+      {
         command: '--debug',
         description: 'Mirror the deploy log to stderr (always written to ~/.void/logs)',
       },

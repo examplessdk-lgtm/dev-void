@@ -104,6 +104,7 @@ if (helpPath) {
       debug: deployArgs.debug,
       backend: deployArgs.backend,
       provision: deployArgs.provision,
+      requireEmail: deployArgs.requireEmail,
     }).catch((err) => {
       log.error(err.message ?? err);
       process.exit(1);
