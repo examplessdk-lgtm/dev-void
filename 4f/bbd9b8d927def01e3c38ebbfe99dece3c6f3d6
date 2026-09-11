@@ -1,0 +1,27 @@
+packages/react/package.json
+  s_6fad3210e8b947::t_007087c7dd467a 48
+packages/void/src/cli/init.ts
+  s_6fad3210e8b947::t_01c3e5a73be566 141
+packages/void/src/cli/template.ts
+  s_6fad3210e8b947::t_d2e637a7460320 41,205,212
+packages/void/test/unit/init.test.ts
+  s_6fad3210e8b947::t_59e215fb79193c 1104-1107,1114-1115,1374-1376,2303-2306,2311-2312
+pnpm-lock.yaml
+  s_6fad3210e8b947::t_f3fa931efe0a08 165-166,1011,1042,5273-5288,13243-13247,17726,17730
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4fbbd9b8d927def01e3c38ebbfe99dece3c6f3d6",
+  "prompts": {},
+  "sessions": {
+    "s_6fad3210e8b947": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08dcf-962b-7e53-83c1-618db15ce3a4",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
