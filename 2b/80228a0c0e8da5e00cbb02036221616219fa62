@@ -1,0 +1,19 @@
+packages/void/test/unit/direct-r2-upload.test.ts
+  s_5a06e7c4c4ad3d::t_96c94046f194ae 69,79-85,109,112-125,165,168-181
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2b80228a0c0e8da5e00cbb02036221616219fa62",
+  "prompts": {},
+  "sessions": {
+    "s_5a06e7c4c4ad3d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e6e-3b48-7183-ac5e-670cd59a2ddc",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
