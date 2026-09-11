@@ -44,6 +44,10 @@ Zero config. Every Void project ships with:
 
 That's it. `sendEmail({ to: '...', subject: '...', text: '...' })` works on first deploy.
 
+::: warning Not on `void deploy --backend cloudflare` yet
+Email is a platform feature today. On a deploy to your own Cloudflare account, `sendEmail` returns `BINDING_MISSING`, and `email/` handlers are not wired: the deploy succeeds, but no Email Routing rule points at your worker, and a handler's `setReject` / `forward` / `reply` actions are not applied even if you add a rule yourself. Email setup on your own account is a follow-up — planned as one prompt on the first deploy, driven by your `wrangler login` session. Until then, deploy with `void deploy`.
+:::
+
 ## Adding recipients
 
 Cloudflare's `send_email` binding only delivers to addresses you've registered as recipients. Add them with the CLI:
@@ -166,15 +170,15 @@ if (result.ok) {
 
 Error codes:
 
-| Code                     | Meaning                                                                             |
-| ------------------------ | ----------------------------------------------------------------------------------- |
-| `BINDING_MISSING`        | The platform proxy binding is unavailable. Deploy through Void, or check the proxy. |
-| `INVALID_FROM`           | `from` was missing, malformed, or not the project sender.                           |
-| `INVALID_TO`             | `to` was empty or contained an invalid address.                                     |
-| `UNVERIFIED_DESTINATION` | Cloudflare rejected the recipient as unverified.                                    |
-| `MIME_ERROR`             | Failed to build the MIME message (oversize attachments, malformed input).           |
-| `QUOTA_EXCEEDED`         | Platform quota for outbound email reached. Retry next billing period.               |
-| `UPSTREAM_ERROR`         | Other binding failure; the original error is attached as `error.cause`.             |
+| Code                     | Meaning                                                                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `BINDING_MISSING`        | No email transport: a `--backend cloudflare` deploy, a Class B/C dev server, or the platform proxy is unavailable. |
+| `INVALID_FROM`           | `from` was missing, malformed, or not the project sender.                                                          |
+| `INVALID_TO`             | `to` was empty or contained an invalid address.                                                                    |
+| `UNVERIFIED_DESTINATION` | Cloudflare rejected the recipient as unverified.                                                                   |
+| `MIME_ERROR`             | Failed to build the MIME message (oversize attachments, malformed input).                                          |
+| `QUOTA_EXCEEDED`         | Platform quota for outbound email reached. Retry next billing period.                                              |
+| `UPSTREAM_ERROR`         | Other binding failure; the original error is attached as `error.cause`.                                            |
 
 Which branch carries the code depends on when the send failed.
 `BINDING_MISSING`, `INVALID_FROM`, `INVALID_TO` and `MIME_ERROR` are pre-flight,
