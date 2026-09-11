@@ -1,0 +1,23 @@
+docs/guide/durable-state.md
+  s_21e37aad7ca081::t_a84c51f9224847 67
+packages/void/src/runtime/durable.ts
+  s_21e37aad7ca081::t_58aee29e0813ff 220-228,242,265
+packages/void/test/unit/durable-state.test.ts
+  s_21e37aad7ca081::t_61f6ef968aea80 65-89
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "696f26ae149fa8a356edda6a354cca6b42957c81",
+  "prompts": {},
+  "sessions": {
+    "s_21e37aad7ca081": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f34-5783-7541-af26-16a1cb0340d6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
