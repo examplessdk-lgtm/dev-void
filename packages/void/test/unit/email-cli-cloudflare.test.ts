@@ -511,6 +511,89 @@ describe('void email status --backend cloudflare', () => {
     );
   });
 
+  it("ready but the rule not created yet (right after `setup`): exit 0 — rules are the next deploy's", async () => {
+    const root = makeProject({
+      wrangler: `{
+  "account_id": "${ACCOUNT}",
+  "name": "acme-support",
+  "send_email": [{ "name": "SEND_EMAIL" }],
+  "addresses": ["support@mail.acme.com"],
+  "vars": { "__VOID_EMAIL_FROM": "noreply@mail.acme.com" },
+}
+`,
+    });
+    roots.push(root);
+    const { deps, printed } = transcriptDeps({
+      runnerTable: {
+        'email sending settings mail.acme.com': {
+          status: 0,
+          stdout: `Email Sending for mail.acme.com:\n  Enabled:            true\n  Tag:                ${ZONE_ID}\n`,
+          stderr: BETA_WARNING,
+        },
+      },
+      fetchTable: {
+        [`GET /zones/${ZONE_ID}/email/routing`]: () =>
+          jsonResponse(200, { success: true, result: { enabled: true, support_subaddress: true } }),
+      },
+      mx: { 'acme.com': ['aspmx.l.google.com'], 'mail.acme.com': ['route1.mx.cloudflare.net'] },
+    });
+
+    const code = await run(root, 'status', { ...deps, isInteractive: false });
+
+    expect(code).toBe(0);
+    expect(printed[1]).toContain(
+      '    inbound   support@mail.acme.com  →  email/support+[ticket].ts   (no rule yet)',
+    );
+  });
+
+  it('an API-token session reads ready like a login session does (CI on CLOUDFLARE_API_TOKEN)', async () => {
+    const root = makeProject({
+      wrangler: `{
+  "account_id": "${ACCOUNT}",
+  "name": "acme-support",
+  "send_email": [{ "name": "SEND_EMAIL" }],
+  "addresses": ["support@mail.acme.com"],
+  "vars": { "__VOID_EMAIL_FROM": "noreply@mail.acme.com" },
+}
+`,
+    });
+    roots.push(root);
+    const { deps, calls } = transcriptDeps({
+      runnerTable: {
+        'whoami --json': {
+          status: 0,
+          stdout: JSON.stringify({
+            loggedIn: true,
+            authType: 'User API Token',
+            accounts: [{ id: ACCOUNT, name: 'Acme' }],
+          }),
+          stderr: '',
+        },
+        'email routing rules list acme.com': {
+          status: 0,
+          stdout:
+            'Rule: 1a2b3c\n  Name:     support\n  Enabled:  true\n  Matchers: to:support@mail.acme.com\n  Actions:  worker:acme-support\n  Priority: 0\n\nCatch-all rule: disabled, action: drop\n',
+          stderr: BETA_WARNING,
+        },
+        'email sending settings mail.acme.com': {
+          status: 0,
+          stdout: `Email Sending for mail.acme.com:\n  Enabled:            true\n  Tag:                ${ZONE_ID}\n`,
+          stderr: BETA_WARNING,
+        },
+      },
+      fetchTable: {
+        [`GET /zones/${ZONE_ID}/email/routing`]: () =>
+          jsonResponse(200, { success: true, result: { enabled: true, support_subaddress: true } }),
+      },
+      mx: { 'acme.com': ['aspmx.l.google.com'], 'mail.acme.com': ['route1.mx.cloudflare.net'] },
+    });
+
+    const code = await run(root, 'status', { ...deps, isInteractive: false });
+
+    expect(code).toBe(0);
+    expect(calls.some((c) => c.args[0] === 'email')).toBe(true);
+  });
+
   it('ready: exit 0 and the routed address map', async () => {
     const root = makeProject({
       wrangler: `{

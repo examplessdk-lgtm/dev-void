@@ -2001,6 +2001,26 @@ function assertObjectContainer(value: unknown, field: string): Record<string, un
 }
 
 /**
+ * The worker-wide OWNER of a binding name as the writer's adopt / `vars` guards see it:
+ * validates `field`'s own outer shape (throws on a malformed target, fail closed), then
+ * looks `name` up among every OTHER binding type — `queues.producers` included — and
+ * returns wrangler's friendly label for the owner, or `undefined` when the name is free
+ * (or held only by `field` itself). Lets a caller refuse a doomed write BEFORE side
+ * effects the write would otherwise follow (the Mode B email step). Reuses the ONE
+ * collector — never fork it.
+ */
+export function findBindingNameOwner(
+  config: Record<string, unknown>,
+  field: string,
+  name: string,
+): string | undefined {
+  bindingNamesForField(field, config[field]);
+  const owners = collectWorkerBindingNames(configWithoutField(config, field));
+  addQueueProducerOwners(owners, config);
+  return owners.get(name);
+}
+
+/**
  * The STRICT canonical reader for a single provisioned binding entry in a wrangler
  * config field (`d1_databases` / `kv_namespaces` / `r2_buckets` / `hyperdrive`). Replaces
  * the provisioner's loose first-match `.find()` — which validated no outer shape,

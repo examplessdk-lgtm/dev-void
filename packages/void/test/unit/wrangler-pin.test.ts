@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
+import { WRANGLER_EMAIL_PROSE_VERSION } from '../../src/cli/email-cloudflare.ts';
 import { resolveWranglerArgv } from '../../src/cli/preset.ts';
 
 const TMP = join(import.meta.dirname, '.tmp-wrangler-pin');
@@ -62,6 +63,16 @@ describe('pinned wrangler (email-feature capability contract)', () => {
     expect(
       compareSemver(parseSemver(wranglerPkg.version), MIN_EMAIL_ROUTING_WRANGLER),
     ).toBeGreaterThanOrEqual(0);
+  });
+
+  it('is the exact wrangler the email prose parsers are pinned to', () => {
+    // The `wrangler email` parsers read prose captured from ONE wrangler
+    // (`test/fixtures/wrangler-email/<version>/`); the fixtures are static files, so a catalog
+    // bump keeps every parser test green while the shipped prose may have moved. A parser miss
+    // fails closed to `unknown — run void email setup` on every deploy, with nothing pointing at
+    // the cause. When this fails: re-capture the fixtures for the new version (README there) and
+    // move `WRANGLER_EMAIL_PROSE_VERSION`.
+    expect(wranglerPkg.version).toBe(WRANGLER_EMAIL_PROSE_VERSION);
   });
 
   it('ships a `wrangler deploy` that applies top-level `addresses` (Email Routing plan)', () => {

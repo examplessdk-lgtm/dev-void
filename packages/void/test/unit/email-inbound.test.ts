@@ -374,7 +374,7 @@ describe('compileRouteTable (email)', () => {
 function buildEmailDispatcher(
   code: string,
   modules: Record<string, { default: unknown }>,
-): (message: unknown, env: unknown, ctx: unknown) => Promise<unknown> {
+): (message: unknown, env: unknown, ctx: unknown, opts?: { slug?: string }) => Promise<unknown> {
   const start = code.indexOf('const __email');
   const fnStart = code.indexOf('export async function __emailHandler');
   expect(start).toBeGreaterThan(-1);
@@ -479,7 +479,7 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
     // The user-visible address has the slug removed - that is the DX contract.
     expect(message.to).toBe('support@mail.void.cloud');
 
-    await dispatch(message, {}, {});
+    await dispatch(message, {}, {}, { slug: 'acme' });
 
     expect(calls).toEqual([{ to: 'support@mail.void.cloud', params: {} }]);
   });
@@ -505,7 +505,7 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
       { slug: 'acme' },
     );
 
-    await dispatch(message, {}, {});
+    await dispatch(message, {}, {}, { slug: 'acme' });
 
     expect(seen).toEqual([{ ticket: 'T-42' }]);
   });
@@ -584,7 +584,7 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
   });
 
   it('still strips the platform prefix when a slug was removed and no tag follows', async () => {
-    // `<slug>@<domain>` with the slug injected: the prefix is recorded as
+    // `<slug>+@<domain>` with the slug injected: the prefix is recorded as
     // `__voidPlatformTo`, the tag after it is empty, and the empty string
     // must fall through to `_default` rather than match `support`.
     const hits: Array<string> = [];
@@ -605,9 +605,81 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
       { slug: 'acme' },
     );
 
-    await dispatch(message, {}, {});
+    await dispatch(message, {}, {}, { slug: 'acme' });
 
     expect(hits).toEqual(['default']);
+  });
+
+  it('reads a bare <slug>@<domain> on the platform as an EMPTY tag, never as the slug itself', async () => {
+    // The platform router forwards a `+`-less recipient (the bare project address) with the
+    // slug configured but nothing to strip, so `createMessageProxy` records no
+    // `__voidPlatformTo`. Keyed on the marker, the dispatcher would match the full local part
+    // and hand `email/[user].ts` `user = acme`; keyed on the configured slug, it is `_default`.
+    const hits: Array<string> = [];
+    const withDynamic = {
+      addresses: [
+        ...SUPPORT.addresses,
+        {
+          address: '[user]',
+          filePath: '[user].ts',
+          pattern: { kind: 'dynamic', regexSource: '^([^+@]+)$', paramNames: ['user'] },
+        },
+      ],
+      defaultHandler: '_default.ts',
+    };
+    const modules = {
+      '/e/support.ts': { default: () => hits.push('support') },
+      '/e/support+[ticket].ts': { default: () => hits.push('ticket') },
+      '/e/[user].ts': {
+        default: (_m: unknown, _e: unknown, _c: unknown, info: { params: { user: string } }) =>
+          hits.push(`user=${info.params.user}`),
+      },
+      '/e/_default.ts': { default: () => hits.push('default') },
+    };
+    const dispatch = buildEmailDispatcher(compile(withDynamic), modules);
+    const bare = createMessageProxy(
+      {
+        from: 'sender@example.com',
+        to: 'acme@mail.void.cloud',
+        headers: {},
+        raw: new Uint8Array(),
+        rawSize: 0,
+      },
+      { slug: 'acme' },
+    ).message;
+    expect((bare as { __voidPlatformTo?: string }).__voidPlatformTo).toBeUndefined();
+
+    await dispatch(bare, {}, {}, { slug: 'acme' });
+    expect(hits).toEqual(['default']);
+
+    // And with no `_default`, the bare address is rejected rather than routed to `[user]`.
+    const rejections: Array<string> = [];
+    const strict = buildEmailDispatcher(
+      compile({ ...withDynamic, defaultHandler: undefined }),
+      modules,
+    );
+    (bare as { setReject: (reason: string) => void }).setReject = (reason) => {
+      rejections.push(reason);
+    };
+    hits.length = 0;
+    await strict(bare, {}, {}, { slug: 'acme' });
+    expect(hits).toEqual([]);
+    expect(rejections).toHaveLength(1);
+
+    // Own account (no slug configured): `acme@` IS the local part, so `[user]` gets it.
+    hits.length = 0;
+    await dispatch(
+      createMessageProxy({
+        from: 'sender@example.com',
+        to: 'acme@mail.acme.com',
+        headers: {},
+        raw: new Uint8Array(),
+        rawSize: 0,
+      }).message,
+      {},
+      {},
+    );
+    expect(hits).toEqual(['user=acme']);
   });
 
   it('rejects an unmatched recipient when the app has no _default handler', async () => {
@@ -631,7 +703,7 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
       rejections.push(reason);
     };
 
-    await dispatch(message, {}, {});
+    await dispatch(message, {}, {}, { slug: 'acme' });
 
     expect(rejections).toHaveLength(1);
     expect(rejections[0]).toContain('no handler matched recipient');
@@ -891,6 +963,37 @@ describe('harness rejects an unmatched delivery, like production', () => {
 
     expect(harness.rejects).toHaveLength(1);
     expect(harness.rejects[0]).toContain('"myslug@app.dev"');
+  });
+
+  it('`slug: null` matches the full local part, like a worker on your own Cloudflare account', async () => {
+    // Own-account deploys carry no platform prefix: `support@mail.acme.com` reaches
+    // `support`, and the first `+` belongs to the TAG. The default harness would read
+    // `support` as a slug and land a plain `support@` in `_default`.
+    const seen: Array<string> = [];
+    const harness = createInboundTestHarness({
+      slug: null,
+      routes: {
+        support: async () => {
+          seen.push('support');
+        },
+        'support+[ticket]': async (_m, _e, _c, info) => {
+          seen.push(`ticket=${info?.params.ticket}`);
+        },
+        _default: async () => {
+          seen.push('default');
+        },
+      },
+    });
+
+    const plain = await harness.deliver({ from: 'u@x.dev', to: 'support@mail.acme.com' });
+    expect(plain.handler).toBe('support');
+    const tagged = await harness.deliver({ from: 'u@x.dev', to: 'support+T-42@mail.acme.com' });
+    expect(tagged.handler).toBe('support+[ticket]');
+    expect(tagged.params).toEqual({ ticket: 'T-42' });
+    expect(seen).toEqual(['support', 'ticket=T-42']);
+    // Nothing was stripped from what the handler sees either.
+    const other = await harness.deliver({ from: 'u@x.dev', to: 'billing@mail.acme.com' });
+    expect(other.handler).toBe('_default');
   });
 });
 

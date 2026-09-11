@@ -19,6 +19,7 @@ import type { EmailArgs } from './email-args.ts';
 import {
   applyEmailSetup,
   createNodeEmailDns,
+  findEmailConfigConflicts,
   preflightEmail,
   renderAddressMap,
   renderEmailChecklist,
@@ -274,6 +275,11 @@ export async function runEmailCloudflareCommand(
     accountId,
     existingSendEmail: Array.isArray(sendEmail) ? (sendEmail as Array<{ name?: unknown }>) : null,
     existingAddresses: rootConfig.addresses,
+    existingVars:
+      rootConfig.vars && typeof rootConfig.vars === 'object' && !Array.isArray(rootConfig.vars)
+        ? (rootConfig.vars as Record<string, unknown>)
+        : null,
+    configConflicts: findEmailConfigConflicts(rootConfig),
     wranglerArgs: ['-c', configPath, '--env='],
     apiBaseUrl,
     runWrangler,

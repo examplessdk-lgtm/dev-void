@@ -4295,11 +4295,46 @@ describe('runCloudflareDeploy — config laundering by a build-adjacent probe', 
     expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
   });
 
-  it('--provision: the pre-build snapshot assertion is SKIPPED (guard scoped to no-provision)', async () => {
+  it('--provision: fails closed at step 6 when the pre-build probe injects `addresses`, `services` or `routes`', async () => {
+    // Under --provision only the id-bearing binding comparison is skipped (the provisioner writes
+    // real ids after the probe). The pass-through-entry, raw-field and containers comparisons
+    // are provision-independent and MUST still run: an injected `addresses` entry is an `added`
+    // plan change wrangler applies with no prompt, even in CI — the account's inbound mail for
+    // that address would be routed to the deployed worker.
+    const injections: Array<(c: Record<string, unknown>) => void> = [
+      (c) => {
+        c.addresses = ['ceo@acme.com'];
+      },
+      (c) => {
+        c.services = [{ binding: 'EVIL', service: 'someone-elses-worker' }];
+      },
+      (c) => {
+        c.routes = [{ pattern: 'acme.com/*', zone_name: 'acme.com' }];
+      },
+    ];
+    for (const inject of injections) {
+      const root = d1Project(PROVISIONED_D1);
+      const { deps, trace, wranglerArgs, exitCalls } = harness({
+        resolveSchemaFacts: (() => {
+          rewriteRootConfig(root, inject);
+          return okSchemaFacts();
+        }) as CloudflareDeployDeps['resolveSchemaFacts'],
+      });
+      await expect(
+        runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps),
+      ).rejects.toBeInstanceOf(ExitError);
+      expect(exitCalls).toEqual([1]);
+      expect(trace).not.toContain('build');
+      expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+    }
+  });
+
+  it('--provision: only the id-bearing binding comparison is SKIPPED (the provisioner writes ids after the probe)', async () => {
     // Under --provision the provisioner legitimately writes real ids into the config AFTER the
-    // probe, so pre-probe ≠ step-6 by design and the new assertion must NOT run (that path is the
-    // residual tracked in #283). Prove it by making the probe swap the DB id — the SAME mutation
-    // the no-provision case rejects — and confirming a --provision run proceeds to deploy instead.
+    // probe, so pre-probe ≠ step-6 by design for the BINDING snapshot and that one comparison
+    // must NOT run (that path is the residual tracked in #283). Prove it by making the probe
+    // swap the DB id — the SAME mutation the no-provision case rejects — and confirming a
+    // --provision run proceeds to deploy instead.
     const root = d1Project(PROVISIONED_D1);
     const { deps, wranglerArgs, exitCalls } = harness({
       resolveSchemaFacts: (() => {
@@ -7622,6 +7657,320 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
   });
 
+  /** The committed Mode B config a first deploy leaves behind. */
+  const COMMITTED_EMAIL = {
+    ...PROVISIONED_D1,
+    send_email: [{ name: 'SEND_EMAIL' }],
+    addresses: ['support@mail.acme.com'],
+    vars: { __VOID_EMAIL_FROM: 'noreply@mail.acme.com' },
+  };
+  /** Every account row ready: routing on the subdomain, subaddressing on, sending onboarded. */
+  const readyRows = {
+    runner: { 'email sending settings mail.acme.com': sendingEnabled },
+    subaddressing: true,
+    dns: emailDns({ 'mail.acme.com': ['route1.mx.cloudflare.net', 'route2.mx.cloudflare.net'] }),
+    confirm: async () => {
+      throw new Error('confirm must not be called when every account row is ready');
+    },
+  };
+
+  it('an API-token session (CLOUDFLARE_API_TOKEN) in CI with a committed config: --require-email passes, no prompt, map printed', async () => {
+    // The CI credential. wrangler reports no `tokenPermissions` for it (they come from the
+    // stored login file), so gating on them would fail every CI deploy before the build.
+    const root = emailProject(COMMITTED_EMAIL);
+    const { deps, spawns, fetchCalls, exitCalls, trace } = emailHarness({
+      ...readyRows,
+      runner: {
+        ...readyRows.runner,
+        'whoami --json': {
+          ...cleanExit,
+          stdout: JSON.stringify({
+            loggedIn: true,
+            authType: 'User API Token',
+            accounts: [{ id: 'acc123', name: 'Acme' }],
+          }),
+        },
+        'auth token --json': {
+          ...cleanExit,
+          stdout: JSON.stringify({ type: 'api_token', token: BEARER }),
+        },
+        'email routing rules list acme.com': myRule,
+      },
+      isCI: true,
+    });
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(
+        root,
+        { backend: 'cloudflare', requireEmail: true },
+        silentCliLog,
+        deps,
+      );
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    expect(fetchCalls.filter((c) => c.method !== 'GET')).toEqual([]);
+    expect(spawns.some((s) => s.args[0] === 'email' && s.args[2] === 'enable')).toBe(false);
+    expect(trace).toContain('build');
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+    const printed = output.lines.join('\n');
+    expect(printed).not.toContain('wrangler login');
+    expect(printed).toContain('inbound   support@mail.acme.com  →  email/support+[ticket].ts');
+  });
+
+  it('committed config, rule not created yet (right after `void email setup`): CI + --require-email proceeds, the map says the deploy creates it', async () => {
+    const root = emailProject(COMMITTED_EMAIL);
+    const { deps, spawns, exitCalls, trace } = emailHarness({ ...readyRows, isCI: true });
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(
+        root,
+        { backend: 'cloudflare', requireEmail: true },
+        silentCliLog,
+        deps,
+      );
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    expect(trace).toContain('build');
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+    const printed = output.lines.join('\n');
+    expect(printed).not.toContain('deploying without email');
+    expect(printed).not.toContain('This changes YOUR Cloudflare account');
+    expect(printed).toContain(
+      'inbound   support@mail.acme.com  →  email/support+[ticket].ts   (rule created by this deploy)',
+    );
+    expect(readRootConfig(root).addresses).toEqual(['support@mail.acme.com']);
+  });
+
+  it('ready path: a committed `addresses` entry no longer in the pruned set is rewritten BEFORE `wrangler deploy`, without a prompt', async () => {
+    // Deploy 1 wrote [support, billing]; billing@ was later re-pointed at a forward in the
+    // dashboard. Left in the array it reaches wrangler's plan as a takeover `conflict`.
+    const forwardedBilling: DeployWranglerRunResult = {
+      ...myRule,
+      stdout: myRule.stdout.replace(
+        '\n\nCatch-all',
+        '\nRule: 4d5e6f\n  Name:     (none)\n  Enabled:  true\n  Matchers: to:billing@mail.acme.com\n  Actions:  forward:ceo@gmail.com\n  Priority: 1\n\n\nCatch-all',
+      ),
+    };
+    const root = emailProject(
+      { ...COMMITTED_EMAIL, addresses: ['support@mail.acme.com', 'billing@mail.acme.com'] },
+      { 'email/billing.ts': 'export default async () => {};' },
+    );
+    const atDeploy: Array<unknown> = [];
+    const { deps, spawns, fetchCalls, exitCalls } = emailHarness({
+      ...readyRows,
+      runner: { ...readyRows.runner, 'email routing rules list acme.com': forwardedBilling },
+    });
+    const inner = deps.runWrangler!;
+    deps.runWrangler = (args, opts) => {
+      if (args[0] === 'deploy') {
+        atDeploy.push(readRootConfig(root).addresses);
+      }
+      return inner(args, opts);
+    };
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    expect(fetchCalls.filter((c) => c.method !== 'GET')).toEqual([]);
+    expect(spawns.some((s) => s.args[0] === 'email' && s.args[2] === 'enable')).toBe(false);
+    // Rewritten to the pruned set, and already so when `wrangler deploy` read the config.
+    expect(atDeploy).toEqual([['support@mail.acme.com']]);
+    const after = readRootConfig(root);
+    expect(after.addresses).toEqual(['support@mail.acme.com']);
+    expect(after.send_email).toEqual(COMMITTED_EMAIL.send_email);
+    expect(after.vars).toEqual(COMMITTED_EMAIL.vars);
+    const printed = output.lines.join('\n');
+    expect(printed).toContain('billing@mail.acme.com: already routed to forward:ceo@gmail.com');
+    expect(printed).toContain('wrangler.jsonc updated (addresses: ["support@mail.acme.com"])');
+    expect(printed).toContain('inbound   support@mail.acme.com  →  email/support+[ticket].ts');
+  });
+
+  it('ready path: after a worker rename every rule is foreign, so the `addresses` key is removed (never `[]`)', async () => {
+    const root = emailProject({ ...COMMITTED_EMAIL, name: 'acme-mail' });
+    const { deps, spawns, exitCalls } = emailHarness({
+      ...readyRows,
+      runner: { ...readyRows.runner, 'email routing rules list acme.com': myRule },
+    });
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    const after = readRootConfig(root);
+    expect(after.addresses).toBeUndefined();
+    expect(after.send_email).toEqual(COMMITTED_EMAIL.send_email);
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+    expect(output.lines.join('\n')).toContain('wrangler.jsonc updated (addresses removed)');
+  });
+
+  it('ready path: a changed `email.from` on the same domain rewrites `__VOID_EMAIL_FROM` without a prompt', async () => {
+    // Only the root var reaches the worker on build; without the rewrite the worker keeps
+    // sending as the old address while the map advertises the new one.
+    const root = emailProject(COMMITTED_EMAIL, {}, { email: { from: 'hello@mail.acme.com' } });
+    const { deps, spawns, fetchCalls, exitCalls } = emailHarness({
+      ...readyRows,
+      runner: { ...readyRows.runner, 'email routing rules list acme.com': myRule },
+    });
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    expect(fetchCalls.filter((c) => c.method !== 'GET')).toEqual([]);
+    expect(spawns.some((s) => s.args[0] === 'email' && s.args[2] === 'enable')).toBe(false);
+    const after = readRootConfig(root);
+    expect((after.vars as Record<string, string>).__VOID_EMAIL_FROM).toBe('hello@mail.acme.com');
+    expect(after.addresses).toEqual(['support@mail.acme.com']);
+    expect(after.send_email).toEqual(COMMITTED_EMAIL.send_email);
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+    const printed = output.lines.join('\n');
+    expect(printed).toContain(
+      'wrangler.jsonc updated (vars.__VOID_EMAIL_FROM: "hello@mail.acme.com")',
+    );
+    expect(printed).toContain('outbound  sendEmail() from hello@mail.acme.com');
+  });
+
+  it('a committed `addresses` array is withdrawn when routing is off, on the CI, declined and blocked exits; the worker ships with its binding', async () => {
+    // Left in place, wrangler's plan on it 400s (2062) AFTER the upload, on every deploy.
+    // Deleting the KEY changes no rule (wrangler skips the plan on `undefined`).
+    const cases: Array<{
+      name: string;
+      options: Parameters<typeof emailHarness>[0];
+      wantConfirm: boolean;
+    }> = [
+      {
+        name: 'CI',
+        options: {
+          isCI: true,
+          confirm: async () => {
+            throw new Error('confirm must not be called in CI');
+          },
+        },
+        wantConfirm: false,
+      },
+      { name: 'declined', options: { confirm: async () => false }, wantConfirm: false },
+      {
+        name: 'blocked (apex unlocked)',
+        options: {
+          runner: { 'email routing settings acme.com': routingSettings('acme.com', 'unlocked') },
+        },
+        wantConfirm: false,
+      },
+    ];
+    for (const c of cases) {
+      const root = emailProject(COMMITTED_EMAIL);
+      // The default harness DNS has no MX on mail.acme.com: routing reads `pending`.
+      const { deps, spawns, fetchCalls, confirms, exitCalls, trace } = emailHarness(c.options);
+      const output = captureOutput();
+      try {
+        await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+      } finally {
+        output.restore();
+      }
+      expect(exitCalls, c.name).toEqual([]);
+      expect(confirms.length > 0, c.name).toBe(c.wantConfirm);
+      expect(
+        fetchCalls.filter((f) => f.method !== 'GET'),
+        c.name,
+      ).toEqual([]);
+      expect(
+        spawns.some((s) => s.args[0] === 'email' && s.args[2] === 'enable'),
+        c.name,
+      ).toBe(false);
+      const after = readRootConfig(root);
+      expect(after.addresses, c.name).toBeUndefined();
+      expect(after.send_email, c.name).toEqual(COMMITTED_EMAIL.send_email);
+      expect(after.vars, c.name).toEqual(COMMITTED_EMAIL.vars);
+      expect(trace, c.name).toContain('build');
+      expect(
+        spawns.some((s) => s.args[0] === 'deploy'),
+        c.name,
+      ).toBe(true);
+      const printed = output.lines.join('\n');
+      expect(printed, c.name).toContain('addresses removed from wrangler.jsonc');
+      expect(printed, c.name).toContain('support@mail.acme.com');
+      // The binding is committed, so the deploy is WITH email — the wording and the map say so.
+      expect(printed, c.name).not.toContain('deploying without email');
+      expect(printed, c.name).toContain(
+        'deploying with the email setup wrangler.jsonc already carries',
+      );
+      expect(printed, c.name).toContain('outbound  sendEmail() from noreply@mail.acme.com');
+    }
+  });
+
+  it('a committed `addresses` array Void did not derive stays untouched when routing is off too (decision 13)', async () => {
+    const root = emailProject({ ...COMMITTED_EMAIL, addresses: ['ceo@acme.com'] });
+    const { deps, spawns, confirms, exitCalls } = emailHarness({ isCI: true });
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    expect(confirms).toEqual([]);
+    expect(readRootConfig(root).addresses).toEqual(['ceo@acme.com']);
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+  });
+
+  it('refuses a config the writer could not update BEFORE the account is touched (binding-name collision)', async () => {
+    // `vars.SEND_EMAIL` already exists: the write after the apply would fail, so the step is
+    // blocked up front — no prompt, no bearer write, no `sending enable`.
+    const root = emailProject({ ...PROVISIONED_D1, vars: { SEND_EMAIL: 'x' } });
+    const { deps, spawns, fetchCalls, confirms, exitCalls } = emailHarness();
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    expect(confirms).toEqual([]);
+    expect(fetchCalls.filter((c) => c.method !== 'GET')).toEqual([]);
+    expect(spawns.some((s) => s.args[0] === 'email' && s.args[2] === 'enable')).toBe(false);
+    expect(output.lines.join('\n')).toContain(
+      'already uses SEND_EMAIL as a Environment Variable binding',
+    );
+    expect(readRootConfig(root).send_email).toBeUndefined();
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+  });
+
+  it('an app that stopped using email warns about the setup wrangler.jsonc still carries, and deploys as-is', async () => {
+    // No `email/` directory and no `void/email` import, but the root still has what a Mode B
+    // deploy wrote: wrangler keeps routing support@ to a worker with no `email()` export.
+    const root = d1Project(COMMITTED_EMAIL, INIT_MIGRATION);
+    const { deps, spawns, exitCalls } = emailHarness({
+      confirm: async () => {
+        throw new Error('confirm must not be called without email use');
+      },
+    });
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    expect(spawns.some((s) => s.args[0] === 'auth' || s.args[0] === 'email')).toBe(false);
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+    expect(readRootConfig(root).addresses).toEqual(['support@mail.acme.com']);
+    const printed = output.lines.join('\n');
+    expect(printed).toContain('no longer declares email handlers');
+    expect(printed).toContain('support@mail.acme.com — still routed to worker "myapp"');
+    expect(printed).toContain('send_email SEND_EMAIL binding');
+  });
+
   it('an app with no email use never touches the email step (no whoami before 3e, no auth token)', async () => {
     const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
     const { deps, spawns, trace } = emailHarness({
@@ -7768,7 +8117,7 @@ describe('runCloudflareDeploy — `addresses` is whole-object pinned across the 
     expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
   });
 
-  it('verifyGeneratedDeployConfig: an emitted `[]` with no root value passes (wrangler default-fill), a dropped root value fails', () => {
+  it('verifyGeneratedDeployConfig: an emitted `addresses: []` with no root value FAILS (wrangler plans the deletion of every owned rule; the key is never default-filled), a root `[]` passes, a dropped root value fails', () => {
     const emptyRoot = makeProject({
       '.wrangler/deploy/config.json': JSON.stringify({
         configPath: '../../dist/ssr/wrangler.json',
@@ -7779,11 +8128,19 @@ describe('runCloudflareDeploy — `addresses` is whole-object pinned across the 
         addresses: [],
       }),
     });
+    const injected = verifyGeneratedDeployConfig(emptyRoot, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+    });
+    expect(injected.ok).toBe(false);
+    expect(injected.reason).toMatch(/addresses/);
+    // A hand-written root `[]` passed through verbatim is the developer's own choice.
     expect(
       verifyGeneratedDeployConfig(emptyRoot, {
         accountId: 'acc123',
         workerName: 'myapp',
-        passthroughRawFields: snapshotPassthroughRawFields({}),
+        passthroughRawFields: snapshotPassthroughRawFields({ addresses: [] }),
       }),
     ).toEqual({ ok: true });
     const dropped = verifyGeneratedDeployConfig(emptyRoot, {

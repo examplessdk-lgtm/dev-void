@@ -89,7 +89,10 @@ import { uploadAssetsToR2, type DirectR2PutItem } from './direct-r2-upload.ts';
 import {
   applyEmailSetup,
   createNodeEmailDns,
+  EMAIL_FROM_VAR,
+  findEmailConfigConflicts,
   preflightEmail,
+  SEND_EMAIL_BINDING,
   renderAddressMap,
   renderEmailChecklist,
   type EmailCloudflareInputs,
@@ -211,6 +214,7 @@ import {
   bindingEntriesForField,
   FRIENDLY_BINDING_NAMES,
   type LiveBindingConfig,
+  type ProvisionedWranglerPatch,
   type WranglerCompat,
 } from './wrangler.ts';
 import { needsWrapper, generateWrapper, bundleEntry, cleanupWrapper } from './wrapper.ts';
@@ -1836,6 +1840,9 @@ export function verifyGeneratedDeployConfig(
   //     Void emits none, so undeclared → absent → both-empty → pass; a build-injected `routes`
   //     entry (attaching the worker to a hostname the account controls) or a flipped
   //     `workers_dev`/`preview_urls` fails the deepEqual against the absent/declared root value.
+  //   • `addresses` — the worker's inbound-mail attachment. Same pin, minus the both-empty pass:
+  //     `[]` is loaded (it deletes every owned routing rule), so an emitted `[]` passes only
+  //     when the root declared exactly `[]`.
   //   • `durable_objects` — an emitted binding carrying a cross-script field targets ANOTHER
   //     worker's DOs; Void's own DOs are always LOCAL, so it must match a root binding.
   //   • `ai` — when the root declared its own ai binding it must SURVIVE byte-identical (a build
@@ -1854,7 +1861,14 @@ export function verifyGeneratedDeployConfig(
       const rootValue = raw.get(field);
       // Both-empty is the only case an empty emitted value passes: a root that declared a
       // non-empty value emitted back empty REMOVES a control the source configured.
-      if (isEmptyPassthroughValue(emitted) && isEmptyPassthroughValue(rootValue)) {
+      // `addresses: []` is NOT empty to wrangler — it plans the deletion of every rule this
+      // worker owns (wrangler returns early only on `undefined`, and never default-fills the
+      // key) — so it gets no both-empty pass: an emitted `[]` must equal a root-declared `[]`.
+      if (
+        field !== 'addresses' &&
+        isEmptyPassthroughValue(emitted) &&
+        isEmptyPassthroughValue(rootValue)
+      ) {
         continue;
       }
       if (!deepEqual(emitted, rootValue)) {
@@ -3581,11 +3595,15 @@ interface CloudflareEmailStepInput {
 }
 
 interface CloudflareEmailStepResult {
-  /** True when the worker ships with email set up (the `SEND_EMAIL` binding is in the config). */
+  /**
+   * True when the step FINISHED: every row read ready, or the one Enter applied the rest.
+   * What `--require-email` gates on. A worker can still SHIP with email (the `SEND_EMAIL`
+   * binding committed) on a branch that returns false — `map` says so.
+   */
   satisfied: boolean;
   /** True when the root wrangler config was rewritten — the caller re-parses `rootConfig`. */
   configWritten: boolean;
-  /** The post-deploy address map, when email is live; `null` when the deploy goes without it. */
+  /** The post-deploy address map, when the worker ships with the binding; `null` otherwise. */
   map: EmailAddressMapInput | null;
 }
 
@@ -3594,9 +3612,10 @@ interface CloudflareEmailStepResult {
  * Preflight is read-only; the checklist is shown; ONE `confirm` (default Yes) authorizes the
  * apply, which runs only the rows not ready and returns the root-config patch this writes.
  * Every branch that cannot finish prints why and returns `satisfied: false` so the deploy
- * continues WITHOUT email (never a deploy failure on its own — `--require-email` is the
- * caller's call). No output of this step ever contains the session bearer: the module borrows it
- * through `getSessionBearer` inside its own closures and drops it.
+ * continues (never a deploy failure on its own — `--require-email` is the caller's call),
+ * WITH the email setup the config already carries when the binding is committed, and
+ * without email otherwise. No output of this step ever contains the session bearer: the
+ * module borrows it through `getSessionBearer` inside its own closures and drops it.
  */
 async function runCloudflareEmailStep(
   input: CloudflareEmailStepInput,
@@ -3613,6 +3632,7 @@ async function runCloudflareEmailStep(
     return without;
   }
   const { rootConfig } = input;
+  const configName = basename(input.configPath);
   const inputs: EmailCloudflareInputs = {
     handlers: input.handlers,
     from,
@@ -3622,6 +3642,11 @@ async function runCloudflareEmailStep(
       ? (rootConfig.send_email as Array<{ name?: unknown }>)
       : undefined,
     existingAddresses: rootConfig.addresses,
+    existingVars:
+      rootConfig.vars && typeof rootConfig.vars === 'object' && !Array.isArray(rootConfig.vars)
+        ? (rootConfig.vars as Record<string, unknown>)
+        : undefined,
+    configConflicts: findEmailConfigConflicts(rootConfig),
     // The SAME `-c`/`--env=` context every other credentialed wrangler run gets.
     wranglerArgs: ['-c', input.configPath, '--env='],
     apiBaseUrl: input.apiBaseUrl,
@@ -3638,44 +3663,127 @@ async function runCloudflareEmailStep(
     log.warn(`deploy: email preflight failed — ${getErrorMessage(err)}. Deploying without email.`);
     return without;
   }
-  const mapFor = (addresses: Array<string>, sendingReady: boolean): EmailAddressMapInput => ({
+  const mapFor = (
+    addresses: Array<string>,
+    sendingReady: boolean,
+    creating: Array<string> = [],
+  ): EmailAddressMapInput => ({
     from,
     routes: pre.derived.routes,
     addresses,
     sendingReady,
+    creating,
   });
+  // Pin `configPath` so read/parse/write hit the SAME file every other step uses. A refused
+  // write (e.g. an `addresses` array with a comment nested inside it) is the developer's
+  // territory (decision 13): surface it as-is; the caller decides what the deploy ships.
+  const writeConfig = (patch: ProvisionedWranglerPatch): boolean => {
+    try {
+      writeProvisionedWranglerConfig(input.root, patch, { configPath: input.configPath });
+      return true;
+    } catch (err) {
+      log.error(`deploy: could not update ${configName} — ${getErrorMessage(err)}.`);
+      return false;
+    }
+  };
 
-  // Every row ready: no prompt, no writes, zero keystrokes (the second deploy).
+  // Every account row ready: no prompt, no account call, zero keystrokes (the second deploy).
+  // The two CONFIG rows are reconciled here by a plain file write, because a stale one is
+  // not idle: an `addresses` entry no longer in the pruned set reaches wrangler's plan as a
+  // `conflict` (a takeover prompt in a TTY, a UserError after the upload in CI — decision
+  // 12), and a stale `__VOID_EMAIL_FROM` ships the OLD sender while the map prints the new.
   if (pre.ready) {
+    const patch: ProvisionedWranglerPatch = {};
+    const rows: Array<string> = [];
+    if (pre.addressesStale) {
+      patch.addresses = pre.addresses.length > 0 ? pre.addresses : null;
+      rows.push(
+        pre.addresses.length > 0
+          ? `addresses: ${JSON.stringify(pre.addresses)}`
+          : 'addresses removed',
+      );
+    }
+    if (pre.sender.state !== 'ready') {
+      patch.vars = { [EMAIL_FROM_VAR]: from };
+      rows.push(`vars.${EMAIL_FROM_VAR}: ${JSON.stringify(from)}`);
+    }
+    let configWritten = false;
+    if (rows.length > 0) {
+      // The prune rows the checklist would have carried: say why an entry goes.
+      for (const foreign of pre.addressesStale ? pre.rules.foreign : []) {
+        log.message(
+          `    ! ${foreign.address}: already routed to ${foreign.owner}; left alone, not in addresses`,
+        );
+      }
+      if (!writeConfig(patch)) {
+        log.warn(`deploy: deploying with the email setup ${configName} already carries.`);
+        return {
+          ...without,
+          map: mapFor(existingAddresses(rootConfig, pre), pre.sending.state === 'ready'),
+        };
+      }
+      configWritten = true;
+      log.message(`  ✔ config    ${configName} updated (${rows.join(', ')})`);
+    }
     return {
       satisfied: true,
-      configWritten: false,
-      map: mapFor(pre.addresses, pre.sending.state === 'ready'),
+      configWritten,
+      map: mapFor(pre.addresses, pre.sending.state === 'ready', pre.rulesPending),
     };
   }
 
   // The checklist carries the `✘` rows, so a blocked run explains itself before the warn line.
   log.message(renderEmailChecklist(pre));
-  if (pre.blockers.some((b) => b.scope === 'all')) {
+  // The three exits below leave the account alone. What the worker then ships is whatever
+  // the config already carries — so when the binding is committed the deploy is WITH the
+  // existing setup (map printed, wording says so), and a committed `addresses` array whose
+  // routing preflight found off is withdrawn first: wrangler's plan on it 400s (`2062`)
+  // AFTER the upload, on every deploy, until the key goes (0078: "deleted, never `[]`,
+  // when a later preflight finds routing off"). Only Void's own array is touched (decision
+  // 13); deleting the KEY changes no rule — wrangler skips the plan on `undefined`.
+  const shipsBinding = pre.binding.state === 'present';
+  const leaveAccount = (reason: string): CloudflareEmailStepResult => {
+    let configWritten = false;
+    if (
+      Array.isArray(rootConfig.addresses) &&
+      pre.addressesOwnership.state === 'mine' &&
+      pre.routing.state !== 'ready'
+    ) {
+      // A refused write leaves the array where it is; the deploy goes on as it would have.
+      if (writeConfig({ addresses: null })) {
+        configWritten = true;
+        log.message(
+          `  ! config    addresses removed from ${configName} (routing on ${pre.domain} is ${pre.routing.state}); no routing rule is created for ${(rootConfig.addresses as Array<unknown>).map(String).join(', ')}`,
+        );
+      }
+    }
     log.warn(
-      `deploy: email on ${pre.domain} cannot be set up from here — deploying without email.`,
+      `deploy: ${reason} — ${shipsBinding ? `deploying with the email setup ${configName} already carries.` : 'deploying without email.'}`,
     );
-    return without;
+    return {
+      satisfied: false,
+      configWritten,
+      map: shipsBinding
+        ? mapFor(
+            configWritten ? [] : existingAddresses(rootConfig, pre),
+            pre.sending.state === 'ready',
+          )
+        : null,
+    };
+  };
+  if (pre.blockers.some((b) => b.scope === 'all')) {
+    return leaveAccount(`email on ${pre.domain} cannot be set up from here.`);
   }
   if (input.nonInteractive) {
-    log.warn(
+    return leaveAccount(
       [
-        `deploy: email on ${pre.domain} is not set up, and this shell cannot ask.`,
-        'Run `void email setup --backend cloudflare` once locally, commit wrangler.jsonc, then redeploy — deploying without email.',
+        `email on ${pre.domain} is not ${shipsBinding ? 'fully ' : ''}set up, and this shell cannot ask.`,
+        'Run `void email setup --backend cloudflare` once locally, commit wrangler.jsonc, then redeploy.',
       ].join('\n'),
     );
-    return without;
   }
   if (!(await input.confirm(`Set up email on ${pre.domain}?`))) {
-    log.warn(
-      'deploy: email setup skipped — run `void email setup --backend cloudflare` later. Deploying without email.',
-    );
-    return without;
+    return leaveAccount('email setup skipped — run `void email setup --backend cloudflare` later.');
   }
 
   const out = await applyEmailSetup(pre, inputs);
@@ -3688,29 +3796,43 @@ async function runCloudflareEmailStep(
     out.patch.addresses !== undefined ||
     out.patch.vars !== undefined
   ) {
-    // Pin `configPath` so read/parse/write hit the SAME file every other step uses. A refused
-    // write (e.g. an `addresses` array with a comment nested inside it) is the developer's
-    // territory (decision 13): surface it as-is and go on without email.
-    try {
-      writeProvisionedWranglerConfig(
-        input.root,
-        { sendEmail: out.patch.sendEmail, addresses: out.patch.addresses, vars: out.patch.vars },
-        { configPath: input.configPath },
-      );
-      configWritten = true;
-    } catch (err) {
-      log.error(
-        `deploy: could not update ${basename(input.configPath)} — ${getErrorMessage(err)}. Deploying without email.`,
-      );
+    if (
+      !writeConfig({
+        sendEmail: out.patch.sendEmail,
+        addresses: out.patch.addresses,
+        vars: out.patch.vars,
+      })
+    ) {
+      log.warn('deploy: deploying without email.');
       return without;
     }
+    configWritten = true;
   }
-  const bindingPresent = pre.binding.state === 'present' || out.patch.sendEmail !== undefined;
+  const bindingPresent = shipsBinding || out.patch.sendEmail !== undefined;
+  const written = out.patch.addresses ?? [];
   return {
     satisfied: bindingPresent,
     configWritten,
-    map: bindingPresent ? mapFor(out.patch.addresses ?? [], out.sendingReady) : null,
+    map: bindingPresent
+      ? mapFor(
+          written,
+          out.sendingReady,
+          pre.rules.absent.filter((a) => written.includes(a)),
+        )
+      : null,
   };
+}
+
+/** The committed `addresses` entries that are still Void's pruned set (what wrangler keeps). */
+function existingAddresses(
+  rootConfig: Record<string, unknown>,
+  pre: EmailPreflight,
+): Array<string> {
+  return Array.isArray(rootConfig.addresses)
+    ? (rootConfig.addresses as Array<unknown>)
+        .map((a) => (typeof a === 'string' ? a.toLowerCase() : ''))
+        .filter((a) => pre.addresses.includes(a))
+    : [];
 }
 
 /**
@@ -4102,8 +4224,8 @@ export async function runCloudflareDeploy(
     if (options.requireEmail && !email.satisfied) {
       log.error(
         [
-          'deploy: --require-email — email is not set up for this deploy; refusing to deploy without it.',
-          'Nothing was built or uploaded. Set email up (see above), or drop --require-email.',
+          'deploy: --require-email — email is not fully set up for this deploy (see above); refusing to deploy.',
+          'Nothing was built or uploaded. Set email up, or drop --require-email.',
         ].join('\n'),
       );
       return exit(1);
@@ -4112,6 +4234,34 @@ export async function runCloudflareDeploy(
       rootConfig = parseRootWranglerConfig(configPath);
     }
     emailMap = email.map;
+  } else {
+    // The app stopped using email, but the root still carries what a Mode B deploy wrote.
+    // wrangler keeps those rules pointed at a worker that no longer exports `email()`, so
+    // inbound mail there fails with nothing in this output — say so. Warn only: deleting the
+    // key would ORPHAN the live rules (wrangler skips the plan on `undefined`), and `[]` is
+    // a destructive plan (a y/n in a TTY, a UserError after the upload in CI) — whether Void
+    // should write it is a product call, not a deploy default (decision 11: never a failure).
+    const staleAddresses = Array.isArray(rootConfig.addresses)
+      ? (rootConfig.addresses as Array<unknown>).filter((a): a is string => typeof a === 'string')
+      : [];
+    const staleBinding =
+      Array.isArray(rootConfig.send_email) &&
+      (rootConfig.send_email as Array<{ name?: unknown } | null>).some(
+        (e) => e?.name === SEND_EMAIL_BINDING,
+      );
+    if (staleAddresses.length > 0 || staleBinding) {
+      log.warn(
+        [
+          'deploy: this app no longer declares email handlers or imports void/email, but wrangler.jsonc still carries the email setup Void wrote:',
+          ...staleAddresses.map(
+            (a) =>
+              `  • ${a} — still routed to worker "${workerName}", which no longer exports email(); inbound mail there will fail.`,
+          ),
+          ...(staleBinding ? [`  • send_email ${SEND_EMAIL_BINDING} binding`] : []),
+          'Deploying as-is. To detach: remove `addresses`, `send_email` and `vars.__VOID_EMAIL_FROM` from wrangler.jsonc and delete the rules with `wrangler email routing rules delete`, or set `addresses: []` and let `wrangler deploy` ask before deleting every Void-owned rule.',
+        ].join('\n'),
+      );
+    }
   }
 
   // 3c. Derive the env-INSENSITIVE schema facts — the required-secret NAMES + the keys
@@ -4415,23 +4565,25 @@ export async function runCloudflareDeploy(
     needsSandbox,
   );
 
-  // 6a. Reject a PRE-BUILD PROBE that laundered the root bindings (NO-PROVISION path only). The
-  // step-3c env-schema probe runs project code BEFORE the step-6 snapshots above, so a probe that
-  // rewrote wrangler.jsonc — swapping a binding id, ADDING an id-bearing / pass-through binding, or
-  // changing unsafe / tail_consumers / routes / containers — would be captured HERE as the trusted
+  // 6a. Reject a PRE-BUILD PROBE that laundered the root bindings. The step-3c env-schema probe
+  // runs project code BEFORE the step-6 snapshots above, so a probe that rewrote wrangler.jsonc —
+  // swapping a binding id, ADDING an id-bearing / pass-through binding, or changing unsafe /
+  // tail_consumers / routes / addresses / containers — would be captured HERE as the trusted
   // baseline, emitted by the build, and waved through the step-10 verifier that pins against it.
-  // `rootConfig` was parsed at step 3, BEFORE any project code ran, so it is the pre-probe ground
-  // truth. Rebuild the same four snapshots from it and assert they deep-equal the step-6 ones.
+  // `rootConfig` was parsed at step 3, BEFORE any project code ran (and re-parsed after the email
+  // step's own write, which precedes the probe), so it is the pre-probe ground truth. Rebuild the
+  // same four snapshots from it and assert they deep-equal the step-6 ones.
   //
-  // Only in the no-provision path: the ONLY config write between the pre-probe parse and step 6 is
-  // step 5's reconcile, which touches only top-level `name`/`account_id` — none of which any of
-  // these snapshots read (they cover d1/kv/r2/hyperdrive ids, pass-through binding entries,
-  // unsafe/tail/routes raw fields, and containers) — so absent laundering the two are identical and
-  // a clean deploy always passes. Under `--provision` the provisioner legitimately writes real ids
-  // into the config after the probe, so pre-probe ≠ step-6 by design; closing that path needs
-  // delta-authorization against a live-provision model and is a known residual tracked in #283.
-  if (!options.provision) {
-    const preProbeBindingIdentities = snapshotBindingIdentities(rootConfig);
+  // The ONLY config writes between the pre-probe parse and step 6 are step 5's reconcile (top-level
+  // `name`/`account_id`) and, under `--provision`, the provisioner's real ids for d1/kv/r2/
+  // hyperdrive/queues plus name/account_id/compatibility_date/migrations_dir. None of the
+  // pass-through ENTRY, raw-field (unsafe/tail/routes/addresses/…) or containers snapshots read any
+  // of those, so those three comparisons hold on EVERY path — an `addresses` entry a probe injects
+  // under `--provision` is an `added` plan change wrangler applies with no prompt, so that path
+  // must not skip it. Only the id-bearing binding snapshot legitimately differs under `--provision`
+  // (the provisioner writes ids after the probe); closing that residual needs delta-authorization
+  // against a live-provision model and is tracked in #283.
+  {
     const preProbePassthroughIdentities = snapshotPassthroughIdentities(rootConfig);
     const preProbePassthroughRawFields = snapshotPassthroughRawFields(rootConfig);
     const preProbeExpectedContainers = reconstructExpectedContainers(
@@ -4444,7 +4596,8 @@ export async function runCloudflareDeploy(
     // which the JSON-shaped `deepEqual` cannot compare — use `snapshotsDeepEqual` (Map-aware).
     // `expectedContainers` is a plain array, so `deepEqual` handles it directly.
     const rootBindingsLaundered =
-      !snapshotsDeepEqual(preProbeBindingIdentities, bindingIdentitySnapshot) ||
+      (!options.provision &&
+        !snapshotsDeepEqual(snapshotBindingIdentities(rootConfig), bindingIdentitySnapshot)) ||
       !snapshotsDeepEqual(preProbePassthroughIdentities, passthroughIdentitySnapshot) ||
       !snapshotsDeepEqual(preProbePassthroughRawFields, passthroughRawFields) ||
       !deepEqual(preProbeExpectedContainers, expectedContainers);

@@ -6,6 +6,7 @@ import {
   deriveAddresses,
   emailFromDomain,
   fetchWithSessionBearer,
+  findEmailConfigConflicts,
   parseRoutingRules,
   parseRoutingSettings,
   parseSendingSettings,
@@ -13,7 +14,7 @@ import {
   preflightEmail,
   renderAddressMap,
   renderEmailChecklist,
-  SUBDOMAIN_DASHBOARD_FALLBACK,
+  subdomainDashboardFallback,
   SENDING_FREE_PLAN_HINT,
   WRANGLER_EMAIL_PROSE_VERSION,
   wranglerApiErrorCode,
@@ -350,6 +351,18 @@ describe('emailFromDomain', () => {
     expect(emailFromDomain('a@localhost')).toBeNull();
   });
 
+  it('validates per label: a leading `-` (a yargs flag), an empty label, a trailing `-` are refused', () => {
+    // The host is handed to wrangler as a positional; `--config.evil` would be parsed as an
+    // option and the domain positional would go missing.
+    expect(emailFromDomain('a@--config.evil')).toBeNull();
+    expect(emailFromDomain('a@-foo.evil')).toBeNull();
+    expect(emailFromDomain('a@..acme.com')).toBeNull();
+    expect(emailFromDomain('a@.acme.com')).toBeNull();
+    expect(emailFromDomain('a@foo-.evil')).toBeNull();
+    expect(emailFromDomain('a@acme.com.')).toBeNull();
+    expect(emailFromDomain('a@my-mail.acme.com')).toBe('my-mail.acme.com');
+  });
+
   it('reads the address inside a display-name form (the shape void.json accepts)', () => {
     expect(emailFromDomain('Acme Support <NoReply@Mail.Acme.com>')).toBe('mail.acme.com');
     expect(emailFromDomain('"Acme, Inc" <noreply@acme.com> ')).toBe('acme.com');
@@ -552,6 +565,7 @@ describe('preflightEmail', () => {
       handlers: scan(['support+[ticket].ts']),
       existingSendEmail: [{ name: 'SEND_EMAIL' }],
       existingAddresses: ['support@mail.acme.com'],
+      existingVars: { __VOID_EMAIL_FROM: 'noreply@mail.acme.com' },
     });
     const pre = await preflightEmail(inputs);
     expect(pre.routing.state).toBe('ready');
@@ -564,10 +578,233 @@ describe('preflightEmail', () => {
       absent: [],
     });
     expect(pre.binding.state).toBe('present');
+    expect(pre.sender.state).toBe('ready');
     expect(pre.addressesOwnership).toEqual({ state: 'mine', foreign: [] });
+    expect(pre.addressesStale).toBe(false);
+    expect(pre.rulesPending).toEqual([]);
     expect(pre.blockers).toEqual([]);
     expect(pre.ready).toBe(true);
     expect(renderEmailChecklist(pre)).toContain('Nothing to change — email is set up.');
+  });
+
+  /** The "second deploy" account state, with the committed config overridable per case. */
+  function readyAccount(
+    overrides: Partial<EmailCloudflareInputs> & {
+      runnerTable?: Record<string, EmailWranglerRunResult | (() => EmailWranglerRunResult)>;
+      calls?: Array<Call>;
+      fetchCalls?: Array<FetchCall>;
+      rules?: string;
+    } = {},
+  ) {
+    const { rules, runnerTable, ...rest } = overrides;
+    return transcriptInputs({
+      runnerTable: {
+        'email routing rules list acme.com': {
+          status: 0,
+          stdout:
+            rules ?? RULES_WITH_ENTRIES.replace('to:support@acme.com', 'to:support@mail.acme.com'),
+          stderr: BETA_WARNING,
+        },
+        'email sending settings mail.acme.com': {
+          status: 0,
+          stdout: `Email Sending for mail.acme.com:\n  Enabled:            true\n  Tag:                19af4fdbee924a92916afea0de5a8fdd\n`,
+          stderr: BETA_WARNING,
+        },
+        ...runnerTable,
+      },
+      fetchTable: { [`GET /zones/${ZONE_ID}/email/routing`]: routingGet(true) },
+      dns: fakeDns({
+        mx: {
+          'acme.com': ['aspmx.l.google.com'],
+          'mail.acme.com': ['route1.mx.cloudflare.net', 'route2.mx.cloudflare.net'],
+        },
+      }),
+      handlers: scan(['support+[ticket].ts']),
+      existingSendEmail: [{ name: 'SEND_EMAIL' }],
+      existingAddresses: ['support@mail.acme.com'],
+      existingVars: { __VOID_EMAIL_FROM: 'noreply@mail.acme.com' },
+      ...rest,
+    });
+  }
+
+  it('an API-token session (CLOUDFLARE_API_TOKEN) is not gated on `tokenPermissions`: reads run, ready reads ready', async () => {
+    // wrangler fills `tokenPermissions` from the stored login file only, so under an API token
+    // it is absent (or describes a stale login file, never the token). The gate is the reads.
+    const calls: Array<Call> = [];
+    const fetchCalls: Array<FetchCall> = [];
+    const { inputs } = readyAccount({
+      calls,
+      fetchCalls,
+      runnerTable: {
+        'whoami --json': {
+          status: 0,
+          stdout: JSON.stringify({
+            loggedIn: true,
+            authType: 'User API Token',
+            email: 'dev@example.com',
+            accounts: [{ id: ACCOUNT, name: 'Acme' }],
+          }),
+          stderr: '',
+        },
+      },
+    });
+    const pre = await preflightEmail(inputs);
+    expect(pre.session).toMatchObject({
+      state: 'ok',
+      authType: 'User API Token',
+      missingScopes: [],
+    });
+    expect(calls.map((c) => c.args.join(' '))).toEqual([
+      'whoami --json',
+      'email routing settings mail.acme.com',
+      'email routing settings acme.com',
+      'email routing rules list acme.com',
+      'email sending settings mail.acme.com',
+    ]);
+    expect(fetchCalls).toHaveLength(2);
+    expect(pre.blockers).toEqual([]);
+    expect(pre.ready).toBe(true);
+    expect(renderEmailChecklist(pre)).toContain('session dev@example.com (User API Token)');
+  });
+
+  it('an API-token session whose read is refused fails closed with the token-permission hint', async () => {
+    const { inputs } = transcriptInputs({
+      runnerTable: {
+        'whoami --json': {
+          status: 0,
+          stdout: JSON.stringify({ loggedIn: true, authType: 'Account API Token' }),
+          stderr: '',
+        },
+        'email routing settings mail.acme.com': apiFailure(10000, '/zones'),
+      },
+    });
+    const pre = await preflightEmail(inputs);
+    expect(pre.session.state).toBe('ok');
+    expect(pre.blockers).toEqual([
+      {
+        scope: 'all',
+        message: expect.stringContaining(
+          'an API token needs Email Routing Edit + Email Sending Edit',
+        ),
+      },
+    ]);
+    expect(pre.ready).toBe(false);
+  });
+
+  it('a Global API Key session is refused by name — there is no bearer to borrow', async () => {
+    const calls: Array<Call> = [];
+    const { inputs } = transcriptInputs({
+      calls,
+      runnerTable: {
+        'whoami --json': {
+          status: 0,
+          stdout: JSON.stringify({ loggedIn: true, authType: 'Global API Key' }),
+          stderr: '',
+        },
+      },
+    });
+    const pre = await preflightEmail(inputs);
+    expect(pre.session.state).toBe('api-key');
+    expect(pre.blockers[0]?.message).toContain('CLOUDFLARE_API_TOKEN');
+    expect(calls.map((c) => c.args.join(' '))).toEqual(['whoami --json']);
+  });
+
+  it('a committed config whose rules wrangler has not created yet still reads ready (rules are `wrangler deploy` work)', async () => {
+    // Right after `void email setup`, before the first deploy: the array is committed, the
+    // rule is absent. Apply has nothing to do; the deploy creates the rule.
+    const { inputs } = readyAccount({ rules: fixture('routing-rules-list-void.cloud').stdout });
+    const pre = await preflightEmail(inputs);
+    expect(pre.rules.state).toBe('pending');
+    expect(pre.rules.absent).toEqual(['support@mail.acme.com']);
+    expect(pre.rulesPending).toEqual(['support@mail.acme.com']);
+    expect(pre.addressesStale).toBe(false);
+    expect(pre.ready).toBe(true);
+    const text = renderEmailChecklist(pre);
+    expect(text).not.toContain('+ wrangler.jsonc');
+    expect(text).toContain('+ routing rule (applied by wrangler deploy)');
+  });
+
+  it('flags a committed `addresses` array that is not the pruned set as stale, without losing ready', async () => {
+    // A rule Void created was later re-pointed at a forward: the entry is pruned, and the
+    // committed array still listing it would reach wrangler's plan as a `conflict`.
+    const forwarded = RULES_WITH_ENTRIES.replace(
+      'to:support@acme.com',
+      'to:support@mail.acme.com',
+    ).replace('to:sales@acme.com', 'to:sales@mail.acme.com');
+    const retarget = await preflightEmail(
+      readyAccount({
+        rules: forwarded,
+        handlers: scan(['support.ts', 'sales.ts']),
+        existingAddresses: ['support@mail.acme.com', 'sales@mail.acme.com'],
+      }).inputs,
+    );
+    expect(retarget.ready).toBe(true);
+    expect(retarget.addresses).toEqual(['support@mail.acme.com']);
+    expect(retarget.addressesStale).toBe(true);
+
+    // Worker rename: every rule now belongs to the old name, so nothing is Void's to list.
+    const renamed = await preflightEmail(
+      readyAccount({ workerName: 'acme-mail', existingAddresses: ['support@mail.acme.com'] })
+        .inputs,
+    );
+    expect(renamed.ready).toBe(true);
+    expect(renamed.addresses).toEqual([]);
+    expect(renamed.addressesStale).toBe(true);
+    expect(renderEmailChecklist(renamed)).toContain('addresses: (removed)');
+
+    // A hand-emptied array with a derived address, and an absent array, are stale too.
+    expect(
+      (await preflightEmail(readyAccount({ existingAddresses: [] }).inputs)).addressesStale,
+    ).toBe(true);
+    expect(
+      (await preflightEmail(readyAccount({ existingAddresses: undefined }).inputs)).addressesStale,
+    ).toBe(true);
+    // Equal to the pruned set (order-insensitive): not stale.
+    expect(
+      (await preflightEmail(readyAccount({ existingAddresses: ['SUPPORT@mail.acme.com'] }).inputs))
+        .addressesStale,
+    ).toBe(false);
+  });
+
+  it('reads the sender var as ready / stale / absent, as a config row that does not gate ready', async () => {
+    const stale = await preflightEmail(
+      readyAccount({ existingVars: { __VOID_EMAIL_FROM: 'hello@mail.acme.com' } }).inputs,
+    );
+    expect(stale.sender.state).toBe('stale');
+    expect(stale.ready).toBe(true);
+    expect(renderEmailChecklist(stale)).toContain(
+      '    + wrangler.jsonc                              vars.__VOID_EMAIL_FROM: "noreply@mail.acme.com"',
+    );
+    const absent = await preflightEmail(readyAccount({ existingVars: undefined }).inputs);
+    expect(absent.sender.state).toBe('absent');
+    expect(absent.ready).toBe(true);
+    expect(renderEmailChecklist(absent)).toContain(
+      '    sender    noreply@mail.acme.com  (vars.__VOID_EMAIL_FROM absent)',
+    );
+  });
+
+  it('turns a writer refusal the caller precomputed into an `all` blocker, so apply makes zero calls', async () => {
+    const calls: Array<Call> = [];
+    const fetchCalls: Array<FetchCall> = [];
+    const { inputs } = transcriptInputs({
+      calls,
+      fetchCalls,
+      configConflicts: findEmailConfigConflicts({ vars: { SEND_EMAIL: 'x' } }),
+    });
+    const pre = await preflightEmail(inputs);
+    expect(pre.blockers).toEqual([
+      {
+        scope: 'all',
+        message:
+          'wrangler.jsonc already uses SEND_EMAIL as a Environment Variable binding; rename it (Void writes SEND_EMAIL into send_email)',
+      },
+    ]);
+    calls.length = 0;
+    fetchCalls.length = 0;
+    const out = await applyEmailSetup(pre, inputs);
+    expect(calls).toEqual([]);
+    expect(fetchCalls).toEqual([]);
+    expect(out.patch).toEqual({});
   });
 
   it('refuses the apex when foreign MX already receives mail there', async () => {
@@ -766,6 +1003,8 @@ describe('preflightEmail', () => {
       { scope: 'all', message: expect.stringContaining('billing@mail.acme.com') },
     ]);
     expect(pre.blockers[0]?.message).toContain('skipping email setup this deploy');
+    // The exact edit is named, so the developer does not have to guess which entries.
+    expect(pre.blockers[0]?.message).toContain('remove "billing@mail.acme.com" from addresses');
   });
 
   it('refuses an existing send_email binding not named SEND_EMAIL, with the rename', async () => {
@@ -931,12 +1170,13 @@ describe('renderEmailChecklist', () => {
         '    sending   mail.acme.com  not onboarded',
         '    rules     support@mail.acme.com → acme-support   (absent)',
         '    binding   SEND_EMAIL             (absent)',
+        '    sender    noreply@mail.acme.com  (vars.__VOID_EMAIL_FROM absent)',
         '',
         '  This changes YOUR Cloudflare account. acme.com itself is not touched.',
         '    + enable Email Routing on mail.acme.com       Cloudflare writes and locks 3 MX + 1 SPF record there',
         '    + turn on subaddressing for acme.com          support+anything@ reaches support@',
         '    + onboard mail.acme.com for Email Sending     MX/SPF/DKIM on cf-bounce.mail.acme.com, _dmarc.mail.acme.com (p=reject)',
-        '    + wrangler.jsonc                              send_email: [{ name: "SEND_EMAIL" }], addresses: ["support@mail.acme.com"]',
+        '    + wrangler.jsonc                              send_email: [{ name: "SEND_EMAIL" }], addresses: ["support@mail.acme.com"], vars.__VOID_EMAIL_FROM: "noreply@mail.acme.com"',
         '    + routing rule (applied by wrangler deploy)   support@mail.acme.com → acme-support',
         '    ! email/_default.ts                           a catch-all exists only on an apex; other @mail.acme.com mail bounces',
       ].join('\n'),
@@ -1081,7 +1321,7 @@ describe('applyEmailSetup', () => {
     // Sending still onboarded → the binding is still written.
     expect(out.sendingReady).toBe(true);
     expect(out.patch.sendEmail).toEqual({ name: 'SEND_EMAIL' });
-    expect(out.lines).toContain(`    ${SUBDOMAIN_DASHBOARD_FALLBACK}`);
+    expect(out.lines).toContain(`    ${subdomainDashboardFallback('acme.com', 'mail.acme.com')}`);
     expect(out.lines.some((l) => l.includes('addresses withheld this run'))).toBe(true);
     expect(calls.map((c) => c.args)).toEqual([['email', 'sending', 'enable', 'mail.acme.com']]);
   });
@@ -1108,7 +1348,68 @@ describe('applyEmailSetup', () => {
     expect(out.lines[0]).toBe(
       '  ✘ routing   mail.acme.com: Cloudflare answered 400 [code: 2062] — Email Routing is not enabled on this zone',
     );
-    expect(out.lines[1]).toBe(`    ${SUBDOMAIN_DASHBOARD_FALLBACK}`);
+    expect(out.lines[1]).toBe(`    ${subdomainDashboardFallback('acme.com', 'mail.acme.com')}`);
+  });
+
+  it('non-2xx on the subdomain POST with a bearer in hand names the failed call, not the bearer', async () => {
+    const { inputs } = transcriptInputs({
+      runnerTable: { 'email sending enable mail.acme.com': sendingEnabled('mail.acme.com') },
+      fetchTable: {
+        [ROUTING_DNS_POST]: () =>
+          jsonResponse(400, { success: false, errors: [{ code: 2062, message: 'nope' }] }),
+      },
+    });
+    const pre = await preflightEmail(inputs);
+    const out = await applyEmailSetup(pre, inputs);
+    expect(out.lines).toContain(
+      '  ✘ routing   subaddressing on acme.com: skipped (the subdomain routing call failed)',
+    );
+    expect(out.lines.some((l) => l.includes('session bearer unavailable'))).toBe(false);
+  });
+
+  it('never posts the subdomain routing call against an apex whose Email Routing is off', async () => {
+    // What `POST …/routing/dns { name }` does on a zone that does not route is unmeasured;
+    // the one outcome that matters — enabling the zone and locking MX over the apex's live
+    // mail — is what the apex refusal exists to prevent. No call; addresses withheld.
+    const calls: Array<Call> = [];
+    const fetchCalls: Array<FetchCall> = [];
+    const { inputs } = transcriptInputs({
+      calls,
+      fetchCalls,
+      runnerTable: {
+        'email routing settings acme.com': routingSettings(
+          'acme.com',
+          false,
+          'unconfigured',
+          ZONE_ID,
+        ),
+        'email sending enable mail.acme.com': sendingEnabled('mail.acme.com'),
+      },
+    });
+    const pre = await preflightEmail(inputs);
+    expect(pre.routing).toEqual({ state: 'pending', status: 'unconfigured', enabled: false });
+    const checklist = renderEmailChecklist(pre);
+    expect(checklist).not.toContain('acme.com itself is not touched');
+    expect(checklist).toContain(
+      `    ! enable Email Routing on mail.acme.com       Email Routing is not enabled on acme.com; Void never enables it on the apex from the subdomain path — ${subdomainDashboardFallback('acme.com', 'mail.acme.com')}`,
+    );
+    calls.length = 0;
+    fetchCalls.length = 0;
+    const out = await applyEmailSetup(pre, inputs);
+    expect(fetchCalls).toEqual([]);
+    expect(calls.map((c) => c.args)).toEqual([['email', 'sending', 'enable', 'mail.acme.com']]);
+    expect(out.routingReady).toBe(false);
+    expect(out.subaddressingReady).toBe(false);
+    expect(out.addressesWithheld).toBe(true);
+    expect(out.patch.addresses).toBeNull();
+    expect(out.lines).toEqual([
+      '  ✘ routing   mail.acme.com: Email Routing is not enabled on acme.com — a subdomain can only be added to a zone that already routes; Void never enables routing on the apex from the subdomain path',
+      `    ${subdomainDashboardFallback('acme.com', 'mail.acme.com')}`,
+      '  ✘ routing   subaddressing on acme.com: skipped (Email Routing is not enabled on acme.com)',
+      '  ✔ sending   mail.acme.com onboarded',
+      '  ! config    addresses withheld this run (routing not ready); no routing rule is created for support@mail.acme.com',
+      '  ✔ config    wrangler.jsonc updated',
+    ]);
   });
 
   it('`[code: 2040]` on sending enable means already onboarded → ok', async () => {
@@ -1285,6 +1586,27 @@ describe('applyEmailSetup', () => {
   });
 });
 
+describe('findEmailConfigConflicts', () => {
+  it('names a cross-type owner of either name, and a malformed target field', () => {
+    expect(findEmailConfigConflicts({})).toEqual([]);
+    expect(findEmailConfigConflicts({ send_email: [{ name: 'SEND_EMAIL' }] })).toEqual([]);
+    expect(
+      findEmailConfigConflicts({ kv_namespaces: [{ binding: 'SEND_EMAIL', id: 'x' }] }),
+    ).toEqual([
+      'wrangler.jsonc already uses SEND_EMAIL as a KV Namespace binding; rename it (Void writes SEND_EMAIL into send_email)',
+    ]);
+    expect(
+      findEmailConfigConflicts({ kv_namespaces: [{ binding: '__VOID_EMAIL_FROM', id: 'x' }] }),
+    ).toEqual([
+      'wrangler.jsonc already uses __VOID_EMAIL_FROM as a KV Namespace binding; rename it (Void writes __VOID_EMAIL_FROM into vars)',
+    ]);
+    expect(findEmailConfigConflicts({ send_email: { name: 'SEND_EMAIL' } })).toEqual([
+      expect.stringContaining('"send_email"'),
+    ]);
+    expect(findEmailConfigConflicts({ vars: 'oops' })).toEqual([expect.stringContaining('"vars"')]);
+  });
+});
+
 describe('fetchWithSessionBearer', () => {
   it('puts the token only in the Authorization header and never throws', async () => {
     const fetchCalls: Array<FetchCall> = [];
@@ -1369,6 +1691,26 @@ describe('renderAddressMap', () => {
         '    inbound   support@acme.com  →  email/support.ts',
         '    inbound   *@acme.com        →  email/_default.ts   (no rule this deploy)',
         '    outbound  sendEmail() from noreply@acme.com   (verified destinations only)',
+      ].join('\n'),
+    );
+  });
+
+  it('marks a written address whose rule this deploy creates', () => {
+    const text = renderAddressMap({
+      from: 'noreply@acme.com',
+      routes: [
+        { address: 'support@acme.com', handler: 'email/support.ts' },
+        { address: 'sales@acme.com', handler: 'email/sales.ts' },
+      ],
+      addresses: ['support@acme.com', 'sales@acme.com'],
+      sendingReady: true,
+      creating: ['sales@acme.com'],
+    });
+    expect(text).toBe(
+      [
+        '    inbound   support@acme.com  →  email/support.ts',
+        '    inbound   sales@acme.com    →  email/sales.ts   (rule created by this deploy)',
+        '    outbound  sendEmail() from noreply@acme.com',
       ].join('\n'),
     );
   });

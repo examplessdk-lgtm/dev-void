@@ -358,14 +358,22 @@ Use `createInboundTestHarness` to run handlers through the real dispatcher with 
 `deliver({ to })` takes the address **as it arrives on the wire**, which is
 `<slug>+<tag>@<domain>` — the same form the platform delivers to your worker.
 The harness strips the `<slug>+` prefix before matching, exactly as the
-generated dispatcher does, so `acme+support+abc-123@acme.dev` is what matches
-`email/support+[ticket].ts`. Pass the user-facing `support+abc-123@acme.dev`
-and the harness reads `support` as the slug, leaving `abc-123` to match — which
-falls through to `_default`. A worker on your own Cloudflare account receives
-no slug and matches the full local part, but the harness still reads the label
-before the first `+` as one, so exercise `support+abc-123@mail.acme.com` through
-it as `<anything>+support+abc-123@mail.acme.com`; a plain `support@mail.acme.com`
-has no `+` and needs no prefix.
+generated dispatcher does on the platform, so `acme+support+abc-123@acme.dev`
+is what matches `email/support+[ticket].ts`. Pass the user-facing
+`support+abc-123@acme.dev` and the harness reads `support` as the slug, leaving
+`abc-123` to match — which falls through to `_default`. A worker on your own
+Cloudflare account receives no slug and matches the full local part; pass
+`slug: null` to test that lane, and `support@mail.acme.com` reaches
+`email/support.ts` while `support+abc-123@mail.acme.com` reaches
+`email/support+[ticket].ts` with `abc-123`:
+
+```ts
+const harness = createInboundTestHarness({
+  slug: null,
+  routes: { support, 'support+[ticket]': ticket },
+});
+await harness.deliver({ from: 'a@x.dev', to: 'support+abc-123@mail.acme.com' });
+```
 
 ```ts
 import { describe, it, expect } from 'vitest';
@@ -421,7 +429,7 @@ The harness uses the same precedence rules as the production dispatcher. Reserve
 
    The host (`mail.acme.com`) must be a zone in the Cloudflare account your deploy is pinned to, or sit under one. Without `email.from`, a deploy that uses email prints `add "email": { "from": "you@mail.acme.com" } to void.json` and deploys without it. Void does not pick a zone for you — wrangler cannot list them — and it never writes `void.json`.
 
-2. **`wrangler login`** on wrangler 4.81 or newer. A session from an older wrangler lacks the two email scopes; the deploy tells you to log in again (one browser Allow) and skips the email step.
+2. **`wrangler login`** on wrangler 4.81 or newer, or **`CLOUDFLARE_API_TOKEN`** set to a token with **Email Routing Edit** and **Email Sending Edit** (zone and account) alongside the deploy permissions. A login session from an older wrangler lacks the two email scopes; the deploy tells you to log in again (one browser Allow) and skips the email step. A token's permissions cannot be listed up front, so a token that lacks one shows up as a row Void could not read (`unknown`), with the permission named. A Global API Key pair (`CLOUDFLARE_API_KEY`) is refused: it has no single bearer for the two calls wrangler has no command for.
 
 ### The first deploy
 
@@ -436,12 +444,13 @@ Before any of your project code runs, the deploy **reads** — the session, the 
     sending   mail.acme.com  not onboarded
     rules     support@mail.acme.com → acme-support   (absent)
     binding   SEND_EMAIL             (absent)
+    sender    noreply@mail.acme.com  (vars.__VOID_EMAIL_FROM absent)
 
   This changes YOUR Cloudflare account. acme.com itself is not touched.
     + enable Email Routing on mail.acme.com       Cloudflare writes and locks 3 MX + 1 SPF record there
     + turn on subaddressing for acme.com          support+anything@ reaches support@
     + onboard mail.acme.com for Email Sending     MX/SPF/DKIM on cf-bounce.mail.acme.com, _dmarc.mail.acme.com (p=reject)
-    + wrangler.jsonc                              send_email: [{ name: "SEND_EMAIL" }], addresses: ["support@mail.acme.com"]
+    + wrangler.jsonc                              send_email: [{ name: "SEND_EMAIL" }], addresses: ["support@mail.acme.com"], vars.__VOID_EMAIL_FROM: "noreply@mail.acme.com"
     + routing rule (applied by wrangler deploy)   support@mail.acme.com → acme-support
     ! email/_default.ts                           a catch-all exists only on an apex; other @mail.acme.com mail bounces
 
@@ -456,7 +465,11 @@ Enter (Yes is the default) applies only the `+` rows that are not ready, then th
     outbound  sendEmail() from support@mail.acme.com
 ```
 
-On the second deploy every row reads ready: no prompt, no writes, and wrangler reports `Email Routing rules are up to date.` Answer No, and the deploy continues without email.
+On the second deploy every row reads ready: no prompt, no account call, and wrangler reports `Email Routing rules are up to date.` Answer No, and the deploy continues without email.
+
+Two rows live in `wrangler.jsonc` rather than in your account, and a deploy that finds every account row ready reconciles them with a plain file write, no prompt: the `addresses` array is rewritten whenever it is not the current derivation (an entry pruned since, a worker rename, a new handler), and `vars.__VOID_EMAIL_FROM` follows a changed `email.from`. Routing rules are `wrangler deploy`'s own work, so a committed `addresses` entry whose rule does not exist yet — the state right after `void email setup` — still reads ready; the address map marks it `(rule created by this deploy)`.
+
+A subdomain is added to a zone that already routes. When Email Routing is **off** on the apex (`Enabled: false`), the subdomain step is not attempted at all — Void never enables routing on the apex from the subdomain path, since that would lock MX records over the apex's live mail — and the checklist prints the dashboard step (`Email → Settings → Subdomains → add mail.acme.com`) instead; `addresses` is withheld until routing on the subdomain reads ready.
 
 ### Subdomain or apex
 
@@ -484,12 +497,12 @@ The apex path (`email.from` on `acme.com` itself) is allowed with the same one E
 - **`__VOID_EMAIL_FROM`** — your `email.from`, so the worker knows its default sender.
 - **`addresses`** — derived from your `email/` directory. `wrangler deploy` turns each entry into an Email Routing rule pointing at this worker (a literal address → this worker; `*@acme.com` → the zone's catch-all). Rules and the catch-all are wrangler's job; Void only derives the list.
 
-**Void owns the `addresses` array.** It is rewritten on every deploy from the current `email/` scan, and deleted — never emptied to `[]`, which would remove every rule wrangler owns — when a later preflight finds routing not ready, with the reason printed. Two consequences:
+**Void owns the `addresses` array.** It is rewritten on every deploy from the current `email/` scan while every existing entry is still one Void derives, and deleted — never emptied to `[]`, which would remove every rule wrangler owns — when a later preflight finds routing not ready, with the reason printed (on every branch, including CI and a declined prompt; a stale array left in place would make wrangler's plan fail after the upload, on every deploy). Two consequences:
 
 - An address already routed to another worker or to a forwarding rule is **pruned** from the array and reported (`! support@mail.acme.com  already routed to …; left alone, not in addresses`). wrangler's plan is never destructive on your account because of something Void derived.
 - If the array holds entries Void did not derive, the deploy prints which ones and **skips the email step for that deploy** — the deploy itself continues and the array is left untouched. Remove them, or manage `addresses` by hand and leave `email.from` unset.
 
-Deleting a handler removes its rule from the plan on the next deploy; that deletion is wrangler's own y/n (default No) in a terminal, and an error in CI.
+Deleting a handler leaves its address in `addresses`: the next deploy names it in a `✘` row as an entry Void no longer derives, and skips the email step until you remove that entry from `wrangler.jsonc` by hand (the row says which). Once removed, wrangler's plan drops the rule with its own y/n (default No) in a terminal, an error in CI. Removing the last handler and every `sendEmail()` call leaves the whole setup in `wrangler.jsonc`; the deploy warns which addresses are still routed to a worker with no `email()` export and how to detach them, and deploys as-is.
 
 How handlers become addresses, with `email.from` on `mail.acme.com` under the zone `acme.com`:
 
@@ -546,7 +559,7 @@ and **withholds `addresses` for that run** — no routing rule is created, so no
 ### What stays manual
 
 1. One Enter on the first deploy — it changes your account and locks DNS records.
-2. `wrangler login` once, on wrangler 4.81 or newer.
+2. `wrangler login` once, on wrangler 4.81 or newer — or a `CLOUDFLARE_API_TOKEN` with Email Routing Edit + Email Sending Edit (what a CI runner needs).
 3. `email.from` typed once.
 4. Workers Paid, if you need `sendEmail()` to arbitrary recipients.
 5. A verification click when a handler `forward()`s to a new destination.

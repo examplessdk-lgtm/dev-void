@@ -3,8 +3,9 @@
 Verbatim stdout / stderr / exit code of the pinned wrangler's `email` command group
 and `whoami --json`, captured READ-ONLY against a real account, one directory per
 wrangler version. `src/cli/email-cloudflare.ts` pins its prose parsers to these
-(`WRANGLER_EMAIL_PROSE_VERSION`); when the wrangler catalog pin moves, re-capture
-into a new `<version>/` directory and update the constant.
+(`WRANGLER_EMAIL_PROSE_VERSION`); `test/unit/wrangler-pin.test.ts` asserts that constant
+equals the installed wrangler's version, so a catalog move fails that test until the prose is
+re-captured into a new `<version>/` directory and the constant is moved.
 
 Capture (all read-only; `WRANGLER_SEND_METRICS=false`, account pinned via
 `CLOUDFLARE_ACCOUNT_ID`):

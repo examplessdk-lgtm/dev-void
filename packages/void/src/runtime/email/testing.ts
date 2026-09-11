@@ -125,8 +125,14 @@ export interface InboundTestHarnessOptions {
    * (everything before the first `+` in the local-part) so existing tests
    * with synthetic `slug+tag@domain` recipients keep working without
    * configuration.
+   *
+   * `null` means NO platform prefix at all — a worker deployed on your own
+   * Cloudflare account (`void deploy --backend cloudflare`) receives the
+   * address the handler author wrote, and the dispatcher matches the full
+   * local part: `support@mail.acme.com` reaches `support`, and
+   * `support+T-42@mail.acme.com` reaches `support+[ticket]` with `T-42`.
    */
-  slug?: string;
+  slug?: string | null;
 }
 
 interface CompiledRoute {
@@ -317,6 +323,9 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // working without configuration. Falls back to the verbatim address
     // if no `+` is present.
     const inferredSlug = (() => {
+      if (opts.slug === null) {
+        return undefined;
+      }
       if (opts.slug) {
         return opts.slug;
       }
@@ -420,11 +429,13 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
       },
     } as unknown as ExecutionContext;
 
-    // Mirror the production dispatcher's slug-strip: in deployed code, the
-    // recipient is `<projectSlug>+<tag>@mail.void.cloud` and the platform
-    // router strips through the first `+` before matching. The test
-    // harness must do the same so tests don't pass against routing paths
-    // that can't occur in production.
+    // Mirror the production dispatcher's slug-strip: on the platform the
+    // recipient is `<projectSlug>+<tag>@mail.void.cloud` and the dispatcher
+    // strips through the first `+` before matching. The test harness must do
+    // the same so tests don't pass against routing paths that can't occur in
+    // production. With `slug: null` (own-account deploy) nothing is stripped
+    // and the full local part is matched, exactly as the dispatcher does with
+    // no `__VOID_PROJECT_SLUG` configured.
     // Case is PRESERVED and the patterns carry the `i` flag instead, exactly
     // as the generated dispatcher does (`router/compile.ts`). Lowercasing
     // here would lowercase the CAPTURED groups too, so a handler under test
@@ -432,9 +443,9 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // a green test asserting behavior the deployed code does not have.
     const fullLocal = input.to.split('@')[0] ?? '';
     const plus = fullLocal.indexOf('+');
-    const local = plus === -1 ? '' : fullLocal.slice(plus + 1);
-    // Note: a recipient with no `+` (e.g. `slug@mail.void.cloud`) has no
-    // tag to match — production lands at `_default` if defined, otherwise
+    const local = opts.slug === null ? fullLocal : plus === -1 ? '' : fullLocal.slice(plus + 1);
+    // Note: on the platform a recipient with no `+` (e.g. `slug@mail.void.cloud`)
+    // has no tag to match — production lands at `_default` if defined, otherwise
     // no-op. We mirror that here.
 
     for (const route of compiled) {

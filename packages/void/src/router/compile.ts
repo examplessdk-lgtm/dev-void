@@ -1556,12 +1556,12 @@ window.__vite_plugin_react_preamble_installed__ = true;
   // Slug stripping: the shared platform sender rewrites every recipient to
   // `<slug>+<tag>@<platform mail domain>`, where `<slug>` is the
   // project slug. User-defined handlers are written against the `<tag>` only
-  // (the slug is invisible to them — see design-doc 0078). When a message
-  // carries that prefix the dispatcher strips everything up to and including
-  // the first `+` from the local-part before running it through the pattern
-  // table. A message that never carried it — delivered straight to a worker
-  // on the developer's own zone — is matched on its full local part, so
-  // `support+T-42@zone` reaches `email/support+[ticket].ts` there too.
+  // (the slug is invisible to them — see design-doc 0078). When a slug is
+  // configured (`__VOID_PROJECT_SLUG`) the dispatcher strips everything up to
+  // and including the first `+` from the local-part before running it through
+  // the pattern table. Without one — a worker on the developer's own zone — the
+  // full local part is matched, so `support+T-42@zone` reaches
+  // `email/support+[ticket].ts` there too.
   const email = scan.email;
   const emailDir = options.emailDir;
   if (emailDir && email && (email.addresses.length > 0 || email.defaultHandler)) {
@@ -1588,7 +1588,7 @@ window.__vite_plugin_react_preamble_installed__ = true;
       lines.push('];');
     }
     lines.push('');
-    lines.push('export async function __emailHandler(message, env, ctx) {');
+    lines.push('export async function __emailHandler(message, env, ctx, __opts) {');
     // Route on the PLATFORM (wire) recipient, not `message.to`.
     // `createMessageProxy` has already removed the `<slug>+` prefix from
     // `message.to` so handler authors see the address they wrote, and it
@@ -1603,14 +1603,18 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('  const __platformTo = message ? message.__voidPlatformTo : undefined;');
     lines.push('  const __to = String((__platformTo ?? (message && message.to)) || "");');
     lines.push('  const __localFull = __to.split("@")[0] || "";');
-    // Strip the platform-injected `<slug>+` prefix only when
-    // `createMessageProxy` recorded one. `__voidPlatformTo` exists exactly
-    // when a slug was removed from `message.to`, so its absence means the
-    // wire address IS the address the handler author wrote: match all of it.
-    // With the prefix present and no `+` after it there is no tag, and the
-    // empty string falls through to `_default`.
+    // Strip the platform-injected `<slug>+` prefix exactly when a slug is
+    // CONFIGURED (`__VOID_PROJECT_SLUG`, passed in by `handleEmail`), not when
+    // `createMessageProxy` happened to remove one: the platform lane is
+    // `<slug>[+<tag>]`, so a bare `<slug>@domain` (no `+`) carries no
+    // `__voidPlatformTo` yet must still read as an EMPTY tag, not as the
+    // slug itself — otherwise `email/[user].ts` would run with `user=<slug>`.
+    // With no slug configured (a worker on the developer's own zone) the wire
+    // address IS the address the handler author wrote: match all of it. With
+    // the prefix present and no `+` after it there is no tag, and the empty
+    // string falls through to `_default`.
     lines.push('  let __local = __localFull;');
-    lines.push('  if (__platformTo !== undefined) {');
+    lines.push('  if (__opts && __opts.slug) {');
     lines.push('    const __plus = __localFull.indexOf("+");');
     lines.push('    __local = __plus === -1 ? "" : __localFull.slice(__plus + 1);');
     lines.push('  }');
@@ -2851,9 +2855,9 @@ ${envValidateCall}${isrDeploymentStamp}  const userEnv = __filterInternalBinding
     : '';
   // `__VOID_PROJECT_SLUG` is the same binding the outbound `sendEmail` reads to
   // default `from`. It is passed to `createMessageProxy` so the user-visible
-  // `message.to` is the bare `<tag>@<domain>` rather than the wire form. The
-  // generated `__emailHandler` routes on the wire address instead, which
-  // `createMessageProxy` preserves as `__voidPlatformTo`.
+  // `message.to` is the bare `<tag>@<domain>` rather than the wire form, and to
+  // the generated `__emailHandler`, which routes on the wire address
+  // (`__voidPlatformTo`) and strips the `<slug>+` prefix iff a slug is set.
   const emailHandler = hasEmail
     ? remotePath
       ? `async function handleEmail(envelope, env, ctx) {
@@ -2861,7 +2865,7 @@ ${envValidateCall}  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
   const userEnv = __filterInternalBindings(env);
   const __slug = typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined;
   const { message, getActions } = __createMessageProxy(envelope, { slug: __slug });
-  await __withRawEnv(env, () => withRuntimeEnv(env, () => __emailHandler(message, userEnv, ctx)));
+  await __withRawEnv(env, () => withRuntimeEnv(env, () => __emailHandler(message, userEnv, ctx, { slug: __slug })));
   const __actions = getActions();
   if (__isForwardableEmailMessage(envelope)) await __enactEmailActions(envelope, __actions);
   return __actions;
@@ -2870,7 +2874,7 @@ ${envValidateCall}  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
 ${envValidateCall}  const userEnv = __filterInternalBindings(env);
   const __slug = typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined;
   const { message, getActions } = __createMessageProxy(envelope, { slug: __slug });
-  await __withRawEnv(env, () => withRuntimeEnv(env, () => __emailHandler(message, userEnv, ctx)));
+  await __withRawEnv(env, () => withRuntimeEnv(env, () => __emailHandler(message, userEnv, ctx, { slug: __slug })));
   const __actions = getActions();
   if (__isForwardableEmailMessage(envelope)) await __enactEmailActions(envelope, __actions);
   return __actions;
