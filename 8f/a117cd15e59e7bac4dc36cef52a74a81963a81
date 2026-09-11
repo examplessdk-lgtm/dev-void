@@ -1,0 +1,19 @@
+packages/void/test/unit/db-migrate.test.ts
+  s_0add8c35799930::t_f3f378fdfd4377 3,52-55,270,286
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8fa117cd15e59e7bac4dc36cef52a74a81963a81",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
