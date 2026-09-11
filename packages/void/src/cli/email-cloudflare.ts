@@ -10,6 +10,11 @@
  *   applyEmailSetup      preflight             →  only the rows not ready, in order,
  *                                                  returning the wrangler.jsonc patch
  *
+ * Both callers (`void deploy --backend cloudflare` step 3b-ii and `void email
+ * setup|status --backend cloudflare`) borrow the session bearer through the deploy
+ * runner's `runWranglerAuthToken` and gate the prompt on `isWranglerNonInteractiveOrCI`
+ * (both in `cli/deploy.ts`), so the two never disagree.
+ *
  * Rules that hold the whole thing together (0078 "The flow, by lane"):
  *
  *   - Void never refreshes, stores or forwards a token. Everything with a wrangler
@@ -152,7 +157,7 @@ export interface DerivedEmailAddresses {
  * so the address inside `<…>` is read when present.
  */
 export function emailFromDomain(from: string): string | null {
-  const bracketed = /<([^<>]*)>\s*$/.exec(from);
+  const bracketed = /<([^<>]*)>\s*$/.exec(from.trim());
   const address = bracketed ? (bracketed[1] as string) : from;
   const at = address.lastIndexOf('@');
   if (at <= 0 || at === address.length - 1) {
@@ -1368,13 +1373,16 @@ export function renderAddressMap(map: {
   /** Addresses actually written to `addresses` — routes outside it are marked pending. */
   addresses: Array<string>;
   sendingReady: boolean;
+  /** The pending marker; `void email status` passes one that does not name a deploy. */
+  pendingLabel?: string;
 }): string {
   const lines: Array<string> = [];
   const width = Math.max(0, ...map.routes.map((r) => r.address.length));
+  const pending = map.pendingLabel ?? '(no rule this deploy)';
   for (const route of map.routes) {
     const live = map.addresses.includes(route.address);
     lines.push(
-      `    inbound   ${pad(route.address, width + 2)}→  ${route.handler}${live ? '' : '   (no rule this deploy)'}`,
+      `    inbound   ${pad(route.address, width + 2)}→  ${route.handler}${live ? '' : `   ${pending}`}`,
     );
   }
   lines.push(

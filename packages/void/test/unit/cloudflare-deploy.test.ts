@@ -16,6 +16,7 @@ import {
   DEPLOY_WHOLE_OBJECT_PINNED_FIELDS,
   hashWranglerUploader,
   runCloudflareDeploy,
+  runWranglerAuthToken,
   snapshotBindingIdentities,
   snapshotPassthroughIdentities,
   snapshotPassthroughRawFields,
@@ -7633,6 +7634,69 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     // The ONLY whoami is 3e's, which comes after the probe.
     expect(trace.filter((t) => t === 'wrangler:whoami --json')).toHaveLength(1);
     expect(trace.indexOf('probe')).toBeLessThan(trace.indexOf('wrangler:whoami --json'));
+  });
+});
+
+describe('runWranglerAuthToken — the session-bearer bridge, on its own', () => {
+  type AuthCall = { args: Array<string>; opts: { capture: boolean; env?: Record<string, string> } };
+  const bridge = (result: DeployWranglerRunResult | (() => never)) => {
+    const calls: Array<AuthCall> = [];
+    const run: DeployWranglerRun = (args, opts) => {
+      calls.push({ args: [...args], opts });
+      return typeof result === 'function' ? result() : result;
+    };
+    return { calls, token: runWranglerAuthToken(run, '/p/wrangler.jsonc') };
+  };
+
+  it('spawns exactly `auth token --json` in the deploy config context, captured, logs off', async () => {
+    const { calls, token } = bridge({
+      status: 0,
+      stdout: `{\n  "type": "oauth",\n  "token": "cfoa.abc"\n}\n`,
+      stderr: '',
+      signal: null,
+      error: null,
+    });
+    expect(await token).toBe('cfoa.abc');
+    expect(calls).toEqual([
+      {
+        args: ['auth', 'token', '--json', '-c', '/p/wrangler.jsonc', '--env='],
+        opts: { capture: true, env: { WRANGLER_WRITE_LOGS: 'false' } },
+      },
+    ]);
+  });
+
+  it('accepts an api_token session and refuses an api_key pair (no single bearer to borrow)', async () => {
+    const ok = (stdout: string): DeployWranglerRunResult => ({
+      status: 0,
+      stdout,
+      stderr: '',
+      signal: null,
+      error: null,
+    });
+    expect(await bridge(ok('{"type":"api_token","token":"abc"}')).token).toBe('abc');
+    expect(
+      await bridge(ok('{"type":"api_key","key":"k","email":"dev@example.com"}')).token,
+    ).toBeNull();
+    expect(await bridge(ok('{"type":"oauth"}')).token).toBeNull();
+    expect(await bridge(ok('not json')).token).toBeNull();
+  });
+
+  it('resolves null on a failed, signal-killed, unspawnable, or throwing run — never throws', async () => {
+    expect(
+      await bridge({ status: 1, stdout: '', stderr: 'Not logged in.', signal: null, error: null })
+        .token,
+    ).toBeNull();
+    expect(
+      await bridge({ status: 0, stdout: '{}', stderr: '', signal: 'SIGKILL', error: null }).token,
+    ).toBeNull();
+    expect(
+      await bridge({ status: 0, stdout: '{}', stderr: '', signal: null, error: 'ENOENT' }).token,
+    ).toBeNull();
+    expect(
+      await bridge(() => {
+        throw new Error('boom');
+      }).token,
+    ).toBeNull();
   });
 });
 

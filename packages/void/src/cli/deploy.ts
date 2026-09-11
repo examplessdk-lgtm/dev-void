@@ -176,7 +176,7 @@ let loadedProvisionModule: ProvisionModule | undefined;
  * Cloudflare fork (`runCloudflareDeploy` / `computeDesiredCloudflareResources`)
  * so a managed deploy never imports it — and thus never loads `proper-lockfile`.
  */
-async function loadProvisionModule(): Promise<ProvisionModule> {
+export async function loadProvisionModule(): Promise<ProvisionModule> {
   loadedProvisionModule ??= await import('./provision.ts');
   return loadedProvisionModule;
 }
@@ -664,7 +664,7 @@ export function assertNoConfigOverrideInProjectDotenv(
  * the deploy tail (build / whoami / migrate / deploy) share one source of truth.
  * Returns the single resolved API base URL to pin into every child env.
  */
-function resolveDeployTransport(root: string, rootConfig: Record<string, unknown>): string {
+export function resolveDeployTransport(root: string, rootConfig: Record<string, unknown>): string {
   const provision = requireProvisionModule();
   assertNoAmbientConfigOverride();
   provision.assertNoTransportRedirectInProjectDotenv(root);
@@ -2240,7 +2240,7 @@ export function parseRootWranglerConfig(configPath: string): Record<string, unkn
 }
 
 /** Read a non-empty top-level string field (`account_id` / `name`) from the config. */
-function readWranglerTopLevelString(
+export function readWranglerTopLevelString(
   config: Record<string, unknown>,
   field: string,
 ): string | undefined {
@@ -2421,7 +2421,7 @@ function suffixedResourceName(workerName: string, suffix: string): string {
  * build emits (and the deploy uploads) the non-override name; deriving from the
  * override here would pin a name the scrubbed build never produces.
  */
-function deriveWorkerName(root: string): string {
+export function deriveWorkerName(root: string): string {
   let pkgName: string | undefined;
   try {
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8')) as { name?: unknown };
@@ -3463,9 +3463,11 @@ export async function checkWranglerMigrationApplySet(
  * child env (via {@link deployChildEnv} — reused provisioner scrub/pin: CF Access +
  * every transport selector incl. `CLOUDFLARE_ENV` + the deploy config-override vars
  * scrubbed, one account + API base pinned), so `whoami`/`migrate`/`deploy` can never
- * consult a different ambient account or endpoint. `capture` pipes or inherits stdio.
+ * consult a different ambient account or endpoint. `capture` pipes or inherits stdio;
+ * `opts.env` layers one more pin over the child env for a single spawn (`auth token` gets
+ * `WRANGLER_WRITE_LOGS=false`, see {@link runWranglerAuthToken}).
  */
-function createDeployWranglerRunner(
+export function createDeployWranglerRunner(
   root: string,
   accountId: string,
   apiBaseUrl: string,
@@ -3568,6 +3570,8 @@ interface CloudflareEmailStepInput {
   handlers: EmailHandlersScan;
   workerName: string;
   accountId: string;
+  /** The ONE pinned transport (3a) — the two bearer `fetch` calls follow it like every wrangler child. */
+  apiBaseUrl: string;
   runWrangler: DeployWranglerRun;
   /** wrangler's gate ({@link isWranglerNonInteractiveOrCI}) or the test override. */
   nonInteractive: boolean;
@@ -3620,6 +3624,7 @@ async function runCloudflareEmailStep(
     existingAddresses: rootConfig.addresses,
     // The SAME `-c`/`--env=` context every other credentialed wrangler run gets.
     wranglerArgs: ['-c', input.configPath, '--env='],
+    apiBaseUrl: input.apiBaseUrl,
     runWrangler: input.runWrangler,
     getSessionBearer: () => runWranglerAuthToken(input.runWrangler, input.configPath),
     fetchImpl: input.fetchImpl,
@@ -4082,6 +4087,7 @@ export async function runCloudflareDeploy(
       handlers: emailHandlers,
       workerName,
       accountId,
+      apiBaseUrl,
       runWrangler,
       nonInteractive: deps.isCI ?? isWranglerNonInteractiveOrCI(),
       confirm:
@@ -4963,7 +4969,7 @@ export async function runCloudflareDeploy(
  * writer do (wrangler.jsonc first, then wrangler.json). Falls back to the
  * default wrangler.jsonc path when none exists yet — the provisioner creates it.
  */
-function discoverRootWranglerConfig(root: string): string {
+export function discoverRootWranglerConfig(root: string): string {
   for (const name of ['wrangler.jsonc', 'wrangler.json']) {
     const candidate = join(root, name);
     if (existsSync(candidate)) {

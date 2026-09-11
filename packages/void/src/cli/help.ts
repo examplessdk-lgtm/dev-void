@@ -247,6 +247,14 @@ const HELP_TREE: HelpTree = {
       { command: 'destinations', description: 'List verified recipient addresses' },
       { command: 'allow <address>', description: 'Add a recipient and trigger CF verification' },
       { command: 'disallow <address>', description: 'Remove a recipient from the allowlist' },
+      {
+        command: 'status --backend cloudflare',
+        description: 'Show the email setup state and address map on your own account',
+      },
+      {
+        command: 'setup --backend cloudflare',
+        description: 'Set email up on your own Cloudflare account (one confirmation)',
+      },
     ],
     children: {
       usage: withProjectOption(
@@ -279,6 +287,29 @@ const HELP_TREE: HelpTree = {
         'Remove a recipient from the verified allowlist.',
         'void email disallow <address> [options]',
       ),
+      // Mode B (design doc 0078): both read the local project + your wrangler session,
+      // never a Void project, so neither takes `--project`.
+      status: {
+        summary: 'Show the email setup state and address map. Exit 1 when not ready.',
+        usage: ['void email status --backend cloudflare'],
+        options: [
+          {
+            command: '--backend cloudflare',
+            description: 'Your own Cloudflare account (the only backend with a status today)',
+          },
+        ],
+      },
+      setup: {
+        summary:
+          'Set email up on your own Cloudflare account: enable Email Routing, onboard Email Sending, write send_email + addresses into wrangler.jsonc. Asks once before changing the account.',
+        usage: ['void email setup --backend cloudflare'],
+        options: [
+          {
+            command: '--backend cloudflare',
+            description: 'Your own Cloudflare account (required; the platform needs no setup)',
+          },
+        ],
+      },
     },
   },
   github: {

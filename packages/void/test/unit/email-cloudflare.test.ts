@@ -352,7 +352,9 @@ describe('emailFromDomain', () => {
 
   it('reads the address inside a display-name form (the shape void.json accepts)', () => {
     expect(emailFromDomain('Acme Support <NoReply@Mail.Acme.com>')).toBe('mail.acme.com');
+    expect(emailFromDomain('"Acme, Inc" <noreply@acme.com> ')).toBe('acme.com');
     expect(emailFromDomain('Acme <bad>')).toBeNull();
+    expect(emailFromDomain('Acme <>')).toBeNull();
   });
 });
 
@@ -1366,6 +1368,22 @@ describe('renderAddressMap', () => {
         '    inbound   support@acme.com  →  email/support.ts',
         '    inbound   *@acme.com        →  email/_default.ts   (no rule this deploy)',
         '    outbound  sendEmail() from noreply@acme.com   (verified destinations only)',
+      ].join('\n'),
+    );
+  });
+
+  it('takes a pending label that does not name a deploy (`void email status`)', () => {
+    const text = renderAddressMap({
+      from: 'noreply@acme.com',
+      routes: [{ address: 'support@acme.com', handler: 'email/support.ts' }],
+      addresses: [],
+      sendingReady: true,
+      pendingLabel: '(no rule yet)',
+    });
+    expect(text).toBe(
+      [
+        '    inbound   support@acme.com  →  email/support.ts   (no rule yet)',
+        '    outbound  sendEmail() from noreply@acme.com',
       ].join('\n'),
     );
   });
