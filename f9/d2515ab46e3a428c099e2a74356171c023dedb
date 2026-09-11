@@ -1,0 +1,25 @@
+packages/deploy-core/README.md
+  s_0add8c35799930::t_fe3158330364b0 7
+packages/deploy-core/src/index.ts
+  s_0add8c35799930::t_08322e822f03b2 165-171
+packages/deploy-core/src/validate.ts
+  s_0add8c35799930::t_de86758cf4ec3c 1-669
+platform/packages/api/src/routes/deploy.ts
+  s_0add8c35799930::t_785a4777f058aa 1-5,97-98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f9d2515ab46e3a428c099e2a74356171c023dedb",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
