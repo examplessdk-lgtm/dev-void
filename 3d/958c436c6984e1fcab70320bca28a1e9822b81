@@ -1,0 +1,23 @@
+packages/edge/src/index.ts
+  s_0add8c35799930::t_174478c87ebc6e 23-29
+packages/edge/src/runtime.ts
+  s_0add8c35799930::t_f912bf23b17102 1-91
+packages/edge/test/unit/runtime.test.ts
+  s_0add8c35799930::t_334380a4f1ded6 1-74
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3d958c436c6984e1fcab70320bca28a1e9822b81",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
