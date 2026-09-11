@@ -1,0 +1,25 @@
+packages/void/src/cli/db.ts
+  s_47ef2a780dfb1e::t_ba6f3ff58ae940 204,207-214,217-218
+packages/void/src/codegen/prepare.ts
+  s_47ef2a780dfb1e::t_bcd32bccc6953b 24-28,50-53,114
+packages/void/src/drizzle/config.ts
+  s_47ef2a780dfb1e::t_973f8f8e2ff2e3 17,21-25,38,45
+packages/void/test/unit/drizzle-config.test.ts
+  s_47ef2a780dfb1e::t_49269f97d471ab 64-88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bdbb9db710dc47fd0ec83684d2bb4567ae48b5d4",
+  "prompts": {},
+  "sessions": {
+    "s_47ef2a780dfb1e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f0b-c30c-7e52-8da4-5dc1e348aee7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
