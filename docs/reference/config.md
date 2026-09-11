@@ -151,7 +151,7 @@ What `from` does depends on where the app runs:
 
 - **`void dev`** — becomes the default `from` of every `sendEmail()` call, captured in the dev inbox; no mail leaves the machine.
 - **`void deploy`** (managed platform) — not used: the sender is pinned to your project's own platform address, which Void fills in for you.
-- **`void deploy --backend cloudflare`** (your own Cloudflare account) — the address host (`mail.acme.com`) is the domain Void sets Email Routing and Email Sending up on, and the address becomes the default `from`.
+- **`void deploy --backend cloudflare`** (your own Cloudflare account) — the address host (`mail.acme.com`) is the domain Void sets Email Routing and Email Sending up on, and the address becomes the default `from` (written into the worker as the `__VOID_EMAIL_FROM` var). The host must be a zone in the pinned Cloudflare account, or a subdomain of one; a subdomain is the usual choice, and the apex is refused when it already receives mail elsewhere. An app that uses email without `email.from` deploys without it and prints the line to add. Void never picks a zone or writes `void.json` for you. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account).
 
 ### `head`
 
@@ -457,7 +457,7 @@ Each binding accepts `true` (use default name), `false` (disable), or a string (
 
 Custom names are used in the deploy manifest, Wrangler config generation/sync, remote binding proxying, internal migrations, and generated runtime helpers such as `void/db`, `void/kv`, and `void/storage`.
 
-`email` is a feature switch rather than a Cloudflare binding, so it has no binding name or type. Outbound mail is sent through the Void platform proxy, which owns the `send_email` binding — none is written into your worker. Set it to `true` to turn the [email integration](../guide/email.md) on — which registers the `void dev` inbox — even when no scanned file imports `void/email`, or `false` to turn it off.
+`email` is a feature switch rather than a Cloudflare binding, so it has no binding name or type. On the platform, outbound mail is sent through the Void proxy, which owns the `send_email` binding — none is written into your worker; on your own Cloudflare account, `void deploy --backend cloudflare` writes a `send_email` binding named `SEND_EMAIL` into `wrangler.jsonc` itself once email is set up (see [`email.from`](#email)). Set it to `true` to turn the [email integration](../guide/email.md) on — which registers the `void dev` inbox — even when no scanned file imports `void/email`, or `false` to turn it off.
 
 #### `inference.build`
 

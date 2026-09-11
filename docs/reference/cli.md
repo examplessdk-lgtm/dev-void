@@ -10,40 +10,42 @@ Use this page as a command reference. If you are setting up a project for the fi
 
 ## Cheat Sheet
 
-| Command                           | Purpose                                                             |
-| --------------------------------- | ------------------------------------------------------------------- |
-| `void deploy`                     | Build and deploy to Void                                            |
-| `void prepare`                    | Generate `.void` artifacts without starting Vite                    |
-| `void gen model <name> [cols...]` | Scaffold migration + CRUD routes                                    |
-| `void gen route <path>`           | Create an API route                                                 |
-| `void db push`                    | Apply schema directly without migration files                       |
-| `void db generate`                | Generate SQL migrations from schema changes                         |
-| `void db status`                  | Show local/remote migration status                                  |
-| `void db reset`                   | Drop and re-apply all migrations                                    |
-| `void db seed`                    | Reset + seed local database                                         |
-| `void db execute <sql>`           | Run SQL against the database (--remote for deployed)                |
-| `void db studio`                  | Open Drizzle Studio (--remote for the deployed PostgreSQL database) |
-| `void secret put <name=value>`    | Set a production secret                                             |
-| `void secret list`                | List production secrets                                             |
-| `void secret sync .env.local`     | Bulk upload secrets from dotenv file                                |
-| `void env check [--remote]`       | Validate env.ts schema                                              |
-| `void env types`                  | Regenerate .void/env.d.ts from env.ts                               |
-| `void env example`                | Refresh the void-managed block in .env.example                      |
-| `void auth login`                 | Authenticate with Void                                              |
-| `void project link`               | Link directory to a project                                         |
-| `void project logs`               | Show runtime logs from deployed project                             |
-| `void project requests`           | Show request-level traffic (status, method, timing)                 |
-| `void project rollback`           | Roll back to a previous deployment                                  |
-| `void project cancel`             | Cancel an active deployment                                         |
-| `void project purge-cache`        | Purge all cached pages                                              |
-| `void build logs`                 | Stream, tail, or download build logs                                |
-| `void email usage`                | Show monthly email send/receive counts and quota                    |
-| `void email logs`                 | Show recent email delivery activity                                 |
-| `void email destinations`         | List verified recipient addresses                                   |
-| `void email allow <address>`      | Add a recipient and send a verification email                       |
-| `void email disallow <address>`   | Remove a recipient from the allowlist                               |
-| `void mcp`                        | Start the Void MCP server                                           |
-| `void init`                       | Setup wizard for new or existing projects                           |
+| Command                           | Purpose                                                                      |
+| --------------------------------- | ---------------------------------------------------------------------------- |
+| `void deploy`                     | Build and deploy to Void                                                     |
+| `void prepare`                    | Generate `.void` artifacts without starting Vite                             |
+| `void gen model <name> [cols...]` | Scaffold migration + CRUD routes                                             |
+| `void gen route <path>`           | Create an API route                                                          |
+| `void db push`                    | Apply schema directly without migration files                                |
+| `void db generate`                | Generate SQL migrations from schema changes                                  |
+| `void db status`                  | Show local/remote migration status                                           |
+| `void db reset`                   | Drop and re-apply all migrations                                             |
+| `void db seed`                    | Reset + seed local database                                                  |
+| `void db execute <sql>`           | Run SQL against the database (--remote for deployed)                         |
+| `void db studio`                  | Open Drizzle Studio (--remote for the deployed PostgreSQL database)          |
+| `void secret put <name=value>`    | Set a production secret                                                      |
+| `void secret list`                | List production secrets                                                      |
+| `void secret sync .env.local`     | Bulk upload secrets from dotenv file                                         |
+| `void env check [--remote]`       | Validate env.ts schema                                                       |
+| `void env types`                  | Regenerate .void/env.d.ts from env.ts                                        |
+| `void env example`                | Refresh the void-managed block in .env.example                               |
+| `void auth login`                 | Authenticate with Void                                                       |
+| `void project link`               | Link directory to a project                                                  |
+| `void project logs`               | Show runtime logs from deployed project                                      |
+| `void project requests`           | Show request-level traffic (status, method, timing)                          |
+| `void project rollback`           | Roll back to a previous deployment                                           |
+| `void project cancel`             | Cancel an active deployment                                                  |
+| `void project purge-cache`        | Purge all cached pages                                                       |
+| `void build logs`                 | Stream, tail, or download build logs                                         |
+| `void email status`               | Show email readiness on your own Cloudflare account (`--backend cloudflare`) |
+| `void email setup`                | Set email up on your own Cloudflare account, without deploying               |
+| `void email usage`                | Show monthly email send/receive counts and quota                             |
+| `void email logs`                 | Show recent email delivery activity                                          |
+| `void email destinations`         | List verified recipient addresses                                            |
+| `void email allow <address>`      | Add a recipient and send a verification email                                |
+| `void email disallow <address>`   | Remove a recipient from the allowlist                                        |
+| `void mcp`                        | Start the Void MCP server                                                    |
+| `void init`                       | Setup wizard for new or existing projects                                    |
 
 ## Binary Invocation
 
@@ -257,22 +259,23 @@ If `--project` is provided, purges that project's cache instead of the linked pr
 
 ```
 void deploy [--project <name>] [--dir <path>] [--spa] [--skip-build] [--debug]
-void deploy --backend cloudflare [--provision]
+void deploy --backend cloudflare [--provision] [--require-email]
 ```
 
 Auto-detects your project type and chooses the right pipeline. See [Supported App Types](../guide/app-types.md) and [Deployment](../guide/deployment.md) for details.
 
 For Drizzle projects, deploy performs a read-only schema drift check. If a new migration would be generated, deploy stops and tells you to run `void db generate`, review the migration, commit it yourself, and rerun `void deploy`.
 
-| Flag                   | Purpose                                                                                      |
-| ---------------------- | -------------------------------------------------------------------------------------------- |
-| `--project <name>`     | Target a specific project by slug; not supported with `--backend cloudflare`                 |
-| `--dir <path>`         | Deploy a pre-built static directory (skips build); not supported with `--backend cloudflare` |
-| `--spa`                | Use SPA mode instead of SSG for static deploys; not supported with `--backend cloudflare`    |
-| `--skip-build`         | Skip the build step (use existing build output); not supported with `--backend cloudflare`   |
-| `--backend cloudflare` | Deploy to your own Cloudflare account instead of the Void platform                           |
-| `--provision`          | Create missing bindings (D1/KV/R2/Queues/Hyperdrive); requires `--backend cloudflare`        |
-| `--debug`              | Mirror the structured deploy log to stderr (also written to `~/.void/logs/`)                 |
+| Flag                   | Purpose                                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------- |
+| `--project <name>`     | Target a specific project by slug; not supported with `--backend cloudflare`                      |
+| `--dir <path>`         | Deploy a pre-built static directory (skips build); not supported with `--backend cloudflare`      |
+| `--spa`                | Use SPA mode instead of SSG for static deploys; not supported with `--backend cloudflare`         |
+| `--skip-build`         | Skip the build step (use existing build output); not supported with `--backend cloudflare`        |
+| `--backend cloudflare` | Deploy to your own Cloudflare account instead of the Void platform                                |
+| `--provision`          | Create missing bindings (D1/KV/R2/Queues/Hyperdrive); requires `--backend cloudflare`             |
+| `--require-email`      | Fail when email cannot be set up instead of deploying without it; requires `--backend cloudflare` |
+| `--debug`              | Mirror the structured deploy log to stderr (also written to `~/.void/logs/`)                      |
 
 Every deploy writes a structured JSONL trace to `~/.void/logs/deploy-<timestamp>.jsonl` regardless of `--debug`. On failure the path is printed at the end of the error message so you can attach it when reporting platform issues. `VOID_DEPLOY_DEBUG=1` is accepted as an alternate trigger for stderr mirroring.
 
@@ -315,14 +318,15 @@ That fallback is mainly for projects that skipped Void project setup during `voi
 Deploy the built worker straight to **your own** Cloudflare account instead of the Void platform. This path uses your local `wrangler` auth and your root `wrangler.jsonc` — no Void login or linked project is involved.
 
 ```
-void deploy --backend cloudflare              # deploy using resources already in wrangler.jsonc
-void deploy --backend cloudflare --provision  # create any missing resources first, then deploy
+void deploy --backend cloudflare                  # deploy using resources already in wrangler.jsonc
+void deploy --backend cloudflare --provision      # create any missing resources first, then deploy
+void deploy --backend cloudflare --require-email  # fail instead of deploying without email
 ```
 
 Prerequisites:
 
 - A Cloudflare account must be **pinned**: set `account_id` in your root `wrangler.jsonc`, or export `CLOUDFLARE_ACCOUNT_ID`. A multi-account token otherwise makes wrangler prompt (or error in CI), which Void cannot intercept.
-- Authenticate wrangler (`wrangler login`, or set `CLOUDFLARE_API_TOKEN`). Deploy needs a token with `Workers Scripts:Edit` plus read on the resources you bind; `--provision` additionally needs per-product `*:Edit` (D1, KV, R2, Queues, Hyperdrive).
+- Authenticate wrangler (`wrangler login`, or set `CLOUDFLARE_API_TOKEN`). Deploy needs a token with `Workers Scripts:Edit` plus read on the resources you bind; `--provision` additionally needs per-product `*:Edit` (D1, KV, R2, Queues, Hyperdrive). Email setup needs a `wrangler login` session from wrangler 4.81 or newer (it carries the Email Routing and Email Sending scopes).
 - `CLOUDFLARE_API_TOKEN` is **required** to provision a Hyperdrive config for the first time — `wrangler login` covers every other resource, but wrangler exposes no machine-readable Hyperdrive list, so Void checks for an existing config over the Cloudflare REST API, which OAuth cannot authenticate. Without a token, `--provision` stops before touching your account. Alternatively create the Hyperdrive config yourself and put its id in `wrangler.jsonc` — deploying an already-provisioned Hyperdrive app needs no token.
 - `--skip-build` is **not supported** with `--backend cloudflare`: this backend validates the artifact the build emits (worker `vars` in `dist/ssr/wrangler.json`, the generated auth schema), so there is nothing to check without a fresh build.
 - `--project`, `--dir` and `--spa` are **not supported** with `--backend cloudflare` either, and are rejected rather than ignored: no Void project is resolved on this path, and it uploads the worker your build emits rather than a static directory.
@@ -338,6 +342,8 @@ The build deliberately comes **before** the secret, auth-schema, and migration g
 - **Your `wrangler.jsonc` is rewritten.** When wrangler writes the new ids, it preserves your comments but normalizes the whole file's indentation — expect that in the diff.
 - **Your `.env*` values ship as plaintext.** All four of `.env`, `.env.local`, `.env.production` and `.env.production.local` are loaded by this backend and baked into the worker's `vars` — the `.local` files included, unlike managed `void deploy`. A value also present in the shell environment is stripped back out. Move real secrets to `wrangler secret put <NAME>` so they are not committed into `wrangler.json`. Deploy warns on likely-plaintext secrets and hard-blocks on missing required secrets.
 - **First deploy of a not-yet-deployed worker:** its remote secrets can't be listed yet, so the secret gate prints the required key names and the `wrangler secret put <NAME>` commands to bootstrap them on the draft worker before deploying (or add a value to `.env` / `.env.production` and rerun).
+
+**Email.** When the app uses email (`sendEmail()` or `email/` handlers) and `void.json` has `email.from`, the deploy reads the state of that address's zone before the build — session scopes, zone, MX records, Email Routing, subaddressing, routing rules, Email Sending, and what `wrangler.jsonc` holds — prints a checklist of what it would change in your account, and asks once (default Yes). On Yes it enables what is missing, writes `send_email: [{ "name": "SEND_EMAIL" }]`, the `__VOID_EMAIL_FROM` var and the `addresses` array into `wrangler.jsonc`, and lets `wrangler deploy` create the routing rules; the deploy ends with the address map. A deploy with nothing left to set up asks nothing. Without `email.from` the deploy prints `add "email": { "from": "you@mail.acme.com" } to void.json` and continues without email. Non-interactive runs (CI, or stdin/stdout not a terminal) never prompt: they print the checklist plus `run void email setup once, commit wrangler.jsonc, redeploy` and deploy without email — unless `--require-email` is passed, which fails instead. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account) for the whole flow, including the subdomain-vs-apex rule and what stays manual.
 
 See the [Cloudflare integration guide](../integrations/cloudflare.md#deploy-to-your-own-cloudflare-account) for the full walk-through.
 
@@ -890,7 +896,23 @@ Project resolution for domain commands follows the same order as deploy (`--proj
 
 Inspect email usage and manage the recipients a project is allowed to send to. See [Email](../guide/email.md) for the runtime API.
 
-Project resolution for email commands follows the same order as deploy (`--project`, `VOID_PROJECT`, linked project).
+Project resolution for email commands follows the same order as deploy (`--project`, `VOID_PROJECT`, linked project). `void email setup` and `void email status --backend cloudflare` are the exception: they act on your own Cloudflare account through your `wrangler login` session and need no Void project.
+
+### `void email status`
+
+```
+void email status --backend cloudflare
+```
+
+Print, for the domain of `email.from` in `void.json`, the same rows the first `void deploy --backend cloudflare` shows — session, zone, MX, Email Routing and subaddressing, Email Sending, the routing rule per derived address, and the `send_email` binding — as a read-only report: nothing is asked and nothing is written.
+
+### `void email setup`
+
+```
+void email setup [--backend cloudflare]
+```
+
+Set email up on your own Cloudflare account without deploying: the same preflight, checklist and one confirmation as the first `void deploy --backend cloudflare`, ending with `wrangler.jsonc` updated (`send_email`, `__VOID_EMAIL_FROM`, `addresses`). This is the CI recipe — run it once on your machine, commit `wrangler.jsonc`, then let CI run `void deploy --backend cloudflare --require-email`. Needs `email.from` in `void.json` and a `wrangler login` session from wrangler 4.81 or newer. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account).
 
 ### `void email usage`
 
